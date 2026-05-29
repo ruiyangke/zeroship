@@ -7406,6 +7406,144 @@ await open("components-separator--role-lock");
   );
 }
 
+/* ─── 90c. Wave-10 Separator 🟡 — vertical block-size tokenized ─── *
+ *
+ * Wave-10 review labelled this 🟡 (token-purity regression, not the
+ * 🔴). The 🔴 is covered by block 90d below.
+ *
+ * Pre-fix, `.zs-separator--vertical` set `block-size: 1.25rem` — a raw
+ * rem literal in production CSS. The project standard is
+ * "--zs-* tokens only — no raw px in component CSS"; 1.25rem === the
+ * value `--zs-space-5` resolves to, so the literal was a token-purity
+ * regression that would silently outlive any future re-tuning of the
+ * spacing scale (a designer who shrinks `--zs-space-5` from 1.25rem
+ * to 1.125rem to fit a tighter density grid would expect the vertical
+ * Separator to follow; pre-fix, it would NOT).
+ *
+ * This test is a real-path source grep over the on-disk CSS file: it
+ * locates the `.zs-separator--vertical` rule body via balanced-brace
+ * matching and asserts (a) `var(--zs-space-5)` appears AND (b) no raw
+ * `1.25rem` literal remains. Reading the rendered DOM's
+ * computedStyle.blockSize would only prove the resolved pixel value,
+ * not the source-level token use; the source grep is the contract.
+ *
+ * Also asserts the vertical Separator renders with a non-zero painted
+ * block-size in the live story so this isn't pure source theatre — a
+ * theoretical "delete the rule entirely" alternative fix would pass
+ * the source-grep but fail the visible-line check. */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/Separator/Separator.css",
+    import.meta.url,
+  );
+  const cssSource = await fs.readFile(cssUrl, "utf8");
+  // Locate `.zs-separator--vertical { … }` via balanced-brace walk so
+  // a future maintainer adding nested `@supports`/`@media` siblings
+  // doesn't break the matcher.
+  const selectorIdx = cssSource.search(
+    /\.zs-separator--vertical\s*\{/,
+  );
+  let ruleBody = "";
+  if (selectorIdx >= 0) {
+    const openBraceIdx = cssSource.indexOf("{", selectorIdx);
+    let depth = 1;
+    let i = openBraceIdx + 1;
+    while (i < cssSource.length && depth > 0) {
+      const ch = cssSource[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    ruleBody = cssSource.slice(openBraceIdx + 1, i - 1);
+  }
+  // The block-size declaration must reference --zs-space-5 (or another
+  // documented token) AND there must be NO raw rem/px literal on the
+  // block-size line. Match the specific line so a comment a few lines
+  // up that says "1.25rem" (annotating what the token resolves to) is
+  // not a false-positive.
+  const blockSizeLineMatch = ruleBody.match(/block-size\s*:\s*([^;]+);/);
+  const blockSizeValue = blockSizeLineMatch ? blockSizeLineMatch[1].trim() : "";
+  const usesToken = /var\(--zs-space-5\)/.test(blockSizeValue);
+  const noRawRem = !/\b\d+(?:\.\d+)?rem\b/.test(blockSizeValue);
+  const noRawPx = !/\b\d+(?:\.\d+)?px\b/.test(blockSizeValue);
+  // Live check: open the Vertical story and confirm the rendered
+  // Separator has a non-zero painted block-size (proves the rule
+  // actually applies — a deleted rule would pass the grep but fail
+  // here).
+  await open("components-separator--vertical");
+  const liveSep = page.locator('[data-testid="separator-vertical"]');
+  await liveSep.waitFor({ state: "attached", timeout: 5000 });
+  const renderedBlockSize = await liveSep.evaluate((el) =>
+    getComputedStyle(el).blockSize,
+  );
+  const renderedPx = parseFloat(renderedBlockSize);
+  const liveOk = Number.isFinite(renderedPx) && renderedPx > 0;
+  const ok = usesToken && noRawRem && noRawPx && liveOk;
+  report(
+    "Separator vertical block-size tokenized via --zs-space-5 (wave-10 🟡)",
+    ok,
+    `blockSizeValue="${blockSizeValue}", usesToken=${usesToken}, noRawRem=${noRawRem}, noRawPx=${noRawPx}, rendered="${renderedBlockSize}"`,
+  );
+}
+
+/* ─── 90d. Wave-10 Separator 🔴 — role-lock bypass (aria-hidden+render) ─
+ *
+ * Pre-fix, `SeparatorProps` Omits `role` / `aria-orientation` but NOT
+ * `aria-hidden`, and the runtime strip missed both `aria-hidden` AND
+ * Base UI's `render` callback. Two concrete bypasses existed:
+ *
+ *   - `<Separator decorative={false} aria-hidden>` (cast through
+ *     `as any` to bypass the Omit) silently hid a
+ *     semantically-required separator from assistive tech — Base UI's
+ *     spread-after-defaults pattern forwarded the caller value past
+ *     the controlled `role="separator"`.
+ *
+ *   - `<Separator render={(props) => <span {...props} role="banner"
+ *     />}>` — Base UI's render callback re-rendered the element with
+ *     a different tag/role, dropping `role="separator"` entirely.
+ *
+ * Fix mirrors Wave-7 Toolbar.Separator: Omit `aria-hidden` AND
+ * `render` from `SeparatorProps`, strip both from rest, and on the
+ * semantic branch reassert `aria-hidden={undefined}` AFTER the spread
+ * so React drops the attribute even if a future regression
+ * re-introduces forwarding.
+ *
+ * This block opens the RoleLockBypass story (which mounts both
+ * bypasses behind `as any` casts) and reads the rendered DOM
+ * directly. Source theatre would prove only that the type Omit is in
+ * place; the live-DOM read proves the runtime contract holds. */
+await open("components-separator--role-lock-bypass");
+{
+  // Bypass 1: aria-hidden must NOT carry through. The semantic
+  // separator must still expose role="separator" to AT.
+  const ariaHiddenBypass = page.locator(
+    '[data-testid="separator-bypass-aria-hidden"]',
+  );
+  await ariaHiddenBypass.waitFor({ state: "attached", timeout: 5000 });
+  const ahRole = await ariaHiddenBypass.getAttribute("role");
+  const ahHidden = await ariaHiddenBypass.getAttribute("aria-hidden");
+  // Bypass 2: render callback must NOT swap the element/role. The
+  // hijack marker (data-render-hijack) MUST be absent and role must
+  // stay "separator".
+  const renderBypass = page.locator(
+    '[data-testid="separator-bypass-render"]',
+  );
+  await renderBypass.waitFor({ state: "attached", timeout: 5000 });
+  const rRole = await renderBypass.getAttribute("role");
+  const rHijack = await renderBypass.getAttribute("data-render-hijack");
+  const ok =
+    ahRole === "separator" &&
+    ahHidden === null &&
+    rRole === "separator" &&
+    rHijack === null;
+  report(
+    "Separator role-lock — aria-hidden + render bypasses dropped (wave-10 🔴)",
+    ok,
+    `aria-hidden bypass: role="${ahRole}"/aria-hidden="${ahHidden}"; render bypass: role="${rRole}"/data-render-hijack="${rHijack}"`,
+  );
+}
+
 /* ─── 87. Slice 19: PreviewCard hover → open → leave → close ───────── *
  *
  * Hover delay default is 600ms on Base UI; the Basic story uses
