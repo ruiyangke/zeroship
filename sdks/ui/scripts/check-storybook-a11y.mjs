@@ -398,6 +398,13 @@ const stories = [
   "components-collapsible--disabled",
   "components-collapsible--inside-card",
   "components-collapsible--rtl",
+  // Wave 10 fix #1: asChild surface on Trigger + Panel via _slot.ts.
+  "components-collapsible--trigger-as-child",
+  "components-collapsible--panel-as-child",
+  // Wave 10 rework fix #2: onOpenChange forwards Base UI details.
+  "components-collapsible--regression-on-open-change-details",
+  // Wave 10 rework fix #3: forced-colors disabled+open trigger.
+  "components-collapsible--regression-disabled-open-forced-colors",
   // Slice 16: Toast. 15 stories covering basic / variant / position /
   // duration / update / stacked / swipe / RTL — the imperative
   // `useToast()` surface drives every story.

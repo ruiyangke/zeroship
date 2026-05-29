@@ -38,7 +38,7 @@
   --zs-collapsible-panel-pad-inline: var(--zs-space-4);
 
   /* Chevron diameter — same optical sweet spot as Accordion. */
-  --zs-collapsible-chevron-size: 0.75rem;                  /* 12 */
+  --zs-collapsible-chevron-size: var(--zs-space-3);        /* 12 */
 }
 
 /* ─── root ──────────────────────────────────────────────────────────── */
@@ -94,7 +94,8 @@
 }
 
 .zs-collapsible-trigger:focus-visible {
-  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline: var(--zs-button-focus-ring-width) solid
+    var(--zs-button-focus-ring-color);
   outline-offset: calc(var(--zs-focus-ring-offset) * -1);
 }
 
@@ -177,10 +178,13 @@
     color: CanvasText;
     background-color: Canvas;
   }
-  .zs-collapsible-trigger[data-disabled] {
-    color: GrayText;
-  }
-  .zs-collapsible-trigger[data-panel-open] {
+  /* Wave 10 rework: exclude [data-disabled] from EVERY [data-panel-open]
+     selector. The open block sits later in source than the disabled
+     block at the same specificity (0,2,0), so without :not(...) an
+     open + disabled trigger paints Highlight/HighlightText and the
+     disabled contract loses the cascade. Same mirror applied to the
+     chevron's open-state selector. */
+  .zs-collapsible-trigger[data-panel-open]:not([data-disabled]) {
     color: HighlightText;
     background-color: Highlight;
   }
@@ -194,8 +198,26 @@
     color: HighlightText;
     background-color: Highlight;
   }
-  .zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron {
+  .zs-collapsible-trigger[data-panel-open]:not([data-disabled])
+    .zs-collapsible-trigger-chevron {
     color: HighlightText;
+  }
+  /* Closed-state chevron — base rule uses var(--zs-label-secondary),
+     which inherits the token under forced-color-adjust: none. Mirror
+     the chevron color here so the closed chevron paints in CanvasText,
+     and the disabled chevron in GrayText, instead of bleeding the
+     token through. Wave10 fix #2. */
+  .zs-collapsible-trigger-chevron {
+    color: CanvasText;
+  }
+  /* Disabled rules come AFTER the open block so they override even
+     without :not(...) — paired-defence against the open cascade
+     leaking into a disabled trigger. */
+  .zs-collapsible-trigger[data-disabled] {
+    color: GrayText;
+  }
+  .zs-collapsible-trigger[data-disabled] .zs-collapsible-trigger-chevron {
+    color: GrayText;
   }
   .zs-collapsible-trigger:focus-visible {
     outline-color: Highlight;
