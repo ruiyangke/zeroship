@@ -352,6 +352,15 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
     <Field
       invalid={inlineInvalid || undefined}
       required={props.required}
+      // Forward `disabled` to the inline Field root so `<Input label
+      // disabled>` is equivalent to the decomposed form `<Field
+      // disabled><Field.Label/><Input/></Field>`. Without this, the
+      // shorthand greyed only the native input (via the `disabled`
+      // attribute carried through `...rest`) but the wrapping Field
+      // row — and the linked label — stayed live. Pass `undefined`
+      // when not disabled so Base UI's controlled/uncontrolled
+      // distinction doesn't flip into "controlled false".
+      disabled={props.disabled || undefined}
     >
       {label != null ? (
         <Field.Label>
