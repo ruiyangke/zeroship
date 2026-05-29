@@ -4132,6 +4132,13 @@ await open("components-tabs--basic");
   const usagePanel = page.locator('[data-testid="tabs-basic-panel-usage"]');
   await overviewTab.waitFor({ state: "visible", timeout: 5000 });
 
+  // Reset to overview before measuring — Storybook autoplay re-runs
+  // Basic.play() on iframe load, which clicks Usage. We need the
+  // pre-state for this assertion to be overview-selected, so click
+  // overview first and wait for the swap to settle.
+  await overviewTab.click();
+  await page.waitForTimeout(50);
+
   const overviewSelectedBefore =
     (await overviewTab.getAttribute("aria-selected")) === "true";
   const usageSelectedBefore =
@@ -4332,6 +4339,17 @@ await open("components-tabs--controlled-value");
 {
   const readout = page.locator('[data-testid="tabs-controlled-readout"]');
   await readout.waitFor({ state: "visible", timeout: 5000 });
+  const secondTab = page.locator(
+    '[data-testid="tabs-controlled"] [role="tab"]',
+    { hasText: "Two" },
+  );
+  // Reset to the story's default value ("two") before measuring —
+  // Storybook autoplay re-runs ControlledValue.play() on iframe
+  // load, which clicks "Three". For this assertion we need the
+  // pre-state to be "Selected: two".
+  await secondTab.click();
+  await page.waitForTimeout(50);
+
   const before = (await readout.innerText()).trim();
   const thirdTab = page.locator(
     '[data-testid="tabs-controlled"] [role="tab"]',

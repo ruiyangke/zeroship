@@ -589,11 +589,39 @@ export const WithAnimatedIndicator: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const alpha = canvas.getByRole("tab", { name: /alpha/i });
+    const bravo = canvas.getByRole("tab", { name: /bravo/i });
 
-    await expect(canvas.getByText(/active content/i)).toBeVisible();
-    await expect(canvas.queryByText(/dormant content/i)).not.toBeInTheDocument();
-    await userEvent.click(canvas.getByRole("tab", { name: /dormant/i }));
-    await expect(await canvas.findByText(/dormant content/i)).toBeVisible();
+    /* Animated-indicator story renders Alpha/Bravo/Charlie/Delta. With
+     * keepMounted=true (the default — `lazyMount` is off here), all
+     * four panels are mounted simultaneously, so `getByRole("tabpanel")`
+     * would match four nodes. Verify the story's actual contract: the
+     * indicator's `--active-tab-left` CSS custom property tracks the
+     * active tab. The initial Alpha tab sits at the start of the row;
+     * clicking Bravo translates the indicator and the custom property
+     * updates to Bravo's pixel position. */
+    await expect(alpha).toHaveAttribute("aria-selected", "true");
+
+    const indicator = canvasElement.querySelector(
+      '[data-testid="tabs-animated-indicator"]',
+    ) as HTMLElement | null;
+    if (!indicator) throw new Error("animated indicator not found");
+    // Wait for Base UI to write the initial CSS vars (raf-driven).
+    await waitFor(() => {
+      const left = indicator.style.getPropertyValue("--active-tab-left");
+      expect(left).not.toBe("");
+    });
+    const initialLeft = indicator.style.getPropertyValue("--active-tab-left");
+
+    await userEvent.click(bravo);
+    await waitFor(() =>
+      expect(bravo).toHaveAttribute("aria-selected", "true"),
+    );
+    await waitFor(() => {
+      const nextLeft = indicator.style.getPropertyValue("--active-tab-left");
+      expect(nextLeft).not.toBe("");
+      expect(nextLeft).not.toBe(initialLeft);
+    });
   },
 };
 
