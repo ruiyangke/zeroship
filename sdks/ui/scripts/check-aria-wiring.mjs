@@ -8677,6 +8677,90 @@ await open("components-select--invalid-focus-ring");
   );
 }
 
+/* ─── Wave-9 NumberField review-fix regressions ──────────────────────── *
+ *
+ * Both blocks regress real-path aria-wiring / event-wiring contracts the
+ * Wave-9 review flagged 🔴.
+ *
+ * Block A — Field-auto aria preservation:
+ *   With NO caller `aria-label` / `aria-labelledby` / `aria-describedby`,
+ *   the inner <input> must keep Base UI's auto-wired ids (Field.Label's
+ *   id under `aria-labelledby`, Field.Description's id under
+ *   `aria-describedby`). Pre-fix the wrapper passed every aria-* prop
+ *   to BaseNumberField.Input directly; Base UI's mergeProps copies the
+ *   caller's `undefined` over its own auto-wired values, erasing the
+ *   ids. This block asserts BOTH ids are present.
+ *
+ * Block B — onFocus / onBlur compose:
+ *   The Root render callback used to REPLACE `rootProps.onFocus` /
+ *   `rootProps.onBlur` with our local bare-focus trackers, silently
+ *   dropping any handler a consumer attached. The play() in
+ *   ConsumerFocusHandlers ticks a counter on each focus / blur; this
+ *   block re-runs the same locator + counter assertions in the
+ *   aria-wiring driver so the regression lives outside the play()
+ *   (which Storybook DCEs from the production iframe). */
+/* ─── 76. NumberField Field-auto aria preservation (Wave 9 fix #1) ──── */
+await open("components-numberfield--field-auto-aria");
+{
+  const input = page.locator('[data-testid="numberfield-field-auto-aria"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = (await input.getAttribute("aria-labelledby")) ?? "";
+  const describedBy = (await input.getAttribute("aria-describedby")) ?? "";
+  // Field auto-wires the Label and Description ids. We don't know the
+  // exact ids Base UI generates, but both attributes must be NON-EMPTY
+  // and the referenced elements must exist in the DOM.
+  const labelledOk =
+    labelledBy.trim().length > 0 &&
+    (await page.evaluate(
+      (ids) => ids.split(/\s+/).every((id) => !!document.getElementById(id)),
+      labelledBy,
+    ));
+  const describedOk =
+    describedBy.trim().length > 0 &&
+    (await page.evaluate(
+      (ids) => ids.split(/\s+/).every((id) => !!document.getElementById(id)),
+      describedBy,
+    ));
+  report(
+    "NumberField Field-auto aria — input keeps auto-wired labelledby + describedby (Wave 9 fix #1)",
+    labelledOk && describedOk,
+    `aria-labelledby="${labelledBy}" aria-describedby="${describedBy}"`,
+  );
+}
+
+/* ─── 77. NumberField consumer onFocus / onBlur compose (Wave 9 fix #2) */
+await open("components-numberfield--consumer-focus-handlers");
+{
+  const input = page.locator('[data-testid="numberfield-focus-handlers"]');
+  const counter = page.locator('[data-testid="numberfield-focus-counter"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await counter.waitFor({ state: "visible", timeout: 5000 });
+  // The Storybook autoplay already ran the story's play(), which clicks
+  // the input and Tab's away. Read the counter after autoplay
+  // settles — both counts must be ≥ 1 (focus AND blur fired through
+  // the caller-supplied handlers). Pre-fix both stayed at zero because
+  // the Root render callback replaced rootProps.onFocus / onBlur with
+  // the local bare-focus tracker.
+  await page.waitForTimeout(100);
+  const initialText = (await counter.textContent()) ?? "";
+  // If autoplay didn't run (or already settled to focus=1 blur=1), we
+  // still drive the input ourselves to make the assertion deterministic
+  // independent of play() execution order.
+  await input.focus();
+  await page.waitForTimeout(50);
+  await input.blur();
+  await page.waitForTimeout(50);
+  const finalText = (await counter.textContent()) ?? "";
+  const match = finalText.match(/focus=(\d+)\s+blur=(\d+)/);
+  const focusCount = match ? Number(match[1]) : 0;
+  const blurCount = match ? Number(match[2]) : 0;
+  report(
+    "NumberField consumer focus handlers — onFocus + onBlur fire (Wave 9 fix #2)",
+    focusCount >= 1 && blurCount >= 1,
+    `initial="${initialText}" final="${finalText}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

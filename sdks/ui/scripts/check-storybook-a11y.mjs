@@ -235,6 +235,8 @@ const stories = [
   "components-numberfield--forced-colors-hover",
   "components-numberfield--coarse-pointer",
   "components-numberfield--rtl",
+  "components-numberfield--field-auto-aria",
+  "components-numberfield--consumer-focus-handlers",
   "components-slider--basic",
   "components-slider--range",
   "components-slider--all-sizes",
