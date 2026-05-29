@@ -6038,6 +6038,252 @@ await open("components-slider--consumer-style-preserved");
   );
 }
 
+/* ─── Wave-5 fix: PreviewCard detached handle honors Root timing ─────── *
+ *
+ * Regression for the 🔴 detached-handle timing carry. Pre-fix, a
+ * detached `<PreviewCard.Trigger handle={h}>` only read `popupId` off
+ * the augmented handle — Root's `delay` / `closeDelay` lived in React
+ * context which never reached a Trigger mounted in a different subtree,
+ * so the detached Trigger silently fell back to Base UI's 600ms open /
+ * 300ms close defaults regardless of what Root was passing.
+ *
+ * The DetachedHandle story sets `delay={0}` and `closeDelay={50}` on
+ * the Root and pairs it with the Trigger via `createPreviewCardHandle()`.
+ * Under the fix, the popup mounts within a few hover-frames (delay 0)
+ * and unmounts within ~250ms after pointer-leave (close delay 50). Pre-
+ * fix, the popup needed ~600ms to mount and ~300ms+ to unmount —
+ * specifically, an attached-popup poll capped at 250ms after hover
+ * would never see the mount, and an unmount poll capped at 250ms after
+ * unhover would still see the popup attached. Both observations fail
+ * pre-fix; both succeed post-fix.
+ *
+ * Also asserts the wiring side: `aria-describedby` on the detached
+ * Trigger must reference the mounted Popup id and that id must resolve
+ * in document. Pre-fix this part worked (popupId carried on the handle
+ * already); we keep the assertion so a future regression on the wiring
+ * side is caught alongside the timing one. */
+await open("components-previewcard--detached-handle");
+{
+  const trigger = page.locator(
+    '[data-testid="previewcard-detached-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Park the cursor at the page origin first so the next `hover()`
+  // dispatches a fresh pointerenter — Storybook's autoplay may have
+  // left the cursor on the trigger.
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(120);
+  const hoverStart = Date.now();
+  await trigger.hover();
+  const popup = page.locator(
+    '[data-testid="previewcard-detached-popup"]',
+  );
+  // With delay=0 the popup should mount near-immediately (Base UI
+  // schedules a synchronous open). Cap the poll well under Base UI's
+  // 600ms intent default so pre-fix (Trigger ignores Root delay,
+  // silently uses 600ms) this poll will not see the mount in time.
+  // 400ms is a comfortable middle ground: post-fix the popup mounts
+  // within ~50ms of hover, pre-fix it stays unmounted for ~600ms.
+  let openMs = -1;
+  let openedFast = false;
+  try {
+    await popup.waitFor({ state: "attached", timeout: 400 });
+    openMs = Date.now() - hoverStart;
+    openedFast = true;
+  } catch {
+    openMs = Date.now() - hoverStart;
+    openedFast = false;
+  }
+  // Sample aria wiring while the popup is mounted. The Trigger's
+  // describedby token list MUST contain the Popup's id, and that id
+  // must resolve to a node in the document.
+  const wiring = await page.evaluate(() => {
+    const t = document.querySelector(
+      '[data-testid="previewcard-detached-trigger"]',
+    );
+    const p = document.querySelector(
+      '[data-testid="previewcard-detached-popup"]',
+    );
+    if (!t) return null;
+    const describedBy = t.getAttribute("aria-describedby") ?? "";
+    const popupId = p ? p.id : "";
+    const tokens = describedBy.split(/\s+/).filter(Boolean);
+    const resolves =
+      popupId.length > 0 && document.getElementById(popupId) !== null;
+    return {
+      describedBy,
+      popupId,
+      hasToken: popupId.length > 0 && tokens.includes(popupId),
+      resolves,
+    };
+  });
+  // Move cursor off the trigger to fire the close timer.
+  await page.mouse.move(2, 2);
+  const unhoverStart = Date.now();
+  // closeDelay=50 means the popup detaches within ~50ms + Floating
+  // UI's safePolygon grace window + a paint frame (~200ms total
+  // measured). Pre-fix the Trigger silently uses our 200ms wrapper
+  // fallback, so closeMs lands around ~350ms (200ms + safePolygon).
+  // 280ms cleanly separates the two regimes; we use 300ms with a
+  // small cushion so a slow CI box doesn't flake the post-fix path
+  // while still failing well under pre-fix's ~350ms.
+  let closeMs = -1;
+  let closedFast = false;
+  try {
+    await popup.waitFor({ state: "detached", timeout: 300 });
+    closeMs = Date.now() - unhoverStart;
+    closedFast = true;
+  } catch {
+    closeMs = Date.now() - unhoverStart;
+    closedFast = false;
+  }
+  const wiringOk =
+    wiring !== null &&
+    wiring.popupId.length > 0 &&
+    wiring.hasToken &&
+    wiring.resolves;
+  report(
+    "PreviewCard detached handle honors Root delay/closeDelay",
+    openedFast && closedFast && wiringOk,
+    `openMs=${openMs}, closeMs=${closeMs}, openedFast=${openedFast}, closedFast=${closedFast}, ` +
+      `describedBy="${wiring?.describedBy ?? ""}", popupId="${wiring?.popupId ?? ""}", ` +
+      `hasToken=${wiring?.hasToken ?? false}, resolves=${wiring?.resolves ?? false}`,
+  );
+}
+
+/* ─── Wave-5 fix: PreviewCard popup paints on an opaque surface ──────── *
+ *
+ * Regression for the 🔴 glass-invariant violation. Pre-fix, the popup
+ * painted `background-color: var(--zs-surface-raised)` which in the
+ * crystal theme resolves to `oklch(1 0 0 / 0.55)` — a translucent
+ * alpha-55% white. With `backdrop-filter` unsupported (older browsers,
+ * forced-colors aside), the page below bled through and axe-core's
+ * color-contrast walk would not terminate inside the popup.
+ *
+ * Post-fix the popup paints on `--zs-surface` (the same opaque token
+ * Popover.Popup uses). We assert two things:
+ *
+ *   1. The computed `background-color` on the popup is fully opaque
+ *      (alpha === 1). Pre-fix the rgba() string carried a non-1 alpha.
+ *   2. The token in the SOURCE CSS that the popup is painted with is
+ *      `--zs-surface`, not `--zs-surface-raised`. We verify this by
+ *      reading the literal background-color declaration from the
+ *      authored stylesheet — the computed value is theme-resolved and
+ *      could in theory be opaque even from `--zs-surface-raised` under
+ *      a non-crystal theme. */
+await open("components-previewcard--basic");
+{
+  // The Storybook addon-themes decorator only sets `data-theme` on
+  // `<html>` from within the manager UI; direct `iframe.html?...`
+  // loads (which this script uses) never get the attribute. Set it
+  // explicitly so `--zs-surface` (and the rest of the crystal palette)
+  // actually resolves during the sample below — otherwise every popup
+  // here would compute to a transparent fallback regardless of which
+  // token the rule references.
+  await page.evaluate(() => {
+    document.documentElement.setAttribute("data-theme", "crystal");
+  });
+  const trigger = page.locator(
+    '[data-testid="previewcard-basic-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(120);
+  await trigger.hover();
+  const popup = page.locator('[data-testid="previewcard-basic-popup"]');
+  let attached = false;
+  try {
+    await popup.waitFor({ state: "visible", timeout: 3000 });
+    attached = true;
+  } catch {
+    attached = false;
+  }
+  // Wait for the opacity transition to settle so the bg-color sample
+  // isn't taken mid-transition (the engine reports a mixed value
+  // during the keyframe).
+  await page
+    .waitForFunction(
+      () => {
+        const p = document.querySelector(
+          '[data-testid="previewcard-basic-popup"]',
+        );
+        if (!p) return false;
+        return parseFloat(window.getComputedStyle(p).opacity) > 0.99;
+      },
+      null,
+      { timeout: 2000 },
+    )
+    .catch(() => {});
+  const sample = await page.evaluate(() => {
+    const p = document.querySelector(
+      '[data-testid="previewcard-basic-popup"]',
+    );
+    if (!p) return null;
+    const bg = window.getComputedStyle(p).backgroundColor;
+    const surfaceVar = window
+      .getComputedStyle(document.documentElement)
+      .getPropertyValue("--zs-surface")
+      .trim();
+    // Walk authored stylesheets for the `.zs-preview-card-popup` rule
+    // and read its `background-color` declaration verbatim — this is
+    // the source token the rule paints with, not the theme-resolved
+    // computed value.
+    let authored = "";
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        continue;
+      }
+      if (!rules) continue;
+      for (const rule of Array.from(rules)) {
+        if (
+          rule instanceof CSSStyleRule &&
+          rule.selectorText === ".zs-preview-card-popup"
+        ) {
+          authored = rule.style
+            .getPropertyValue("background-color")
+            .trim();
+        }
+      }
+    }
+    return { bg, authored, surfaceVar };
+  });
+  // Parse the computed background-color for an alpha channel. Both
+  // `rgb(...)` and `rgba(...)` / `oklch(... / a)` forms can appear
+  // depending on the engine. Opaque means no explicit non-1 alpha.
+  let opaque = false;
+  if (sample?.bg) {
+    const m = sample.bg.match(/rgba?\(([^)]+)\)/i);
+    if (m) {
+      const parts = m[1].split(/[,/\s]+/).filter(Boolean);
+      // rgb(a, b, c) — 3 parts, opaque. rgba(a, b, c, alpha) — 4 parts.
+      if (parts.length === 3) opaque = true;
+      else if (parts.length === 4) opaque = Number(parts[3]) >= 0.999;
+    } else if (/^oklch\(/i.test(sample.bg)) {
+      // oklch(L C h) — opaque. oklch(L C h / a) — check alpha.
+      const slashMatch = sample.bg.match(/\/\s*([0-9.]+)\s*\)/);
+      opaque = slashMatch ? Number(slashMatch[1]) >= 0.999 : true;
+    }
+  }
+  // Pre-fix: rule referenced `--zs-surface-raised`, the source-of-
+  // truth token check fails. Post-fix: rule references `--zs-surface`.
+  // We require the literal `var(--zs-surface)` substring and the
+  // absence of `--zs-surface-raised` so a hybrid declaration would
+  // still fail.
+  const usesOpaqueToken =
+    sample?.authored.includes("var(--zs-surface)") === true &&
+    !sample.authored.includes("--zs-surface-raised");
+  report(
+    "PreviewCard popup paints on opaque --zs-surface (glass invariant)",
+    attached && opaque && usesOpaqueToken,
+    `attached=${attached}, computed-bg="${sample?.bg ?? ""}", ` +
+      `authored="${sample?.authored ?? ""}", surfaceVar="${sample?.surfaceVar ?? ""}", ` +
+      `opaque=${opaque}, usesOpaqueToken=${usesOpaqueToken}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

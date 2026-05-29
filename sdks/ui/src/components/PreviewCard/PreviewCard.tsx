@@ -68,9 +68,12 @@ import {
   createContext,
   forwardRef,
   isValidElement,
+  useCallback,
   useContext,
+  useEffect,
   useId,
   useMemo,
+  useSyncExternalStore,
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type ReactNode,
@@ -107,16 +110,80 @@ type BasePreviewCardHandle = ReturnType<typeof BasePreviewCard.createHandle>;
 
 /**
  * Wrapper handle. Base UI's `createHandle` returns a `PreviewCardHandle`
- * that connects a detached Trigger to a Root. We augment it with a
- * stable `popupId` so detached Triggers can wire `aria-describedby` to
- * the popup the same way Triggers inside a Root context do — without it,
- * a detached Trigger would lose the wiring (Root's runtime context is
- * the only other carrier of the id).
+ * that connects a detached Trigger to a Root. We augment it with:
+ *
+ *   - `popupId`: a stable id so detached Triggers can wire
+ *     `aria-describedby` to the popup the same way Triggers inside a
+ *     Root context do — without it, a detached Trigger would lose the
+ *     wiring (Root's runtime context is the only other carrier).
+ *   - `delay` / `closeDelay`: timing the paired Root publishes via the
+ *     handle so detached Triggers honor the Root's `delay` / `closeDelay`
+ *     props. React context cannot bridge a Root subtree to a Trigger
+ *     mounted somewhere else in the tree, so the augmented handle is
+ *     the only carrier. Detached Triggers read these whenever they fall
+ *     back from the React-context path.
+ *
+ * `delay` / `closeDelay` are mutable on the handle so a Root can update
+ * them across renders without forcing the consumer to recreate the
+ * handle every time. The handle is created outside React; mutating its
+ * fields from a Root effect is the documented way to thread timing
+ * through it.
  */
 export type PreviewCardHandle = BasePreviewCardHandle & {
   /** Stable id used for `aria-describedby` ↔ Popup `id` wiring. */
   readonly popupId: string;
+  /**
+   * Open delay (ms) published by the paired Root. `undefined` when the
+   * Root did not pass `delay` — Base UI's built-in default applies.
+   */
+  delay: number | undefined;
+  /**
+   * Close delay (ms) published by the paired Root. `undefined` when the
+   * Root did not pass `closeDelay` — the wrapper's 200ms brief default
+   * is applied at the Trigger.
+   */
+  closeDelay: number | undefined;
 };
+
+/* ─── Handle subscriber registry ───────────────────────────────────── *
+ *
+ * Detached Triggers need to RE-RENDER when their paired Root mutates
+ * the handle's `delay` / `closeDelay` so they pick up the new timing
+ * and forward it to Base UI. React doesn't observe plain-object
+ * mutations on its own, so we wire a tiny pub-sub keyed by handle.
+ * `useSyncExternalStore` in the Trigger subscribes to its handle's
+ * notifier; Root calls `notifyPreviewCardHandle` after every write.
+ *
+ * Module-scoped WeakMap so the subscribers don't pollute the public
+ * `PreviewCardHandle` shape, and so the registry is GC-clean when a
+ * handle is no longer referenced.
+ */
+const handleSubscribers = new WeakMap<
+  PreviewCardHandle,
+  Set<() => void>
+>();
+
+function subscribeToPreviewCardHandle(
+  handle: PreviewCardHandle | undefined,
+  listener: () => void,
+): () => void {
+  if (!handle) return () => {};
+  let set = handleSubscribers.get(handle);
+  if (!set) {
+    set = new Set();
+    handleSubscribers.set(handle, set);
+  }
+  set.add(listener);
+  return () => {
+    set?.delete(listener);
+  };
+}
+
+function notifyPreviewCardHandle(handle: PreviewCardHandle): void {
+  const set = handleSubscribers.get(handle);
+  if (!set) return;
+  for (const listener of set) listener();
+}
 
 /**
  * Create an imperative handle for pairing a Root with detached Triggers
@@ -124,6 +191,11 @@ export type PreviewCardHandle = BasePreviewCardHandle & {
  * stable `popupId` so a Trigger outside the Root's React subtree still
  * publishes `aria-describedby={handle.popupId}` — the wiring Root
  * context normally provides is preserved via the handle instead.
+ *
+ * `delay` / `closeDelay` start undefined; the paired Root assigns them
+ * during render whenever the consumer passes those props. Detached
+ * Triggers reading from this handle then honor the Root's timing
+ * instead of silently falling back to Base UI's defaults.
  */
 export function createPreviewCardHandle(): PreviewCardHandle {
   const handle = BasePreviewCard.createHandle() as PreviewCardHandle;
@@ -135,6 +207,21 @@ export function createPreviewCardHandle(): PreviewCardHandle {
   Object.defineProperty(handle, "popupId", {
     value: id,
     writable: false,
+    enumerable: true,
+    configurable: false,
+  });
+  // Initialise the timing fields so detached Triggers can safely read
+  // them even before the paired Root has rendered. Mutable (writable:
+  // true) so the Root can update them across renders.
+  Object.defineProperty(handle, "delay", {
+    value: undefined,
+    writable: true,
+    enumerable: true,
+    configurable: false,
+  });
+  Object.defineProperty(handle, "closeDelay", {
+    value: undefined,
+    writable: true,
     enumerable: true,
     configurable: false,
   });
@@ -211,6 +298,23 @@ function PreviewCardRoot({
   const handle = (rest as { handle?: PreviewCardHandle }).handle;
   const generatedId = useId();
   const popupId = handle?.popupId ?? generatedId;
+  // Publish Root timing onto the augmented handle so detached Triggers
+  // (paired via the same handle) honor the Root's `delay` / `closeDelay`
+  // even though they live outside this Root's React subtree. Without
+  // this carrier, a detached `<PreviewCard.Trigger handle={h}>` only
+  // sees Base UI's defaults (600ms open / 300ms close) — the Root's
+  // `delay={0}` or `closeDelay={500}` silently does nothing. We
+  // mutate during render (safe — the handle is module-scoped, not
+  // React state) and notify subscribers in a layout effect so any
+  // detached Trigger that already rendered with stale handle values
+  // picks up the change on the same commit.
+  if (handle) {
+    handle.delay = delay;
+    handle.closeDelay = closeDelay;
+  }
+  useEffect(() => {
+    if (handle) notifyPreviewCardHandle(handle);
+  }, [handle, delay, closeDelay]);
   const ctxValue = useMemo<PreviewCardRootRuntimeContext>(
     () => ({ delay, closeDelay, popupId }),
     [delay, closeDelay, popupId],
@@ -278,6 +382,32 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
       (rest as { handle?: PreviewCardHandle }).handle ?? undefined;
     const resolvedPopupId = rootCtx?.popupId ?? handleFromProps?.popupId;
 
+    // Subscribe to the paired handle's notifier so this Trigger
+    // re-renders whenever the Root mutates `delay` / `closeDelay`
+    // across mounts. React doesn't observe plain-object mutations on
+    // its own, and detached Triggers can render BEFORE the Root's
+    // effect runs on first commit — without this subscription, the
+    // Trigger reads `undefined` once and never re-renders to pick up
+    // the Root's actual timing. The snapshot returns a stable token
+    // so React only re-renders when timing actually changes.
+    const handleSubscribe = useCallback(
+      (listener: () => void) =>
+        subscribeToPreviewCardHandle(handleFromProps, listener),
+      [handleFromProps],
+    );
+    const handleSnapshot = useCallback(
+      () =>
+        handleFromProps
+          ? `${handleFromProps.delay ?? "_"}|${handleFromProps.closeDelay ?? "_"}`
+          : "",
+      [handleFromProps],
+    );
+    useSyncExternalStore(
+      handleSubscribe,
+      handleSnapshot,
+      handleSnapshot, // SSR snapshot — same as client; timing read happens lazily during render
+    );
+
     // Compose any consumer-supplied aria-describedby with the wrapper's
     // popup id so AT announces the preview content on focus. We wire
     // this unconditionally — referring to a non-mounted id is a no-op
@@ -292,8 +422,15 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
     // explicitly supplied a value so per-Root timing remains optional
     // (Base UI's default applies for `delay`; we override the close
     // default since Base UI's 300ms is heavier than the brief asks for).
-    const resolvedDelay = rootCtx?.delay;
-    const resolvedCloseDelay = rootCtx?.closeDelay ?? 200;
+    //
+    // Detached Triggers (no Root context) read the same timing off the
+    // augmented handle, which the paired Root mutates during its
+    // render. Without this carrier, a `<PreviewCard delay={0}>` paired
+    // via `createHandle()` would still wait 600ms before opening
+    // because the Root's React context never reaches the Trigger.
+    const resolvedDelay = rootCtx?.delay ?? handleFromProps?.delay;
+    const resolvedCloseDelay =
+      rootCtx?.closeDelay ?? handleFromProps?.closeDelay ?? 200;
 
     if (
       process.env.NODE_ENV !== "production" &&
