@@ -24,6 +24,8 @@ const stories = [
   "components-fieldset--with-form-integration",
   "components-fieldset--nested-fieldset",
   "components-fieldset--custom-legend-position",
+  "components-fieldset--aria-labelled-by-undefined",
+  "components-fieldset--nested-fieldset-disabled-cascade",
   "components-fieldset--rtl",
 ];
 

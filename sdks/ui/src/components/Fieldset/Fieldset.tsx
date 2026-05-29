@@ -44,10 +44,12 @@
  *   `aria-labelledby` so the AT label survives any DOM position.
  *   We keep the Base UI `<div>` shape so consumers can place the
  *   Legend anywhere (top, between fields, bottom) — the
- *   `CustomLegendPosition` story exercises this. If a consumer
- *   needs a real `<legend>` they can pass `render={<legend />}`
- *   through the Base UI surface, but the default `<div>` is the
- *   right call for a flexible design system.
+ *   `CustomLegendPosition` story exercises this. Element-swap via
+ *   Base UI's `render` is intentionally NOT exposed on the wrapper
+ *   (`FieldsetProps` / `FieldsetLegendProps` `Omit<…,"render">`):
+ *   the design-system layer owns the shape, and a consumer who
+ *   needs a different container should compose with Card / a
+ *   plain div instead.
  *
  * Aria contract: every aria detail (`aria-labelledby` on the
  * fieldset, `aria-disabled` cascade onto descendant controls when
@@ -87,6 +89,27 @@ export interface FieldsetProps extends Omit<BaseFieldsetRootProps, "render"> {
 
   /** Class hook for the root `<fieldset>`. */
   className?: string;
+
+  /**
+   * Disables the entire group. The native `<fieldset disabled>`
+   * attribute cascades to descendant form controls at the AT +
+   * layout layers; the wrapper additionally propagates the signal
+   * through a `FieldsetDisabledContext` so non-native Base UI
+   * primitives (Checkbox / Switch / Radio / Toggle) grey out in
+   * step. When `false` AND a wrapping Fieldset is disabled, the
+   * outer disabled state still wins (nested cascade); pass
+   * `disabled` explicitly only when you mean to disable THIS
+   * fieldset. Default `false`.
+   */
+  disabled?: boolean;
+
+  /**
+   * Group children — typically a `Fieldset.Legend` plus one or
+   * more `Field` / control rows. The Legend can sit anywhere
+   * inside the fieldset; Base UI wires `aria-labelledby` via id,
+   * not DOM order.
+   */
+  children?: React.ReactNode;
 }
 
 /* ─── Fieldset disabled context ───────────────────────────────────── *
@@ -122,6 +145,23 @@ export function useFieldsetDisabledContext(): boolean {
 /* ─── styled passthroughs around Base UI parts ────────────────────── */
 
 type LegendProps = ComponentPropsWithoutRef<typeof BaseFieldset.Legend>;
+
+/**
+ * Props for `Fieldset.Legend` — the visible group label.
+ *
+ * Renders Base UI's `<div>`-shaped Legend (the element shape is
+ * fixed at the design-system layer; `render` is intentionally
+ * omitted). Base UI auto-assigns the Legend an id and wires it
+ * into the parent Fieldset's `aria-labelledby` via context, so
+ * the Legend can sit anywhere inside the fieldset — first child,
+ * between Fields, or at the bottom via `order` — and the
+ * accessible name still survives.
+ *
+ * Accepts every HTML attribute applicable to a `<div>` (e.g.
+ * `className`, `style`, `data-testid`, `id`); inherits Base UI's
+ * own state attrs (`data-disabled`) when the wrapping Fieldset
+ * is disabled.
+ */
 export type FieldsetLegendProps = Omit<LegendProps, "render">;
 const FieldsetLegend = forwardRef<HTMLDivElement, FieldsetLegendProps>(
   function FieldsetLegend({ className, ...rest }, ref) {
@@ -147,6 +187,26 @@ function FieldsetRoot(
     disabled = false,
     className,
     children,
+    /*
+     * Sift `aria-label` / `aria-labelledby` / `aria-describedby`
+     * out of `...rest` so they do NOT spread onto BaseFieldset.Root
+     * with potentially-`undefined` values. Base UI auto-wires
+     * `aria-labelledby` to the Legend's id via RootContext; if a
+     * consumer renders `<Fieldset aria-labelledby={undefined}>`,
+     * a bare `{...rest}` spread lands `aria-labelledby={undefined}`
+     * AFTER Base UI's merged props and CLOBBERS the wired id. Same
+     * footgun a defined `aria-labelledby={"some-id"}` raises —
+     * silently replacing the Legend binding without composing.
+     *
+     * Mirror of the Combobox / Select pattern: sift the aria props,
+     * spread `...rest` (which now excludes them), then re-apply
+     * each aria attr ONLY when the caller actually passed a defined
+     * value. Undefined values stay out of the DOM and the
+     * Legend-id binding survives untouched.
+     */
+    "aria-label": ariaLabel,
+    "aria-labelledby": ariaLabelledBy,
+    "aria-describedby": ariaDescribedBy,
     ...rest
   }: FieldsetProps,
   ref: React.ForwardedRef<HTMLFieldSetElement>,
@@ -154,10 +214,28 @@ function FieldsetRoot(
   // Inherit a wrapping Fieldset's disabled state — when a
   // `<Fieldset disabled>` wraps a non-disabled inner Fieldset, the
   // inner one should still report disabled to its selection
-  // descendants. Native cascade handles the DOM; we propagate the
-  // React-context signal in step.
+  // descendants AND to Base UI's Root (so its `data-disabled` chip
+  // and the descendant native-cascade chain both pick up the
+  // ancestor signal). Native cascade also handles the DOM at the
+  // outer fieldset level; this `effectiveDisabled` mirrors the
+  // signal into the inner Root + context so the styling /
+  // metadata never disagree with the browser-cascaded behavior.
   const parentFieldsetDisabled = useContext(FieldsetDisabledContext);
   const effectiveDisabled = disabled || parentFieldsetDisabled;
+
+  // Only apply each aria attr when defined (mirror of Combobox /
+  // Select sift pattern — preserves Base UI's auto-wired ids when
+  // the caller passes nothing).
+  const ariaProps: {
+    "aria-label"?: string;
+    "aria-labelledby"?: string;
+    "aria-describedby"?: string;
+  } = {};
+  if (ariaLabel !== undefined) ariaProps["aria-label"] = ariaLabel;
+  if (ariaLabelledBy !== undefined)
+    ariaProps["aria-labelledby"] = ariaLabelledBy;
+  if (ariaDescribedBy !== undefined)
+    ariaProps["aria-describedby"] = ariaDescribedBy;
 
   return (
     <FieldsetDisabledContext.Provider value={effectiveDisabled}>
@@ -167,7 +245,7 @@ function FieldsetRoot(
         // `HTMLFieldSetElement` so consumers forwarding refs land on
         // the expected element type.
         ref={ref as React.Ref<HTMLElement>}
-        disabled={disabled}
+        disabled={effectiveDisabled}
         className={composeBaseClass(
           classnames(
             "zs-fieldset",
@@ -176,8 +254,9 @@ function FieldsetRoot(
           className,
         )}
         data-size={size}
-        data-disabled={disabled ? "" : undefined}
+        data-disabled={effectiveDisabled ? "" : undefined}
         {...rest}
+        {...ariaProps}
       >
         {children}
       </BaseFieldset.Root>
