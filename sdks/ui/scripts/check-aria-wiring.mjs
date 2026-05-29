@@ -1865,6 +1865,58 @@ await open("components-combobox--aria-propagation");
   );
 }
 
+/* ─── 44a. Combobox FieldAriaAutowiring — Field-wired ids survive ──── *
+ *
+ * Wave-6 review-fix A regression: inside `<Field><Field.Label>…<Field.Description>…`
+ * with NO consumer-passed aria-*, the wrapper used to stamp
+ * `aria-labelledby={undefined}` / `aria-describedby={undefined}` on
+ * `<BaseCombobox.Input>`. Base UI's `mergeProps` treated those
+ * `undefined`s as explicit overrides and clobbered the ids Field's
+ * bridge had auto-wired. Post-fix, the wrapper only spreads aria-*
+ * keys when they are actually defined. The story renders Field +
+ * Field.Label + Field.Description and passes NO aria-* on Combobox.
+ * We assert the focusable input carries BOTH `aria-labelledby` and
+ * `aria-describedby` with non-empty ids. */
+await open("components-combobox--field-aria-autowiring");
+{
+  const input = page.locator(
+    '[data-testid="combobox-field-aria-autowiring"] input',
+  );
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = (await input.getAttribute("aria-labelledby")) ?? "";
+  const describedBy = (await input.getAttribute("aria-describedby")) ?? "";
+  const hasLabelledBy = labelledBy.trim().length > 0;
+  const hasDescribedBy = describedBy.trim().length > 0;
+  const ok = hasLabelledBy && hasDescribedBy;
+  report(
+    "Combobox FieldAriaAutowiring — Field-wired aria-labelledby + aria-describedby survive on input",
+    ok,
+    `aria-labelledby="${labelledBy}" aria-describedby="${describedBy}"`,
+  );
+}
+
+/* ─── 44b. Combobox PlaceholderFallback — placeholder → aria-label ── *
+ *
+ * Wave-6 review-fix B regression: a standalone `<Combobox placeholder="…">`
+ * with no Field, no `aria-label`, and no `aria-labelledby` had no
+ * accessible name (placeholder is not one). The wrapper now promotes
+ * placeholder text to `aria-label` as a last-resort fallback. Assert
+ * the input carries `aria-label="Search fruits"`. */
+await open("components-combobox--placeholder-fallback");
+{
+  const input = page.locator(
+    '[data-testid="combobox-placeholder-fallback"] input',
+  );
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const ariaLabel = await input.getAttribute("aria-label");
+  const ok = ariaLabel === "Search fruits";
+  report(
+    "Combobox PlaceholderFallback — placeholder promotes to aria-label when unlabeled",
+    ok,
+    `aria-label="${ariaLabel}"`,
+  );
+}
+
 /* ─── 45. Autocomplete AriaPropagation — aria-label propagates to input ─ */
 await open("components-autocomplete--aria-propagation");
 {
