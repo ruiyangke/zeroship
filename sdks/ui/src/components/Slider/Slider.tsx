@@ -297,9 +297,24 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
     };
   }
 
+  // Merge the caller's `style` with our `--zs-slider-value-position`
+  // custom property. Spreading `rest` after destructuring would
+  // re-introduce the caller's style and clobber the custom property;
+  // explicitly destructure here and rebuild the style attr so both
+  // survive (consumer keys + our CSS var). Order: consumer style first,
+  // then ours — ours wins on the custom-prop collision while the rest
+  // of the consumer style passes through untouched.
+  const { style: consumerStyle, ...restWithoutStyle } = rest as {
+    style?: CSSProperties;
+  } & Record<string, unknown>;
+  const mergedStyle: CSSProperties | undefined =
+    consumerStyle || valuePositionStyle
+      ? { ...(consumerStyle ?? {}), ...(valuePositionStyle ?? {}) }
+      : undefined;
+
   return (
     <BaseSlider.Root
-      {...(rest as BaseRootProps)}
+      {...(restWithoutStyle as BaseRootProps)}
       ref={ref}
       orientation={orientation}
       disabled={disabled || undefined}
@@ -315,7 +330,7 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
         `zs-slider--${orientation}`,
         className,
       )}
-      style={valuePositionStyle}
+      style={mergedStyle}
       data-variant={variant}
       data-size={size}
       data-orientation={orientation}

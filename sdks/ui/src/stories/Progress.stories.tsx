@@ -125,13 +125,25 @@ export const AllSizes: Story = {
     </div>
   ),
   play: async ({ canvasElement }) => {
+    // AllSizes renders three progressbars (sm / md / lg), all with
+    // value=55. The play asserts every variant carries the determinate
+    // value and that the labels expose the size via aria-label.
     const canvas = within(canvasElement);
-    const progress = canvas.getByRole("progressbar", {
-      name: /download progress/i,
-    });
+    const bars = canvas.getAllByRole("progressbar");
 
-    await expect(progress).toHaveAttribute("aria-valuenow", "68");
-    await expect(canvas.getByText("68%")).toBeInTheDocument();
+    await expect(bars).toHaveLength(3);
+    for (const bar of bars) {
+      await expect(bar).toHaveAttribute("aria-valuenow", "55");
+    }
+    await expect(
+      canvas.getByRole("progressbar", { name: /small progress/i }),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.getByRole("progressbar", { name: /medium progress/i }),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.getByRole("progressbar", { name: /large progress/i }),
+    ).toBeInTheDocument();
   },
 };
 
@@ -162,12 +174,16 @@ export const WithValue: Story = {
     </div>
   ),
   play: async ({ canvasElement }) => {
+    // WithValue renders a single bar with value=68 and showValue, so
+    // both the aria-valuenow and the rendered "68%" string come from
+    // the same Progress instance under the "Download progress" label.
     const canvas = within(canvasElement);
-    const progress = canvas.getByRole("progressbar", { name: /backup/i });
+    const progress = canvas.getByRole("progressbar", {
+      name: /download progress/i,
+    });
 
-    await expect(progress).toHaveAttribute("aria-valuenow", "100");
-    await expect(progress).toHaveAttribute("data-status", "complete");
-    await expect(canvas.getByText("100%")).toBeInTheDocument();
+    await expect(progress).toHaveAttribute("aria-valuenow", "68");
+    await expect(canvas.getByText("68%")).toBeInTheDocument();
   },
 };
 
@@ -197,13 +213,15 @@ export const CompletionCelebrate: Story = {
     </div>
   ),
   play: async ({ canvasElement }) => {
+    // CompletionCelebrate renders value=100 with label="Backup"; Base UI
+    // flips data-status to "complete" at the cap. The aria-label cascades
+    // from the visible label since `label` is set but no aria-label override.
     const canvas = within(canvasElement);
-    const progress = canvas.getByRole("progressbar", {
-      name: /uploading photo\.jpg/i,
-    });
+    const progress = canvas.getByRole("progressbar", { name: /backup/i });
 
-    await expect(progress).toHaveAttribute("aria-valuenow", "33");
-    await expect(canvas.getByText("33%")).toBeInTheDocument();
+    await expect(progress).toHaveAttribute("aria-valuenow", "100");
+    await expect(progress).toHaveAttribute("data-status", "complete");
+    await expect(canvas.getByText("100%")).toBeInTheDocument();
   },
 };
 

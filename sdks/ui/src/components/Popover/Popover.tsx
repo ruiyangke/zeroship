@@ -352,9 +352,17 @@ const PopoverClose = forwardRef<HTMLButtonElement, PopoverCloseProps>(
 
           if (asChild) {
             if (!isValidElement(children)) return <></>;
+            // Forward `rest` (className, data-*, aria-*, disabled,
+            // style) through Slot so wrapper-level attributes survive
+            // the asChild render. Slot's mergeProps composes onClick
+            // with the child's onClick (theirs first → ours), so we
+            // pass `composedOnClick` directly — no manual extraction.
+            // Mirrors Dialog.Close's shape (commit 3a64a726) extended
+            // with the rest-spread fix.
             return (
               <Slot
                 {...closeProps}
+                {...rest}
                 ref={composeRefs(ref as Ref<unknown>, closePropsRef)}
                 onClick={composedOnClick}
               >

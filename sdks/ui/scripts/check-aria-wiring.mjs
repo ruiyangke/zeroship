@@ -55,7 +55,7 @@ function report(label, ok, extra) {
 
 /* ─── Slice 17 public-package smoke import regression ───────────────── *
  *
- * Regression for Fix 2. The aria-wiring script runs after `pnpm
+ * Regression for Slice 17. The aria-wiring script runs after `pnpm
  * --filter @zeroship/ui build`, so `dist/index.js` exists. We assert
  * that Avatar and Separator are reachable from the package root the
  * way real consumers will reach them: `import { Avatar } from
@@ -101,6 +101,83 @@ function report(label, ok, extra) {
     importError
       ? `importError=${importError}`
       : `Avatar=${hasAvatar}, AvatarRoot=${hasAvatarRoot}, AvatarImage=${hasAvatarImage}, AvatarFallback=${hasAvatarFallback}, Separator=${hasSeparator}`,
+  );
+}
+
+/* ─── Round 5 fix #1 — exhaustive dist-import surface regression ────── *
+ *
+ * Walks the value bindings exported from `src/components/index.ts` AND
+ * the dist build at `dist/index.js`, diffs the symbol sets, and asserts
+ * EVERY public value-binding reachable from the internal components
+ * barrel is also reachable from the package root. The component-review
+ * sweep found PreviewCard / ScrollArea / Toolbar / Tabs / Drawer /
+ * NavigationMenu / Accordion / Menu / Toast / etc. exported only from
+ * the internal barrel — silently invisible to real consumers doing
+ * `import { Toolbar } from "@zeroship/ui"`.
+ *
+ * Implementation note: we read `components/index.ts` as text and pull
+ * value exports from `export { … } from "…"` blocks (skipping
+ * `export type { … }`). The dist module is the real esm `dist/index.js`,
+ * so the diff catches both missing exports AND tree-shake mishaps.
+ *
+ * Pre-fix this would FAIL with a non-empty `missing` set (one entry per
+ * dropped component). Post-fix the set is empty. */
+{
+  const fs = await import("node:fs/promises");
+  const componentsSrcUrl = new URL(
+    "../src/components/index.ts",
+    import.meta.url,
+  );
+  const distUrl = new URL("../dist/index.js", import.meta.url);
+
+  let walkError = null;
+  let missing = [];
+  let valueSymbols = [];
+  try {
+    const source = await fs.readFile(componentsSrcUrl, "utf8");
+    // Strip line comments + block comments before matching so a
+    // commented-out `export { Foo } …` line doesn't pollute the set.
+    const stripped = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    // Match `export { A, B as C, … } from "./X";` (value exports only).
+    // The `(?!\s*type\b)` look-ahead skips `export type { … }`.
+    const valueExportRe =
+      /export\s+(?!type\b)\{([^}]+)\}\s+from\s+["'][^"']+["']/g;
+    const set = new Set();
+    let match;
+    while ((match = valueExportRe.exec(stripped))) {
+      const inner = match[1];
+      for (const raw of inner.split(",")) {
+        const cleaned = raw.trim();
+        if (!cleaned) continue;
+        if (/^type\b/.test(cleaned)) continue;
+        // Handle `Original as Alias` — we want the externally-visible
+        // alias, which is what the package root re-exports.
+        const asMatch = cleaned.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+        const symbol = asMatch ? asMatch[2] : cleaned;
+        if (/^[A-Za-z_$][\w$]*$/.test(symbol)) set.add(symbol);
+      }
+    }
+    valueSymbols = [...set].sort();
+
+    const mod = await import(distUrl.href);
+    for (const sym of valueSymbols) {
+      const value = mod[sym];
+      if (value === undefined || value === null) {
+        missing.push(sym);
+      }
+    }
+  } catch (err) {
+    walkError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !walkError && missing.length === 0;
+  report(
+    "@zeroship/ui dist surface mirrors components barrel (Round 5 fix #1)",
+    ok,
+    walkError
+      ? `walkError=${walkError}`
+      : `walked=${valueSymbols.length} missing=[${missing.join(",")}]`,
   );
 }
 
@@ -5830,6 +5907,134 @@ await open("components-checkboxgroup--basic");
     "CheckboxGroup Basic — Tab + Space toggles each child",
     ok,
     `product:${beforeProduct}->${afterProduct} betaFocused=${betaFocused} beta:${beforeBeta}->${afterBeta}`,
+  );
+}
+
+/* ─── Round 5 fix #3 (Popover) — Close asChild forwards wrapper rest ─ *
+ *
+ * Regression for Popover.Close asChild. Pre-fix, the wrapper's `rest`
+ * (className, data-*, aria-*) never reached the rendered child because
+ * only `closeProps` + `ref` + `onClick` were spread onto Slot. The
+ * `CloseAsChildForwardsRest` story sets className="custom-close-class",
+ * data-side-effect="logged", and aria-keyshortcuts="Escape" on the
+ * `<Popover.Close asChild>` wrapper; the rendered child must carry all
+ * three after the post-fix Slot spread. */
+await open("components-popover--close-as-child-forwards-rest");
+{
+  const trigger = page.getByRole("button", {
+    name: /open close-with-rest/i,
+  });
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const target = page.locator('[data-testid="popover-close-rest-target"]');
+  await target.waitFor({ state: "visible", timeout: 5000 });
+  const className = (await target.getAttribute("class")) ?? "";
+  const sideEffect = await target.getAttribute("data-side-effect");
+  const ariaKey = await target.getAttribute("aria-keyshortcuts");
+  const ok =
+    /\bcustom-close-class\b/.test(className) &&
+    sideEffect === "logged" &&
+    ariaKey === "Escape";
+  report(
+    "Popover.Close asChild forwards rest (className + data + aria) — Round 5 fix #3",
+    ok,
+    `class="${className}" data-side-effect=${sideEffect} aria-keyshortcuts=${ariaKey}`,
+  );
+}
+
+/* ─── Round 5 fix #3 (AlertDialog) — Cancel asChild single-fire ──────── *
+ *
+ * Regression for AlertDialog.Cancel asChild double-fire. Pre-fix, the
+ * branch manually called the child's onClick AND passed the child to
+ * Slot — whose mergeProps composes the child's onClick automatically.
+ * Result: each click fired the caller's onClick twice. The
+ * `CancelAsChildSingleFire` story renders a counter that the asChild
+ * child increments by 1 per onClick.
+ *
+ * Storybook auto-runs the story's `play()` on iframe load, which
+ * already opens the dialog and clicks the Cancel target ONCE. We
+ * therefore assert the counter == 1 after autoplay (post-fix) and ==
+ * 2 pre-fix. To avoid race conditions on autoplay completion, we wait
+ * up to 5s for the counter to read either Count: 1 or Count: 2 — the
+ * value tells us whether the bug is present. */
+await open("components-alertdialog--cancel-as-child-single-fire");
+{
+  const counter = page.locator(
+    '[data-testid="cancel-singlefire-counter"]',
+  );
+  await counter.waitFor({ state: "visible", timeout: 5000 });
+  // Poll the readout: after autoplay settles, post-fix counter==1.
+  // Pre-fix counter==2 (the autoplay click double-fires).
+  const deadline = Date.now() + 6000;
+  let text = "";
+  while (Date.now() < deadline) {
+    text = (await counter.innerText()).trim();
+    if (/Count:\s*[12]\b/.test(text)) break;
+    await page.waitForTimeout(120);
+  }
+  const ok = /Count:\s*1\b/.test(text) && !/Count:\s*2\b/.test(text);
+  report(
+    "AlertDialog.Cancel asChild fires onClick exactly once — Round 5 fix #3",
+    ok,
+    `counter="${text}" (expected "Count: 1"; pre-fix would be "Count: 2")`,
+  );
+}
+
+/* ─── Round 5 fix #4 — Toolbar aria-orientation lock regression ──────── *
+ *
+ * Regression for the Toolbar aria-orientation lock. Pre-fix, only
+ * `role` was Omit'd; a caller could still spread `aria-orientation=
+ * "vertical"` onto a `<Toolbar orientation="horizontal">` and Base UI's
+ * mergeProps (rightmost-wins) would render the inconsistent value. The
+ * post-fix wrapper strips `aria-orientation` from rest at runtime so
+ * the rendered DOM mirrors the resolved orientation. */
+await open("components-toolbar--aria-orientation-lock-regression");
+{
+  const toolbar = page.locator(
+    '[data-testid="toolbar-aria-orientation-lock"]',
+  );
+  await toolbar.waitFor({ state: "visible", timeout: 5000 });
+  const ariaOrientation = await toolbar.getAttribute("aria-orientation");
+  const role = await toolbar.getAttribute("role");
+  const ok = ariaOrientation === "horizontal" && role === "toolbar";
+  report(
+    "Toolbar aria-orientation locks to orientation prop — Round 5 fix #4",
+    ok,
+    `aria-orientation=${ariaOrientation} role=${role}`,
+  );
+}
+
+/* ─── Round 5 fix #5 — Slider preserves consumer style ───────────────── *
+ *
+ * Regression for the Slider style merge. Pre-fix, the wrapper spread
+ * `{...rest}` BEFORE its own `style={valuePositionStyle}`, so a
+ * caller-passed `style={{ backgroundColor: "rgb(255,0,0)" }}` was
+ * dropped — even when valuePositionStyle was undefined (since the
+ * explicit `style` prop blanked the consumer one out of `rest`). The
+ * post-fix destructures `style` out of `rest` and merges it with the
+ * value-position style. The `ConsumerStylePreserved` story sets a red
+ * background; the rendered slider root MUST carry it. */
+await open("components-slider--consumer-style-preserved");
+{
+  const slider = page.locator(
+    '[data-testid="slider-consumer-style"]',
+  );
+  await slider.waitFor({ state: "visible", timeout: 5000 });
+  const bg = await slider.evaluate(
+    (el) => window.getComputedStyle(el).backgroundColor,
+  );
+  const paddingInlineStart = await slider.evaluate(
+    (el) => window.getComputedStyle(el).paddingInlineStart,
+  );
+  // Browsers report rgb(255, 0, 0) with a space-after-comma; webkit
+  // sometimes emits no spaces. Normalise.
+  const normalisedBg = bg.replace(/\s+/g, "");
+  const ok =
+    normalisedBg === "rgb(255,0,0)" && /^(?:8px|0\.5rem)$/.test(paddingInlineStart);
+  report(
+    "Slider preserves consumer style on root — Round 5 fix #5",
+    ok,
+    `background-color="${bg}" padding-inline-start="${paddingInlineStart}"`,
   );
 }
 

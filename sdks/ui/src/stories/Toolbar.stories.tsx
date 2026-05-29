@@ -568,3 +568,53 @@ export const LinkAndInput: Story = {
     await expect(filter).toHaveValue("deploys");
   },
 };
+
+/* ─── 13. AriaOrientationLockRegression — Round 5 fix #4 ─────────────── *
+ *
+ * Regression for Round 5 fix #4. The Toolbar root LOCKS
+ * `aria-orientation` to the value Base UI computes from the `orientation`
+ * prop. Pre-fix, a caller-passed `aria-orientation` could leak through
+ * Base UI's `mergeProps` (rightmost-wins) and contradict the resolved
+ * orientation. The wrapper now omits `aria-orientation` at the type
+ * level AND strips it at runtime so a typed-bypass spread cannot ship
+ * the inconsistency. */
+export const AriaOrientationLockRegression: Story = {
+  name: "aria-orientation lock — caller override is stripped",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Pass `aria-orientation=\"vertical\"` via untyped spread on a " +
+          "horizontal toolbar. The wrapper's runtime strip MUST keep the " +
+          "rendered `aria-orientation` equal to `\"horizontal\"`.",
+      },
+    },
+  },
+  render: () => {
+    const bypass = { "aria-orientation": "vertical" } as Record<
+      string,
+      unknown
+    >;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="aria-orientation lock regression"
+      >
+        <Toolbar
+          data-testid="toolbar-aria-orientation-lock"
+          orientation="horizontal"
+          {...bypass}
+        >
+          <Toolbar.Button>Cut</Toolbar.Button>
+          <Toolbar.Button>Copy</Toolbar.Button>
+        </Toolbar>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const toolbar = canvas.getByRole("toolbar");
+    await expect(toolbar).toHaveAttribute("aria-orientation", "horizontal");
+  },
+};
