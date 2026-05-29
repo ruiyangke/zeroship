@@ -220,6 +220,7 @@ function TabsRootInner(
         )}
         data-variant={variant}
         data-size={size}
+        data-orientation={orientation}
         data-lazy-mount={lazyMount ? "true" : "false"}
       >
         <LazyMountContext.Provider value={lazyMount}>
