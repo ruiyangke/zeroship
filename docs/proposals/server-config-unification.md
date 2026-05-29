@@ -1,6 +1,6 @@
 # Server configuration unification
 
-**Status:** Draft. Not implemented. Deferred until current auth/authz work (Phase 10) closes.
+**Status:** Implemented on `feat/server-config-unification` (units U10a–U10g + a consolidation/hardening polish pass; 8 commits, unmerged). This document is the as-built design.
 
 > Grounded in `docs/proposals/server-config-inventory.md` (whole-codebase audit, 2026-05-28). Every file:line claim below traces to that inventory.
 
