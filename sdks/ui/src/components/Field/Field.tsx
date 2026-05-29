@@ -53,9 +53,38 @@ import {
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type ReactNode,
+  type Ref,
 } from "react";
 import { Field as BaseField } from "@base-ui/react/field";
 import { classnames, composeBaseClass } from "../_classnames";
+
+/* ─── ref + describedby composition helpers ──────────────────────────────
+ *
+ * Field.Control mirrors Input.tsx's render-callback discipline so the
+ * bare `<Field.Control>` path inherits the same guarantees Input gets:
+ *
+ *   1. `controlProps.ref` is composed with the forwardRef'd ref so Base
+ *      UI's internal ref (validation registration, autofill detection,
+ *      focus management) AND the consumer's ref both land on the same
+ *      node.
+ *   2. `aria-describedby` is UNIONED — Base UI's auto-wired
+ *      description / error ids first, then the caller's external ids —
+ *      so an external `aria-describedby` does not clobber Field's
+ *      own announcements (review-fix 🔴 #2).
+ */
+function setRef<T>(ref: Ref<T> | undefined, value: T | null): void {
+  if (typeof ref === "function") {
+    ref(value);
+  } else if (ref != null) {
+    (ref as React.MutableRefObject<T | null>).current = value;
+  }
+}
+
+function composeRefs<T>(...refs: Array<Ref<T> | undefined>): Ref<T> {
+  return (value: T | null) => {
+    for (const ref of refs) setRef(ref, value);
+  };
+}
 
 export type FieldOrientation = "vertical" | "horizontal";
 export type FieldSize = "sm" | "md" | "lg";
@@ -200,8 +229,38 @@ const FieldError = forwardRef<HTMLDivElement, ErrorProps>(
 FieldError.displayName = "Field.Error";
 
 type ControlProps = ComponentPropsWithoutRef<typeof BaseField.Control>;
+
+/*
+ * `controlProps` shape Base UI's FieldControl render callback hands
+ * back. Mirrors the local type Input uses for the same reason — only
+ * the attrs Field.Control's render touches are typed; the rest fall
+ * through via spread.
+ */
+type FieldControlRenderProps = ComponentPropsWithRef<"input"> & {
+  className?: string;
+  "aria-describedby"?: string;
+};
+
 const FieldControl = forwardRef<HTMLInputElement, ControlProps>(
-  function FieldControl({ className, ...rest }, ref) {
+  function FieldControl({ className, required: requiredProp, ...rest }, ref) {
+    // Inherit `required` from the enclosing Field if the caller didn't
+    // set it explicitly — same cascade Input uses (review-fix 🔴 #1).
+    // Without this, `<Field required><Field.Control /></Field>` lied:
+    // the visible `<Field.Required />` indicator and `aria-required`
+    // disagreed because Field.Root carries no `required` of its own.
+    const ctx = useFieldContext();
+    const required = requiredProp ?? ctx?.required ?? false;
+
+    // Split caller's aria-describedby out of `rest` so we can union
+    // it with Base UI's auto-wired one inside the render callback.
+    // Base UI's `mergeProps` lets external props clobber auto-wired
+    // ones (see node_modules/@base-ui/react/merge-props/mergeProps.js
+    // — non-event, non-className props are overwritten by the
+    // rightmost source). Spreading `aria-describedby` through
+    // `...rest` therefore loses Field's own description/error ids
+    // (review-fix 🔴 #2). We union explicitly inside `render`.
+    const { "aria-describedby": callerDescribedBy, ...restProps } = rest;
+
     return (
       <BaseField.Control
         // Base UI's FieldControl ref is `HTMLElement`. We narrow at
@@ -209,8 +268,39 @@ const FieldControl = forwardRef<HTMLInputElement, ControlProps>(
         // without our `<Input>` shell still get the expected
         // `HTMLInputElement` ref type.
         ref={ref as React.Ref<HTMLElement>}
-        className={composeBaseClass("zs-field__control", className)}
-        {...rest}
+        required={required}
+        {...restProps}
+        render={(controlProps: FieldControlRenderProps, state) => {
+          // Union Base UI's auto-wired aria-describedby (description +
+          // error ids from the enclosing Field) with the caller's
+          // external id(s). Base UI first keeps Field's own
+          // announcements primary; caller ids follow.
+          const mergedDescribedBy =
+            [controlProps["aria-describedby"], callerDescribedBy]
+              .filter(Boolean)
+              .join(" ") || undefined;
+          // Resolve the caller's className (string OR state callback)
+          // and prepend our static class so the local compose
+          // invariant holds even on the bare render path.
+          const callerClass =
+            typeof className === "function" ? className(state) : className;
+          return (
+            <input
+              {...controlProps}
+              ref={composeRefs(
+                ref as Ref<HTMLInputElement>,
+                controlProps.ref as Ref<HTMLInputElement>,
+              )}
+              aria-describedby={mergedDescribedBy}
+              aria-required={required || undefined}
+              className={classnames(
+                "zs-field__control",
+                callerClass,
+                controlProps.className,
+              )}
+            />
+          );
+        }}
       />
     );
   },
