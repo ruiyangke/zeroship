@@ -399,6 +399,12 @@ const stories = [
   "components-toast--position-bottom",
   "components-toast--swipe-to-dismiss",
   "components-toast--rtl",
+  // Wave 8 review fix: Toast.Close keeps default `aria-label` when a
+  // consumer spreads `aria-label={undefined}` AND never carries
+  // `aria-hidden="true"` at rest (Base UI parks it there until viewport
+  // expansion; we override to undefined). Story exists primarily for
+  // the aria-wiring regression but is axe-clean on its own merits.
+  "components-toast--close-label-default",
   // Slice 15: Drawer — 12 stories (review-fix 8 added SizesVertical).
   "components-drawer--basic",
   "components-drawer--left-side",

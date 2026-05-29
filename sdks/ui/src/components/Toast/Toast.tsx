@@ -546,13 +546,40 @@ export interface ToastCloseProps extends Omit<BaseCloseProps, "className"> {
 }
 
 const ToastClose = forwardRef<HTMLButtonElement, ToastCloseProps>(
-  function ToastClose({ className, children, ...rest }, ref) {
+  function ToastClose(
+    {
+      className,
+      children,
+      "aria-label": ariaLabel,
+      ...rest
+    },
+    ref,
+  ) {
     return (
       <BaseToast.Close
         ref={ref}
-        aria-label={rest["aria-label"] ?? "Dismiss notification"}
         className={composeBaseClass("zs-toast-close", className)}
         {...rest}
+        /* Apply `aria-label` AFTER the spread so the default survives
+         * the common `aria-label={maybeLabel}` pattern when `maybeLabel`
+         * is `undefined`. Destructuring `aria-label` out of `rest` above
+         * prevents an explicit `undefined` from blowing the default
+         * away — `?? "Dismiss notification"` is the floor.
+         *
+         * `aria-hidden` is force-undefined for the same reason
+         * `Toast.Root` neutralizes Base UI's high-priority `aria-hidden`
+         * (root/ToastRoot.js:462): Base UI parks `aria-hidden="true"`
+         * on the close button while the viewport is unexpanded (see
+         * close/ToastClose.js:49 `aria-hidden: !expanded && !hasFocus`)
+         * to dedupe screen-reader announcements with the live region.
+         * Modern screen readers already dedupe announcements; the side
+         * effect is that the button is focusable inside an aria-hidden
+         * subtree, which axe flags as `aria-hidden-focus` (critical).
+         * Forcing `undefined` keeps the button discoverable to AT users
+         * AND satisfies the axe rule. Setting `undefined` instead of
+         * `false` lets `mergeProps` omit the attribute entirely. */
+        aria-label={ariaLabel ?? "Dismiss notification"}
+        aria-hidden={undefined}
       >
         {children ?? <CloseGlyph />}
       </BaseToast.Close>
