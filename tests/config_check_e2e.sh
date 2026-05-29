@@ -224,11 +224,20 @@ show_last_output
 expect_nonzero "control rejects file-supplied remote Hydra admin without allow flag"
 echo ""
 
-echo "=== Case 4: bad-filter-tolerant ==="
+echo "=== Case 4: bad-filter-tolerant + STRUCTURED warning (O3) ==="
 run_cmd control-bad-filter "$CONTROL" --check-config --config "$TMPDIR/bad-filter.toml" --dev-insecure
 show_last_output
 expect_status 0 "control tolerates invalid observability filter"
-expect_stderr_contains "invalid tracing filter" "control warns about invalid observability filter"
+# O3: the invalid-filter fallback is now a STRUCTURED tracing event on stdout (the
+# platform's log sink), not a pre-tracing plaintext eprintln on stderr. Assert it is
+# on stdout AND that the warning line is valid JSON (non-TTY default format).
+expect_stdout_contains "invalid tracing filter" "control warns (structured) about invalid observability filter"
+if grep -F 'invalid tracing filter' "$LAST_STDOUT" | head -1 \
+    | python3 -c "import json,sys; json.loads(sys.stdin.readline()); " 2>/dev/null; then
+    pass "invalid-filter warning is a structured JSON log line (O3), not a plaintext eprintln"
+else
+    fail "invalid-filter warning should be a structured JSON log line on stdout (O3)"
+fi
 echo ""
 
 echo "=== Case 5: config-source ==="

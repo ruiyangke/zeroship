@@ -57,7 +57,7 @@ Fixed on `feat/server-config-unification` across commits `ea7d740b` (auto-discov
 | M8 god-module + duplication | ✅ mostly | submodule split + `bootstrap()`/`CheckConfigReport` dedup + Result-not-exit; full `zeroship-config` crate extraction deliberately deferred |
 | O1 compose gaps | ✅ fixed | added `auth` service; blob-store + overlay mounts; `--bind 0.0.0.0` |
 | O2 runbooks don't boot | ✅ fixed | local-dev + docker-compose runbooks corrected |
-| O3 pre-tracing eprintln unstructured | ⏳ remaining | Low: the invalid-filter/overlay warning is still `eprintln!` (pre-tracing), not a JSON log event |
+| O3 pre-tracing eprintln unstructured | ✅ fixed | invalid-filter fallback is now a STRUCTURED `tracing::warn!` emitted post-init by `bootstrap` (honors `--log-format`); `resolve_log_filter` is silent. (A *fatal* overlay-load error still `eprintln!`s — correct: it's pre-init and the process is exiting.) |
 | O4 entropy wording | ✅ fixed | "random bytes" ⇒ "bytes" |
 | O5 no --no-config opt-out | ✅ fixed | `--no-config` disables discovery |
 | O6 dangling D8 | ✅ fixed | D8 row added to the proposal table |

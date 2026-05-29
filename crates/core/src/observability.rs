@@ -78,21 +78,22 @@ pub struct ObservabilityFlags {
     pub log_format: Option<LogFormat>,
 }
 
-/// Resolve a tracing filter candidate, warning and falling back to the default on parse error.
+/// Resolve a tracing filter candidate, silently falling back to the default on parse error.
+///
+/// Silent by design: the invalid-filter fallback is surfaced as a STRUCTURED
+/// `tracing::warn!` by [`crate::config::bootstrap`] *after* the subscriber is
+/// initialized, so the warning honors the configured `--log-format` (e.g. JSON)
+/// instead of being a pre-tracing `eprintln!` a log pipeline would miss (O3).
 #[must_use]
 pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> String {
     let Some(candidate) = candidate else {
         return default_filter.to_string();
     };
 
-    match EnvFilter::try_new(candidate.as_str()) {
-        Ok(_) => candidate,
-        Err(err) => {
-            eprintln!(
-                "invalid tracing filter {candidate:?}: {err}; falling back to default filter {default_filter:?}"
-            );
-            default_filter.to_string()
-        }
+    if EnvFilter::try_new(candidate.as_str()).is_ok() {
+        candidate
+    } else {
+        default_filter.to_string()
     }
 }
 

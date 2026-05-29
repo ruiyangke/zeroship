@@ -43,6 +43,24 @@ pub fn bootstrap(
     init_tracing_with(&log_filter, log_format);
     log_overlay_source(&overlay.source);
 
+    // O3: an invalid log filter falls back to the default silently in
+    // `resolve_log_filter`. Surface that here as a STRUCTURED warning — now that
+    // the subscriber is up, it honors `--log-format` (JSON, etc.) instead of being
+    // a pre-tracing `eprintln!` a structured log pipeline would miss.
+    let filter_candidate = obs
+        .log_filter
+        .clone()
+        .or_else(|| overlay.config.observability.log_filter.clone());
+    if let Some(candidate) = filter_candidate {
+        if tracing_subscriber::EnvFilter::try_new(candidate.as_str()).is_err() {
+            tracing::warn!(
+                invalid_filter = %candidate,
+                fallback = %log_filter,
+                "invalid tracing filter; falling back to the default filter"
+            );
+        }
+    }
+
     Ok(Bootstrap {
         overlay,
         log_filter,
