@@ -38,6 +38,11 @@
  *
  * The title renders as a heading (`<h2>` by default; relevel via
  * `<ErrorState.Title asChild>`). The icon wrapper is `aria-hidden`.
+ *
+ * This block has no root `asChild` — its value is the composed column
+ * (icon + title + description + retry/actions); routing the root through
+ * a Slot would render only the consumer's child and discard that column.
+ * Wrap the block in your own element if you need a custom/semantic root.
  */
 import {
   forwardRef,
@@ -93,12 +98,6 @@ export interface ErrorStateProps
    */
   live?: boolean;
 
-  /**
-   * Render-as the single child element rather than a `<div>`. Routed
-   * through `Slot` (React-19-safe refs).
-   */
-  asChild?: boolean;
-
   /** Panel contents — compound parts and/or arbitrary children. */
   children?: ReactNode;
 }
@@ -113,22 +112,12 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
       description,
       onRetry,
       live = false,
-      asChild = false,
       className,
       children,
       ...rest
     },
     ref,
   ) {
-    if (process.env.NODE_ENV !== "production") {
-      if (asChild && !isValidElement(children)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "ErrorState asChild requires a single React element child; rendering nothing.",
-        );
-      }
-    }
-
     const composedClassName = classnames(
       "zs-error-state",
       `zs-error-state--${intent}`,
@@ -162,21 +151,6 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
         </Stack>
       </Center>
     );
-
-    if (asChild) {
-      if (!isValidElement(children)) return null;
-      return (
-        <Slot
-          {...rest}
-          {...liveProps}
-          {...dataProps}
-          ref={ref as Ref<unknown>}
-          className={composedClassName}
-        >
-          {children}
-        </Slot>
-      );
-    }
 
     return (
       <div

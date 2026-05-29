@@ -41,6 +41,12 @@
  * `aria-hidden` because it is decorative — the heading carries the
  * meaning.
  *
+ * This block has no root `asChild` — its value is the composed column
+ * (icon + title + description + actions); routing the root through a
+ * Slot would render only the consumer's child and discard that column.
+ * Wrap the block in your own element if you need a custom/semantic root
+ * (e.g. a `<section aria-labelledby>`).
+ *
  * `data-slot="empty-state"` (and `empty-state-<part>` on each subpart)
  * mirrors the Card data-slot vocabulary so consumers can target parts
  * in CSS without leaning on the internal BEM class names.
@@ -85,13 +91,6 @@ export interface EmptyStateProps
    */
   action?: ReactNode;
 
-  /**
-   * Render-as the single child element rather than a `<div>` (e.g. a
-   * `<section aria-labelledby>`). Routed through `Slot` so className /
-   * style / refs compose under React 19.
-   */
-  asChild?: boolean;
-
   /** Panel contents — compound parts and/or arbitrary children. */
   children?: ReactNode;
 }
@@ -100,21 +99,9 @@ export interface EmptyStateProps
 
 const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
   function EmptyStateRoot(
-    { icon, title, description, action, asChild = false, className, children, ...rest },
+    { icon, title, description, action, className, children, ...rest },
     ref,
   ) {
-    // Dev-mode parity with Card / the Wave 1 layout primitives: warn when
-    // asChild has no single valid element child (Slot renders nothing
-    // silently otherwise). DCEs out of production builds.
-    if (process.env.NODE_ENV !== "production") {
-      if (asChild && !isValidElement(children)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "EmptyState asChild requires a single React element child; rendering nothing.",
-        );
-      }
-    }
-
     const composedClassName = classnames("zs-empty-state", className);
 
     // The centered column. `Center` handles both-axes centering; the
@@ -133,22 +120,6 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
         </Stack>
       </Center>
     );
-
-    if (asChild) {
-      if (!isValidElement(children)) return null;
-      // In asChild mode the consumer's element IS the panel; the
-      // ergonomic props still render inside it via the same column.
-      return (
-        <Slot
-          {...rest}
-          ref={ref as Ref<unknown>}
-          data-slot="empty-state"
-          className={composedClassName}
-        >
-          {children}
-        </Slot>
-      );
-    }
 
     return (
       <div

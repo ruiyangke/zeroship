@@ -67,6 +67,9 @@
 @import "./blocks/Spinner/Spinner.css";
 @import "./blocks/Badge/Badge.css";
 @import "./blocks/Tag/Tag.css";
+@import "./blocks/StatCard/StatCard.css";
+@import "./blocks/Banner/Banner.css";
+@import "./blocks/DescriptionList/DescriptionList.css";
 
 *,
 *::before,

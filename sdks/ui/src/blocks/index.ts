@@ -27,3 +27,27 @@ export {
   type BadgeSize,
 } from "./Badge";
 export { Tag, type TagProps, type TagSize } from "./Tag";
+
+// Content blocks (Wave 2c) — composed metric / message / key-value blocks.
+export {
+  StatCard,
+  type StatCardProps,
+  type StatCardDelta,
+  type StatCardDeltaDirection,
+} from "./StatCard";
+export {
+  Banner,
+  type BannerProps,
+  type BannerIntent,
+  type BannerTitleProps,
+  type BannerDescriptionProps,
+  type BannerActionsProps,
+} from "./Banner";
+export {
+  DescriptionList,
+  type DescriptionListProps,
+  type DescriptionListOrientation,
+  type DescriptionListItemProps,
+  type DescriptionListTermProps,
+  type DescriptionListDetailProps,
+} from "./DescriptionList";
