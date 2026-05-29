@@ -136,7 +136,9 @@ async fn drop_magic_links_insert_delay(client: &Client) {
         .ok();
 }
 
-#[compio::test]
+// Mock-hydra `web::test::server` needs the ntex runtime/System; run under
+// `#[ntex::test]` not `#[compio::test]` ("System is not running" otherwise).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let dsn = match std::env::var("AUTH_DB_URL") {
@@ -326,7 +328,8 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .ok();
 }
 
-#[compio::test]
+// Mock-hydra `web::test::server` needs the ntex runtime/System; see above.
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_consumes_magic_login_state_for_same_email() {
     let dsn = match std::env::var("AUTH_DB_URL") {

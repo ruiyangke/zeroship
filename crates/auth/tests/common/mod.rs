@@ -104,13 +104,27 @@ pub fn extract_query_param(raw_url: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-/// Rewrite the host of a URL hydra hands us (always
-/// `https://auth.zeroship.ai/...`) to the loopback admin address used by the
-/// local hydra container.
+/// Rewrite the host of a URL hydra hands us to the loopback public address
+/// the test can actually reach.
+///
+/// Hydra builds every `redirect_to` (login, consent, token) from its own
+/// configured public URL — which is environment-dependent: the historical
+/// fixture used `auth.zeroship.ai`, but the docker-compose deployment serves
+/// hydra behind Caddy at `auth.zeroship.localhost`. Neither host resolves
+/// from inside the test process, so we strip the known external origins and
+/// re-point them at the loopback hydra public endpoint (`HYDRA_PUBLIC_URL`,
+/// default `http://127.0.0.1:4444`). Path + query are preserved verbatim so
+/// the embedded `login_challenge` / `consent_challenge` / `code` survive.
 pub fn rewrite_to_hydra_loopback(raw_url: &str) -> String {
-    for prefix in ["https://auth.zeroship.ai", "http://auth.zeroship.ai"] {
-        if let Some(rest) = raw_url.strip_prefix(prefix) {
-            return format!("http://127.0.0.1:4444{rest}");
+    let loopback = std::env::var("HYDRA_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
+    let loopback = loopback.trim_end_matches('/');
+    for host in ["auth.zeroship.ai", "auth.zeroship.localhost"] {
+        for scheme in ["https://", "http://"] {
+            let prefix = format!("{scheme}{host}");
+            if let Some(rest) = raw_url.strip_prefix(&prefix) {
+                return format!("{loopback}{rest}");
+            }
         }
     }
     raw_url.to_string()

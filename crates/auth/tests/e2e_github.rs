@@ -432,9 +432,14 @@ async fn github_federation_rejects_noreply_only_email() {
     //   - the additional rows are EITHER non-primary OR unverified
     //     (so the picker can't find a `primary && verified && !noreply`
     //     match anywhere in the list).
-    let noreply_email = "456789012+e2e@users.noreply.github.com".to_string();
+    // Unique subject per run: the happy-path test (github_federation_links_new
+    // _user) also lived on the literal "456789012" and creates a real identity
+    // row with it. Sharing the subject made this test's "no identity row"
+    // assertion observe that leftover row when the two ran in the same binary.
+    let subject = format!("456789012-noreply-{}", Uuid::new_v4().simple());
+    let noreply_email = format!("{subject}+e2e@users.noreply.github.com");
     let mock_user = MockUser {
-        subject: "456789012".to_string(),
+        subject: subject.clone(),
         email: noreply_email.clone(),
         email_verified: true,
         name: Some("E2E Noreply".into()),
@@ -506,9 +511,16 @@ async fn github_federation_rejects_noreply_only_email() {
         "noreply-only path should render an error page (got HTTP {status})"
     );
     let body = resp.text().await.expect("body");
+    // The picker-failure path deliberately renders the generic
+    // `PublicErrorMessage::PleaseTryAgain` page — it must NOT leak *why*
+    // federation failed (which email was rejected / unverified) to the
+    // browser. The distinctive `email_picker_failed` reason is recorded in
+    // the audit log instead (asserted below). So the body carries the
+    // generic copy/code, not a github-specific or "sign-in failed" string.
     assert!(
-        body.to_lowercase().contains("github") || body.to_lowercase().contains("sign-in failed"),
-        "error page should mention github or sign-in failed: body={body}"
+        body.to_lowercase().contains("please try again")
+            || body.contains("please_try_again"),
+        "picker-failure path must render the generic please-try-again error page: body={body}"
     );
 
     // Critical assertion: NO user row created (with the noreply email
@@ -559,8 +571,11 @@ async fn github_federation_rejects_unverified_primary_email() {
         "e2e-github-unverified-{}@example.test",
         Uuid::new_v4().simple()
     );
+    // Unique subject per run so the "no identity row" assertion can never
+    // observe a leftover row from another test/run sharing a literal subject.
+    let subject = format!("456789013-unverified-{}", Uuid::new_v4().simple());
     let mock_user = MockUser {
-        subject: "456789013".to_string(),
+        subject: subject.clone(),
         email: test_email.clone(),
         email_verified: false,
         name: Some("E2E Unverified".into()),
@@ -623,9 +638,13 @@ async fn github_federation_rejects_unverified_primary_email() {
         "unverified GitHub primary email should render an error page (got HTTP {status})"
     );
     let body = resp.text().await.expect("body");
+    // Generic please-try-again page only — the unverified-primary reason is
+    // not leaked to the browser; it lives in the audit log. See the noreply
+    // test for the rationale.
     assert!(
-        body.to_lowercase().contains("github") || body.to_lowercase().contains("sign-in failed"),
-        "error page should mention github or sign-in failed: body={body}"
+        body.to_lowercase().contains("please try again")
+            || body.contains("please_try_again"),
+        "unverified-primary path must render the generic please-try-again error page: body={body}"
     );
 
     let user_rows = fx

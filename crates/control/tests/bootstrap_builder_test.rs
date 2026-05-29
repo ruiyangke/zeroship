@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 
 use compio_postgres::{connect, Client, NoTls};
@@ -20,6 +20,20 @@ fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+}
+
+/// All three bootstrap tests operate on the *same* singleton OAuth client row
+/// (`BUILDER_CLIENT_ID` is a hard-coded constant — only one builder client can
+/// ever exist). The default test harness runs them concurrently, so one test's
+/// `cleanup_builder_client` DELETE and another's INSERT race on the
+/// `oauth_clients_pkey` (client_id) primary key, surfacing as `Db("db error")`.
+/// Serialize them on a process-wide lock so each still exercises the real
+/// check-then-insert path against live PG without stomping the shared row.
+fn bootstrap_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -227,6 +241,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
         eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
         return;
     };
+    let _serial = bootstrap_guard();
     let pg = pg(&db_url).await;
     let hydra = MockHydra::start();
     let root = tmpdir("first");
@@ -312,6 +327,7 @@ async fn bootstrap_is_idempotent_on_second_run() {
         eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
         return;
     };
+    let _serial = bootstrap_guard();
     let pg = pg(&db_url).await;
     let hydra = MockHydra::start();
     let root = tmpdir("idempotent");
@@ -343,6 +359,7 @@ async fn bootstrap_disabled_does_nothing() {
         eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
         return;
     };
+    let _serial = bootstrap_guard();
     let pg = pg(&db_url).await;
     let hydra = MockHydra::start();
     let root = tmpdir("disabled");

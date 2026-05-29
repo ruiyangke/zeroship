@@ -239,7 +239,10 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     assert_eq!(status, 400, "expected 400 (CSRF rejection), got {status}");
 }
 
-#[compio::test]
+// Uses a mock-hydra `web::test::server`, which needs the ntex runtime/System
+// — run under `#[ntex::test]` (the sibling logout tests already do), not
+// `#[compio::test]` (no System → "System is not running" panic).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn logout_post_revokes_local_session_cookie() {
     let db_url = match std::env::var("AUTH_DB_URL") {

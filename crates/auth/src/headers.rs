@@ -26,6 +26,26 @@ const DEFAULT_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
          object-src 'none'; \
          upgrade-insecure-requests";
 
+/// Client IP for rate-limiting and audit, as a string.
+///
+/// The auth service runs behind the gateway, so the socket peer is the
+/// gateway, not the end user. We therefore prefer the forwarded client
+/// address (`Forwarded` / `X-Forwarded-For`, via ntex `connection_info`)
+/// and only fall back to the raw socket peer when no proxy header is
+/// present. Mirrors [`RequestContext`]'s IP derivation so per-IP rate
+/// limits and audit records agree on who the caller is.
+///
+/// Returns `"0.0.0.0"` when neither source yields an address (e.g. unit
+/// tests with no peer and no forwarded header).
+#[must_use]
+pub(crate) fn client_ip(req: &HttpRequest) -> String {
+    req.connection_info()
+        .remote()
+        .map(str::to_owned)
+        .or_else(|| req.peer_addr().map(|addr| addr.ip().to_string()))
+        .unwrap_or_else(|| "0.0.0.0".to_string())
+}
+
 #[must_use]
 pub fn content_security_policy_with_script_nonce(nonce: &str) -> String {
     format!(

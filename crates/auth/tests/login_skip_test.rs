@@ -99,7 +99,11 @@ async fn mock_reject_login(
     web::HttpResponse::Ok().json(&json!({ "redirect_to": REJECT_REDIRECT }))
 }
 
-#[compio::test]
+// Stands up a mock hydra via `web::test::server`, which needs the ntex
+// runtime/System — so this runs under `#[ntex::test]`, not `#[compio::test]`
+// (which has no System: the server start panics "System is not running").
+// `compio_postgres` still works under the ntex runtime (compio-backed here).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn skip_login_rejects_disabled_user_subject() {
     let db_url = match std::env::var("AUTH_DB_URL") {
@@ -192,7 +196,9 @@ async fn skip_login_rejects_disabled_user_subject() {
         .ok();
 }
 
-#[compio::test]
+// See `skip_login_rejects_disabled_user_subject`: needs `#[ntex::test]` for
+// the mock-hydra `web::test::server`.
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn password_login_rejects_locked_user_without_session() {
     let db_url = match std::env::var("AUTH_DB_URL") {

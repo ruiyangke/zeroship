@@ -443,8 +443,8 @@ async fn inactive_oauth_token_returns_401() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("wrong audience json");
-    assert_eq!(body["error"], "wrong_audience");
+        serde_json::from_slice(&test::read_body(resp).await).expect("inactive token json");
+    assert_eq!(body["error"], "inactive_token");
 
     fx.cleanup().await;
 }

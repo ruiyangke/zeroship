@@ -71,6 +71,14 @@ mod tests {
     #[test]
     fn remote_hydra_admin_from_file_overlay_rejected_without_flag() {
         let mut cfg = test_config();
+        // `hydra_admin_url` is a clap `env = "HYDRA_ADMIN_URL"` arg, so
+        // `parse_from` in `test_config` picks up any ambient value (the auth
+        // integration suite runs with HYDRA_ADMIN_URL set to a loopback). This
+        // test asserts the *file overlay* path, so the CLI/env source must be
+        // empty — otherwise `resolve`'s `cli.or(file)` precedence lets the
+        // ambient loopback win and validation wrongly passes. Clear it so the
+        // overlay is the only source.
+        cfg.hydra_admin_url = None;
         cfg.resolve(AuthSection {
             hydra_admin_url: Some("http://hydra.example.com:4445".to_string()),
             ..AuthSection::default()

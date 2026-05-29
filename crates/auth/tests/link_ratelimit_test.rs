@@ -75,7 +75,12 @@ async fn mock_get_login(query: web::types::Query<LoginChallengeQuery>) -> web::H
     }))
 }
 
-#[compio::test]
+// Uses `web::test::server` to stand up a mock hydra; that requires the
+// ntex runtime/System, so this must run under `#[ntex::test]` (not
+// `#[compio::test]`, which has no System — the server start panics with
+// "System is not running"). `compio_postgres` and `compio::runtime` still
+// work under the ntex runtime (it is compio-backed in this stack).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn link_wrong_password_is_limited_by_fifth_attempt() {
     let db_url = match std::env::var("AUTH_DB_URL") {
