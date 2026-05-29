@@ -1072,3 +1072,122 @@ export const AriaOverrideAttempt: Story = {
     await expect(toast).toHaveAttribute("aria-live", "assertive");
   },
 };
+
+/* ─── 17. CloseLabelDefault ─────────────────────────────────────────── *
+ *
+ * Regression coverage for two locked-together fixes on Toast.Close:
+ *
+ *   F-aria-label: the default `aria-label="Dismiss notification"`
+ *     must survive the common spread pattern `aria-label={maybeLabel}`
+ *     when `maybeLabel` is `undefined`. Pre-fix the wrapper applied the
+ *     default BEFORE `{...rest}`, so spreading an undefined value blew
+ *     the default away and the rendered button had no accessible name.
+ *
+ *   F-aria-hidden: Base UI parks `aria-hidden="true"` on the close
+ *     button until the viewport is expanded (see Base UI
+ *     close/ToastClose.js:49). The button itself is focusable, so axe
+ *     fires `aria-hidden-focus` (critical). Our wrapper forces
+ *     `aria-hidden={undefined}` AFTER the spread to mirror the same
+ *     treatment Toast.Root applies on high-priority toasts (the brief
+ *     covers AT discoverability via the live region; the redundant
+ *     aria-hidden costs us testability + axe-cleanliness for no gain
+ *     on modern screen readers).
+ *
+ * Story renders a custom-Viewport child that passes
+ * `aria-label={undefined}` directly through to `<Toast.Close>`.
+ * `play()` asserts both the default label AND the absence of
+ * `aria-hidden="true"` at rest. */
+export const CloseLabelDefault: Story = {
+  name: "Close button — default label + axe-clean at rest",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: `Toast.Close` keeps its default " +
+          "`aria-label=\"Dismiss notification\"` when a consumer " +
+          "spreads `aria-label={undefined}`, AND it never carries " +
+          "`aria-hidden=\"true\"` (which would make the button a " +
+          "focusable element inside an aria-hidden subtree — an " +
+          "`aria-hidden-focus` axe violation).",
+      },
+    },
+  },
+  render: () => {
+    function CustomList() {
+      const manager = useToastManager();
+      return (
+        <>
+          {manager.toasts.map((entry: ToastPayload) => (
+            <Toast.Root key={entry.id} toast={entry}>
+              <div className="zs-toast-content">
+                {entry.title ? (
+                  <Toast.Title>{entry.title}</Toast.Title>
+                ) : null}
+              </div>
+              {/* The common spread pattern: a caller forwards
+               * `aria-label={maybeLabel}` from props where `maybeLabel`
+               * is `undefined`. Pre-fix this clobbered the default. */}
+              <Toast.Close aria-label={undefined} />
+            </Toast.Root>
+          ))}
+        </>
+      );
+    }
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-close-default-label-trigger"
+          onClick={() =>
+            toast({
+              id: "close-default-label-demo",
+              title: "Default label survives",
+            })
+          }
+        >
+          Show toast (custom close)
+        </Button>
+      );
+    }
+    return (
+      <Toast.Provider>
+        <div className="zs-story-row" role="group" aria-label="Toast demo">
+          <Trigger />
+        </div>
+        <Toast.Viewport position="bottom-end">
+          <CustomList />
+        </Toast.Viewport>
+      </Toast.Provider>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show toast \(custom close\)/i }),
+    );
+    const toast = await findToastByTitle(
+      canvasElement,
+      /default label survives/i,
+    );
+    expectToastShown(toast);
+
+    // The close button must be findable by its DEFAULT accessible
+    // name even after the caller passed `aria-label={undefined}`.
+    // Pre-fix the spread blew the default away and this query failed.
+    const closeBtn = body.getByRole("button", {
+      name: /dismiss notification/i,
+    });
+    await expect(closeBtn).toHaveAttribute(
+      "aria-label",
+      "Dismiss notification",
+    );
+    // The close button must not carry aria-hidden="true" at rest —
+    // pre-fix Base UI parked it there until viewport expansion, which
+    // axe flags as `aria-hidden-focus` because the button itself is
+    // focusable. We force `aria-hidden={undefined}` so the attribute
+    // is omitted entirely.
+    await expect(closeBtn).not.toHaveAttribute("aria-hidden", "true");
+  },
+};

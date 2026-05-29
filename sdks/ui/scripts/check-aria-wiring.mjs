@@ -5695,6 +5695,50 @@ await open("components-toast--aria-override-attempt");
   );
 }
 
+/* ─── 85c. Wave 8 Toast review fix: Close keeps default label + axe-clean ─
+ *
+ * Two locked-together regressions on Toast.Close:
+ *
+ *   F-aria-label — the default `aria-label="Dismiss notification"`
+ *   survives a consumer spreading `aria-label={undefined}` through to
+ *   the close button (e.g. forwarding an optional prop). Pre-fix the
+ *   wrapper wrote the default BEFORE `{...rest}`, so an undefined
+ *   value in the spread blew the default away and the rendered button
+ *   had no accessible name.
+ *
+ *   F-aria-hidden — Base UI parks `aria-hidden="true"` on the close
+ *   button until the viewport is expanded (close/ToastClose.js:49,
+ *   `aria-hidden: !expanded && !hasFocus`). The button itself is
+ *   focusable, so axe flags `aria-hidden-focus` (critical) on every
+ *   resting toast — the same posture Toast.Root corrects on
+ *   high-priority toasts via the `aria-hidden={undefined}` override
+ *   at root/ToastRoot.js:462. Toast.Close gets the same treatment.
+ *
+ * The CloseLabelDefault story renders a custom Viewport child that
+ * passes `aria-label={undefined}` directly to `<Toast.Close>`; this
+ * block confirms the rendered button keeps the default label AND
+ * never carries `aria-hidden="true"` at rest. */
+await open("components-toast--close-label-default");
+{
+  const trigger = page.locator(
+    '[data-testid="toast-close-default-label-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const toast = page.locator(".zs-toast-root").first();
+  await toast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const closeBtn = page.locator(".zs-toast-close").first();
+  const ariaLabel = await closeBtn.getAttribute("aria-label");
+  const ariaHidden = await closeBtn.getAttribute("aria-hidden");
+  const ok = ariaLabel === "Dismiss notification" && ariaHidden !== "true";
+  report(
+    "Toast.Close — default label survives undefined spread + no aria-hidden=true at rest",
+    ok,
+    `aria-label=${JSON.stringify(ariaLabel)} aria-hidden=${JSON.stringify(ariaHidden)}`,
+  );
+}
+
 /* ─── 82. Slice 15: Drawer — Trigger opens + role + label/description ─
  *
  * The Drawer Basic story renders a Trigger that opens a side-anchored
