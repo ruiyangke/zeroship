@@ -366,7 +366,159 @@ export const CustomLegendPosition: Story = {
   ),
 };
 
-/* ─── 8. RTL ──────────────────────────────────────────────────────── */
+/* ─── 8. aria-labelledby={undefined} preserves Legend wiring ──────── *
+ *
+ * Regression for the spread-undefined footgun: rendering
+ * `<Fieldset aria-labelledby={undefined}>` MUST NOT clobber Base UI's
+ * auto-wired Legend id on the underlying `<fieldset>`. The wrapper
+ * sifts the aria props and only re-applies each one when defined,
+ * so the Legend binding survives whether the consumer passes
+ * undefined or simply doesn't mention `aria-labelledby` at all.
+ */
+export const AriaLabelledByUndefined: Story = {
+  name: "aria-labelledby undefined preserves Legend wiring",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Renders a Fieldset with `aria-labelledby={undefined}` " +
+          "explicitly passed. Base UI's auto-wired Legend id MUST " +
+          "still drive the fieldset's accessible name — the wrapper " +
+          "sifts undefined aria props instead of letting them spread " +
+          "onto Base UI and clobber the wiring.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Fieldset aria-labelledby undefined"
+    >
+      <Fieldset
+        aria-labelledby={undefined}
+        data-testid="fieldset-aria-undef"
+        style={{ maxWidth: "26rem", width: "100%" }}
+      >
+        <Fieldset.Legend data-testid="fieldset-aria-undef-legend">
+          Billing address
+        </Fieldset.Legend>
+        <Field name="street-aria">
+          <Field.Label>Street</Field.Label>
+          <Input data-testid="fieldset-aria-undef-street" />
+        </Field>
+      </Fieldset>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // The fieldset MUST still be accessibly-named "Billing address"
+    // via Base UI's auto-wired Legend id — the undefined
+    // aria-labelledby prop did NOT erase the wiring.
+    const fieldset = canvas.getByRole("group", { name: /billing address/i });
+    await expect(fieldset.tagName).toBe("FIELDSET");
+    const labelledBy = fieldset.getAttribute("aria-labelledby");
+    await expect(labelledBy).toBeTruthy();
+    const legend = canvasElement.querySelector(
+      '[data-testid="fieldset-aria-undef-legend"]',
+    );
+    await expect(legend?.id).toBe(labelledBy);
+  },
+};
+
+/* ─── 9. Nested disabled Fieldset (effective cascade) ─────────────── *
+ *
+ * Regression for the inner-Fieldset disabled-state shadow: an inner
+ * `<Fieldset>` placed inside a disabled outer `<Fieldset>` MUST
+ * pick up the effective disabled state at its own Base UI Root —
+ * `disabled` prop propagates, `data-disabled` attribute paints, and
+ * the FieldsetDisabledContext continues forwarding to selection
+ * primitives nested even deeper. Without this propagation the inner
+ * Root reports enabled even though the native cascade greys every
+ * descendant, leaving the chrome / metadata at odds.
+ */
+export const NestedFieldsetDisabledCascade: Story = {
+  name: "Nested Fieldset disabled cascade",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Outer Fieldset is `disabled`; the inner Fieldset has no " +
+          "explicit `disabled` prop yet MUST inherit the disabled " +
+          "state at its own Base UI Root (carrying `disabled` + " +
+          "`data-disabled`) so the cascade reaches descendant " +
+          "non-native controls without disagreement.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Nested fieldset disabled cascade"
+    >
+      <Fieldset
+        disabled
+        data-testid="fieldset-nested-disabled-outer"
+        style={{ maxWidth: "30rem", width: "100%" }}
+      >
+        <Fieldset.Legend>Outer (disabled)</Fieldset.Legend>
+        <Field name="outer-name">
+          <Field.Label>Outer name</Field.Label>
+          <Input />
+        </Field>
+        <Fieldset
+          size="sm"
+          data-testid="fieldset-nested-disabled-inner"
+          style={{
+            background: "var(--zs-fill-quaternary)",
+            borderRadius: "var(--zs-radius-3)",
+          }}
+        >
+          <Fieldset.Legend>Inner (inherits disabled)</Fieldset.Legend>
+          <Field name="inner-email">
+            <Field.Label>Inner email</Field.Label>
+            <Input
+              type="email"
+              data-testid="fieldset-nested-disabled-inner-email"
+            />
+          </Field>
+          <Checkbox
+            name="inner-newsletter"
+            label="Inner newsletter"
+            data-testid="fieldset-nested-disabled-inner-checkbox"
+          />
+        </Fieldset>
+      </Fieldset>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const inner = canvasElement.querySelector(
+      '[data-testid="fieldset-nested-disabled-inner"]',
+    ) as HTMLFieldSetElement | null;
+    // Inner Fieldset must paint disabled state — Base UI emits
+    // `data-disabled=""` whenever its Root prop is true, and
+    // propagates the signal into the Legend via context.
+    await expect(inner).not.toBeNull();
+    await expect(inner?.tagName).toBe("FIELDSET");
+    await expect(inner?.hasAttribute("data-disabled")).toBe(true);
+    // Resolve the Legend element via aria-labelledby (Base UI wires
+    // by id). The Legend MUST also carry data-disabled — Base UI
+    // only does this when it sees the inner Root's disabled prop
+    // come through.
+    const labelledBy = inner?.getAttribute("aria-labelledby");
+    const legend = labelledBy
+      ? canvasElement.querySelector(`[id="${labelledBy}"]`)
+      : null;
+    await expect(legend?.hasAttribute("data-disabled")).toBe(true);
+    const innerEmail = canvasElement.querySelector(
+      '[data-testid="fieldset-nested-disabled-inner-email"]',
+    ) as HTMLInputElement | null;
+    await expect(innerEmail?.disabled).toBe(true);
+  },
+};
+
+/* ─── 10. RTL ─────────────────────────────────────────────────────── */
 export const RTL: Story = {
   name: "RTL",
   parameters: {

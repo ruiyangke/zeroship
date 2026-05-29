@@ -3371,6 +3371,103 @@ await open("components-fieldset--basic-with-legend");
   );
 }
 
+/* ─── 66b. Fieldset preserves Legend wiring under aria-labelledby={undefined} *
+ *
+ * Regression: a consumer who spreads `<Fieldset {...maybeAria}>`
+ * where `maybeAria["aria-labelledby"]` is `undefined` (or who writes
+ * `<Fieldset aria-labelledby={undefined}>` explicitly) MUST NOT see
+ * Base UI's auto-wired Legend id clobbered. Before the wave10 fix
+ * the wrapper spread `...rest` AFTER Base UI's merged props, so an
+ * `aria-labelledby={undefined}` in `rest` overwrote the wired id
+ * and the fieldset's accessible name vanished. The wrapper now sifts
+ * the aria props and re-applies each one only when defined.
+ *
+ * Assertion: the AriaLabelledByUndefined story's fieldset still
+ * carries a non-empty `aria-labelledby` whose id resolves to the
+ * Legend's text. */
+await open("components-fieldset--aria-labelled-by-undefined");
+{
+  const fieldset = page.locator('[data-testid="fieldset-aria-undef"]');
+  await fieldset.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = await fieldset.getAttribute("aria-labelledby");
+  const legendEl = labelledBy
+    ? page.locator(`[id="${labelledBy}"]`)
+    : null;
+  const legendText = legendEl
+    ? (await legendEl.innerText().catch(() => "")).trim()
+    : "";
+  // Also confirm the resolved Legend matches the data-testid'd
+  // Legend element (the very one Base UI wired in via context).
+  const wiredId = labelledBy ?? "";
+  const expectedId = await page
+    .locator('[data-testid="fieldset-aria-undef-legend"]')
+    .getAttribute("id")
+    .catch(() => null);
+  const ok =
+    Boolean(labelledBy) &&
+    legendText === "Billing address" &&
+    wiredId === expectedId;
+  report(
+    "Fieldset aria-labelledby={undefined} preserves Base UI Legend wiring",
+    ok,
+    `aria-labelledby="${labelledBy}" legend="${legendText}" expectedId="${expectedId}"`,
+  );
+}
+
+/* ─── 66c. Nested Fieldset inherits disabled at the inner Root ────── *
+ *
+ * Regression: an inner `<Fieldset>` placed inside a `<Fieldset
+ * disabled>` MUST paint its own Base UI Root with the effective
+ * disabled state — Base UI's Fieldset.Root keeps `disabled` in
+ * state-only (it emits `data-disabled=""` but does NOT mirror to
+ * the native `disabled` HTML attribute), so the testable signal at
+ * the Root element is `data-disabled` plus its Legend's
+ * `data-disabled` (Base UI propagates the Root disabled state into
+ * the Legend via RootContext). Descendant native inputs DO pick up
+ * the cascade via Base UI's Field wiring. Before the wave10 fix
+ * the wrapper computed `effectiveDisabled` for the local
+ * FieldsetDisabledContext only — `disabled={disabled}` on
+ * BaseFieldset.Root and `data-disabled` painted only when local —
+ * so the inner Root chrome / metadata disagreed with the cascade.
+ *
+ * Assertions:
+ *   - inner `<fieldset>` carries `data-disabled=""`
+ *   - inner Legend (via aria-labelledby resolution) carries
+ *     `data-disabled=""` (proves Base UI saw the inner Root as
+ *     disabled — which only happens when we passed the prop)
+ *   - nested email input is `.disabled === true` (real-path
+ *     cascade to a non-Fieldset descendant) */
+await open("components-fieldset--nested-fieldset-disabled-cascade");
+{
+  const inner = page.locator(
+    '[data-testid="fieldset-nested-disabled-inner"]',
+  );
+  await inner.waitFor({ state: "visible", timeout: 5000 });
+  const innerTag = await inner.evaluate((el) => el.tagName);
+  const innerDataDisabled = await inner.getAttribute("data-disabled");
+  const innerLabelledBy = await inner.getAttribute("aria-labelledby");
+  const innerLegendDataDisabled = innerLabelledBy
+    ? await page
+        .locator(`[id="${innerLabelledBy}"]`)
+        .getAttribute("data-disabled")
+        .catch(() => null)
+    : null;
+  const innerEmail = page.locator(
+    '[data-testid="fieldset-nested-disabled-inner-email"]',
+  );
+  const emailDisabled = await innerEmail.evaluate((el) => el.disabled);
+  const ok =
+    innerTag === "FIELDSET" &&
+    innerDataDisabled !== null &&
+    innerLegendDataDisabled !== null &&
+    emailDisabled === true;
+  report(
+    "Fieldset nested disabled cascade: inner Root + Legend + descendant carry disabled",
+    ok,
+    `innerTag=${innerTag} innerDataDisabled=${innerDataDisabled !== null} legendDataDisabled=${innerLegendDataDisabled !== null} emailDisabled=${emailDisabled}`,
+  );
+}
+
 /* ─── 63. OtpField typing first cell auto-advances focus (slice 9) ─── *
  *
  * Type a single character into cell 0. Base UI advances focus to
