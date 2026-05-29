@@ -5497,11 +5497,18 @@ await open("components-previewcard--basic");
     '[data-testid="previewcard-basic-trigger"]',
   );
   await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Park the cursor at the page origin first so the next `hover()`
+  // dispatches a fresh pointerenter — Storybook's autoplay just ran
+  // `userEvent.hover` on this same trigger and the cursor may still
+  // be ON it, making a second `hover()` a no-op (no pointerenter ⇒
+  // Base UI's intent timer never starts).
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(120);
   await trigger.hover();
   const popup = page.locator('[data-testid="previewcard-basic-popup"]');
   let appeared = false;
   try {
-    await popup.waitFor({ state: "visible", timeout: 2000 });
+    await popup.waitFor({ state: "visible", timeout: 3000 });
     appeared = true;
   } catch {
     appeared = false;
@@ -5582,6 +5589,105 @@ await open("components-previewcard--as-child");
     "PreviewCard asChild renders consumer <a> and still opens on hover",
     tag === "a" && href === "https://example.com/post/42" && opened,
     `tag=${tag}, href=${href}, opened=${opened}`,
+  );
+}
+
+/* ─── 90. Slice 19 review fix 1: RTL inline-end resolves physically ─── *
+ *
+ * Regression for the 🔴 RTL/DirectionProvider fix. The RTL story now
+ * wraps content in `<DirectionProvider direction="rtl">` AND the
+ * wrapper no longer reinvents Base UI's logical-side resolution. Pre-
+ * fix, `resolveSide` consulted `document.documentElement.dir` (still
+ * LTR in the story) and resolved `inline-end` to physical `right`,
+ * leaving the popup to the right of the trigger. Under the fix, Base
+ * UI's `useDirection()` sees DirectionProvider's RTL signal and
+ * resolves `inline-end` to physical `left` — the popup's box now
+ * sits to the LEFT of the trigger.
+ */
+await open("components-previewcard--rtl");
+{
+  const trigger = page.locator(
+    '[data-testid="previewcard-rtl-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // The Storybook play() for this story dispatched `userEvent.hover` on
+  // load; the cursor may already be ON the trigger when this block
+  // runs, making the next `hover()` a no-op pointer move. Park the
+  // cursor at the page origin first so the next hover is a fresh
+  // pointerenter that starts a new Base UI intent window.
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(120);
+  await trigger.hover();
+  const popup = page.locator('[data-testid="previewcard-rtl-popup"]');
+  let opened = false;
+  let popupRight = NaN;
+  let triggerLeft = NaN;
+  try {
+    await popup.waitFor({ state: "visible", timeout: 5000 });
+    opened = true;
+    // Allow the Floating UI placement to settle before sampling rects.
+    await page.waitForTimeout(200);
+    const rects = await page.evaluate(() => {
+      const t = document.querySelector(
+        '[data-testid="previewcard-rtl-trigger"]',
+      );
+      const p = document.querySelector(
+        '[data-testid="previewcard-rtl-popup"]',
+      );
+      if (!t || !p) return null;
+      const tr = t.getBoundingClientRect();
+      const pr = p.getBoundingClientRect();
+      return {
+        triggerLeft: tr.left,
+        popupLeft: pr.left,
+        popupRight: pr.right,
+      };
+    });
+    if (rects) {
+      triggerLeft = rects.triggerLeft;
+      popupRight = rects.popupRight;
+    }
+  } catch {
+    opened = false;
+  }
+  // Under RTL with `side="inline-end"`, Base UI resolves the popup to
+  // the trailing physical side. In an RTL frame the trailing edge is
+  // on the LEFT — the popup's right edge therefore sits at or before
+  // the trigger's left edge. Pre-fix the popup landed to the RIGHT of
+  // the trigger (popupRight > triggerLeft + triggerWidth).
+  const onLeftOfTrigger = opened && popupRight <= triggerLeft + 1;
+  report(
+    "PreviewCard RTL inline-end resolves to physical-left under DirectionProvider",
+    onLeftOfTrigger,
+    `opened=${opened}, popupRight=${popupRight}, triggerLeft=${triggerLeft}`,
+  );
+}
+
+/* ─── 91. Slice 19 review fix 2: asChild trigger keeps wrapper className ─ *
+ *
+ * Regression for the 🟡 `asChild` className drop. The AsChild story
+ * sets `className="zs-aschild-wrapper-class"` on `<PreviewCard.Trigger
+ * asChild>` AND `className="zs-aschild-consumer-class"` on the
+ * consumer's `<a>`. The fix routes the wrapper's className through
+ * the Slot helper's className-merge path so the rendered element
+ * carries BOTH classes. Pre-fix, the wrapper class was destructured
+ * but never re-passed, leaving only the consumer's class on the DOM.
+ */
+await open("components-previewcard--as-child");
+{
+  const trigger = page.locator(
+    '[data-testid="previewcard-aschild-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const classList = await trigger.evaluate(
+    (node) => Array.from(node.classList),
+  );
+  const hasWrapperClass = classList.includes("zs-aschild-wrapper-class");
+  const hasConsumerClass = classList.includes("zs-aschild-consumer-class");
+  report(
+    "PreviewCard asChild composes wrapper className with consumer className",
+    hasWrapperClass && hasConsumerClass,
+    `wrapper=${hasWrapperClass}, consumer=${hasConsumerClass}, classList=${classList.join(" ")}`,
   );
 }
 

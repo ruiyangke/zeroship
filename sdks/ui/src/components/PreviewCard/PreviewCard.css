@@ -212,7 +212,10 @@
 /* Reduced-motion mirror at equal specificity — every state selector
  * with a transition above is matched here so the high-priority media
  * wins. Opacity-only fade keeps the entrance perceptible without
- * movement; transform is suppressed entirely. */
+ * movement; transform is suppressed entirely. Suppressing the opacity
+ * transition too (with `transition: none`) would make the popup
+ * teleport in — visually jarring even for reduced-motion users — so we
+ * keep an opacity fade and only neutralize transform. */
 @media (prefers-reduced-motion: reduce) {
   .zs-preview-card-popup,
   .zs-preview-card-popup[data-starting-style],
@@ -221,11 +224,11 @@
   .zs-preview-card-popup[data-side="top"][data-ending-style],
   .zs-preview-card-popup[data-side="bottom"][data-starting-style],
   .zs-preview-card-popup[data-side="bottom"][data-ending-style] {
-    transition: none;
+    transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
     transform: none;
   }
   .zs-preview-card-backdrop {
-    transition: none;
+    transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
   }
 }
 

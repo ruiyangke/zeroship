@@ -29,13 +29,16 @@
  *     for its Root-level `delay`. Brief default: `delay = 600`,
  *     `closeDelay = 200`.
  *   - `side` accepts logical `inline-start` / `inline-end` IN ADDITION to
- *     physical `top` / `right` / `bottom` / `left`. The logical values are
- *     resolved to Base UI's physical sides via the surrounding
- *     `<DirectionProvider>` (Base UI flips `start` / `end` alignment for
- *     RTL automatically; we extend that to `side` too). Brief anti-pattern
- *     guard: callers should never write raw `left` / `right` when they
- *     mean "edge nearest the inline start" — the wrapper's logical sides
- *     do the right thing under RTL.
+ *     physical `top` / `right` / `bottom` / `left`. Base UI 1.5's
+ *     Positioner consumes the logical values directly via its own
+ *     `useDirection()` hook — we forward them through unchanged and let
+ *     Base UI resolve against the surrounding `<DirectionProvider>`. No
+ *     hand-rolled translation: an earlier wrapper read
+ *     `document.documentElement.dir` (not reactive, not honoring nested
+ *     DirectionProvider) and got it wrong. Brief anti-pattern guard:
+ *     callers should never write raw `left` / `right` when they mean
+ *     "edge nearest the inline start" — the logical sides do the right
+ *     thing under RTL automatically.
  *   - `size` resolves to a `max-inline-size` token on the popup via a
  *     `data-size` attribute (`sm` = 16rem, `md` = 22rem, `lg` = 28rem).
  *     The default size is `md`. Brief anti-pattern: there is NO `image`
@@ -75,21 +78,23 @@ import {
 } from "react";
 import { PreviewCard as BasePreviewCard } from "@base-ui/react/preview-card";
 import { Slot, composeRefs } from "../_slot";
-import { composeBaseClass } from "../_classnames";
+import { classnames, composeBaseClass } from "../_classnames";
 
 /**
- * Physical and logical sides the Popup can anchor on. The logical sides
- * (`inline-start` / `inline-end`) are flipped to their physical
- * counterparts based on `<DirectionProvider>` direction; LTR resolves
- * `inline-start` → `left` and `inline-end` → `right`, RTL reverses.
+ * Physical and logical sides the Popup can anchor on. Derived from Base
+ * UI 1.5's Positioner `side` prop (`'top' | 'bottom' | 'left' | 'right'
+ * | 'inline-start' | 'inline-end'`). Base UI's Positioner resolves the
+ * logical values against the surrounding `<DirectionProvider>` via
+ * `useDirection()` — the wrapper does NOT translate sides itself.
+ *
+ * `NonNullable` strips Base UI's optional-marker so consumers writing
+ * `side="inline-end"` (etc.) get a closed union, not `<value> |
+ * undefined`. The Positioner type is sourced via
+ * `ComponentPropsWithoutRef` to avoid coupling to its deep import path.
  */
-export type PreviewCardSide =
-  | "top"
-  | "right"
-  | "bottom"
-  | "left"
-  | "inline-start"
-  | "inline-end";
+export type PreviewCardSide = NonNullable<
+  ComponentPropsWithoutRef<typeof BasePreviewCard.Positioner>["side"]
+>;
 
 /** Alignment along the chosen `side`. */
 export type PreviewCardAlign = "start" | "center" | "end";
@@ -98,12 +103,43 @@ export type PreviewCardAlign = "start" | "center" | "end";
 export type PreviewCardSize = "sm" | "md" | "lg";
 
 type BaseRootProps = ComponentPropsWithRef<typeof BasePreviewCard.Root>;
+type BasePreviewCardHandle = ReturnType<typeof BasePreviewCard.createHandle>;
 
 /**
- * Re-export Base UI's `createHandle` so consumers can imperatively pair
- * a Trigger to a Root (mirrors Tooltip / Popover / Dialog).
+ * Wrapper handle. Base UI's `createHandle` returns a `PreviewCardHandle`
+ * that connects a detached Trigger to a Root. We augment it with a
+ * stable `popupId` so detached Triggers can wire `aria-describedby` to
+ * the popup the same way Triggers inside a Root context do — without it,
+ * a detached Trigger would lose the wiring (Root's runtime context is
+ * the only other carrier of the id).
  */
-export const createPreviewCardHandle = BasePreviewCard.createHandle;
+export type PreviewCardHandle = BasePreviewCardHandle & {
+  /** Stable id used for `aria-describedby` ↔ Popup `id` wiring. */
+  readonly popupId: string;
+};
+
+/**
+ * Create an imperative handle for pairing a Root with detached Triggers
+ * (mirrors Tooltip / Popover / Dialog). The returned handle carries a
+ * stable `popupId` so a Trigger outside the Root's React subtree still
+ * publishes `aria-describedby={handle.popupId}` — the wiring Root
+ * context normally provides is preserved via the handle instead.
+ */
+export function createPreviewCardHandle(): PreviewCardHandle {
+  const handle = BasePreviewCard.createHandle() as PreviewCardHandle;
+  // Generate a stable id without relying on React's useId (the handle
+  // is created outside of render). The id only needs to be unique per
+  // handle instance; collisions across handles are harmless because
+  // each instance pairs a single Root with its own Triggers.
+  const id = `zs-previewcard-${Math.random().toString(36).slice(2, 10)}`;
+  Object.defineProperty(handle, "popupId", {
+    value: id,
+    writable: false,
+    enumerable: true,
+    configurable: false,
+  });
+  return handle;
+}
 
 /**
  * Props for the PreviewCard root.
@@ -116,17 +152,27 @@ export interface PreviewCardProps
   extends Omit<BaseRootProps, "render"> {
   /**
    * Milliseconds the pointer must rest on the Trigger before the Popup
-   * opens. Default `600` (matches Base UI). Set to `0` for keyboard-
-   * focused or "quick reveal" surfaces; raise it to suppress drive-by
-   * hovers on dense link clusters.
+   * opens. When omitted, Base UI's intent timer applies (currently
+   * 600ms). Pass an explicit value to override per-Root; set to `0` for
+   * keyboard-focused or "quick reveal" surfaces; raise it to suppress
+   * drive-by hovers on dense link clusters. Asymmetric vs `closeDelay`:
+   * the wrapper deliberately does NOT force an open default since Base
+   * UI's 600ms already matches the brief.
    */
   delay?: number;
   /**
    * Milliseconds after pointer-leave before the Popup closes. The grace
    * window lets the cursor cross from Trigger into the floating Popup
-   * without the panel disappearing in transit. Default `200`.
+   * without the panel disappearing in transit. Default `200` (the
+   * wrapper overrides Base UI's heavier 300ms default to match the
+   * brief; pass an explicit value here to override per-Root).
    */
   closeDelay?: number;
+  /**
+   * Composed children — typically a `PreviewCard.Trigger` paired with a
+   * `PreviewCard.Portal`-wrapped `PreviewCard.Popup`. The Root is a
+   * context-only node; it does not render visible chrome itself.
+   */
   children?: ReactNode;
 }
 
@@ -156,7 +202,15 @@ function PreviewCardRoot({
   children,
   ...rest
 }: PreviewCardProps) {
-  const popupId = useId();
+  // When a `handle` is supplied, prefer its stable popupId so detached
+  // Triggers (which read popupId off the handle directly) and Triggers
+  // inside this Root's React subtree (which read it off the runtime
+  // context) end up referencing the SAME id. Without this, a handle-
+  // paired Root would publish one id via context and the handle would
+  // carry another, splitting the aria-describedby wiring.
+  const handle = (rest as { handle?: PreviewCardHandle }).handle;
+  const generatedId = useId();
+  const popupId = handle?.popupId ?? generatedId;
   const ctxValue = useMemo<PreviewCardRootRuntimeContext>(
     () => ({ delay, closeDelay, popupId }),
     [delay, closeDelay, popupId],
@@ -215,21 +269,29 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
   ) {
     const rootCtx = useContext(PreviewCardRootRuntimeCtx);
 
+    // Detached-trigger fallback: when a Trigger lives outside any
+    // PreviewCard.Root subtree (`createHandle()` pairing), the Root
+    // runtime context is null. The wrapper's augmented handle carries a
+    // stable `popupId` so we can still wire `aria-describedby` to it —
+    // without this, detached Triggers would silently lose the wiring.
+    const handleFromProps =
+      (rest as { handle?: PreviewCardHandle }).handle ?? undefined;
+    const resolvedPopupId = rootCtx?.popupId ?? handleFromProps?.popupId;
+
     // Compose any consumer-supplied aria-describedby with the wrapper's
     // popup id so AT announces the preview content on focus. We wire
     // this unconditionally — referring to a non-mounted id is a no-op
     // for assistive tech (the AT only dereferences describedby AFTER
     // focus + mount).
     const ariaDescribedBy =
-      ariaDescribedByProp && rootCtx?.popupId
-        ? `${ariaDescribedByProp} ${rootCtx.popupId}`
-        : (ariaDescribedByProp ?? rootCtx?.popupId);
+      ariaDescribedByProp && resolvedPopupId
+        ? `${ariaDescribedByProp} ${resolvedPopupId}`
+        : (ariaDescribedByProp ?? resolvedPopupId);
 
-    // Brief defaults: 600ms open, 200ms close. Forward only when the
-    // consumer or Root explicitly supplied a value so per-Root timing
-    // remains optional (Base UI's defaults otherwise apply for `delay`;
-    // we override the close default since Base UI's 300ms is heavier
-    // than the brief asks for).
+    // Brief defaults: 600ms open, 200ms close. Forward only when Root
+    // explicitly supplied a value so per-Root timing remains optional
+    // (Base UI's default applies for `delay`; we override the close
+    // default since Base UI's 300ms is heavier than the brief asks for).
     const resolvedDelay = rootCtx?.delay;
     const resolvedCloseDelay = rootCtx?.closeDelay ?? 200;
 
@@ -249,8 +311,11 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
     if (asChild) {
       if (!isValidElement(children)) return null;
       // Slot composition matches Dialog.Close (commit 3a64a726): the
-      // shared helper merges className / style / refs / event handlers
-      // — we just hand Base UI a render-prop that emits a Slot.
+      // shared helper merges className / style / refs / event handlers.
+      // The wrapper's own `className` flows IN through the Slot so the
+      // consumer's child element ends up with `wrapper-class + child-
+      // class` — without this pass-through the wrapper className was
+      // silently dropped in asChild mode (codex review fix 2).
       return (
         <BasePreviewCard.Trigger
           {...(resolvedDelay !== undefined ? { delay: resolvedDelay } : {})}
@@ -260,9 +325,15 @@ const PreviewCardTrigger = forwardRef<HTMLElement, PreviewCardTriggerProps>(
           ref={ref as Ref<HTMLAnchorElement>}
           render={(triggerProps) => {
             const triggerRef = (triggerProps as { ref?: Ref<unknown> }).ref;
+            const { className: slotClassName, ...slotProps } =
+              triggerProps as { className?: string } & Record<string, unknown>;
             return (
               <Slot
-                {...triggerProps}
+                {...slotProps}
+                className={classnames(
+                  slotClassName as string | undefined,
+                  className,
+                )}
                 ref={composeRefs(ref as Ref<unknown>, triggerRef)}
               >
                 {children}
@@ -388,26 +459,13 @@ export interface PreviewCardPopupProps extends Omit<BasePopupProps, "id"> {
   size?: PreviewCardSize;
 }
 
-/* Logical → physical side resolution. Base UI's Positioner takes only
- * physical sides; we translate `inline-start` / `inline-end` at the
- * Popup boundary so the public API can stay token-style without
- * leaking the resolution detail. Direction is read from the document at
- * the time the Popup mounts — the same heuristic Base UI uses for align
- * flipping (it consults the surrounding `<DirectionProvider>`). */
-function resolveSide(
-  side: PreviewCardSide,
-): "top" | "right" | "bottom" | "left" {
-  if (side === "inline-start" || side === "inline-end") {
-    if (
-      typeof document !== "undefined" &&
-      document.documentElement.getAttribute("dir") === "rtl"
-    ) {
-      return side === "inline-start" ? "right" : "left";
-    }
-    return side === "inline-start" ? "left" : "right";
-  }
-  return side;
-}
+/* Side handling is delegated to Base UI 1.5's Positioner. Its `Side`
+ * type is `'top' | 'bottom' | 'left' | 'right' | 'inline-start' |
+ * 'inline-end'` — `useDirection()` resolves the logical values against
+ * the surrounding `<DirectionProvider>`. An earlier wrapper translated
+ * the logical sides itself by reading `document.documentElement.dir`,
+ * which (a) ignored nested `DirectionProvider`s, (b) wasn't reactive,
+ * and (c) reinvented what Base UI already does correctly. */
 
 const PreviewCardPopup = forwardRef<HTMLDivElement, PreviewCardPopupProps>(
   function PreviewCardPopup(
@@ -424,11 +482,10 @@ const PreviewCardPopup = forwardRef<HTMLDivElement, PreviewCardPopupProps>(
   ) {
     const rootCtx = useContext(PreviewCardRootRuntimeCtx);
     const popupId = rootCtx?.popupId;
-    const physicalSide = resolveSide(side);
     return (
       <BasePreviewCard.Positioner
         className="zs-preview-card-positioner"
-        side={physicalSide}
+        side={side}
         align={align}
         sideOffset={sideOffset}
       >
