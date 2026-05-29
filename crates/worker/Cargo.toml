@@ -13,6 +13,7 @@ zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -6781,6 +6781,7 @@ name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "clap",
  "compio",
  "cyper",
  "futures",

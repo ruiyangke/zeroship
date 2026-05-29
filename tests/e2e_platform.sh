@@ -116,7 +116,7 @@ sleep 3
 # Start 3 separate workers (so we can verify routing)
 WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
-    "$BIN/zeroship-worker" --port "$port" --workers 2 --control "http://localhost:$CONTROL_PORT" \
+    "$BIN/zeroship-worker" --port "$port" --worker-threads 2 --control "http://localhost:$CONTROL_PORT" \
         --control-key "$CONTROL_KEY" --poll-interval 2 > /dev/null 2>&1 &
     PIDS+=($!)
     [ -n "$WORKER_URL_LIST" ] && WORKER_URL_LIST="$WORKER_URL_LIST,"

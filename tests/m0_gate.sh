@@ -145,7 +145,7 @@ Bring-up commands used by tests/m0_gate.sh:
   ./tests/sandbox_up.sh
   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway
   target/release/zeroship-control --port $CONTROL_PORT --db "$DATABASE_URL" --bundles "$STATE_DIR/bundles" --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY"
-  target/release/zeroship-worker --port $WORKER_PORT --workers 2 --control "$CONTROL_URL" --control-key "$CONTROL_KEY" --poll-interval 2
+  target/release/zeroship-worker --port $WORKER_PORT --worker-threads 2 --control "$CONTROL_URL" --control-key "$CONTROL_KEY" --poll-interval 2
   target/release/zeroship-gate --port $GATEWAY_PORT --control "$CONTROL_URL" --control-key "$CONTROL_KEY" --workers "http://localhost:$WORKER_PORT" --poll-interval 2
   cd apps/zeroship-builder && ZEROSHIP_BUILDER_API_PORT=$BUILDER_API_PORT npm run dev -- --host 127.0.0.1 --port $BUILDER_PORT --strictPort
   cd apps/zeroship-builder && npx playwright test --config=playwright.m0.config.ts e2e/deploy-tool.spec.ts e2e/live-preview-proxy.spec.ts e2e/m0-gate.spec.ts
@@ -206,7 +206,7 @@ PIDS+=("$!")
 echo "[m0] starting worker"
 "$ROOT/target/release/zeroship-worker" \
   --port "$WORKER_PORT" \
-  --workers 2 \
+  --worker-threads 2 \
   --control "$CONTROL_URL" \
   --control-key "$CONTROL_KEY" \
   --blob-store "$STATE_DIR/bundles" \

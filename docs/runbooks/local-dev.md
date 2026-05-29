@@ -74,7 +74,7 @@ Terminal 2:
 ```bash
 ./target/release/zeroship-worker \
   --port 8080 \
-  --workers 4 \
+  --worker-threads 4 \
   --control http://localhost:9090 \
   --control-key dev-control \
   --blob-store ./bundles

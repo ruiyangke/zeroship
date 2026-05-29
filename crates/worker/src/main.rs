@@ -6,6 +6,7 @@ mod logs;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use clap::Parser;
 use ntex::web;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
@@ -15,11 +16,83 @@ use crate::sync::{SharedEnvs, SharedVersions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn dev_insecure_enabled(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--dev-insecure")
-        || std::env::var("ZEROSHIP_DEV_INSECURE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+/// zeroship worker startup configuration.
+#[derive(Debug, Parser)]
+#[command(name = "zeroship-worker")]
+struct WorkerCli {
+    /// HTTP listen port.
+    #[arg(long, env = "WORKER_PORT", default_value = "8080")]
+    port: String,
+
+    /// Number of ntex worker threads.
+    #[arg(long = "worker-threads", env = "WORKER_THREADS")]
+    worker_threads: Option<usize>,
+
+    /// Control-plane API base URL.
+    #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
+    control: String,
+
+    /// Admin/control API shared secret.
+    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
+    control_key: String,
+
+    /// Allow explicitly insecure local development startup.
+    #[arg(long = "dev-insecure", action = clap::ArgAction::SetTrue)]
+    dev_insecure: bool,
+
+    /// Environment half of `--dev-insecure`; only `1` is truthy.
+    #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
+    dev_insecure_env: bool,
+
+    /// Maximum number of cached app isolates.
+    #[arg(long = "max-isolates", env = "MAX_ISOLATES", default_value = "200")]
+    max_isolates: usize,
+
+    /// Control-plane polling interval in seconds.
+    #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
+    poll_interval: u64,
+
+    /// PostgreSQL DSN for runtime env/db state.
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "")]
+    db: String,
+
+    /// Shared secret for gateway dispatch endpoints.
+    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
+    worker_key: String,
+
+    /// Shutdown drain timeout in seconds.
+    #[arg(long = "shutdown-timeout", env = "SHUTDOWN_TIMEOUT", default_value = "30")]
+    shutdown_timeout: u64,
+
+    /// Root directory for content-addressed deploy blobs.
+    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
+    blob_store: String,
+
+    /// HTTP bind host.
+    #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
+    bind: String,
+
+    /// Optional Unix domain socket path.
+    #[arg(long = "socket", env = "WORKER_SOCKET", default_value = "")]
+    socket: String,
+}
+
+impl WorkerCli {
+    fn insecure_dev(&self) -> bool {
+        self.dev_insecure || self.dev_insecure_env
+    }
+}
+
+fn env_is_exact(key: &str, expected: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| value == expected)
+}
+
+fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
+    worker_threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    })
 }
 
 fn validate_worker_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
@@ -61,32 +134,20 @@ async fn main() -> std::io::Result<()> {
     zeroship_core::observability::init_tracing("info,zeroship_worker=debug,zeroship_runtime=info");
     init_v8();
 
-    let args: Vec<String> = std::env::args().collect();
-    let port = arg_or_env(&args, "--port", "WORKER_PORT", "8080");
-    let workers = arg_or_env(
-        &args,
-        "--workers",
-        "WORKER_THREADS",
-        &std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .to_string(),
-    );
-    let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
-    let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
-    let insecure_dev = dev_insecure_enabled(&args);
-    let max_isolates = arg_or_env(&args, "--max-isolates", "MAX_ISOLATES", "200");
-    let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
-    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "");
-    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
-    let shutdown_timeout = arg_or_env(&args, "--shutdown-timeout", "SHUTDOWN_TIMEOUT", "30");
-    // Same default + flag name as zeroship-control / zeroship-gate so a
-    // single-host dev box can point all three at one shared volume.
-    let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
-    // Default to loopback. Operators must explicitly opt into a public bind
-    // (--bind 0.0.0.0) after ensuring WORKER_KEY is set; without the shared
-    // secret, any network-reachable caller can impersonate users and run code.
-    let bind_host = arg_or_env(&args, "--bind", "WORKER_BIND", "127.0.0.1");
+    let cli = WorkerCli::parse();
+    let insecure_dev = cli.insecure_dev();
+    let port = cli.port;
+    let workers_count = resolve_worker_threads(cli.worker_threads);
+    let control_url = cli.control;
+    let control_key = cli.control_key;
+    let max_isolates = cli.max_isolates;
+    let poll_interval = cli.poll_interval;
+    let db_url = cli.db;
+    let worker_key = cli.worker_key;
+    let shutdown_timeout = cli.shutdown_timeout;
+    let blob_store_root = cli.blob_store;
+    let bind_host = cli.bind;
+    let socket_path = cli.socket;
 
     if let Err(message) = validate_worker_control_key(&control_key, insecure_dev) {
         tracing::error!(error = %message, "worker: refusing to start without control key");
@@ -118,15 +179,13 @@ async fn main() -> std::io::Result<()> {
         control_url,
         control_key,
         db_url: if db_url.is_empty() { None } else { Some(db_url) },
-        max_isolates: max_isolates.parse().unwrap_or(200),
-        poll_interval_secs: poll_interval.parse().unwrap_or(5),
+        max_isolates,
+        poll_interval_secs: poll_interval,
         worker_key,
-        shutdown_timeout_secs: shutdown_timeout.parse().unwrap_or(30),
+        shutdown_timeout_secs: shutdown_timeout,
         blob_store,
     });
 
-    let socket_path = arg_or_env(&args, "--socket", "WORKER_SOCKET", "");
-    let workers_count: usize = workers.parse().unwrap_or(1);
     let bind_addr = format!("{bind_host}:{port}");
 
     // Shared version snapshot populated by a SINGLE process-wide poller and
@@ -213,15 +272,6 @@ async fn main() -> std::io::Result<()> {
     run_result
 }
 
-fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return pair[1].clone();
-        }
-    }
-    std::env::var(env_key).unwrap_or_else(|_| default.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +290,38 @@ mod tests {
     #[test]
     fn worker_control_key_allows_missing_in_insecure_dev() {
         assert!(validate_worker_control_key("", true).is_ok());
+    }
+
+    #[test]
+    fn worker_threads_default_resolves_to_positive_count() {
+        assert!(resolve_worker_threads(None) > 0);
+        assert_eq!(resolve_worker_threads(Some(3)), 3);
+    }
+
+    #[test]
+    fn worker_thread_flag_uses_unambiguous_name() {
+        let cli = WorkerCli::try_parse_from([
+            "zeroship-worker",
+            "--worker-threads",
+            "3",
+            "--max-isolates",
+            "200",
+            "--poll-interval",
+            "5",
+            "--shutdown-timeout",
+            "30",
+        ])
+        .expect("--worker-threads should parse");
+        assert_eq!(cli.worker_threads, Some(3));
+
+        let old_flag = WorkerCli::try_parse_from(["zeroship-worker", "--workers", "3"]);
+        assert!(old_flag.is_err(), "--workers must not parse for worker threads");
+    }
+
+    #[test]
+    fn worker_numeric_fields_reject_bad_input() {
+        let err = WorkerCli::try_parse_from(["zeroship-worker", "--max-isolates", "abc"])
+            .expect_err("bad max-isolates should be a clap error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }
