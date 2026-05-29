@@ -60,10 +60,36 @@
 @import "./layouts/Split/Split.css";
 @import "./layouts/Center/Center.css";
 
+/* ─── Composed blocks — empty/error/loading state family. */
+@import "./blocks/EmptyState/EmptyState.css";
+@import "./blocks/ErrorState/ErrorState.css";
+@import "./blocks/Skeleton/Skeleton.css";
+@import "./blocks/Spinner/Spinner.css";
+
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Visually hidden but available to assistive tech (the canonical
+   "sr-only" idiom). Used by Spinner's status label and any future
+   block that needs an SR-only accessible name. This is the SINGLE
+   place in the package allowed to use raw `px`: the 1px clip-box is
+   the well-known cross-browser sr-only recipe — a `0` box collapses
+   out of the AT tree in some engines, and a rem value rounds to a
+   sub-pixel that some screen readers skip. Do NOT introduce other
+   raw px anywhere in the codebase. */
+.zs-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 :root {

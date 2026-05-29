@@ -1,0 +1,135 @@
+import type { Meta, StoryObj } from "@storybook/react";
+import { expect, within } from "@storybook/test";
+import { Skeleton } from "../blocks";
+
+const meta: Meta<typeof Skeleton> = {
+  title: "Blocks/Skeleton",
+  component: Skeleton,
+  parameters: { layout: "fullscreen" },
+};
+
+export default meta;
+
+type Story = StoryObj<typeof Skeleton>;
+
+/* ─── 1. Variants — text / rect / circle ────────────────────────────── */
+export const Variants: Story = {
+  name: "Variants (text / rect / circle)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The three placeholder shapes. Each is `aria-hidden` (no role) " +
+          "— the page's status/Spinner conveys loading, not the skeleton.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Skeleton variants"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">text</span>
+        <Skeleton variant="text" data-testid="skeleton-text" />
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">rect</span>
+        <Skeleton variant="rect" height="6rem" data-testid="skeleton-rect" />
+      </div>
+      <div className="zs-story-cell">
+        <span className="zs-story-label">circle</span>
+        <Skeleton
+          variant="circle"
+          width="3rem"
+          height="3rem"
+          data-testid="skeleton-circle"
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    for (const id of ["skeleton-text", "skeleton-rect", "skeleton-circle"]) {
+      const el = canvas.getByTestId(id);
+      // Decorative: aria-hidden, no role.
+      await expect(el).toHaveAttribute("aria-hidden", "true");
+    }
+    await expect(canvas.getByTestId("skeleton-circle")).toHaveAttribute(
+      "data-variant",
+      "circle",
+    );
+  },
+};
+
+/* ─── 2. Multi-line text ────────────────────────────────────────────── */
+export const MultiLineText: Story = {
+  name: "Multi-line text (paragraph)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`variant='text'` with `lines > 1` renders N stacked bars; the " +
+          "last bar is shortened so the block reads as a paragraph.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Multi-line skeleton">
+      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+        <Skeleton variant="text" lines={4} data-testid="skeleton-lines" />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const container = canvas.getByTestId("skeleton-lines");
+    await expect(container).toHaveAttribute("data-lines", "4");
+    await expect(container).toHaveAttribute("aria-hidden", "true");
+    // Four bars rendered.
+    const bars = container.querySelectorAll('[data-slot="skeleton-line"]');
+    await expect(bars).toHaveLength(4);
+  },
+};
+
+/* ─── 3. Reduced motion ─────────────────────────────────────────────── *
+ *
+ * Under prefers-reduced-motion the shimmer animation is disabled while
+ * the static base fill stays painted (paint preserved). The CSS gates
+ * `animation: none` + `background-image: none` inside the
+ * `@media (prefers-reduced-motion: reduce)` block; the base
+ * `background-color: var(--zs-fill-secondary)` remains. This story
+ * documents that contract and asserts the placeholder still renders
+ * (visible) regardless of the motion preference. */
+export const ReducedMotion: Story = {
+  name: "Reduced motion (animation disabled, paint preserved)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Under `prefers-reduced-motion: reduce` the shimmer stops " +
+          "(`animation: none`) but the static fill remains painted, so " +
+          "the placeholder is still visible. The motion gate lives in " +
+          "Skeleton.css; this story asserts the placeholder renders.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Reduced-motion skeleton">
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Skeleton variant="rect" height="4rem" data-testid="skeleton-rm" />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const el = canvas.getByTestId("skeleton-rm");
+    // Paint preserved: the base fill is always set (never transparent),
+    // so the placeholder is visible with or without motion.
+    const bg = getComputedStyle(el).backgroundColor;
+    await expect(bg).not.toBe("rgba(0, 0, 0, 0)");
+    await expect(bg).not.toBe("transparent");
+  },
+};

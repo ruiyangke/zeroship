@@ -1,0 +1,106 @@
+/*
+ * ErrorState — "something went wrong" panel.
+ *
+ * Anatomy:
+ *   .zs-error-state                  — outer region (paints nothing itself)
+ *     └─ Center → Stack column
+ *         ├─ .zs-error-state__icon         — alert glyph, tinted by intent
+ *         ├─ .zs-error-state__title        — heading (h2 by default)
+ *         ├─ .zs-error-state__description  — muted supporting copy
+ *         └─ .zs-error-state__actions      — action row (Retry Button)
+ *
+ * Modifier classes (intent):
+ *   --error    → icon tinted system-red   (default)
+ *   --warning  → icon tinted system-orange
+ *
+ * Intent only colors the icon — title/description stay in the label
+ * hierarchy so the panel reads calm. The icon is the failure signal;
+ * a fully-red panel would over-shout.
+ *
+ * Motion: none.
+ */
+
+.zs-error-state {
+  padding-block: var(--zs-space-8);
+  padding-inline: var(--zs-space-6);
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  /* Per-intent icon color resolved here so the __icon rule below stays
+     a single declaration. Default is the error red. */
+  --zs-error-state-icon-color: var(--zs-system-red);
+}
+
+.zs-error-state--warning {
+  --zs-error-state-icon-color: var(--zs-system-orange);
+}
+
+.zs-error-state__column {
+  max-inline-size: 28rem;
+  text-align: center;
+}
+
+.zs-error-state__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--zs-error-state-icon-color);
+  font-size: var(--zs-text-large-title-size);
+  line-height: 1;
+}
+
+.zs-error-state__icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+  fill: none;
+  stroke: currentColor;
+  /* SVG attribute units (viewBox space), not CSS px. */
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The exclamation dot is a filled mark, not a stroked path. */
+.zs-error-state__icon svg circle:last-of-type {
+  fill: currentColor;
+  stroke: none;
+}
+
+.zs-error-state__title {
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: 600;
+}
+
+.zs-error-state__description {
+  margin: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  margin-block-start: calc(-1 * var(--zs-space-1));
+}
+
+.zs-error-state__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-2);
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * No system-red/orange slot exists in forced-colors; defer the icon to
+ * CanvasText so it stays visible (the glyph shape carries the alert
+ * meaning under HCM, not the color). */
+@media (forced-colors: active) {
+  .zs-error-state__icon {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-error-state__title,
+  .zs-error-state__description {
+    color: CanvasText;
+  }
+}

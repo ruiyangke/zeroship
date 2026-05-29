@@ -1,0 +1,77 @@
+/*
+ * Spinner — standalone activity indicator.
+ *
+ * Anatomy:
+ *   .zs-spinner            — role="status" inline-flex host
+ *     └─ .zs-spinner__ring  — the rotating arc (aria-hidden)
+ *
+ * Modifier classes (size):
+ *   --sm | --md (default) | --lg
+ *
+ * The ring is a conic / border arc: a full ring in the muted fill with
+ * one quadrant in the accent, rotated by a keyframe. Sized via the
+ * per-size `--zs-spinner-size` custom property.
+ *
+ * Motion: the rotation respects `prefers-reduced-motion: reduce` — the
+ * spin stops and the static arc remains painted (an acceptable
+ * non-animated busy indicator). Mirrors the Button spinner.
+ */
+
+.zs-spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Default (md) size; per-size modifiers override below. */
+  --zs-spinner-size: 1.5rem;
+  --zs-spinner-track: 0.1875rem;
+  inline-size: var(--zs-spinner-size);
+  block-size: var(--zs-spinner-size);
+  color: var(--zs-accent);
+}
+
+.zs-spinner--sm {
+  --zs-spinner-size: 1rem;
+  --zs-spinner-track: 0.125rem;
+}
+.zs-spinner--lg {
+  --zs-spinner-size: 2.5rem;
+  --zs-spinner-track: 0.25rem;
+}
+
+.zs-spinner__ring {
+  inline-size: 100%;
+  block-size: 100%;
+  border-radius: var(--zs-radius-full);
+  /* A ring in the muted fill with the top arc in the accent (current
+     color), so the spin reads as a moving highlight around the track. */
+  border: var(--zs-spinner-track) solid var(--zs-fill-secondary);
+  border-block-start-color: currentColor;
+  animation: zs-spinner-spin 0.7s linear infinite;
+}
+
+@keyframes zs-spinner-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─── reduced motion ───────────────────────────────────────────────── *
+ * Stop the spin entirely; the static arc (muted ring + accent top
+ * quadrant) stays painted as a non-animated busy indicator. The
+ * role="status" label still announces "loading" to AT. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-spinner__ring {
+    animation: none;
+  }
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * Map the ring to system colors so it stays visible: the track to
+ * GrayText, the active arc to Highlight. */
+@media (forced-colors: active) {
+  .zs-spinner__ring {
+    border-color: GrayText;
+    border-block-start-color: Highlight;
+    forced-color-adjust: none;
+  }
+}
