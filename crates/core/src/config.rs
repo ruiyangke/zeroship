@@ -62,6 +62,34 @@ pub struct ObsSection {
     pub log_format: Option<String>,
 }
 
+/// CLI/environment observability overrides shared by server binaries.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct ObservabilityFlags {
+    /// `RUST_LOG` / `EnvFilter` directive.
+    #[arg(long = "log-filter", env = "RUST_LOG")]
+    pub log_filter: Option<String>,
+    /// Tracing output format.
+    #[arg(long = "log-format", env = "ZEROSHIP_LOG_FORMAT")]
+    pub log_format: Option<String>,
+}
+
+/// Resolve observability settings with flag/env values overriding the file.
+#[must_use]
+pub fn resolve_observability(
+    flags: &ObservabilityFlags,
+    file: &ObsSection,
+    default_filter: &str,
+) -> (String, Option<String>) {
+    (
+        flags
+            .log_filter
+            .clone()
+            .or(file.rust_log.clone())
+            .unwrap_or_else(|| default_filter.to_string()),
+        flags.log_format.clone().or(file.log_format.clone()),
+    )
+}
+
 impl FileConfig {
     /// Load an optional TOML overlay from `path`.
     ///
@@ -118,7 +146,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{ConfigError, FileConfig};
+    use super::{
+        ConfigError, FileConfig, ObsSection, ObservabilityFlags, resolve_observability,
+    };
 
     struct TempFile {
         path: PathBuf,
@@ -228,6 +258,52 @@ rust_log = "debug"
         assert!(config.auth.hydra_public_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_empty());
         assert_eq!(config.observability.rust_log.as_deref(), Some("debug"));
+    }
+
+    #[test]
+    fn resolve_observability_prefers_flag_then_file_then_default_filter() {
+        let file = ObsSection {
+            rust_log: Some("info,zeroship_file=debug".to_string()),
+            log_format: None,
+        };
+
+        let flags = ObservabilityFlags {
+            log_filter: Some("warn,zeroship_flag=trace".to_string()),
+            log_format: None,
+        };
+        let (filter, _) = resolve_observability(&flags, &file, "info,zeroship_default=debug");
+        assert_eq!(filter, "warn,zeroship_flag=trace");
+
+        let flags = ObservabilityFlags::default();
+        let (filter, _) = resolve_observability(&flags, &file, "info,zeroship_default=debug");
+        assert_eq!(filter, "info,zeroship_file=debug");
+
+        let file = ObsSection::default();
+        let (filter, _) = resolve_observability(&flags, &file, "info,zeroship_default=debug");
+        assert_eq!(filter, "info,zeroship_default=debug");
+    }
+
+    #[test]
+    fn resolve_observability_prefers_flag_then_file_then_none_format() {
+        let file = ObsSection {
+            rust_log: None,
+            log_format: Some("json".to_string()),
+        };
+
+        let flags = ObservabilityFlags {
+            log_filter: None,
+            log_format: Some("compact".to_string()),
+        };
+        let (_, format) = resolve_observability(&flags, &file, "info");
+        assert_eq!(format.as_deref(), Some("compact"));
+
+        let flags = ObservabilityFlags::default();
+        let (_, format) = resolve_observability(&flags, &file, "info");
+        assert_eq!(format.as_deref(), Some("json"));
+
+        let file = ObsSection::default();
+        let (_, format) = resolve_observability(&flags, &file, "info");
+        assert!(format.is_none());
     }
 
     #[test]

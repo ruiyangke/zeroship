@@ -30,20 +30,33 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// is unset, we auto-detect: TTY stderr -> `pretty`, otherwise
 /// `json` (production-friendly).
 pub fn init_tracing(default_filter: &str) {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) if EnvFilter::try_new(value.as_str()).is_ok() => value,
+        _ => default_filter.to_string(),
+    };
+    let format = std::env::var("ZEROSHIP_LOG_FORMAT").ok();
 
-    let format = std::env::var("ZEROSHIP_LOG_FORMAT").ok().unwrap_or_else(|| {
+    init_tracing_with(&filter, format.as_deref());
+}
+
+/// Initialise tracing with already-resolved filter and optional format values.
+///
+/// Passing `None` for `format` preserves the standard auto-detection:
+/// TTY stderr uses `pretty`, and non-TTY stderr uses `json`.
+pub fn init_tracing_with(filter: &str, format: Option<&str>) {
+    let env_filter = EnvFilter::new(filter);
+
+    let format = format.unwrap_or_else(|| {
         if std::io::stderr().is_terminal() {
-            "pretty".into()
+            "pretty"
         } else {
-            "json".into()
+            "json"
         }
     });
 
     let registry = tracing_subscriber::registry().with(env_filter);
 
-    match format.as_str() {
+    match format {
         "json" => {
             registry
                 .with(

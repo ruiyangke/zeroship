@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ntex::web;
-use zeroship_core::config::FileConfig;
+use zeroship_core::config::{FileConfig, resolve_observability};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
     backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
@@ -138,6 +138,10 @@ struct GateCli {
     /// Optional shared config overlay path.
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
+
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    obs: zeroship_core::config::ObservabilityFlags,
 }
 
 impl GateCli {
@@ -205,16 +209,20 @@ fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), Str
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    zeroship_core::observability::init_tracing("info,zeroship_gateway=debug");
-
     let cli = GateCli::parse();
     let file = match FileConfig::load(cli.config_path.as_deref()) {
         Ok(file) => file,
         Err(err) => {
-            tracing::error!(error = %err, "gateway: failed to load config file");
+            eprintln!("gateway: failed to load config file: {err}");
             std::process::exit(1);
         }
     };
+    let (filter, format) = resolve_observability(
+        &cli.obs,
+        &file.observability,
+        "info,zeroship_gateway=debug",
+    );
+    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
 
     let insecure_dev = cli.insecure_dev();
     let trust_proxy = cli.trust_proxy();

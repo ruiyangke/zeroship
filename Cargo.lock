@@ -6550,6 +6550,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64",
+ "clap",
  "compio",
  "compio-postgres",
  "cyper",

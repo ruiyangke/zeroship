@@ -5,6 +5,7 @@ edition = "2021"
 description = "Core types, VFS, and auth for the zeroship platform"
 
 [dependencies]
+clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

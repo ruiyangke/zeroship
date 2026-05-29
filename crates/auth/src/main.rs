@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
-use zeroship_core::config::FileConfig;
+use zeroship_core::config::{FileConfig, resolve_observability};
 use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
@@ -26,16 +26,18 @@ use zeroship_auth::store;
 
 #[ntex::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    zeroship_core::observability::init_tracing("info,zeroship_auth=debug");
-
     let mut cfg = AuthConfig::parse();
     let file = match FileConfig::load(cfg.config_path.as_deref()) {
         Ok(file) => file,
         Err(err) => {
-            tracing::error!(error = %err, "auth: failed to load config file");
+            eprintln!("auth: failed to load config file: {err}");
             std::process::exit(1);
         }
     };
+    let (filter, format) =
+        resolve_observability(&cfg.obs, &file.observability, "info,zeroship_auth=debug");
+    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
+
     cfg.resolve_file_overlay(file.auth);
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 

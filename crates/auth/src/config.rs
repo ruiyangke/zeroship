@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use zeroship_core::config::AuthSection;
+use zeroship_core::config::{AuthSection, ObservabilityFlags};
 
 const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
 const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
@@ -14,6 +14,10 @@ pub struct AuthConfig {
     /// Optional shared config overlay path.
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     pub config_path: Option<PathBuf>,
+
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    pub obs: ObservabilityFlags,
 
     /// Listen address.
     #[arg(long, env = "AUTH_ADDR", default_value = "0.0.0.0:9092")]

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
+use zeroship_core::config::{FileConfig, resolve_observability};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
 
@@ -75,6 +76,14 @@ struct WorkerCli {
     /// Optional Unix domain socket path.
     #[arg(long = "socket", env = "WORKER_SOCKET", default_value = "")]
     socket: String,
+
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    config_path: Option<PathBuf>,
+
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    obs: zeroship_core::config::ObservabilityFlags,
 }
 
 impl WorkerCli {
@@ -131,10 +140,22 @@ pub struct WorkerConfig {
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    zeroship_core::observability::init_tracing("info,zeroship_worker=debug,zeroship_runtime=info");
+    let cli = WorkerCli::parse();
+    let file = match FileConfig::load(cli.config_path.as_deref()) {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("worker: failed to load config file: {err}");
+            std::process::exit(1);
+        }
+    };
+    let (filter, format) = resolve_observability(
+        &cli.obs,
+        &file.observability,
+        "info,zeroship_worker=debug,zeroship_runtime=info",
+    );
+    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
     init_v8();
 
-    let cli = WorkerCli::parse();
     let insecure_dev = cli.insecure_dev();
     let port = cli.port;
     let workers_count = resolve_worker_threads(cli.worker_threads);

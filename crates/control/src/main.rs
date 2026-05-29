@@ -7,7 +7,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use clap::Parser;
 use ntex::web;
-use zeroship_core::config::FileConfig;
+use zeroship_core::config::{FileConfig, resolve_observability};
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
@@ -125,6 +125,10 @@ struct ControlCli {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    obs: zeroship_core::config::ObservabilityFlags,
+
     /// Hydra admin API base URL.
     #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
     hydra_admin_url: Option<String>,
@@ -241,16 +245,20 @@ fn validate_master_key_material(
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    zeroship_core::observability::init_tracing("info,zeroship_control=debug");
-
     let cli = ControlCli::parse();
     let file = match FileConfig::load(cli.config_path.as_deref()) {
         Ok(file) => file,
         Err(err) => {
-            tracing::error!(error = %err, "control: failed to load config file");
+            eprintln!("control: failed to load config file: {err}");
             std::process::exit(1);
         }
     };
+    let (filter, format) = resolve_observability(
+        &cli.obs,
+        &file.observability,
+        "info,zeroship_control=debug",
+    );
+    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
 
     let insecure_dev = cli.insecure_dev();
     let trust_proxy = cli.trust_proxy();
