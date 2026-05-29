@@ -89,6 +89,8 @@ const stories = [
   "components-alertdialog--cancel-with-cleanup-on-click",
   "components-alertdialog--cancel-as-child",
   "components-alertdialog--three-buttons-destructive-bottom",
+  // wave-7 focused-review 🔴 #2 addition (forced-colors popup mirror).
+  "components-alertdialog--forced-colors",
   // Negative-test stories — excluded from the a11y list since their
   // story meta sets `a11y: { disable: true }` and they exist purely to
   // exercise dev-warn paths:

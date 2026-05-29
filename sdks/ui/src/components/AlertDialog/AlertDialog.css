@@ -108,5 +108,32 @@
   justify-content: center;
 }
 
-/* forced-colors is inherited from .zs-dialog-popup — no alert-specific
- * overrides needed (review-fix item 11). */
+/* ─── forced-colors ────────────────────────────────────────────────────── */
+/* `.zs-alertdialog-popup` at the top of this file overrides
+ * `box-shadow` with `var(--zs-shadow-4)`. Because AlertDialog.css is
+ * imported AFTER Dialog.css (see sdks/ui/src/styles.css), that rule
+ * also wins inside `@media (forced-colors: active)` against Dialog's
+ * `.zs-dialog-popup { box-shadow: 0 0 0 0.0625rem CanvasText inset; }`
+ * mirror — both selectors have equal specificity, and source order
+ * decides. Without this block the popup loses its system-colored
+ * 1px ring in Windows High Contrast and becomes indistinguishable
+ * from the page background.
+ *
+ * The mirror lives at the bottom of the file so it lands strictly
+ * after the base `.zs-alertdialog-popup` rule, restoring the system
+ * ring (and clearing material/backdrop filters that don't paint in
+ * forced-colors anyway). */
+@media (forced-colors: active) {
+  .zs-alertdialog-popup {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: 0 0 0 0.0625rem CanvasText inset;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .zs-alertdialog-backdrop {
+    background-color: color-mix(in oklch, CanvasText 40%, transparent);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
