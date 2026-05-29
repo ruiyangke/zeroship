@@ -51,8 +51,17 @@ export const RequiredFallbackAndControl: Story = {
       >
         <Field name="alias">
           <Field.Label>Team alias</Field.Label>
-          <Field.Control placeholder="platform" />
-          <Field.Description>Rendered through Field.Control.</Field.Description>
+          <Field.Control
+            placeholder="platform"
+            data-testid="field-bare-control-alias"
+            aria-describedby="field-bare-control-external-help"
+          />
+          <Field.Description>
+            Rendered through Field.Control.
+          </Field.Description>
+          <p id="field-bare-control-external-help">
+            External help unrelated to Field.Description.
+          </p>
         </Field>
       </div>
     </div>
@@ -68,6 +77,65 @@ export const RequiredFallbackAndControl: Story = {
 
     await userEvent.type(alias, "console");
     await expect(alias).toHaveValue("console");
+
+    // Regression — bare Field.Control aria-describedby UNION (🔴 #2):
+    // the caller's external id MUST coexist with Base UI's auto-wired
+    // Field.Description id. Pre-fix, Base UI's `mergeProps` let the
+    // caller's `aria-describedby` clobber the auto-wired one.
+    const describedBy = alias.getAttribute("aria-describedby") ?? "";
+    const ids = describedBy.split(/\s+/).filter(Boolean);
+    await expect(ids).toContain("field-bare-control-external-help");
+    // Find the Field.Description id by matching the rendered text —
+    // Base UI generates a stable id; we don't pin the literal value.
+    const descriptionNode = canvas.getByText(/rendered through field\.control/i);
+    const descriptionId = descriptionNode.getAttribute("id");
+    await expect(descriptionId).toBeTruthy();
+    await expect(ids).toContain(descriptionId);
+  },
+};
+
+/* ─── 🔴 #1 — bare Field.Control inherits Field `required` ──────────────
+ *
+ * Regression for the Wave-6 review: `<Field.Control>` (no `<Input>`
+ * wrapper) MUST inherit the `required` flag from the enclosing
+ * `<Field>` so the visible required marker, native form validation
+ * (`valueMissing`), and `aria-required` agree. Pre-fix the bare control
+ * forwarded `...rest` to Base UI directly and never read the context,
+ * so `<Field required><Field.Control /></Field>` was silently
+ * optional. */
+export const RequiredBareControl: Story = {
+  name: "Required bare control (play)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Field required bare control"
+    >
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 18rem", minWidth: "14rem" }}
+      >
+        <Field required name="handle">
+          <Field.Label>
+            Handle <Field.Required />
+          </Field.Label>
+          <Field.Control
+            data-testid="field-required-bare-control"
+            placeholder="@you"
+          />
+          <Field.Description>Inherits required from Field.</Field.Description>
+        </Field>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const handle = canvas.getByRole("textbox", { name: /handle/i });
+    // Both AT-visible attribute AND native HTMLInputElement.required
+    // must reflect the cascade — `aria-required` for AT scripts, the
+    // DOM property for native form validation.
+    await expect(handle).toHaveAttribute("aria-required", "true");
+    await expect(handle).toBeRequired();
   },
 };
 
