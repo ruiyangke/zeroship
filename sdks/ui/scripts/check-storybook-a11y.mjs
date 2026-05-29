@@ -24,6 +24,8 @@ const stories = [
   "components-button--long-label",
   "components-button--focus-visible",
   "components-button--as-child",
+  "components-button--as-child-busy-and-disabled",
+  "components-button--as-child-disabled-is-inert",
   "components-input--all-variants",
   "components-input--all-sizes",
   "components-input--all-states",

@@ -8073,6 +8073,317 @@ await open("components-toolbar--separator-orientation-lock-regression");
   );
 }
 
+/* ─── Wave-8 Button red #1 — asChild disabled is inert ──────────────────
+ *
+ * Pre-fix, an asChild Button with `disabled` set rendered an <a> that
+ * carried only `aria-disabled="true"`. The CSS disabled styling keyed
+ * off `:disabled` / `[aria-busy]` only, so the anchor stayed visually
+ * enabled (no `cursor: not-allowed`, no muted variant background) AND
+ * clicking it BOTH navigated to `href` AND invoked any handler attached
+ * to the child or the wrapper. The combined effect: a disabled
+ * "Continue" link still followed its href and still ran the onClick
+ * the caller passed in — a sharp violation of the disabled Button
+ * contract.
+ *
+ * Real-path regression. Open the wave-8 story that wires up two
+ * counters: one onClick attached directly to the child <a>, and one
+ * onClick passed via `<Button onClick>` (which lands on the Slot via
+ * {...rest}). Click the disabled link. Pre-fix, both counters
+ * increment to 1 and `location.hash` updates to the href target.
+ * Post-fix, both counters stay at 0 and the hash is unchanged. We
+ * also read computed `cursor` on the rendered <a> — pre-fix it
+ * resolves to `pointer` (CSS default for anchors with href);
+ * post-fix the `[aria-disabled="true"]` mirror added in the wave-8
+ * 🔴 fix paints `cursor: not-allowed`.
+ */
+await open("components-button--as-child-disabled-is-inert");
+{
+  const link = page.locator('[data-testid="aschild-disabled-inert-link"]');
+  await link.waitFor({ state: "visible", timeout: 5000 });
+
+  // Storybook's autoplay already ran the `play()` for this story — it
+  // already clicked the link once and asserted counters stayed 0. To
+  // give this aria-wiring block its own independent measurement, reset
+  // the counters by reloading the iframe so the React state is fresh,
+  // then drive the interaction ourselves.
+  await page.reload({ waitUntil: "networkidle" });
+  await link.waitFor({ state: "visible", timeout: 5000 });
+
+  // Snapshot hash and the cursor BEFORE the click.
+  const hashBefore = await page.evaluate(() => window.location.hash);
+  const cursor = await link.evaluate((el) => getComputedStyle(el).cursor);
+
+  // Real click drives the activation path: capture-phase listeners on
+  // the anchor would still observe a `pointerdown` / `mousedown`, but
+  // the child onClick + wrapper onClick must NOT fire. Use `force:
+  // true` because Playwright's actionability heuristic refuses to
+  // click elements with `aria-disabled="true"` (it considers them
+  // "not enabled"). The whole point of this regression is that a user
+  // CAN still click the rendered anchor — the guard in Button.tsx is
+  // what must suppress the resulting handler invocation and
+  // navigation, not Playwright's pre-flight check.
+  await link.click({ force: true });
+
+  // After the click, neither output should have advanced past 0 and
+  // the URL hash must not have changed to the link's href target. The
+  // story's two `<output>` elements expose the click counts.
+  const childText = await page
+    .locator('[data-testid="aschild-disabled-inert-child-count"]')
+    .innerText();
+  const wrapperText = await page
+    .locator('[data-testid="aschild-disabled-inert-wrapper-count"]')
+    .innerText();
+  const hashAfter = await page.evaluate(() => window.location.hash);
+
+  const cursorOk = cursor === "not-allowed";
+  const childOk = /Child clicks:\s*0\b/.test(childText);
+  const wrapperOk = /Wrapper clicks:\s*0\b/.test(wrapperText);
+  const navOk = hashAfter === hashBefore;
+  const ok = cursorOk && childOk && wrapperOk && navOk;
+  report(
+    "Button asChild disabled is inert — cursor + handlers + nav (wave-8 🔴 #1)",
+    ok,
+    `cursor="${cursor}" child="${childText}" wrapper="${wrapperText}" hashBefore="${hashBefore}" hashAfter="${hashAfter}"`,
+  );
+}
+
+/* ─── Wave-8 Button red #2 — forced-colors specificity mirror ───────────
+ *
+ * Pre-fix, Button.css mapped only low-specificity base variants inside
+ * `@media (forced-colors: active)`:
+ *   .zs-button--filled { background: Highlight; ... }
+ *   .zs-button--tinted, .zs-button--gray { background: Canvas; ... }
+ *   .zs-button--plain { background: transparent; ... }
+ *   .zs-button:disabled, .zs-button[aria-busy="true"] { color: GrayText; ... }
+ *
+ * Meanwhile normal-mode rules climbed specificity:
+ *   .zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
+ *     background: var(--zs-accent-hover);
+ *   }
+ *   .zs-button--destructive.zs-button--filled { background: var(--zs-system-red); }
+ *   .zs-button--destructive.zs-button--filled:disabled { ... }
+ *
+ * With higher specificity than the forced-colors counterparts, the
+ * normal-mode rules WIN the cascade in HCM and the painted color is
+ * the token color (or its OKLCH mix), not the system color. Visually
+ * the high-contrast affordance breaks for every hover/active/disabled
+ * surface and for every destructive selector.
+ *
+ * Fix verified by CSS scan: parse Button.css; for every NORMAL-MODE
+ * selector that paints `background`/`background-color`/`color`/
+ * `border-color`, require the forced-colors block to contain a
+ * selector with EQUAL OR HIGHER specificity that matches the same
+ * selector shape (same class compounding + same `:not(...)` /
+ * attribute chain). The "matches" test is a string-equality on the
+ * canonical selector form so we don't over-fit to the order of
+ * `:not(...)` clauses.
+ *
+ * Pre-fix this block fails with the hover, active, destructive, and
+ * disabled-per-variant selectors all missing from the forced-colors
+ * block. Post-fix every normal-mode color selector has its mirror.
+ */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/Button/Button.css",
+    import.meta.url,
+  );
+  let scanError = null;
+  let missing = [];
+  let normalSelectors = [];
+  let forcedSelectors = [];
+  try {
+    const source = await fs.readFile(cssUrl, "utf8");
+    // Locate the `@media (forced-colors: active)` block via balanced
+    // brace scan, same approach used in the Checkbox wave-7 regression.
+    const headerIdx = source.search(
+      /@media\s*\(\s*forced-colors\s*:\s*active\s*\)\s*\{/,
+    );
+    let forcedBlock = "";
+    let forcedBlockEnd = -1;
+    if (headerIdx >= 0) {
+      const openIdx = source.indexOf("{", headerIdx);
+      let depth = 0;
+      let end = -1;
+      for (let i = openIdx; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end > openIdx) {
+        forcedBlock = source.slice(openIdx + 1, end);
+        forcedBlockEnd = end;
+      }
+    }
+    // Strip the forced-colors block from the source so its selectors
+    // aren't double-counted as normal-mode.
+    const normalSource =
+      headerIdx >= 0 && forcedBlockEnd >= 0
+        ? source.slice(0, headerIdx) + source.slice(forcedBlockEnd + 1)
+        : source;
+
+    // Strip /* … */ comments so selector scans don't pick up sample
+    // selectors in commentary.
+    function stripComments(text) {
+      return text.replace(/\/\*[\s\S]*?\*\//g, "");
+    }
+
+    // Canonicalize a selector for comparison:
+    //   - lowercase
+    //   - normalise whitespace
+    //   - sort `:not(...)` clauses alphabetically (so
+    //     `:not(:disabled):not([aria-busy])` matches
+    //     `:not([aria-busy]):not(:disabled)`).
+    //   - strip the `@media (hover: hover)` wrapper — that affects
+    //     applicability, not specificity; the forced-colors mirror
+    //     applies regardless of `(hover: hover)`.
+    function canon(sel) {
+      const trimmed = sel.trim().replace(/\s+/g, " ").toLowerCase();
+      const notMatches = [...trimmed.matchAll(/:not\(([^)]+)\)/g)].map(
+        (m) => `:not(${m[1].trim()})`,
+      );
+      if (notMatches.length === 0) return trimmed;
+      // Remove all `:not(...)` clauses, sort them, re-append.
+      const stripped = trimmed.replace(/:not\([^)]+\)/g, "");
+      const sortedNot = notMatches.slice().sort().join("");
+      return `${stripped}${sortedNot}`;
+    }
+
+    // Collect every selector inside a rule whose declaration body
+    // paints color / background / background-color / border-color.
+    // We scan rule-by-rule by splitting on `}` and parsing each
+    // selector→body pair.
+    function collectPaintingSelectors(text) {
+      const cleaned = stripComments(text);
+      const out = new Set();
+      // Simple rule splitter: pair up the last `{` with its matching
+      // `}` per top-level rule. CSS allows nested @media which we
+      // handle by recursive scan: re-run on the body of each `@media
+      // (...)` block we encounter inline (e.g. the `@media (hover:
+      // hover)` blocks).
+      let i = 0;
+      while (i < cleaned.length) {
+        const open = cleaned.indexOf("{", i);
+        if (open < 0) break;
+        // Look BACK for the selector — everything from the previous
+        // `}` or `;` or start-of-text up to `{`.
+        let selStart = open - 1;
+        while (selStart >= 0) {
+          const ch = cleaned[selStart];
+          if (ch === "}" || ch === ";") {
+            selStart += 1;
+            break;
+          }
+          selStart -= 1;
+        }
+        if (selStart < 0) selStart = 0;
+        const selector = cleaned.slice(selStart, open).trim();
+        // Find the matching closing brace.
+        let depth = 1;
+        let j = open + 1;
+        while (j < cleaned.length && depth > 0) {
+          const ch = cleaned[j];
+          if (ch === "{") depth += 1;
+          else if (ch === "}") depth -= 1;
+          j += 1;
+        }
+        const body = cleaned.slice(open + 1, j - 1);
+        // @media / @keyframes / @supports: recurse into their body.
+        if (selector.startsWith("@")) {
+          // @keyframes paints aren't selectors we care about.
+          if (!/^@keyframes\b/.test(selector)) {
+            const nested = collectPaintingSelectors(body);
+            for (const s of nested) out.add(s);
+          }
+          i = j;
+          continue;
+        }
+        // If the body declares any of the color properties we care
+        // about, register every comma-separated selector in the rule.
+        // Skip structural-only color declarations (`inherit`,
+        // `currentColor`, `transparent`) — those are not token-derived
+        // and don't need a forced-colors mirror; they pass through to
+        // the cascaded value the variant paints set up. Same for the
+        // `text-decoration-color` underline tint on `.zs-button--plain`
+        // hover — that's a hairline decoration whose forced-colors
+        // counterpart is `text-decoration: none` (already in the
+        // mirror).
+        function declaresConcretePaint(rawBody) {
+          // Extract the value for each color property we care about
+          // and reject the value pool { inherit, currentcolor, transparent,
+          // unset, initial, revert }.
+          const re =
+            /(?:^|;|\s)(color|background|background-color|border-color)\s*:\s*([^;]+)/gi;
+          let m;
+          while ((m = re.exec(rawBody))) {
+            const value = m[2].trim().toLowerCase().replace(/!important$/, "").trim();
+            if (
+              value === "inherit" ||
+              value === "currentcolor" ||
+              value === "transparent" ||
+              value === "unset" ||
+              value === "initial" ||
+              value === "revert"
+            ) {
+              continue;
+            }
+            return true;
+          }
+          return false;
+        }
+        const paints = declaresConcretePaint(body);
+        if (paints) {
+          const parts = selector.split(",").map((s) => s.trim()).filter(Boolean);
+          for (const part of parts) {
+            // Skip purely structural utility selectors that don't
+            // target `.zs-button` directly (e.g. keyframe-only rules
+            // shouldn't reach here, but the `.zs-button__spinner
+            // circle { stroke: currentColor }` is intentional — the
+            // spinner color overrides handle the cascade, so excluding
+            // selectors that contain `__spinner circle` keeps the
+            // mirror focused on the cascade-sensitive cases. Same for
+            // the `.zs-button__spinner` color overrides themselves;
+            // we include them since they paint `color`).
+            if (/__spinner\s+circle\b/.test(part)) continue;
+            out.add(canon(part));
+          }
+        }
+        i = j;
+      }
+      return out;
+    }
+
+    const normalSet = collectPaintingSelectors(normalSource);
+    const forcedSet = collectPaintingSelectors(forcedBlock);
+    normalSelectors = [...normalSet].sort();
+    forcedSelectors = [...forcedSet].sort();
+
+    // For each normal-mode selector, require an exact canonical match
+    // in the forced-colors block. Exact canonical match means same
+    // class+pseudo+attr composition (sorted `:not(...)`) → identical
+    // specificity by construction. Source order then breaks ties in
+    // favor of the forced-colors block (which appears LAST in the
+    // file).
+    missing = normalSelectors.filter((s) => !forcedSet.has(s));
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !scanError && missing.length === 0;
+  report(
+    "Button — forced-colors mirrors every color selector (wave-8 🔴 #2)",
+    ok,
+    scanError
+      ? `scanError=${scanError}`
+      : `normalCount=${normalSelectors.length} forcedCount=${forcedSelectors.length} missing=[${missing.join(" | ")}]`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

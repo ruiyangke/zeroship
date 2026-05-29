@@ -48,7 +48,7 @@
 }
 
 @media (pointer: coarse) {
-  .zs-button:not(:disabled):not([aria-busy="true"])::before {
+  .zs-button:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])::before {
     content: "";
     position: absolute;
     top: 50%;
@@ -120,16 +120,20 @@
   outline-offset: var(--zs-focus-ring-offset);
 }
 
-.zs-button:active:not(:disabled):not([aria-busy="true"]) .zs-button__inner {
+.zs-button:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) .zs-button__inner {
   transform: scale(0.97);
 }
 
 .zs-button:disabled,
+.zs-button[aria-disabled="true"],
 .zs-button[aria-busy="true"] {
-  /* HTML `disabled` already prevents activation; we keep `cursor:
-     not-allowed` for affordance. `pointer-events: none` is deliberately
-     NOT set — it would hide the cursor (defeating not-allowed) and let
-     clicks fall through to underlying elements. */
+  /* HTML `disabled` already prevents activation; for `asChild` anchors
+     and other elements where `disabled` does not apply, the
+     `[aria-disabled="true"]` mirror keeps the cursor/affordance
+     identical. The activation guard in Button.tsx prevents navigation
+     and handler execution in that path. `pointer-events: none` is
+     deliberately NOT set — it would hide the cursor (defeating
+     not-allowed) and let clicks fall through to underlying elements. */
   cursor: not-allowed;
 }
 
@@ -171,14 +175,15 @@
   color: var(--zs-accent-ink);
 }
 @media (hover: hover) {
-  .zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: var(--zs-accent-hover);
   }
 }
-.zs-button--filled:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: var(--zs-accent-active);
 }
 .zs-button--filled:disabled,
+.zs-button--filled[aria-disabled="true"],
 .zs-button--filled[aria-busy="true"] {
   background: color-mix(in oklch, var(--zs-accent) 38%, transparent);
   color: var(--zs-accent-ink);
@@ -197,14 +202,15 @@
   color: var(--zs-accent-active);
 }
 @media (hover: hover) {
-  .zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: color-mix(in oklch, var(--zs-accent) 22%, transparent);
   }
 }
-.zs-button--tinted:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-accent) 30%, transparent);
 }
 .zs-button--tinted:disabled,
+.zs-button--tinted[aria-disabled="true"],
 .zs-button--tinted[aria-busy="true"] {
   background: color-mix(in oklch, var(--zs-accent) 8%, transparent);
   color: color-mix(in oklch, var(--zs-accent) 55%, var(--zs-label-tertiary));
@@ -221,14 +227,15 @@
   color: var(--zs-label);
 }
 @media (hover: hover) {
-  .zs-button--gray:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: color-mix(in oklch, var(--zs-label) 12%, transparent);
   }
 }
-.zs-button--gray:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-label) 16%, transparent);
 }
 .zs-button--gray:disabled,
+.zs-button--gray[aria-disabled="true"],
 .zs-button--gray[aria-busy="true"] {
   background: color-mix(in oklch, var(--zs-label) 4%, transparent);
   color: var(--zs-label-tertiary);
@@ -239,7 +246,7 @@
   color: var(--zs-accent);
 }
 @media (hover: hover) {
-  .zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: var(--zs-fill-tertiary);
     /* Button-polish item 6. Plain buttons floated in grouped layouts
        (Footer/row beside filled). A hover-only underline anchors the
@@ -254,10 +261,11 @@
     text-underline-offset: 0.125rem;
   }
 }
-.zs-button--plain:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: var(--zs-fill);
 }
 .zs-button--plain:disabled,
+.zs-button--plain[aria-disabled="true"],
 .zs-button--plain[aria-busy="true"] {
   color: var(--zs-label-tertiary);
   background: transparent;
@@ -269,14 +277,15 @@
   color: var(--zs-accent-ink);
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: var(--zs-system-red-hover);
   }
 }
-.zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: var(--zs-system-red-active);
 }
 .zs-button--destructive.zs-button--filled:disabled,
+.zs-button--destructive.zs-button--filled[aria-disabled="true"],
 .zs-button--destructive.zs-button--filled[aria-busy="true"] {
   /* Button-polish item 1. Previously mixed the system-red at 42% over
      transparent, leaving a saturated faded-red that still read as
@@ -313,14 +322,15 @@
   color: var(--zs-system-red-active);
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: color-mix(in oklch, var(--zs-system-red-active) 28%, transparent);
   }
 }
-.zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-system-red-active) 36%, transparent);
 }
 .zs-button--destructive.zs-button--tinted:disabled,
+.zs-button--destructive.zs-button--tinted[aria-disabled="true"],
 .zs-button--destructive.zs-button--tinted[aria-busy="true"] {
   /* Item 1 (destructive-tinted half). Mix toward --zs-fill-secondary
      (neutral) instead of transparent so disabled destructive-tinted
@@ -335,14 +345,15 @@
   color: var(--zs-system-red);
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     background: color-mix(in oklch, var(--zs-system-red) 12%, transparent);
   }
 }
-.zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-system-red) 18%, transparent);
 }
 .zs-button--destructive.zs-button--plain:disabled,
+.zs-button--destructive.zs-button--plain[aria-disabled="true"],
 .zs-button--destructive.zs-button--plain[aria-busy="true"] {
   /* Without this, the destructive-plain disabled state keeps system-red
      text — wrong signal for a disabled control. Defer to the neutral
@@ -358,14 +369,15 @@
   color: var(--zs-system-red);
 }
 @media (hover: hover) {
-  .zs-button--destructive.zs-button--gray:hover:not(:disabled):not([aria-busy="true"]) {
+  .zs-button--destructive.zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     color: var(--zs-system-red-hover);
   }
 }
-.zs-button--destructive.zs-button--gray:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button--destructive.zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   color: var(--zs-system-red-active);
 }
 .zs-button--destructive.zs-button--gray:disabled,
+.zs-button--destructive.zs-button--gray[aria-disabled="true"],
 .zs-button--destructive.zs-button--gray[aria-busy="true"] {
   color: color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary));
 }
@@ -453,12 +465,37 @@
 /* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ─── */
 /* Defer to system tokens so buttons stay identifiable when the user has
    forced colors on. Border-width is a hairline (0.0625rem ≈ one device
-   pixel at default zoom) expressed in rem to honor the no-raw-px rule. */
+   pixel at default zoom) expressed in rem to honor the no-raw-px rule.
+ *
+ * Specificity mirror (wave-8 🔴 #2). Every normal-mode color/background
+ * selector in this file has its own forced-colors counterpart at EQUAL
+ * OR HIGHER specificity so the cascade picks the system-color rule in
+ * HCM. The normal-mode rules climb specificity via `:not(:disabled)
+ * :not([aria-disabled="true"]):not([aria-busy="true"])` chains (hover/
+ * active), via class compounding (`.zs-button--destructive
+ * .zs-button--filled`), and via attribute matchers on the disabled/busy
+ * states. Each forced-colors selector below uses the SAME selector
+ * shape (same class compounding + the same `:not(...)` chain or
+ * attribute matchers) so specificity ties — and source order (this
+ * block is last in the file) breaks the tie in favor of the system-
+ * color rule.
+ *
+ * Why this is a 🔴: Chromium's forced-colors mode SUBSTITUTES system
+ * colors at paint time for `color` / `background-color` / `border-
+ * color` IF the matched rule uses a system-color keyword. If a more
+ * specific normal-mode rule wins the cascade (e.g. the destructive-
+ * tinted hover rule that paints `color-mix(in oklch, var(--zs-system-
+ * red-active) 28%, transparent)`), the painted value is whatever the
+ * UA does with the OKLCH mix — which on Chromium today is the actual
+ * token color, not a system color. The mirror restores parity.
+ */
 @media (forced-colors: active) {
   .zs-button {
     border: 0.0625rem solid CanvasText;
     forced-color-adjust: none;
   }
+
+  /* Base variants — rest state. */
   .zs-button--filled {
     background: Highlight;
     color: HighlightText;
@@ -472,11 +509,123 @@
     background: transparent;
     color: LinkText;
   }
+
+  /* Variant hover mirrors. Match the normal-mode selector shape so
+     specificity ties and source order wins. */
+  .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    background: transparent;
+    color: LinkText;
+    /* Suppress the hover underline in forced-colors so the system-
+       color rule isn't visually competing with a token-derived
+       decoration color. */
+    text-decoration: none;
+  }
+
+  /* Per-variant disabled mirrors. Equal class+attr count to the
+     normal-mode `.zs-button--filled:disabled` form (class:1, pseudo/
+     attr:1) — and adding `[aria-disabled="true"]` keeps parity for
+     asChild anchors. */
+  .zs-button--filled:disabled,
+  .zs-button--filled[aria-disabled="true"],
+  .zs-button--filled[aria-busy="true"],
+  .zs-button--tinted:disabled,
+  .zs-button--tinted[aria-disabled="true"],
+  .zs-button--tinted[aria-busy="true"],
+  .zs-button--gray:disabled,
+  .zs-button--gray[aria-disabled="true"],
+  .zs-button--gray[aria-busy="true"],
+  .zs-button--plain:disabled,
+  .zs-button--plain[aria-disabled="true"],
+  .zs-button--plain[aria-busy="true"] {
+    background: Canvas;
+    color: GrayText;
+    border-color: GrayText;
+  }
+
+  /* Destructive — rest, hover, active. Class-compound (0,2,0) matches
+     the normal-mode `.zs-button--destructive.zs-button--filled` rule. */
+  .zs-button--destructive.zs-button--filled {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .zs-button--destructive.zs-button--tinted,
+  .zs-button--destructive.zs-button--gray {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--destructive.zs-button--gray:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--destructive.zs-button--gray:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .zs-button--destructive.zs-button--plain {
+    background: transparent;
+    color: LinkText;
+  }
+  .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+  .zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    background: transparent;
+    color: LinkText;
+    text-decoration: none;
+  }
+
+  /* Destructive disabled mirrors. Class-compound + attr matches
+     normal-mode `.zs-button--destructive.zs-button--filled:disabled`. */
+  .zs-button--destructive.zs-button--filled:disabled,
+  .zs-button--destructive.zs-button--filled[aria-disabled="true"],
+  .zs-button--destructive.zs-button--filled[aria-busy="true"],
+  .zs-button--destructive.zs-button--tinted:disabled,
+  .zs-button--destructive.zs-button--tinted[aria-disabled="true"],
+  .zs-button--destructive.zs-button--tinted[aria-busy="true"],
+  .zs-button--destructive.zs-button--gray:disabled,
+  .zs-button--destructive.zs-button--gray[aria-disabled="true"],
+  .zs-button--destructive.zs-button--gray[aria-busy="true"],
+  .zs-button--destructive.zs-button--plain:disabled,
+  .zs-button--destructive.zs-button--plain[aria-disabled="true"],
+  .zs-button--destructive.zs-button--plain[aria-busy="true"] {
+    background: Canvas;
+    color: GrayText;
+    border-color: GrayText;
+  }
+
+  /* Generic disabled fallback (kept for any future selector that uses
+     the bare `.zs-button:disabled` shape). */
   .zs-button:disabled,
+  .zs-button[aria-disabled="true"],
   .zs-button[aria-busy="true"] {
     color: GrayText;
     border-color: GrayText;
   }
+
+  /* Spinner — both the default rule and the destructive overrides
+     must defer to system colors so the spinner stroke (currentColor
+     on the SVG circle) reads as a system color, not the token mix. */
+  .zs-button__spinner,
+  .zs-button--destructive .zs-button__spinner,
+  .zs-button--destructive.zs-button--filled .zs-button__spinner {
+    color: CanvasText;
+  }
+
   .zs-button:focus-visible {
     outline: 0.125rem solid Highlight;
     outline-offset: 0.125rem;

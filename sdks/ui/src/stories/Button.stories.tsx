@@ -455,3 +455,99 @@ export const AsChildBusyAndDisabled: Story = {
     await expect(busyLink).toHaveAttribute("aria-busy", "true");
   },
 };
+
+/*
+ * Wave-8 🔴 #1 regression. Pre-fix, an `asChild` Button with `disabled`
+ * (or `loading`) set only carried `aria-disabled` — the CSS keyed off
+ * `:disabled` / `[aria-busy]`, so the rendered <a> stayed visually
+ * enabled (no `cursor: not-allowed`, the active token color, full
+ * hover paint) AND a click on the anchor BOTH navigated to `href` AND
+ * invoked the child's onClick + any caller-attached onClick. This
+ * story exercises the real activation path: a `useState` counter is
+ * incremented from a click handler attached DIRECTLY to the child <a>,
+ * and a second counter is incremented from `<Button onClick>` (which
+ * lands on the Slot via {...rest}). With the activation guard in
+ * place, both counters MUST stay at 0 after a click, the URL hash MUST
+ * NOT change to the link target, and the rendered <a> MUST visually
+ * resolve to `cursor: not-allowed` (the per-variant disabled styling
+ * keyed off `[aria-disabled="true"]`). Pre-fix this story fails on
+ * every one of those assertions.
+ */
+export const AsChildDisabledIsInert: Story = {
+  name: "asChild disabled is inert (play)",
+  render: function AsChildDisabledIsInertRender() {
+    const [childClicks, setChildClicks] = useState(0);
+    const [wrapperClicks, setWrapperClicks] = useState(0);
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="asChild disabled inert interactions"
+      >
+        <Button
+          asChild
+          disabled
+          variant="filled"
+          onClick={() => setWrapperClicks((value) => value + 1)}
+        >
+          <a
+            href="#wave8-asChild-disabled-target"
+            data-testid="aschild-disabled-inert-link"
+            onClick={() => setChildClicks((value) => value + 1)}
+          >
+            Inert link action
+          </a>
+        </Button>
+        <output
+          role="status"
+          aria-label="asChild disabled child click count"
+          data-testid="aschild-disabled-inert-child-count"
+        >
+          Child clicks: {childClicks}
+        </output>
+        <output
+          role="status"
+          aria-label="asChild disabled wrapper click count"
+          data-testid="aschild-disabled-inert-wrapper-count"
+        >
+          Wrapper clicks: {wrapperClicks}
+        </output>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const link = canvas.getByRole("link", { name: /inert link action/i });
+    const childCount = canvas.getByRole("status", {
+      name: /asChild disabled child click count/i,
+    });
+    const wrapperCount = canvas.getByRole("status", {
+      name: /asChild disabled wrapper click count/i,
+    });
+
+    // 1. Visual disabled — cursor:not-allowed lands via the
+    //    `[aria-disabled="true"]` mirror added in wave-8 🔴 #1.
+    const cursor = getComputedStyle(link).cursor;
+    await expect(cursor).toBe("not-allowed");
+
+    // 2. Aria state is correct.
+    await expect(link).toHaveAttribute("aria-disabled", "true");
+    await expect(link).toHaveAttribute("href", "#wave8-asChild-disabled-target");
+
+    // 3. The hash before the click is captured so we can prove the
+    //    click did NOT navigate. We don't rely on the test runner's
+    //    URL because Storybook iframes can rewrite location.hash for
+    //    their own routing — read window.location.hash directly via
+    //    evaluate to keep this real-path.
+    const hashBefore = window.location.hash;
+
+    // 4. Click the anchor — neither the child onClick nor the wrapper
+    //    onClick should fire, and navigation should be suppressed.
+    await userEvent.click(link);
+
+    const hashAfter = window.location.hash;
+    await expect(hashAfter).toBe(hashBefore);
+    await expect(childCount).toHaveTextContent("Child clicks: 0");
+    await expect(wrapperCount).toHaveTextContent("Wrapper clicks: 0");
+  },
+};
