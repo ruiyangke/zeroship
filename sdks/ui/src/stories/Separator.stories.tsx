@@ -349,6 +349,95 @@ export const RoleLock: Story = {
   },
 };
 
+/* ─── 8b. RoleLockBypass — aria-hidden + render cannot bypass the lock ─
+ *
+ * Wave-10 🔴 #1 regression. The Wave-7 RoleLock story above proved
+ * `role` + `aria-orientation` are stripped, but `aria-hidden` and
+ * `render` were still forwarded through `...rest`. Two concrete
+ * bypasses existed pre-fix:
+ *
+ *   - `<Separator decorative={false} aria-hidden>` — a typed caller
+ *     (cast through `as any` to bypass the Omit) could silently hide
+ *     a semantically-required separator from assistive tech. With the
+ *     fix, `SeparatorProps` Omits `aria-hidden`, the runtime strips
+ *     it, and the semantic branch reasserts `aria-hidden={undefined}`
+ *     after the spread — React drops the attribute entirely so AT
+ *     still sees `role="separator"`.
+ *
+ *   - `<Separator render={({ render(props) { return <span {...props}
+ *     role="banner" /> }})}` — Base UI's `render` callback can swap
+ *     the tag/role. With the fix, `render` is Omit'd and stripped at
+ *     runtime, so Base UI falls back to its default `<div>` with
+ *     `role="separator"`.
+ *
+ * We assert both bypasses fail at the rendered-DOM level (real-path
+ * Playwright assertions, not type-system theatre). */
+export const RoleLockBypass: Story = {
+  name: "Role lock bypass (aria-hidden + render)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Wave-10 🔴 #1 role-lock bypass. A typed " +
+          "caller `<Separator decorative={false} aria-hidden>` (cast " +
+          "through `as any`) used to silently hide a semantic " +
+          "separator from AT; an untyped `render` callback used to " +
+          "swap the role. With the fix, both are Omit'd from the " +
+          "public props AND stripped at runtime; the semantic branch " +
+          "reasserts `aria-hidden={undefined}` so React drops it.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Role lock bypass"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
+    >
+      {/* Bypass 1: aria-hidden on a semantic separator. The `as any`
+          cast bypasses the Omit at the type layer; the runtime strip
+          + aria-hidden={undefined} reassertion must defeat it. */}
+      <Separator
+        decorative={false}
+        orientation="horizontal"
+        data-testid="separator-bypass-aria-hidden"
+        {...({ "aria-hidden": "true" } as any)}
+      />
+      <div style={{ height: "1rem" }} />
+      {/* Bypass 2: Base UI render callback. An untyped consumer could
+          pass a render that swaps the element / drops the role. The
+          runtime strip removes `render` so Base UI falls back to its
+          default `<div>` rendering with `role="separator"`. */}
+      <Separator
+        decorative={false}
+        orientation="horizontal"
+        data-testid="separator-bypass-render"
+        {...({
+          render: (props: Record<string, unknown>) => (
+            <span {...props} role="banner" data-render-hijack="1" />
+          ),
+        } as any)}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Bypass 1: aria-hidden must NOT carry through; role must stay
+    // "separator" on the semantic branch.
+    const ariaHiddenBypass = canvas.getByTestId(
+      "separator-bypass-aria-hidden",
+    );
+    await expect(ariaHiddenBypass).toHaveAttribute("role", "separator");
+    await expect(ariaHiddenBypass).not.toHaveAttribute("aria-hidden");
+    // Bypass 2: render must NOT swap the element; the role must stay
+    // "separator" and the hijack marker must be absent.
+    const renderBypass = canvas.getByTestId("separator-bypass-render");
+    await expect(renderBypass).toHaveAttribute("role", "separator");
+    await expect(renderBypass).not.toHaveAttribute("data-render-hijack");
+  },
+};
+
 /* ─── 9. RTL — logical-property regression ──────────────────────────── */
 export const RTL: Story = {
   name: "RTL",

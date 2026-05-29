@@ -61,12 +61,15 @@
  * properties — no separate rule needed). */
 .zs-separator--vertical {
   inline-size: 0;
-  /* Sensible visible default: 1.25rem block-size lets a vertical
+  /* Sensible visible default: --zs-space-5 block-size lets a vertical
      Separator render in a row whose parent doesn't stretch (e.g. a
      row of inline-content). Consumers wanting full-row height set
      `align-self: stretch` on a parent with `align-items: stretch`,
-     or set `block-size` explicitly. */
-  block-size: 1.25rem;
+     or set `block-size` explicitly. The token resolves to the same
+     vertical extent a small Button reserves, so a vertical Separator
+     between toolbar buttons reads as the right rhythm out of the box.
+     Wave-10 🟡 fix: raw `1.25rem` literal → token. */
+  block-size: var(--zs-space-5);
   align-self: center;
   border-inline-end-width: var(--zs-separator-weight);
 }

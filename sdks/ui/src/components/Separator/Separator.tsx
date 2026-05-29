@@ -65,7 +65,12 @@ type BaseSeparatorProps = ComponentPropsWithRef<typeof BaseSeparator>;
 export interface SeparatorProps
   extends Omit<
     BaseSeparatorProps,
-    "className" | "render" | "orientation" | "role" | "aria-orientation"
+    | "className"
+    | "render"
+    | "orientation"
+    | "role"
+    | "aria-orientation"
+    | "aria-hidden"
   > {
   /**
    * Layout axis — `horizontal` (default) cuts a row; `vertical` cuts a
@@ -119,21 +124,45 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
       className,
     );
 
-    // Strip `role` / `aria-orientation` defensively in case a caller
-    // bypasses the type system (e.g., `<Separator {...untypedProps}>`).
-    // `SeparatorProps` `Omit`s both at compile time; this guard keeps
-    // the contract intact under runtime spread so neither branch can
-    // be coerced into the wrong semantics. Mirrors Toolbar's role-lock.
+    // Strip `role` / `aria-orientation` / `aria-hidden` / `render`
+    // defensively in case a caller bypasses the type system (e.g.,
+    // `<Separator {...untypedProps}>` or a cast through `as any`).
+    // `SeparatorProps` `Omit`s all four at compile time; this guard
+    // keeps the contract intact under runtime spread so neither branch
+    // can be coerced into the wrong semantics. Mirrors
+    // Toolbar.Separator's role-lock (Wave 7 fix #3):
+    //   - `role` / `aria-orientation`: Base UI controls these on the
+    //     semantic branch; we control them on the decorative branch.
+    //     A caller-supplied override would silently swap a
+    //     "separator" + "horizontal" into navigation + "vertical".
+    //   - `aria-hidden`: a typed caller writing
+    //     `<Separator decorative={false} aria-hidden>` (cast through
+    //     `as any` to bypass the Omit) would otherwise hide a
+    //     semantically-required separator from assistive tech. The
+    //     decorative branch reasserts `aria-hidden="true"` after the
+    //     spread; the semantic branch sets `aria-hidden={undefined}`
+    //     so React drops the attribute entirely.
+    //   - `render`: Base UI's `render` callback can re-render the
+    //     element with a different tag/role, dropping
+    //     `role="separator"` entirely. We own the rendering surface;
+    //     `asChild` would have to be routed through `_slot.ts` to
+    //     preserve the role contract.
     const {
       role: _role,
       "aria-orientation": _ariaOrientation,
+      "aria-hidden": _ariaHidden,
+      render: _render,
       ...restLocked
     } = rest as Record<string, unknown> & {
       role?: string;
       "aria-orientation"?: string;
+      "aria-hidden"?: string | boolean;
+      render?: unknown;
     };
     void _role;
     void _ariaOrientation;
+    void _ariaHidden;
+    void _render;
 
     if (decorative) {
       // Plain `<div>` path — no role from Base UI to fight with. We
@@ -156,9 +185,14 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
 
     // Semantic path — Base UI's Separator emits role="separator" and
     // aria-orientation. We forward consumer props through `restLocked`
-    // (role / aria-orientation already stripped) so neither can
-    // override Base UI's controlled semantics. The orientation prop is
-    // named identically so the value flows straight through.
+    // (role / aria-orientation / aria-hidden / render already
+    // stripped) so none can override Base UI's controlled semantics.
+    // The orientation prop is named identically so the value flows
+    // straight through. `aria-hidden={undefined}` is reasserted AFTER
+    // the spread so even a runtime-attempted override (cast through
+    // `as any`) drops off — a `role="separator"` element with
+    // `aria-hidden="true"` would be contradictory and silently hide
+    // the semantic divider from assistive tech.
     return (
       <BaseSeparator
         {...(restLocked as BaseSeparatorProps)}
@@ -167,6 +201,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
         className={composedClassName}
         data-orientation={orientation}
         data-variant={variant}
+        aria-hidden={undefined}
       />
     );
   },

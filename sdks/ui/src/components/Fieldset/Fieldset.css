@@ -98,13 +98,22 @@
  * specificity mirror lives in its own @media block below. */
 /* Disabled legend: NOT shifted to --zs-label-tertiary (which sits at
  * L~0.55 in Crystal and measures 4.46:1 against the surface — just
- * under the 4.5:1 AA threshold for normal-weight 15px text). Same
- * contingency Field's Description hit (held on label-secondary
- * instead of tertiary). The native disabled cascade already greys
- * every interactive descendant; the legend keeping label-secondary
- * reads as "section is disabled" without the AA shortfall. */
-.zs-fieldset[data-disabled] > .zs-fieldset__legend,
-.zs-fieldset:disabled > .zs-fieldset__legend {
+ * under the 4.5:1 AA threshold for normal-weight body text at
+ * --zs-text-subheadline-size). Same contingency Field's Description
+ * hit (held on label-secondary instead of tertiary). The native
+ * disabled cascade already greys every interactive descendant; the
+ * legend keeping label-secondary reads as "section is disabled"
+ * without the AA shortfall. */
+/* Descendant matcher — not `> .zs-fieldset__legend`. The Fieldset
+ * contract (Fieldset.tsx file-header) says the Legend can sit
+ * anywhere inside the fieldset, including wrapped in a layout div
+ * (e.g. for CustomLegendPosition / Form-card layouts). A
+ * direct-child selector misses those wrapped Legends — the
+ * aria-wiring still works (Base UI binds by id, not DOM nesting),
+ * but the disabled greying wouldn't fire. Mirror in forced-colors
+ * below. */
+.zs-fieldset[data-disabled] .zs-fieldset__legend,
+.zs-fieldset:disabled .zs-fieldset__legend {
   color: var(--zs-label-secondary);
 }
 
@@ -124,8 +133,8 @@
   .zs-fieldset__legend {
     color: CanvasText;
   }
-  .zs-fieldset[data-disabled] > .zs-fieldset__legend,
-  .zs-fieldset:disabled > .zs-fieldset__legend {
+  .zs-fieldset[data-disabled] .zs-fieldset__legend,
+  .zs-fieldset:disabled .zs-fieldset__legend {
     color: GrayText;
   }
 }
