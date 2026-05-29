@@ -1,0 +1,11 @@
+# ops/zeroship.toml -- cross-binary domain config. Hand-edited; in git.
+# One file PER ENVIRONMENT. Secrets never live here.
+
+[auth]
+hydra_admin_url       = "http://hydra:4445"
+hydra_public_url      = "https://auth.zeroship.ai"
+trusted_oauth_clients = ["zeroship-builder"]
+
+[observability]
+rust_log   = "info,zeroship_=debug"
+log_format = "json"
