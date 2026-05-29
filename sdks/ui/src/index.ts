@@ -354,6 +354,10 @@ export {
   type ScrollAreaCornerProps,
 } from "./components";
 
+// Layout primitives + compositions, and composed blocks.
+export * from "./layouts";
+export * from "./blocks";
+
 // Temporary placeholders — see ./placeholders.tsx for migration tracking.
 export {
   Badge,
