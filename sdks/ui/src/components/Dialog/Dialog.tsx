@@ -73,7 +73,6 @@ import {
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
   type Ref,
 } from "react";
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
@@ -132,7 +131,16 @@ export interface DialogProps
    * leave ESC). The user must use a Dialog.Close button to dismiss.
    */
   dismissible?: boolean;
-  children?: ReactNode;
+  /**
+   * Subparts of the dialog (Trigger, Portal, Backdrop, Popup, …) — or
+   * a Base UI payload render function `({ payload }) => ReactNode`
+   * that receives the typed payload from the active `Dialog.Trigger`
+   * (its `payload` prop) and returns the subparts. Forwarded verbatim
+   * to `BaseDialog.Root` so the typed payload-handle flow keeps
+   * working; do NOT narrow to `ReactNode`, that drops the
+   * render-function branch and makes `createDialogHandle` half-broken.
+   */
+  children?: BaseRootProps["children"];
 }
 
 /* `composeBaseClass` now lives in `../_classnames` (review-fix item 10,
@@ -582,9 +590,19 @@ const DialogClose = forwardRef<HTMLButtonElement, DialogCloseProps>(
             // ref fan-out, including React 19's `element.props.ref`
             // shape (review-fix item 3). Caller's onClick on the child
             // composes with the close handler we pass in.
+            //
+            // Spread `{...rest}` AFTER `{...closeProps}` so wrapper
+            // props on `<Dialog.Close asChild>` — `className`,
+            // `data-*`, `aria-*`, `style`, `disabled` — reach the
+            // rendered child via Slot's mergeProps. Mirrors
+            // AlertDialog.Cancel's asChild branch. Wave6 fix: the
+            // prior implementation dropped `...rest` entirely, so
+            // `<Dialog.Close asChild data-foo="bar">` would silently
+            // discard `data-foo`.
             return (
               <Slot
                 {...closeProps}
+                {...rest}
                 ref={composeRefs(
                   ref as Ref<unknown>,
                   closePropsRef,

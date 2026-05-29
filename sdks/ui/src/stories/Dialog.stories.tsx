@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, within } from "@storybook/test";
-import { useRef, useState } from "react";
-import { Button, Dialog, Field, Input } from "../components";
+import { useMemo, useRef, useState } from "react";
+import { Button, createDialogHandle, Dialog, Field, Input } from "../components";
 
 const meta: Meta<typeof Dialog> = {
   title: "Components/Dialog",
@@ -444,6 +444,200 @@ export const CloseAsChild: Story = {
 
     await expect(done.tagName).toBe("BUTTON");
     await userEvent.click(done);
+  },
+};
+
+/* ─── 8b-bis. Close asChild — wrapper props forward through Slot ────── */
+/*
+ * Regression for the wave6 fix: previously the `asChild` branch
+ * rendered `<Slot {...closeProps} … >` and dropped `...rest`, so any
+ * `className`, `data-*`, `aria-*`, `style`, or wrapper `onClick`
+ * placed on `<Dialog.Close asChild>` silently disappeared. This story
+ * asserts every observable prop reaches the child AND that the
+ * wrapper's onClick composes with the child's onClick AND Base UI's
+ * close handler.
+ */
+function CloseAsChildWrapperPropsStory() {
+  const [order, setOrder] = useState<string[]>([]);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog close asChild wrapper props"
+    >
+      <p role="status" aria-label="Dialog close asChild click order">
+        Order: {order.join(",") || "idle"}
+      </p>
+      <Dialog>
+        <Dialog.Trigger render={<Button>Open wrapper-props close</Button>} />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup>
+            <Dialog.Header>
+              <Dialog.Title>Wrapper props on Close.asChild</Dialog.Title>
+              <Dialog.Description>
+                Every prop on `Dialog.Close asChild` must reach the child.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Footer>
+              <Dialog.Close
+                asChild
+                className="zs-wrapper-cls"
+                data-wrapper-flag="present"
+                aria-label="Wrapper aria label"
+                style={{ outlineStyle: "dotted" }}
+                onClick={() => setOrder((prev) => [...prev, "wrapper"])}
+              >
+                <button
+                  type="button"
+                  className="zs-child-cls"
+                  data-child-flag="present"
+                  data-testid="dialog-close-aschild-wrapped"
+                  onClick={() => setOrder((prev) => [...prev, "child"])}
+                >
+                  Done
+                </button>
+              </Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  );
+}
+export const CloseAsChildWrapperProps: Story = {
+  name: "Close — asChild wrapper-props forward (regression)",
+  render: () => <CloseAsChildWrapperPropsStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", {
+      name: /dialog close aschild click order/i,
+    });
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open wrapper-props close/i }),
+    );
+    const dialog = await page.findByRole("dialog", {
+      name: /wrapper props on close\.aschild/i,
+    });
+
+    // Wrapper's aria-label wins over the child text (the prior
+    // implementation dropped aria-label, so getByRole here would have
+    // failed with the wrapper name).
+    const target = page.getByRole("button", { name: /wrapper aria label/i });
+    await expect(target.tagName).toBe("BUTTON");
+    await expect(target).toHaveAttribute("data-testid", "dialog-close-aschild-wrapped");
+    // Wrapper's data-* and child's data-* both land on the node.
+    await expect(target).toHaveAttribute("data-wrapper-flag", "present");
+    await expect(target).toHaveAttribute("data-child-flag", "present");
+    // Wrapper's className concatenates with the child's className.
+    await expect(target).toHaveClass("zs-child-cls");
+    await expect(target).toHaveClass("zs-wrapper-cls");
+    // Wrapper's style merges onto the child.
+    await expect(target).toHaveStyle({ outlineStyle: "dotted" });
+
+    await userEvent.click(target);
+    // Child onClick fires first (Slot mergeProps order), then wrapper.
+    await expect(status).toHaveTextContent("Order: child,wrapper");
+    // Base UI's close handler still ran — the dialog is closing.
+    // `data-closed=""` is the Base UI exit-transition flag; presence
+    // proves Base UI's close handler fired (pre-fix, dropping `...rest`
+    // also dropped the `onClick` we built composedOnClick from when the
+    // wrapper-onClick path was the only handler — so Base UI's
+    // close-on-press never ran).
+    await expect(dialog).toHaveAttribute("data-closed", "");
+  },
+};
+
+/* ─── 8b-ter. createDialogHandle — payload render-function child ───── */
+/*
+ * Regression for the wave6 type-narrowing fix: DialogProps.children
+ * was `ReactNode`, which compiled away the Base UI payload
+ * render-function branch (`(payload) => ReactElement`). With the
+ * narrowed type, `<Dialog handle={…}>{(payload) => …}</Dialog>` was a
+ * type error AND a runtime no-op (React tried to render a function as
+ * a child).
+ *
+ * Uses Base UI's canonical handle flow: `<Dialog.Trigger handle={h}
+ * payload={…}>` opens the dialog and the `(payload) => …` child of
+ * `<Dialog>` renders the popup. The Title is rendered FROM the
+ * payload, so a regression on either the type narrowing OR the
+ * runtime render-function dispatch fails this assertion.
+ */
+type ConfirmPayload = { itemName: string };
+
+function CreateDialogHandlePayloadStory() {
+  // Memoize so re-renders don't break Base UI's handle identity check.
+  const handle = useMemo(() => createDialogHandle<ConfirmPayload>(), []);
+  const [confirmed, setConfirmed] = useState<string>("idle");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog createHandle payload"
+    >
+      <p role="status" aria-label="Dialog handle confirm status">
+        Status: {confirmed}
+      </p>
+      <Dialog.Trigger
+        handle={handle}
+        payload={{ itemName: "Project Atlas" }}
+        render={
+          <Button data-testid="dialog-handle-trigger">
+            Delete Project Atlas
+          </Button>
+        }
+      />
+      <Dialog handle={handle}>
+        {({ payload }) => (
+          <Dialog.Portal>
+            <Dialog.Backdrop />
+            <Dialog.Popup data-testid="dialog-handle-popup">
+              <Dialog.Header>
+                <Dialog.Title>Delete {payload?.itemName}?</Dialog.Title>
+                <Dialog.Description>
+                  This action cannot be undone.
+                </Dialog.Description>
+              </Dialog.Header>
+              <Dialog.Footer>
+                <Dialog.Close>Cancel</Dialog.Close>
+                <Dialog.Close
+                  variant="filled"
+                  intent="destructive"
+                  onClick={() =>
+                    setConfirmed(`deleted ${payload?.itemName ?? ""}`.trim())
+                  }
+                >
+                  Delete
+                </Dialog.Close>
+              </Dialog.Footer>
+            </Dialog.Popup>
+          </Dialog.Portal>
+        )}
+      </Dialog>
+    </div>
+  );
+}
+export const CreateDialogHandlePayload: Story = {
+  name: "createHandle — payload render-function child (regression)",
+  render: () => <CreateDialogHandlePayloadStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", {
+      name: /dialog handle confirm status/i,
+    });
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /delete project atlas/i }),
+    );
+    // Title is rendered from the payload — proves the render function
+    // received the typed payload and React rendered its return value
+    // as children (not as a literal function).
+    await page.findByRole("dialog", { name: /delete project atlas\?/i });
+    await userEvent.click(page.getByRole("button", { name: /^delete$/i }));
+    await expect(status).toHaveTextContent("Status: deleted Project Atlas");
   },
 };
 
