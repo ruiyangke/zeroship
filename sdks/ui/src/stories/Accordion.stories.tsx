@@ -585,6 +585,56 @@ export const RegressionControlled: Story = {
   },
 };
 
+/* ─── 9d. RegressionHorizontalTransition — wave 7 fix regression baseline ─ *
+ *
+ * Horizontal accordion preopened on `shipping`. The aria-wiring script
+ * samples the panel's computed `block-size` mid-transition while a
+ * second item is being opened — and asserts the closing panel's
+ * `block-size` is NOT zero during the `data-starting-style` /
+ * `data-ending-style` frames.
+ *
+ * Pre-fix regression: the generic `[data-starting-style] /
+ * [data-ending-style] { block-size: 0 }` rule was unscoped, so
+ * horizontal panels collapsed to a 0 block-size during transition
+ * frames (the rail visually disappeared even though the close was on
+ * the inline axis). The orientation-scoped rules introduced here keep
+ * block-size content-driven on horizontal panels at every frame and
+ * only zero the inline-size. No play() so Storybook autoplay doesn't
+ * race the script's clicks. */
+export const RegressionHorizontalTransition: Story = {
+  name: "Regression — horizontal panel keeps block-size (wave 7 fix)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression baseline for the wave 7 fix: horizontal panels " +
+          "must keep their block-size content-driven during " +
+          "starting/ending-style frames. The aria-wiring script samples " +
+          "the closing panel's block-size mid-transition and asserts " +
+          "it stays > 0 (pre-fix it snapped to 0).",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Regression horizontal transition"
+      style={{ minBlockSize: "8rem" }}
+    >
+      <Accordion
+        type="single"
+        orientation="horizontal"
+        defaultValue="shipping"
+        data-testid="accordion-regression-horizontal"
+        style={{ inlineSize: "100%" }}
+      >
+        {renderItems("accordion-regression-horizontal")}
+      </Accordion>
+    </div>
+  ),
+};
+
 /* ─── 9. RichContent — panels with structured content ──────────────── */
 export const RichContent: Story = {
   name: "Rich content",

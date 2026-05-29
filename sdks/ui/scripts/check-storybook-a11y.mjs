@@ -361,6 +361,7 @@ const stories = [
   "components-accordion--with-default-value",
   "components-accordion--disabled",
   "components-accordion--horizontal",
+  "components-accordion--regression-horizontal-transition",
   "components-accordion--rtl",
   "components-accordion--rich-content",
   "components-collapsible--basic",
