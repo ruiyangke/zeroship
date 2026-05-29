@@ -8,8 +8,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    DEV_STASH_SIGNING_KEY, env_is_exact, load_overlay_or_exit, require_unless_dev,
-    resolve_observability, resolve_overlay_string, validate_stash_key,
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_overlay_string,
+    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
@@ -20,11 +20,11 @@ use zeroship_gateway::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DEFAULT_HYDRA_PUBLIC_URL: &str = "http://hydra:4444";
+const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
 const DEV_GATEWAY_OIDC_SECRET: &str = "dev-secret-rotate-me-too";
 
 /// zeroship gateway startup configuration.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "zeroship-gate")]
 struct GateCli {
     /// HTTP listen port.
@@ -46,10 +46,6 @@ struct GateCli {
     /// Route-table polling interval in seconds.
     #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
     poll_interval: u64,
-
-    /// Shared JWT/HMAC secret for gateway auth paths.
-    #[arg(long = "auth-secret", env = "AUTH_SECRET", default_value = "", hide_env_values = true)]
-    auth_secret: String,
 
     /// Shared secret for worker admin endpoints.
     #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
@@ -75,8 +71,8 @@ struct GateCli {
     )]
     blob_cache_disk_root: String,
 
-    /// PostgreSQL DSN for gateway session validation.
-    #[arg(long = "db", env = "DATABASE_URL", default_value = "")]
+    /// `PostgreSQL` DSN for gateway session validation.
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
 
     /// PEM/PKCS#8 signing key file for gateway-issued wrapper tokens.
@@ -122,59 +118,76 @@ struct GateCli {
     stash_signing_key: String,
 
     /// Allow explicitly insecure local development startup.
-    #[arg(long = "dev-insecure", action = clap::ArgAction::SetTrue)]
-    dev_insecure: bool,
+    /// CLI presence overrides the env var, so `--dev-insecure=false`
+    /// disables a stray `ZEROSHIP_DEV_INSECURE=1`.
+    #[arg(
+        long = "dev-insecure",
+        env = "ZEROSHIP_DEV_INSECURE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    dev_insecure: Option<bool>,
 
-    /// Environment half of `--dev-insecure`; only `1` is truthy.
-    #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
-    dev_insecure_env: bool,
-
-    /// Trust `X-Forwarded-For` from an upstream proxy.
-    #[arg(long = "trust-proxy", action = clap::ArgAction::SetTrue)]
-    trust_proxy: bool,
-
-    /// Environment half of `--trust-proxy`; only `1` is truthy.
-    #[arg(skip = env_is_exact("TRUST_PROXY", "1"))]
-    trust_proxy_env: bool,
+    /// Trust `X-Forwarded-For` from an upstream proxy. CLI presence
+    /// overrides the env var.
+    #[arg(
+        long = "trust-proxy",
+        env = "ZEROSHIP_TRUST_PROXY",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    trust_proxy: Option<bool>,
 
     /// Optional shared config overlay path.
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Disable auto-discovery of the well-known config overlay
+    /// (`/etc/zeroship/zeroship.toml`); use compiled defaults instead.
+    #[arg(long = "no-config")]
+    no_config: bool,
+
     /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
     #[arg(long = "check-config")]
     check_config: bool,
 
+    /// Output format for `--check-config`: `text` (default) or `json`.
+    #[arg(long = "check-config-format", default_value = "text")]
+    check_config_format: String,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
-    obs: zeroship_core::config::ObservabilityFlags,
+    obs: zeroship_core::observability::ObservabilityFlags,
 }
 
-impl GateCli {
-    fn insecure_dev(&self) -> bool {
-        self.dev_insecure || self.dev_insecure_env
-    }
-
-    fn trust_proxy(&self) -> bool {
-        self.trust_proxy || self.trust_proxy_env
-    }
+/// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
+/// vector, trimming whitespace and dropping empty entries. Parsed ONCE so
+/// the check-config count and the runtime hash ring can never disagree
+/// (M7) — previously check-config filtered empties while the runtime kept
+/// them, so `a,,b` reported 2 workers but routed across 3 (one empty URL).
+fn parse_worker_urls(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
-    let overlay = load_overlay_or_exit(cli.config_path.as_deref(), "gateway");
-    let config_source = zeroship_core::config::describe_source(&overlay);
-    let file = &overlay.config;
-    let (filter, format) = resolve_observability(
+    let boot = bootstrap_or_exit(
+        cli.config_path.as_deref(),
+        !cli.no_config,
         &cli.obs,
-        &file.observability,
         "info,zeroship_gateway=debug",
+        "gateway",
     );
-    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
-    zeroship_core::config::log_overlay_source(&overlay);
+    let file = &boot.overlay.config;
 
-    let insecure_dev = cli.insecure_dev();
-    let trust_proxy = cli.trust_proxy();
+    let insecure_dev = cli.dev_insecure.unwrap_or(false);
+    let trust_proxy = cli.trust_proxy.unwrap_or(false);
     let hydra_public_url = resolve_overlay_string(
         cli.hydra_public_url,
         file.auth.hydra_public_url.clone(),
@@ -184,9 +197,11 @@ fn main() -> std::io::Result<()> {
     let port = cli.port;
     let control_url = cli.control;
     let control_key = cli.control_key;
-    let workers_str = cli.workers;
+    // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
+    // entries) and reuse it for both the check-config count and the
+    // runtime hash ring, so the two can never disagree.
+    let worker_urls = parse_worker_urls(&cli.workers);
     let poll_interval = cli.poll_interval;
-    let auth_secret = cli.auth_secret;
     let worker_key = cli.worker_key;
     let blob_store_root = cli.blob_store;
     let blob_cache_mem_mb = cli.blob_cache_mem_mb;
@@ -230,10 +245,16 @@ fn main() -> std::io::Result<()> {
         stash_signing_key
     };
 
-    if worker_key.is_empty() {
-        tracing::warn!(
-            "WORKER_KEY not set — worker endpoints are unauthenticated"
-        );
+    // S3 — symmetric WORKER_KEY enforcement. The worker refuses a
+    // non-loopback bind without a key; the gateway is the caller of those
+    // worker admin endpoints, so it must fail just as hard rather than
+    // shipping `Authorization: Bearer ` (empty) into a cluster that
+    // believes dispatch is authenticated.
+    if let Err(message) =
+        require_unless_dev("WORKER_KEY / --worker-key", &worker_key, insecure_dev)
+    {
+        tracing::error!(error = %message, "gateway: refusing to start without worker key");
+        std::process::exit(1);
     }
 
     // Phase 8 U1 — load the gateway's wrapper-token signing key. The
@@ -280,36 +301,54 @@ fn main() -> std::io::Result<()> {
     });
 
     if cli.check_config {
-        println!("check-config: port = {port}");
-        println!("check-config: config_source = {config_source}");
-        println!("check-config: control_url = {control_url}");
-        println!("check-config: hydra_public_url = {hydra_public_url}");
-        println!("check-config: auth_ui_url = {auth_ui_url}");
-        println!("check-config: log_filter = {filter}");
-        println!(
-            "check-config: log_format = {}",
-            format.as_deref().unwrap_or("auto")
+        let log_format = boot
+            .log_format
+            .map_or_else(|| "auto".to_string(), |f| f.to_string());
+        let mut report = CheckConfigReport::new();
+        report.field("port", CheckValue::Count(usize::from(port)));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
         );
-        println!("check-config: insecure_dev = {insecure_dev}");
-        println!("check-config: trust_proxy = {trust_proxy}");
-        println!("check-config: blob_store = {blob_store_root}");
-        println!("check-config: blob_cache_mem_mb = {blob_cache_mem_mb}");
-        println!("check-config: blob_cache_disk_gb = {blob_cache_disk_gb}");
-        println!("check-config: blob_cache_disk_root = {blob_cache_disk_root}");
-        println!("check-config: poll_interval_secs = {poll_interval}");
-        println!(
-            "check-config: workers_count = {}",
-            workers_str
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .count()
+        report.field("control_url", CheckValue::Plain(control_url));
+        report.field(
+            "hydra_public_url",
+            CheckValue::Plain(hydra_public_url),
         );
-        println!("check-config: db_configured = {}", !pg_dsn.is_empty());
-        println!(
-            "check-config: signing_key_configured = {}",
-            !signing_key_path.is_empty()
+        report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field("log_format", CheckValue::Plain(log_format));
+        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
+        report.field("trust_proxy", CheckValue::Flag(trust_proxy));
+        report.field("blob_store", CheckValue::Plain(blob_store_root));
+        report.field(
+            "blob_cache_mem_mb",
+            CheckValue::Count(blob_cache_mem_mb),
         );
+        report.field(
+            "blob_cache_disk_gb",
+            CheckValue::Count(usize::try_from(blob_cache_disk_gb).unwrap_or(usize::MAX)),
+        );
+        report.field(
+            "blob_cache_disk_root",
+            CheckValue::Plain(blob_cache_disk_root),
+        );
+        report.field(
+            "poll_interval_secs",
+            CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
+        );
+        report.field("workers_count", CheckValue::Count(worker_urls.len()));
+        report.field("db_configured", CheckValue::Secret(!pg_dsn.is_empty()));
+        report.field(
+            "signing_key_configured",
+            CheckValue::Secret(!signing_key_path.is_empty()),
+        );
+        let fmt = if cli.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
         return Ok(());
     }
 
@@ -335,11 +374,6 @@ fn main() -> std::io::Result<()> {
         blob_cache_disk_gb = %blob_cache_disk_gb,
         "gateway blob store + cache configured"
     );
-
-    let worker_urls: Vec<String> = workers_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
 
     let num_workers = worker_urls.len();
     // Bounded load: each worker handles at most 125% of average load
@@ -395,7 +429,7 @@ fn main() -> std::io::Result<()> {
             let pg = zeroship_core::dpop::PgJtiCache::new(client.clone());
             zeroship_core::dpop::TieredJtiCache::with_pg(pg)
         })
-        .unwrap_or_else(zeroship_core::dpop::TieredJtiCache::default);
+        .unwrap_or_default();
 
     let state = Arc::new(GateState {
         config: GateConfig {
@@ -403,7 +437,6 @@ fn main() -> std::io::Result<()> {
             control_key,
             worker_urls,
             poll_interval_secs: poll_interval,
-            auth_secret,
             worker_key,
             hydra_public_url,
             auth_ui_url,
@@ -480,6 +513,72 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
+    // overridable from the CLI. `--dev-insecure=false` resolves to false.
+    // NB: `GateCli` deliberately has no `Debug` (S2 — it holds raw secret
+    // strings), so we can't `.expect()` the Ok arm; match instead.
+    #[test]
+    fn dev_insecure_cli_false_overrides_env_one() {
+        // Single-threaded test: env set + cleared within this fn.
+        // (Edition 2021 — `set_var`/`remove_var` are safe here.)
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+        let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure=false"]);
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+
+        let Ok(cli) = parsed else {
+            panic!("parse with explicit false should succeed");
+        };
+        let insecure_dev = cli.dev_insecure.unwrap_or(false);
+        assert!(!insecure_dev, "CLI --dev-insecure=false must beat env=1");
+    }
+
+    #[test]
+    fn dev_insecure_env_one_enables_when_cli_absent() {
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+        let parsed = GateCli::try_parse_from(["zeroship-gate"]);
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+
+        let Ok(cli) = parsed else {
+            panic!("parse with env only should succeed");
+        };
+        assert_eq!(cli.dev_insecure, Some(true));
+    }
+
+    // S3: a missing WORKER_KEY is fatal outside dev, allowed inside dev.
+    #[test]
+    fn missing_worker_key_is_fatal_outside_dev() {
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", false).is_err());
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", true).is_ok());
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "k", false).is_ok());
+    }
+
+    // M6: `--auth-secret` is a deleted legacy knob — clap must reject it
+    // as an unknown argument, not silently accept it.
+    #[test]
+    fn auth_secret_flag_is_rejected() {
+        let parsed = GateCli::try_parse_from(["zeroship-gate", "--auth-secret", "x"]);
+        let err = match parsed {
+            Ok(_) => panic!("--auth-secret must be rejected as an unknown argument"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    // M7: the worker URL list is parsed ONCE; empty/whitespace entries are
+    // dropped so the check-config count and runtime hash ring agree.
+    #[test]
+    fn worker_urls_drops_empty_entries() {
+        let parsed = parse_worker_urls("http://a:8080,,http://b:8080");
+        assert_eq!(parsed, vec!["http://a:8080", "http://b:8080"]);
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn worker_urls_trims_whitespace_entries() {
+        let parsed = parse_worker_urls(" http://a:8080 ,  , http://b:8080 ");
+        assert_eq!(parsed, vec!["http://a:8080", "http://b:8080"]);
+    }
 
     #[test]
     fn gateway_stash_key_rejects_missing_in_non_dev() {

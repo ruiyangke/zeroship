@@ -1,13 +1,17 @@
 //! Fatal boot-time config validation.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use zeroship_core::config::is_loopback_url;
 
 use crate::config::AuthConfig;
 
 pub fn validate_hydra_admin_url(cfg: &AuthConfig) -> Result<(), String> {
     let hydra_admin_url = cfg.hydra_admin_url();
 
-    if hydra_admin_host_is_loopback(hydra_admin_url)? {
+    // Literal-only loopback check (S8): a hostname that merely *resolves* to
+    // loopback is rejected, closing the DNS-rebind / TOCTOU window the old
+    // `to_socket_addrs` check left open. Remote admin needs the explicit
+    // opt-in below.
+    if is_loopback_url(hydra_admin_url) {
         return Ok(());
     }
 
@@ -20,42 +24,10 @@ pub fn validate_hydra_admin_url(cfg: &AuthConfig) -> Result<(), String> {
     }
 
     Err(format!(
-        "HYDRA_ADMIN_URL points to a non-loopback host ({url}); refusing to boot. \
+        "HYDRA_ADMIN_URL points to a non-loopback host ({hydra_admin_url}); refusing to boot. \
          Keep Hydra admin on 127.0.0.1/::1/localhost or set --allow-remote-hydra-admin=true \
          only when mTLS / firewall protection is configured externally.",
-        url = hydra_admin_url,
     ))
-}
-
-fn hydra_admin_host_is_loopback(raw_url: &str) -> Result<bool, String> {
-    let url = url::Url::parse(raw_url)
-        .map_err(|e| format!("HYDRA_ADMIN_URL must be a valid URL: {e}"))?;
-    let Some(host) = url.host_str() else {
-        return Err("HYDRA_ADMIN_URL must include a host".to_string());
-    };
-
-    if host.eq_ignore_ascii_case("localhost") {
-        return Ok(true);
-    }
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(ip.is_loopback());
-    }
-
-    let Some(port) = url.port_or_known_default() else {
-        return Ok(false);
-    };
-
-    match (host, port).to_socket_addrs() {
-        Ok(addrs) => {
-            let mut saw_addr = false;
-            let all_loopback = addrs
-                .inspect(|_| saw_addr = true)
-                .all(|addr| addr.ip().is_loopback());
-            Ok(saw_addr && all_loopback)
-        }
-        Err(_) => Ok(false),
-    }
 }
 
 #[cfg(test)]
@@ -99,7 +71,7 @@ mod tests {
     #[test]
     fn remote_hydra_admin_from_file_overlay_rejected_without_flag() {
         let mut cfg = test_config();
-        cfg.resolve_file_overlay(AuthSection {
+        cfg.resolve(AuthSection {
             hydra_admin_url: Some("http://hydra.example.com:4445".to_string()),
             ..AuthSection::default()
         });
@@ -114,6 +86,28 @@ mod tests {
         cfg.hydra_admin_url = Some("http://hydra.example.com:4445".to_string());
         cfg.allow_remote_hydra_admin = true;
 
+        assert!(validate_hydra_admin_url(&cfg).is_ok());
+    }
+
+    // (c) S8 regression: a DNS *name* that resolves to loopback must be
+    // REJECTED under the literal-only guard (no DNS resolution), unless the
+    // operator explicitly opts in with --allow-remote-hydra-admin.
+    #[test]
+    fn dns_name_resolving_to_loopback_rejected_without_flag() {
+        let mut cfg = test_config();
+        // `localhost.localdomain` and nip.io-style names resolve to 127.0.0.1
+        // on many hosts, but are NOT literal loopback — the old
+        // to_socket_addrs check accepted them; the literal-only guard rejects.
+        cfg.hydra_admin_url = Some("http://localhost.localdomain:4445".to_string());
+        cfg.allow_remote_hydra_admin = false;
+
+        assert!(
+            validate_hydra_admin_url(&cfg).is_err(),
+            "a DNS name (even one resolving to loopback) must be rejected literal-only"
+        );
+
+        // The explicit opt-in still lets it through.
+        cfg.allow_remote_hydra_admin = true;
         assert!(validate_hydra_admin_url(&cfg).is_ok());
     }
 }

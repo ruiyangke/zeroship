@@ -36,7 +36,7 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         // basic-auth comparison, so any value parses.
         "--db-url".to_string(),
         String::new(),
-        "--insecure-dev".to_string(),
+        "--dev-insecure".to_string(),
     ];
     if let Some(u) = user {
         args.push("--postmark-webhook-user".to_string());
@@ -46,7 +46,9 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         args.push("--postmark-webhook-password".to_string());
         args.push(p.to_string());
     }
-    AuthConfig::parse_from(args)
+    let mut cfg = AuthConfig::parse_from(args);
+    cfg.resolve(zeroship_core::config::AuthSection::default());
+    cfg
 }
 
 /// Boot PG + register the `/webhooks/postmark` route. Returns `None` if

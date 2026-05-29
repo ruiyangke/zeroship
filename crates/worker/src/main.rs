@@ -9,7 +9,8 @@ use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    env_is_exact, load_overlay_or_exit, require_unless_dev, resolve_observability,
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, CheckConfigReport, CheckFormat,
+    CheckValue,
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
@@ -20,7 +21,11 @@ use crate::sync::{SharedEnvs, SharedVersions};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// zeroship worker startup configuration.
-#[derive(Debug, Parser)]
+///
+/// No `#[derive(Debug)]`: this struct holds raw secrets (`control_key`,
+/// `worker_key`, `db`) before they are consumed, and a `{:?}` would print
+/// them in plaintext (S2).
+#[derive(Parser)]
 #[command(name = "zeroship-worker")]
 struct WorkerCli {
     /// HTTP listen port.
@@ -40,12 +45,18 @@ struct WorkerCli {
     control_key: String,
 
     /// Allow explicitly insecure local development startup.
-    #[arg(long = "dev-insecure", action = clap::ArgAction::SetTrue)]
-    dev_insecure: bool,
-
-    /// Environment half of `--dev-insecure`; only `1` is truthy.
-    #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
-    dev_insecure_env: bool,
+    ///
+    /// `--dev-insecure` / `--dev-insecure=true` enables; `--dev-insecure=false`
+    /// disables even when `ZEROSHIP_DEV_INSECURE=1` is set in the environment
+    /// (CLI presence overrides env — proper `CLI > env` precedence, S1).
+    #[arg(
+        long = "dev-insecure",
+        env = "ZEROSHIP_DEV_INSECURE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    dev_insecure: Option<bool>,
 
     // No --trust-proxy: the worker has no client-facing IP logic.
 
@@ -58,7 +69,7 @@ struct WorkerCli {
     poll_interval: u64,
 
     /// PostgreSQL DSN for runtime env/db state.
-    #[arg(long = "db", env = "DATABASE_URL", default_value = "")]
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
 
     /// Shared secret for gateway dispatch endpoints.
@@ -85,18 +96,49 @@ struct WorkerCli {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Disable auto-discovery of the well-known overlay path; use compiled
+    /// defaults even if `/etc/zeroship/zeroship.toml` exists (O5).
+    #[arg(long = "no-config")]
+    no_config: bool,
+
     /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
     #[arg(long = "check-config")]
     check_config: bool,
 
+    /// Output format for `--check-config`: `text` (default) or `json`.
+    #[arg(long = "check-config-format", default_value = "text")]
+    check_config_format: String,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
-    obs: zeroship_core::config::ObservabilityFlags,
+    obs: zeroship_core::observability::ObservabilityFlags,
 }
 
-impl WorkerCli {
-    fn insecure_dev(&self) -> bool {
-        self.dev_insecure || self.dev_insecure_env
+// Hand-written Debug that redacts the raw-secret fields (`control_key`,
+// `worker_key`, `db`) so a `{:?}` never leaks credentials (S2). The derived
+// Debug is intentionally NOT used.
+impl std::fmt::Debug for WorkerCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerCli")
+            .field("port", &self.port)
+            .field("worker_threads", &self.worker_threads)
+            .field("control", &self.control)
+            .field("control_key", &"<redacted>")
+            .field("dev_insecure", &self.dev_insecure)
+            .field("max_isolates", &self.max_isolates)
+            .field("poll_interval", &self.poll_interval)
+            .field("db", &"<redacted>")
+            .field("worker_key", &"<redacted>")
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field("blob_store", &self.blob_store)
+            .field("bind", &self.bind)
+            .field("socket", &self.socket)
+            .field("config_path", &self.config_path)
+            .field("no_config", &self.no_config)
+            .field("check_config", &self.check_config)
+            .field("check_config_format", &self.check_config_format)
+            .field("obs", &self.obs)
+            .finish()
     }
 }
 
@@ -137,18 +179,17 @@ pub struct WorkerConfig {
 
 fn main() -> std::io::Result<()> {
     let cli = WorkerCli::parse();
-    let overlay = load_overlay_or_exit(cli.config_path.as_deref(), "worker");
-    let config_source = zeroship_core::config::describe_source(&overlay);
-    let file = &overlay.config;
-    let (filter, format) = resolve_observability(
+    let boot = bootstrap_or_exit(
+        cli.config_path.as_deref(),
+        !cli.no_config,
         &cli.obs,
-        &file.observability,
         "info,zeroship_worker=debug,zeroship_runtime=info",
+        "worker",
     );
-    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
-    zeroship_core::config::log_overlay_source(&overlay);
 
-    let insecure_dev = cli.insecure_dev();
+    // CLI presence overrides env: `--dev-insecure=false` disables even a stray
+    // `ZEROSHIP_DEV_INSECURE=1` (S1).
+    let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let port = cli.port;
     let workers_count = resolve_worker_threads(cli.worker_threads);
     let control_url = cli.control;
@@ -185,23 +226,40 @@ fn main() -> std::io::Result<()> {
     }
 
     if cli.check_config {
-        println!("check-config: bind = {bind_host}");
-        println!("check-config: port = {port}");
-        println!("check-config: config_source = {config_source}");
-        println!("check-config: control_url = {control_url}");
-        println!("check-config: worker_threads = {workers_count}");
-        println!("check-config: max_isolates = {max_isolates}");
-        println!("check-config: poll_interval_secs = {poll_interval}");
-        println!("check-config: shutdown_timeout_secs = {shutdown_timeout}");
-        println!("check-config: log_filter = {filter}");
-        println!(
-            "check-config: log_format = {}",
-            format.as_deref().unwrap_or("auto")
+        let log_format = boot
+            .log_format
+            .map_or_else(|| "auto".to_string(), |f| f.to_string());
+        let mut report = CheckConfigReport::new();
+        report.field("bind", CheckValue::Plain(bind_host.clone()));
+        report.field("port", CheckValue::Count(usize::from(port)));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
         );
-        println!("check-config: insecure_dev = {insecure_dev}");
-        println!("check-config: blob_store = {blob_store_root}");
-        println!("check-config: socket_configured = {}", !socket_path.is_empty());
-        println!("check-config: db_configured = {}", !db_url.is_empty());
+        report.field("control_url", CheckValue::Plain(control_url.clone()));
+        report.field("worker_threads", CheckValue::Count(workers_count));
+        report.field("max_isolates", CheckValue::Count(max_isolates));
+        report.field(
+            "poll_interval_secs",
+            CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
+        );
+        report.field(
+            "shutdown_timeout_secs",
+            CheckValue::Count(usize::try_from(shutdown_timeout).unwrap_or(usize::MAX)),
+        );
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field("log_format", CheckValue::Plain(log_format));
+        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
+        report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
+        report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
+        report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
+
+        let fmt = if cli.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
         return Ok(());
     }
 
@@ -367,5 +425,53 @@ mod tests {
         let err = WorkerCli::try_parse_from(["zeroship-worker", "--max-isolates", "abc"])
             .expect_err("bad max-isolates should be a clap error");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    // Serialise the tests that mutate the shared `ZEROSHIP_DEV_INSECURE`
+    // process environment so they don't race each other.
+    static DEV_INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// S1 regression: an explicit `--dev-insecure=false` on the CLI overrides a
+    /// stray `ZEROSHIP_DEV_INSECURE=1` in the environment. Pre-fix the env half
+    /// was a separate `SetTrue`-OR-`env_is_exact` pair, so env always won and the
+    /// CLI could not turn insecure mode back off. Now both share one
+    /// `Option<bool>` field and CLI presence wins.
+    #[test]
+    fn worker_dev_insecure_cli_false_overrides_env_one() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().unwrap();
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+
+        let cli = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure=false"])
+            .expect("--dev-insecure=false should parse");
+        // CLI presence overrides the env var.
+        assert_eq!(cli.dev_insecure, Some(false));
+        assert!(
+            !cli.dev_insecure.unwrap_or(false),
+            "resolved insecure_dev must be false"
+        );
+
+        // Sanity: with no CLI flag the env var still flows through to `Some(true)`.
+        let env_only = WorkerCli::try_parse_from(["zeroship-worker"])
+            .expect("env-only parse should succeed");
+        assert_eq!(env_only.dev_insecure, Some(true));
+
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+    }
+
+    /// Bare `--dev-insecure` (no value) enables insecure mode via the
+    /// `default_missing_value = "true"`.
+    #[test]
+    fn worker_dev_insecure_bare_flag_enables() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+
+        let cli = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure"])
+            .expect("bare --dev-insecure should parse");
+        assert_eq!(cli.dev_insecure, Some(true));
+
+        // Absent flag + absent env resolves to false (secure default).
+        let bare = WorkerCli::try_parse_from(["zeroship-worker"]).expect("bare parse");
+        assert_eq!(bare.dev_insecure, None);
+        assert!(!bare.dev_insecure.unwrap_or(false));
     }
 }

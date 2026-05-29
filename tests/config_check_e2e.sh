@@ -175,7 +175,7 @@ expect_status 0 "worker exits 0"
 expect_stdout_contains "check-config: bind = 127.0.0.1" "worker prints dry-run summary"
 echo ""
 
-run_cmd auth-overlay "$AUTH" --check-config --config "$TMPDIR/shared.toml" --db-url postgres://check-config --insecure-dev --allow-remote-hydra-admin
+run_cmd auth-overlay "$AUTH" --check-config --config "$TMPDIR/shared.toml" --db-url postgres://check-config --dev-insecure --allow-remote-hydra-admin
 show_last_output
 expect_status 0 "auth exits 0"
 expect_stdout_contains "hydra_admin_url = http://hydra-from-file:4445" "auth uses file hydra admin URL"
@@ -191,7 +191,7 @@ expect_stdout_not_contains "hydra_admin_url = http://hydra-from-file:4445" "cont
 echo ""
 
 echo "=== Case 3: guard-fires-from-file ==="
-run_cmd auth-remote-guard "$AUTH" --check-config --config "$TMPDIR/remote-hydra.toml" --db-url postgres://check-config --insecure-dev
+run_cmd auth-remote-guard "$AUTH" --check-config --config "$TMPDIR/remote-hydra.toml" --db-url postgres://check-config --dev-insecure
 show_last_output
 expect_nonzero "auth rejects file-supplied remote Hydra admin without allow flag"
 echo ""

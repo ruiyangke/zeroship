@@ -328,7 +328,6 @@ fn build_handler_state(db: Arc<Client>, auth_base: &str) -> Arc<GateState> {
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            auth_secret: String::new(),
             worker_key: String::new(),
             hydra_public_url: String::new(),
             auth_ui_url: auth_base.to_string(),

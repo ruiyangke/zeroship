@@ -880,7 +880,6 @@ mod tests {
                 control_key: String::new(),
                 worker_urls: vec![],
                 poll_interval_secs: 5,
-                auth_secret: String::new(),
                 worker_key: String::new(),
                 hydra_public_url: String::new(),
                 auth_ui_url: String::new(),

@@ -18,7 +18,7 @@ const ACCEPT_REDIRECT: &str = "https://client.example/callback?code=accepted";
 const REJECT_REDIRECT: &str = "https://client.example/callback?error=access_denied";
 
 fn test_cfg(db_url: &str, hydra_admin: &str) -> AuthConfig {
-    AuthConfig::parse_from([
+    let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--db-url",
         db_url,
@@ -26,10 +26,12 @@ fn test_cfg(db_url: &str, hydra_admin: &str) -> AuthConfig {
         hydra_admin,
         "--hydra-public-url",
         hydra_admin,
-        "--insecure-dev",
+        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
-    ])
+    ]);
+    cfg.resolve(zeroship_core::config::AuthSection::default());
+    cfg
 }
 
 fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String> {

@@ -5,7 +5,7 @@ use zeroship_control::{resolve_trusted_oauth_clients, AppState};
 fn file_overlay_clients_drive_trust_resolution() {
     let file = FileConfig {
         auth: AuthSection {
-            trusted_oauth_clients: vec!["zeroship-console".to_string()],
+            trusted_oauth_clients: Some(vec!["zeroship-console".to_string()]),
             ..AuthSection::default()
         },
         ..FileConfig::default()

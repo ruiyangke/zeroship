@@ -4,12 +4,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    DEV_STASH_SIGNING_KEY, env_is_exact, env_is_truthy, load_overlay_or_exit,
-    resolve_observability, resolve_overlay_string,
+    bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, require_unless_dev,
+    resolve_overlay_string, validate_master_key_material, CheckConfigReport, CheckFormat,
+    CheckValue, DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
@@ -26,7 +26,7 @@ const DEV_HYDRA_ADMIN_URL: &str = "http://localhost:4445";
 const DEV_CONSOLE_OIDC_SECRET: &str = "dev-console-oidc-secret";
 
 /// zeroship control-plane startup configuration.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "zeroship-control")]
 struct ControlCli {
     /// HTTP listen port.
@@ -34,7 +34,12 @@ struct ControlCli {
     port: u16,
 
     /// PostgreSQL DSN for control-plane data.
-    #[arg(long = "db", env = "DATABASE_URL", default_value = "postgres://localhost/zeroship")]
+    #[arg(
+        long = "db",
+        env = "DATABASE_URL",
+        default_value = "postgres://localhost/zeroship",
+        hide_env_values = true
+    )]
     db: String,
 
     /// Root directory for bundles and content-addressed deploy blobs.
@@ -80,20 +85,27 @@ struct ControlCli {
     legacy_master_keys: String,
 
     /// Allow explicitly insecure local development startup.
-    #[arg(long = "dev-insecure", action = clap::ArgAction::SetTrue)]
-    dev_insecure: bool,
-
-    /// Environment half of `--dev-insecure`; only `1` is truthy.
-    #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
-    dev_insecure_env: bool,
+    ///
+    /// `--dev-insecure` / `--dev-insecure=true` enables; `--dev-insecure=false`
+    /// disables (overriding a stray `ZEROSHIP_DEV_INSECURE=1` in the env).
+    #[arg(
+        long = "dev-insecure",
+        env = "ZEROSHIP_DEV_INSECURE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    dev_insecure: Option<bool>,
 
     /// Trust `X-Forwarded-For` from an upstream proxy.
-    #[arg(long = "trust-proxy", action = clap::ArgAction::SetTrue)]
-    trust_proxy: bool,
-
-    /// Environment half of `--trust-proxy`; only `1` is truthy.
-    #[arg(skip = env_is_exact("TRUST_PROXY", "1"))]
-    trust_proxy_env: bool,
+    #[arg(
+        long = "trust-proxy",
+        env = "ZEROSHIP_TRUST_PROXY",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    trust_proxy: Option<bool>,
 
     /// Bootstrap the first-party builder OAuth client at startup.
     #[arg(long = "bootstrap-builder-client", action = clap::ArgAction::SetTrue)]
@@ -127,17 +139,37 @@ struct ControlCli {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Disable auto-discovery of the well-known config overlay (compiled defaults only).
+    #[arg(long = "no-config")]
+    no_config: bool,
+
     /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
     #[arg(long = "check-config")]
     check_config: bool,
 
+    /// Output format for `--check-config`: `text` (default) or `json`.
+    #[arg(long = "check-config-format", default_value = "text")]
+    check_config_format: String,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
-    obs: zeroship_core::config::ObservabilityFlags,
+    obs: zeroship_core::observability::ObservabilityFlags,
 
     /// Hydra admin API base URL.
     #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
     hydra_admin_url: Option<String>,
+
+    /// Allow a non-loopback Hydra **admin** API URL. The admin API is
+    /// privileged; outside `--dev-insecure` a remote admin URL is refused
+    /// unless this is set.
+    #[arg(
+        long = "allow-remote-hydra-admin",
+        env = "ALLOW_REMOTE_HYDRA_ADMIN",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    allow_remote_hydra_admin: Option<bool>,
 
     /// Hydra public issuer/base URL used by the console OIDC RP.
     #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
@@ -171,74 +203,68 @@ struct ControlCli {
 }
 
 impl ControlCli {
-    fn insecure_dev(&self) -> bool {
-        self.dev_insecure || self.dev_insecure_env
-    }
-
-    fn trust_proxy(&self) -> bool {
-        self.trust_proxy || self.trust_proxy_env
-    }
-
     fn bootstrap_builder_client(&self) -> bool {
         self.bootstrap_builder_client || self.bootstrap_builder_client_env
     }
 }
 
-fn decoded_master_key_len(value: &str) -> Option<usize> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if trimmed.len() % 2 == 0 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
-        if let Ok(bytes) = hex::decode(trimmed) {
-            if bytes.len() >= 32 {
-                return Some(bytes.len());
-            }
-        }
-    }
-
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(trimmed)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
-        .ok()
-        .map(|bytes| bytes.len())
-}
-
-fn validate_master_key_material(
-    label: &str,
-    value: &str,
-    insecure_dev: bool,
-) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
-    }
-    match decoded_master_key_len(value) {
-        Some(n) if n >= 32 => Ok(()),
-        Some(n) => Err(format!(
-            "{label} decodes to {n} bytes; minimum is 32 random bytes"
-        )),
-        None => Err(format!(
-            "{label} must be hex or base64url encoded and decode to at least 32 random bytes"
-        )),
+// S2: hand-written `Debug` that redacts every raw-secret field. The derive is
+// intentionally dropped so a stray `{:?}` (e.g. in a clap parse error or a test
+// `.unwrap_err()`) can never echo a DSN, master key, control key, worker key,
+// stash key, Stripe secret, console OIDC secret, or legacy master keys.
+impl std::fmt::Debug for ControlCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlCli")
+            .field("port", &self.port)
+            .field("db", &"<redacted>")
+            .field("blob_store", &self.blob_store)
+            .field("control_key", &"<redacted>")
+            .field("master_key", &"<redacted>")
+            .field("workers", &self.workers)
+            .field("worker_key", &"<redacted>")
+            .field("signing_key_file", &self.signing_key_file)
+            .field("stripe_webhook_secret", &"<redacted>")
+            .field("legacy_master_keys", &"<redacted>")
+            .field("dev_insecure", &self.dev_insecure)
+            .field("trust_proxy", &self.trust_proxy)
+            .field("bootstrap_builder_client", &self.bootstrap_builder_client)
+            .field("bootstrap_builder_client_env", &self.bootstrap_builder_client_env)
+            .field("builder_redirect_uri", &self.builder_redirect_uri)
+            .field("builder_client_secret_file", &self.builder_client_secret_file)
+            .field("deploy_tmp_dir", &self.deploy_tmp_dir)
+            .field("config_path", &self.config_path)
+            .field("no_config", &self.no_config)
+            .field("check_config", &self.check_config)
+            .field("check_config_format", &self.check_config_format)
+            .field("obs", &self.obs)
+            .field("hydra_admin_url", &self.hydra_admin_url)
+            .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
+            .field("hydra_public_url", &self.hydra_public_url)
+            .field("console_oidc_secret", &"<redacted>")
+            .field("stash_signing_key", &"<redacted>")
+            .field("auth_db_url", &"<redacted>")
+            .field("oauth_audience", &self.oauth_audience)
+            .finish()
     }
 }
 
 fn main() -> std::io::Result<()> {
     let cli = ControlCli::parse();
-    let overlay = load_overlay_or_exit(cli.config_path.as_deref(), "control");
-    let config_source = zeroship_core::config::describe_source(&overlay);
-    let file = &overlay.config;
-    let (filter, format) = resolve_observability(
+    let boot = bootstrap_or_exit(
+        cli.config_path.as_deref(),
+        !cli.no_config,
         &cli.obs,
-        &file.observability,
         "info,zeroship_control=debug",
+        "control",
     );
-    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
-    zeroship_core::config::log_overlay_source(&overlay);
+    let file = &boot.overlay.config;
+    let filter = &boot.log_filter;
 
-    let insecure_dev = cli.insecure_dev();
-    let trust_proxy = cli.trust_proxy();
+    // CLI presence overrides env, so `--dev-insecure=false` disables a stray
+    // `ZEROSHIP_DEV_INSECURE=1`.
+    let insecure_dev = cli.dev_insecure.unwrap_or(false);
+    let trust_proxy = cli.trust_proxy.unwrap_or(false);
+    let allow_remote_hydra_admin = cli.allow_remote_hydra_admin.unwrap_or(false);
     let bootstrap_builder_client = cli.bootstrap_builder_client();
 
     let hydra_admin_url = resolve_overlay_string(
@@ -256,6 +282,26 @@ fn main() -> std::io::Result<()> {
         trusted_oauth_clients = trusted_oauth_clients.len(),
         "control: trusted OAuth client set resolved"
     );
+
+    // S8: control consumes the privileged Hydra ADMIN API. A non-loopback admin
+    // URL outside dev is refused unless explicitly opted in — literal loopback
+    // only (no DNS), closing the rebind/TOCTOU window.
+    if !hydra_admin_url.is_empty()
+        && !insecure_dev
+        && !allow_remote_hydra_admin
+        && !is_loopback_url(&hydra_admin_url)
+    {
+        eprintln!(
+            "control: refusing to start; HYDRA_ADMIN_URL ({hydra_admin_url}) is not a loopback \
+             address. The Hydra admin API is privileged — pass --allow-remote-hydra-admin \
+             (or ALLOW_REMOTE_HYDRA_ADMIN=1) to use a remote admin endpoint."
+        );
+        tracing::error!(
+            hydra_admin_url = %hydra_admin_url,
+            "control: refusing to start with non-loopback Hydra admin URL"
+        );
+        std::process::exit(1);
+    }
 
     let port = cli.port;
     let db_url = cli.db;
@@ -283,38 +329,25 @@ fn main() -> std::io::Result<()> {
     let auth_db_url = cli.auth_db_url;
     let expected_oauth_audience = cli.oauth_audience;
 
+    // Pure path resolution only — the writability PROBE (create_dir_all + probe
+    // file) is deferred to the real startup path (M1) so `--check-config`
+    // performs NO filesystem mutation but can still report the resolved path.
     let deploy_tmp_dir: std::path::PathBuf = if deploy_tmp_dir_str.is_empty() {
         std::env::temp_dir()
     } else {
         std::path::PathBuf::from(&deploy_tmp_dir_str)
     };
 
-    // Validate at startup so operators don't discover a misconfigured
-    // path on first deploy. We check existence + writability by trying
-    // to create the directory tree (idempotent if it already exists)
-    // and then writing + removing a probe file.
-    if let Err(e) = std::fs::create_dir_all(&deploy_tmp_dir) {
-        tracing::error!(
-            path = %deploy_tmp_dir.display(),
-            error = %e,
-            "control: deploy_tmp_dir not creatable, refusing to start",
-        );
+    // S3: control authenticates the worker admin log fan-out with WORKER_KEY.
+    // Enforce its presence outside dev (worker already refuses a non-loopback
+    // bind without it; this guards the caller side symmetrically).
+    if let Err(message) =
+        require_unless_dev("WORKER_KEY / --worker-key", &worker_key, insecure_dev)
+    {
+        eprintln!("control: {message}");
+        tracing::error!(error = %message, "control: refusing to start without WORKER_KEY");
         std::process::exit(1);
     }
-    let probe = deploy_tmp_dir.join(format!(
-        ".zeroship-probe-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    if let Err(e) = std::fs::write(&probe, b"") {
-        tracing::error!(
-            path = %deploy_tmp_dir.display(),
-            error = %e,
-            "control: deploy_tmp_dir not writable, refusing to start",
-        );
-        std::process::exit(1);
-    }
-    let _ = std::fs::remove_file(&probe);
-    tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
 
     if !insecure_dev {
         let mut missing = Vec::new();
@@ -410,6 +443,88 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    if cli.check_config {
+        // M1: read-only. No filesystem mutation, no signing-key load.
+        let workers_count = workers_str
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .count();
+        let log_format_str = boot
+            .log_format
+            .map_or_else(|| "auto".to_string(), |fmt| fmt.to_string());
+
+        let mut report = CheckConfigReport::new();
+        report.field("port", CheckValue::Count(usize::from(port)));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
+        );
+        report.field("hydra_admin_url", CheckValue::Plain(hydra_admin_url.clone()));
+        report.field(
+            "hydra_public_url",
+            CheckValue::Plain(hydra_public_url.clone()),
+        );
+        report.field(
+            "trusted_oauth_clients_count",
+            CheckValue::Count(trusted_oauth_clients.len()),
+        );
+        report.field("log_filter", CheckValue::Plain(filter.clone()));
+        report.field("log_format", CheckValue::Plain(log_format_str));
+        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
+        report.field("trust_proxy", CheckValue::Flag(trust_proxy));
+        report.field(
+            "bootstrap_builder_client",
+            CheckValue::Flag(bootstrap_builder_client),
+        );
+        report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
+        report.field(
+            "deploy_tmp_dir",
+            CheckValue::Plain(deploy_tmp_dir.display().to_string()),
+        );
+        report.field(
+            "auth_db_configured",
+            CheckValue::Flag(!auth_db_url.is_empty()),
+        );
+        report.field("workers_count", CheckValue::Count(workers_count));
+
+        let fmt = if cli.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
+        return Ok(());
+    }
+
+    // M1: side-effecting preflight runs only on the real startup path, after the
+    // read-only `--check-config` early-return above.
+
+    // Validate the deploy tmp dir is creatable + writable so operators don't
+    // discover a misconfigured path on first deploy. Idempotent if it exists.
+    if let Err(e) = std::fs::create_dir_all(&deploy_tmp_dir) {
+        tracing::error!(
+            path = %deploy_tmp_dir.display(),
+            error = %e,
+            "control: deploy_tmp_dir not creatable, refusing to start",
+        );
+        std::process::exit(1);
+    }
+    let probe = deploy_tmp_dir.join(format!(
+        ".zeroship-probe-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(e) = std::fs::write(&probe, b"") {
+        tracing::error!(
+            path = %deploy_tmp_dir.display(),
+            error = %e,
+            "control: deploy_tmp_dir not writable, refusing to start",
+        );
+        std::process::exit(1);
+    }
+    let _ = std::fs::remove_file(&probe);
+    tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
+
     let pat_issuer = if signing_key_file.is_empty() {
         tracing::warn!("control: using dev-only PAT signing key");
         Arc::new(token_handlers::PatIssuer::dev_insecure())
@@ -426,43 +541,6 @@ fn main() -> std::io::Result<()> {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
         })?)
     };
-
-    if cli.check_config {
-        println!("check-config: port = {port}");
-        println!("check-config: config_source = {config_source}");
-        println!("check-config: hydra_admin_url = {hydra_admin_url}");
-        println!("check-config: hydra_public_url = {hydra_public_url}");
-        println!(
-            "check-config: trusted_oauth_clients_count = {}",
-            trusted_oauth_clients.len()
-        );
-        println!("check-config: log_filter = {filter}");
-        println!(
-            "check-config: log_format = {}",
-            format.as_deref().unwrap_or("auto")
-        );
-        println!("check-config: insecure_dev = {insecure_dev}");
-        println!("check-config: trust_proxy = {trust_proxy}");
-        println!("check-config: bootstrap_builder_client = {bootstrap_builder_client}");
-        println!("check-config: blob_store = {blob_store_root}");
-        println!(
-            "check-config: deploy_tmp_dir = {}",
-            deploy_tmp_dir.display()
-        );
-        println!(
-            "check-config: auth_db_configured = {}",
-            !auth_db_url.is_empty()
-        );
-        println!(
-            "check-config: workers_count = {}",
-            workers_str
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .count()
-        );
-        return Ok(());
-    }
 
     ntex::rt::System::build()
         .name("zeroship-control")
@@ -779,23 +857,9 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    #[test]
-    fn master_key_rejects_dictionary_string_in_non_dev() {
-        let err = validate_master_key_material(
-            "MASTER_KEY",
-            "correct horse battery staple",
-            false,
-        )
-        .unwrap_err();
-        assert!(err.contains("hex or base64url"), "{err}");
-    }
-
-    #[test]
-    fn master_key_rejects_short_decoded_material_in_non_dev() {
-        let err = validate_master_key_material("MASTER_KEY", "YWJj", false).unwrap_err();
-        assert!(err.contains("3 bytes"), "{err}");
-    }
-
+    // Master-key strength logic now lives in `zeroship_core::config::secrets`
+    // (fully tested there). These two assert control still calls *through* to
+    // the shared validator with the expected outcomes.
     #[test]
     fn master_key_accepts_32_byte_hex_in_non_dev() {
         let key = "00".repeat(32);
@@ -803,13 +867,110 @@ mod tests {
     }
 
     #[test]
-    fn master_key_accepts_32_byte_base64url_in_non_dev() {
-        let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
-        assert!(validate_master_key_material("MASTER_KEY", &key, false).is_ok());
+    fn master_key_allows_dev_shortcut_in_insecure_dev() {
+        assert!(validate_master_key_material("MASTER_KEY", "password", true).is_ok());
+    }
+
+    // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
+    // overridable from the CLI. `--dev-insecure=false` resolves to false,
+    // while env=1 alone (no CLI flag) enables.
+    #[test]
+    fn dev_insecure_cli_false_overrides_env_one() {
+        // Serialise env mutation across the two env-touching tests.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+
+        // env=1 alone (no CLI flag) enables.
+        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse with env only");
+        assert_eq!(
+            cli.dev_insecure,
+            Some(true),
+            "ZEROSHIP_DEV_INSECURE=1 should enable"
+        );
+        assert!(cli.dev_insecure.unwrap_or(false));
+
+        // explicit CLI false beats the stray env=1.
+        let cli = ControlCli::try_parse_from(["zeroship-control", "--dev-insecure=false"])
+            .expect("parse with explicit false");
+        let insecure_dev = cli.dev_insecure.unwrap_or(false);
+        assert!(!insecure_dev, "CLI --dev-insecure=false must beat env=1");
+
+        match old {
+            Some(value) => std::env::set_var("ZEROSHIP_DEV_INSECURE", value),
+            None => std::env::remove_var("ZEROSHIP_DEV_INSECURE"),
+        }
+    }
+
+    // S3: a missing WORKER_KEY is fatal outside dev, allowed inside dev.
+    #[test]
+    fn missing_worker_key_is_fatal_outside_dev() {
+        // Outside dev: empty worker key rejected.
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", false).is_err());
+        // Inside dev: allowed.
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", true).is_ok());
+        // Present: allowed even outside dev.
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "k", false).is_ok());
+    }
+
+    // S8: a non-loopback Hydra admin URL is rejected outside dev unless
+    // --allow-remote-hydra-admin is set. This mirrors the guard in `main`.
+    fn hydra_admin_guard_rejects(
+        hydra_admin_url: &str,
+        insecure_dev: bool,
+        allow_remote: bool,
+    ) -> bool {
+        !hydra_admin_url.is_empty()
+            && !insecure_dev
+            && !allow_remote
+            && !is_loopback_url(hydra_admin_url)
     }
 
     #[test]
-    fn master_key_allows_dev_shortcut_in_insecure_dev() {
-        assert!(validate_master_key_material("MASTER_KEY", "password", true).is_ok());
+    fn non_loopback_hydra_admin_rejected_without_opt_in() {
+        // Remote admin URL, prod, no opt-in -> rejected.
+        assert!(hydra_admin_guard_rejects("http://hydra:4445", false, false));
+        // Loopback admin URL -> allowed.
+        assert!(!hydra_admin_guard_rejects("http://127.0.0.1:4445", false, false));
+        assert!(!hydra_admin_guard_rejects("http://localhost:4445", false, false));
+        // Remote admin URL with explicit opt-in -> allowed.
+        assert!(!hydra_admin_guard_rejects("http://hydra:4445", false, true));
+        // Remote admin URL in dev -> allowed.
+        assert!(!hydra_admin_guard_rejects("http://hydra:4445", true, false));
+    }
+
+    // M4: resolve_trusted_oauth_clients distinguishes absent / present.
+    #[test]
+    fn trusted_oauth_clients_none_is_default_set() {
+        let auth = zeroship_core::config::AuthSection {
+            trusted_oauth_clients: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            zeroship_control::resolve_trusted_oauth_clients(&auth),
+            zeroship_control::default_trusted_oauth_clients()
+        );
+    }
+
+    #[test]
+    fn trusted_oauth_clients_some_empty_is_empty_set() {
+        let auth = zeroship_core::config::AuthSection {
+            trusted_oauth_clients: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(zeroship_control::resolve_trusted_oauth_clients(&auth).is_empty());
+    }
+
+    #[test]
+    fn trusted_oauth_clients_some_vec_is_exactly_that_set() {
+        let auth = zeroship_core::config::AuthSection {
+            trusted_oauth_clients: Some(vec!["a".to_string(), "b".to_string()]),
+            ..Default::default()
+        };
+        let resolved = zeroship_control::resolve_trusted_oauth_clients(&auth);
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains("a"));
+        assert!(resolved.contains("b"));
     }
 }

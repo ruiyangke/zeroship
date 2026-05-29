@@ -13,14 +13,16 @@ use zeroship_auth::identity::magic_link;
 use zeroship_auth::store::migrations;
 
 fn test_cfg(db_url: &str) -> AuthConfig {
-    AuthConfig::parse_from([
+    let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--db-url",
         db_url,
-        "--insecure-dev",
+        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
-    ])
+    ]);
+    cfg.resolve(zeroship_core::config::AuthSection::default());
+    cfg
 }
 
 #[allow(clippy::future_not_send)]

@@ -39,7 +39,6 @@ pub struct GateConfig {
     pub control_key: String,
     pub worker_urls: Vec<String>,
     pub poll_interval_secs: u64,
-    pub auth_secret: String,
     /// Shared secret between gateway and workers. Used to bearer-auth the
     /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
     /// workers can verify forwarded identity was not forged by an attacker

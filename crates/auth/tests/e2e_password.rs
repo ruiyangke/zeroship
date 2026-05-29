@@ -90,7 +90,7 @@ async fn e2e_password_flow() {
 
     let pg_client = Arc::new(pg_client);
     let admin = HydraAdmin::new(&hydra_admin_url);
-    // `--insecure-dev` drops Secure flag so the cyper client sees cookies on http://
+    // `--dev-insecure` drops Secure flag so the cyper client sees cookies on http://
     let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
 
     // 2. Boot the auth server via `ntex::web::test::server` — runs the

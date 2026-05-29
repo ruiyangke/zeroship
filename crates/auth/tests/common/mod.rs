@@ -50,7 +50,7 @@ use zeroship_auth::store::migrations;
 // 8 more CLI args).
 #[must_use]
 pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> AuthConfig {
-    AuthConfig::parse_from([
+    let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
@@ -62,7 +62,7 @@ pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> 
         hydra_public,
         "--clients-config",
         "ops/auth-clients.example.toml",
-        "--insecure-dev",
+        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
         "--mail-from-email",
@@ -71,7 +71,11 @@ pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> 
         "Test",
         "--public-url",
         "http://localhost:0",
-    ])
+    ]);
+    // Populate the resolved `insecure_dev` field handlers read (and apply the
+    // hydra-url overlay defaults), the same step `main` runs after parse.
+    cfg.resolve(zeroship_core::config::AuthSection::default());
+    cfg
 }
 
 // ─── PKCE ────────────────────────────────────────────────────────────────

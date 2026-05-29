@@ -234,7 +234,6 @@ fn build_state(
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            auth_secret: String::new(),
             worker_key: "wk-test-e2e".into(),
             hydra_public_url: introspect_base_url.clone(),
             auth_ui_url: introspect_base_url.clone(),

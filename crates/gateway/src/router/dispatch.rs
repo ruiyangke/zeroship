@@ -3,10 +3,10 @@
 //!
 //! Public surface (re-exported from `router/mod.rs`):
 //!
-//! * [`handle`]               — path-based handler `/{app_name}/{tail*}`.
-//! * [`handle_subdomain`]     — Host-header subdomain handler.
-//! * [`extract_app_name`]     — shared helper used by both, plus the
-//!                              gateway's outer middleware.
+//! * [`handle`] — path-based handler `/{app_name}/{tail*}`.
+//! * [`handle_subdomain`] — Host-header subdomain handler.
+//! * [`extract_app_name`] — shared helper used by both, plus the
+//!   gateway's outer middleware.
 //!
 //! Internal flow (`handle_request` → `execute_resource_tree`):
 //!
@@ -424,6 +424,7 @@ async fn handle_request(
 /// manifest with `resources` non-empty. Looks up the matching resource,
 /// enforces the precomputed `EffectivePolicy`, and executes the
 /// resolved action (worker forward / redirect / static).
+#[allow(clippy::too_many_arguments)]
 async fn execute_resource_tree(
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
@@ -1524,7 +1525,6 @@ mod tests {
                 control_key: String::new(),
                 worker_urls: vec![],
                 poll_interval_secs: 5,
-                auth_secret: String::new(),
                 worker_key: String::new(),
                 hydra_public_url: String::new(),
                 auth_ui_url: String::new(),

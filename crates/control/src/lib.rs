@@ -50,12 +50,14 @@ pub fn default_trusted_oauth_clients() -> HashSet<String> {
 }
 
 /// Resolve trusted OAuth clients from the optional shared auth config.
+///
+/// `None` (key absent) uses the compiled default set; `Some(vec)` is exactly
+/// that set, where an empty vec means "no trusted clients".
 #[must_use]
 pub fn resolve_trusted_oauth_clients(auth: &AuthSection) -> HashSet<String> {
-    if auth.trusted_oauth_clients.is_empty() {
-        default_trusted_oauth_clients()
-    } else {
-        auth.trusted_oauth_clients.iter().cloned().collect()
+    match &auth.trusted_oauth_clients {
+        None => default_trusted_oauth_clients(),
+        Some(clients) => clients.iter().cloned().collect(),
     }
 }
 

@@ -9,11 +9,13 @@ use std::sync::Arc;
 
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
-use zeroship_core::config::{load_overlay_or_exit, resolve_observability};
+use zeroship_core::config::{
+    bootstrap_or_exit, validate_stash_key, CheckConfigReport, CheckFormat, CheckValue,
+};
 use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
-use zeroship_auth::config::{validate_stash_key, AuthConfig};
+use zeroship_auth::config::AuthConfig;
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
@@ -26,16 +28,27 @@ use zeroship_auth::store;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
-    let overlay = load_overlay_or_exit(cfg.config_path.as_deref(), "auth");
-    let config_source = zeroship_core::config::describe_source(&overlay);
-    let (filter, format) =
-        resolve_observability(&cfg.obs, &overlay.config.observability, "info,zeroship_auth=debug");
-    zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
-    zeroship_core::config::log_overlay_source(&overlay);
-    cfg.resolve_file_overlay(overlay.config.auth);
+    let boot = bootstrap_or_exit(
+        cfg.config_path.as_deref(),
+        !cfg.no_config,
+        &cfg.obs,
+        "info,zeroship_auth=debug",
+        "auth",
+    );
+    let file = &boot.overlay.config;
+    cfg.resolve(file.auth.clone());
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
-    if let Err(message) = validate_stash_key(&cfg) {
+    // Loopback is the default; a non-loopback bind under --dev-insecure is
+    // intentional (compose dev on a private network) but must shout (S1).
+    if cfg.insecure_dev && !is_loopback_addr(&cfg.addr) {
+        tracing::warn!(
+            addr = %cfg.addr,
+            "auth: binding a non-loopback address with --dev-insecure; admin/cookie guards are relaxed — NEVER in production"
+        );
+    }
+
+    if let Err(message) = validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev) {
         tracing::error!("{message}");
         std::process::exit(1);
     }
@@ -50,33 +63,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(driver = %cfg.mailer, "mailer ready");
 
     if cfg.check_config {
-        println!("check-config: addr = {}", cfg.addr);
-        println!("check-config: config_source = {config_source}");
-        println!("check-config: hydra_admin_url = {}", cfg.hydra_admin_url());
-        println!("check-config: hydra_public_url = {}", cfg.hydra_public_url());
-        println!("check-config: log_filter = {filter}");
-        println!(
-            "check-config: log_format = {}",
-            format.as_deref().unwrap_or("auto")
+        let mut report = CheckConfigReport::new();
+        report.field("addr", CheckValue::Plain(cfg.addr.clone()));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
         );
-        println!("check-config: insecure_dev = {}", cfg.insecure_dev);
-        println!(
-            "check-config: allow_remote_hydra_admin = {}",
-            cfg.allow_remote_hydra_admin
+        report.field(
+            "hydra_admin_url",
+            CheckValue::Plain(cfg.hydra_admin_url().to_string()),
         );
-        println!("check-config: bootstrap = {}", cfg.bootstrap);
-        println!("check-config: public_url = {}", cfg.public_url());
-        println!("check-config: clients_config = {}", cfg.clients_config);
-        println!("check-config: db_configured = {}", !cfg.db_url.is_empty());
-        println!("check-config: mailer = {}", cfg.mailer);
-        println!(
-            "check-config: google_oauth_configured = {}",
-            cfg.google_client_id.is_some()
+        report.field(
+            "hydra_public_url",
+            CheckValue::Plain(cfg.hydra_public_url().to_string()),
         );
-        println!(
-            "check-config: github_oauth_configured = {}",
-            cfg.github_client_id.is_some()
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field(
+            "log_format",
+            CheckValue::Plain(
+                boot.log_format
+                    .map_or_else(|| "auto".to_string(), |f| f.to_string()),
+            ),
         );
+        report.field("insecure_dev", CheckValue::Flag(cfg.insecure_dev));
+        report.field(
+            "allow_remote_hydra_admin",
+            CheckValue::Flag(cfg.allow_remote_hydra_admin),
+        );
+        report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
+        report.field("public_url", CheckValue::Plain(cfg.public_url()));
+        report.field("clients_config", CheckValue::Plain(cfg.clients_config.clone()));
+        report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
+        report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));
+        report.field(
+            "google_oauth_configured",
+            CheckValue::Flag(cfg.google_client_id.is_some()),
+        );
+        report.field(
+            "github_oauth_configured",
+            CheckValue::Flag(cfg.github_client_id.is_some()),
+        );
+        let fmt = if cfg.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
         return Ok(());
     }
 
@@ -177,5 +209,36 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
         other => Err(AuthError::Config(format!(
             "unknown mailer: {other:?}; use stdout|smtp|resend"
         ))),
+    }
+}
+
+/// Return true when the bind address (`host:port`) is a literal loopback host
+/// (`localhost` or a loopback IP). Mirrors the literal-only policy in
+/// `zeroship_core::config::is_loopback_url`; no DNS resolution. Used only to
+/// decide whether to shout about a non-loopback `--dev-insecure` bind.
+fn is_loopback_addr(addr: &str) -> bool {
+    let host = match addr.rsplit_once(':') {
+        // Strip the IPv6 brackets from `[::1]:9092` style addresses.
+        Some((host, _)) => host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host),
+        None => addr,
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_addr;
+
+    #[test]
+    fn loopback_addr_recognises_literal_loopback_only() {
+        assert!(is_loopback_addr("127.0.0.1:9092"));
+        assert!(is_loopback_addr("localhost:9092"));
+        assert!(is_loopback_addr("[::1]:9092"));
+        // non-loopback binds (the ones the dev-insecure warn fires on)
+        assert!(!is_loopback_addr("0.0.0.0:9092"));
+        assert!(!is_loopback_addr("10.0.0.5:9092"));
     }
 }
