@@ -8422,6 +8422,175 @@ await open("components-tooltip--detached-handle");
   );
 }
 
+/* ─── Wave 8 fix (Radio red #1) — forced-colors mirrors hover + readonly ── */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/Radio/Radio.css",
+    import.meta.url,
+  );
+  let scanError = null;
+  let missing = [];
+  let combos = [];
+  try {
+    const source = await fs.readFile(cssUrl, "utf8");
+    const headerIdx = source.search(
+      /@media\s*\(\s*forced-colors\s*:\s*active\s*\)\s*\{/,
+    );
+    let forcedBlock = "";
+    if (headerIdx >= 0) {
+      const openIdx = source.indexOf("{", headerIdx);
+      let depth = 0;
+      let end = -1;
+      for (let i = openIdx; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end > openIdx) forcedBlock = source.slice(openIdx + 1, end);
+    }
+    const normalSource =
+      headerIdx >= 0
+        ? source.slice(0, headerIdx) +
+          source.slice(headerIdx + forcedBlock.length + 100)
+        : source;
+    const stateAttrs = new Set([
+      "data-disabled",
+      "data-readonly",
+      "data-checked",
+    ]);
+    function collectCombos(text) {
+      const found = new Set();
+      const re =
+        /\.zs-radio(?:(?:\[[^\]]+\]|:not\([^)]+\)|:[a-z-]+(?:\([^)]+\))?)*)/g;
+      let m;
+      while ((m = re.exec(text))) {
+        const head = m[0];
+        const stripped = head.replace(/:not\([^)]+\)/g, "");
+        const positiveAttrs = [
+          ...stripped.matchAll(/\[([^\]=]+)(?:=[^\]]*)?\]/g),
+        ]
+          .map((a) => a[1].trim())
+          .filter((a) => stateAttrs.has(a))
+          .sort();
+        const hasHover = /:hover\b/.test(head);
+        if (positiveAttrs.length === 0 && !hasHover) continue;
+        const key =
+          (positiveAttrs.length ? positiveAttrs.join("+") : "_") +
+          (hasHover ? ":hover" : "");
+        found.add(key);
+      }
+      return found;
+    }
+    const normalCombos = collectCombos(normalSource);
+    const forcedCombos = collectCombos(forcedBlock);
+    combos = [...normalCombos].sort();
+    missing = combos.filter((c) => !forcedCombos.has(c));
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !scanError && missing.length === 0;
+  report(
+    "Radio — forced-colors mirrors hover + readonly + state-combinations (wave-8 red #1)",
+    ok,
+    scanError
+      ? `scanError=${scanError}`
+      : `combos=[${combos.join(",")}] missing=[${missing.join(",")}]`,
+  );
+}
+
+/* ─── Wave 8 fix (Radio yellow #1) — Field required cascades to group ── */
+await open("components-radio--required");
+{
+  const group = page.locator('[data-testid="radio-required-group"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  const ariaRequired = await group.getAttribute("aria-required");
+  const role = await group.getAttribute("role");
+  const ok = ariaRequired === "true" && role === "radiogroup";
+  report(
+    "Radio.Group — Field required cascades to group aria-required (wave-8 yellow #1)",
+    ok,
+    `role=${role} aria-required=${ariaRequired}`,
+  );
+}
+
+/* ─── Wave 8 fix (Radio yellow #2) — JSDoc on every public prop ─── */
+{
+  const fs = await import("node:fs/promises");
+  const tsxUrl = new URL(
+    "../src/components/Radio/Radio.tsx",
+    import.meta.url,
+  );
+  let scanError = null;
+  let missing = [];
+  try {
+    const source = await fs.readFile(tsxUrl, "utf8");
+    function extractInterfaceBody(name) {
+      const headerRe = new RegExp(`export interface ${name}[^\\{]*\\{`);
+      const headerMatch = headerRe.exec(source);
+      if (!headerMatch) return "";
+      const openIdx = headerMatch.index + headerMatch[0].length - 1;
+      let depth = 0;
+      let end = -1;
+      for (let i = openIdx; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      return end > openIdx ? source.slice(openIdx + 1, end) : "";
+    }
+    function propHasJsDoc(body, propName) {
+      const propRe = new RegExp(`(^|\\n)\\s*${propName}\\??\\s*[:?]`);
+      const m = propRe.exec(body);
+      if (!m) return false;
+      const idx = m.index + m[0].indexOf(propName);
+      const before = body.slice(0, idx);
+      const lastJsdocClose = before.lastIndexOf("*/");
+      if (lastJsdocClose < 0) return false;
+      const between = before.slice(lastJsdocClose + 2);
+      return /^\s*$/.test(between);
+    }
+    const groupBody = extractInterfaceBody("RadioGroupProps<T = string>");
+    const radioBody = extractInterfaceBody("RadioProps<T = string>");
+    const groupProps = [
+      "orientation",
+      "size",
+      "className",
+      "value",
+      "defaultValue",
+      "onValueChange",
+      "children",
+    ];
+    const radioProps = ["value", "size", "className", "label", "fieldClassName", "fieldProps"];
+    for (const p of groupProps) {
+      if (!propHasJsDoc(groupBody, p)) missing.push(`RadioGroupProps.${p}`);
+    }
+    for (const p of radioProps) {
+      if (!propHasJsDoc(radioBody, p)) missing.push(`RadioProps.${p}`);
+    }
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !scanError && missing.length === 0;
+  report(
+    "Radio — JSDoc on every public prop (wave-8 yellow #2)",
+    ok,
+    scanError ? `scanError=${scanError}` : `missing=[${missing.join(",")}]`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
