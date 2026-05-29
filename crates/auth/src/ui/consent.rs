@@ -243,6 +243,24 @@ pub async fn post_consent_accept(
         }
     };
 
+    // Audit the consent decision — symmetric with consent_deny so both
+    // outcomes of a consent prompt are recorded.
+    audit::emit(
+        db.as_ref(),
+        &AuditEvent {
+            event_type: "consent_accept",
+            outcome: "success",
+            user_id: Some(&subject),
+            client_id: Some(&info.client.client_id),
+            auth_method: Some("consent"),
+            detail: json!({
+                "requested_scopes": requested_scopes,
+            }),
+            ..AuditEvent::from_request(&req)
+        },
+    )
+    .await;
+
     redirect(&redirect_to)
 }
 

@@ -14,6 +14,10 @@ CREATE TABLE auth.users (
     password_hash     TEXT,
     credential_version BIGINT NOT NULL DEFAULT 0,
     locked_until      TIMESTAMPTZ,
+    -- Soft-disable flag (NULL = active). Read by the login/link eligibility
+    -- checks (ui/login.rs, ui/link.rs, identity/eligibility.rs) and returned by
+    -- store::users; the account is rejected while non-NULL.
+    disabled_at       TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at     TIMESTAMPTZ
@@ -133,6 +137,16 @@ CREATE INDEX auth_audit_event_idx ON auth.audit_events (event_type, occurred_at)
 CREATE OR REPLACE FUNCTION auth.audit_events_block_tamper()
  RETURNS trigger AS $$
  BEGIN
+     -- Append-only: UPDATE and TRUNCATE are always rejected. The one sanctioned
+     -- DELETE is the retention sweep (auth::cron::audit_retention), which flags
+     -- its connection with `SET zeroship.audit_retention = 'on'` before deleting
+     -- expired rows. App handlers never set that GUC (and can't via a
+     -- parameterised query), so the tamper guard still holds against application
+     -- code and SQL injection.
+     IF TG_OP = 'DELETE'
+        AND current_setting('zeroship.audit_retention', true) = 'on' THEN
+         RETURN OLD;
+     END IF;
      RAISE EXCEPTION 'auth.audit_events is append-only'
          USING ERRCODE = 'insufficient_privilege';
  END
@@ -180,7 +194,9 @@ DO $$
 --changeset zeroship:auth-gateway-sessions splitStatements:true
 CREATE TABLE auth.gateway_sessions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         TEXT NOT NULL,
+    -- The gateway session store (gateway::sessions) parses the subject into a
+    -- Uuid and binds/reads it as UUID, so the column is UUID (not TEXT).
+    user_id         UUID NOT NULL,
     app_id          TEXT NOT NULL,
     email           CITEXT,
     name            TEXT,
@@ -207,7 +223,9 @@ CREATE INDEX auth_dpop_jti_inserted_idx
 --changeset zeroship:auth-console-sessions splitStatements:true
 CREATE TABLE auth.console_sessions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         TEXT NOT NULL,
+    -- The console-session store (control::console_sessions) parses the OIDC
+    -- subject into a Uuid and binds/reads it as UUID, so the column is UUID.
+    user_id         UUID NOT NULL,
     email           CITEXT,
     name            TEXT,
     avatar_url      TEXT,

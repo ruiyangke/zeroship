@@ -101,9 +101,22 @@ pub async fn run(db: Arc<Client>, cfg: Arc<AuthConfig>) {
 /// deterministically without sitting on the cron sleep.
 #[doc(hidden)]
 pub async fn tick(db: &Client) -> Result<()> {
-    let security_deleted = delete_older_than(db, SECURITY, 365).await?;
-    let pii_deleted = delete_older_than(db, PII, 90).await?;
-    let debug_deleted = delete_older_than(db, DEBUG, 30).await?;
+    // `auth.audit_events` is append-only — a BEFORE DELETE trigger rejects any
+    // tampering. This retention sweep is the single sanctioned deleter, so it
+    // flags the connection (`zeroship.audit_retention = 'on'`); the trigger
+    // permits DELETEs only while that GUC is set. The flag is cleared afterward
+    // (in all paths) so nothing else on this connection can delete. See the
+    // `auth.audit_events_block_tamper()` trigger in db/changelog/0002_auth.sql.
+    db.batch_execute("SET zeroship.audit_retention = 'on'")
+        .await
+        .map_err(|e| AuthError::Db(format!("audit retention: enable sweep: {e}")))?;
+
+    let swept = sweep_all(db).await;
+
+    // Always clear the flag, even if a delete failed mid-sweep.
+    let _ = db.batch_execute("SET zeroship.audit_retention = 'off'").await;
+
+    let (security_deleted, pii_deleted, debug_deleted) = swept?;
     let total = security_deleted + pii_deleted + debug_deleted;
     if total > 0 {
         tracing::info!(
@@ -114,6 +127,15 @@ pub async fn tick(db: &Client) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Sweep all three buckets. Split out so [`tick`] can bracket it with the
+/// retention GUC and still guarantee the flag is cleared on the error path.
+async fn sweep_all(db: &Client) -> Result<(u64, u64, u64)> {
+    let security_deleted = delete_older_than(db, SECURITY, 365).await?;
+    let pii_deleted = delete_older_than(db, PII, 90).await?;
+    let debug_deleted = delete_older_than(db, DEBUG, 30).await?;
+    Ok((security_deleted, pii_deleted, debug_deleted))
 }
 
 /// Delete `auth.audit_events` rows whose `event_type` is in `event_types`

@@ -270,6 +270,7 @@ async fn logout_post_revokes_local_session_cookie() {
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
+            expected_credential_version: Some(user.credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },

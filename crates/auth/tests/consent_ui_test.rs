@@ -327,6 +327,20 @@ impl ConsentTestApp {
             .expect("count oauth grant")
             .get("n")
     }
+
+    #[allow(clippy::future_not_send)]
+    async fn audit_event_count(&self, event_type: &str) -> i64 {
+        self.pg
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS n \
+                 FROM auth.audit_events \
+                 WHERE user_id = $1 AND event_type = $2",
+                &[&self.user_id, &event_type],
+            )
+            .await
+            .expect("count audit event")
+            .get("n")
+    }
 }
 
 #[derive(Debug)]

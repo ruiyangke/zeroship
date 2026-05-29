@@ -21,17 +21,6 @@ async fn pg() -> Option<compio_postgres::Client> {
     Some(pg_connect(&dsn).await)
 }
 
-async fn pg_connect(dsn: &str) -> compio_postgres::Client {
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            eprintln!("magic_link test pg connection error: {e}");
-        }
-    })
-    .detach();
-    client
-}
-
 async fn pg_connect(dsn: &str) -> Client {
     let (client, connection) = connect(dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -396,7 +385,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
     assert!(!consumed, "redeem_pending must not finalize consumed_at");
 
     assert!(
-        magic_link::clear_consume_pending(&client, &first.token_hash, &first.reserved_at)
+        magic_link::clear_consume_pending(&client, &first.token_hash, Some(&first.reserved_at))
             .await
             .expect("clear consume pending"),
         "clear should update the pending row"
@@ -467,7 +456,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
         "stale owner must not finalize the newer reservation"
     );
     assert!(
-        !magic_link::clear_consume_pending(&client, &first.token_hash, &first.reserved_at)
+        !magic_link::clear_consume_pending(&client, &first.token_hash, Some(&first.reserved_at))
             .await
             .expect("stale clear"),
         "stale owner must not clear the newer reservation"
@@ -513,7 +502,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
         "second pending redeem should return InFlight, got {err:?}"
     );
 
-    magic_link::clear_consume_pending(&client, &first.token_hash, &first.reserved_at)
+    magic_link::clear_consume_pending(&client, &first.token_hash, Some(&first.reserved_at))
         .await
         .expect("clear consume pending");
 
@@ -936,7 +925,7 @@ async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() 
         "stale owner must not finalize the newer completion reservation"
     );
     assert!(
-        !completions_store::clear_consume_pending(&client, &csrf_nonce, &first.reserved_at)
+        !completions_store::clear_consume_pending(&client, &csrf_nonce, Some(&first.reserved_at))
             .await
             .expect("stale completion clear"),
         "stale owner must not clear the newer completion reservation"

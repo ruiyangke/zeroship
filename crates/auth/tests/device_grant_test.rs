@@ -225,6 +225,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
+            expected_credential_version: Some(user.credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },
