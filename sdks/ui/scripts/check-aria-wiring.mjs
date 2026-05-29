@@ -1436,6 +1436,122 @@ await open("components-toggle--forced-colors-hover");
 // Reset the emulation so subsequent navigations aren't affected.
 await page.emulateMedia({ forcedColors: "none" });
 
+/* ─── 36a. Toggle.Group controlled clearable — undefined stays controlled ─
+ *
+ * ToggleGroup review-fix 🔴 #1 regression. The ControlledClearable
+ * harness owns `useState<string | undefined>("list")`; a Clear button
+ * resets the state to `undefined`. Pre-fix, the runtime mapped a
+ * controlled `value={undefined}` to `undefined` instead of `[]`, which
+ * Base UI treats as "uncontrolled — fall back to internal state". The
+ * "list" segment stayed `aria-pressed="true"` after the clear because
+ * Base UI kept tracking the original press internally. Post-fix we
+ * detect prop presence and emit `[]`, which Base UI reads as
+ * "controlled, nothing pressed".
+ *
+ * Pre-fix expectation:  after Clear → list `aria-pressed=true`
+ * Post-fix expectation: after Clear → list `aria-pressed=false` AND
+ *                       grid `aria-pressed=false` */
+await open("components-toggle--controlled-clearable");
+{
+  const list = page.locator(
+    '[data-testid="toggle-controlled-clearable-list"]',
+  );
+  const grid = page.locator(
+    '[data-testid="toggle-controlled-clearable-grid"]',
+  );
+  const reset = page.locator(
+    '[data-testid="toggle-controlled-clearable-reset"]',
+  );
+  await list.waitFor({ state: "visible", timeout: 5000 });
+  // Sanity-check the controlled initial state: "list" is pressed.
+  const listInitial = await list.getAttribute("aria-pressed");
+  const gridInitial = await grid.getAttribute("aria-pressed");
+  // Click Clear → controlled state becomes `undefined`.
+  await reset.click();
+  await page.waitForTimeout(150);
+  const listAfter = await list.getAttribute("aria-pressed");
+  const gridAfter = await grid.getAttribute("aria-pressed");
+  const ok =
+    listInitial === "true" &&
+    gridInitial === "false" &&
+    listAfter === "false" &&
+    gridAfter === "false";
+  report(
+    "Toggle.Group controlled clearable — undefined stays on controlled path",
+    ok,
+    `initial list=${listInitial} grid=${gridInitial} → after Clear list=${listAfter} grid=${gridAfter}`,
+  );
+}
+
+/* ─── 36b. Toggle.Group role override attempt — runtime lock wins ──────
+ *
+ * ToggleGroup review-fix 🔴 #2 regression. RoleOverrideAttempt renders
+ * the group with a rogue `{role: "banner"} as any` cast spread in via
+ * `{...rest}`. Pre-fix the runtime sat `role="toolbar"` BEFORE the
+ * spread so the cast won and the DOM role was `"banner"`. Post-fix the
+ * role attribute sits AFTER `{...rest}` and the DOM role stays
+ * `"toolbar"` regardless of what the spread carries.
+ *
+ * We also sanity-check `aria-roledescription` (the second prop in the
+ * rogue payload) DID land on the element — proves the spread executed
+ * and the rest of the rogue payload is on the DOM. That isolates the
+ * test to the role-lock specifically. */
+await open("components-toggle--role-override-attempt");
+{
+  const group = page.locator('[data-testid="toggle-group-role-override"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  const role = await group.getAttribute("role");
+  const ariaRoledescription = await group.getAttribute(
+    "aria-roledescription",
+  );
+  const ok =
+    role === "toolbar" && ariaRoledescription === "rogue-override-attempt";
+  report(
+    "Toggle.Group role lock — rogue spread cannot overwrite role=\"toolbar\"",
+    ok,
+    `role=${role} aria-roledescription=${ariaRoledescription}`,
+  );
+}
+
+/* ─── 36c. Toggle.Group Field.Label wiring — aria-labelledby points at label ─
+ *
+ * ToggleGroup review-fix 🔴 #3 regression. The WithLabel story now
+ * wires `Field.Label id={labelId}` and the group's
+ * `aria-labelledby={labelId}` — no `aria-label` shortcut. The accessible
+ * name resolves by traversing the labelledby pointer to the Label DOM
+ * node's text. Pre-fix the story stamped `aria-label="View"` directly
+ * on the group, so a totally broken labelling chain would still produce
+ * the expected accessible name (the assertion couldn't tell the
+ * difference). Post-fix:
+ *
+ *   - the group MUST NOT carry an `aria-label` attribute
+ *   - the group's `aria-labelledby` MUST equal the Field.Label's id
+ *   - the Field.Label's textContent MUST be "View"
+ *
+ * Together those three checks prove the labelling chain is real. */
+await open("components-toggle--with-label");
+{
+  const group = page.locator('[data-testid="toggle-group-withlabel"]');
+  const label = page.locator('[data-testid="toggle-withlabel-label"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  await label.waitFor({ state: "visible", timeout: 5000 });
+  const ariaLabel = await group.getAttribute("aria-label");
+  const ariaLabelledby = await group.getAttribute("aria-labelledby");
+  const labelId = await label.getAttribute("id");
+  const labelText = (await label.innerText()).trim();
+  const ok =
+    ariaLabel === null &&
+    ariaLabelledby !== null &&
+    labelId !== null &&
+    ariaLabelledby === labelId &&
+    labelText === "View";
+  report(
+    "Toggle.Group Field.Label — aria-labelledby resolves to Field.Label text",
+    ok,
+    `aria-label=${ariaLabel} aria-labelledby=${ariaLabelledby} labelId=${labelId} labelText="${labelText}"`,
+  );
+}
+
 /* ─── 37. Select Basic — ↓ + Enter commits value (slice 6) ───────────── *
  *
  * Open the popup via Trigger click; press ArrowDown twice to roving-

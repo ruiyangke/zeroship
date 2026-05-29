@@ -723,45 +723,60 @@ export const EqualWidthOff: Story = {
   ),
 };
 
-/* ─── 14. WithLabel — Field-wrapped group ──────────────────────────── */
+/* ─── 14. WithLabel — Field-wrapped group ──────────────────────────── *
+ *
+ * ToggleGroup review-fix 🔴 #3: pre-fix this story also stamped
+ * `aria-label="View"` on the group, which made the accessible name come
+ * from the literal aria-label, not from the Field.Label DOM node. The
+ * story still passed even if the Field → Toggle.Group labelling chain
+ * was completely broken. Real-path fix: mint an id, pin it on the
+ * Field.Label, point the group's `aria-labelledby` at that id, and
+ * remove `aria-label`. The aria-wiring regression resolves the
+ * accessible name by traversing the labelledby pointer to the Label's
+ * text — proving the wiring works end-to-end. */
 export const WithLabel: Story = {
   name: "With label (Field)",
   parameters: {
     docs: {
       description: {
         story:
-          "Toggle.Group wrapped in a Field. Field.Label labels the " +
-          "whole group; the group is what `aria-required` and " +
-          "validation attach to. Mirrors the Radio + Field idiom from " +
+          "Toggle.Group wrapped in a Field. `Field.Label` carries the " +
+          "explicit id the group's `aria-labelledby` resolves to — no " +
+          "`aria-label` shortcut. Mirrors the Radio + Field idiom from " +
           "Slice 4.",
       },
     },
   },
   // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
-  render: () => (
-    <div className="zs-story-row" role="group" aria-label="With label">
-      <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
-        <Field>
-          <Field.Label>View</Field.Label>
-          <Toggle.Group
-            defaultValue="card"
-            aria-label="View"
-            data-testid="toggle-group-withlabel"
-          >
-            <Toggle value="list" data-testid="toggle-withlabel-list">
-              List
-            </Toggle>
-            <Toggle value="card" data-testid="toggle-withlabel-card">
-              Card
-            </Toggle>
-            <Toggle value="map" data-testid="toggle-withlabel-map">
-              Map
-            </Toggle>
-          </Toggle.Group>
-        </Field>
+  render: () => {
+    const labelId = "toggle-withlabel-label";
+    return (
+      <div className="zs-story-row" role="group" aria-label="With label">
+        <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
+          <Field>
+            <Field.Label id={labelId} data-testid="toggle-withlabel-label">
+              View
+            </Field.Label>
+            <Toggle.Group
+              defaultValue="card"
+              aria-labelledby={labelId}
+              data-testid="toggle-group-withlabel"
+            >
+              <Toggle value="list" data-testid="toggle-withlabel-list">
+                List
+              </Toggle>
+              <Toggle value="card" data-testid="toggle-withlabel-card">
+                Card
+              </Toggle>
+              <Toggle value="map" data-testid="toggle-withlabel-map">
+                Map
+              </Toggle>
+            </Toggle.Group>
+          </Field>
+        </div>
       </div>
-    </div>
-  ),
+    );
+  },
 };
 
 /* ─── 15. Disabled — whole group inactive ──────────────────────────── */
@@ -961,5 +976,132 @@ export const RoleToolbarLock: Story = {
     await expect(toolbar).toHaveAttribute("role", "toolbar");
     await userEvent.click(grid);
     await waitFor(() => expect(grid).toHaveAttribute("aria-pressed", "true"));
+  },
+};
+
+/* ─── 19. ControlledClearable — regression for ToggleGroup 🔴 fix #1 ──
+ *
+ * Real-path regression for the controlled-`undefined` bug. A consumer
+ * holds `useState<string | undefined>("list")` and a "Clear" button
+ * resets the state to `undefined`. Pre-fix Toggle.Group mapped the
+ * cleared scalar to `undefined`, which Base UI interprets as
+ * "uncontrolled — fall back to defaultValue/internal state", and the
+ * group stuck on the last value despite the consumer owning state.
+ * Post-fix the cleared scalar maps to `[]` (controlled empty) and both
+ * segments resolve to `aria-pressed="false"`.
+ *
+ * The aria-wiring assertion picks segments by data-testid, asserts the
+ * initial controlled value lights up "list", clicks Clear, then asserts
+ * neither segment is pressed. Pre-fix this test fails because "list"
+ * stays pressed after the clear. */
+function ControlledClearableHarness() {
+  const [value, setValue] = useState<string | undefined>("list");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Controlled clearable"
+    >
+      <div className="zs-story-cell">
+        <Toggle.Group
+          value={value}
+          onValueChange={(next) => setValue(next)}
+          aria-label="View mode"
+          data-testid="toggle-group-controlled-clearable"
+        >
+          <Toggle value="list" data-testid="toggle-controlled-clearable-list">
+            List
+          </Toggle>
+          <Toggle value="grid" data-testid="toggle-controlled-clearable-grid">
+            Grid
+          </Toggle>
+        </Toggle.Group>
+        <button
+          type="button"
+          onClick={() => setValue(undefined)}
+          data-testid="toggle-controlled-clearable-reset"
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export const ControlledClearable: Story = {
+  name: "Controlled clearable (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression target for the controlled-`undefined` bug. " +
+          "Consumer holds a `Value | undefined` state; clearing it must " +
+          "leave the group with no pressed segment. Pre-fix the group " +
+          "fell off Base UI's controlled path and stuck on the last " +
+          "value; post-fix `aria-pressed` is `false` on every segment.",
+      },
+    },
+  },
+  render: () => <ControlledClearableHarness />,
+};
+
+/* ─── 20. RoleOverrideAttempt — regression for ToggleGroup 🔴 fix #2 ──
+ *
+ * Real-path regression for the runtime role lock. The public type
+ * `ToggleGroupBaseProps` omits `role`, but the runtime defense is what
+ * actually matters when a consumer escape-hatches the type system
+ * (`{role: "banner"} as any`, a Field/Fieldset that forwards arbitrary
+ * unrecognised props, etc.). Pre-fix, `role="toolbar"` sat BEFORE
+ * `{...rest}` and the cast override won; post-fix it sits AFTER and
+ * physically cannot be overridden.
+ *
+ * We cast the rogue prop through `unknown` so TypeScript's `Omit`
+ * doesn't block the story render. The aria-wiring assertion reads the
+ * DOM `role` attribute and confirms it is exactly `"toolbar"`. */
+export const RoleOverrideAttempt: Story = {
+  name: "Role override attempt (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression target for the runtime `role=\"toolbar\"` lock. " +
+          "An untyped consumer escape-hatch (`{role: \"banner\"} as " +
+          "any`) attempts to overwrite the role on the group root. " +
+          "The runtime stamps `role` AFTER the `{...rest}` spread so " +
+          "the DOM role stays `toolbar` regardless.",
+      },
+    },
+  },
+  render: () => {
+    // Build the rogue prop via `unknown` so the type-level `Omit<…,
+    // "role">` doesn't surface at the call site. This is the exact
+    // shape of an escape-hatch consumer cast.
+    const rogue = {
+      role: "banner",
+      "aria-roledescription": "rogue-override-attempt",
+    } as unknown as Record<string, never>;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Role override attempt"
+      >
+        <div className="zs-story-cell">
+          <Toggle.Group
+            defaultValue="list"
+            aria-label="View mode rogue"
+            data-testid="toggle-group-role-override"
+            {...rogue}
+          >
+            <Toggle value="list" data-testid="toggle-role-override-list">
+              List
+            </Toggle>
+            <Toggle value="grid" data-testid="toggle-role-override-grid">
+              Grid
+            </Toggle>
+          </Toggle.Group>
+        </div>
+      </div>
+    );
   },
 };

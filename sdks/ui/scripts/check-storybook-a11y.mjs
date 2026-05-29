@@ -158,6 +158,12 @@ const stories = [
   // Slice-5 review-fix regression targets (items 1 + 2).
   "components-toggle--forced-colors-hover",
   "components-toggle--role-toolbar-lock",
+  // ToggleGroup focused-review 🔴 regressions (items 1 + 2). The
+  // Field.Label wiring regression rides the existing `with-label`
+  // story above (re-wired to use `aria-labelledby` instead of the
+  // masking `aria-label`).
+  "components-toggle--controlled-clearable",
+  "components-toggle--role-override-attempt",
   // Slice 6: Select / Combobox / Autocomplete.
   // Count is 154, not the brief's 153: Autocomplete needed a new
   // Required baseline story plus its RequiredInvalid companion.
