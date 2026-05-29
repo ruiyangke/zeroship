@@ -1,7 +1,7 @@
 //! End-to-end Google federation flow against a live hydra + the
 //! in-process `crates/auth` server + an in-process mock Google provider.
 //!
-//! Skips if `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` aren't both set —
+//! Skips if `AUTH_DB_URL` and `HYDRA_ADMIN_URL` aren't both set —
 //! same gate as `e2e_password.rs`. The mock provider (see
 //! `tests/common/mock_provider.rs`) is in-process so no real Google
 //! credentials are required in CI.
@@ -45,12 +45,12 @@ async fn google_federation_creates_new_user() {
     // 0. Env-skip check (same gate as e2e_password.rs).
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[e2e_google] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_google] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     // 1. Boot the mock Google provider on a random port. The mock will
@@ -339,12 +339,12 @@ async fn google_federation_creates_new_user() {
 async fn google_federation_rejects_untrusted_domain_without_hd() {
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[e2e_google untrusted] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_google untrusted] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     let test_email = format!(

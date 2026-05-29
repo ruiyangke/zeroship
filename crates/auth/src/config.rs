@@ -1,10 +1,20 @@
 //! Auth server configuration.
 
+use std::path::PathBuf;
+
 use clap::Parser;
+use zeroship_core::config::AuthSection;
+
+const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
+const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "zeroship-auth")]
 pub struct AuthConfig {
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    pub config_path: Option<PathBuf>,
+
     /// Listen address.
     #[arg(long, env = "AUTH_ADDR", default_value = "0.0.0.0:9092")]
     pub addr: String,
@@ -14,8 +24,8 @@ pub struct AuthConfig {
     pub db_url: String,
 
     /// Hydra admin base URL (loopback).
-    #[arg(long, env = "AUTH_HYDRA_ADMIN", default_value = "http://127.0.0.1:4445")]
-    pub hydra_admin: String,
+    #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
+    pub hydra_admin_url: Option<String>,
 
     /// Permit a non-loopback Hydra admin URL. Production deployments that
     /// enable this must protect Hydra admin externally with mTLS, firewall
@@ -31,8 +41,8 @@ pub struct AuthConfig {
     pub allow_remote_hydra_admin: bool,
 
     /// Hydra public base URL (issuer).
-    #[arg(long, env = "AUTH_HYDRA_PUBLIC", default_value = "https://auth.zeroship.ai")]
-    pub hydra_public: String,
+    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
+    pub hydra_public_url: Option<String>,
 
     /// Path to clients config TOML.
     #[arg(long, env = "AUTH_CLIENTS_CONFIG", default_value = "/etc/zeroship/auth-clients.toml")]
@@ -276,6 +286,41 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// Apply the shared `[auth]` file overlay to fields that support it.
+    ///
+    /// Values already supplied by CLI flags or environment variables remain
+    /// authoritative. Missing values fall back to the auth server defaults.
+    pub fn resolve_file_overlay(&mut self, auth: AuthSection) {
+        self.hydra_admin_url = Some(
+            self.hydra_admin_url
+                .take()
+                .or(auth.hydra_admin_url)
+                .unwrap_or_else(|| DEFAULT_HYDRA_ADMIN_URL.to_string()),
+        );
+        self.hydra_public_url = Some(
+            self.hydra_public_url
+                .take()
+                .or(auth.hydra_public_url)
+                .unwrap_or_else(|| DEFAULT_HYDRA_PUBLIC_URL.to_string()),
+        );
+    }
+
+    /// Resolved Hydra admin API base URL.
+    #[must_use]
+    pub fn hydra_admin_url(&self) -> &str {
+        self.hydra_admin_url
+            .as_deref()
+            .unwrap_or(DEFAULT_HYDRA_ADMIN_URL)
+    }
+
+    /// Resolved Hydra public issuer/base URL.
+    #[must_use]
+    pub fn hydra_public_url(&self) -> &str {
+        self.hydra_public_url
+            .as_deref()
+            .unwrap_or(DEFAULT_HYDRA_PUBLIC_URL)
+    }
+
     /// External origin of this auth server (no trailing slash). Returns
     /// [`Self::public_url`] with any trailing `/` trimmed so callers can
     /// freely concatenate `/magic/verify?…`.
@@ -314,7 +359,84 @@ pub fn validate_stash_key(cfg: &AuthConfig) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use zeroship_core::config::FileConfig;
+
+    static HYDRA_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TempFile {
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        fn write(name: &str, contents: &str) -> Self {
+            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+            let path = std::env::temp_dir().join(format!(
+                "zeroship-auth-config-{name}-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(path.as_path(), contents).expect("write temp config");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.path.as_path());
+        }
+    }
+
+    fn set_env_opt(key: &str, value: Option<&str>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn with_hydra_env<T>(
+        hydra_admin_url: Option<&str>,
+        hydra_public_url: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = HYDRA_ENV_LOCK.lock().expect("hydra env lock poisoned");
+        let old_admin = std::env::var_os("HYDRA_ADMIN_URL");
+        let old_public = std::env::var_os("HYDRA_PUBLIC_URL");
+
+        set_env_opt("HYDRA_ADMIN_URL", hydra_admin_url);
+        set_env_opt("HYDRA_PUBLIC_URL", hydra_public_url);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        restore_env("HYDRA_ADMIN_URL", old_admin);
+        restore_env("HYDRA_PUBLIC_URL", old_public);
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn resolve_from_file(mut cfg: AuthConfig) -> AuthConfig {
+        let file = FileConfig::load(cfg.config_path.as_deref()).expect("load config file");
+        cfg.resolve_file_overlay(file.auth);
+        cfg
+    }
 
     fn test_config() -> AuthConfig {
         AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
@@ -373,5 +495,88 @@ mod tests {
         ]);
 
         assert!(cfg.allow_remote_hydra_admin);
+    }
+
+    #[test]
+    fn auth_file_overlay_supplies_hydra_urls_when_unset() {
+        with_hydra_env(None, None, || {
+            let file = TempFile::write(
+                "auth-overlay.toml",
+                r#"
+[auth]
+hydra_admin_url = "http://hydra-file:4445"
+hydra_public_url = "https://hydra-file.example"
+"#,
+            );
+
+            let cfg = resolve_from_file(AuthConfig::parse_from([
+                "zeroship-auth",
+                "--db-url",
+                "postgres://test",
+                "--config",
+                file.path.to_str().expect("utf-8 temp path"),
+            ]));
+
+            assert_eq!(cfg.hydra_admin_url(), "http://hydra-file:4445");
+            assert_eq!(cfg.hydra_public_url(), "https://hydra-file.example");
+        });
+    }
+
+    #[test]
+    fn cli_hydra_urls_override_file_overlay() {
+        with_hydra_env(None, None, || {
+            let file = TempFile::write(
+                "auth-cli-override.toml",
+                r#"
+[auth]
+hydra_admin_url = "http://hydra-file:4445"
+hydra_public_url = "https://hydra-file.example"
+"#,
+            );
+
+            let cfg = resolve_from_file(AuthConfig::parse_from([
+                "zeroship-auth",
+                "--db-url",
+                "postgres://test",
+                "--config",
+                file.path.to_str().expect("utf-8 temp path"),
+                "--hydra-admin-url",
+                "http://hydra-cli:4445",
+                "--hydra-public-url",
+                "https://hydra-cli.example",
+            ]));
+
+            assert_eq!(cfg.hydra_admin_url(), "http://hydra-cli:4445");
+            assert_eq!(cfg.hydra_public_url(), "https://hydra-cli.example");
+        });
+    }
+
+    #[test]
+    fn env_hydra_urls_override_file_overlay() {
+        with_hydra_env(
+            Some("http://hydra-env:4445"),
+            Some("https://hydra-env.example"),
+            || {
+                let file = TempFile::write(
+                    "auth-env-override.toml",
+                    r#"
+[auth]
+hydra_admin_url = "http://hydra-file:4445"
+hydra_public_url = "https://hydra-file.example"
+"#,
+                );
+
+                let cfg = resolve_from_file(AuthConfig::parse_from([
+                    "zeroship-auth",
+                    "--db-url",
+                    "postgres://test",
+                    "--config",
+                    file.path.to_str().expect("utf-8 temp path"),
+                ]));
+
+                assert_eq!(cfg.hydra_admin_url(), "http://hydra-env:4445");
+                assert_eq!(cfg.hydra_public_url(), "https://hydra-env.example");
+            },
+        );
     }
 }

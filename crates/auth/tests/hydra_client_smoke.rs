@@ -1,4 +1,4 @@
-//! Hydra admin client smoke test — only runs if `AUTH_HYDRA_ADMIN` is set
+//! Hydra admin client smoke test — only runs if `HYDRA_ADMIN_URL` is set
 //! (e.g. `http://localhost:4445`). Without env, each test prints "skip" and
 //! passes, mirroring the pattern in `migrations_smoke.rs`.
 //!
@@ -10,14 +10,14 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 
 fn admin() -> Option<HydraAdmin> {
-    let base = std::env::var("AUTH_HYDRA_ADMIN").ok()?;
+    let base = std::env::var("HYDRA_ADMIN_URL").ok()?;
     Some(HydraAdmin::new(base))
 }
 
 #[compio::test]
 async fn jwks_create_and_delete_roundtrip() {
     let Some(admin) = admin() else {
-        eprintln!("skip (no AUTH_HYDRA_ADMIN)");
+        eprintln!("skip (no HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -54,7 +54,7 @@ async fn jwks_create_and_delete_roundtrip() {
 #[compio::test]
 async fn client_crud_roundtrip() {
     let Some(admin) = admin() else {
-        eprintln!("skip (no AUTH_HYDRA_ADMIN)");
+        eprintln!("skip (no HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -106,7 +106,7 @@ async fn client_crud_roundtrip() {
 #[compio::test]
 async fn login_challenge_returns_404_for_unknown() {
     let Some(admin) = admin() else {
-        eprintln!("skip (no AUTH_HYDRA_ADMIN)");
+        eprintln!("skip (no HYDRA_ADMIN_URL)");
         return;
     };
 

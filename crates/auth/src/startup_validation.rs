@@ -5,31 +5,33 @@ use std::net::{IpAddr, ToSocketAddrs};
 use crate::config::AuthConfig;
 
 pub fn validate_hydra_admin_url(cfg: &AuthConfig) -> Result<(), String> {
-    if hydra_admin_host_is_loopback(&cfg.hydra_admin)? {
+    let hydra_admin_url = cfg.hydra_admin_url();
+
+    if hydra_admin_host_is_loopback(hydra_admin_url)? {
         return Ok(());
     }
 
     if cfg.allow_remote_hydra_admin {
         tracing::warn!(
-            hydra_admin = %cfg.hydra_admin,
+            hydra_admin_url = %hydra_admin_url,
             "hydra admin is reachable over the network -- ensure mTLS / firewall is configured externally"
         );
         return Ok(());
     }
 
     Err(format!(
-        "AUTH_HYDRA_ADMIN points to a non-loopback host ({url}); refusing to boot. \
+        "HYDRA_ADMIN_URL points to a non-loopback host ({url}); refusing to boot. \
          Keep Hydra admin on 127.0.0.1/::1/localhost or set --allow-remote-hydra-admin=true \
          only when mTLS / firewall protection is configured externally.",
-        url = cfg.hydra_admin,
+        url = hydra_admin_url,
     ))
 }
 
 fn hydra_admin_host_is_loopback(raw_url: &str) -> Result<bool, String> {
     let url = url::Url::parse(raw_url)
-        .map_err(|e| format!("AUTH_HYDRA_ADMIN must be a valid URL: {e}"))?;
+        .map_err(|e| format!("HYDRA_ADMIN_URL must be a valid URL: {e}"))?;
     let Some(host) = url.host_str() else {
-        return Err("AUTH_HYDRA_ADMIN must include a host".to_string());
+        return Err("HYDRA_ADMIN_URL must include a host".to_string());
     };
 
     if host.eq_ignore_ascii_case("localhost") {
@@ -59,6 +61,7 @@ fn hydra_admin_host_is_loopback(raw_url: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use zeroship_core::config::AuthSection;
 
     use super::*;
 
@@ -69,7 +72,7 @@ mod tests {
     #[test]
     fn loopback_hydra_admin_accepted_without_flag() {
         let mut cfg = test_config();
-        cfg.hydra_admin = "http://127.0.0.1:4445".to_string();
+        cfg.hydra_admin_url = Some("http://127.0.0.1:4445".to_string());
         cfg.allow_remote_hydra_admin = false;
 
         assert!(validate_hydra_admin_url(&cfg).is_ok());
@@ -78,7 +81,7 @@ mod tests {
     #[test]
     fn loopback_hostname_accepted_without_flag() {
         let mut cfg = test_config();
-        cfg.hydra_admin = "http://localhost:4445".to_string();
+        cfg.hydra_admin_url = Some("http://localhost:4445".to_string());
         cfg.allow_remote_hydra_admin = false;
 
         assert!(validate_hydra_admin_url(&cfg).is_ok());
@@ -87,7 +90,19 @@ mod tests {
     #[test]
     fn remote_hydra_admin_rejected_without_flag() {
         let mut cfg = test_config();
-        cfg.hydra_admin = "http://hydra.example.com:4445".to_string();
+        cfg.hydra_admin_url = Some("http://hydra.example.com:4445".to_string());
+        cfg.allow_remote_hydra_admin = false;
+
+        assert!(validate_hydra_admin_url(&cfg).is_err());
+    }
+
+    #[test]
+    fn remote_hydra_admin_from_file_overlay_rejected_without_flag() {
+        let mut cfg = test_config();
+        cfg.resolve_file_overlay(AuthSection {
+            hydra_admin_url: Some("http://hydra.example.com:4445".to_string()),
+            ..AuthSection::default()
+        });
         cfg.allow_remote_hydra_admin = false;
 
         assert!(validate_hydra_admin_url(&cfg).is_err());
@@ -96,7 +111,7 @@ mod tests {
     #[test]
     fn remote_hydra_admin_accepted_with_flag() {
         let mut cfg = test_config();
-        cfg.hydra_admin = "http://hydra.example.com:4445".to_string();
+        cfg.hydra_admin_url = Some("http://hydra.example.com:4445".to_string());
         cfg.allow_remote_hydra_admin = true;
 
         assert!(validate_hydra_admin_url(&cfg).is_ok());

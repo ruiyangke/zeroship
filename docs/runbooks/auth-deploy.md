@@ -55,8 +55,9 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 | `AUTH_ADDR` | `0.0.0.0:9092` | no | Bind address. |
 | `AUTH_PUBLIC_URL` | `http://localhost:9092` | **yes in prod** | Externally-reachable origin (scheme + host + optional port). Used to construct absolute URLs in outbound email (magic-link, verify, reset). Distinct from `AUTH_ADDR`. |
 | `AUTH_DB_URL` | — | yes | Postgres DSN. Same database as hydra. |
-| `AUTH_HYDRA_ADMIN` | `http://127.0.0.1:4445` | yes | Hydra admin API base URL. Loopback in prod. |
-| `AUTH_HYDRA_PUBLIC` | `https://auth.zeroship.ai` | yes | Hydra public base URL (issuer). |
+| `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path. `[auth].hydra_admin_url` and `[auth].hydra_public_url` are read from this file when the env vars below are unset. |
+| `HYDRA_ADMIN_URL` | `http://127.0.0.1:4445` | yes | Hydra admin API base URL. Loopback in prod. |
+| `HYDRA_PUBLIC_URL` | `https://auth.zeroship.ai` | yes | Hydra public base URL (issuer). |
 | `AUTH_CLIENTS_CONFIG` | `/etc/zeroship/auth-clients.toml` | yes | Path to the declarative OIDC client registry. |
 | `AUTH_BOOTSTRAP` | unset | first boot only | Boolean — set to `true` on first boot to allow JWK + client creation. Drop on subsequent restarts. Without it, an empty `hydra_jwk` set is a fatal startup error. |
 | `AUTH_INSECURE_DEV` | unset | dev only | Drops the `Secure` flag on cookies. **Never set in production.** |
@@ -139,8 +140,8 @@ at their defaults.
 
    ```bash
    AUTH_BOOTSTRAP=true \
-   AUTH_DB_URL=… AUTH_HYDRA_ADMIN=http://127.0.0.1:4445 \
-   AUTH_HYDRA_PUBLIC=https://auth.zeroship.ai \
+   AUTH_DB_URL=… HYDRA_ADMIN_URL=http://127.0.0.1:4445 \
+   HYDRA_PUBLIC_URL=https://auth.zeroship.ai \
    AUTH_PUBLIC_URL=https://auth.zeroship.ai \
    AUTH_STASH_SIGNING_KEY=… AUTH_CLIENTS_CONFIG=/etc/zeroship/auth-clients.toml \
    AUTH_MAILER=smtp AUTH_SMTP_HOST=… \

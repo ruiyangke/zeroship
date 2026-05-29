@@ -12,7 +12,7 @@
 //! If these diverge in status, body length, or wall time, the dummy-hash
 //! arm has regressed and an attacker can probe for valid emails.
 //!
-//! Skips when `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` are unset (same gate as
+//! Skips when `AUTH_DB_URL` and `HYDRA_ADMIN_URL` are unset (same gate as
 //! `e2e_password.rs`). Live path requires a registered test OIDC client in
 //! hydra so `/login` POST can resolve a real `login_challenge`.
 
@@ -98,12 +98,12 @@ async fn login_failure_responses_are_indistinguishable() {
     // 0. Env-skip check.
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[enum_defense] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[enum_defense] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     // 1. Connect PG and run migrations.

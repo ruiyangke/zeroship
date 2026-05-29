@@ -21,14 +21,14 @@
 //! Triple-gated so it never runs in normal `cargo test`:
 //!   - `AUTH_LOAD_TEST=1` must be set
 //!   - `AUTH_DB_URL` must point at a live PG with the auth schema
-//!   - `AUTH_HYDRA_ADMIN` must point at a reachable hydra admin endpoint
+//!   - `HYDRA_ADMIN_URL` must point at a reachable hydra admin endpoint
 //!
 //!
 //! Manual smoke:
 //! ```text
 //!   AUTH_LOAD_TEST=1 \
 //!   AUTH_DB_URL=postgres://postgres:zeroship@localhost:5441/zeroship \
-//!   AUTH_HYDRA_ADMIN=http://localhost:4445 \
+//!   HYDRA_ADMIN_URL=http://localhost:4445 \
 //!     cargo test -p zeroship-auth --test load_test -- --nocapture
 //! ```
 
@@ -60,13 +60,13 @@ const RPS_FLOOR: f64 = 10.0;
 #[ntex::test]
 async fn auth_login_throughput() {
     // 0. Triple env-gate. Skip silently (test still passes) unless ALL of
-    //    AUTH_LOAD_TEST, AUTH_DB_URL, and AUTH_HYDRA_ADMIN are set.
+    //    AUTH_LOAD_TEST, AUTH_DB_URL, and HYDRA_ADMIN_URL are set.
     if std::env::var("AUTH_LOAD_TEST").is_err() {
         eprintln!("[load_test] skip (set AUTH_LOAD_TEST=1 to run)");
         return;
     }
-    if std::env::var("AUTH_DB_URL").is_err() || std::env::var("AUTH_HYDRA_ADMIN").is_err() {
-        eprintln!("[load_test] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+    if std::env::var("AUTH_DB_URL").is_err() || std::env::var("HYDRA_ADMIN_URL").is_err() {
+        eprintln!("[load_test] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     }
 

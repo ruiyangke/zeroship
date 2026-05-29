@@ -1,6 +1,6 @@
 //! OAuth 2.0 Device Authorization Grant UI regression tests.
 //!
-//! Live Hydra checks skip unless `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` are set.
+//! Live Hydra checks skip unless `AUTH_DB_URL` and `HYDRA_ADMIN_URL` are set.
 
 mod common;
 
@@ -38,12 +38,12 @@ async fn boot() -> Option<(
 )> {
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[device_grant] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[device_grant] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return None;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     let (pg_client, pg_connection) =

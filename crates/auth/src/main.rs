@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
+use zeroship_core::config::FileConfig;
 use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
@@ -27,7 +28,15 @@ use zeroship_auth::store;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zeroship_core::observability::init_tracing("info,zeroship_auth=debug");
 
-    let cfg = AuthConfig::parse();
+    let mut cfg = AuthConfig::parse();
+    let file = match FileConfig::load(cfg.config_path.as_deref()) {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: failed to load config file");
+            std::process::exit(1);
+        }
+    };
+    cfg.resolve_file_overlay(file.auth);
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
     if let Err(message) = validate_stash_key(&cfg) {
@@ -67,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("auth.* migrations applied");
 
     // 3. Bootstrap: keys + client reconciliation.
-    let admin = HydraAdmin::new(&cfg.hydra_admin);
+    let admin = HydraAdmin::new(cfg.hydra_admin_url());
     bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
     tracing::info!("bootstrap complete");
 
