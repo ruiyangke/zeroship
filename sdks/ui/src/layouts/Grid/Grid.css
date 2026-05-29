@@ -1,0 +1,90 @@
+/*
+ * Grid — two-dimensional grid arrangement.
+ *
+ * Anatomy:
+ *   .zs-grid              — the grid container
+ *   .zs-grid--intrinsic   — minColWidth path (auto-fit, breakpoint-free)
+ *   .zs-grid--explicit    — fixed-count path (columns number/object)
+ *
+ * Driven by inline custom properties / data-attributes set from props:
+ *   --grid-gap       --zs-space-*    (default --zs-space-0)
+ *   --grid-align     align-items     (default stretch)
+ *   --grid-flow      grid-auto-flow  (default row)
+ *   --grid-min-col   length          (intrinsic path only)
+ *   --grid-cols      integer         (explicit path base count)
+ *   --grid-cols-sm/md/lg  integer    (responsive object; switched at @media)
+ *   [data-responsive]    present when columns is a {sm,md,lg} object
+ *
+ * Layout discipline:
+ *   - Arrange-only: no background, no border, no padding.
+ *   - The breakpoint @media conditions use literal rem values because
+ *     CSS custom properties cannot appear in a media query condition.
+ *     Each literal is commented with the --zs-bp-* token it mirrors so
+ *     the foundation tokens stay the documented source of the values.
+ *
+ * Motion: none.
+ */
+
+.zs-grid {
+  display: grid;
+  gap: var(--grid-gap, var(--zs-space-0));
+  align-items: var(--grid-align, stretch);
+  grid-auto-flow: var(--grid-flow, row);
+}
+
+/* Intrinsic path — fluid, breakpoint-free. Packs as many equal columns
+ * as fit the available inline-size, each at least --grid-min-col wide. */
+.zs-grid--intrinsic {
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(var(--grid-min-col), 1fr)
+  );
+}
+
+/* Explicit path — fixed equal-fraction columns. --grid-cols is the base
+ * (mobile-first) count; the responsive object switches it at breakpoints
+ * below. */
+.zs-grid--explicit {
+  grid-template-columns: repeat(var(--grid-cols, 1), minmax(0, 1fr));
+}
+
+/* ─── Responsive column counts ────────────────────────────────────────
+ *
+ * Only the responsive ({sm,md,lg}) path opts in via [data-responsive].
+ * Each @media uses the literal rem value of the matching --zs-bp-* token
+ * (custom properties cannot appear in @media conditions). Rather than
+ * reassign --grid-cols (a self-referencing var is a cyclic dependency
+ * and resolves to invalid), each breakpoint sets grid-template-columns
+ * directly from its own --grid-cols-* token, chaining the previous
+ * breakpoints as fallbacks so an absent breakpoint carries the last
+ * provided count forward. Mobile-first: widest matching query wins by
+ * source order, so lg overrides md overrides sm overrides the base. */
+@media (min-width: 40rem) { /* --zs-bp-sm */
+  .zs-grid--explicit[data-responsive] {
+    grid-template-columns: repeat(
+      var(--grid-cols-sm, var(--grid-cols)),
+      minmax(0, 1fr)
+    );
+  }
+}
+
+@media (min-width: 48rem) { /* --zs-bp-md */
+  .zs-grid--explicit[data-responsive] {
+    grid-template-columns: repeat(
+      var(--grid-cols-md, var(--grid-cols-sm, var(--grid-cols))),
+      minmax(0, 1fr)
+    );
+  }
+}
+
+@media (min-width: 64rem) { /* --zs-bp-lg */
+  .zs-grid--explicit[data-responsive] {
+    grid-template-columns: repeat(
+      var(
+        --grid-cols-lg,
+        var(--grid-cols-md, var(--grid-cols-sm, var(--grid-cols)))
+      ),
+      minmax(0, 1fr)
+    );
+  }
+}

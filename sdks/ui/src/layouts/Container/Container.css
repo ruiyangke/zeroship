@@ -1,0 +1,25 @@
+/*
+ * Container — the page-width authority.
+ *
+ * Anatomy:
+ *   .zs-container   — the constrained, centered content column
+ *
+ * Driven by inline custom properties set from props:
+ *   --container-max-width       --zs-container-* | none  (default lg token)
+ *   --container-pad-x           --zs-space-*             (default --zs-space-4)
+ *   --container-margin-inline   auto | 0                 (default auto)
+ *
+ * Layout discipline:
+ *   - Arrange-only: no background, no border. The ONLY layout primitive
+ *     that sets `max-width` — width discipline lives here.
+ *   - `padding-inline` + `margin-inline` are logical properties, so the
+ *     symmetric padding and the centering survive RTL with no extra rule.
+ *
+ * Motion: none.
+ */
+
+.zs-container {
+  max-width: var(--container-max-width, var(--zs-container-lg));
+  margin-inline: var(--container-margin-inline, auto);
+  padding-inline: var(--container-pad-x, var(--zs-space-4));
+}

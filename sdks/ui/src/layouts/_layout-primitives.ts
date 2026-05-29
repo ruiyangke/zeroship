@@ -5,7 +5,7 @@
  */
 export type Gap = 0 | "half" | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 export type Pad = Gap;
-export type Align = "start" | "center" | "end" | "stretch" | "baseline";
+export type Align = "start" | "center" | "end" | "stretch";
 export type Justify =
   | "start"
   | "center"
@@ -24,7 +24,6 @@ const ALIGN: Record<Align, string> = {
   center: "center",
   end: "flex-end",
   stretch: "stretch",
-  baseline: "baseline",
 };
 
 const JUSTIFY: Record<Justify, string> = {

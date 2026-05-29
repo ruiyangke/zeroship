@@ -1,0 +1,32 @@
+/*
+ * Stack — one-dimensional flex arrangement.
+ *
+ * Anatomy:
+ *   .zs-stack    — the flex container
+ *
+ * Driven by inline custom properties set from props:
+ *   --stack-direction   row | column     (default column)
+ *   --stack-gap         --zs-space-*      (default --zs-space-0)
+ *   --stack-wrap        wrap | nowrap     (default nowrap)
+ *   --stack-align       align-items       (default stretch — flex UA default)
+ *   --stack-justify     justify-content   (default flex-start)
+ *
+ * Layout discipline:
+ *   - Arrange-only: no background, no border, no padding. The Stack
+ *     positions its children and nothing else.
+ *   - Spacing comes exclusively from `gap` (the --zs-space-* scale);
+ *     children never carry their own inter-item margin.
+ *   - RTL is automatic — `flex-direction: row` follows the writing
+ *     direction, so a row Stack reorders under `dir="rtl"` with no rule.
+ *
+ * Motion: none. Stack carries no transitions.
+ */
+
+.zs-stack {
+  display: flex;
+  flex-direction: var(--stack-direction, column);
+  gap: var(--stack-gap, var(--zs-space-0));
+  flex-wrap: var(--stack-wrap, nowrap);
+  align-items: var(--stack-align, stretch);
+  justify-content: var(--stack-justify, flex-start);
+}

@@ -52,6 +52,14 @@
 @import "./components/Avatar/Avatar.css";
 @import "./components/Separator/Separator.css";
 
+/* ─── Layout primitives — arrange-only, paint nothing. */
+@import "./layouts/Stack/Stack.css";
+@import "./layouts/Grid/Grid.css";
+@import "./layouts/Cluster/Cluster.css";
+@import "./layouts/Container/Container.css";
+@import "./layouts/Split/Split.css";
+@import "./layouts/Center/Center.css";
+
 *,
 *::before,
 *::after {
@@ -292,6 +300,23 @@
 
   /* Modal z-stack token consumed by Dialog/AlertDialog backdrops. */
   --zs-z-modal: 50;
+
+  /* ─── Breakpoints — minimal responsive scale for layout primitives.
+     The system is fluid by default; these gate Grid `columns` objects and
+     Split `collapseBelow` only. CSS custom properties cannot be used inside
+     `@media` query conditions, so the layout CSS writes the literal rem
+     values in its media queries with a comment referencing the token name
+     (e.g. a 40rem min-width query annotated as the --zs-bp-sm breakpoint).
+     These tokens stay the single documented source of the values. */
+  --zs-bp-sm: 40rem;   /* 640 */
+  --zs-bp-md: 48rem;   /* 768 */
+  --zs-bp-lg: 64rem;   /* 1024 */
+
+  /* ─── Container max-widths — Container is the sole width authority. */
+  --zs-container-sm: 30rem;   /* 480 */
+  --zs-container-md: 48rem;   /* 768 */
+  --zs-container-lg: 64rem;   /* 1024 */
+  --zs-container-xl: 80rem;   /* 1280 */
 }
 
 @media (prefers-reduced-motion: reduce) {

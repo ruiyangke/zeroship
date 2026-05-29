@@ -1,0 +1,32 @@
+/*
+ * Center — centers its content on both axes.
+ *
+ * Anatomy:
+ *   .zs-center            — the centering flex box
+ *   .zs-center--inline    — horizontal-only variant (drops vertical)
+ *
+ * Driven by inline custom properties set from props:
+ *   --center-min-block    length   (applied as min-block-size when set)
+ *
+ * Layout discipline:
+ *   - Arrange-only: no background, no border, no padding.
+ *   - `min-block-size` is the logical form of `min-height` so the floor
+ *     survives vertical writing modes.
+ *   - The `--inline` variant flips to `flex-start` on the cross axis so
+ *     content is centered horizontally but pinned to the top.
+ *
+ * Motion: none.
+ */
+
+.zs-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: var(--center-min-block, 0);
+}
+
+/* Horizontal-only: keep justify-content centered (main axis = inline in
+ * the default row direction) but stop centering on the block axis. */
+.zs-center--inline {
+  align-items: flex-start;
+}
