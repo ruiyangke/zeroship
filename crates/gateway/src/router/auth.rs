@@ -780,19 +780,19 @@ mod tests {
     fn build_state_with_wrapper(
         signing: ed25519_dalek::SigningKey,
     ) -> std::sync::Arc<crate::GateState> {
-        build_state_with_wrapper_and_auth_public(signing, "http://127.0.0.1:1")
+        build_state_with_wrapper_and_auth_ui_url(signing, "http://127.0.0.1:1")
     }
 
-    fn build_state_with_wrapper_and_auth_public(
+    fn build_state_with_wrapper_and_auth_ui_url(
         signing: ed25519_dalek::SigningKey,
-        auth_public: &str,
+        auth_ui_url: &str,
     ) -> std::sync::Arc<crate::GateState> {
-        build_state_with_wrapper_and_auth_public_and_db(signing, auth_public, None)
+        build_state_with_wrapper_and_auth_ui_url_and_db(signing, auth_ui_url, None)
     }
 
-    fn build_state_with_wrapper_and_auth_public_and_db(
+    fn build_state_with_wrapper_and_auth_ui_url_and_db(
         signing: ed25519_dalek::SigningKey,
-        auth_public: &str,
+        auth_ui_url: &str,
         db: Option<std::sync::Arc<compio_postgres::Client>>,
     ) -> std::sync::Arc<crate::GateState> {
         use std::sync::Arc as StdArc;
@@ -821,8 +821,8 @@ mod tests {
                 poll_interval_secs: 5,
                 auth_secret: String::new(),
                 worker_key: "wk".into(),
-                hydra_public: String::new(),
-                auth_public: auth_public.into(),
+                hydra_public_url: String::new(),
+                auth_ui_url: auth_ui_url.into(),
                 insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
@@ -1065,7 +1065,7 @@ mod tests {
         let subject = Uuid::new_v4();
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper_and_auth_public_and_db(
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
             Some(db.clone()),
@@ -1234,13 +1234,13 @@ mod tests {
             }
         })
         .await;
-        let auth_public = srv.url("").trim_end_matches('/').to_string();
+        let auth_ui_url = srv.url("").trim_end_matches('/').to_string();
 
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let forged_signing = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
         let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let state =
-            build_state_with_wrapper_and_auth_public(gateway_signing, &auth_public);
+            build_state_with_wrapper_and_auth_ui_url(gateway_signing, &auth_ui_url);
 
         let aud = "myapp.zeroship.ai";
         let jkt = client_jkt(&client_key);

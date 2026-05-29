@@ -21,21 +21,22 @@ use zeroship_core::oidc_verify::{verify_id_token, JwksCache, OidcError, TokenCla
 use zeroship_core::pkce::{generate_verifier, s256_challenge};
 
 /// A configured OIDC relying party for the gateway, parameterised by the
-/// hydra public URL, the shared gateway client credentials, and the
-/// signing key used to MAC the per-request `__Host-zs_oidc_stash` cookie.
+/// auth UI/OIDC upstream URL, the shared gateway client credentials, and
+/// the signing key used to MAC the per-request `__Host-zs_oidc_stash`
+/// cookie.
 #[derive(Debug, Clone)]
 pub struct OidcRp {
-    /// hydra's public base URL (e.g. `https://auth.zeroship.ai`).
+    /// Auth service UI base URL (e.g. `https://auth.zeroship.ai`).
     /// This is the URL the gateway actually dials for `/oauth2/auth`,
     /// `/oauth2/token`, and JWKS — it must be reachable from the gateway
-    /// process. In tests it points at a loopback hydra; in prod it is
-    /// the public DNS name.
-    pub auth_public: String,
+    /// process. In tests it points at a loopback auth/Hydra surface; in
+    /// prod it is the public DNS name.
+    pub auth_ui_url: String,
     /// Expected `iss` claim in ID tokens issued by hydra. Per
     /// `ops/hydra.yaml::urls.self.issuer` hydra always emits its
     /// configured public URL with a trailing slash, regardless of which
     /// host the RP dialled to obtain the token. In tests this can be
-    /// overridden separately from `auth_public` (which may point at
+    /// overridden separately from `auth_ui_url` (which may point at
     /// loopback) — see [`OidcRp::with_issuer`].
     pub issuer: String,
     /// `OAuth2` `client_id` registered with hydra (currently `"gateway"`).
@@ -50,27 +51,28 @@ pub struct OidcRp {
 }
 
 impl OidcRp {
-    /// Construct a new RP. Caller supplies hydra's public URL, the `OAuth2`
-    /// client credentials registered for the gateway, and the stash
-    /// signing key. The JWKS cache is derived from `auth_public` by
-    /// appending `/.well-known/jwks.json`. The expected ID-token `iss`
-    /// defaults to `auth_public` with a trailing slash; override via
+    /// Construct a new RP. Caller supplies the auth UI/OIDC upstream URL,
+    /// the `OAuth2` client credentials registered for the gateway, and
+    /// the stash signing key. The JWKS cache is derived from
+    /// `auth_ui_url` by appending `/.well-known/jwks.json`. The expected
+    /// ID-token `iss` defaults to `auth_ui_url` with a trailing slash;
+    /// override via
     /// [`OidcRp::with_issuer`] when the dial-URL and issuer string
     /// differ (e.g. loopback hydra during tests).
     pub fn new(
-        auth_public: impl Into<String>,
+        auth_ui_url: impl Into<String>,
         client_id: impl Into<String>,
         client_secret: impl Into<String>,
         stash_signing_key: impl Into<Vec<u8>>,
     ) -> Self {
-        let auth_public = auth_public.into();
+        let auth_ui_url = auth_ui_url.into();
         let jwks_url = format!(
             "{}/.well-known/jwks.json",
-            auth_public.trim_end_matches('/')
+            auth_ui_url.trim_end_matches('/')
         );
-        let issuer = format!("{}/", auth_public.trim_end_matches('/'));
+        let issuer = format!("{}/", auth_ui_url.trim_end_matches('/'));
         Self {
-            auth_public,
+            auth_ui_url,
             issuer,
             client_id: client_id.into(),
             client_secret: client_secret.into(),
@@ -80,7 +82,7 @@ impl OidcRp {
     }
 
     /// Override the expected ID-token `iss` claim. Used when the
-    /// network-reachable hydra URL (`auth_public`) and the logical
+    /// network-reachable auth/Hydra URL (`auth_ui_url`) and the logical
     /// issuer hydra emits in ID tokens are not the same string — e.g.
     /// in integration tests against a loopback hydra that's configured
     /// with `urls.self.issuer: https://auth.zeroship.ai/`.
@@ -139,7 +141,7 @@ impl OidcRp {
 
         let url = format!(
             "{}/oauth2/auth?{}",
-            self.auth_public.trim_end_matches('/'),
+            self.auth_ui_url.trim_end_matches('/'),
             query
         );
 
@@ -189,7 +191,7 @@ impl OidcRp {
         let client = cyper::Client::new();
         let token_url = format!(
             "{}/oauth2/token",
-            self.auth_public.trim_end_matches('/')
+            self.auth_ui_url.trim_end_matches('/')
         );
         let resp = client
             .request(http::Method::POST, &token_url)
@@ -218,7 +220,7 @@ impl OidcRp {
 
         // 4. Verify ID token. Hydra's issuer is whatever
         //    `urls.self.issuer` is set to in ops/hydra.yaml; by default
-        //    we derive it from `auth_public + "/"`, but the test suite
+        //    we derive it from `auth_ui_url + "/"`, but the test suite
         //    (and any deployment where the dial URL differs from the
         //    logical issuer) overrides it via [`with_issuer`].
         let claims = verify_id_token(
@@ -263,7 +265,7 @@ impl OidcRp {
             .finish();
         let url = format!(
             "{}/oauth2/introspect",
-            self.auth_public.trim_end_matches('/')
+            self.auth_ui_url.trim_end_matches('/')
         );
 
         // Basic auth header — hydra requires confidential-client auth on
@@ -616,8 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn new_derives_issuer_from_auth_public_with_trailing_slash() {
-        // Default — issuer is auth_public with one trailing slash, matching
+    fn new_derives_issuer_from_auth_ui_url_with_trailing_slash() {
+        // Default — issuer is auth_ui_url with one trailing slash, matching
         // hydra's `urls.self.issuer` shape.
         let rp = OidcRp::new(
             "https://auth.zeroship.ai",
@@ -627,7 +629,7 @@ mod tests {
         );
         assert_eq!(rp.issuer, "https://auth.zeroship.ai/");
 
-        // Trimming is idempotent — trailing slash on auth_public must not
+        // Trimming is idempotent — trailing slash on auth_ui_url must not
         // produce `//`.
         let rp = OidcRp::new(
             "https://auth.zeroship.ai/",
@@ -649,14 +651,14 @@ mod tests {
             b"k".repeat(32),
         )
         .with_issuer("https://auth.zeroship.ai/");
-        // `auth_public` still drives /oauth2/token + JWKS (loopback).
-        assert_eq!(rp.auth_public, "http://127.0.0.1:4444");
+        // `auth_ui_url` still drives /oauth2/token + JWKS (loopback).
+        assert_eq!(rp.auth_ui_url, "http://127.0.0.1:4444");
         // `issuer` is the logical hydra issuer that ID tokens carry.
         assert_eq!(rp.issuer, "https://auth.zeroship.ai/");
     }
 
     #[test]
-    fn authorize_url_trims_trailing_slash_on_auth_public() {
+    fn authorize_url_trims_trailing_slash_on_auth_ui_url() {
         let rp = OidcRp::new(
             "https://auth.zeroship.ai/",
             "gateway",

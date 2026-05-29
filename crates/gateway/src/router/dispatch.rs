@@ -322,8 +322,8 @@ async fn route_auth_host(
 ) -> HttpResponse {
     let path = req.uri().path();
     let upstream_base = match classify_auth_path(path) {
-        AuthUpstream::Hydra => state.config.hydra_public.as_str(),
-        AuthUpstream::Auth => state.config.auth_public.as_str(),
+        AuthUpstream::Hydra => state.config.hydra_public_url.as_str(),
+        AuthUpstream::Auth => state.config.auth_ui_url.as_str(),
     };
 
     let path_and_query = req
@@ -1526,8 +1526,8 @@ mod tests {
                 poll_interval_secs: 5,
                 auth_secret: String::new(),
                 worker_key: String::new(),
-                hydra_public: String::new(),
-                auth_public: String::new(),
+                hydra_public_url: String::new(),
+                auth_ui_url: String::new(),
                 insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),

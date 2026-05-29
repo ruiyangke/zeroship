@@ -5,7 +5,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use ntex::web;
+use zeroship_core::config::FileConfig;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
     backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
@@ -15,14 +17,151 @@ use zeroship_gateway::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+const DEFAULT_HYDRA_PUBLIC_URL: &str = "http://hydra:4444";
+const DEV_GATEWAY_OIDC_SECRET: &str = "dev-secret-rotate-me-too";
 const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 
-fn dev_insecure_enabled(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--dev-insecure")
-        || std::env::var("ZEROSHIP_DEV_INSECURE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        || arg_or_env(args, "--insecure-dev", "INSECURE_DEV", "false").eq_ignore_ascii_case("true")
+/// zeroship gateway startup configuration.
+#[derive(Debug, Parser)]
+#[command(name = "zeroship-gate")]
+struct GateCli {
+    /// HTTP listen port.
+    #[arg(long, env = "GATE_PORT", default_value = "80")]
+    port: String,
+
+    /// Control-plane API base URL.
+    #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
+    control: String,
+
+    /// Admin/control API shared secret.
+    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
+    control_key: String,
+
+    /// Comma-separated worker base URLs.
+    #[arg(long = "workers", env = "WORKER_URLS", default_value = "http://localhost:8080")]
+    workers: String,
+
+    /// Route-table polling interval in seconds.
+    #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
+    poll_interval: u64,
+
+    /// Shared JWT/HMAC secret for gateway auth paths.
+    #[arg(long = "auth-secret", env = "AUTH_SECRET", default_value = "", hide_env_values = true)]
+    auth_secret: String,
+
+    /// Shared secret for worker admin endpoints.
+    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
+    worker_key: String,
+
+    /// Root directory for content-addressed deploy blobs.
+    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
+    blob_store: String,
+
+    /// In-memory blob cache budget in MiB.
+    #[arg(long = "blob-cache-mem-mb", env = "BLOB_CACHE_MEM_MB", default_value = "256")]
+    blob_cache_mem_mb: usize,
+
+    /// On-disk blob cache budget in GiB.
+    #[arg(long = "blob-cache-disk-gb", env = "BLOB_CACHE_DISK_GB", default_value = "20")]
+    blob_cache_disk_gb: u64,
+
+    /// Root directory for the on-disk blob cache.
+    #[arg(
+        long = "blob-cache-disk-root",
+        env = "BLOB_CACHE_DISK_ROOT",
+        default_value = "./blob-cache"
+    )]
+    blob_cache_disk_root: String,
+
+    /// PostgreSQL DSN for gateway session validation.
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "")]
+    db: String,
+
+    /// PEM/PKCS#8 signing key file for gateway-issued wrapper tokens.
+    #[arg(
+        long = "signing-key-file",
+        env = "GATEWAY_SIGNING_KEY_FILE",
+        default_value = ""
+    )]
+    gateway_signing_key_file: String,
+
+    /// Public URL advertised as the gateway wrapper-token issuer.
+    #[arg(
+        long = "gateway-public-url",
+        env = "GATEWAY_PUBLIC_URL",
+        default_value = "https://api.zeroship.ai"
+    )]
+    gateway_public_url: String,
+
+    /// Hydra public issuer/base URL.
+    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
+    hydra_public_url: Option<String>,
+
+    /// Upstream URL for the auth service UI and OAuth surfaces.
+    #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
+    auth_ui_url: String,
+
+    /// Gateway OIDC client secret.
+    #[arg(
+        long = "gateway-oidc-secret",
+        env = "GATEWAY_OIDC_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    gateway_oidc_secret: String,
+
+    /// HMAC key for short-lived OIDC stash cookies.
+    #[arg(
+        long = "stash-signing-key",
+        env = "STASH_SIGNING_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    stash_signing_key: String,
+
+    /// Allow explicitly insecure local development startup.
+    #[arg(long = "dev-insecure", action = clap::ArgAction::SetTrue)]
+    dev_insecure: bool,
+
+    /// Environment half of `--dev-insecure`; only `1` is truthy.
+    #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
+    dev_insecure_env: bool,
+
+    /// Trust `X-Forwarded-For` from an upstream proxy.
+    #[arg(long = "trust-proxy", action = clap::ArgAction::SetTrue)]
+    trust_proxy: bool,
+
+    /// Environment half of `--trust-proxy`; only `1` is truthy.
+    #[arg(skip = env_is_exact("TRUST_PROXY", "1"))]
+    trust_proxy_env: bool,
+
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    config_path: Option<PathBuf>,
+}
+
+impl GateCli {
+    fn insecure_dev(&self) -> bool {
+        self.dev_insecure || self.dev_insecure_env
+    }
+
+    fn trust_proxy(&self) -> bool {
+        self.trust_proxy || self.trust_proxy_env
+    }
+}
+
+fn env_is_exact(key: &str, expected: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| value == expected)
+}
+
+fn resolve_file_overlay_string(
+    cli_value: Option<String>,
+    file_value: Option<String>,
+    default_value: &str,
+) -> String {
+    cli_value
+        .or(file_value)
+        .unwrap_or_else(|| default_value.to_string())
 }
 
 fn validate_gateway_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
@@ -32,88 +171,91 @@ fn validate_gateway_control_key(value: &str, insecure_dev: bool) -> Result<(), S
     Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
 }
 
+fn validate_gateway_oidc_secret(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev || !value.is_empty() {
+        return Ok(());
+    }
+    Err("GATEWAY_OIDC_SECRET / --gateway-oidc-secret is required outside --dev-insecure".to_string())
+}
+
 fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
     if insecure_dev {
         return Ok(());
     }
-    if value.is_empty() {
-        return Err(
-            "STASH_SIGNING_KEY is required outside INSECURE_DEV=true; set a strong (>=32 byte) value"
-                .to_string(),
-        );
-    }
     if value == DEV_STASH_SIGNING_KEY {
         return Err(
-            "STASH_SIGNING_KEY is the dev default; refusing to boot without INSECURE_DEV=true"
+            "STASH_SIGNING_KEY is the dev default; refusing to boot without --dev-insecure"
                 .to_string(),
         );
     }
-    if value.len() < 32 {
-        return Err(format!(
-            "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
-            value.len()
-        ));
-    }
-    Ok(())
+    zeroship_core::config::validate_stash_key(value, insecure_dev).map_err(|message| {
+        if value.is_empty() {
+            "STASH_SIGNING_KEY is required outside --dev-insecure; set a strong (>=32 byte) value"
+                .to_string()
+        } else if value.len() < 32 {
+            format!(
+                "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
+                value.len()
+            )
+        } else {
+            message
+        }
+    })
 }
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     zeroship_core::observability::init_tracing("info,zeroship_gateway=debug");
 
-    let args: Vec<String> = std::env::args().collect();
-    let port = arg_or_env(&args, "--port", "GATE_PORT", "80");
-    let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
-    let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
-    let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
-    let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
-    let auth_secret = arg_or_env(&args, "--auth-secret", "AUTH_SECRET", "");
-    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
-    let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
-    let blob_cache_mem_mb = arg_or_env(&args, "--blob-cache-mem-mb", "BLOB_CACHE_MEM_MB", "256");
-    let blob_cache_disk_gb = arg_or_env(&args, "--blob-cache-disk-gb", "BLOB_CACHE_DISK_GB", "20");
-    let blob_cache_disk_root = arg_or_env(
-        &args,
-        "--blob-cache-disk-root",
-        "BLOB_CACHE_DISK_ROOT",
-        "./blob-cache",
+    let cli = GateCli::parse();
+    let file = match FileConfig::load(cli.config_path.as_deref()) {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::error!(error = %err, "gateway: failed to load config file");
+            std::process::exit(1);
+        }
+    };
+
+    let insecure_dev = cli.insecure_dev();
+    let trust_proxy = cli.trust_proxy();
+    let hydra_public_url = resolve_file_overlay_string(
+        cli.hydra_public_url,
+        file.auth.hydra_public_url.clone(),
+        DEFAULT_HYDRA_PUBLIC_URL,
     );
-    let hydra_public = arg_or_env(&args, "--hydra-public", "HYDRA_PUBLIC", "http://hydra:4444");
-    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "http://auth:9092");
-    let pg_dsn = arg_or_env(&args, "--db", "DATABASE_URL", "");
-    let oidc_client_secret = arg_or_env(
-        &args,
-        "--gateway-oidc-secret",
-        "GATEWAY_OIDC_SECRET",
-        "dev-secret-rotate-me-too",
-    );
-    let stash_signing_key = arg_or_env(
-        &args,
-        "--stash-signing-key",
-        "STASH_SIGNING_KEY",
-        "",
-    );
-    let insecure_dev = dev_insecure_enabled(&args);
-    let trust_proxy =
-        args.iter().any(|a| a == "--trust-proxy")
-            || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
-    let signing_key_path = arg_or_env(
-        &args,
-        "--signing-key-file",
-        "GATEWAY_SIGNING_KEY_FILE",
-        "",
-    );
-    let public_url = arg_or_env(
-        &args,
-        "--gateway-public-url",
-        "GATEWAY_PUBLIC_URL",
-        "https://api.zeroship.ai",
-    );
+
+    let port = cli.port;
+    let control_url = cli.control;
+    let control_key = cli.control_key;
+    let workers_str = cli.workers;
+    let poll_interval = cli.poll_interval;
+    let auth_secret = cli.auth_secret;
+    let worker_key = cli.worker_key;
+    let blob_store_root = cli.blob_store;
+    let blob_cache_mem_mb = cli.blob_cache_mem_mb;
+    let blob_cache_disk_gb = cli.blob_cache_disk_gb;
+    let blob_cache_disk_root = cli.blob_cache_disk_root;
+    let auth_ui_url = cli.auth_ui_url;
+    let pg_dsn = cli.db;
+    let oidc_client_secret = cli.gateway_oidc_secret;
+    let stash_signing_key = cli.stash_signing_key;
+    let signing_key_path = cli.gateway_signing_key_file;
+    let public_url = cli.gateway_public_url;
 
     if let Err(message) = validate_gateway_control_key(&control_key, insecure_dev) {
         tracing::error!(error = %message, "gateway: refusing to start without control key");
         std::process::exit(1);
     }
+
+    if let Err(message) = validate_gateway_oidc_secret(&oidc_client_secret, insecure_dev) {
+        tracing::error!(error = %message, "gateway: refusing to start without gateway OIDC secret");
+        std::process::exit(1);
+    }
+    let oidc_client_secret = if oidc_client_secret.is_empty() {
+        DEV_GATEWAY_OIDC_SECRET.to_string()
+    } else {
+        oidc_client_secret
+    };
 
     if let Err(message) = validate_gateway_stash_key(&stash_signing_key, insecure_dev) {
         tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
@@ -174,14 +316,8 @@ async fn main() -> std::io::Result<()> {
         Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
     });
 
-    let blob_cache_bytes: usize = blob_cache_mem_mb
-        .parse::<usize>()
-        .unwrap_or(256)
-        .saturating_mul(1024 * 1024);
-    let disk_cache_bytes: u64 = blob_cache_disk_gb
-        .parse::<u64>()
-        .unwrap_or(20)
-        .saturating_mul(1024 * 1024 * 1024);
+    let blob_cache_bytes: usize = blob_cache_mem_mb.saturating_mul(1024 * 1024);
+    let disk_cache_bytes: u64 = blob_cache_disk_gb.saturating_mul(1024 * 1024 * 1024);
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
             .expect("failed to initialise blob store"),
@@ -246,7 +382,7 @@ async fn main() -> std::io::Result<()> {
     // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
     // built at the dispatch site.
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
-        &auth_public,
+        &auth_ui_url,
         "gateway",
         oidc_client_secret,
         stash_signing_key.into_bytes(),
@@ -265,11 +401,11 @@ async fn main() -> std::io::Result<()> {
             control_url,
             control_key,
             worker_urls,
-            poll_interval_secs: poll_interval.parse().unwrap_or(5),
+            poll_interval_secs: poll_interval,
             auth_secret,
             worker_key,
-            hydra_public,
-            auth_public,
+            hydra_public_url,
+            auth_ui_url,
             insecure_dev,
             trust_proxy,
             public_url,
@@ -339,15 +475,6 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
-fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return pair[1].clone();
-        }
-    }
-    std::env::var(env_key).unwrap_or_else(|_| default.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +499,22 @@ mod tests {
     #[test]
     fn gateway_control_key_allows_missing_in_insecure_dev() {
         assert!(validate_gateway_control_key("", true).is_ok());
+    }
+
+    #[test]
+    fn gateway_oidc_secret_rejects_missing_in_non_dev() {
+        let err = validate_gateway_oidc_secret("", false).unwrap_err();
+        assert!(err.contains("GATEWAY_OIDC_SECRET"), "{err}");
+    }
+
+    #[test]
+    fn gateway_oidc_secret_allows_missing_in_insecure_dev() {
+        assert!(validate_gateway_oidc_secret("", true).is_ok());
+    }
+
+    #[test]
+    fn gateway_oidc_secret_accepts_nonempty_in_non_dev() {
+        assert!(validate_gateway_oidc_secret("secret", false).is_ok());
     }
 
     #[test]

@@ -29,7 +29,7 @@
 //! `iss: https://auth.zeroship.ai/` regardless of which interface a token
 //! request came in on. The gateway's `OidcRp` dials hydra at
 //! `http://127.0.0.1:4444` (loopback admin/public) during tests, so the
-//! `auth_public` URL and the expected `iss` differ. We use
+//! OIDC dial URL and the expected `iss` differ. We use
 //! `OidcRp::with_issuer` (added alongside this test) to override the
 //! verifier's expected issuer to the canonical
 //! `https://auth.zeroship.ai/`.
@@ -291,7 +291,7 @@ async fn gateway_oidc_rp_full_dance() {
 
     // 5. Build the OidcRp under test.
     //
-    // `auth_public` is the loopback hydra (the only place we can actually
+    // The OIDC dial URL is loopback hydra (the only place we can actually
     // dial); `with_issuer` overrides the expected `iss` to hydra's
     // configured value so verification matches what hydra emits.
     let rp = OidcRp::new(

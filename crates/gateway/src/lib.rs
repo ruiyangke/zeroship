@@ -49,14 +49,14 @@ pub struct GateConfig {
     /// forwards `auth.zeroship.ai/{oauth2,.well-known}/*` (plus
     /// `/userinfo`) here. Compose-internal default points at the
     /// `hydra` service on its 4444 port.
-    pub hydra_public: String,
+    pub hydra_public_url: String,
     /// Upstream URL for `crates/auth` — the login/signup UI, OAuth2
     /// consent handlers, and webhook surfaces. Everything on the
     /// `auth.zeroship.ai` host that is NOT an OIDC protocol endpoint
     /// is forwarded here. Defaults to the compose-internal `auth`
     /// service; will be wired through once the service joins compose
     /// (Phase 3 Unit U11).
-    pub auth_public: String,
+    pub auth_ui_url: String,
     /// Dev-only flag. When true the gateway emits cookies without the
     /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
     /// / docker-compose. Production MUST set this to false — the

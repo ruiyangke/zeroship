@@ -182,6 +182,20 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     }
 }
 
+async fn insert_user(client: &Client, label: &str) -> Uuid {
+    let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
+    let rows = client
+        .query(
+            "INSERT INTO auth.users (email, name, email_verified_at)
+             VALUES ($1, $2, NOW())
+             RETURNING id",
+            &[&email, &label],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
+}
+
 #[derive(Debug, Default)]
 struct StubBlobStore;
 
@@ -316,8 +330,8 @@ fn build_handler_state(db: Arc<Client>, auth_base: &str) -> Arc<GateState> {
             poll_interval_secs: 5,
             auth_secret: String::new(),
             worker_key: String::new(),
-            hydra_public: String::new(),
-            auth_public: auth_base.to_string(),
+            hydra_public_url: String::new(),
+            auth_ui_url: auth_base.to_string(),
             insecure_dev: true,
             trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),
@@ -405,7 +419,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
     let issuer = format!("{auth_base}/");
 
-    let target_user = Uuid::new_v4();
+    let target_user = insert_user(&db, "gateway-bcl-handler-target").await;
     let target_user_string = target_user.to_string();
     let app_id = format!("app-bcl-{}", Uuid::new_v4().simple());
     let session = create(
@@ -493,7 +507,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     db.execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&session.id])
         .await
         .ok();
-    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user_id])
+    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user])
         .await
         .ok();
 }

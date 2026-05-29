@@ -6587,6 +6587,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "clap",
  "compio",
  "compio-postgres",
  "cyper",
