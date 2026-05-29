@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { Field, NumberField } from "../components";
@@ -520,10 +521,10 @@ export const CoarsePointer: Story = {
       description: {
         story:
           "Under `pointer: coarse` the stepper buttons grow to the " +
-          "Apple HIG floor (44 device-units ≈ `--zs-hit-min`) on BOTH " +
-          "axes so a finger lands. The aria-wiring suite emulates a " +
-          "coarse pointer and asserts the button's bounding rect ≥ " +
-          "2.75rem in inline and block.",
+          "coarse-pointer minimum target (44 device-units ≈ " +
+          "`--zs-hit-min`) on BOTH axes so a finger lands. The " +
+          "aria-wiring suite emulates a coarse pointer and asserts " +
+          "the button's bounding rect ≥ 2.75rem in inline and block.",
       },
     },
   },
@@ -579,3 +580,128 @@ export const RTL: Story = {
     </div>
   ),
 };
+
+/* ─── 15. Field-auto aria preservation (Wave-9 review item 1) ──────── *
+ *
+ * REGRESSION for the aria-merge fix. Mounts NumberField inside a Field
+ * with a Label AND a Description, but passes NO `aria-label` /
+ * `aria-labelledby` / `aria-describedby` props from the caller. The
+ * inner <input> must STILL carry Base UI's auto-wired
+ * `aria-labelledby` (from Field.Label) and `aria-describedby` (from
+ * Field.Description) — pre-fix, our wrapper passed every aria-*
+ * prop directly to BaseNumberField.Input, and Base UI's mergeProps
+ * writes `undefined` over its own auto-wired ids
+ * (`mergedProps[propName] = externalPropValue` even when undefined,
+ * `@base-ui/merge-props/mergeProps.js:153`). The aria-wiring suite
+ * asserts BOTH ids are present.
+ *
+ * Post-fix the inner input keeps Base UI's `aria-labelledby` (the
+ * Label's id) and `aria-describedby` (the Description's id). */
+export const FieldAutoAria: Story = {
+  name: "Field-auto aria preservation (no caller props)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Wave-9 review aria-merge item. With NO " +
+          "caller-supplied `aria-label` / `aria-labelledby` / " +
+          "`aria-describedby`, the Field-auto-wired ids must still land " +
+          "on the inner <input>. Pre-fix, passing `undefined` for those " +
+          "props would silently wipe Base UI's auto-wired ids via its " +
+          "`mergeProps` (it copies `undefined` over its own values).",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Field aria preservation"
+    >
+      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+        <Field>
+          <Field.Label>Quantity</Field.Label>
+          <NumberField
+            defaultValue={3}
+            min={0}
+            max={10}
+            step={1}
+            data-testid="numberfield-field-auto-aria"
+          />
+          <Field.Description>
+            How many do you need? Field auto-wires this id to the input.
+          </Field.Description>
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 16. Consumer focus handlers preserved (Wave-9 review item 2) ─── *
+ *
+ * REGRESSION for the focus-handler compose fix. Pre-fix the Root
+ * render callback REPLACED `rootProps.onFocus` / `rootProps.onBlur`
+ * with our local bare-focus trackers, dropping any handler a parent
+ * forwarded down via inherited root props. The story attaches an
+ * `onFocus` / `onBlur` to the NumberField; the play() focuses the
+ * input and asserts the counter ticks. Pre-fix the counter stays
+ * at zero. */
+export const ConsumerFocusHandlers: Story = {
+  name: "Consumer onFocus / onBlur preserved",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Wave-9 review focus-handler item. A " +
+          "caller-supplied `onFocus` / `onBlur` on `<NumberField>` must " +
+          "fire when the inner input gains / loses focus — pre-fix the " +
+          "Root render callback replaced those handlers with our local " +
+          "bare-focus trackers and the consumer never saw the event.",
+      },
+    },
+  },
+  render: () => <ConsumerFocusInline />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByTestId("numberfield-focus-handlers");
+    const counter = canvas.getByTestId("numberfield-focus-counter");
+    await expect(counter).toHaveTextContent("focus=0 blur=0");
+    await userEvent.click(input);
+    await waitFor(() =>
+      expect(counter).toHaveTextContent("focus=1 blur=0"),
+    );
+    // Blur by tabbing away.
+    await userEvent.tab();
+    await waitFor(() =>
+      expect(counter).toHaveTextContent("focus=1 blur=1"),
+    );
+  },
+};
+
+function ConsumerFocusInline() {
+  const [focusCount, setFocusCount] = useState(0);
+  const [blurCount, setBlurCount] = useState(0);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Consumer focus handlers"
+    >
+      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+        <NumberField
+          defaultValue={1}
+          aria-label="Counted focus"
+          data-testid="numberfield-focus-handlers"
+          onFocus={() => setFocusCount((n) => n + 1)}
+          onBlur={() => setBlurCount((n) => n + 1)}
+        />
+        <span
+          className="zs-story-label"
+          data-testid="numberfield-focus-counter"
+        >
+          {`focus=${focusCount} blur=${blurCount}`}
+        </span>
+      </div>
+    </div>
+  );
+}

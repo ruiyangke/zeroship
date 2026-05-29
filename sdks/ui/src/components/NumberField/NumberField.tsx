@@ -26,7 +26,8 @@
  *
  *   2. Stepper buttons hit-target floor at 1.75rem (sm) so a finger can
  *      land them. On `pointer: coarse` they grow to `--zs-hit-min`
- *      (2.75rem ≈ 44 device-units) — Apple HIG floor. Brief contingency.
+ *      (2.75rem ≈ 44 device-units) — the coarse-pointer minimum target
+ *      we adopt platform-wide. Brief contingency.
  *
  *   3. The scrub area lives at the input's `start` edge (logical-property
  *      `inset-inline-start`) so RTL flips it automatically. It mounts a
@@ -66,6 +67,7 @@ import {
   type ComponentPropsWithoutRef,
   type FocusEvent as ReactFocusEvent,
   type HTMLAttributes,
+  type InputHTMLAttributes,
   type Ref,
 } from "react";
 import { NumberField as BaseNumberField } from "@base-ui/react/number-field";
@@ -114,7 +116,12 @@ export interface NumberFieldProps
   showScrub?: boolean;
   /** Placeholder for the input. Base UI forwards to the inner <input>. */
   placeholder?: string;
-  /** Class hook for the bordered shell. */
+  /**
+   * Class hook for the Root (`.zs-number-field`) — the positioning
+   * context that anchors the scrub area. The bordered shell is the
+   * inner `.zs-number-field__group`; consumers wanting to retheme just
+   * the shell should target that descendant from the Root class.
+   */
   className?: string;
   /**
    * `aria-label` / `aria-labelledby` / `aria-describedby` forwarded to
@@ -227,6 +234,23 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           // surface `data-invalid` only when explicitly false so the
           // styling-only invalid path matches Input's contract.
           const dataInvalid = state.valid === false ? "" : undefined;
+          // Compose Base UI's rootProps.onFocus / onBlur (which may
+          // carry handlers a parent forwarded down via inherited root
+          // props) with our local bare-focus tracking. Replacing the
+          // handlers — the pre-fix shape — silently dropped any
+          // consumer-attached focus listeners (Wave-9 review item 2).
+          const composedFocus = (
+            event: ReactFocusEvent<HTMLDivElement>,
+          ) => {
+            rootProps.onFocus?.(event);
+            handleFocus(event);
+          };
+          const composedBlur = (
+            event: ReactFocusEvent<HTMLDivElement>,
+          ) => {
+            rootProps.onBlur?.(event);
+            handleBlur(event);
+          };
           return (
             <div
               {...rootProps}
@@ -244,8 +268,8 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
               data-disabled={dataDisabled}
               data-readonly={dataReadonly}
               data-invalid={dataInvalid}
-              onFocus={handleFocus}
-              onBlur={handleBlur}
+              onFocus={composedFocus}
+              onBlur={composedBlur}
             />
           );
         }}
@@ -294,10 +318,52 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           <BaseNumberField.Input
             className="zs-number-field__input"
             placeholder={placeholder}
-            aria-label={ariaLabel}
-            aria-labelledby={ariaLabelledBy}
-            aria-describedby={ariaDescribedBy}
             data-testid={dataTestId}
+            // ───────────────────────────────────────────────────────
+            // Aria merge — render-callback path (Wave-9 review item 1).
+            //
+            // Base UI's NumberField.Input auto-wires `aria-labelledby`
+            // from the enclosing Field's label and `aria-describedby`
+            // from Field.Description / Field.Error via
+            // `validation.getValidationProps()`. Its internal
+            // `mergeProps` writes the caller's value EVEN WHEN
+            // UNDEFINED (`mergedProps[propName] = externalPropValue`,
+            // sdks/@base-ui/merge-props/mergeProps.js), so passing
+            // `aria-label={undefined}` / `aria-labelledby={undefined}`
+            // /`aria-describedby={undefined}` at the prop layer
+            // silently wipes Field's auto-wired ids. That breaks the
+            // real-path aria-wiring contract — the spinbutton would
+            // not announce the description / error against the
+            // input.
+            //
+            // Fix: take Base UI's merged inputProps (which already
+            // carry the auto-wired aria) inside the render callback
+            // and only apply the caller's aria when it's actually
+            // defined. `aria-describedby` is UNIONED so external
+            // help text composes with Field's announcements (Input
+            // pattern, sdks/ui/src/components/Input/Input.tsx:243-250).
+            render={(
+              inputProps: InputHTMLAttributes<HTMLInputElement>,
+            ) => {
+              const mergedDescribedBy =
+                [inputProps["aria-describedby"], ariaDescribedBy]
+                  .filter(Boolean)
+                  .join(" ") || undefined;
+              return (
+                <input
+                  {...inputProps}
+                  // Defined-only overrides — preserve Base UI's
+                  // auto-wired ids when the caller didn't pass one.
+                  {...(ariaLabel !== undefined
+                    ? { "aria-label": ariaLabel }
+                    : null)}
+                  {...(ariaLabelledBy !== undefined
+                    ? { "aria-labelledby": ariaLabelledBy }
+                    : null)}
+                  aria-describedby={mergedDescribedBy}
+                />
+              );
+            }}
           />
           <BaseNumberField.Increment
             className="zs-number-field__step zs-number-field__step--inc"

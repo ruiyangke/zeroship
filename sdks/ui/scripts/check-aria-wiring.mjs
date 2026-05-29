@@ -9154,6 +9154,56 @@ await open("components-contextmenu--basic-right-click-area");
 }
 await page.emulateMedia({ reducedMotion: "no-preference" });
 
+/* ─── Wave 9 fix (NumberField #1) — Field-auto aria preservation ─── */
+await open("components-numberfield--field-auto-aria");
+{
+  const input = page.locator('[data-testid="numberfield-field-auto-aria"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = (await input.getAttribute("aria-labelledby")) ?? "";
+  const describedBy = (await input.getAttribute("aria-describedby")) ?? "";
+  const labelledOk =
+    labelledBy.trim().length > 0 &&
+    (await page.evaluate(
+      (ids) => ids.split(/\s+/).every((id) => !!document.getElementById(id)),
+      labelledBy,
+    ));
+  const describedOk =
+    describedBy.trim().length > 0 &&
+    (await page.evaluate(
+      (ids) => ids.split(/\s+/).every((id) => !!document.getElementById(id)),
+      describedBy,
+    ));
+  report(
+    "NumberField Field-auto aria — input keeps auto-wired labelledby + describedby (Wave 9 fix #1)",
+    labelledOk && describedOk,
+    `aria-labelledby="${labelledBy}" aria-describedby="${describedBy}"`,
+  );
+}
+
+/* ─── Wave 9 fix (NumberField #2) — onFocus / onBlur compose ─── */
+await open("components-numberfield--consumer-focus-handlers");
+{
+  const input = page.locator('[data-testid="numberfield-focus-handlers"]');
+  const counter = page.locator('[data-testid="numberfield-focus-counter"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await counter.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(100);
+  const initialText = (await counter.textContent()) ?? "";
+  await input.focus();
+  await page.waitForTimeout(50);
+  await input.blur();
+  await page.waitForTimeout(50);
+  const finalText = (await counter.textContent()) ?? "";
+  const match = finalText.match(/focus=(\d+)\s+blur=(\d+)/);
+  const focusCount = match ? Number(match[1]) : 0;
+  const blurCount = match ? Number(match[2]) : 0;
+  report(
+    "NumberField consumer focus handlers — onFocus + onBlur fire (Wave 9 fix #2)",
+    focusCount >= 1 && blurCount >= 1,
+    `initial="${initialText}" final="${finalText}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

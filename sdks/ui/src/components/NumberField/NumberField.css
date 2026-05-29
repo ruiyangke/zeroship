@@ -82,16 +82,18 @@
 .zs-number-field--outline .zs-number-field__group {
   background: transparent;
 }
-@media (hover: hover) {
-  .zs-number-field--default:not([data-disabled]):not([data-readonly]):not(
-      [data-focused]
-    )
-    .zs-number-field__group:hover {
-    background-color: var(--zs-input-bg-filled-hover);
-  }
-}
 
-/* ─── Hover (hover-capable pointers only) ──────────────────────────── */
+/* ─── Hover (hover-capable pointers only) ──────────────────────────── *
+ *
+ * Wave-9 review item 6: the variant-specific default-hover rule below
+ * has the SAME specificity as this generic hover rule (one variant /
+ * shell class + one descendant class + three :not() attribute
+ * selectors + :hover). When the variant rule sat BEFORE the generic
+ * one, the later cascade entry won and `--zs-input-bg-filled-hover`
+ * was dead. Order the variant rule AFTER the generic so the filled
+ * surface tone wins for the default variant. The outline variant has
+ * no per-variant hover treatment; it falls through to the generic
+ * `--zs-input-bg-hover`. */
 @media (hover: hover) {
   .zs-number-field:not([data-disabled]):not([data-readonly]):not([data-focused])
     .zs-number-field__group:hover {
@@ -99,6 +101,12 @@
     box-shadow:
       inset 0 0 0 0.0625rem var(--zs-input-border-hover),
       0 0 0 0 transparent;
+  }
+  .zs-number-field--default:not([data-disabled]):not([data-readonly]):not(
+      [data-focused]
+    )
+    .zs-number-field__group:hover {
+    background-color: var(--zs-input-bg-filled-hover);
   }
 }
 
@@ -233,19 +241,20 @@
   min-inline-size: 2rem;
 }
 
-/* Coarse-pointer hit-target floor (Apple HIG: 44 device-units ≈
-   --zs-hit-min 2.75rem). Pre-fix only inline-size grew, leaving
-   block-size at 2rem/2.5rem — a stylus or finger could land off the
-   target's vertical centre. Slice-7 review item 4: expand BOTH axes
-   under pointer:coarse. The Root grows together via min-block-size on
-   the group so the shell follows the buttons.
+/* Coarse-pointer hit-target floor (44 device-units ≈
+   --zs-hit-min 2.75rem — the platform-wide coarse-pointer minimum
+   target). Pre-fix only inline-size grew, leaving block-size at
+   2rem/2.5rem — a stylus or finger could land off the target's
+   vertical centre. Slice-7 review item 4: expand BOTH axes under
+   pointer:coarse. The Root grows together via min-block-size on the
+   group so the shell follows the buttons.
 
    Specificity note: the `--sm` / `--md` / `--lg` size variants above
    set `min-inline-size` at TWO-class specificity
    (`.zs-number-field--md .zs-number-field__step`), so the coarse-
    pointer mirror MUST also be two-class — otherwise the variant rule
-   pins the per-size floor (1.75rem / 2rem) and the HIG floor never
-   applies. We re-emit per variant to match. */
+   pins the per-size floor (1.75rem / 2rem) and the coarse-pointer
+   floor never applies. We re-emit per variant to match. */
 @media (pointer: coarse) {
   .zs-number-field--sm .zs-number-field__step,
   .zs-number-field--md .zs-number-field__step,
@@ -360,10 +369,18 @@
   box-shadow: 0 0.125rem 0.5rem 0 color-mix(in oklch, var(--zs-label) 30%, transparent);
 }
 
-/* ─── Reduced motion ───────────────────────────────────────────────── */
+/* ─── Reduced motion ───────────────────────────────────────────────── *
+ *
+ * Wave-9 review item 3: every selector above that declares a
+ * `transition` must be silenced under `prefers-reduced-motion: reduce`.
+ * Pre-fix only `.zs-number-field__group` and `.zs-number-field__step`
+ * were covered; the scrub affordance still animated `color` and
+ * `box-shadow` on hover. Add `.zs-number-field__scrub` so the mirror
+ * is complete. */
 @media (prefers-reduced-motion: reduce) {
   .zs-number-field__group,
-  .zs-number-field__step {
+  .zs-number-field__step,
+  .zs-number-field__scrub {
     transition: none;
   }
 }
@@ -480,6 +497,19 @@
   }
   .zs-number-field__scrub {
     color: CanvasText;
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+  }
+  /* Hover mirror — the non-forced rule
+     (`.zs-number-field__scrub:hover`) paints token color + token
+     shadow at one-class + :hover specificity. Mirror at equal
+     specificity (inside the @media block) so the system palette wins
+     on hover under forced-colors. Wave-9 review item 4. */
+  @media (hover: hover) {
+    .zs-number-field__scrub:hover {
+      color: Highlight;
+      box-shadow: inset 0 0 0 0.0625rem Highlight;
+    }
   }
   .zs-number-field__scrub-cursor {
     background: Canvas;
