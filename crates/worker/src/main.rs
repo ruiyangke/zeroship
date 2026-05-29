@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
-use zeroship_core::config::{FileConfig, resolve_observability};
+use zeroship_core::config::{
+    env_is_exact, load_overlay_or_exit, require_unless_dev, resolve_observability,
+};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
 
@@ -22,8 +24,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[command(name = "zeroship-worker")]
 struct WorkerCli {
     /// HTTP listen port.
-    #[arg(long, env = "WORKER_PORT", default_value = "8080")]
-    port: String,
+    #[arg(long, env = "WORKER_PORT", default_value_t = 8080)]
+    port: u16,
 
     /// Number of ntex worker threads.
     #[arg(long = "worker-threads", env = "WORKER_THREADS")]
@@ -44,6 +46,8 @@ struct WorkerCli {
     /// Environment half of `--dev-insecure`; only `1` is truthy.
     #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
     dev_insecure_env: bool,
+
+    // No --trust-proxy: the worker has no client-facing IP logic.
 
     /// Maximum number of cached app isolates.
     #[arg(long = "max-isolates", env = "MAX_ISOLATES", default_value = "200")]
@@ -92,23 +96,12 @@ impl WorkerCli {
     }
 }
 
-fn env_is_exact(key: &str, expected: &str) -> bool {
-    std::env::var(key).is_ok_and(|value| value == expected)
-}
-
 fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
     worker_threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
     })
-}
-
-fn validate_worker_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev || !value.is_empty() {
-        return Ok(());
-    }
-    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
 }
 
 #[allow(missing_debug_implementations)]
@@ -141,13 +134,7 @@ pub struct WorkerConfig {
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     let cli = WorkerCli::parse();
-    let file = match FileConfig::load(cli.config_path.as_deref()) {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("worker: failed to load config file: {err}");
-            std::process::exit(1);
-        }
-    };
+    let file = load_overlay_or_exit(cli.config_path.as_deref(), "worker");
     let (filter, format) = resolve_observability(
         &cli.obs,
         &file.observability,
@@ -170,7 +157,9 @@ async fn main() -> std::io::Result<()> {
     let bind_host = cli.bind;
     let socket_path = cli.socket;
 
-    if let Err(message) = validate_worker_control_key(&control_key, insecure_dev) {
+    if let Err(message) =
+        require_unless_dev("CONTROL_KEY / --control-key", &control_key, insecure_dev)
+    {
         tracing::error!(error = %message, "worker: refusing to start without control key");
         std::process::exit(1);
     }
@@ -299,18 +288,19 @@ mod tests {
 
     #[test]
     fn worker_control_key_rejects_missing_in_non_dev() {
-        let err = validate_worker_control_key("", false).unwrap_err();
+        let err =
+            require_unless_dev("CONTROL_KEY / --control-key", "", false).unwrap_err();
         assert!(err.contains("CONTROL_KEY"), "{err}");
     }
 
     #[test]
     fn worker_control_key_accepts_nonempty_in_non_dev() {
-        assert!(validate_worker_control_key("secret", false).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "secret", false).is_ok());
     }
 
     #[test]
     fn worker_control_key_allows_missing_in_insecure_dev() {
-        assert!(validate_worker_control_key("", true).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
     }
 
     #[test]

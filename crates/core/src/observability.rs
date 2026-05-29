@@ -30,10 +30,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// is unset, we auto-detect: TTY stderr -> `pretty`, otherwise
 /// `json` (production-friendly).
 pub fn init_tracing(default_filter: &str) {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(value) if EnvFilter::try_new(value.as_str()).is_ok() => value,
-        _ => default_filter.to_string(),
-    };
+    let filter = resolve_init_filter(std::env::var("RUST_LOG").ok(), default_filter);
     let format = std::env::var("ZEROSHIP_LOG_FORMAT").ok();
 
     init_tracing_with(&filter, format.as_deref());
@@ -44,7 +41,10 @@ pub fn init_tracing(default_filter: &str) {
 /// Passing `None` for `format` preserves the standard auto-detection:
 /// TTY stderr uses `pretty`, and non-TTY stderr uses `json`.
 pub fn init_tracing_with(filter: &str, format: Option<&str>) {
-    let env_filter = EnvFilter::new(filter);
+    let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|err| {
+        eprintln!("invalid tracing filter {filter:?}: {err}; falling back to \"error\"");
+        EnvFilter::try_new("error").expect("hard-coded tracing filter is valid")
+    });
 
     let format = format.unwrap_or_else(|| {
         if std::io::stderr().is_terminal() {
@@ -105,4 +105,21 @@ fn binary_name() -> String {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "zeroship".into())
+}
+
+fn resolve_init_filter(rust_log: Option<String>, default_filter: &str) -> String {
+    crate::config::resolve_log_filter(rust_log, default_filter)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn init_filter_falls_back_to_default_for_malformed_rust_log() {
+        let filter = super::resolve_init_filter(
+            Some("zeroship_core=definitely-not-a-level".to_string()),
+            "warn,zeroship_core=debug",
+        );
+
+        assert_eq!(filter, "warn,zeroship_core=debug");
+    }
 }

@@ -42,8 +42,8 @@ pub use stripe_store::StripeStore;
 /// Compiled default for first-party OAuth clients that skip Hydra consent.
 ///
 /// The shared `[auth].trusted_oauth_clients` file overlay replaces this list
-/// when present. Keeping the builder client as the no-file default preserves
-/// local/dev behavior for deployments that have not opted into the overlay.
+/// when present. Keeping the builder client as the no-file default gives local
+/// dev a sensible zero-config default.
 #[must_use]
 pub fn default_trusted_oauth_clients() -> HashSet<String> {
     [bootstrap_builder::BUILDER_CLIENT_ID.to_string()].into()

@@ -70,7 +70,8 @@ pub struct AuthConfig {
     #[arg(
         long,
         env = "AUTH_STASH_SIGNING_KEY",
-        default_value = "dev-only-stash-signing-key-not-for-production-use!!"
+        default_value = "dev-only-stash-signing-key-not-for-production-use!!",
+        hide_env_values = true
     )]
     pub stash_signing_key: String,
 
@@ -81,7 +82,7 @@ pub struct AuthConfig {
     pub google_client_id: Option<String>,
 
     /// Google OAuth 2.0 client secret.
-    #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET")]
+    #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET", hide_env_values = true)]
     pub google_client_secret: Option<String>,
 
     /// Redirect URI registered with Google. Must match the value configured in
@@ -139,7 +140,7 @@ pub struct AuthConfig {
     pub github_client_id: Option<String>,
 
     /// GitHub OAuth App client secret.
-    #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET")]
+    #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET", hide_env_values = true)]
     pub github_client_secret: Option<String>,
 
     /// Callback URL registered on the GitHub OAuth App. Must match what's set
@@ -202,7 +203,7 @@ pub struct AuthConfig {
     pub smtp_username: Option<String>,
 
     /// SMTP password (paired with `--smtp-username`).
-    #[arg(long, env = "AUTH_SMTP_PASSWORD")]
+    #[arg(long, env = "AUTH_SMTP_PASSWORD", hide_env_values = true)]
     pub smtp_password: Option<String>,
 
     /// `true` ⇒ open plaintext then upgrade with STARTTLS (port 587).
@@ -211,7 +212,7 @@ pub struct AuthConfig {
     pub smtp_starttls: bool,
 
     /// Resend API key (required when `--mailer=resend`).
-    #[arg(long, env = "AUTH_RESEND_API_KEY")]
+    #[arg(long, env = "AUTH_RESEND_API_KEY", hide_env_values = true)]
     pub resend_api_key: Option<String>,
 
     /// `From` address every transactional mail uses.
@@ -251,7 +252,11 @@ pub struct AuthConfig {
 
     /// HTTP Basic-auth password paired with [`Self::postmark_webhook_user`].
     /// See that field for the rationale.
-    #[arg(long, env = "AUTH_POSTMARK_WEBHOOK_PASSWORD")]
+    #[arg(
+        long,
+        env = "AUTH_POSTMARK_WEBHOOK_PASSWORD",
+        hide_env_values = true
+    )]
     pub postmark_webhook_password: Option<String>,
 
     // ─── Cron (P6-U1: jwk_rotation; future units add audit retention) ───

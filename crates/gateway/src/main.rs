@@ -7,7 +7,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ntex::web;
-use zeroship_core::config::{FileConfig, resolve_observability};
+use zeroship_core::config::{
+    DEV_STASH_SIGNING_KEY, env_is_exact, load_overlay_or_exit, require_unless_dev,
+    resolve_observability, resolve_overlay_string, validate_stash_key,
+};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
     backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
@@ -19,15 +22,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const DEFAULT_HYDRA_PUBLIC_URL: &str = "http://hydra:4444";
 const DEV_GATEWAY_OIDC_SECRET: &str = "dev-secret-rotate-me-too";
-const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 
 /// zeroship gateway startup configuration.
 #[derive(Debug, Parser)]
 #[command(name = "zeroship-gate")]
 struct GateCli {
     /// HTTP listen port.
-    #[arg(long, env = "GATE_PORT", default_value = "80")]
-    port: String,
+    #[arg(long, env = "GATE_PORT", default_value_t = 80)]
+    port: u16,
 
     /// Control-plane API base URL.
     #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
@@ -154,69 +156,10 @@ impl GateCli {
     }
 }
 
-fn env_is_exact(key: &str, expected: &str) -> bool {
-    std::env::var(key).is_ok_and(|value| value == expected)
-}
-
-fn resolve_file_overlay_string(
-    cli_value: Option<String>,
-    file_value: Option<String>,
-    default_value: &str,
-) -> String {
-    cli_value
-        .or(file_value)
-        .unwrap_or_else(|| default_value.to_string())
-}
-
-fn validate_gateway_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev || !value.is_empty() {
-        return Ok(());
-    }
-    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
-}
-
-fn validate_gateway_oidc_secret(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev || !value.is_empty() {
-        return Ok(());
-    }
-    Err("GATEWAY_OIDC_SECRET / --gateway-oidc-secret is required outside --dev-insecure".to_string())
-}
-
-fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
-    }
-    if value == DEV_STASH_SIGNING_KEY {
-        return Err(
-            "STASH_SIGNING_KEY is the dev default; refusing to boot without --dev-insecure"
-                .to_string(),
-        );
-    }
-    zeroship_core::config::validate_stash_key(value, insecure_dev).map_err(|message| {
-        if value.is_empty() {
-            "STASH_SIGNING_KEY is required outside --dev-insecure; set a strong (>=32 byte) value"
-                .to_string()
-        } else if value.len() < 32 {
-            format!(
-                "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
-                value.len()
-            )
-        } else {
-            message
-        }
-    })
-}
-
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
-    let file = match FileConfig::load(cli.config_path.as_deref()) {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("gateway: failed to load config file: {err}");
-            std::process::exit(1);
-        }
-    };
+    let file = load_overlay_or_exit(cli.config_path.as_deref(), "gateway");
     let (filter, format) = resolve_observability(
         &cli.obs,
         &file.observability,
@@ -226,10 +169,10 @@ async fn main() -> std::io::Result<()> {
 
     let insecure_dev = cli.insecure_dev();
     let trust_proxy = cli.trust_proxy();
-    let hydra_public_url = resolve_file_overlay_string(
+    let hydra_public_url = resolve_overlay_string(
         cli.hydra_public_url,
         file.auth.hydra_public_url.clone(),
-        DEFAULT_HYDRA_PUBLIC_URL,
+        Some(DEFAULT_HYDRA_PUBLIC_URL),
     );
 
     let port = cli.port;
@@ -250,12 +193,18 @@ async fn main() -> std::io::Result<()> {
     let signing_key_path = cli.gateway_signing_key_file;
     let public_url = cli.gateway_public_url;
 
-    if let Err(message) = validate_gateway_control_key(&control_key, insecure_dev) {
+    if let Err(message) =
+        require_unless_dev("CONTROL_KEY / --control-key", &control_key, insecure_dev)
+    {
         tracing::error!(error = %message, "gateway: refusing to start without control key");
         std::process::exit(1);
     }
 
-    if let Err(message) = validate_gateway_oidc_secret(&oidc_client_secret, insecure_dev) {
+    if let Err(message) = require_unless_dev(
+        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+        &oidc_client_secret,
+        insecure_dev,
+    ) {
         tracing::error!(error = %message, "gateway: refusing to start without gateway OIDC secret");
         std::process::exit(1);
     }
@@ -265,7 +214,7 @@ async fn main() -> std::io::Result<()> {
         oidc_client_secret
     };
 
-    if let Err(message) = validate_gateway_stash_key(&stash_signing_key, insecure_dev) {
+    if let Err(message) = validate_stash_key(&stash_signing_key, insecure_dev) {
         tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
         std::process::exit(1);
     }
@@ -489,63 +438,78 @@ mod tests {
 
     #[test]
     fn gateway_stash_key_rejects_missing_in_non_dev() {
-        let err = validate_gateway_stash_key("", false).unwrap_err();
+        let err = validate_stash_key("", false).unwrap_err();
         assert!(err.contains("required"), "{err}");
     }
 
     #[test]
     fn gateway_control_key_rejects_missing_in_non_dev() {
-        let err = validate_gateway_control_key("", false).unwrap_err();
+        let err =
+            require_unless_dev("CONTROL_KEY / --control-key", "", false).unwrap_err();
         assert!(err.contains("CONTROL_KEY"), "{err}");
     }
 
     #[test]
     fn gateway_control_key_accepts_nonempty_in_non_dev() {
-        assert!(validate_gateway_control_key("secret", false).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "secret", false).is_ok());
     }
 
     #[test]
     fn gateway_control_key_allows_missing_in_insecure_dev() {
-        assert!(validate_gateway_control_key("", true).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
     }
 
     #[test]
     fn gateway_oidc_secret_rejects_missing_in_non_dev() {
-        let err = validate_gateway_oidc_secret("", false).unwrap_err();
+        let err = require_unless_dev(
+            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+            "",
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("GATEWAY_OIDC_SECRET"), "{err}");
     }
 
     #[test]
     fn gateway_oidc_secret_allows_missing_in_insecure_dev() {
-        assert!(validate_gateway_oidc_secret("", true).is_ok());
+        assert!(
+            require_unless_dev("GATEWAY_OIDC_SECRET / --gateway-oidc-secret", "", true).is_ok()
+        );
     }
 
     #[test]
     fn gateway_oidc_secret_accepts_nonempty_in_non_dev() {
-        assert!(validate_gateway_oidc_secret("secret", false).is_ok());
+        assert!(
+            require_unless_dev(
+                "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+                "secret",
+                false
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn gateway_stash_key_rejects_dev_default_in_non_dev() {
-        let err = validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
+        let err = validate_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
         assert!(err.contains("dev default"), "{err}");
     }
 
     #[test]
     fn gateway_stash_key_rejects_short_in_non_dev() {
-        let err = validate_gateway_stash_key("short", false).unwrap_err();
+        let err = validate_stash_key("short", false).unwrap_err();
         assert!(err.contains("too short"), "{err}");
     }
 
     #[test]
     fn gateway_stash_key_accepts_strong_in_non_dev() {
         let key = "0123456789abcdef0123456789abcdef";
-        assert!(validate_gateway_stash_key(key, false).is_ok());
+        assert!(validate_stash_key(key, false).is_ok());
     }
 
     #[test]
     fn gateway_stash_key_allows_dev_default_in_insecure_dev() {
-        assert!(validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
-        assert!(validate_gateway_stash_key("", true).is_ok());
+        assert!(validate_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
+        assert!(validate_stash_key("", true).is_ok());
     }
 }

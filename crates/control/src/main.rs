@@ -7,7 +7,10 @@ use std::sync::Arc;
 use base64::Engine as _;
 use clap::Parser;
 use ntex::web;
-use zeroship_core::config::{FileConfig, resolve_observability};
+use zeroship_core::config::{
+    DEV_STASH_SIGNING_KEY, env_is_exact, env_is_truthy, load_overlay_or_exit,
+    resolve_observability, resolve_overlay_string,
+};
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
@@ -21,15 +24,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const DEV_HYDRA_PUBLIC_URL: &str = "http://localhost:4444";
 const DEV_HYDRA_ADMIN_URL: &str = "http://localhost:4445";
 const DEV_CONSOLE_OIDC_SECRET: &str = "dev-console-oidc-secret";
-const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 
 /// zeroship control-plane startup configuration.
 #[derive(Debug, Parser)]
 #[command(name = "zeroship-control")]
 struct ControlCli {
     /// HTTP listen port.
-    #[arg(long, env = "CONTROL_PORT", default_value = "9090")]
-    port: String,
+    #[arg(long, env = "CONTROL_PORT", default_value_t = 9090)]
+    port: u16,
 
     /// PostgreSQL DSN for control-plane data.
     #[arg(long = "db", env = "DATABASE_URL", default_value = "postgres://localhost/zeroship")]
@@ -98,7 +100,7 @@ struct ControlCli {
     bootstrap_builder_client: bool,
 
     /// Environment half of `--bootstrap-builder-client`; `1`/`true` are truthy.
-    #[arg(skip = env_is_1_or_true("BOOTSTRAP_BUILDER_OAUTH_CLIENT"))]
+    #[arg(skip = env_is_truthy("BOOTSTRAP_BUILDER_OAUTH_CLIENT"))]
     bootstrap_builder_client_env: bool,
 
     /// Redirect URI for the bootstrapped builder OAuth client.
@@ -178,31 +180,6 @@ impl ControlCli {
     }
 }
 
-fn env_is_exact(key: &str, expected: &str) -> bool {
-    std::env::var(key).is_ok_and(|value| value == expected)
-}
-
-fn env_is_1_or_true(key: &str) -> bool {
-    std::env::var(key).is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
-fn resolve_file_overlay_string(
-    cli_value: Option<String>,
-    file_value: Option<String>,
-    insecure_dev: bool,
-    dev_default: &str,
-) -> String {
-    cli_value
-        .or(file_value)
-        .unwrap_or_else(|| {
-            if insecure_dev {
-                dev_default.to_string()
-            } else {
-                String::new()
-            }
-        })
-}
-
 fn decoded_master_key_len(value: &str) -> Option<usize> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -246,13 +223,7 @@ fn validate_master_key_material(
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     let cli = ControlCli::parse();
-    let file = match FileConfig::load(cli.config_path.as_deref()) {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("control: failed to load config file: {err}");
-            std::process::exit(1);
-        }
-    };
+    let file = load_overlay_or_exit(cli.config_path.as_deref(), "control");
     let (filter, format) = resolve_observability(
         &cli.obs,
         &file.observability,
@@ -264,19 +235,21 @@ async fn main() -> std::io::Result<()> {
     let trust_proxy = cli.trust_proxy();
     let bootstrap_builder_client = cli.bootstrap_builder_client();
 
-    let hydra_admin_url = resolve_file_overlay_string(
+    let hydra_admin_url = resolve_overlay_string(
         cli.hydra_admin_url,
         file.auth.hydra_admin_url.clone(),
-        insecure_dev,
-        DEV_HYDRA_ADMIN_URL,
+        insecure_dev.then_some(DEV_HYDRA_ADMIN_URL),
     );
-    let hydra_public_url = resolve_file_overlay_string(
+    let hydra_public_url = resolve_overlay_string(
         cli.hydra_public_url,
         file.auth.hydra_public_url.clone(),
-        insecure_dev,
-        DEV_HYDRA_PUBLIC_URL,
+        insecure_dev.then_some(DEV_HYDRA_PUBLIC_URL),
     );
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
+    tracing::info!(
+        trusted_oauth_clients = trusted_oauth_clients.len(),
+        "control: trusted OAuth client set resolved"
+    );
 
     let port = cli.port;
     let db_url = cli.db;
