@@ -58,18 +58,27 @@ export const Indeterminate: Story = {
       description: {
         story:
           "Pass `value={null}` for indeterminate mode. Base UI omits " +
-          "`aria-valuenow` and adds `aria-valuetext='Loading'`; the " +
-          "indicator shimmers across the track (or, under reduced " +
-          "motion, paints a static 100% dim fill).",
+          "`aria-valuenow`. To give AT users a meaningful readout " +
+          "(Base UI's default is the literal string 'indeterminate " +
+          "progress'), pass an explicit `aria-valuetext` that names " +
+          "the activity. The indicator shimmers across the track (or, " +
+          "under reduced motion, paints a static 100% dim fill).",
       },
     },
   },
+  // Pass aria-valuetext explicitly because Base UI's default for an
+  // indeterminate progress is the generic literal "indeterminate
+  // progress" — overriding it with the activity name is the SR-friendly
+  // read. (Pre-wave10 the story asserted `aria-valuetext === "Loading"`
+  // but never forwarded the prop, so the assertion fell through to Base
+  // UI's default and the play() failed in test-storybook.)
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Indeterminate progress">
       <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
         <Progress
           value={null}
           aria-label="Loading"
+          aria-valuetext="Loading"
           data-testid="progress-indeterminate"
         />
       </div>
@@ -234,7 +243,12 @@ export const ExternalAriaLabelling: Story = {
         story:
           "External aria-labelledby, aria-describedby, and aria-valuetext " +
           "forward to the progress root without clobbering determinate " +
-          "value semantics.",
+          "value semantics. `showValue` is intentionally omitted on " +
+          "custom-range progresses — Base UI's default percent formatter " +
+          "divides the raw value by 100 (not by `max`), so a value=7/max=10 " +
+          "bar would paint a misleading '7%' badge over a 70%-complete " +
+          "track. The SR-only `aria-valuetext` carries the real readout; " +
+          "the visible cue is the filled track itself.",
       },
     },
   },
@@ -250,7 +264,7 @@ export const ExternalAriaLabelling: Story = {
         <Progress
           value={7}
           max={10}
-          showValue
+          data-testid="progress-external-aria"
           aria-labelledby="progress-import-label"
           aria-describedby="progress-import-description"
           aria-valuetext="Seven of ten rows imported"
@@ -273,6 +287,14 @@ export const ExternalAriaLabelling: Story = {
       "aria-describedby",
       "progress-import-description",
     );
+    // Custom-range guardrail (mirror of Meter wave10 ExternalAria fix): no
+    // misleading "N%" badge from Base UI's default `Intl.NumberFormat
+    // {style: 'percent'}` (which divides by 100, not by `max`). The
+    // determinate readout is the aria-valuetext above; sighted users get
+    // the filled track. Both the raw-value and the would-be-correct-pct
+    // strings must be absent from the rendered text.
+    await expect(canvas.queryByText("7%")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("70%")).not.toBeInTheDocument();
   },
 };
 
@@ -301,6 +323,71 @@ export const WithLabel: Story = {
       </div>
     </div>
   ),
+};
+
+/* ─── 9. DisabledIndeterminate — Wave 10 fix #3 regression ───────────
+ *
+ * A `data-disabled + data-status="indeterminate"` row under
+ * `prefers-reduced-motion: reduce` must keep its disabled paint
+ * (`var(--zs-label-quaternary)` on the indicator, `var(--zs-fill-
+ * quaternary)` on the track) — not the reduced-motion indeterminate
+ * placeholder color-mix.
+ *
+ * Pre-fix the base `[data-disabled] .zs-progress__indicator` rule
+ * lived above an equal-specificity rule inside `@media (prefers-
+ * reduced-motion: reduce)` that re-painted the indicator to a dim
+ * accent for indeterminate progress. Equal specificity + later source
+ * order made the reduced-motion rule win, so disabled indeterminate
+ * progress repainted as active accent under reduced motion.
+ *
+ * The aria-wiring runner (check-aria-wiring.mjs Wave 10 fix #3) emulates
+ * `reducedMotion: 'reduce'`, opens this story, and asserts the indicator
+ * computed background matches the disabled token, not the active fill.
+ *
+ * `data-disabled=""` is forwarded through the BaseProgress.Root rest
+ * spread; the rendered Root carries both `data-disabled` and Base UI's
+ * own `data-status="indeterminate"`. */
+export const DisabledIndeterminate: Story = {
+  name: "Disabled indeterminate (Wave 10 fix #3)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Wave 10 fix #3: a disabled indeterminate " +
+          "progress row must keep its disabled paint under prefers-" +
+          "reduced-motion. The CSS cascade is verified by the aria-" +
+          "wiring runner against computed style.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Disabled indeterminate"
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+        <Progress
+          value={null}
+          aria-label="Paused upload"
+          aria-valuetext="Paused"
+          data-testid="progress-disabled-indeterminate"
+          // data-* attrs forward through Base UI Progress.Root's rest
+          // spread — the rendered Root carries both `data-disabled`
+          // (consumer-set) and `data-status="indeterminate"` (Base UI).
+          {...({ "data-disabled": "" } as Record<string, string>)}
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", {
+      name: /paused upload/i,
+    });
+    await expect(progress).toHaveAttribute("data-status", "indeterminate");
+    await expect(progress).toHaveAttribute("data-disabled", "");
+  },
 };
 
 /* ─── 7. RTL ──────────────────────────────────────────────────────── */
