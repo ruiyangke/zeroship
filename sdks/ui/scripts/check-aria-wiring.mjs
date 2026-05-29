@@ -8677,6 +8677,184 @@ await open("components-select--invalid-focus-ring");
   );
 }
 
+/* ─── Wave 9 fix (ContextMenu 🔴 #1) — public root export surface ───── *
+ *
+ * Pre-fix: `ContextMenuPopupProps` was defined in the component but
+ * NOT re-exported from `components/index.ts` or the package root, so
+ * `import type { ContextMenuPopupProps } from "@zeroship/ui"` resolved
+ * to `any` and consumers couldn't tighten Popup overrides. Types
+ * vanish at build-time, but their `export type` declaration in
+ * `src/index.ts` is the only thing that keeps the public surface in
+ * sync — we assert the declaration is present in source. The
+ * Round-5 exhaustive walker (above) only covers value exports.
+ *
+ * We ALSO re-assert the value binding `ContextMenu` is reachable from
+ * the package root via dynamic import — the original Wave-9 review
+ * flagged that the public list "never includes ContextMenu", so an
+ * explicit smoke import keeps that signal in CI even if a future edit
+ * accidentally drops it again. */
+{
+  const fs = await import("node:fs/promises");
+  const srcIndexUrl = new URL("../src/index.ts", import.meta.url);
+  const distUrl = new URL("../dist/index.js", import.meta.url);
+
+  let importError = null;
+  let mod = null;
+  let srcText = "";
+  try {
+    srcText = await fs.readFile(srcIndexUrl, "utf8");
+    mod = await import(distUrl.href);
+  } catch (err) {
+    importError = err instanceof Error ? err.message : String(err);
+  }
+  const hasContextMenuValue =
+    !!(mod && (typeof mod.ContextMenu === "function" || typeof mod.ContextMenu === "object")) &&
+    mod.ContextMenu !== null;
+  // Type-only exports live in source; the build erases them, so we
+  // scan `src/index.ts` for the literal `type ContextMenuPopupProps`
+  // re-export (matches the `type ContextMenuTriggerProps` shape next to it).
+  const hasPopupPropsTypeReExport = /\btype\s+ContextMenuPopupProps\b/.test(srcText);
+  const hasTriggerPropsTypeReExport = /\btype\s+ContextMenuTriggerProps\b/.test(srcText);
+  const ok =
+    !importError &&
+    hasContextMenuValue &&
+    hasPopupPropsTypeReExport &&
+    hasTriggerPropsTypeReExport;
+  report(
+    "@zeroship/ui public root re-exports ContextMenu + ContextMenuPopupProps (Wave 9 fix #1)",
+    ok,
+    importError
+      ? `importError=${importError}`
+      : `ContextMenu=${hasContextMenuValue} PopupProps=${hasPopupPropsTypeReExport} TriggerProps=${hasTriggerPropsTypeReExport}`,
+  );
+}
+
+/* ─── Wave 9 fix (ContextMenu 🔴 #2) — Root `disabled` blocks open ──── *
+ *
+ * Pre-fix: `disabled` lived on `ContextMenu.Trigger` and only stamped
+ * `aria-disabled`/`tabIndex={-1}`; the Base UI store wasn't informed,
+ * so a right-click STILL opened the popup. Post-fix: `disabled` lives
+ * on the Root (Base UI's MenuRoot honors it), the Trigger short-
+ * circuits its contextmenu handler, and the popup stays closed. Also
+ * regresses the still-tabbable / aria-disabled story conditions. */
+await open("components-contextmenu--disabled-trigger");
+{
+  const trigger = page.locator('[data-testid="contextmenu-disabled-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // ARIA wiring: aria-disabled="true" AND tabindex="-1" — the Trigger
+  // is pulled out of the tab sequence; caller tabIndex on a disabled
+  // trigger is overridden (Wave-9 design: disabled wins).
+  const ariaDisabled = await trigger.getAttribute("aria-disabled");
+  const tabIndex = await trigger.getAttribute("tabindex");
+  // Right-click via `force: true` because Playwright respects
+  // `aria-disabled` and refuses to click otherwise — exactly the
+  // contract we want, but the test runner needs to bypass it to
+  // assert the popup STILL doesn't open. `dispatchEvent` directly
+  // fires the contextmenu event React listens for.
+  await trigger.dispatchEvent("contextmenu", { button: 2 });
+  await page.waitForTimeout(300);
+  // Popup never mounts; the testid attaches to ContextMenu.Popup which
+  // Base UI only renders once the menu opens.
+  const popup = page.locator('[data-testid="contextmenu-disabled-popup"]');
+  const popupVisible = await popup
+    .first()
+    .isVisible()
+    .catch(() => false);
+  // Make sure nothing else slipped a menuitem into the DOM either.
+  const menuItemCount = await page.locator('[role="menuitem"]').count();
+  const ok =
+    ariaDisabled === "true" &&
+    tabIndex === "-1" &&
+    !popupVisible &&
+    menuItemCount === 0;
+  report(
+    "ContextMenu — Root `disabled` stamps ARIA + blocks right-click open (Wave 9 fix #2)",
+    ok,
+    `aria-disabled=${ariaDisabled} tabindex=${tabIndex} popupVisible=${popupVisible} menuItemCount=${menuItemCount}`,
+  );
+}
+
+/* ─── Wave 9 fix (ContextMenu 🟡 #3) — asChild routes through Slot ──── *
+ *
+ * Pre-fix: ContextMenu.Trigger rejected the `_slot.ts`/asChild path
+ * and forced a wrapper trigger. Post-fix: `asChild` puts Base UI's
+ * contextmenu binding on the consumer's element directly. We verify
+ * that right-clicking the Card root (NOT a wrapper) opens the popup,
+ * and that the rendered Card carries the Base UI Trigger semantics
+ * (the `zs-contextmenu-trigger` class composes onto the consumer's
+ * className via Slot). */
+await open("components-contextmenu--as-child");
+{
+  const card = page.locator('[data-testid="contextmenu-aschild-card"]');
+  await card.waitFor({ state: "visible", timeout: 5000 });
+  // The Card element itself should carry our trigger class — Slot
+  // mergeProps concatenates classNames.
+  const cardTag = await card.evaluate((el) => el.tagName.toLowerCase());
+  const cardClassName = (await card.getAttribute("class")) ?? "";
+  const hasTriggerClass = /\bzs-contextmenu-trigger\b/.test(cardClassName);
+  const stillCardSurface = /\bzs-card\b/.test(cardClassName);
+  // Right-click the Card directly — popup opens.
+  await card.click({ button: "right" });
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="contextmenu-aschild-popup"]');
+  const popupVisible = await popup
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const item = page.locator('[data-testid="contextmenu-aschild-item-open"]');
+  const itemVisible = await item
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const ok =
+    hasTriggerClass && stillCardSurface && popupVisible && itemVisible;
+  report(
+    "ContextMenu.Trigger asChild — Slot fan-out routes binding onto the Card (Wave 9 fix #3)",
+    ok,
+    `tag=${cardTag} hasTriggerClass=${hasTriggerClass} stillCard=${stillCardSurface} popupVisible=${popupVisible} itemVisible=${itemVisible}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
+/* ─── Wave 9 fix (ContextMenu 🟡 #4) — prefers-reduced-motion ──────── *
+ *
+ * Pre-fix: `.zs-contextmenu-trigger` set
+ * `transition: box-shadow var(--zs-motion-fast) …` with no reduced-
+ * motion override, so users with `prefers-reduced-motion: reduce`
+ * still saw the focus-ring transition animate. Post-fix: a matching-
+ * specificity `@media (prefers-reduced-motion: reduce)` block sets
+ * `transition: none`. Emulate the media query and read the computed
+ * style. */
+await page.emulateMedia({ reducedMotion: "reduce" });
+await open("components-contextmenu--basic-right-click-area");
+{
+  const trigger = page.locator('[data-testid="contextmenu-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const transition = await trigger.evaluate(
+    (el) => getComputedStyle(el).transition,
+  );
+  const transitionProperty = await trigger.evaluate(
+    (el) => getComputedStyle(el).transitionProperty,
+  );
+  const transitionDuration = await trigger.evaluate(
+    (el) => getComputedStyle(el).transitionDuration,
+  );
+  // Under reduced motion the shorthand resolves to `all 0s ease 0s` or
+  // similar — the key signal is `transition-property: none` OR
+  // `transition-duration: 0s`. Browsers vary in the shorthand spelling
+  // but never report a non-zero duration once `transition: none` wins.
+  const propertyNone = /\bnone\b/.test(transitionProperty);
+  const durationZero = /^0s\b/.test(transitionDuration);
+  const ok = propertyNone || durationZero;
+  report(
+    "ContextMenu.Trigger — prefers-reduced-motion disables focus-ring transition (Wave 9 fix #4)",
+    ok,
+    `transition="${transition}" property="${transitionProperty}" duration="${transitionDuration}"`,
+  );
+}
+await page.emulateMedia({ reducedMotion: "no-preference" });
+
 await ctx.close();
 await browser.close();
 

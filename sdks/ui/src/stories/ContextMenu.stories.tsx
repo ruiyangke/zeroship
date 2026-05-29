@@ -459,22 +459,33 @@ export const PositionedPopup: Story = {
 /* ─── 8. DisabledTrigger ───────────────────────────────────────────── */
 export const DisabledTrigger: Story = {
   name: "Disabled trigger",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`disabled` lives on the Root. Base UI's ContextMenu short-" +
+          "circuits its `contextmenu` / touch handlers AND the document-" +
+          "level contextmenu listener, so a right-click on a disabled " +
+          "trigger does NOT open the popup. Wave-9 fix.",
+      },
+    },
+  },
   render: () => (
     <div
       className="zs-story-row"
       role="group"
       aria-label="Disabled context menu trigger"
     >
-      <ContextMenu>
+      <ContextMenu disabled>
         <ContextMenu.Trigger
-          disabled
+          data-testid="contextmenu-disabled-trigger"
           role="button"
           aria-label="Unavailable context menu"
         >
           Unavailable actions
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
-          <ContextMenu.Popup>
+          <ContextMenu.Popup data-testid="contextmenu-disabled-popup">
             <ContextMenu.Item>Hidden action</ContextMenu.Item>
           </ContextMenu.Popup>
         </ContextMenu.Portal>
@@ -483,13 +494,86 @@ export const DisabledTrigger: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", {
       name: /unavailable context menu/i,
     });
 
     await expect(trigger).toHaveAttribute("aria-disabled", "true");
     await expect(trigger).toHaveAttribute("tabindex", "-1");
-    await userEvent.tab();
-    await expect(trigger).not.toHaveFocus();
+    // Right-click MUST NOT open the popup. Pre-fix: trigger-level
+    // `disabled` only stamped ARIA/tabindex; Base UI still routed the
+    // contextmenu event through and the popup opened. Post-fix: the
+    // Root provides a disabled context the Trigger reads and uses to
+    // capture-stop the `contextmenu` event before Base UI's handler.
+    await userEvent.pointer([{ target: trigger, keys: "[MouseRight]" }]);
+    await expect(
+      body.queryByRole("menuitem", { name: /hidden action/i }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+/* ─── 9. AsChild ────────────────────────────────────────────────────── */
+export const AsChild: Story = {
+  name: "asChild (Card root is the trigger)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`asChild` lets a semantic element BE the right-click target — " +
+          "no wrapper `<div>`. The Card root receives Base UI's contextmenu " +
+          "binding via the shared Slot helper; className, refs, and event " +
+          "handlers compose. Useful when the visible bounding box should " +
+          "match the consumer's intrinsic layout (no extra wrapper height).",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="asChild context menu"
+    >
+      <ContextMenu>
+        <ContextMenu.Trigger asChild>
+          <Card
+            variant="elevated"
+            style={{ inlineSize: "18rem" }}
+            data-testid="contextmenu-aschild-card"
+          >
+            <Card.Header>
+              <Card.Title>asChild — Card is the trigger</Card.Title>
+              <Card.Description>
+                Right-click anywhere on this Card to open the menu.
+              </Card.Description>
+            </Card.Header>
+          </Card>
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Popup data-testid="contextmenu-aschild-popup">
+            <ContextMenu.Item data-testid="contextmenu-aschild-item-open">
+              Open
+            </ContextMenu.Item>
+            <ContextMenu.Item>Rename…</ContextMenu.Item>
+          </ContextMenu.Popup>
+        </ContextMenu.Portal>
+      </ContextMenu>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const card = canvas.getByTestId("contextmenu-aschild-card");
+
+    // The Slot fan-out must put the Base UI contextmenu binding on the
+    // Card itself, so right-clicking inside the Card opens the popup.
+    await userEvent.pointer([{ target: card, keys: "[MouseRight]" }]);
+    await expect(
+      await body.findByRole("menuitem", { name: /open/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByRole("menuitem", { name: /open/i })).not.toBeInTheDocument(),
+    );
   },
 };
