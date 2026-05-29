@@ -87,10 +87,10 @@ pub fn resolve_observability(
 ) -> (String, Option<String>) {
     (
         resolve_log_filter(
-            flags.log_filter.clone().or(file.log_filter.clone()),
+            flags.log_filter.clone().or_else(|| file.log_filter.clone()),
             default_filter,
         ),
-        flags.log_format.clone().or(file.log_format.clone()),
+        flags.log_format.clone().or_else(|| file.log_format.clone()),
     )
 }
 

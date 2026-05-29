@@ -40,6 +40,11 @@ pub fn init_tracing(default_filter: &str) {
 ///
 /// Passing `None` for `format` preserves the standard auto-detection:
 /// TTY stderr uses `pretty`, and non-TTY stderr uses `json`.
+///
+/// # Panics
+///
+/// Never in practice: the sole `expect` is on the hard-coded `"error"`
+/// fallback directive, which is always a valid `EnvFilter`.
 pub fn init_tracing_with(filter: &str, format: Option<&str>) {
     let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|err| {
         eprintln!("invalid tracing filter {filter:?}: {err}; falling back to \"error\"");
