@@ -49,10 +49,10 @@
 import {
   forwardRef,
   isValidElement,
+  useEffect,
+  useRef,
   type ComponentPropsWithoutRef,
-  type ComponentPropsWithRef,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
   type Ref,
 } from "react";
 import { Popover as BasePopover } from "@base-ui/react/popover";
@@ -63,8 +63,6 @@ import { composeBaseClass } from "../_classnames";
 export type PopoverSide = "top" | "right" | "bottom" | "left";
 export type PopoverAlign = "start" | "center" | "end";
 
-type BaseRootProps = ComponentPropsWithRef<typeof BasePopover.Root>;
-
 /**
  * Re-export Base UI's `createHandle` so consumers can imperatively pair
  * a Trigger to a Root (matches the Dialog pattern — Phase 2.B review-
@@ -73,16 +71,20 @@ type BaseRootProps = ComponentPropsWithRef<typeof BasePopover.Root>;
 export const createPopoverHandle = BasePopover.createHandle;
 
 /**
- * Props for the Popover root. Mirrors Base UI's `Popover.Root` so every
- * escape hatch (`onOpenChangeComplete`, `actionsRef`, `handle`,
- * `triggerId`, `defaultTriggerId`, payload child-render) is forwarded.
+ * Props for the Popover root. Generic over `Payload` so Base UI's
+ * payload-render channel survives the wrapper: the Root's `children`
+ * is `ReactNode | PayloadChildRenderFunction<Payload>`, exactly as the
+ * Base UI source declares (`PopoverRoot.Props<Payload>` in
+ * @base-ui/react/popover). The previous wrapper narrowed `children` to
+ * a plain `ReactNode`, which silently rejected the documented
+ * payload-render API and contradicted the lines above that promise it
+ * is forwarded.
  *
  * We omit `render` for the same reason Dialog does — Root is a context
- * provider with no DOM, so render has no meaning at this layer.
+ * provider with no DOM, so `render` has no meaning at this layer.
  */
-export interface PopoverProps extends Omit<BaseRootProps, "render"> {
-  children?: ReactNode;
-}
+export interface PopoverProps<Payload = unknown>
+  extends Omit<BasePopover.Root.Props<Payload>, "render"> {}
 
 /* ─── Root ──────────────────────────────────────────────────────────── *
  *
@@ -93,9 +95,16 @@ export interface PopoverProps extends Omit<BaseRootProps, "render"> {
  * Slack-style settings popover (which should usually also opt into
  * `<Popover.Backdrop>`). */
 
-function PopoverRoot({ modal = false, children, ...rest }: PopoverProps) {
+function PopoverRoot<Payload = unknown>({
+  modal = false,
+  children,
+  ...rest
+}: PopoverProps<Payload>) {
+  // Pass `children` through `<BasePopover.Root>` verbatim so a payload
+  // render-function child is recognised by Base UI (instead of being
+  // rendered as a literal React child).
   return (
-    <BasePopover.Root modal={modal} {...rest}>
+    <BasePopover.Root<Payload> modal={modal} {...rest}>
       {children}
     </BasePopover.Root>
   );
@@ -186,6 +195,35 @@ const PopoverPopup = forwardRef<HTMLElement, PopoverPopupProps>(
     },
     ref,
   ) {
+    // Dev-only assertion mirroring Dialog.Popup (review-fix item 7):
+    // Base UI renders the popup with `role="dialog"`. A `role="dialog"`
+    // without an accessible name is a serious a11y bug — screen readers
+    // announce "dialog" with no context. `<Popover.Title>` auto-wires
+    // `aria-labelledby`; absence of BOTH a Title descendant AND an
+    // explicit `aria-label` / `aria-labelledby` on the popup means no
+    // accessible name. We probe the DOM after mount so Title's id has
+    // landed.
+    const popupRef = useRef<HTMLElement | null>(null);
+    const composedRef = composeRefs<HTMLElement>(
+      ref,
+      popupRef as Ref<HTMLElement>,
+    );
+    useEffect(() => {
+      if (process.env.NODE_ENV === "production") return;
+      const node = popupRef.current;
+      if (!node) return;
+      const ariaLabel = node.getAttribute("aria-label");
+      const ariaLabelledBy = node.getAttribute("aria-labelledby");
+      if (!ariaLabel && !ariaLabelledBy) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "Popover.Popup has no accessible name. Add a <Popover.Title>" +
+            " (Base UI auto-wires aria-labelledby) or pass aria-label" +
+            "/aria-labelledby directly.",
+        );
+      }
+    }, []);
+
     return (
       <BasePopover.Positioner
         className="zs-popover-positioner"
@@ -195,7 +233,7 @@ const PopoverPopup = forwardRef<HTMLElement, PopoverPopupProps>(
       >
         <BasePopover.Popup
           {...rest}
-          ref={ref as Ref<HTMLDivElement>}
+          ref={composedRef as Ref<HTMLDivElement>}
           className={composeBaseClass("zs-popover-popup", className)}
         >
           {children}

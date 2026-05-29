@@ -6985,6 +6985,102 @@ await open("components-previewcard--basic");
   );
 }
 
+/* ─── Round 6 fix #2 (Popover) — Basic popup has an accessible name ── *
+ *
+ * Regression for the unnamed `role="dialog"` Popover Basic story.
+ * Pre-fix, `<Popover.Popup>` rendered bare text with no Title and no
+ * `aria-label`/`aria-labelledby` — Base UI still exposed the popup
+ * as `role="dialog"`, leaving screen readers to announce just
+ * "dialog". The story now adds `aria-label="Helper hint"` and the
+ * wrapper logs a missing-name warning in dev for any Popup that
+ * mounts without an accessible name.
+ *
+ * We assert that the rendered popup carries an accessible name (a
+ * non-empty `aria-label`, or any `aria-labelledby` that resolves to
+ * non-empty text). Pre-fix this assertion would fail because neither
+ * attribute was set. */
+await open("components-popover--basic");
+{
+  const trigger = page.locator('[data-testid="popover-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="popover-basic-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const ariaLabel = (await popup.getAttribute("aria-label")) ?? "";
+  const labelledById = await popup.getAttribute("aria-labelledby");
+  let labelledByText = "";
+  if (labelledById) {
+    // Resolve EVERY id in the space-separated list and concat their text,
+    // matching the way assistive tech computes the accessible name.
+    labelledByText = await popup.evaluate((el, ids) => {
+      const tokens = ids.split(/\s+/).filter(Boolean);
+      return tokens
+        .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? "")
+        .join(" ")
+        .trim();
+    }, labelledById);
+  }
+  const hasAccessibleName =
+    ariaLabel.trim().length > 0 || labelledByText.length > 0;
+  // `open()` resets to a clean baseline on the next call (ESC ×3) so
+  // we end the block on `);\n}\n` per the block-shape convention.
+  report(
+    "Popover Basic — popup exposes a non-empty accessible name (Round 6 fix #2)",
+    hasAccessibleName,
+    `aria-label="${ariaLabel}" aria-labelledby="${labelledById ?? ""}" labelledByText="${labelledByText}"`,
+  );
+}
+
+/* ─── Round 6 fix #1 (Popover) — payload render-function child ──────── *
+ *
+ * Regression for the `PopoverProps.children` narrowing bug. Base UI
+ * declares `Popover.Root.Props.children` as
+ * `ReactNode | PayloadChildRenderFunction<Payload>`; the wrapper
+ * previously narrowed it to `ReactNode`, silently rejecting the
+ * payload-render API the wrapper comments claim to forward. Without
+ * the wrapper-side fix this story does not compile (TS rejects the
+ * function child), so Storybook build itself becomes the build-time
+ * regression. At runtime we additionally prove the payload channel
+ * survives the wrapper: clicking the "alpha" trigger renders the
+ * "Alpha" label inside the popup; clicking the "beta" trigger after
+ * dismissal swaps the label to "Beta". */
+await open("components-popover--payload-render");
+{
+  const alphaTrigger = page.locator(
+    '[data-testid="popover-payload-trigger-alpha"]',
+  );
+  const betaTrigger = page.locator(
+    '[data-testid="popover-payload-trigger-beta"]',
+  );
+  await alphaTrigger.waitFor({ state: "visible", timeout: 5000 });
+  await betaTrigger.waitFor({ state: "visible", timeout: 5000 });
+
+  await alphaTrigger.click();
+  const labelAfterAlpha = page.locator(
+    '[data-testid="popover-payload-label"]',
+  );
+  await labelAfterAlpha.waitFor({ state: "visible", timeout: 5000 });
+  const alphaText = (await labelAfterAlpha.textContent())?.trim() ?? "";
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+
+  await betaTrigger.click();
+  const labelAfterBeta = page.locator(
+    '[data-testid="popover-payload-label"]',
+  );
+  await labelAfterBeta.waitFor({ state: "visible", timeout: 5000 });
+  const betaText = (await labelAfterBeta.textContent())?.trim() ?? "";
+
+  const ok = alphaText === "Alpha" && betaText === "Beta";
+  // `open()` resets to a clean baseline on the next call (ESC ×3) so
+  // we end the block on `);\n}\n` per the block-shape convention.
+  report(
+    "Popover — payload render-function child receives active trigger payload (Round 6 fix #1)",
+    ok,
+    `alphaText="${alphaText}" betaText="${betaText}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
