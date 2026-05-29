@@ -311,4 +311,40 @@
   .zs-switch-field[data-disabled] {
     color: GrayText;
   }
+
+  /* Higher-specificity mirrors — without these, the non-forced-colors
+   * selectors below (hover-with-:not-:hover at lines 145/148, disabled-
+   * checked at line 174, readonly-unchecked at line 190, readonly-checked
+   * at lines 193+197) WIN inside forced-colors mode because they have
+   * more selectors than the bare `.zs-switch[data-checked]` rule above,
+   * and `background-color: var(--zs-…)` would override the `Highlight`/
+   * `Canvas`/`GrayText` system colors. Mirror each higher-specificity
+   * rule with the matching forced-colors paint so the system-color
+   * surface always wins.
+   *
+   * `forced-color-adjust: none` is already set on the base selector
+   * above; it cascades to these matching selectors. */
+  @media (hover: hover) {
+    .zs-switch:not([data-disabled]):not([data-checked]):hover {
+      background-color: Canvas;
+    }
+    .zs-switch:not([data-disabled])[data-checked]:hover {
+      background-color: Highlight;
+    }
+  }
+  .zs-switch[data-disabled][data-checked] {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-switch[data-readonly]:not([data-checked]) {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-switch[data-readonly][data-checked] {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  .zs-switch[data-readonly][data-checked] .zs-switch__thumb {
+    background-color: Highlight;
+  }
 }

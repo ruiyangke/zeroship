@@ -153,7 +153,22 @@ export const Inline: Story = {
         <Switch label="Notifications" name="notifications-inline" defaultChecked />
       </div>
       <div className="zs-story-cell">
-        <Switch label="Public profile" name="public-inline" />
+        {/* The aria-wiring assertion (`Switch inline label click toggles
+         * track + hidden input`) targets this row. The `data-testid` on
+         * the track lets the assertion grab the host span, walk to its
+         * wrapping <label>, click the visible text node, and verify both
+         * the track's `aria-checked` AND the sibling hidden input flip
+         * — the contract of the `label` prop is "text click toggles".
+         *
+         * The wrapping SelectionRow renders a real <label>, so a click
+         * on the text dispatches a synthetic click to the associated
+         * control via the browser's native label-target lookup; there
+         * is no JS label handler. This is the real path. */}
+        <Switch
+          data-testid="switch-inline-public"
+          label="Public profile"
+          name="public-inline"
+        />
       </div>
     </div>
   ),

@@ -61,8 +61,25 @@ export type SwitchSize = "sm" | "md" | "lg";
 
 type BaseSwitchRootProps = ComponentPropsWithRef<typeof BaseSwitch.Root>;
 
+// `nativeButton` is a Base UI prop that only makes sense when the caller
+// replaces the rendered element via `render` / asChild — it tells Base UI
+// whether the replacement element is a real <button>. We do NOT expose
+// `render` on the public surface (selection primitives are chips with a
+// hidden input — slice-4 review fix item 1), so `nativeButton` has no
+// caller-meaningful axis. Worse: with the DEFAULT span root, accepting
+// `nativeButton={true}` from a caller would make Base UI treat the span
+// as a native <button>, which disables its non-native Space/Enter
+// activation path and silently breaks keyboard activation. We therefore
+// omit it from the public props AND force `nativeButton={false}` after
+// `...rest` on the Root so a spread props bag with `nativeButton: true`
+// can't slip through. If Switch ever needs element replacement, route it
+// through explicit `_slot.ts` rather than re-opening `nativeButton` on
+// the public surface.
 export interface SwitchProps
-  extends Omit<BaseSwitchRootProps, "className" | "render" | "children"> {
+  extends Omit<
+    BaseSwitchRootProps,
+    "className" | "render" | "children" | "nativeButton"
+  > {
   /** Visual size — small 1.5rem wide, medium 2rem (default), large 2.5rem. */
   size?: SwitchSize;
 
@@ -124,6 +141,13 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
   const track = (
     <BaseSwitch.Root
       {...rest}
+      // nativeButton MUST come AFTER `...rest` — a spread props bag with
+      // `nativeButton: true` from a caller (or from an earlier hand-off
+      // through an untyped `as any` cast) would otherwise survive and
+      // break Base UI's Space/Enter activation path on the default
+      // span root. See the `SwitchProps` block above for the full
+      // rationale; this line is the runtime half of that contract.
+      nativeButton={false}
       ref={ref as React.Ref<HTMLElement>}
       disabled={disabled || undefined}
       required={required || undefined}
