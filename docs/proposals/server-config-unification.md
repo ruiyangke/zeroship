@@ -57,7 +57,7 @@ struct ControlCli {
 }
 ```
 
-**Surface B — one optional TOML overlay**, `ops/zeroship.toml`, loaded *only when* `--config`/`ZEROSHIP_CONFIG` points at it. There is no auto-discovery at a well-known path: absent that flag, the overlay is simply not loaded. It fills gaps; nothing breaks if it's absent.
+**Surface B — one optional TOML overlay**, `ops/zeroship.toml`, loaded from `--config`/`ZEROSHIP_CONFIG` when given, and otherwise auto-discovered at the fixed system path `/etc/zeroship/zeroship.toml` (no CWD scan, no env-redirectable discovery path — see Open Q #4 for the full discovery semantics). It fills gaps; nothing breaks if it's absent.
 
 ```toml
 # ops/zeroship.toml — cross-binary domain config. Hand-edited; in git.
@@ -158,7 +158,7 @@ Incremental, per-binary. Each unit ships independently; no big-bang refactor.
 
 ## Decided (was "open questions")
 
-1. **File role = optional overlay.** Loaded only when `--config`/`ZEROSHIP_CONFIG` is given; precedence `CLI > env > file > default`. A primary-config-file model would force rewriting every compose `command:` line and test harness — rejected.
+1. **File role = optional overlay.** Loaded from `--config`/`ZEROSHIP_CONFIG` when given, otherwise auto-discovered at the fixed system path `/etc/zeroship/zeroship.toml` (see Open Q #4); precedence `CLI > env > file > default`. A primary-config-file model would force rewriting every compose `command:` line and test harness — rejected.
 2. **Hydra/auth URLs live in the file's `[auth]` section**, CLI/env override retained. The one-file-per-environment model makes "per-environment" and "in-file" compatible. Only secrets and per-instance values (ports, bind addrs, DSNs-with-creds) stay out.
 3. **`trusted_oauth_clients` is the headline file-only value** — the original motivator; moves out of the `trusted_clients.rs` const into `[auth].trusted_oauth_clients`.
 4. **Sandbox is out** (env-only, microVM-domain, no auth overlap).
@@ -168,7 +168,9 @@ Incremental, per-binary. Each unit ships independently; no big-bang refactor.
 1. **`SecretString`-typed clap field.** Optional polish, not a blocker. `auth` already carries `stash_signing_key: String` in its clap struct via `env =` (`config.rs:56`) and that is fine. The only hard rule is **secrets never in the TOML file**. `secrecy` is not a workspace dependency today; if we later want a `SecretString`-typed field, add the crate then — not a blocker.
 2. **Multiple files vs one.** If `ops/zeroship.toml` grows past ~200 lines, split by domain (`ops/auth.toml`, …). Defer — start with one.
 3. **CLI augment vs replace for lists.** If `--trusted-client foo` ever needs to *augment* (not replace) the TOML list, that's a small hand-rolled merge. Skip until asked.
-4. **Auto-discovery at a well-known default path.** Deferred — v1 loads the overlay only via explicit `--config`/`ZEROSHIP_CONFIG`.
+4. **Auto-discovery at a well-known default path.** **IMPLEMENTED.** `FileConfig::resolve()` now probes the fixed system path `/etc/zeroship/zeroship.toml` when no explicit `--config`/`ZEROSHIP_CONFIG` is given.
+
+   **Discovery semantics:** the *only* auto-discovered path is the fixed system path `/etc/zeroship/zeroship.toml` (`SYSTEM_CONFIG_PATH`). There is **no** CWD discovery and **no** environment variable that can redirect the discovery path — an env/CWD-controllable config path is a privilege/injection vector, so hardened daemons (sshd, nginx) never read CWD. Error handling differs by source: an **explicit** path that is missing/unreadable/unparsable is a **hard error** (you asked for it), whereas a **missing** well-known path silently falls back to all-defaults (absence is normal). A well-known path that *exists* but fails to read/parse is still a hard error. `--config`/`ZEROSHIP_CONFIG` remains the explicit override and always wins.
 
 ## Estimated effort
 

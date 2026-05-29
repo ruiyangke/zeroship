@@ -24,7 +24,6 @@ services:
     build: .
     command: >
       zeroship-control
-        --config /etc/zeroship/zeroship.toml
         --port 9090
         --db postgres://postgres:zeroship@postgres:5432/zeroship
         --blob-store /data/bundles
@@ -38,6 +37,7 @@ services:
     volumes:
       - bundles:/data/bundles
       - ./data:/data
+      # mounted at the well-known path => auto-discovered, no --config needed
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
       - seccomp:unconfined
@@ -62,7 +62,6 @@ services:
         [ -z "$$WORKERS" ] && WORKERS="http://worker:8080"
         echo "[gateway] workers: $$WORKERS"
         exec zeroship-gate \
-          --config /etc/zeroship/zeroship.toml \
           --port 8000 \
           --control http://control:9090 \
           --control-key platform-key \
@@ -73,6 +72,7 @@ services:
           --db postgres://postgres:zeroship@postgres:5432/zeroship \
           --dev-insecure
     volumes:
+      # mounted at the well-known path => auto-discovered, no --config needed
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     environment:
       # OAuth2 client_secret registered for the `gateway` client in

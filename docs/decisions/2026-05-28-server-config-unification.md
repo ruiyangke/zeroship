@@ -67,8 +67,12 @@ parser and XDG `token.json` state.
   deprecated.
 - `[runtime]`, `[control]`, and `[billing]` sections: deferred as YAGNI. They
   are new surfaces, not values currently consumed from process config.
-- Well-known-path auto-discovery: deferred. The v1 file is explicit only via
-  `--config` or `ZEROSHIP_CONFIG`.
+- Well-known-path auto-discovery: now implemented in this branch.
+  `FileConfig::resolve()` probes the fixed system path
+  `/etc/zeroship/zeroship.toml` when no explicit `--config`/`ZEROSHIP_CONFIG` is
+  given. The system path is the only auto-discovered location (no CWD, no
+  env-redirect, for hardening); an explicit path that fails is a hard error,
+  while a *missing* well-known path falls back to all-defaults.
 - Unifying sandbox or CLI config: rejected as out of scope for this web-tier
   server change.
 

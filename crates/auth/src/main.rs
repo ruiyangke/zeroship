@@ -26,12 +26,13 @@ use zeroship_auth::store;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
-    let file = load_overlay_or_exit(cfg.config_path.as_deref(), "auth");
+    let overlay = load_overlay_or_exit(cfg.config_path.as_deref(), "auth");
+    let config_source = zeroship_core::config::describe_source(&overlay);
     let (filter, format) =
-        resolve_observability(&cfg.obs, &file.observability, "info,zeroship_auth=debug");
+        resolve_observability(&cfg.obs, &overlay.config.observability, "info,zeroship_auth=debug");
     zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
-
-    cfg.resolve_file_overlay(file.auth);
+    zeroship_core::config::log_overlay_source(&overlay);
+    cfg.resolve_file_overlay(overlay.config.auth);
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
     if let Err(message) = validate_stash_key(&cfg) {
@@ -50,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if cfg.check_config {
         println!("check-config: addr = {}", cfg.addr);
+        println!("check-config: config_source = {config_source}");
         println!("check-config: hydra_admin_url = {}", cfg.hydra_admin_url());
         println!("check-config: hydra_public_url = {}", cfg.hydra_public_url());
         println!("check-config: log_filter = {filter}");

@@ -1,6 +1,11 @@
 # zeroship shared config overlay. Copy to ops/zeroship.toml (one per environment)
 # and pass via --config / ZEROSHIP_CONFIG.
 #
+# Placing this file at the well-known path /etc/zeroship/zeroship.toml makes
+# --config unnecessary: the binaries auto-discover that fixed system path when no
+# explicit --config / ZEROSHIP_CONFIG is given. (That is the ONLY auto-discovered
+# location — there is no CWD/env redirect.)
+#
 # All keys are optional. Absent keys use the binary's compiled default.
 # Scalar key precedence: CLI flag > env > this file > default.
 # Secrets NEVER go in this file — use env/CLI/file-paths.

@@ -98,6 +98,12 @@ Notes:
 - `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
   overlay; add `--check-config` to the normal command to validate CLI/env/file
   config and exit before binding a port.
+- Absent an explicit `--config`/`ZEROSHIP_CONFIG`, the binaries auto-discover the
+  fixed well-known path `/etc/zeroship/zeroship.toml` (the only auto-discovered
+  location — no CWD/env redirect). A missing well-known file is fine (defaults
+  apply); a present-but-broken one is a hard startup error. Dev usually just
+  passes `--config ops/zeroship.toml` or sets `ZEROSHIP_CONFIG` rather than
+  installing into `/etc`.
 - To seed the Builder OAuth client in local dev, start control with
   `BOOTSTRAP_BUILDER_OAUTH_CLIENT=1` or `--bootstrap-builder-client` while
   Hydra admin is reachable. Control registers `zeroship-builder` in Hydra and

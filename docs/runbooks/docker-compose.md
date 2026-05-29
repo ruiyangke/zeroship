@@ -31,9 +31,10 @@ before starting Vite. The file is local dev state and is ignored by git.
 ### Configuration overlay
 
 `docker-compose.yml` mounts `./ops/zeroship.toml` into `control` and `gateway`
-as `/etc/zeroship/zeroship.toml`, and starts both with
-`--config /etc/zeroship/zeroship.toml`. The worker and auth server are not wired
-to this overlay in the compose stack.
+at the well-known path `/etc/zeroship/zeroship.toml`. The compose stack relies on
+auto-discovery: because the file lives at the system well-known path, neither
+service passes `--config` — `FileConfig::resolve()` finds it automatically. The
+worker and auth server are not wired to this overlay in the compose stack.
 
 The overlay provides the shared `[auth]` Hydra URLs, `trusted_oauth_clients`,
 and `[observability]` defaults so those values are defined once instead of per

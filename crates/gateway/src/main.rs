@@ -162,13 +162,16 @@ impl GateCli {
 
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
-    let file = load_overlay_or_exit(cli.config_path.as_deref(), "gateway");
+    let overlay = load_overlay_or_exit(cli.config_path.as_deref(), "gateway");
+    let config_source = zeroship_core::config::describe_source(&overlay);
+    let file = &overlay.config;
     let (filter, format) = resolve_observability(
         &cli.obs,
         &file.observability,
         "info,zeroship_gateway=debug",
     );
     zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
+    zeroship_core::config::log_overlay_source(&overlay);
 
     let insecure_dev = cli.insecure_dev();
     let trust_proxy = cli.trust_proxy();
@@ -278,6 +281,7 @@ fn main() -> std::io::Result<()> {
 
     if cli.check_config {
         println!("check-config: port = {port}");
+        println!("check-config: config_source = {config_source}");
         println!("check-config: control_url = {control_url}");
         println!("check-config: hydra_public_url = {hydra_public_url}");
         println!("check-config: auth_ui_url = {auth_ui_url}");

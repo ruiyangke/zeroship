@@ -137,13 +137,16 @@ pub struct WorkerConfig {
 
 fn main() -> std::io::Result<()> {
     let cli = WorkerCli::parse();
-    let file = load_overlay_or_exit(cli.config_path.as_deref(), "worker");
+    let overlay = load_overlay_or_exit(cli.config_path.as_deref(), "worker");
+    let config_source = zeroship_core::config::describe_source(&overlay);
+    let file = &overlay.config;
     let (filter, format) = resolve_observability(
         &cli.obs,
         &file.observability,
         "info,zeroship_worker=debug,zeroship_runtime=info",
     );
     zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
+    zeroship_core::config::log_overlay_source(&overlay);
 
     let insecure_dev = cli.insecure_dev();
     let port = cli.port;
@@ -184,6 +187,7 @@ fn main() -> std::io::Result<()> {
     if cli.check_config {
         println!("check-config: bind = {bind_host}");
         println!("check-config: port = {port}");
+        println!("check-config: config_source = {config_source}");
         println!("check-config: control_url = {control_url}");
         println!("check-config: worker_threads = {workers_count}");
         println!("check-config: max_isolates = {max_isolates}");

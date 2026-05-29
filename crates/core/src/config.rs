@@ -9,6 +9,9 @@ use tracing_subscriber::EnvFilter;
 /// Development-only stash signing key used by web binaries when insecure dev is explicit.
 pub const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 
+/// Fixed well-known path probed when no explicit --config / ZEROSHIP_CONFIG is given.
+pub const SYSTEM_CONFIG_PATH: &str = "/etc/zeroship/zeroship.toml";
+
 /// Error returned while loading an optional zeroship configuration file.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -43,6 +46,17 @@ pub struct FileConfig {
     /// Observability configuration shared by platform binaries.
     #[serde(default)]
     pub observability: ObsSection,
+}
+
+/// Outcome of resolving the optional config overlay, including its source.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedConfig {
+    /// Parsed overlay (all-default when no source was found).
+    pub config: FileConfig,
+    /// Path the overlay was loaded from, or None when no overlay applied.
+    pub source: Option<std::path::PathBuf>,
+    /// True when 'source' came from well-known-path discovery (not an explicit request).
+    pub discovered: bool,
 }
 
 /// Auth-domain values that can be supplied by the shared file overlay.
@@ -162,9 +176,9 @@ pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> St
 }
 
 /// Load an optional file overlay or exit the current process with a uniform startup error.
-pub fn load_overlay_or_exit(path: Option<&Path>, binary: &str) -> FileConfig {
-    match FileConfig::load(path) {
-        Ok(file) => file,
+pub fn load_overlay_or_exit(path: Option<&Path>, binary: &str) -> ResolvedConfig {
+    match FileConfig::resolve(path) {
+        Ok(resolved) => resolved,
         Err(err) => {
             let message = format!("{binary}: failed to load config file: {err}");
             tracing::error!("{message}");
@@ -174,12 +188,35 @@ pub fn load_overlay_or_exit(path: Option<&Path>, binary: &str) -> FileConfig {
     }
 }
 
+/// Render the overlay source for --check-config output.
+#[must_use]
+pub fn describe_source(resolved: &ResolvedConfig) -> String {
+    match &resolved.source {
+        Some(path) if resolved.discovered => format!("{} (auto-discovered)", path.display()),
+        Some(path) => path.display().to_string(),
+        None => "(none)".to_string(),
+    }
+}
+
+/// Emit a startup log line naming the resolved overlay source. Call AFTER tracing init.
+pub fn log_overlay_source(resolved: &ResolvedConfig) {
+    match &resolved.source {
+        Some(path) if resolved.discovered => {
+            tracing::info!(path = %path.display(), "config: loaded overlay (auto-discovered)")
+        }
+        Some(path) => tracing::info!(path = %path.display(), "config: loaded overlay"),
+        None => tracing::debug!(default_path = SYSTEM_CONFIG_PATH, "config: no overlay found"),
+    }
+}
+
 impl FileConfig {
     /// Load an optional TOML overlay from `path`.
     ///
-    /// Passing `None` returns an all-default configuration. Passing `Some`
-    /// reads the file and parses it as TOML. Absent a path the overlay is
-    /// empty; there is no well-known-path auto-discovery.
+    /// This is the explicit-only primitive: passing `None` returns an
+    /// all-default configuration and does *not* probe any well-known path.
+    /// Passing `Some` reads the file and parses it as TOML. Callers that want
+    /// system-path auto-discovery use [`FileConfig::resolve`], which is built
+    /// on top of this primitive.
     ///
     /// # Errors
     ///
@@ -198,6 +235,42 @@ impl FileConfig {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Resolve the overlay: explicit path if given, else probe the system well-known path.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`ConfigError`] for an explicit path that fails, OR for a
+    /// *present* well-known file that fails to read/parse. A *missing*
+    /// well-known path is not an error.
+    pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedConfig, ConfigError> {
+        Self::resolve_with_well_known(explicit, Path::new(SYSTEM_CONFIG_PATH))
+    }
+
+    fn resolve_with_well_known(
+        explicit: Option<&Path>,
+        well_known: &Path,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        if let Some(path) = explicit {
+            return Ok(ResolvedConfig {
+                config: Self::load(Some(path))?,
+                source: Some(path.to_path_buf()),
+                discovered: false,
+            });
+        }
+        match well_known.try_exists() {
+            Ok(true) => Ok(ResolvedConfig {
+                config: Self::load(Some(well_known))?,
+                source: Some(well_known.to_path_buf()),
+                discovered: true,
+            }),
+            Ok(false) => Ok(ResolvedConfig::default()),
+            Err(source) => Err(ConfigError::Io {
+                path: well_known.to_path_buf(),
+                source,
+            }),
+        }
     }
 }
 
@@ -241,7 +314,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{ConfigError, FileConfig, ObsSection, ObservabilityFlags, resolve_observability};
+    use super::{
+        ConfigError, FileConfig, ObsSection, ObservabilityFlags, ResolvedConfig,
+        SYSTEM_CONFIG_PATH, describe_source, resolve_observability,
+    };
 
     struct TempFile {
         path: PathBuf,
@@ -530,6 +606,113 @@ rust_log = "debug"
 
         assert!(matches!(err, ConfigError::Io { .. }));
         assert!(err.to_string().contains(path.to_str().expect("utf-8 path")));
+    }
+
+    #[test]
+    fn resolve_explicit_loads_and_marks_not_discovered() {
+        let file = TempFile::write(
+            "resolve-explicit.toml",
+            r#"
+[auth]
+hydra_admin_url = "http://hydra:4445"
+"#,
+        );
+
+        let resolved = FileConfig::resolve(Some(&file.path)).expect("resolve explicit");
+
+        assert_eq!(resolved.source.as_deref(), Some(file.path.as_path()));
+        assert!(!resolved.discovered);
+        assert_eq!(
+            resolved.config.auth.hydra_admin_url.as_deref(),
+            Some("http://hydra:4445")
+        );
+    }
+
+    #[test]
+    fn resolve_explicit_missing_is_error() {
+        let path = std::env::temp_dir().join(format!(
+            "zeroship-core-config-resolve-missing-{}",
+            std::process::id()
+        ));
+
+        let err = FileConfig::resolve(Some(&path)).expect_err("explicit missing is error");
+
+        assert!(matches!(err, ConfigError::Io { .. }));
+    }
+
+    #[test]
+    fn resolve_discovers_present_well_known() {
+        let file = TempFile::write(
+            "resolve-well-known.toml",
+            r#"
+[observability]
+rust_log = "info,zeroship_=debug"
+"#,
+        );
+
+        let resolved =
+            FileConfig::resolve_with_well_known(None, &file.path).expect("resolve well-known");
+
+        assert_eq!(resolved.source.as_deref(), Some(file.path.as_path()));
+        assert!(resolved.discovered);
+        assert_eq!(
+            resolved.config.observability.log_filter.as_deref(),
+            Some("info,zeroship_=debug")
+        );
+    }
+
+    #[test]
+    fn resolve_missing_well_known_returns_default_none() {
+        let path = std::env::temp_dir().join(format!(
+            "zeroship-core-config-well-known-missing-{}",
+            std::process::id()
+        ));
+
+        let resolved =
+            FileConfig::resolve_with_well_known(None, &path).expect("missing well-known is ok");
+
+        assert!(resolved.source.is_none());
+        assert!(!resolved.discovered);
+        assert!(resolved.config.auth.hydra_admin_url.is_none());
+        assert!(resolved.config.observability.log_filter.is_none());
+    }
+
+    #[test]
+    fn resolve_present_but_malformed_well_known_is_error() {
+        let file = TempFile::write("resolve-malformed.toml", "[auth");
+
+        let err = FileConfig::resolve_with_well_known(None, &file.path)
+            .expect_err("malformed well-known is error");
+
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn describe_source_variants() {
+        let explicit = ResolvedConfig {
+            config: FileConfig::default(),
+            source: Some(PathBuf::from("/tmp/explicit.toml")),
+            discovered: false,
+        };
+        assert_eq!(describe_source(&explicit), "/tmp/explicit.toml");
+
+        let discovered = ResolvedConfig {
+            config: FileConfig::default(),
+            source: Some(PathBuf::from("/etc/zeroship/zeroship.toml")),
+            discovered: true,
+        };
+        assert_eq!(
+            describe_source(&discovered),
+            "/etc/zeroship/zeroship.toml (auto-discovered)"
+        );
+
+        let none = ResolvedConfig::default();
+        assert_eq!(describe_source(&none), "(none)");
+    }
+
+    #[test]
+    fn system_config_path_is_etc() {
+        assert_eq!(SYSTEM_CONFIG_PATH, "/etc/zeroship/zeroship.toml");
     }
 
     #[test]

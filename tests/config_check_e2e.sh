@@ -203,6 +203,34 @@ expect_status 0 "control tolerates invalid observability filter"
 expect_stderr_contains "invalid tracing filter" "control warns about invalid observability filter"
 echo ""
 
+echo "=== Case 5: config-source ==="
+# $TMPDIR is an absolute path (mktemp -d), so shared.toml is an absolute path.
+SHARED_ABS="$TMPDIR/shared.toml"
+run_cmd control-source "$CONTROL" --check-config --config "$SHARED_ABS" --dev-insecure
+show_last_output
+expect_status 0 "control config-source exits 0"
+expect_stdout_contains "config_source = $SHARED_ABS" "control reports explicit config_source path"
+expect_stdout_not_contains "(auto-discovered)" "control explicit source is not marked auto-discovered"
+echo ""
+
+run_cmd gateway-source "$GATEWAY" --check-config --config "$SHARED_ABS" --dev-insecure
+show_last_output
+expect_status 0 "gateway config-source exits 0"
+expect_stdout_contains "config_source = $SHARED_ABS" "gateway reports explicit config_source path"
+expect_stdout_not_contains "(auto-discovered)" "gateway explicit source is not marked auto-discovered"
+echo ""
+
+echo "=== Case 6: discovery-absent (guarded; never writes to /etc) ==="
+if [ ! -e /etc/zeroship/zeroship.toml ]; then
+    run_cmd control-no-config "$CONTROL" --check-config --dev-insecure
+    show_last_output
+    expect_status 0 "control with no --config exits 0"
+    expect_stdout_contains "config_source = (none)" "control reports no overlay when well-known path absent"
+else
+    echo "SKIP: /etc/zeroship/zeroship.toml exists; cannot assert discovery-absent without touching /etc"
+fi
+echo ""
+
 echo "============================================"
 echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"

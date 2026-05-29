@@ -226,13 +226,16 @@ fn validate_master_key_material(
 
 fn main() -> std::io::Result<()> {
     let cli = ControlCli::parse();
-    let file = load_overlay_or_exit(cli.config_path.as_deref(), "control");
+    let overlay = load_overlay_or_exit(cli.config_path.as_deref(), "control");
+    let config_source = zeroship_core::config::describe_source(&overlay);
+    let file = &overlay.config;
     let (filter, format) = resolve_observability(
         &cli.obs,
         &file.observability,
         "info,zeroship_control=debug",
     );
     zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
+    zeroship_core::config::log_overlay_source(&overlay);
 
     let insecure_dev = cli.insecure_dev();
     let trust_proxy = cli.trust_proxy();
@@ -426,6 +429,7 @@ fn main() -> std::io::Result<()> {
 
     if cli.check_config {
         println!("check-config: port = {port}");
+        println!("check-config: config_source = {config_source}");
         println!("check-config: hydra_admin_url = {hydra_admin_url}");
         println!("check-config: hydra_public_url = {hydra_public_url}");
         println!(
