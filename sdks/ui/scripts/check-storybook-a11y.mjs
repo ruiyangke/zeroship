@@ -231,6 +231,9 @@ const stories = [
   "components-slider--forced-colors-outline",
   "components-slider--coarse-pointer",
   "components-slider--rtl",
+  "components-slider--consumer-style-preserved",
+  "components-slider--required-cascade",
+  "components-slider--range-labelled-by",
   // Slice 10: Popover + Tooltip. 10 Popover + 8 Tooltip = 18 new entries.
   "components-popover--basic",
   "components-popover--with-title-description",

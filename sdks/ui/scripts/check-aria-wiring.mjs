@@ -6154,6 +6154,99 @@ await open("components-slider--consumer-style-preserved");
   );
 }
 
+/* ─── Wave 5 Slider fix #1 — `<Field required>` cascades into Slider ── *
+ *
+ * Wave 5 🔴 regression. Pre-fix, Slider read FieldContext for `size`
+ * and `disabled` but never `required`; a `<Field required><Slider/></
+ * Field>` thumb input carried no `aria-required`. Post-fix the resolved
+ * boolean is attached to each Thumb's nested `<input type="range">` via
+ * the `inputRef` callback (Base UI's Slider.Root has no `required`
+ * prop). The story renders three sliders: Field-cascade, explicit prop,
+ * and a control with no required at all. */
+await open("components-slider--required-cascade");
+{
+  const fieldThumb = page.locator(
+    '[data-testid="slider-required-field"] input[type="range"]',
+  );
+  const explicitThumb = page.locator(
+    '[data-testid="slider-required-explicit"] input[type="range"]',
+  );
+  const optionalThumb = page.locator(
+    '[data-testid="slider-required-none"] input[type="range"]',
+  );
+  await fieldThumb.first().waitFor({ state: "attached", timeout: 5000 });
+  const fieldRequired = await fieldThumb
+    .first()
+    .getAttribute("aria-required");
+  const explicitRequired = await explicitThumb
+    .first()
+    .getAttribute("aria-required");
+  const optionalRequired = await optionalThumb
+    .first()
+    .getAttribute("aria-required");
+  const ok =
+    fieldRequired === "true" &&
+    explicitRequired === "true" &&
+    optionalRequired == null;
+  report(
+    "Slider — <Field required> cascades to thumb input aria-required (Wave 5 fix)",
+    ok,
+    `field=${fieldRequired} explicit=${explicitRequired} optional=${optionalRequired}`,
+  );
+}
+
+/* ─── Wave 5 Slider fix #2 — range thumbs get distinct accessible names *
+ *
+ * Wave 5 🔴 regression. Pre-fix, range Thumbs forwarded the SAME
+ * `aria-labelledby` to both inputs, and Base UI puts `aria-labelledby`
+ * ahead of `aria-label`, so both thumbs ended up with the SAME
+ * accessible name (e.g. "Price range" twice). Post-fix we render a
+ * visually-hidden per-thumb suffix `<span>` (" (1 of 2)" / " (2 of 2)")
+ * and append its id to each thumb's aria-labelledby chain. The two
+ * thumb inputs' accessible names MUST be distinct. We read each input's
+ * computed accessible name via `aria-labelledby` resolution. */
+await open("components-slider--range-labelled-by");
+{
+  const slider = page.locator('[data-testid="slider-range-labelledby"]');
+  await slider.waitFor({ state: "attached", timeout: 5000 });
+  const inputs = slider.locator('input[type="range"]');
+  const count = await inputs.count();
+  // Resolve each input's accessible name from its aria-labelledby chain
+  // by reading the referenced elements' textContent in the page.
+  const names = [];
+  for (let i = 0; i < count; i += 1) {
+    const input = inputs.nth(i);
+    const labelledBy = await input.getAttribute("aria-labelledby");
+    if (!labelledBy) {
+      names.push(null);
+      continue;
+    }
+    const text = await page.evaluate((ids) => {
+      return ids
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }, labelledBy);
+    names.push(text);
+  }
+  const ok =
+    count === 2 &&
+    names[0] != null &&
+    names[1] != null &&
+    names[0] !== names[1] &&
+    /\(1 of 2\)/.test(names[0]) &&
+    /\(2 of 2\)/.test(names[1]) &&
+    /price range/i.test(names[0]) &&
+    /price range/i.test(names[1]);
+  report(
+    "Slider — range thumbs get distinct accessible names with aria-labelledby (Wave 5 fix)",
+    ok,
+    `count=${count} names=${JSON.stringify(names)}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
