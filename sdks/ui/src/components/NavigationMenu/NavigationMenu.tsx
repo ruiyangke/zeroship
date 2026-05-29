@@ -73,13 +73,12 @@ import {
   forwardRef,
   isValidElement,
   type ComponentPropsWithoutRef,
-  type ReactElement,
   type ReactNode,
   type Ref,
 } from "react";
 import { NavigationMenu as BaseNavMenu } from "@base-ui/react/navigation-menu";
 import { classnames, composeBaseClass } from "../_classnames";
-import { Slot, composeRefs, getElementRef } from "../_slot";
+import { Slot, composeRefs } from "../_slot";
 
 export type NavMenuSide = "top" | "right" | "bottom" | "left";
 export type NavMenuAlign = "start" | "center" | "end";
@@ -296,7 +295,16 @@ type BaseLinkProps = ComponentPropsWithoutRef<typeof BaseNavMenu.Link>;
  * router primitive while preserving the merged className, event
  * handlers, ref, and `data-active` state.
  */
-export interface NavMenuLinkProps extends Omit<BaseLinkProps, "render"> {
+export interface NavMenuLinkProps
+  extends Omit<BaseLinkProps, "render" | "className"> {
+  /**
+   * Optional class hook on the rendered link. String only — the Base
+   * UI function form (`(state) => string`) is intentionally hidden so
+   * the prop carries one shape across the package. Compose your own
+   * class string with the link's `data-active` attribute if you need
+   * state-derived styling.
+   */
+  className?: string;
   /**
    * When `true`, render the single child element instead of an `<a>`.
    * Useful for composing with router-link components — the child
@@ -309,47 +317,60 @@ export interface NavMenuLinkProps extends Omit<BaseLinkProps, "render"> {
 
 const NavMenuLink = forwardRef<HTMLAnchorElement, NavMenuLinkProps>(
   function NavMenuLink({ asChild = false, className, children, ...rest }, ref) {
-    // Base UI's `className` prop accepts a function form (state →
-    // string). We only support the string form on `NavMenuLink` —
-    // narrow here so `composeBaseClass` and `classnames` see a string.
-    const userClass: string | undefined =
-      typeof className === "string" ? className : undefined;
+    // Public prop is string-only (see `NavMenuLinkProps.className`),
+    // so we pass it straight through. The Base UI function form is
+    // hidden at the type layer.
+    const userClass = className;
+
+    if (process.env.NODE_ENV !== "production" && asChild && !isValidElement(children)) {
+      // eslint-disable-next-line no-console
+      console.error(
+        "NavigationMenu.Link asChild expects a single React element child; received " +
+          typeof children +
+          "; rendering nothing.",
+      );
+    }
+
     if (asChild) {
       // Slot path: route Base UI's emitted props onto the child element
-      // via the local Slot helper (className/style/event handlers merge,
-      // refs compose). The single child must be a valid React element.
+      // via the local Slot helper. We MUST NOT pass `ref={ref}` to
+      // `<BaseNavMenu.Link>` directly — Base UI's render-prop hands us
+      // `linkProps.ref` already pointing at the element it would render.
+      // Compose the outer forwarded ref with `linkProps.ref` INSIDE the
+      // render-prop and let `Slot.getElementRef` compose the child's own
+      // ref. This matches `Menu.LinkItem` (which itself mirrors
+      // `Dialog.Close` commit 3a64a726). Doing the child-side
+      // composition here would double-fire the child callback ref on
+      // every attach (regression for wave10 review 🔴 #1).
       return (
         <BaseNavMenu.Link
           {...rest}
           render={(linkProps) => {
-            if (!isValidElement(children)) {
-              const { className: baseClassName, ...anchorProps } =
-                linkProps as Record<string, unknown>;
-              const stringClass =
-                typeof baseClassName === "string" ? baseClassName : undefined;
-              return (
-                <a
-                  {...(anchorProps as React.AnchorHTMLAttributes<HTMLAnchorElement>)}
-                  className={stringClass}
-                />
-              );
-            }
-            const child = children as ReactElement<Record<string, unknown>>;
-            const childRef = getElementRef<HTMLAnchorElement>(child);
-            const { className: baseClassName, ...slotProps } =
-              linkProps as Record<string, unknown>;
+            const linkPropsRef = (linkProps as { ref?: Ref<unknown> }).ref;
+            const baseClass = (linkProps as { className?: unknown }).className;
             const stringClass =
-              typeof baseClassName === "string" ? baseClassName : undefined;
+              typeof baseClass === "string" ? baseClass : undefined;
+            if (!isValidElement(children)) {
+              // Dev-error above already flagged the misuse. Return an
+              // empty fragment so Base UI's render-prop contract
+              // (returns ReactElement) is satisfied.
+              return <></>;
+            }
             return (
               <Slot
-                {...slotProps}
+                {...(linkProps as Record<string, unknown>)}
                 className={composeBaseClass(
                   "zs-navmenu-link",
-                  classnames(stringClass, userClass),
+                  // userClass on the wrapper outranks Base UI's state
+                  // class (matches the default branch order below).
+                  userClass ?? stringClass,
                 )}
-                ref={composeRefs(ref, childRef) as Ref<HTMLAnchorElement>}
+                ref={composeRefs(
+                  ref as Ref<unknown>,
+                  linkPropsRef,
+                )}
               >
-                {child}
+                {children}
               </Slot>
             );
           }}

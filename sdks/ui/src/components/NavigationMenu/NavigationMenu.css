@@ -114,7 +114,12 @@
   transition: transform var(--zs-motion-base) var(--zs-motion-ease);
 }
 
-.zs-navmenu-icon[data-open] {
+/* Base UI emits `data-popup-open` (NOT `data-open`) on the Icon when
+ * its owning Item is the active one — the Icon shares the trigger's
+ * `pressableTriggerOpenStateMapping`. The previous selector
+ * (`[data-open]`) never matched, so the chevron stayed upright when the
+ * mega-menu opened. */
+.zs-navmenu-icon[data-popup-open] {
   transform: rotate(180deg);
 }
 
@@ -171,9 +176,13 @@
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
   /* Sized to comfortably host a 2-3 column mega-menu without exceeding
-   * the viewport. The brief contingency: max-inline-size fits viewport.
-   * `min()` floors against viewport width minus a comfortable gutter. */
-  min-inline-size: 18rem;
+   * the viewport. Both bounds clamp against the viewport — without
+   * clamping the minimum, narrow phones (≤ ~320px after the gutter)
+   * would let `min-inline-size: 18rem` (= 288px) override the
+   * viewport-capped `max-inline-size` and overflow horizontally
+   * (wave10 review 🔴 #3). The shared gutter expression keeps min and
+   * max symmetrical. */
+  min-inline-size: min(18rem, calc(100dvw - var(--zs-space-6) * 2));
   max-inline-size: min(56rem, calc(100dvw - var(--zs-space-6) * 2));
   border-radius: var(--zs-radius-5);
   box-shadow:

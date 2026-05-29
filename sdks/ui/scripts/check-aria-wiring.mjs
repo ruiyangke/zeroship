@@ -9256,6 +9256,179 @@ await open("components-numberfield--consumer-focus-handlers");
   );
 }
 
+/* ─── Wave 10 fix (NavigationMenu #1) — asChild ref attaches once ─── *
+ *
+ * Regression for the wave10 NavigationMenu 🔴 #1. Pre-fix, the asChild
+ * branch called `getElementRef(child)` and composed `(ref, childRef)`
+ * itself, then handed the composed ref to `<Slot>`. `<Slot>` ALSO
+ * composes the child's ref via its own `getElementRef`, so the child's
+ * callback ref fired TWICE per attach. The wrapper's explicit
+ * `ref={...}` also outranked Base UI's `linkProps.ref` from the
+ * render-prop spread, so the wrapper ref never landed on the anchor.
+ *
+ * Post-fix mirrors `Menu.LinkItem` / `Dialog.Close`: extract
+ * `linkProps.ref`, compose with the outer `ref`, and let `<Slot>`
+ * do the child-ref composition.
+ *
+ * The story stamps the wrapper ref's tagName on an `<output>` element
+ * via `data-wrapper-ref-tag`. We open the Item, then read it. Pre-fix
+ * the wrapper ref never lands, so the value stays at "none" and this
+ * block FAILS. */
+await open("components-navigationmenu--as-child-ref-attach-regression");
+{
+  const trigger = page.locator(
+    '[data-testid="navmenu-aschild-ref-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page.waitForTimeout(400);
+  const link = page.locator('[data-testid="navmenu-aschild-ref-link"]');
+  await link.waitFor({ state: "visible", timeout: 5000 });
+  const tag = await link.evaluate((el) => el.tagName);
+  const href = await link.getAttribute("href");
+  // Pull the attach counters from the <output> companion (which is
+  // re-rendered via rAF after each attach).
+  const counters = page.locator(
+    '[data-testid="navmenu-aschild-ref-counters"]',
+  );
+  await counters.waitFor({ state: "visible", timeout: 5000 });
+  const wrapperRefTagAttr = await counters.getAttribute(
+    "data-wrapper-ref-tag",
+  );
+  const wrapperAttachCount = Number(
+    (await counters.getAttribute("data-wrapper-attach-count")) ?? "0",
+  );
+  const childAttachCount = Number(
+    (await counters.getAttribute("data-child-attach-count")) ?? "0",
+  );
+  // Post-fix: wrapper ref lands on the anchor (tag === "A") AND the
+  // child callback ref fires the SAME number of times as the wrapper
+  // ref (one fire per attach). Pre-fix the child ref fired TWICE per
+  // attach because both the wrapper's `composeRefs(ref, childRef)`
+  // and `<Slot>`'s internal `composeRefs(ourRef, getElementRef
+  // (child))` handed the same childRef to the rendered anchor — so
+  // childAttach == 2 * wrapperAttach. Base UI may unmount/remount
+  // the Content portal a few times during animation; the ratio
+  // (1:1 vs 2:1) is the regression signal that survives that noise.
+  const ratioOk = wrapperAttachCount > 0 && childAttachCount === wrapperAttachCount;
+  const ok =
+    tag === "A" &&
+    href === "/launch" &&
+    wrapperRefTagAttr === "A" &&
+    ratioOk;
+  report(
+    "NavigationMenu — asChild Link child ref fires once per attach, not twice (wave10 🔴 #1)",
+    ok,
+    `tag=${tag} href=${href} wrapperRefTag=${wrapperRefTagAttr} wrapperAttach=${wrapperAttachCount} childAttach=${childAttachCount} ratio=${
+      wrapperAttachCount > 0
+        ? (childAttachCount / wrapperAttachCount).toFixed(2)
+        : "n/a"
+    }`,
+  );
+}
+
+/* ─── Wave 10 fix (NavigationMenu #2) — Icon rotates on open ─── *
+ *
+ * Regression for the wave10 NavigationMenu 🔴 #2. Pre-fix the chevron
+ * rotation CSS targeted `.zs-navmenu-icon[data-open]`, but Base UI's
+ * `NavigationMenu.Icon` uses `triggerOpenStateMapping` which stamps
+ * `data-popup-open` (NOT `data-open`). The selector matched nothing,
+ * so the chevron stayed upright when the popup opened. Post-fix the
+ * CSS selector is `.zs-navmenu-icon[data-popup-open]`.
+ *
+ * We assert two facts that together would catch BOTH the missing
+ * attribute and a misnamed selector:
+ *   1. The Icon's `data-popup-open` attribute is absent when closed
+ *      and present when open. (Renames `data-open` → `data-popup-open`
+ *      blow up here.)
+ *   2. The computed `transform` on the Icon is a non-identity matrix
+ *      when open. (CSS selector typos blow up here.) */
+await open("components-navigationmenu--icon-rotation-regression");
+{
+  const trigger = page.locator(
+    '[data-testid="navmenu-icon-rotate-trigger"]',
+  );
+  const icon = page.locator('[data-testid="navmenu-icon-rotate-icon"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await icon.waitFor({ state: "visible", timeout: 5000 });
+  const popupOpenBefore = await icon.getAttribute("data-popup-open");
+  const transformBefore = await icon.evaluate(
+    (el) => getComputedStyle(el).transform,
+  );
+  await trigger.click();
+  await page.waitForTimeout(300);
+  const popupOpenAfter = await icon.getAttribute("data-popup-open");
+  const transformAfter = await icon.evaluate(
+    (el) => getComputedStyle(el).transform,
+  );
+  // Pre-fix transformAfter would equal transformBefore (both 'none' /
+  // identity) because the `[data-open]` selector never matched. With
+  // the `[data-popup-open]` selector the open state paints a
+  // `rotate(180deg)` matrix.
+  const ok =
+    popupOpenBefore === null &&
+    popupOpenAfter === "" &&
+    transformBefore !== transformAfter &&
+    /matrix/.test(transformAfter);
+  report(
+    "NavigationMenu — Icon flips to data-popup-open + rotates 180° on open (wave10 🔴 #2)",
+    ok,
+    `popupOpen: ${popupOpenBefore} → ${popupOpenAfter}; transform: "${transformBefore}" → "${transformAfter}"`,
+  );
+}
+
+/* ─── Wave 10 fix (NavigationMenu #3) — Popup never overflows ─── *
+ *
+ * Regression for the wave10 NavigationMenu 🔴 #3. Pre-fix the popup
+ * carried `min-inline-size: 18rem` (= 288px) but `max-inline-size`
+ * was viewport-capped. On a narrow viewport (e.g. 320px after
+ * removing the gutter) the un-clamped minimum overrode the maximum,
+ * so the popup painted wider than the viewport and overflowed
+ * horizontally. Post-fix the minimum ALSO clamps: `min(18rem,
+ * calc(100dvw - var(--zs-space-6) * 2))`.
+ *
+ * We force a narrow iframe (320px), open the popup, and read its
+ * `getBoundingClientRect().width`. Pre-fix the width landed near
+ * ~288px on a 320px viewport — overflowing the viewport-capped
+ * gutter. Post-fix the width clamps to the viewport-minus-gutter
+ * expression, well under 288px. */
+await open("components-navigationmenu--popup-min-width-clamp-regression");
+{
+  // Shrink the viewport AFTER the story has loaded so the popup
+  // reflows under the new dvw. We use setViewportSize on the page
+  // (which Playwright wires into both the outer browser context AND
+  // the Storybook iframe).
+  await page.setViewportSize({ width: 320, height: 600 });
+  await page.waitForTimeout(150);
+  const trigger = page.locator('[data-testid="navmenu-clamp-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="navmenu-clamp-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(250);
+  const popupWidth = await popup.evaluate(
+    (el) => el.getBoundingClientRect().width,
+  );
+  const viewportWidth = await page.evaluate(() => window.innerWidth);
+  // Pre-fix the un-clamped `min-inline-size: 18rem` (= 288px) won on
+  // narrow viewports, so the popup rendered ~287.97-288.03px on a
+  // 320px viewport. Post-fix both bounds collapse to
+  // `calc(100dvw - var(--zs-space-6) * 2)` (320px - 48px = 272px) on
+  // the same viewport. We gate at 280px — comfortably below the
+  // pre-fix ~288 but well above the post-fix 272, so sub-pixel
+  // rounding can't flip the result either way.
+  const ok = popupWidth <= viewportWidth + 1 && popupWidth <= 280;
+  report(
+    "NavigationMenu — Popup width clamps to viewport on narrow screens (wave10 🔴 #3)",
+    ok,
+    `popupWidth=${popupWidth.toFixed(1)} viewportWidth=${viewportWidth}`,
+  );
+  // Restore the default viewport for any subsequent blocks (none
+  // today, but we don't want to surprise future maintainers).
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.waitForTimeout(100);
+}
+
 await ctx.close();
 await browser.close();
 
