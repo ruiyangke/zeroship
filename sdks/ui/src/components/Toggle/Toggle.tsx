@@ -214,6 +214,15 @@ function ToggleGroupInner<Value extends string = string>(
   props: ToggleGroupProps<Value>,
   ref: React.ForwardedRef<HTMLDivElement>,
 ) {
+  // Detect prop *presence* before destructuring so a controlled group
+  // whose `value` is explicitly `undefined` (cleared selection in a
+  // controlled handler) stays on Base UI's controlled path. If we read
+  // only the destructured value, `undefined` is indistinguishable from
+  // "prop not passed" and Base UI silently flips to uncontrolled. See
+  // ToggleGroup review-fix 🔴 #1.
+  const hasValueProp = "value" in props;
+  const hasDefaultValueProp = "defaultValue" in props;
+
   const {
     size,
     variant,
@@ -308,18 +317,42 @@ function ToggleGroupInner<Value extends string = string>(
   }, [children, equalWidth]);
 
   // Adapt scalar single-mode values into the always-array contract Base
-  // UI's ToggleGroup expects. Single-mode `undefined` becomes `[]` (Base
-  // UI's "nothing pressed" representation); multiple-mode arrays pass
-  // through. Item 3 fix.
+  // UI's ToggleGroup expects. Item 3 fix.
+  //
+  // ToggleGroup review-fix 🔴 #1: prop *presence* is the controlled
+  // signal. A consumer holding state via `useState<Value | undefined>`
+  // and clearing it via `setValue(undefined)` still owns the value —
+  // we must keep Base UI on the controlled path. Pre-fix this code
+  // mapped `value={undefined}` (present-but-cleared) to `undefined`,
+  // which Base UI treats as "uncontrolled, derive from defaultValue".
+  // Result: the cleared state silently regressed to whatever
+  // defaultValue happened to be (or the last uncontrolled state).
+  //
+  //   hasValueProp + value=undefined → []            (controlled empty)
+  //   hasValueProp + value=scalar    → [scalar]      (controlled value)
+  //   !hasValueProp                  → undefined     (uncontrolled)
+  //
+  // Multiple-mode arrays pass through unchanged because Base UI's
+  // controlled-detection on the array branch already keys on prop
+  // presence (a multi-mode consumer passing `value={undefined}` is the
+  // same edge — handled identically below).
   const adaptedValue: readonly Value[] | undefined = isMultiple
-    ? (value as readonly Value[] | undefined)
-    : value != null
-      ? [value as Value]
+    ? hasValueProp
+      ? ((value as readonly Value[] | undefined) ?? [])
+      : undefined
+    : hasValueProp
+      ? value != null
+        ? [value as Value]
+        : []
       : undefined;
   const adaptedDefaultValue: readonly Value[] | undefined = isMultiple
-    ? (defaultValue as readonly Value[] | undefined)
-    : defaultValue != null
-      ? [defaultValue as Value]
+    ? hasDefaultValueProp
+      ? ((defaultValue as readonly Value[] | undefined) ?? [])
+      : undefined
+    : hasDefaultValueProp
+      ? defaultValue != null
+        ? [defaultValue as Value]
+        : []
       : undefined;
   const adaptedOnValueChange = (
     next: Value[],
@@ -351,12 +384,16 @@ function ToggleGroupInner<Value extends string = string>(
       }}
     >
       <BaseToggleGroup
-        // role="toolbar" is set BEFORE {...rest} so a future maintainer
-        // who drops the `Omit<…, "role">` from the public type can't
-        // accidentally let consumer props overwrite it via spread order.
-        // Belt-and-braces with the TypeScript omit above.
-        role="toolbar"
+        // ToggleGroup review-fix 🔴 #2: stamp `role="toolbar"` AFTER
+        // {...rest} so an untyped spread (e.g. a consumer who casts past
+        // the public `Omit<…, "role">` type, or a Field/Fieldset that
+        // forwards arbitrary props) physically cannot overwrite the
+        // role. Pre-fix the role attribute sat BEFORE the spread and a
+        // `{role: "X"} as any` consumer escape hatch silently won. The
+        // TypeScript omit on `ToggleGroupBaseProps` is the compile-time
+        // half; this is the runtime half.
         {...rest}
+        role="toolbar"
         ref={ref}
         // Base UI's value props are typed as `readonly Value[]`; the
         // scalar→array adaptation above made the shape match. The cast
