@@ -28,6 +28,27 @@ generated dev client secret to `data/builder-client-secret`. That file is
 mounted into the Builder container, which exports it as `BUILDER_CLIENT_SECRET`
 before starting Vite. The file is local dev state and is ignored by git.
 
+### Configuration overlay
+
+`docker-compose.yml` mounts `./ops/zeroship.toml` into `control` and `gateway`
+as `/etc/zeroship/zeroship.toml`, and starts both with
+`--config /etc/zeroship/zeroship.toml`. The worker and auth server are not wired
+to this overlay in the compose stack.
+
+The overlay provides the shared `[auth]` Hydra URLs, `trusted_oauth_clients`,
+and `[observability]` defaults so those values are defined once instead of per
+service. Copy `ops/zeroship.example.toml` to `ops/zeroship.toml` when
+customizing an environment. Secrets do not belong in this file; keep them in
+env, CLI flags, or secret file paths.
+
+Validate a web binary's resolved config by adding `--check-config` to the
+normal command. It runs the same startup guards, so include the same required
+secret or dev-mode flags you would use for startup:
+
+```bash
+zeroship-<bin> --check-config --config <file> <normal required flags>
+```
+
 ## Redis cluster test stack
 
 `docker-compose.cluster.yml` is separate. It does **not** boot the platform stack; it only starts a 3-node Dragonfly cluster for `compio-redis` integration tests:

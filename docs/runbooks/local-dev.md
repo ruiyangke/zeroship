@@ -95,6 +95,9 @@ Notes:
 
 - `zeroship-gate` uses `--auth-secret` / `AUTH_SECRET` for gateway auth paths.
 - `zeroship-worker` binds `127.0.0.1` by default. Only add `--bind 0.0.0.0` together with `--worker-key`.
+- `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
+  overlay; add `--check-config` to the normal command to validate CLI/env/file
+  config and exit before binding a port.
 - To seed the Builder OAuth client in local dev, start control with
   `BOOTSTRAP_BUILDER_OAUTH_CLIENT=1` or `--bootstrap-builder-client` while
   Hydra admin is reachable. Control registers `zeroship-builder` in Hydra and
