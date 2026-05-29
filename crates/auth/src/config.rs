@@ -15,6 +15,10 @@ pub struct AuthConfig {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     pub config_path: Option<PathBuf>,
 
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    pub check_config: bool,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
     pub obs: ObservabilityFlags,

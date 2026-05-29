@@ -141,6 +141,10 @@ struct GateCli {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    check_config: bool,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
     obs: zeroship_core::config::ObservabilityFlags,
@@ -156,8 +160,7 @@ impl GateCli {
     }
 }
 
-#[ntex::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
     let file = load_overlay_or_exit(cli.config_path.as_deref(), "gateway");
     let (filter, format) = resolve_observability(
@@ -273,6 +276,43 @@ async fn main() -> std::io::Result<()> {
         Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
     });
 
+    if cli.check_config {
+        println!("check-config: port = {port}");
+        println!("check-config: control_url = {control_url}");
+        println!("check-config: hydra_public_url = {hydra_public_url}");
+        println!("check-config: auth_ui_url = {auth_ui_url}");
+        println!("check-config: log_filter = {filter}");
+        println!(
+            "check-config: log_format = {}",
+            format.as_deref().unwrap_or("auto")
+        );
+        println!("check-config: insecure_dev = {insecure_dev}");
+        println!("check-config: trust_proxy = {trust_proxy}");
+        println!("check-config: blob_store = {blob_store_root}");
+        println!("check-config: blob_cache_mem_mb = {blob_cache_mem_mb}");
+        println!("check-config: blob_cache_disk_gb = {blob_cache_disk_gb}");
+        println!("check-config: blob_cache_disk_root = {blob_cache_disk_root}");
+        println!("check-config: poll_interval_secs = {poll_interval}");
+        println!(
+            "check-config: workers_count = {}",
+            workers_str
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .count()
+        );
+        println!("check-config: db_configured = {}", !pg_dsn.is_empty());
+        println!(
+            "check-config: signing_key_configured = {}",
+            !signing_key_path.is_empty()
+        );
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-gate")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
     let blob_cache_bytes: usize = blob_cache_mem_mb.saturating_mul(1024 * 1024);
     let disk_cache_bytes: u64 = blob_cache_disk_gb.saturating_mul(1024 * 1024 * 1024);
     let blob_store: Arc<dyn BlobStore> = Arc::new(
@@ -430,6 +470,7 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run()
     .await
+        })
 }
 
 #[cfg(test)]

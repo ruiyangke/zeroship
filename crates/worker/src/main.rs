@@ -85,6 +85,10 @@ struct WorkerCli {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    check_config: bool,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
     obs: zeroship_core::config::ObservabilityFlags,
@@ -131,8 +135,7 @@ pub struct WorkerConfig {
     pub blob_store: Arc<dyn BlobStore>,
 }
 
-#[ntex::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     let cli = WorkerCli::parse();
     let file = load_overlay_or_exit(cli.config_path.as_deref(), "worker");
     let (filter, format) = resolve_observability(
@@ -141,7 +144,6 @@ async fn main() -> std::io::Result<()> {
         "info,zeroship_worker=debug,zeroship_runtime=info",
     );
     zeroship_core::observability::init_tracing_with(&filter, format.as_deref());
-    init_v8();
 
     let insecure_dev = cli.insecure_dev();
     let port = cli.port;
@@ -178,6 +180,32 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
+
+    if cli.check_config {
+        println!("check-config: bind = {bind_host}");
+        println!("check-config: port = {port}");
+        println!("check-config: control_url = {control_url}");
+        println!("check-config: worker_threads = {workers_count}");
+        println!("check-config: max_isolates = {max_isolates}");
+        println!("check-config: poll_interval_secs = {poll_interval}");
+        println!("check-config: shutdown_timeout_secs = {shutdown_timeout}");
+        println!("check-config: log_filter = {filter}");
+        println!(
+            "check-config: log_format = {}",
+            format.as_deref().unwrap_or("auto")
+        );
+        println!("check-config: insecure_dev = {insecure_dev}");
+        println!("check-config: blob_store = {blob_store_root}");
+        println!("check-config: socket_configured = {}", !socket_path.is_empty());
+        println!("check-config: db_configured = {}", !db_url.is_empty());
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-worker")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+    init_v8();
 
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
@@ -280,6 +308,7 @@ async fn main() -> std::io::Result<()> {
     let run_result = server.run().await;
     tracing::info!("worker shutdown complete");
     run_result
+        })
 }
 
 #[cfg(test)]

@@ -127,6 +127,10 @@ struct ControlCli {
     #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
     config_path: Option<PathBuf>,
 
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    check_config: bool,
+
     /// Observability CLI/env overrides.
     #[command(flatten)]
     obs: zeroship_core::config::ObservabilityFlags,
@@ -220,8 +224,7 @@ fn validate_master_key_material(
     }
 }
 
-#[ntex::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     let cli = ControlCli::parse();
     let file = load_overlay_or_exit(cli.config_path.as_deref(), "control");
     let (filter, format) = resolve_observability(
@@ -263,14 +266,19 @@ async fn main() -> std::io::Result<()> {
     // Comma-separated list of previous master keys, tried as fallbacks
     // on decrypt failure during a rotation grace period.
     let legacy_master_keys_raw = cli.legacy_master_keys;
-    let legacy_keys: Vec<&str> = legacy_master_keys_raw
+    let legacy_keys: Vec<String> = legacy_master_keys_raw
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
         .collect();
     let builder_redirect_uri = cli.builder_redirect_uri;
     let builder_client_secret_path = cli.builder_client_secret_file;
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
+    let console_oidc_secret = cli.console_oidc_secret;
+    let stash_signing_key = cli.stash_signing_key;
+    let auth_db_url = cli.auth_db_url;
+    let expected_oauth_audience = cli.oauth_audience;
 
     let deploy_tmp_dir: std::path::PathBuf = if deploy_tmp_dir_str.is_empty() {
         std::env::temp_dir()
@@ -355,68 +363,12 @@ async fn main() -> std::io::Result<()> {
         tracing::warn!("control: --dev-insecure set; admin + internal auth disabled");
     }
 
-    let pat_issuer = if signing_key_file.is_empty() {
-        tracing::warn!("control: using dev-only PAT signing key");
-        Arc::new(token_handlers::PatIssuer::dev_insecure())
-    } else {
-        let signing_key = token_handlers::load_signing_key_from_path(
-            std::path::Path::new(&signing_key_file),
-        )
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: failed to load PAT signing key");
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-        })?;
-        Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
-            tracing::error!(error = %err, "control: failed to initialize PAT issuer");
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-        })?)
-    };
-
-    let registry = Registry::new(&db_url)
-        .await
-        .expect("failed to connect to database");
-
-    let vfs = Arc::new(
-        LocalFs::new(&blob_store_root).expect("failed to initialise bundle store"),
-    ) as Arc<dyn BundleStore + Send + Sync>;
-
-    // BlobStore lives alongside the legacy BundleStore on the same
-    // root. New `.zship` deploys land in `<blob_store_root>/blobs/` and
-    // `<blob_store_root>/manifests/`; legacy `<blob_store_root>/<app_id>/...`
-    // files stay where they are until the old BundleStore path is
-    // retired.
-    let blob_root = PathBuf::from(&blob_store_root);
-    let blob_store: Arc<dyn BlobStore> = Arc::new(
-        LocalDiskBlobStore::new(blob_root)
-            .expect("failed to initialise blob store"),
-    );
-
-    if !legacy_keys.is_empty() {
-        tracing::info!(
-            legacy_keys = legacy_keys.len(),
-            "control: EnvStore booted with legacy master keys (rotation grace period)"
-        );
-    }
-    let env_store = EnvStore::new_with_previous(
-        registry.clone(),
-        &master_key,
-        &legacy_keys,
-        insecure_dev,
-    )
-    .expect("env store init");
-    let stripe_store = StripeStore::new(registry.clone());
-
     // Phase 3 U7/U8 — control plane OIDC RP for `console.zeroship.ai`.
     // Mandatory post-U8: the legacy `auth_handlers` / `auth_service`
     // chain has been retired, so the OIDC RP is the only console-auth
     // surface. Control also needs hydra-admin for OAuth bearer
     // introspection. Refuses to boot unless these pieces are configured
     // (`--dev-insecure` permits localhost defaults only).
-    let console_oidc_secret = cli.console_oidc_secret;
-    let stash_signing_key = cli.stash_signing_key;
-    let auth_db_url = cli.auth_db_url;
-    let expected_oauth_audience = cli.oauth_audience;
-
     if !insecure_dev {
         let mut missing = Vec::new();
         if hydra_public_url.is_empty() {
@@ -454,6 +406,98 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
+
+    let pat_issuer = if signing_key_file.is_empty() {
+        tracing::warn!("control: using dev-only PAT signing key");
+        Arc::new(token_handlers::PatIssuer::dev_insecure())
+    } else {
+        let signing_key = token_handlers::load_signing_key_from_path(
+            std::path::Path::new(&signing_key_file),
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: failed to load PAT signing key");
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+        })?;
+        Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
+            tracing::error!(error = %err, "control: failed to initialize PAT issuer");
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+        })?)
+    };
+
+    if cli.check_config {
+        println!("check-config: port = {port}");
+        println!("check-config: hydra_admin_url = {hydra_admin_url}");
+        println!("check-config: hydra_public_url = {hydra_public_url}");
+        println!(
+            "check-config: trusted_oauth_clients_count = {}",
+            trusted_oauth_clients.len()
+        );
+        println!("check-config: log_filter = {filter}");
+        println!(
+            "check-config: log_format = {}",
+            format.as_deref().unwrap_or("auto")
+        );
+        println!("check-config: insecure_dev = {insecure_dev}");
+        println!("check-config: trust_proxy = {trust_proxy}");
+        println!("check-config: bootstrap_builder_client = {bootstrap_builder_client}");
+        println!("check-config: blob_store = {blob_store_root}");
+        println!(
+            "check-config: deploy_tmp_dir = {}",
+            deploy_tmp_dir.display()
+        );
+        println!(
+            "check-config: auth_db_configured = {}",
+            !auth_db_url.is_empty()
+        );
+        println!(
+            "check-config: workers_count = {}",
+            workers_str
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .count()
+        );
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-control")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+    let registry = Registry::new(&db_url)
+        .await
+        .expect("failed to connect to database");
+
+    let vfs = Arc::new(
+        LocalFs::new(&blob_store_root).expect("failed to initialise bundle store"),
+    ) as Arc<dyn BundleStore + Send + Sync>;
+
+    // BlobStore lives alongside the legacy BundleStore on the same
+    // root. New `.zship` deploys land in `<blob_store_root>/blobs/` and
+    // `<blob_store_root>/manifests/`; legacy `<blob_store_root>/<app_id>/...`
+    // files stay where they are until the old BundleStore path is
+    // retired.
+    let blob_root = PathBuf::from(&blob_store_root);
+    let blob_store: Arc<dyn BlobStore> = Arc::new(
+        LocalDiskBlobStore::new(blob_root)
+            .expect("failed to initialise blob store"),
+    );
+
+    if !legacy_keys.is_empty() {
+        tracing::info!(
+            legacy_keys = legacy_keys.len(),
+            "control: EnvStore booted with legacy master keys (rotation grace period)"
+        );
+    }
+    let legacy_key_refs: Vec<&str> = legacy_keys.iter().map(String::as_str).collect();
+    let env_store = EnvStore::new_with_previous(
+        registry.clone(),
+        &master_key,
+        &legacy_key_refs,
+        insecure_dev,
+    )
+    .expect("env store init");
+    let stripe_store = StripeStore::new(registry.clone());
 
     let stash_key_bytes = if stash_signing_key.is_empty() {
         // Dev-only fallback. Ephemeral keys are fine for the 10-minute
@@ -703,6 +747,7 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run()
     .await
+        })
 }
 
 #[cfg(test)]

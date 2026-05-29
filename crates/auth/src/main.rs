@@ -24,8 +24,7 @@ use zeroship_auth::server;
 use zeroship_auth::startup_validation::validate_hydra_admin_url;
 use zeroship_auth::store;
 
-#[ntex::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
     let file = load_overlay_or_exit(cfg.config_path.as_deref(), "auth");
     let (filter, format) =
@@ -44,6 +43,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Mailer config validation is cheap and should fail before any DB/Hydra
+    // work. The constructed driver is reused below on normal startup.
+    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.mailer, "mailer ready");
+
+    if cfg.check_config {
+        println!("check-config: addr = {}", cfg.addr);
+        println!("check-config: hydra_admin_url = {}", cfg.hydra_admin_url());
+        println!("check-config: hydra_public_url = {}", cfg.hydra_public_url());
+        println!("check-config: log_filter = {filter}");
+        println!(
+            "check-config: log_format = {}",
+            format.as_deref().unwrap_or("auto")
+        );
+        println!("check-config: insecure_dev = {}", cfg.insecure_dev);
+        println!(
+            "check-config: allow_remote_hydra_admin = {}",
+            cfg.allow_remote_hydra_admin
+        );
+        println!("check-config: bootstrap = {}", cfg.bootstrap);
+        println!("check-config: public_url = {}", cfg.public_url());
+        println!("check-config: clients_config = {}", cfg.clients_config);
+        println!("check-config: db_configured = {}", !cfg.db_url.is_empty());
+        println!("check-config: mailer = {}", cfg.mailer);
+        println!(
+            "check-config: google_oauth_configured = {}",
+            cfg.google_client_id.is_some()
+        );
+        println!(
+            "check-config: github_oauth_configured = {}",
+            cfg.github_client_id.is_some()
+        );
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-auth")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
     // OAuth provider credentials are optional. We log a warning per disabled
     // provider so it's obvious during boot which federation arms aren't wired
     // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
@@ -85,15 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // 5. Build the mailer driver. `--mailer=stdout` is the dev default;
-    //    `smtp` and `resend` are the production drivers. Missing creds
-    //    for the selected driver is a fatal config error — we'd rather
-    //    fail loudly at boot than silently swallow magic-link / reset
-    //    mails at request time.
-    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
-    tracing::info!(driver = %cfg.mailer, "mailer ready");
-
-    // 6. Spawn in-process cron tasks. Detached on
+    // 5. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared with the server
@@ -103,11 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
     tracing::info!("cron tasks spawned");
 
-    // 7. Serve. `Arc`s keep the PG client + config alive across the
+    // 6. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
     server::run(cfg, admin, db, google_jwks, mailer).await?;
-    Ok(())
+    Ok::<(), Box<dyn std::error::Error>>(())
+        })
 }
 
 /// Translate `--mailer` + per-driver flags into a concrete
