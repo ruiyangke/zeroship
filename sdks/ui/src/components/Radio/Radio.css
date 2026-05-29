@@ -247,7 +247,18 @@
   }
 }
 
-/* ─── forced-colors ─────────────────────────────────────────────────── */
+/* ─── forced-colors ─────────────────────────────────────────────────── *
+ *
+ * Because `.zs-radio` carries `forced-color-adjust: none` (the chip is a
+ * non-native surface, not a `<input type=radio>`), browsers will NOT
+ * auto-substitute system colors. Every selector that paints a token
+ * outside this block (hover, checked, disabled, readonly + combinations)
+ * needs an equal-or-higher specificity mirror INSIDE this block so
+ * Windows High Contrast / forced-colors users see system colors, not
+ * brand tokens. Slice-8 review red #1: the pre-fix block only mirrored
+ * base/checked/disabled selectors — the hover + readonly + readonly-
+ * checked rules outranked the unconditional `.zs-radio` reset on
+ * specificity and leaked `--zs-*` tokens through. */
 @media (forced-colors: active) {
   .zs-radio {
     background-color: Canvas;
@@ -255,6 +266,15 @@
       inset 0 0 0 0.0625rem CanvasText,
       0 0 0 0 transparent;
     forced-color-adjust: none;
+  }
+  /* Hover (normal-mode specificity 0,4,1 — mirror it to system tone so
+   * the hover hairline stays CanvasText and the bg stays Canvas under
+   * forced-colors). */
+  .zs-radio:not([data-disabled]):not([data-checked]):hover {
+    background-color: Canvas;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
   }
   .zs-radio[data-checked] {
     box-shadow:
@@ -279,6 +299,28 @@
   }
   .zs-radio[data-disabled] .zs-radio__indicator {
     background-color: GrayText;
+  }
+  /* Readonly mirrors (normal-mode specificities 0,2,1 / 0,3,1 / 0,3,1 /
+   * 0,3,2). The readonly chip in forced-colors collapses to the same
+   * "Canvas bg, CanvasText hairline, Highlight dot when checked"
+   * vocabulary the base state uses — system colors don't carry a
+   * separate "presented, not editable" tone, and the cursor change is
+   * already non-color. The `[data-readonly]` mirror keeps the cursor
+   * declaration so the specificity ladder matches normal mode. */
+  .zs-radio[data-readonly] {
+    cursor: default;
+  }
+  .zs-radio[data-readonly]:not([data-checked]) {
+    background-color: Canvas;
+  }
+  .zs-radio[data-readonly][data-checked] {
+    background-color: Canvas;
+    box-shadow:
+      inset 0 0 0 0.125rem Highlight,
+      0 0 0 0 transparent;
+  }
+  .zs-radio[data-readonly][data-checked] .zs-radio__indicator {
+    background-color: Highlight;
   }
   .zs-radio-field[data-disabled] {
     color: GrayText;

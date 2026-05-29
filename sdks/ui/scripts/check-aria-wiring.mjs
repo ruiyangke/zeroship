@@ -7854,6 +7854,227 @@ await open("components-toolbar--separator-orientation-lock-regression");
   );
 }
 
+/* ─── Wave 8 fix #1 (Radio red) — forced-colors mirrors hover + readonly ──
+ *
+ * Pre-fix the `@media (forced-colors: active)` block in
+ * `sdks/ui/src/components/Radio/Radio.css` only mirrored selectors of
+ * specificity ≤ (0,2,1) (base / `[data-checked]` / `[data-disabled]`).
+ * The normal-mode rules at (0,4,1) (hover) and the `[data-readonly]`
+ * family at (0,2,1)–(0,3,2) outranked the unconditional `.zs-radio`
+ * reset and — because the chip carries `forced-color-adjust: none` —
+ * kept painting `--zs-*` tokens (selection-bg-readonly, accent rings)
+ * under Windows High Contrast. The fix adds equal-or-higher specificity
+ * mirrors that paint Canvas / CanvasText / Highlight inside the
+ * forced-colors block. This scan is a static enumerator that catches
+ * any future drift in the same shape the Checkbox wave-7 #2 scan uses. */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/Radio/Radio.css",
+    import.meta.url,
+  );
+  let scanError = null;
+  let missing = [];
+  let combos = [];
+  try {
+    const source = await fs.readFile(cssUrl, "utf8");
+    // Extract the `@media (forced-colors: active) { … }` block by
+    // matching balanced braces from the header to its closing brace.
+    const headerIdx = source.search(
+      /@media\s*\(\s*forced-colors\s*:\s*active\s*\)\s*\{/,
+    );
+    let forcedBlock = "";
+    if (headerIdx >= 0) {
+      const openIdx = source.indexOf("{", headerIdx);
+      let depth = 0;
+      let end = -1;
+      for (let i = openIdx; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end > openIdx) forcedBlock = source.slice(openIdx + 1, end);
+    }
+    const normalSource =
+      headerIdx >= 0
+        ? source.slice(0, headerIdx) +
+          source.slice(headerIdx + forcedBlock.length + 100)
+        : source;
+
+    // Two kinds of token-painting selectors need mirroring:
+    //   A. State-attribute selectors (`.zs-radio[attr]…`, possibly
+    //      followed by descendants like `.zs-radio__indicator`)
+    //   B. The hover rule (`.zs-radio…:hover`) — paints
+    //      --zs-radio-bg-hover / --zs-radio-border-hover. The pre-fix
+    //      forced block had no hover mirror at all.
+    const stateAttrs = new Set([
+      "data-disabled",
+      "data-readonly",
+      "data-checked",
+    ]);
+    function collectCombos(text) {
+      const found = new Set();
+      // Greedy match of every `.zs-radio…` selector head up to a
+      // selector terminator (space, comma, brace). We then bucket on
+      // (positive-attr-set, has-hover) so a `:not([data-disabled])`
+      // arm doesn't get mis-attributed as a `data-disabled` paint.
+      const re =
+        /\.zs-radio(?:(?:\[[^\]]+\]|:not\([^)]+\)|:[a-z-]+(?:\([^)]+\))?)*)/g;
+      let m;
+      while ((m = re.exec(text))) {
+        const head = m[0];
+        // Strip `:not(…)` arms so they don't contribute positive attrs.
+        const stripped = head.replace(/:not\([^)]+\)/g, "");
+        const positiveAttrs = [
+          ...stripped.matchAll(/\[([^\]=]+)(?:=[^\]]*)?\]/g),
+        ]
+          .map((a) => a[1].trim())
+          .filter((a) => stateAttrs.has(a))
+          .sort();
+        const hasHover = /:hover\b/.test(head);
+        // We track every paint surface — including the base
+        // `.zs-radio` (no attrs, no hover) only as a known-mirrored
+        // sentinel that we drop before the missing-set diff so it
+        // never registers as a gap.
+        if (positiveAttrs.length === 0 && !hasHover) continue;
+        const key =
+          (positiveAttrs.length ? positiveAttrs.join("+") : "_") +
+          (hasHover ? ":hover" : "");
+        found.add(key);
+      }
+      return found;
+    }
+    const normalCombos = collectCombos(normalSource);
+    const forcedCombos = collectCombos(forcedBlock);
+    combos = [...normalCombos].sort();
+    missing = combos.filter((c) => !forcedCombos.has(c));
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !scanError && missing.length === 0;
+  report(
+    "Radio — forced-colors mirrors hover + readonly + state-combinations (wave-8 red #1)",
+    ok,
+    scanError
+      ? `scanError=${scanError}`
+      : `combos=[${combos.join(",")}] missing=[${missing.join(",")}]`,
+  );
+}
+
+/* ─── Wave 8 fix #2 (Radio yellow) — Field required → group aria-required ──
+ *
+ * Pre-fix, RadioGroupInner ignored `useFieldContext().required` and
+ * each Radio read it instead — so `<Field required>` painted
+ * `aria-required="true"` on the chips' hidden inputs but NEVER on the
+ * `role="radiogroup"` element. The WAI-ARIA radiogroup pattern wants
+ * the group itself to carry `aria-required`, and screen readers that
+ * announce the group's aria-* on entry would miss the requiredness.
+ * The fix moves the cascade to the group; Base UI propagates `required`
+ * down to every child Radio internally. */
+await open("components-radio--required");
+{
+  const group = page.locator('[data-testid="radio-required-group"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  const ariaRequired = await group.getAttribute("aria-required");
+  const role = await group.getAttribute("role");
+  const ok = ariaRequired === "true" && role === "radiogroup";
+  report(
+    "Radio.Group — Field required cascades to group aria-required (wave-8 yellow #1)",
+    ok,
+    `role=${role} aria-required=${ariaRequired}`,
+  );
+}
+
+/* ─── Wave 8 fix #3 (Radio yellow) — JSDoc on every public prop ─────
+ *
+ * Storybook autodocs is the public API ref; props without JSDoc render
+ * with a blank description column. Pre-fix RadioGroupProps had no doc
+ * on className / value / defaultValue / onValueChange / children and
+ * RadioProps had no doc on className. Static check: parse the TSX and
+ * verify each named prop appears with a leading `/**` block comment
+ * within the interface body. */
+{
+  const fs = await import("node:fs/promises");
+  const tsxUrl = new URL(
+    "../src/components/Radio/Radio.tsx",
+    import.meta.url,
+  );
+  let scanError = null;
+  let missing = [];
+  try {
+    const source = await fs.readFile(tsxUrl, "utf8");
+    function extractInterfaceBody(name) {
+      const headerRe = new RegExp(
+        `export interface ${name}[^\\{]*\\{`,
+      );
+      const headerMatch = headerRe.exec(source);
+      if (!headerMatch) return "";
+      const openIdx = headerMatch.index + headerMatch[0].length - 1;
+      let depth = 0;
+      let end = -1;
+      for (let i = openIdx; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      return end > openIdx ? source.slice(openIdx + 1, end) : "";
+    }
+    function propHasJsDoc(body, propName) {
+      // Look for `propName?:` or `propName:` and walk backwards looking
+      // for `*/` no further than the previous `;` or `}` (so we don't
+      // attribute a comment on a sibling prop to this one).
+      const propRe = new RegExp(`(^|\\n)\\s*${propName}\\??\\s*[:?]`);
+      const m = propRe.exec(body);
+      if (!m) return false;
+      const idx = m.index + m[0].indexOf(propName);
+      const before = body.slice(0, idx);
+      const lastJsdocClose = before.lastIndexOf("*/");
+      if (lastJsdocClose < 0) return false;
+      const between = before.slice(lastJsdocClose + 2);
+      // Allow only whitespace between `*/` and the prop name.
+      return /^\s*$/.test(between);
+    }
+    const groupBody = extractInterfaceBody("RadioGroupProps<T = string>");
+    const radioBody = extractInterfaceBody("RadioProps<T = string>");
+    const groupProps = [
+      "orientation",
+      "size",
+      "className",
+      "value",
+      "defaultValue",
+      "onValueChange",
+      "children",
+    ];
+    const radioProps = ["value", "size", "className", "label", "fieldClassName", "fieldProps"];
+    for (const p of groupProps) {
+      if (!propHasJsDoc(groupBody, p)) missing.push(`RadioGroupProps.${p}`);
+    }
+    for (const p of radioProps) {
+      if (!propHasJsDoc(radioBody, p)) missing.push(`RadioProps.${p}`);
+    }
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !scanError && missing.length === 0;
+  report(
+    "Radio — JSDoc on every public prop (wave-8 yellow #2)",
+    ok,
+    scanError ? `scanError=${scanError}` : `missing=[${missing.join(",")}]`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -110,12 +110,25 @@ export interface RadioGroupProps<T = string>
   /** Visual size — cascades to each Radio child. */
   size?: RadioSize;
 
+  /** Extra CSS class names merged onto the group `<div>` after the base
+   *  `zs-radio-group` and modifier classes. */
   className?: string;
 
+  /** Controlled selected value. Pair with `onValueChange`; omit for the
+   *  uncontrolled story and use `defaultValue` instead. */
   value?: T;
+
+  /** Uncontrolled initial selection. Ignored when `value` is set. */
   defaultValue?: T;
+
+  /** Fires when the user picks a new value (keyboard or pointer). The
+   *  second argument is Base UI's event-details payload (`event`,
+   *  `reason`, `cancel`, etc.) — typed as `unknown` to stay independent
+   *  of the upstream BaseUIChangeEventDetails shape. */
   onValueChange?: (value: T, eventDetails: unknown) => void;
 
+  /** Child `<Radio>` elements — typically two to five options. Beyond
+   *  that, prefer a Select. */
   children?: ReactNode;
 }
 
@@ -124,6 +137,7 @@ function RadioGroupInner<T = string>(
     orientation = "vertical",
     size: sizeProp,
     disabled: disabledProp,
+    required: requiredProp,
     className,
     children,
     // Pull the typed value props out so Base UI sees them as named
@@ -145,10 +159,21 @@ function RadioGroupInner<T = string>(
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
   const fieldsetDisabled = useFieldsetDisabledContext();
+  // `required` lives on the GROUP, not the individual radio (the WAI-
+  // ARIA pattern paints `aria-required="true"` on `role="radiogroup"`).
+  // Cascading it here means a `<Field required>` ancestor flows
+  // straight through to Base UI's `RadioGroup`, which both emits
+  // `aria-required` on the group element AND propagates `required` to
+  // every child Radio internally. Slice-8 review yellow #1: before
+  // this fix, the cascade ran per-Radio (`fieldCtx.required` read
+  // inside `RadioInner`), which skipped Base UI's group-level
+  // `aria-required` path entirely.
+  const fieldCtx = useFieldContext();
   const size = sizeProp ?? fieldSize;
   // OR the two booleans rather than ??-chain — `??` would short-
   // circuit on a legitimate `false` from the inner Field.
   const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
+  const required = requiredProp ?? fieldCtx?.required ?? false;
 
   return (
     <RadioGroupContext.Provider value={{ size, disabled }}>
@@ -162,6 +187,7 @@ function RadioGroupInner<T = string>(
         onValueChange={onValueChange as never}
         ref={ref}
         disabled={disabled || undefined}
+        required={required || undefined}
         className={classnames(
           "zs-radio-group",
           `zs-radio-group--${orientation}`,
@@ -197,6 +223,8 @@ export interface RadioProps<T = string>
   /** Inherited from the enclosing RadioGroup / Field by default. */
   size?: RadioSize;
 
+  /** Extra CSS class names merged onto the chip `<span>` after the base
+   *  `zs-radio` and size modifier. */
   className?: string;
 
   /**
@@ -237,10 +265,19 @@ function RadioInner<T = string>(
   // Group context wins over field context for size — a group is a
   // tighter scope. Explicit prop still beats both. A wrapping
   // Fieldset is the outermost fallback for disabled.
+  //
+  // `required` is NOT cascaded from Field here — RadioGroupInner reads
+  // `useFieldContext().required` and threads it through Base UI's
+  // RadioGroup, which both paints `aria-required` on the group element
+  // (the WAI-ARIA radiogroup pattern) AND propagates `required` to every
+  // child Radio internally. Cascading per-Radio here would re-emit
+  // `aria-required` on each chip without ever touching the group, which
+  // is the bug slice-8 review yellow #1 caught. An explicit
+  // `required={true}` on a single Radio still wins (Base UI ORs the
+  // group-level and per-Radio flags).
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
   const fieldsetDisabled = useFieldsetDisabledContext();
-  const fieldCtx = useFieldContext();
   const groupCtx = useRadioGroupContext();
 
   const size: RadioSize = sizeProp ?? groupCtx?.size ?? fieldSize ?? "md";
@@ -250,7 +287,7 @@ function RadioInner<T = string>(
   // wrapping Fieldset.
   const disabled =
     disabledProp ?? groupCtx?.disabled ?? (fieldDisabled || fieldsetDisabled);
-  const required = requiredProp ?? fieldCtx?.required ?? false;
+  const required = requiredProp ?? false;
 
   // Dev-mode usage check: a Radio outside a RadioGroup is almost
   // always a bug. Module-level dedup ensures one warn per process; the
