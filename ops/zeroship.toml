@@ -3,7 +3,7 @@
 
 [auth]
 hydra_admin_url       = "http://hydra:4445"
-hydra_public_url      = "https://auth.zeroship.ai"
+hydra_public_url      = "http://hydra:4444"
 trusted_oauth_clients = ["zeroship-builder"]
 
 [observability]

@@ -1,0 +1,36 @@
+# zeroship shared config overlay. Copy to ops/zeroship.toml (one per environment)
+# and pass via --config / ZEROSHIP_CONFIG.
+#
+# All keys are optional. Absent keys use the binary's compiled default.
+# Scalar key precedence: CLI flag > env > this file > default.
+# Secrets NEVER go in this file — use env/CLI/file-paths.
+
+[auth]
+# Hydra admin API base URL used by control for OAuth client management,
+# builder bootstrap, and bearer-token introspection.
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+hydra_admin_url = "http://hydra:4445"
+
+# Hydra public issuer/base URL used by control and gateway for OIDC
+# protocol endpoints and token verification.
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+hydra_public_url = "https://auth.zeroship.ai"
+
+# First-party OAuth client IDs that skip Hydra consent screens.
+# Optional; absent => compiled default.
+# Precedence: this file > default. List keys do not have CLI/env overrides.
+trusted_oauth_clients = ["zeroship-builder"]
+
+[observability]
+# Tracing filter passed to Rust tracing subscribers, equivalent to RUST_LOG.
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+rust_log = "info,zeroship_=debug"
+
+# Log output format. Use "json" for production log pipelines. Supported
+# values include "pretty", "compact", "json", "logfmt", and "bunyan".
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+log_format = "json"

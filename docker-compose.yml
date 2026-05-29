@@ -24,13 +24,13 @@ services:
     build: .
     command: >
       zeroship-control
+        --config /etc/zeroship/zeroship.toml
         --port 9090
         --db postgres://postgres:zeroship@postgres:5432/zeroship
         --blob-store /data/bundles
         --control-key platform-key
         --master-key master-key
         --dev-insecure
-        --hydra-admin-url http://hydra:4445
         --bootstrap-builder-client
         --builder-client-secret-file /data/builder-client-secret
     ports:
@@ -38,6 +38,7 @@ services:
     volumes:
       - bundles:/data/bundles
       - ./data:/data
+      - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -61,16 +62,18 @@ services:
         [ -z "$$WORKERS" ] && WORKERS="http://worker:8080"
         echo "[gateway] workers: $$WORKERS"
         exec zeroship-gate \
+          --config /etc/zeroship/zeroship.toml \
           --port 8000 \
           --control http://control:9090 \
           --control-key platform-key \
           --worker-key worker-key \
           --workers "$$WORKERS" \
           --poll-interval 3 \
-          --hydra-public http://hydra:4444 \
-          --auth-public http://auth:9092 \
+          --auth-ui-url http://auth:9092 \
           --db postgres://postgres:zeroship@postgres:5432/zeroship \
-          --insecure-dev true
+          --dev-insecure
+    volumes:
+      - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     environment:
       # OAuth2 client_secret registered for the `gateway` client in
       # ops/auth-clients.example.toml. The gateway exchanges this on
