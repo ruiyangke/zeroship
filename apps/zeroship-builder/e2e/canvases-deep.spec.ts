@@ -1,37 +1,39 @@
 import { test, expect } from "@playwright/test";
 
-// Deep canvas interaction coverage. Each test exercises the catch-all
-// workspace shell at /__catchall_for_test where the WorkspaceShell
+// Deep canvas interaction coverage. Each test exercises the dev-only
+// workspace shell at /__test/workspace where the WorkspaceShell
 // mounts without an appId. Canvases that need an appId render their
 // "No project selected." fallback — we still verify the pill switching
-// and the topbar affordances. Canvases that work without an appId
-// (preview-canvas) get full interaction coverage.
+// and the topbar affordances. Preview gets full interaction coverage.
 //
-// For per-app behaviour (Files / Logs / Env / Settings / Plan / Health
-// / Data / Media), the existing workspace-canvases.spec.ts and
-// data-media.spec.ts files require a control plane and skip cleanly
-// without one. These tests target the SHELL — pill switching, no-
+// For per-app behaviour (Files / Logs / Env / Settings), the existing
+// workspace-canvases.spec.ts file requires a control plane and skips
+// cleanly without one. These tests target the SHELL — pill switching, no-
 // project fallback, ProductTour open/close, topbar URL pill — because
 // those exercise the contract every canvas relies on.
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("Canvas pills — every pill renders + activates", () => {
-  test("all 9 pills render in the canvas-pills bar", async ({ page }) => {
+  test("maker tier starts with the preview pill only", async ({ page }) => {
     await page.goto(SHELL_PATH);
     await expect(page.getByTestId("canvas-pills")).toBeVisible();
-    for (const id of [
-      "preview",
-      "files",
-      "data",
-      "media",
-      "logs",
-      "env",
-      "plan",
-      "health",
-      "settings",
-    ]) {
+    await expect(page.getByTestId("pill:preview")).toBeVisible();
+    for (const id of ["files", "logs", "env", "settings"]) {
+      await expect(page.getByTestId(`pill:${id}`)).toBeHidden();
+    }
+  });
+
+  test("code tier exposes the concrete workspace canvases", async ({ page }) => {
+    await page.goto(SHELL_PATH);
+    await page.getByTestId("tier-toggle").click();
+    await page.getByTestId("tier-toggle").click();
+    await expect(page.getByTestId("tier-toggle")).toHaveAttribute("data-tier", "code");
+    for (const id of ["preview", "files", "logs", "env", "settings"]) {
       await expect(page.getByTestId(`pill:${id}`)).toBeVisible();
+    }
+    for (const id of ["data", "media", "plan", "health"]) {
+      await expect(page.getByTestId(`pill:${id}`)).toHaveCount(0);
     }
   });
 
@@ -44,7 +46,9 @@ test.describe("Canvas pills — every pill renders + activates", () => {
     page,
   }) => {
     await page.goto(SHELL_PATH);
-    for (const id of ["files", "data", "media", "logs", "env", "plan", "health", "settings"]) {
+    await page.getByTestId("tier-toggle").click();
+    await page.getByTestId("tier-toggle").click();
+    for (const id of ["files", "logs", "env", "settings"]) {
       await page.getByTestId(`pill:${id}`).click();
       await expect(page.getByText(/no project selected/i)).toBeVisible();
       // After fallback shows, switch back to preview to reset.
@@ -90,40 +94,13 @@ test.describe("Canvas pills — keyboard activation", () => {
     await page.goto(SHELL_PATH);
     // Click preview to ensure baseline.
     await page.getByTestId("pill:preview").click();
+    await page.getByTestId("tier-toggle").click();
+    await page.getByTestId("tier-toggle").click();
     // Tab to the files pill — exact tab count depends on layout, so
     // we click directly with .focus() then keyboard Enter.
     const files = page.getByTestId("pill:files");
     await files.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByText(/no project selected/i)).toBeVisible();
-  });
-});
-
-test.describe("Plan canvas — no-app fallback", () => {
-  test("plan pill shows the no-project nudge when appId is absent", async ({ page }) => {
-    await page.goto(SHELL_PATH);
-    await page.getByTestId("pill:plan").click();
-    await expect(page.getByText(/no project selected/i)).toBeVisible();
-  });
-});
-
-test.describe("Health canvas — no-app fallback", () => {
-  test("health pill shows the no-project nudge when appId is absent", async ({ page }) => {
-    await page.goto(SHELL_PATH);
-    await page.getByTestId("pill:health").click();
-    await expect(page.getByText(/no project selected/i)).toBeVisible();
-  });
-});
-
-test.describe("Data + Media canvases — no-app fallback", () => {
-  test("data pill shows the no-project nudge when appId is absent", async ({ page }) => {
-    await page.goto(SHELL_PATH);
-    await page.getByTestId("pill:data").click();
-    await expect(page.getByText(/no project selected/i)).toBeVisible();
-  });
-  test("media pill shows the no-project nudge when appId is absent", async ({ page }) => {
-    await page.goto(SHELL_PATH);
-    await page.getByTestId("pill:media").click();
     await expect(page.getByText(/no project selected/i)).toBeVisible();
   });
 });

@@ -7,7 +7,7 @@ import { test, expect } from "@playwright/test";
 
 const HAS_KEY = !!process.env.OPENAI_API_KEY;
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 async function probeUrl(url: string): Promise<boolean> {
   try {

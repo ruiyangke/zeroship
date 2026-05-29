@@ -2,17 +2,16 @@ import { test, expect } from "@playwright/test";
 
 const HAS_KEY = !!process.env.OPENAI_API_KEY;
 
-// `/` renders `<Home>` (the project gallery). The workspace
-// shell still mounts at /p/:appId/* (real project) and at the catch-
-// all (no appId, default name=untitled). These tests target the
-// catch-all path so they don't depend on the control plane being up.
-const SHELL_PATH = "/__catchall_for_test";
+// The workspace shell mounts at /p/:appId/* for real projects and at a
+// dev-only no-app route for shell tests. These tests use the dev shell
+// so they don't depend on the control plane being up.
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("workspace shell + real OpenAI Builder", () => {
   test("renders the shell with project name and chat rail", async ({ page }) => {
     await page.goto(SHELL_PATH);
     await expect(page.getByTestId("topbar")).toBeVisible();
-    await expect(page.getByTestId("topbar-project")).toContainText("untitled");
+    await expect(page.getByTestId("topbar-project")).toContainText("test project");
     await expect(page.getByTestId("topbar-url")).toContainText(".zeroship.app");
     await expect(page.getByTestId("chat-rail")).toBeVisible();
     await expect(page.getByTestId("preview-canvas")).toContainText("Nothing's been built");

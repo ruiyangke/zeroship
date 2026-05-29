@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Your account · zeroship{% endblock %}
+{% block body %}
+<h2>Your account</h2>
+
+{% if let Some(s) = success %}<div class="success">{{ s }}</div>{% endif %}
+{% if let Some(e) = error %}<div class="error">{{ e }}</div>{% endif %}
+
+<dl class="profile">
+  <dt>Email</dt><dd>{{ email }}</dd>
+  <dt>Name</dt><dd>{{ name }}</dd>
+  {% if let Some(a) = avatar_url %}
+    <dt>Avatar</dt><dd><img src="{{ a }}" alt="" width="48" height="48"></dd>
+  {% endif %}
+  <dt>Password</dt><dd>{% if has_password %}Set{% else %}Not set (OAuth-only account){% endif %}</dd>
+</dl>
+
+<h3>Linked accounts</h3>
+{% if identities.is_empty() %}
+  <p>No external accounts linked.</p>
+{% else %}
+  <ul class="identities">
+  {% for i in identities %}
+    <li>
+      <span><strong>{{ i.provider }}</strong> &mdash; {{ i.email_at_link }}</span>
+      <form method="POST" action="/me/unlink/{{ i.provider }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="small">Unlink</button>
+      </form>
+    </li>
+  {% endfor %}
+  </ul>
+{% endif %}
+
+<h3>Link an account</h3>
+<p class="subtle">Linking another sign-in method is coming soon.</p>
+
+<p><a href="/logout">Sign out</a></p>
+{% endblock %}

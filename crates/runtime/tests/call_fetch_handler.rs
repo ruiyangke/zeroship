@@ -124,6 +124,82 @@ fn handler_throwing_http_error_preserves_status() {
 }
 
 #[test]
+fn handler_throwing_500_returns_sanitized_error_body() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                const err = new Error("dsn=postgres://internal/path");
+                err.code = "DB_PRIVATE";
+                err.details = { host: "db.internal" };
+                throw err;
+            }
+        };
+    "#);
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 500, "body: {}", body);
+            assert!(body.contains(r#""message":"internal error""#), "body: {}", body);
+            assert!(body.contains(r#""name":"Error""#), "body: {}", body);
+            assert!(body.contains(r#""request_id":""#), "body: {}", body);
+            assert!(!body.contains("dsn=postgres"), "body: {}", body);
+            assert!(!body.contains("DB_PRIVATE"), "body: {}", body);
+            assert!(!body.contains("db.internal"), "body: {}", body);
+            assert!(!body.contains("stack"), "body: {}", body);
+        }
+        _ => panic!("expected Response outcome"),
+    }
+}
+
+#[test]
+fn async_handler_rejecting_500_returns_sanitized_error_body() {
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let runtime = Runtime::builder()
+            .modules(m(r#"
+                export default {
+                    async fetch(request, env, ctx) {
+                        await new Promise(r => setTimeout(r, 0));
+                        throw new Error("secret async stack");
+                    }
+                };
+            "#))
+            .build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let outcome = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &[],
+            "",
+            &env,
+            ctx,
+        );
+
+        let FetchOutcome::Pending { rx, cancel: _ } = outcome else {
+            panic!("expected Pending outcome");
+        };
+
+        let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("receiver wait timed out")
+            .expect("pending delivered DispatchError");
+
+        match settled {
+            SettledFetch::Response { status, body, .. } => {
+                assert_eq!(status, 500, "body: {}", body);
+                assert!(body.contains(r#""message":"internal error""#), "body: {}", body);
+                assert!(body.contains(r#""request_id":""#), "body: {}", body);
+                assert!(!body.contains("secret async stack"), "body: {}", body);
+                assert!(!body.contains("stack"), "body: {}", body);
+            }
+            _ => panic!("expected SettledFetch::Response"),
+        }
+    });
+}
+
+#[test]
 fn streaming_response() {
     // A synchronously-closed ReadableStream is collapsed by `inspect_response`
     // to `ResponseInfo::Complete` (matching dispatch_http's behavior). To

@@ -15,6 +15,7 @@ import Signup from "./pages/Signup";
 import ForgotPassword from "./pages/ForgotPassword";
 import { Account } from "./pages/Account";
 import { OnboardingIntent } from "./pages/OnboardingIntent";
+import { NotFound } from "./pages/NotFound";
 import { AuthGuard } from "./auth/AuthGuard";
 import { DevEventsBadge } from "./components/DevEventsBadge";
 
@@ -56,12 +57,19 @@ export default function App() {
 
         {/* Project workspace — the WORKSPACE Builder takes over here.
             `:appId` is the typed-id (UUIDv7 + base62) returned by
-            createApp; suffix routes (/preview, /code, /env, …) are
+            createApp; suffix routes (/preview, /files, /env, …) are
             handled inside WorkspaceShell via canvas pills. */}
         <Route
           path="/p/:appId/*"
           element={<AuthGuard><WorkspaceShell /></AuthGuard>}
         />
+
+        {import.meta.env.DEV && (
+          <Route
+            path="/__test/workspace"
+            element={<WorkspaceShell projectName="test project" />}
+          />
+        )}
 
         {/* Account settings — gated. */}
         <Route
@@ -70,7 +78,7 @@ export default function App() {
         />
 
         {/* Catch-all stays last so explicit routes match first. */}
-        <Route path="*" element={<AuthGuard><WorkspaceShell /></AuthGuard>} />
+        <Route path="*" element={<NotFound />} />
       </Routes>
       {/* Dev-only floating analytics inspector. Renders nothing in
           production builds (the component itself short-circuits on

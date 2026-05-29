@@ -8,7 +8,7 @@ import { test, expect } from "@playwright/test";
 //   - Modal sets role="dialog" + aria-modal="true".
 //   - ⌘+Enter submits the chat composer (shortcut wired).
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("a11y — keyboard navigation", () => {
   test("Tab from page top lands on a focusable element", async ({ page }) => {

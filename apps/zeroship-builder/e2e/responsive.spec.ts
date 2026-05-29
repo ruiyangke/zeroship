@@ -10,7 +10,7 @@ const PHONE = { width: 375, height: 812 };
 const TABLET = { width: 768, height: 1024 };
 const DESKTOP = { width: 1280, height: 800 };
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("Responsive — workspace shell", () => {
   test("phone (375) hides the chat sidebar; topbar gets a chat toggle", async ({ page }) => {

@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 // Additional surface coverage for areas the other specs only touched
 // lightly. Single-page interactions; no LLM / control plane / sandbox.
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("Pricing + 15% share band", () => {
   test("revenue example renders with the right numbers", async ({ page }) => {
@@ -133,7 +133,7 @@ test.describe("Wizard — composer presence", () => {
   });
 });
 
-test.describe("Catch-all workspace — chat composer disabled state", () => {
+test.describe("Dev workspace shell — chat composer disabled state", () => {
   test("composer renders without an appId (no project selected)", async ({ page }) => {
     await page.goto(SHELL_PATH);
     await expect(page.getByTestId("chat-composer")).toBeVisible();

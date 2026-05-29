@@ -5,7 +5,9 @@ use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
 use uuid::Uuid;
 
-use zeroship_core::auth::{extract_bearer, validate_control_key};
+use zeroship_core::auth::{
+    extract_bearer, validate_control_key, verify_zeroship_user_header_for_request,
+};
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
@@ -39,6 +41,36 @@ pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<H
         _ => {
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
             Some(HttpResponse::Unauthorized().body(r#"{"error":"unauthorized"}"#))
+        }
+    }
+}
+
+fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<String>, HttpResponse> {
+    let Some(value) = req.headers().get("zeroship-user") else {
+        return Ok(None);
+    };
+    let Ok(header) = value.to_str() else {
+        metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
+        return Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#));
+    };
+    let expected_request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok());
+    let Some(expected_request_id) = expected_request_id else {
+        metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
+        return Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#));
+    };
+    match verify_zeroship_user_header_for_request(
+        worker_key.as_bytes(),
+        header,
+        expected_request_id,
+    ) {
+        Some(json) => Ok(Some(json)),
+        None => {
+            metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
+            Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#))
         }
     }
 }
@@ -116,6 +148,10 @@ pub async fn dispatch(
     if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
         return resp;
     }
+    let user_json = match verified_user_json(&req, &config.worker_key) {
+        Ok(user_json) => user_json,
+        Err(resp) => return resp,
+    };
 
     // Cheap rejection BEFORE app_id parse / runtime lookup / env load.
     if body.len() > MAX_DISPATCH_BODY_BYTES {
@@ -188,13 +224,14 @@ pub async fn dispatch(
     // Enter isolate, dispatch through the unified fetch handler.
     let outcome = {
         runtime.enter_isolate();
-        let o = runtime.call_fetch_handler(
+        let o = runtime.call_fetch_handler_with_user(
             &envelope.method,
             &envelope.url,
             &envelope.headers,
             &envelope.body,
             &env,
             ctx,
+            user_json,
         );
         runtime.exit_isolate();
         o

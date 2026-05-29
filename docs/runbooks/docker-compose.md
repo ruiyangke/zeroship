@@ -17,9 +17,16 @@ Services and host ports from the live file:
 - `control` (`zeroship-control`) → `localhost:9090`
 - `gateway` (`zeroship-gate`) → `localhost:8000`
 - `sandbox` (`zeroship-sandbox`) → `localhost:9091`
+- `builder` (`apps/zeroship-builder` Vite dev server) → `localhost:3001`
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 
 The compose file already sets the current service names, keys, and sandbox env vars. Use it as the source of truth before copying flags into ad-hoc commands.
+
+Control starts with `--bootstrap-builder-client` in this stack. On first boot it
+registers the `zeroship-builder` OAuth client with Hydra admin and writes the
+generated dev client secret to `data/builder-client-secret`. That file is
+mounted into the Builder container, which exports it as `BUILDER_CLIENT_SECRET`
+before starting Vite. The file is local dev state and is ignored by git.
 
 ## Redis cluster test stack
 

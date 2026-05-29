@@ -7,6 +7,7 @@ import {
   mutation,
   action,
   stream,
+  streamResponse,
   subscription,
 } from "../src/server.js";
 
@@ -44,6 +45,19 @@ describe("@zeroship/rpc/server wrappers", () => {
     assert.equal(sub.config?.kind, "subscription");
   });
 
+  test("streamResponse() marks raw Response handlers as stream procedures", async () => {
+    const wrapped = streamResponse(
+      async (input: { ok: boolean }) => Response.json(input),
+      { id: "raw.stream" },
+    );
+
+    const res = await wrapped({ ok: true });
+    assert.equal(wrapped.config?.id, "raw.stream");
+    assert.equal(wrapped.config?.kind, "stream");
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+
   test("explicit config.kind overrides wrapper default", () => {
     const wrapped = query(async () => null, { kind: "mutation" });
     assert.equal(wrapped.config?.kind, "mutation");
@@ -55,4 +69,3 @@ describe("@zeroship/rpc/server wrappers", () => {
     assert.equal(Object.keys(wrapped).includes("__zsKind"), false);
   });
 });
-

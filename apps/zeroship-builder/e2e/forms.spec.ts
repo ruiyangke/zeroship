@@ -118,27 +118,23 @@ test.describe("Forms — Wizard prompt validation", () => {
   });
 });
 
-test.describe("Forms — EnvCanvas Add var", () => {
-  // The catch-all route mounts a workspace shell without an appId, so
+test.describe("Forms — EnvCanvas unavailable without project", () => {
+  // The dev shell route mounts a workspace shell without an appId, so
   // the env canvas only renders its empty-state when the pill is
-  // clicked. We can't add a var without a real app, but we can verify
-  // the canvas pill switches and the "+ add" button is present when
-  // an appId IS in scope. Catch-all has no appId; skip that path —
-  // we test the path that's reachable without env requirements: the
-  // empty-state copy + form open/cancel via the roadmap canvas instead.
-  test("Plan new-issue modal opens, fills, cancels", async ({ page }) => {
-    await page.goto("/__catchall_for_test");
-    // Without an appId the plan canvas shows "No project selected".
-    // We can still verify the new-issue trigger is wired up by
-    // checking the no-project copy renders.
-    await page.getByTestId("pill:plan").click();
+  // clicked. We can't add a var without a real app; the contract here
+  // is that the advanced canvas is hidden until the user opts into the
+  // ops tier, then shows a clear no-project fallback.
+  test("env pill shows the no-project nudge without appId", async ({ page }) => {
+    await page.goto("/__test/workspace");
+    await page.getByTestId("tier-toggle").click();
+    await page.getByTestId("pill:env").click();
     await expect(page.getByText(/no project selected/i)).toBeVisible();
   });
 });
 
 test.describe("Forms — Modal focus + Esc behaviour (ProductTour as proxy)", () => {
   test("Esc on ProductTour closes it", async ({ page }) => {
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     await page.getByTestId("topbar-tour").click();
     await expect(page.getByTestId("product-tour")).toBeVisible();
     await page.keyboard.press("Escape");

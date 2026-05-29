@@ -2,10 +2,13 @@
 
 use std::collections::HashMap;
 
-use zeroship_core::auth::hash_api_key;
-use zeroship_core::types::{AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap};
+use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::auth::hash_api_key;
+use zeroship_core::types::{
+    AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap,
+};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -32,15 +35,14 @@ impl std::fmt::Display for RegistryError {
 
 impl From<compio_postgres::Error> for RegistryError {
     fn from(e: compio_postgres::Error) -> Self {
-        let msg = e.to_string();
-        // compio-postgres's Error is opaque — peek at the full chain (the
-        // underlying DbError's SQLSTATE or message) via the Display/source
-        // fallback. UNIQUE violations flow through the chain as "23505 /
-        // duplicate key value violates unique constraint".
-        let full = format!("{msg}: {}", source_chain(&e));
-        if full.contains("duplicate key") || full.contains("unique") || full.contains("23505") {
-            Self::AlreadyExists(full)
+        if matches!(e.code(), Some(code) if code == &SqlState::UNIQUE_VIOLATION) {
+            Self::AlreadyExists("resource already exists".into())
         } else {
+            let msg = e.to_string();
+            let full = match source_chain(&e) {
+                Some(chain) => format!("{msg}: {chain}"),
+                None => msg,
+            };
             Self::Database(full)
         }
     }
@@ -49,7 +51,7 @@ impl From<compio_postgres::Error> for RegistryError {
 /// Walk an error's `source()` chain and concatenate the messages. Useful for
 /// reaching through the opaque `compio_postgres::Error` wrapper to the
 /// `DbError` inside.
-fn source_chain(err: &dyn std::error::Error) -> String {
+fn source_chain(err: &dyn std::error::Error) -> Option<String> {
     let mut out = String::new();
     let mut cur: Option<&dyn std::error::Error> = err.source();
     while let Some(e) = cur {
@@ -59,7 +61,11 @@ fn source_chain(err: &dyn std::error::Error) -> String {
         out.push_str(&e.to_string());
         cur = e.source();
     }
-    out
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -94,8 +100,12 @@ impl Registry {
     pub async fn new(db_url: &str) -> Result<Self, String> {
         let conn = open_conn(db_url).await.map_err(|e| e.to_string())?;
 
+        conn.execute("CREATE SCHEMA IF NOT EXISTS control", &[])
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS apps (
+            "CREATE TABLE IF NOT EXISTS control.apps (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name TEXT NOT NULL UNIQUE,
                 plan_id TEXT NOT NULL DEFAULT 'free',
@@ -103,6 +113,8 @@ impl Registry {
                 api_key TEXT NOT NULL,
                 api_key_hash TEXT NOT NULL DEFAULT '',
                 env_version BIGINT NOT NULL DEFAULT 0,
+                suspended BOOLEAN NOT NULL DEFAULT FALSE,
+                audit_locked BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
@@ -113,7 +125,7 @@ impl Registry {
 
         // Backfill column for deployments that predate env_version.
         conn.execute(
-            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS env_version BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE control.apps ADD COLUMN IF NOT EXISTS env_version BIGINT NOT NULL DEFAULT 0",
             &[],
         )
         .await
@@ -123,15 +135,27 @@ impl Registry {
         // NULL for apps deployed before the manifest era — gateway
         // falls back to its legacy dispatch in that case.
         conn.execute(
-            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS manifest_json TEXT",
+            "ALTER TABLE control.apps ADD COLUMN IF NOT EXISTS manifest_json TEXT",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS audit_locked BOOLEAN NOT NULL DEFAULT FALSE",
             &[],
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS usage (
-                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+            "CREATE TABLE IF NOT EXISTS control.usage (
+                app_id UUID NOT NULL REFERENCES control.apps(id) ON DELETE CASCADE,
                 resource TEXT NOT NULL,
                 value BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY (app_id, resource)
@@ -142,8 +166,8 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS usage_history (
-                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+            "CREATE TABLE IF NOT EXISTS control.usage_history (
+                app_id UUID NOT NULL REFERENCES control.apps(id) ON DELETE CASCADE,
                 period TEXT NOT NULL,
                 counters JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -154,15 +178,15 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_usage_history_app ON usage_history(app_id, period)",
+            "CREATE INDEX IF NOT EXISTS idx_usage_history_app ON control.usage_history(app_id, period)",
             &[],
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS app_vars (
-                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+            "CREATE TABLE IF NOT EXISTS control.app_vars (
+                app_id UUID NOT NULL REFERENCES control.apps(id) ON DELETE CASCADE,
                 key_name TEXT NOT NULL,
                 value TEXT NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -174,8 +198,8 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS app_secrets (
-                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+            "CREATE TABLE IF NOT EXISTS control.app_secrets (
+                app_id UUID NOT NULL REFERENCES control.apps(id) ON DELETE CASCADE,
                 key_name TEXT NOT NULL,
                 ciphertext BYTEA NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -186,6 +210,41 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS control_migrations (
+                key TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        let secret_aad_migration = "app_secrets_aad_v1";
+        let rows = conn
+            .query(
+                "SELECT 1 FROM control_migrations WHERE key = $1",
+                &[&secret_aad_migration],
+            )
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+        if rows.is_empty() {
+            // Pre-launch compatibility stance: old app-secret blobs did
+            // not authenticate `(app_id, key_name)`. Registry migrations
+            // do not receive the master key, so the only safe in-place
+            // migration is to wipe dev/test secrets and require re-entry.
+            conn.execute("DELETE FROM app_secrets", &[])
+                .await
+                .map_err(|e| format!("migration: {e}"))?;
+            conn.execute(
+                "INSERT INTO control_migrations (key) VALUES ($1)
+                 ON CONFLICT (key) DO NOTHING",
+                &[&secret_aad_migration],
+            )
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+        }
+
         // Per-app opt-in list: secret names the creator has explicitly
         // allowed to surface in `process.env` for libraries (e.g.
         // LangChain) that defensively read `process.env.OPENAI_API_KEY`.
@@ -195,8 +254,8 @@ impl Registry {
         // cleans up when an app is removed. Sticky across deploys —
         // it's app-config, not deploy-config.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS app_env_expose (
-                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+            "CREATE TABLE IF NOT EXISTS control.app_env_expose (
+                app_id UUID NOT NULL REFERENCES control.apps(id) ON DELETE CASCADE,
                 key_name TEXT NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (app_id, key_name)
@@ -213,7 +272,7 @@ impl Registry {
         // the link — payouts (which FK on creator_id) survive so the
         // financial ledger stays intact.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS creator_accounts (
+            "CREATE TABLE IF NOT EXISTS control.creator_accounts (
                 creator_id UUID PRIMARY KEY,
                 stripe_account_id TEXT NOT NULL,
                 onboarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -225,7 +284,7 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
         // Backfill column for existing deployments.
         conn.execute(
-            "ALTER TABLE creator_accounts ADD COLUMN IF NOT EXISTS unlinked_at TIMESTAMPTZ",
+            "ALTER TABLE control.creator_accounts ADD COLUMN IF NOT EXISTS unlinked_at TIMESTAMPTZ",
             &[],
         )
         .await
@@ -236,7 +295,7 @@ impl Registry {
         // OR the next relink). Lets ops audit "did the creator's
         // Stripe account ever change."
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS creator_account_history (
+            "CREATE TABLE IF NOT EXISTS control.creator_account_history (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 creator_id UUID NOT NULL,
                 stripe_account_id TEXT NOT NULL,
@@ -249,7 +308,34 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_creator_account_history_creator
-             ON creator_account_history(creator_id, linked_at DESC)",
+             ON control.creator_account_history(creator_id, linked_at DESC)",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "WITH ranked AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY creator_id
+                           ORDER BY linked_at DESC, id DESC
+                       ) AS rn
+                FROM control.creator_account_history
+                WHERE unlinked_at IS NULL
+            )
+            UPDATE control.creator_account_history h
+               SET unlinked_at = NOW()
+              FROM ranked r
+             WHERE h.id = r.id
+               AND r.rn > 1",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_creator_account_history_one_open
+             ON control.creator_account_history(creator_id)
+             WHERE unlinked_at IS NULL",
             &[],
         )
         .await
@@ -263,19 +349,88 @@ impl Registry {
         // webhook endpoint), we record the mismatch rather than
         // silently accepting the first value.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS payouts (
+            "CREATE TABLE IF NOT EXISTS control.payouts (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                creator_id UUID NOT NULL REFERENCES creator_accounts(creator_id) ON DELETE RESTRICT,
+                creator_id UUID NOT NULL REFERENCES control.creator_accounts(creator_id) ON DELETE RESTRICT,
                 event_id TEXT NOT NULL UNIQUE,
                 event_type TEXT NOT NULL,
-                gross_amount BIGINT NOT NULL,
-                platform_fee BIGINT NOT NULL,
-                net_amount BIGINT NOT NULL,
-                currency TEXT NOT NULL,
+                gross_amount BIGINT NOT NULL
+                    CONSTRAINT control_payouts_gross_nonnegative CHECK (gross_amount >= 0),
+                platform_fee BIGINT NOT NULL
+                    CONSTRAINT control_payouts_fee_nonnegative CHECK (platform_fee >= 0),
+                net_amount BIGINT NOT NULL
+                    CONSTRAINT control_payouts_net_nonnegative CHECK (net_amount >= 0),
+                currency TEXT NOT NULL
+                    CONSTRAINT control_payouts_currency_shape CHECK (currency ~ '^[a-z]{3}$'),
                 occurred_at TIMESTAMPTZ NOT NULL,
                 payload_hash BYTEA,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT control_payouts_fee_lte_gross CHECK (platform_fee <= gross_amount),
+                CONSTRAINT control_payouts_net_matches_amounts CHECK (net_amount = gross_amount - platform_fee)
             )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_gross_nonnegative'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_gross_nonnegative
+                        CHECK (gross_amount >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_fee_nonnegative'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_fee_nonnegative
+                        CHECK (platform_fee >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_net_nonnegative'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_net_nonnegative
+                        CHECK (net_amount >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_fee_lte_gross'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_fee_lte_gross
+                        CHECK (platform_fee <= gross_amount);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_net_matches_amounts'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_net_matches_amounts
+                        CHECK (net_amount = gross_amount - platform_fee);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_currency_shape'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_currency_shape
+                        CHECK (currency ~ '^[a-z]{3}$');
+                END IF;
+            END;
+            $$",
             &[],
         )
         .await
@@ -283,14 +438,14 @@ impl Registry {
 
         // Add column for existing deployments that predate the hash.
         conn.execute(
-            "ALTER TABLE payouts ADD COLUMN IF NOT EXISTS payload_hash BYTEA",
+            "ALTER TABLE control.payouts ADD COLUMN IF NOT EXISTS payload_hash BYTEA",
             &[],
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_payouts_creator_time ON payouts(creator_id, occurred_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_payouts_creator_time ON control.payouts(creator_id, occurred_at DESC)",
             &[],
         )
         .await
@@ -301,29 +456,140 @@ impl Registry {
         // `app_id` is nullable for events that don't scope to an app
         // (e.g., creator_account changes which key on creator_id).
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS app_audit (
+            "CREATE TABLE IF NOT EXISTS control.app_audit (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 app_id UUID,
                 creator_id UUID,
-                actor TEXT NOT NULL,
+                actor_user_id UUID,
+                actor_token_id UUID,
                 action TEXT NOT NULL,
                 resource TEXT,
                 source_ip TEXT,
+                detail JSONB,
                 at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
             &[],
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
-
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_app_audit_app_at ON app_audit(app_id, at DESC)",
+            "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS actor_user_id UUID",
             &[],
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_app_audit_creator_at ON app_audit(creator_id, at DESC)",
+            "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS actor_token_id UUID",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS detail JSONB",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute("ALTER TABLE app_audit DROP COLUMN IF EXISTS actor", &[])
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+
+        conn.execute(
+            "CREATE OR REPLACE FUNCTION public.app_audit_block_tamper()
+             RETURNS trigger AS $$
+             BEGIN
+                 RAISE EXCEPTION 'app_audit is append-only'
+                     USING ERRCODE = 'insufficient_privilege';
+             END
+             $$ LANGUAGE plpgsql",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DROP TRIGGER IF EXISTS app_audit_block_update ON app_audit",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE TRIGGER app_audit_block_update
+                BEFORE UPDATE ON app_audit
+                FOR EACH ROW EXECUTE FUNCTION public.app_audit_block_tamper()",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DROP TRIGGER IF EXISTS app_audit_block_delete ON app_audit",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE TRIGGER app_audit_block_delete
+                BEFORE DELETE ON app_audit
+                FOR EACH ROW EXECUTE FUNCTION public.app_audit_block_tamper()",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DROP TRIGGER IF EXISTS app_audit_block_truncate ON app_audit",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE TRIGGER app_audit_block_truncate
+                BEFORE TRUNCATE ON app_audit
+                FOR EACH STATEMENT EXECUTE FUNCTION public.app_audit_block_tamper()",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "REVOKE UPDATE, DELETE, TRUNCATE ON TABLE app_audit FROM PUBLIC",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DO $$
+             DECLARE
+                 role_name TEXT;
+             BEGIN
+                 FOREACH role_name IN ARRAY ARRAY[
+                     'zeroship_auth',
+                     'zeroship_control',
+                     'zeroship_gateway',
+                     'zeroship_worker',
+                     'zeroship_app',
+                     'auth',
+                     'control'
+                 ] LOOP
+                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                         EXECUTE format(
+                             'REVOKE UPDATE, DELETE, TRUNCATE ON TABLE app_audit FROM %I',
+                             role_name
+                         );
+                     END IF;
+                 END LOOP;
+             END
+             $$",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_app_audit_app_at ON control.app_audit(app_id, at DESC)",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_app_audit_creator_at ON control.app_audit(creator_id, at DESC)",
             &[],
         )
         .await
@@ -369,7 +635,7 @@ impl Registry {
         let conn = self.conn().await?;
 
         conn.execute(
-            "INSERT INTO apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO control.apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
             &[&name, &plan_id, &api_key, &key_hash],
         )
         .await?;
@@ -377,7 +643,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM apps WHERE name = $1",
+                 FROM control.apps WHERE name = $1",
                 &[&name],
             )
             .await?;
@@ -393,7 +659,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM apps WHERE id = $1",
+                 FROM control.apps WHERE id = $1",
                 &[id],
             )
             .await?;
@@ -406,7 +672,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM apps WHERE name = $1",
+                 FROM control.apps WHERE name = $1",
                 &[&name],
             )
             .await?;
@@ -419,7 +685,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM apps ORDER BY name",
+                 FROM control.apps ORDER BY name",
                 &[],
             )
             .await?;
@@ -430,7 +696,7 @@ impl Registry {
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
         let n = conn
-            .execute("DELETE FROM apps WHERE id = $1", &[id])
+            .execute("DELETE FROM control.apps WHERE id = $1", &[id])
             .await?;
         Ok(n > 0)
     }
@@ -440,7 +706,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE apps SET deploy_hash = $1, \
+                "UPDATE control.apps SET deploy_hash = $1, \
                  updated_at = NOW() WHERE id = $2",
                 &[&hash, id],
             )
@@ -460,7 +726,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE apps SET deploy_hash = $1, manifest_json = $2, \
+                "UPDATE control.apps SET deploy_hash = $1, manifest_json = $2, \
                  updated_at = NOW() WHERE id = $3",
                 &[&deploy_hash, &manifest_json, id],
             )
@@ -475,7 +741,7 @@ impl Registry {
     pub async fn get_manifest_json(&self, id: &Uuid) -> Result<Option<String>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT manifest_json FROM apps WHERE id = $1", &[id])
+            .query("SELECT manifest_json FROM control.apps WHERE id = $1", &[id])
             .await?;
         Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("manifest_json")))
     }
@@ -485,7 +751,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE apps SET plan_id = $1, \
+                "UPDATE control.apps SET plan_id = $1, \
                  updated_at = NOW() WHERE id = $2",
                 &[&plan_id, id],
             )
@@ -507,7 +773,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM apps",
+                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM control.apps",
                 &[],
             )
             .await?;
@@ -549,7 +815,7 @@ impl Registry {
     pub(crate) async fn bump_env_version(&self, app_id: Uuid) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "UPDATE apps SET env_version = env_version + 1 WHERE id = $1",
+            "UPDATE control.apps SET env_version = env_version + 1 WHERE id = $1",
             &[&app_id],
         )
         .await?;
@@ -567,7 +833,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, api_key_hash, deploy_hash, manifest_json \
-                 FROM apps",
+                 FROM control.apps",
                 &[],
             )
             .await?;
@@ -616,8 +882,8 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "INSERT INTO usage (app_id, resource, value) VALUES ($1, $2, $3) \
-             ON CONFLICT (app_id, resource) DO UPDATE SET value = usage.value + $3",
+            "INSERT INTO control.usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
+             ON CONFLICT (app_id, resource) DO UPDATE SET value = u.value + EXCLUDED.value",
             &[app_id, &resource, &delta],
         )
         .await?;
@@ -632,7 +898,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT resource, value FROM usage WHERE app_id = $1",
+                "SELECT resource, value FROM control.usage WHERE app_id = $1",
                 &[app_id],
             )
             .await?;

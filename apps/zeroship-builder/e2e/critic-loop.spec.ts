@@ -11,15 +11,15 @@ import { test, expect } from "@playwright/test";
 //   - OPENAI_API_KEY required.
 //   - Sandbox controller reachable (Builder's write_file tool routes
 //     through it).
-//   - Control plane is NOT required — we use the workspace catchall
-//     route, same as chat-openai.spec.ts.
+//   - Control plane is NOT required — we use the dev-only workspace
+//     shell, same as chat-openai.spec.ts.
 
 const HAS_KEY = !!process.env.OPENAI_API_KEY;
 // Critic is one extra round-trip per write, so budget is wider than
 // chat-openai's plain stream test.
 const STEP_TIMEOUT = 90_000;
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 async function probe(url: string): Promise<boolean> {
   try {

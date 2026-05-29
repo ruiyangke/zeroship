@@ -37,6 +37,7 @@ import {
 } from "@zeroship/server/typed-id";
 
 import { SANDBOX_URL, SANDBOX_TOKEN, ZEROSHIP_SDK_REGISTRY } from "./env.js";
+import { publicErrorWithRequestId, UpstreamServiceError } from "./upstream-error.js";
 import { userinfo } from "../auth.js";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
@@ -215,10 +216,13 @@ async function controllerCreateSandbox(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(
-      `sandbox create failed (${res.status}): ${body}. ` +
-        `Is the sandbox controller running on ${controllerBase()}?`,
-    );
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: "create",
+      status: res.status,
+      body,
+      publicMessage: "sandbox unavailable",
+    });
   }
   return (await res.json()) as SandboxInfo;
 }
@@ -312,11 +316,18 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
+      const err = new UpstreamServiceError({
+        service: "sandbox",
+        operation: "execute",
+        status: res.status,
+        body,
+        publicMessage: "sandbox command failed",
+      });
       // Surface the failure as a non-zero-exit ExecuteResponse rather
       // than throwing — deepagents tools can render the error to the
       // model, whereas an exception would crash the run.
       return {
-        output: `[sandbox controller error ${res.status}] ${body}`,
+        output: publicErrorWithRequestId(err.message, err.request_id),
         exitCode: -1,
         truncated: false,
       };
@@ -349,8 +360,15 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
+      const err = new UpstreamServiceError({
+        service: "sandbox",
+        operation: "write file",
+        status: res.status,
+        body,
+        publicMessage: "sandbox file write failed",
+      });
       return {
-        error: `Failed to write to ${filePath} (${res.status}): ${body}`,
+        error: publicErrorWithRequestId(err.message, err.request_id),
       };
     }
     return {

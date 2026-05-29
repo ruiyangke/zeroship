@@ -4,11 +4,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, auth_handlers, auth_service, env_handlers, internal, oauth, stripe_handlers,
-    AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
+    admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
+    oauth_grants_handlers, oauth_handlers, oidc_rp, stripe_handlers, token_handlers, AppState,
+    EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -28,6 +30,53 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
     env_or(env_key, default)
 }
 
+fn flag_or_env(args: &[String], flag: &str, env_key: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+        || std::env::var(env_key)
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+fn decoded_master_key_len(value: &str) -> Option<usize> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.len() % 2 == 0 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(bytes) = hex::decode(trimmed) {
+            if bytes.len() >= 32 {
+                return Some(bytes.len());
+            }
+        }
+    }
+
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .ok()
+        .map(|bytes| bytes.len())
+}
+
+fn validate_master_key_material(
+    label: &str,
+    value: &str,
+    insecure_dev: bool,
+) -> Result<(), String> {
+    if insecure_dev {
+        return Ok(());
+    }
+    match decoded_master_key_len(value) {
+        Some(n) if n >= 32 => Ok(()),
+        Some(n) => Err(format!(
+            "{label} decodes to {n} bytes; minimum is 32 random bytes"
+        )),
+        None => Err(format!(
+            "{label} must be hex or base64url encoded and decode to at least 32 random bytes"
+        )),
+    }
+}
+
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     zeroship_core::observability::init_tracing("info,zeroship_control=debug");
@@ -41,6 +90,7 @@ async fn main() -> std::io::Result<()> {
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
     let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
     let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
+    let signing_key_file = arg_or_env(&args, "--signing-key-file", "SIGNING_KEY_FILE", "");
     let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
     // Comma-separated list of previous master keys, tried as fallbacks
     // on decrypt failure during a rotation grace period.
@@ -52,12 +102,34 @@ async fn main() -> std::io::Result<()> {
     let insecure_dev =
         args.iter().any(|a| a == "--dev-insecure")
             || std::env::var("ZEROSHIP_DEV_INSECURE").map(|v| v == "1").unwrap_or(false);
+    let legacy_keys: Vec<&str> = legacy_master_keys_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     // Default: do NOT trust X-Forwarded-For. Operators behind a real
     // load balancer opt in explicitly via --trust-proxy; everyone else
     // gets the safe behavior (peer_addr only, no spoof surface).
     let trust_proxy =
         args.iter().any(|a| a == "--trust-proxy")
             || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
+    let bootstrap_builder_client = flag_or_env(
+        &args,
+        "--bootstrap-builder-client",
+        "BOOTSTRAP_BUILDER_OAUTH_CLIENT",
+    );
+    let builder_redirect_uri = arg_or_env(
+        &args,
+        "--builder-redirect-uri",
+        "BUILDER_REDIRECT_URI",
+        bootstrap_builder::DEFAULT_BUILDER_REDIRECT_URI,
+    );
+    let builder_client_secret_path = PathBuf::from(arg_or_env(
+        &args,
+        "--builder-client-secret-file",
+        "BUILDER_CLIENT_SECRET_FILE",
+        bootstrap_builder::DEFAULT_BUILDER_CLIENT_SECRET_PATH,
+    ));
 
     let deploy_tmp_dir_str = arg_or_env(
         &args,
@@ -100,8 +172,15 @@ async fn main() -> std::io::Result<()> {
 
     if !insecure_dev {
         let mut missing = Vec::new();
-        if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
-        if control_key.is_empty() { missing.push("--control-key / CONTROL_KEY"); }
+        if master_key.is_empty() {
+            missing.push("--master-key / MASTER_KEY");
+        }
+        if control_key.is_empty() {
+            missing.push("--control-key / CONTROL_KEY");
+        }
+        if signing_key_file.is_empty() {
+            missing.push("--signing-key-file / SIGNING_KEY_FILE");
+        }
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
@@ -110,6 +189,21 @@ async fn main() -> std::io::Result<()> {
                  without them — NEVER in production."
             );
             std::process::exit(1);
+        }
+        if let Err(message) = validate_master_key_material("MASTER_KEY", &master_key, insecure_dev)
+        {
+            tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
+            std::process::exit(1);
+        }
+        for (idx, legacy_key) in legacy_keys.iter().enumerate() {
+            let label = format!("LEGACY_MASTER_KEYS[{idx}]");
+            if let Err(message) = validate_master_key_material(&label, legacy_key, insecure_dev) {
+                tracing::error!(
+                    error = %message,
+                    "control: refusing to start with weak legacy master key"
+                );
+                std::process::exit(1);
+            }
         }
         if stripe_webhook_secret.is_empty() {
             // Not fatal — operators may run a control plane without
@@ -125,6 +219,23 @@ async fn main() -> std::io::Result<()> {
     if insecure_dev {
         tracing::warn!("control: --dev-insecure set; admin + internal auth disabled");
     }
+
+    let pat_issuer = if signing_key_file.is_empty() {
+        tracing::warn!("control: using dev-only PAT signing key");
+        Arc::new(token_handlers::PatIssuer::dev_insecure())
+    } else {
+        let signing_key = token_handlers::load_signing_key_from_path(
+            std::path::Path::new(&signing_key_file),
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: failed to load PAT signing key");
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+        })?;
+        Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
+            tracing::error!(error = %err, "control: failed to initialize PAT issuer");
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+        })?)
+    };
 
     let registry = Registry::new(&db_url)
         .await
@@ -145,11 +256,6 @@ async fn main() -> std::io::Result<()> {
             .expect("failed to initialise blob store"),
     );
 
-    let legacy_keys: Vec<&str> = legacy_master_keys_raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
     if !legacy_keys.is_empty() {
         tracing::info!(
             legacy_keys = legacy_keys.len(),
@@ -165,47 +271,158 @@ async fn main() -> std::io::Result<()> {
     .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
-    // JWT secret — used to sign session cookies. Must be stable across
-    // restarts in prod (else everyone gets logged out). In dev a random
-    // boot-time secret is fine.
-    let jwt_secret = arg_or_env(&args, "--jwt-secret", "JWT_SECRET", "");
-    let jwt_secret = if jwt_secret.is_empty() {
-        if !insecure_dev {
-            tracing::error!("control: refusing to start; --jwt-secret / JWT_SECRET required (or pass --dev-insecure)");
+    // Phase 3 U7/U8 — control plane OIDC RP for `console.zeroship.ai`.
+    // Mandatory post-U8: the legacy `auth_handlers` / `auth_service`
+    // chain has been retired, so the OIDC RP is the only console-auth
+    // surface. Control also needs hydra-admin for OAuth bearer
+    // introspection. Refuses to boot unless these pieces are configured
+    // (`--dev-insecure` permits localhost defaults only).
+    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
+    let legacy_hydra_admin_url = arg_or_env(
+        &args,
+        "--hydra-admin",
+        "AUTH_HYDRA_ADMIN",
+        "",
+    );
+    let console_oidc_secret =
+        arg_or_env(&args, "--console-oidc-secret", "CONSOLE_OIDC_SECRET", "");
+    let stash_signing_key = arg_or_env(
+        &args,
+        "--stash-signing-key",
+        "STASH_SIGNING_KEY",
+        "",
+    );
+    let auth_db_url = arg_or_env(&args, "--auth-db", "AUTH_DB_URL", "");
+    let hydra_admin_url = {
+        let value = arg_or_env(&args, "--hydra-admin-url", "HYDRA_ADMIN_URL", "");
+        if value.is_empty() {
+            legacy_hydra_admin_url
+        } else {
+            value
+        }
+    };
+    let expected_oauth_audience = arg_or_env(
+        &args,
+        "--oauth-audience",
+        "OAUTH_AUDIENCE",
+        "control.zeroship.ai",
+    );
+
+    if !insecure_dev {
+        let mut missing = Vec::new();
+        if auth_public.is_empty() {
+            missing.push("--auth-public / AUTH_PUBLIC");
+        }
+        if console_oidc_secret.is_empty() {
+            missing.push("--console-oidc-secret / CONSOLE_OIDC_SECRET");
+        }
+        if stash_signing_key.is_empty() {
+            missing.push("--stash-signing-key / STASH_SIGNING_KEY");
+        }
+        if auth_db_url.is_empty() {
+            missing.push("--auth-db / AUTH_DB_URL");
+        }
+        if hydra_admin_url.is_empty() {
+            missing.push("--hydra-admin-url / HYDRA_ADMIN_URL");
+        }
+        if !missing.is_empty() {
+            tracing::error!(
+                missing = %missing.join(", "),
+                "control: refusing to start; OIDC RP and OAuth introspection require these flags. \
+                 Pass --dev-insecure to run with localhost defaults."
+            );
             std::process::exit(1);
         }
-        // Stable fallback so cookies survive a quick restart in dev.
-        "dev-jwt-secret-please-override-in-prod".to_string()
+    }
+
+    let stash_key_bytes = if stash_signing_key.is_empty() {
+        // Dev-only fallback. Ephemeral keys are fine for the 10-minute
+        // stash window during local development; in prod the guard
+        // above already exited.
+        b"dev-stash-key-please-rotate".to_vec()
     } else {
-        jwt_secret
+        stash_signing_key.into_bytes()
     };
+    let auth_public_value = if auth_public.is_empty() {
+        // Dev-only fallback so a `--dev-insecure` boot succeeds without
+        // a configured hydra. Production exited above.
+        "http://localhost:4444".to_string()
+    } else {
+        auth_public.clone()
+    };
+    let hydra_admin_url_value = if hydra_admin_url.is_empty() {
+        // Dev-only fallback: Hydra's default admin listener in local
+        // docker-compose. Production exited above.
+        "http://localhost:4445".to_string()
+    } else {
+        hydra_admin_url
+    };
+    let console_oidc_secret_value = if console_oidc_secret.is_empty() {
+        "dev-console-oidc-secret".to_string()
+    } else {
+        console_oidc_secret
+    };
+    tracing::info!(
+        auth_public = %auth_public_value,
+        "control: console OIDC RP enabled"
+    );
+    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+        &auth_public_value,
+        "console.zeroship.ai",
+        console_oidc_secret_value,
+        stash_key_bytes,
+    ));
+    let hydra_introspector = Arc::new(zeroship_core::hydra::HydraIntrospector::new(
+        &hydra_admin_url_value,
+    ));
 
-    let auth = auth_service::AuthService::new(&db_url, &jwt_secret)
-        .await
-        .expect("failed to init auth service");
-
-    // Optional Google OAuth config — only set if all three env vars present.
-    let google_client_id = env_or("GOOGLE_CLIENT_ID", "");
-    let google_client_secret = env_or("GOOGLE_CLIENT_SECRET", "");
-    let google_redirect = env_or("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/google/callback");
-    let google_oauth = if !google_client_id.is_empty() && !google_client_secret.is_empty() {
-        tracing::info!(redirect_uri = %google_redirect, "control: Google OAuth enabled");
-        Some(oauth::GoogleConfig {
-            client_id: google_client_id,
-            client_secret: google_client_secret,
-            redirect_uri: google_redirect,
+    let auth_db_url_resolved = if auth_db_url.is_empty() {
+        // Dev fallback: reuse the control DB URL so /auth/callback
+        // works against a single local Postgres without operator
+        // ceremony. Production refused to start without --auth-db
+        // above.
+        db_url.clone()
+    } else {
+        auth_db_url
+    };
+    let auth_pg: Arc<compio_postgres::Client> = {
+        let (pg_client, pg_conn) = compio_postgres::connect(&auth_db_url_resolved, compio_postgres::NoTls)
+            .await
+            .expect("control: auth-pg connect");
+        compio::runtime::spawn(async move {
+            if let Err(e) = pg_conn.run().await {
+                tracing::error!(error = %e, "control/auth-pg connection ended");
+            }
         })
-    } else {
-        tracing::info!("control: Google OAuth disabled (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET)");
-        None
+        .detach();
+        Arc::new(pg_client)
     };
+
+    if bootstrap_builder_client {
+        zeroship_auth::store::migrations::migrate(&auth_pg)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "control: auth/control migrations failed");
+                std::io::Error::other(err.to_string())
+            })?;
+        let cfg = bootstrap_builder::BuilderClientBootstrapConfig {
+            enabled: true,
+            hydra_admin_url: hydra_admin_url_value.clone(),
+            redirect_uri: builder_redirect_uri,
+            client_secret_path: builder_client_secret_path,
+        };
+        bootstrap_builder::bootstrap_builder_oauth_client(&auth_pg, &cfg)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "control: builder OAuth client bootstrap failed");
+                std::io::Error::other(err.to_string())
+            })?;
+    }
 
     let state = Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
-        auth,
-        google_oauth,
         vfs,
         blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
@@ -223,6 +440,16 @@ async fn main() -> std::io::Result<()> {
         insecure_dev,
         trust_proxy,
         deploy_tmp_dir,
+        oidc_rp,
+        auth_pg,
+        auth_db_url: auth_db_url_resolved,
+        hydra_admin_url: hydra_admin_url_value,
+        expected_oauth_audience,
+        static_policies: zeroship_authz::load_platform_policies()
+            .expect("control: bundled authz policies parse"),
+        pat_issuer,
+        hydra_introspector,
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
@@ -231,6 +458,8 @@ async fn main() -> std::io::Result<()> {
     web::server(async move || {
         web::App::new()
             .state(state.clone())
+            .configure(admin_handlers::configure)
+            .configure(oauth_handlers::configure)
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")
@@ -267,6 +496,9 @@ async fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/api/apps/{id}/vars")
+                    .state(web::types::PayloadConfig::new(
+                        env_handlers::ENV_MUTATION_PAYLOAD_BYTES,
+                    ))
                     .route(web::get().to(env_handlers::list_vars))
                     .route(web::post().to(env_handlers::set_var)),
             )
@@ -276,6 +508,9 @@ async fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/api/apps/{id}/secrets")
+                    .state(web::types::PayloadConfig::new(
+                        env_handlers::ENV_MUTATION_PAYLOAD_BYTES,
+                    ))
                     .route(web::get().to(env_handlers::list_secrets))
                     .route(web::post().to(env_handlers::set_secret)),
             )
@@ -292,15 +527,22 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )
-            // --- Auth (creator + end-user) ---
-            .service(web::resource("/auth/register").route(web::post().to(auth_handlers::register)))
-            .service(web::resource("/auth/login").route(web::post().to(auth_handlers::login)))
-            .service(web::resource("/auth/logout").route(web::post().to(auth_handlers::logout)))
-            .service(web::resource("/auth/userinfo").route(web::get().to(auth_handlers::userinfo)))
-            .service(web::resource("/auth/consent").route(web::post().to(auth_handlers::consent)))
-            .service(web::resource("/auth/authorize").route(web::get().to(auth_handlers::authorize)))
-            .service(web::resource("/auth/google/start").route(web::get().to(auth_handlers::google_start)))
-            .service(web::resource("/auth/google/callback").route(web::get().to(auth_handlers::google_callback)))
+            // --- Auth (creator console) ---
+            // OIDC RP callback for the `console.zeroship.ai` client.
+            // The legacy `/auth/{login,register,logout,userinfo,consent,
+            // authorize,google/*}` handlers were retired in P3-U8 along
+            // with `auth_service` / `auth_handlers`; this is now the
+            // only console-auth surface.
+            .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
+            .configure(token_handlers::configure)
+            .configure(oauth_grants_handlers::configure)
+            // OIDC Back-Channel Logout 1.0 RP endpoint. Hydra POSTs
+            // here on user sign-out; we verify the logout_token and
+            // revoke the user's console sessions. The URI must match
+            // `backchannel_logout_uri` on the `console.zeroship.ai`
+            // client in `ops/auth-clients.example.toml`. Mounted via
+            // `.configure(...)` to mirror the gateway pattern.
+            .configure(backchannel_logout::configure)
             // --- Stripe Connect ---
             .service(
                 web::resource("/api/creators/{id}/stripe/onboard")
@@ -352,4 +594,43 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_key_rejects_dictionary_string_in_non_dev() {
+        let err = validate_master_key_material(
+            "MASTER_KEY",
+            "correct horse battery staple",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("hex or base64url"), "{err}");
+    }
+
+    #[test]
+    fn master_key_rejects_short_decoded_material_in_non_dev() {
+        let err = validate_master_key_material("MASTER_KEY", "YWJj", false).unwrap_err();
+        assert!(err.contains("3 bytes"), "{err}");
+    }
+
+    #[test]
+    fn master_key_accepts_32_byte_hex_in_non_dev() {
+        let key = "00".repeat(32);
+        assert!(validate_master_key_material("MASTER_KEY", &key, false).is_ok());
+    }
+
+    #[test]
+    fn master_key_accepts_32_byte_base64url_in_non_dev() {
+        let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
+        assert!(validate_master_key_material("MASTER_KEY", &key, false).is_ok());
+    }
+
+    #[test]
+    fn master_key_allows_dev_shortcut_in_insecure_dev() {
+        assert!(validate_master_key_material("MASTER_KEY", "password", true).is_ok());
+    }
 }

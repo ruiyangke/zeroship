@@ -48,8 +48,7 @@ export function MessageAssistant({
                 <td className="border border-rule px-2 py-1 align-top">{children}</td>
               ),
               // Inline `code` stays subtle; block code uses `pre` from
-              // the prose- styles above. shiki-driven highlighting is
-              // This action is still pending server support.
+              // the prose styles above.
               code: ({ children, className }) => {
                 const isBlock = (className ?? "").startsWith("language-");
                 if (isBlock) {

@@ -295,7 +295,9 @@ pub async fn create_sandbox(
             }
             HttpResponse::Created().json(&stored)
         }
-        CreateOutcome::Failed { status, code, message } => err(status, code, message),
+        CreateOutcome::Failed { status, code, message, raw } => {
+            err_safe(status, code, message, raw)
+        }
     }
 }
 
@@ -318,7 +320,12 @@ pub(crate) enum CreateOutcome {
     /// non-retriable, 503 for retry-budget exhaustion); `code` is the
     /// §10.0 machine-readable kind that ends up in the response's
     /// `error` field.
-    Failed { status: u16, code: &'static str, message: String },
+    Failed {
+        status: u16,
+        code: &'static str,
+        message: String,
+        raw: String,
+    },
 }
 
 /// FM-E: drives the create + retry loop. Extracted so unit tests
@@ -352,13 +359,15 @@ where
                 attempts = attempt - 1,
                 "sandbox/handlers create: retry budget exhausted"
             );
+            let attempts = attempt - 1;
             return CreateOutcome::Failed {
                 status: 503,
                 code: "create_retry_budget_exhausted",
-                message: format!(
+                message: create_failed_public_message(attempts),
+                raw: format!(
                     "backend.create: retry budget exhausted after {} \
                      attempt(s); last error: {}",
-                    attempt - 1,
+                    attempts,
                     last_err.unwrap_or_else(|| "<no error captured>".to_string()),
                 ),
             };
@@ -392,7 +401,8 @@ where
                     return CreateOutcome::Failed {
                         status: 500,
                         code: "backend_create_failed",
-                        message: format!(
+                        message: "sandbox create failed".to_string(),
+                        raw: format!(
                             "backend.create: {}",
                             last_err.unwrap_or_default()
                         ),
@@ -404,11 +414,16 @@ where
     CreateOutcome::Failed {
         status: 503,
         code: "create_retry_budget_exhausted",
-        message: format!(
+        message: create_failed_public_message(max_attempts),
+        raw: format!(
             "backend.create: {max_attempts} attempts failed; last error: {last}",
             last = last_err.unwrap_or_else(|| "<no error captured>".to_string()),
         ),
     }
+}
+
+fn create_failed_public_message(attempts: u32) -> String {
+    format!("sandbox create failed after {attempts} attempt(s)")
 }
 
 /// FM-E: classify a `backend.create` error as retriable.
@@ -1057,7 +1072,7 @@ mod tests {
         .await;
         match outcome {
             CreateOutcome::Ok { .. } => {}
-            CreateOutcome::Failed { status, code: _, message } => {
+            CreateOutcome::Failed { status, code: _, message, .. } => {
                 panic!("expected Ok, got {status}: {message}")
             }
         }
@@ -1124,11 +1139,15 @@ mod tests {
             "must try max_attempts (1 initial + 2 retries) times"
         );
         match outcome {
-            CreateOutcome::Failed { status, code: _, message } => {
+            CreateOutcome::Failed { status, code: _, message, raw } => {
                 assert_eq!(status, 503, "exhausted retries → 503");
                 assert!(
-                    message.contains("attempts failed") || message.contains("attempt"),
+                    message.contains("attempt"),
                     "503 body must include attempt count for triage; got {message:?}"
+                );
+                assert!(
+                    raw.contains("10.99.101.2") && raw.contains("expected fp=aa"),
+                    "raw backend detail must stay available to logs; got {raw:?}"
                 );
             }
             CreateOutcome::Ok { .. } => panic!("expected failure"),
@@ -1156,6 +1175,35 @@ mod tests {
         match outcome {
             CreateOutcome::Failed { status, .. } => {
                 assert_eq!(status, 500, "non-retriable → 500, not 503")
+            }
+            CreateOutcome::Ok { .. } => panic!("expected failure"),
+        }
+    }
+
+    #[test]
+    fn retry_loop_non_retriable_failure_message_is_sanitized() {
+        let outcome = futures::executor::block_on(run_create_with_retry(
+            3,
+            Duration::from_secs(10),
+            || async {
+                let id = Uuid::new_v4();
+                (
+                    id,
+                    Err(
+                        "nomad allocation failed: host=10.0.0.9 path=/var/lib/nomad"
+                            .to_string(),
+                    ),
+                )
+            },
+        ));
+        match outcome {
+            CreateOutcome::Failed { status, message, raw, .. } => {
+                assert_eq!(status, 500);
+                assert_eq!(message, "sandbox create failed");
+                assert!(!message.contains("10.0.0.9"), "message: {message}");
+                assert!(!message.contains("/var/lib/nomad"), "message: {message}");
+                assert!(raw.contains("10.0.0.9"), "raw: {raw}");
+                assert!(raw.contains("/var/lib/nomad"), "raw: {raw}");
             }
             CreateOutcome::Ok { .. } => panic!("expected failure"),
         }
@@ -1211,10 +1259,10 @@ mod tests {
             "budget cap must short-circuit before max_attempts; got {n}"
         );
         match outcome {
-            CreateOutcome::Failed { status, code: _, message } => {
+            CreateOutcome::Failed { status, code: _, message, raw: _ } => {
                 assert_eq!(status, 503);
                 assert!(
-                    message.contains("budget") || message.contains("attempts failed"),
+                    message.contains("attempt"),
                     "exhaustion message must hint at the cause; got {message:?}"
                 );
             }
@@ -1308,6 +1356,32 @@ mod tests {
     // public_msg) tuple used at the corresponding call site, then
     // asserts (a) the sentinel is absent from the wire body and (b)
     // the fixed public message is present.
+
+    fn body_json_buffered(mut resp: HttpResponse) -> serde_json::Value {
+        use ntex::http::body::{Body, MessageBody, ResponseBody};
+
+        let body = resp.take_body();
+        let bytes = match body {
+            ResponseBody::Body(Body::Bytes(bytes))
+            | ResponseBody::Other(Body::Bytes(bytes)) => bytes,
+            other => panic!("expected buffered JSON body, got size {:?}", other.size()),
+        };
+        serde_json::from_slice(&bytes).expect("body is JSON")
+    }
+
+    #[test]
+    fn r9_h3_backend_create_sanitizes_raw_driver_error() {
+        let raw = "backend.create: allocation terminal on host=10.0.0.7 \
+                   driver event: /var/lib/nomad/ch-wrapper failed";
+        let resp = err_safe(500, "backend_create_failed", "sandbox create failed", raw);
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = body_json_buffered(resp);
+        assert_eq!(body["error"], "backend_create_failed");
+        let msg = body["message"].as_str().expect("message must be a string");
+        assert_eq!(msg, "sandbox create failed");
+        assert!(!msg.contains("10.0.0.7"), "raw host leaked: {msg}");
+        assert!(!msg.contains("/var/lib/nomad"), "raw path leaked: {msg}");
+    }
 
     #[compio::test]
     async fn r10_q1_backend_stop_sanitizes_raw_driver_error() {

@@ -5,7 +5,7 @@ import { test, expect } from "@playwright/test";
 // interactions, and the chat empty/error states. Real-LLM hover-
 // actions live in chat-actions.spec.ts (gated on OPENAI_API_KEY).
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("Chat composer — affordances + shortcuts", () => {
   test("composer shows the cmd-enter / @ mention helper line", async ({ page }) => {

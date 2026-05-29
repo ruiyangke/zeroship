@@ -24,7 +24,7 @@
 import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
-import { SRE_PROMPT } from "./prompts.js";
+import { SRE_PROMPT } from "./prompts";
 
 export const sreResponseSchema = z.object({
   // Plain-text root cause as best as can be determined from the

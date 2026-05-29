@@ -39,12 +39,12 @@
 import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
-import { PM_PROMPT } from "./internal/prompts.js";
-import { listIssues, getQualityScores } from "./agents.js";
+import { PM_PROMPT } from "./internal/prompts";
+import { listIssues, getQualityScores } from "./agents";
 // `getApp` lives in apps.ts (proxied to the control plane). Keep the
 // wire optional — the digest still works without deploy info, so a
 // catch() below lets a control-plane outage degrade gracefully.
-import { getApp as getAppRecord } from "./apps.js";
+import { getApp as getAppRecord } from "./apps";
 
 // ─── recommendation shape ────────────────────────────────────────
 //
@@ -82,6 +82,10 @@ export type PMDigest = z.infer<typeof pmDigestResponseSchema>;
 export interface PMDigestInput {
   appId: string;
 }
+
+const pmDigestInputSchema = z.object({
+  appId: z.string().min(1).max(256),
+}).strict();
 
 /**
  * Run a PM digest pass over the given app's current state.
@@ -150,7 +154,7 @@ export const pmDigest = action(async (input: PMDigestInput): Promise<PMDigest> =
   ]);
 
   return result;
-}, { id: "pm.digest" });
+}, { id: "pm.digest", input: pmDigestInputSchema, maxInputBytes: 4_096 });
 
 // --- helpers --------------------------------------------------------
 

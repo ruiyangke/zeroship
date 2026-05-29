@@ -5,19 +5,17 @@
 // The chat middleware (`middleware.ts`) calls these after every
 // agent SubAgent dispatch to persist round-by-round state into the
 // project's KV slot. The READ side of the same data ships from
-// `agents.ts` (`getQualityScores`, `listIssues`, etc.) which the
-// canvases call as plain RPC procs. Splitting reads (public) from
-// writes (server-only) keeps the canvas's public surface read-only-
-// from-the-client, which is the right shape for stub state — only
-// the server agents should be writing here.
+// `agents.ts` (`getQualityScores`, `listIssues`, etc.). Splitting
+// reads (public) from writes (server-only) keeps agent state
+// read-only from the client — only server agents should write here.
 
-import { persistSet } from "./persist.js";
+import { persistSet } from "./persist";
 import {
   CRITIC_DIMENSION_LABELS,
   CRITIC_DIMENSIONS,
   type CriticDimensionKey,
-} from "../../shared/review-contract.js";
-import type { QualityDimension, QualityGrade, QualityScores } from "../agents.js";
+} from "../../shared/review-contract";
+import type { QualityDimension, QualityGrade, QualityScores } from "../agents";
 
 const qualityKey = (appId: string) => `quality:${appId}`;
 

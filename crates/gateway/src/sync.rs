@@ -12,6 +12,8 @@ use zeroship_core::types::{RouteEntry, RouteMap};
 use crate::compiled::CompiledManifest;
 use crate::GateState;
 
+const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl std::fmt::Debug for RouteCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RouteCache").finish_non_exhaustive()
@@ -31,7 +33,14 @@ pub struct RouteCache {
     name_index: RwLock<HashMap<String, Uuid>>,
 }
 
+impl Default for RouteCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RouteCache {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             routes: RwLock::new(HashMap::new()),
@@ -102,6 +111,19 @@ async fn sync_once(state: &GateState) -> Result<(), String> {
 }
 
 async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
+    compio::time::timeout(CONTROL_REQUEST_TIMEOUT, http_get_inner(url, auth_key))
+        .await
+        .map_err(|_| control_timeout_error())?
+}
+
+fn control_timeout_error() -> String {
+    format!(
+        "control request timed out after {}s",
+        CONTROL_REQUEST_TIMEOUT.as_secs()
+    )
+}
+
+async fn http_get_inner(url: &str, auth_key: &str) -> Result<String, String> {
     let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
     let host = parsed.host_str().ok_or("no host")?;
     let port = parsed.port().unwrap_or(80);
@@ -142,4 +164,15 @@ async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
     }
 
     String::from_utf8(response[header_end + 4..].to_vec()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_timeout_defaults_to_five_seconds() {
+        assert_eq!(CONTROL_REQUEST_TIMEOUT, std::time::Duration::from_secs(5));
+        assert_eq!(control_timeout_error(), "control request timed out after 5s");
+    }
 }

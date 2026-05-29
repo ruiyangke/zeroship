@@ -10,12 +10,14 @@
 // immediately.
 
 import { action } from "@zeroship/rpc/server";
+import { z } from "zod";
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./internal/env";
 import {
   DEFAULT_PREVIEW_PORT,
   ensureSandboxPreviewServer,
   getOrCreateSandboxFor,
 } from "./internal/sandbox-backend";
+import { UpstreamServiceError } from "./internal/upstream-error";
 
 // The controller's `/sandboxes/:id/*` routes verify ownership via a
 // `?user_id=<id>` query string and 404 on mismatch. Builder's backend
@@ -35,10 +37,16 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return h;
 }
 
-async function jsonOrThrow<T>(res: Response, op: string): Promise<T> {
+export async function jsonOrThrow<T>(res: Response, op: string): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`sandbox ${op} → ${res.status}: ${body}`);
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: op,
+      status: res.status,
+      body,
+      publicMessage: "sandbox request failed",
+    });
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -59,6 +67,17 @@ function encodePath(p: string): string {
 
 export interface ListSandboxFilesInput { appId: string }
 
+const appIdSchema = z.string().min(1).max(256);
+const listSandboxFilesInputSchema = z.object({ appId: appIdSchema }).strict();
+const readSandboxFileInputSchema = z.object({
+  appId: appIdSchema,
+  path: z.string().min(1).max(4_096),
+}).strict();
+const livePreviewInputSchema = z.object({
+  appId: appIdSchema,
+  port: z.number().int().min(1).max(65_535).optional(),
+}).strict();
+
 export const listSandboxFiles = action(async (
   input: ListSandboxFilesInput,
 ): Promise<FileEntry[]> => {
@@ -71,7 +90,7 @@ export const listSandboxFiles = action(async (
   );
   const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
   return data.entries ?? [];
-}, { id: "sandbox.listSandboxFiles" });
+}, { id: "sandbox.files.list", input: listSandboxFilesInputSchema, maxInputBytes: 4_096 });
 
 export interface ReadSandboxFileInput { appId: string; path: string }
 
@@ -86,10 +105,16 @@ export const readSandboxFile = action(async (
     { headers: authHeaders() },
   );
   if (!res.ok) {
-    throw new Error(`read ${input.path} → ${res.status}: ${await res.text()}`);
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: "read file",
+      status: res.status,
+      body: await res.text(),
+      publicMessage: "file read failed",
+    });
   }
   return res.text();
-}, { id: "sandbox.readSandboxFile" });
+}, { id: "sandbox.files.read", input: readSandboxFileInputSchema, maxInputBytes: 8_192 });
 
 export interface LivePreviewInput {
   appId: string;
@@ -120,4 +145,4 @@ export const getLivePreview = action(async (
     url: `/api/preview/${encodeURIComponent(input.appId)}/${port}/`,
     status: "ready",
   };
-}, { id: "sandbox.getLivePreview" });
+}, { id: "sandbox.preview.get", input: livePreviewInputSchema, maxInputBytes: 4_096 });

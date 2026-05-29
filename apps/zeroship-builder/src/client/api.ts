@@ -38,7 +38,6 @@ export {
   getApp,
   createApp,
   deleteApp,
-  deployApp,
   updatePlan,
   getAppLogs,
   listVars,
@@ -63,60 +62,14 @@ export {
   type LivePreviewInfo,
 } from "../server/sandbox";
 
-// Plan / Health canvas stubs. Every export takes one
-// object input — see `server/agents.ts` header for the wire-shape
-// rationale. The current implementation is in-memory only.
-//
-// Data + Media canvas stubs live in the same module with the same
-// single-input wire convention. Real persistence and backing stores
-// are still separate follow-up work.
+// Agent context read model. MentionDropdown uses this to autocomplete
+// issue references for the active project.
 export {
   listIssues,
-  addIssue,
-  getQualityScores,
-  // Data canvas
-  listTables,
-  getTableRows,
-  listIndexes,
-  listMigrations,
-  listBackups,
-  triggerBackup,
-  // Media canvas
-  listMedia,
-  uploadMedia,
-  deleteMedia,
   type Issue,
   type IssueStatus,
   type IssueSource,
-  type QualityScores,
-  type QualityDimension,
-  type QualityGrade,
-  type TableSummary,
-  type TableRow,
-  type IndexInfo,
-  type MigrationEntry,
-  type MigrationStatus,
-  type BackupEntry,
-  type BackupKind,
-  type MediaEntry,
 } from "../server/agents";
-
-// PM / SRE scheduled-worker procs (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.3.2). Each takes
-// `{appId}` and returns a structured digest / findings payload — see
-// `server/pm-worker.ts` and `server/sre-worker.ts` for the wire shape
-// and the missing cron infrastructure caveat.
-export {
-  pmDigest,
-  type PMDigest,
-  type PMDigestRecommendationItem,
-  type PMDigestInput,
-} from "../server/pm-worker";
-export {
-  sreMonitor,
-  type SREMonitorResult,
-  type SREFindingItem,
-  type SREMonitorInput,
-} from "../server/sre-worker";
 
 export { appPreviewUrl } from "./lib/preview-url";
 

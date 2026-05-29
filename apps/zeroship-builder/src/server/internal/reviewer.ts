@@ -35,11 +35,11 @@
 import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
-import { REVIEWER_PROMPT } from "./prompts.js";
+import { REVIEWER_PROMPT } from "./prompts";
 import {
   REVIEWER_BLOCKER_KINDS,
   REVIEWER_HARD_GATE_SEVERITIES,
-} from "../../shared/review-contract.js";
+} from "../../shared/review-contract";
 
 export const reviewerResponseSchema = z.object({
   approved: z.boolean(),

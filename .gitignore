@@ -19,6 +19,7 @@ config/verdaccio/storage/
 # (`./.zeroship/kv.redb` + lock) and the storage root (`.zeroship/storage`)
 # here. Never tracked.
 .zeroship/
+data/builder-client-secret
 
 # Never commit dotenv files — only the .example templates
 .env
@@ -37,3 +38,6 @@ yarn.lock
 # Go build artefacts for nomad-driver-ch (the driver has its own .gitignore
 # but be defensive — `make build` drops binaries here).
 nomad-driver-ch/bin/
+
+# Claude Code local state
+.claude/

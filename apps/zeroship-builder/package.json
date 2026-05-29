@@ -17,6 +17,7 @@
     "@ai-sdk/openai": "^3.0.55",
     "@ai-sdk/react": "^3.0.174",
     "ai": "^6.0.172",
+    "@zeroship/control": "workspace:*",
     "@zeroship/kv": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
@@ -44,12 +45,12 @@
     "clsx": "catalog:",
     "deepagents": "^1.9.0",
     "langchain": "^1.3.5",
+    "jose": "^6.2.3",
     "react": "catalog:",
     "react-dom": "catalog:",
     "react-markdown": "^9.0.0",
     "react-router-dom": "catalog:",
     "remark-gfm": "^4.0.0",
-    "shiki": "^1.0.0",
     "tailwind-merge": "catalog:",
     "tailwindcss": "catalog:",
     "zod": "catalog:"
@@ -62,6 +63,7 @@
     "@vitejs/plugin-react": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
+    "vitest": "^4.1.7",
     "zeroship": "workspace:*"
   }
 }

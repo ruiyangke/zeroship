@@ -13,11 +13,11 @@ import { test, expect, type Page } from "@playwright/test";
 //     the hover-revealed copy/regenerate buttons appear on the
 //     streamed bubble.
 //
-// We use the `/__catchall_for_test` shell path so the shell mounts
+// We use the `/__test/workspace` shell path so the shell mounts
 // without a control plane, mirroring chat-openai.spec.ts.
 
 const HAS_KEY = !!process.env.OPENAI_API_KEY;
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 // Grant clipboard permissions before each test so navigator.clipboard
 // works headless. Chromium needs both read + write for round-tripping.
@@ -46,7 +46,7 @@ test.describe("chat actions (shell-only)", () => {
     const input = page.getByTestId("chat-input");
     await input.click();
     await input.type("@");
-    // Dropdown should appear even when the catch-all has no appId —
+    // Dropdown should appear even when the dev shell has no appId —
     // it shows "no matches" but is still rendered. That's the load-
     // bearing UI affordance.
     await expect(page.getByTestId("mention-dropdown")).toBeVisible();

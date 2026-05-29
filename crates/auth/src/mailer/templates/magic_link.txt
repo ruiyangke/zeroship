@@ -1,0 +1,10 @@
+Hi {{ name }},
+
+Click the link below to sign in to your zeroship account.
+The link expires in {{ expires_in }}.
+
+{{ link }}
+
+Requested from {{ requesting_device }} · {{ requesting_location }}
+
+If you didn't request this, you can ignore this email — no action is needed.

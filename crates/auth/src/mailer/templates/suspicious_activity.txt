@@ -1,0 +1,10 @@
+Hi {{ name }},
+
+We noticed: {{ event }} at {{ time }}.
+
+If this was you, you can ignore this email — no action is needed. If you
+don't recognize this activity, we recommend changing your password.
+
+{% if let Some(link) = action_link %}
+Change your password: {{ link }}
+{% endif %}

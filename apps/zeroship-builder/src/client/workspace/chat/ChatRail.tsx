@@ -23,7 +23,7 @@ export interface ChatRailProps {
   appName?: string;
   /** App id from the URL — feeds the composer's `@`-mention dropdown
    *  (file picker / issue picker / recent log error). When omitted
-   *  (catch-all route, no project), the dropdown silently degrades to
+   *  (dev shell / no project), the dropdown silently degrades to
    *  "no suggestions". */
   appId?: string;
   /** Wizard hand-off: the brief stashed by WizardWorkspace.handleBegin

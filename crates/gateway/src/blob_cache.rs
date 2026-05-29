@@ -13,7 +13,7 @@
 //!   `sendfile(2)` or `IORING_OP_SPLICE`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use bytes::Bytes;
 use lru::LruCache;
@@ -45,9 +45,16 @@ impl BlobCache {
         }
     }
 
+    fn lock_state(&self) -> MutexGuard<'_, CacheState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("BlobCache mutex poisoned; recovering cache state");
+            poisoned.into_inner()
+        })
+    }
+
     /// Look up a blob, promoting the entry to most-recently-used on hit.
     pub fn get(&self, hash: &str) -> Option<Bytes> {
-        let mut state = self.state.lock().expect("BlobCache mutex poisoned");
+        let mut state = self.lock_state();
         state.lru.get(hash).cloned()
     }
 
@@ -60,7 +67,7 @@ impl BlobCache {
         if new_size > self.max_bytes {
             return;
         }
-        let mut state = self.state.lock().expect("BlobCache mutex poisoned");
+        let mut state = self.lock_state();
         // Replacing an existing key needs to subtract the old size first
         // so the byte accounting tracks the delta, not the gross sum.
         if let Some(old) = state.lru.pop(&hash) {
@@ -81,13 +88,13 @@ impl BlobCache {
     /// Total bytes currently held across all entries.
     #[must_use]
     pub fn current_bytes(&self) -> usize {
-        self.state.lock().expect("BlobCache mutex poisoned").current_bytes
+        self.lock_state().current_bytes
     }
 
     /// Number of entries currently cached.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state.lock().expect("BlobCache mutex poisoned").lru.len()
+        self.lock_state().lru.len()
     }
 
     /// True iff no entries are cached.
@@ -163,6 +170,13 @@ impl DiskBlobCache {
         })
     }
 
+    fn lock_state(&self) -> MutexGuard<'_, DiskState> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("DiskBlobCache mutex poisoned; recovering cache state");
+            poisoned.into_inner()
+        })
+    }
+
     /// On-disk path for a hash, regardless of whether the blob is
     /// currently cached. Used internally for read/write; callers
     /// should prefer [`Self::local_path`] which only returns paths
@@ -187,7 +201,7 @@ impl DiskBlobCache {
     /// the entry isn't present in the LRU (a cold path triggers a
     /// backend fetch + insert).
     pub fn local_path(&self, hash: &str) -> Option<PathBuf> {
-        let mut state = self.state.lock().expect("DiskBlobCache mutex poisoned");
+        let mut state = self.lock_state();
         // `LruCache::get` promotes on hit.
         state.lru.get(hash)?;
         Some(self.path_for(hash))
@@ -231,7 +245,7 @@ impl DiskBlobCache {
 
         // Now update the bookkeeping. The lock is taken last so the
         // common case (different hashes) doesn't contend.
-        let mut state = self.state.lock().expect("DiskBlobCache mutex poisoned");
+        let mut state = self.lock_state();
         if let Some(old_size) = state.lru.pop(hash) {
             state.current_bytes = state.current_bytes.saturating_sub(old_size);
         }
@@ -264,20 +278,13 @@ impl DiskBlobCache {
     /// Total bytes currently tracked across all entries.
     #[must_use]
     pub fn current_bytes(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("DiskBlobCache mutex poisoned")
-            .current_bytes
+        self.lock_state().current_bytes
     }
 
     /// Number of entries currently cached.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state
-            .lock()
-            .expect("DiskBlobCache mutex poisoned")
-            .lru
-            .len()
+        self.lock_state().lru.len()
     }
 
     /// True iff no entries are cached.
@@ -423,6 +430,21 @@ mod tests {
         // And shrink — also tracked.
         cache.insert("a".into(), b(2));
         assert_eq!(cache.current_bytes(), 2);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn blob_cache_recovers_after_state_lock_poison() {
+        let cache = BlobCache::new(10);
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = cache.state.lock().unwrap();
+            panic!("poison blob cache");
+        });
+        assert!(poisoned.is_err());
+
+        cache.insert("a".into(), b(4));
+        assert!(cache.get("a").is_some());
+        assert_eq!(cache.current_bytes(), 4);
         assert_eq!(cache.len(), 1);
     }
 

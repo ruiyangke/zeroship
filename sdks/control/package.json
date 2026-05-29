@@ -1,0 +1,29 @@
+{
+  "name": "@zeroship/control",
+  "version": "0.1.0",
+  "description": "Typed client for the zeroship control-plane HTTP API",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "lint:pkg": "publint && attw --pack .",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
+    "@types/node": "catalog:",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

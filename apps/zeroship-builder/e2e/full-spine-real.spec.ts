@@ -147,6 +147,8 @@ test.describe("Full spine — real LLM, real sandbox, real control plane", () =>
     // 7. Files canvas — Builder wrote at least one file during the
     // assistant turn. Click the Files pill and wait for the tree to
     // surface a file-tree node.
+    await page.getByTestId("tier-toggle").click();
+    await page.getByTestId("tier-toggle").click();
     await page.getByTestId("pill:files").click();
     await expect(page.getByTestId("files-canvas")).toBeVisible({
       timeout: STEP_TIMEOUT,

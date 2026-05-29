@@ -54,6 +54,13 @@ async function deleteApp(id: string): Promise<void> {
 
 async function selectPill(page: Page, pill: string): Promise<void> {
   const target = page.getByTestId(`pill:${pill}`);
+  if (!(await target.isVisible().catch(() => false))) {
+    const toggle = page.getByTestId("tier-toggle");
+    for (let i = 0; i < 2; i++) {
+      await toggle.click();
+      if (await target.isVisible().catch(() => false)) break;
+    }
+  }
   await expect(target).toBeVisible();
   await target.click();
 }

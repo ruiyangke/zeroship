@@ -77,6 +77,20 @@ export type ServerProcedure<
   readonly [rpcMeta]?: Meta;
 };
 
+export type ResponseStreamProcedure<
+  Input = unknown,
+  Id extends string = string,
+  Meta extends ClientRpcMeta = NoClientRpcMeta,
+> = {
+  (input: Input): Response | Promise<Response>;
+  config?: ProcedureConfig<Input, never> & { id?: Id; kind?: "stream" } & Meta;
+  readonly [rpcKind]?: "stream";
+  readonly [rpcId]?: Id;
+  readonly [rpcInput]?: Input;
+  readonly [rpcOutput]?: never;
+  readonly [rpcMeta]?: Meta;
+};
+
 export type Query<
   Input = void,
   Output = unknown,
@@ -127,14 +141,16 @@ type InferredProcedureId<Id> = Id extends string
 
 export type InferRpcContract<TProcedures> = {
   [K in keyof TProcedures as TProcedures[K] extends ServerProcedure<
-    any,
-    any,
-    any,
-    infer Id,
-    any
-  >
-    ? InferredProcedureId<Id>
-    : never]: TProcedures[K] extends ServerProcedure<
+      any,
+      any,
+      any,
+      infer Id,
+      any
+    >
+      ? InferredProcedureId<Id>
+      : TProcedures[K] extends ResponseStreamProcedure<any, infer Id, any>
+        ? InferredProcedureId<Id>
+        : never]: TProcedures[K] extends ServerProcedure<
       infer Kind,
       infer Input,
       infer Output,
@@ -142,7 +158,13 @@ export type InferRpcContract<TProcedures> = {
       infer Meta
     >
       ? RpcDescriptor<Kind, Input, Output, Meta>
-      : never;
+      : TProcedures[K] extends ResponseStreamProcedure<
+            infer Input,
+            infer _Id,
+            infer Meta
+          >
+        ? RpcDescriptor<"stream", Input, never, Meta>
+        : never;
 };
 
 type DescriptorKind<T> = T extends RpcDescriptor<infer Kind, any, any, any>

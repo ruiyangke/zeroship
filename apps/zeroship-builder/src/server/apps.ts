@@ -1,13 +1,15 @@
 "use server";
-// Apps server functions — proxies to control plane's /api/apps/*.
-//
-// Cookie session covers admin auth (control plane's `check_admin_auth`
-// accepts session cookie OR Bearer master-key); we forward both.
+// Apps server functions — OAuth-scoped control-plane operations.
 
 import { action, mutation } from "@zeroship/rpc/server";
-import { CONTROL_URL, CONTROL_KEY } from "./internal/env";
-import { getRequest } from "./internal/request-context";
+import {
+  getControlClient,
+  type App as ControlApp,
+  type EnvVar,
+} from "./control-client.js";
 import { persistGet, persistSet } from "./internal/persist.js";
+
+export type { EnvVar } from "./control-client.js";
 
 // ─── archive: KV-backed stub ─────────────────────────────────────
 //
@@ -46,44 +48,17 @@ export interface AppRecord {
   archived?: boolean;
 }
 
-async function proxy<T>(
-  path: string,
-  init: { method?: string; body?: BodyInit; contentType?: string } = {},
-): Promise<T> {
-  const cookie = getRequest()?.headers.get("cookie") ?? "";
-  const headers: Record<string, string> = {
-    "content-type": init.contentType ?? "application/json",
-    "authorization": `Bearer ${CONTROL_KEY()}`,
-  };
-  if (cookie) headers["cookie"] = cookie;
-
-  const res = await fetch(`${CONTROL_URL()}${path}`, {
-    method: init.method ?? "GET",
-    headers,
-    body: init.body,
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-  if (res.status === 204) return undefined as T;
-  const ct = res.headers.get("content-type") ?? "";
-  if (!ct.includes("json")) return (await res.text()) as unknown as T;
-  return (await res.json()) as T;
-}
-
 export const listApps = action(async (): Promise<AppRecord[]> => {
   const [apps, archive] = await Promise.all([
-    proxy<AppRecord[]>("/api/apps"),
+    getControlClient().listApps(),
     loadArchive(),
   ]);
-  return apps.map((a) => ({ ...a, archived: archive.has(a.id) }));
+  return apps.map(withArchive(archive));
 }, { id: "apps.listApps" });
 
 export const getApp = action(async (id: string): Promise<AppRecord> => {
   const [app, archive] = await Promise.all([
-    proxy<AppRecord>(`/api/apps/${encodeURIComponent(id)}`),
+    getControlClient().getApp(id),
     loadArchive(),
   ]);
   return { ...app, archived: archive.has(app.id) };
@@ -127,84 +102,66 @@ export const createApp = action(async (input: {
 }): Promise<AppRecord> => {
   const name = input?.name;
   const plan_id = input?.plan_id ?? "free";
-  return proxy("/api/apps", {
-    method: "POST",
-    body: JSON.stringify({ name, plan_id }),
-  });
+  return getControlClient().createApp(name, plan_id);
 }, { id: "apps.createApp" });
 
 export const deleteApp = action(async (id: string): Promise<{ deleted: boolean }> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return getControlClient().deleteApp(id);
 }, { id: "apps.deleteApp" });
 
 export const deployApp = action(async (
-  input: { appId: string; code: string },
+  input: { appId: string; zshipBytes: Uint8Array | number[] },
 ): Promise<{ deploy_hash: string }> => {
-  return proxy(`/api/apps/${encodeURIComponent(input.appId)}/deploy`, {
-    method: "POST",
-    body: input.code,
-    contentType: "application/javascript",
-  });
+  return getControlClient().deploy(input.appId, Uint8Array.from(input.zshipBytes));
 }, { id: "apps.deployApp" });
 
 export const updatePlan = action(async (
   input: { appId: string; plan_id: string },
 ): Promise<{ updated: boolean }> => {
-  return proxy(`/api/apps/${encodeURIComponent(input.appId)}/plan`, {
-    method: "PUT",
-    body: JSON.stringify({ plan_id: input.plan_id }),
-  });
+  return getControlClient().updatePlan(input.appId, input.plan_id);
 }, { id: "apps.updatePlan" });
 
 export const getAppLogs = action(async (id: string): Promise<string[]> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/logs`);
+  return getControlClient().getAppLogs(id);
 }, { id: "apps.getAppLogs" });
 
 // ─── env vars + secrets ─────────────────────────────────────────
 
-export interface EnvVar { key: string; value: string }
-
 export const listVars = action(async (id: string): Promise<{ vars: EnvVar[] }> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/vars`);
+  return getControlClient().listVars(id);
 }, { id: "apps.listVars" });
 
 export const setVar = action(async (
   input: { appId: string; key: string; value: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/vars`, {
-    method: "POST",
-    body: JSON.stringify({ key: input.key, value: input.value }),
-  });
+  await getControlClient().setVar(input.appId, input.key, input.value);
 }, { id: "apps.setVar" });
 
 export const deleteVar = action(async (
   input: { appId: string; key: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/vars/${encodeURIComponent(input.key)}`, {
-    method: "DELETE",
-  });
+  await getControlClient().deleteVar(input.appId, input.key);
 }, { id: "apps.deleteVar" });
 
 export const listSecrets = action(async (id: string): Promise<{ secrets: string[] }> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/secrets`);
+  return getControlClient().listSecrets(id);
 }, { id: "apps.listSecrets" });
 
 export const setSecret = action(async (
   input: { appId: string; key: string; value: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/secrets`, {
-    method: "POST",
-    body: JSON.stringify({ key: input.key, value: input.value }),
-  });
+  await getControlClient().setSecret(input.appId, input.key, input.value);
 }, { id: "apps.setSecret" });
 
 export const deleteSecret = action(async (
   input: { appId: string; key: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/secrets/${encodeURIComponent(input.key)}`, {
-    method: "DELETE",
-  });
+  await getControlClient().deleteSecret(input.appId, input.key);
 }, { id: "apps.deleteSecret" });
+
+function withArchive(archive: Set<string>): (app: ControlApp) => AppRecord {
+  return (app) => ({ ...app, archived: archive.has(app.id) });
+}
 
 // `appPreviewUrl` moved to `src/client/lib/preview-url.ts` — it's a
 // pure URL-builder that the iframe consumes synchronously, so it must

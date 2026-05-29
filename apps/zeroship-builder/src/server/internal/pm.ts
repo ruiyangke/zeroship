@@ -25,7 +25,7 @@
 import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
-import { PM_PROMPT } from "./prompts.js";
+import { PM_PROMPT } from "./prompts";
 
 // One recommendation slot — can be tied to an existing issue (issueId)
 // or be a brand-new suggestion (issueId omitted). The card on the

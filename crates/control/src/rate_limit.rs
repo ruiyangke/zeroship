@@ -1,17 +1,17 @@
-//! Per-IP token-bucket rate limiter for the control plane.
+//! Per-IP token-bucket quota helpers for the control plane.
 //!
-//! In-memory only — losing the bucket state on restart is fine (worst
-//! case: an attacker gets one full burst per restart). Production
-//! deployments behind a load balancer should ALSO configure
-//! LB-level rate limits as the primary defense; this is one layer
-//! down for redundancy.
+//! HTTP handlers consume from the DB-backed `auth.rate_limits` table via
+//! `http_util`, so buckets are shared across control-plane instances.
+//! The in-memory implementation below stays as a small local primitive
+//! for unit tests and non-HTTP callers that explicitly want process-local
+//! accounting.
 //!
 //! Buckets are evicted lazily on access if untouched for `IDLE_TTL`,
 //! so the map can't grow unbounded under a churning attacker.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// Idle bucket TTL — buckets older than this are dropped on next access.
@@ -52,11 +52,19 @@ impl RateLimiter {
         Self { quota, buckets: Mutex::new(HashMap::new()) }
     }
 
+    #[must_use]
+    pub fn quota(&self) -> Quota {
+        self.quota
+    }
+
     /// Try to consume one token for `ip`. Returns true if allowed,
     /// false if the bucket was empty.
     pub fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().expect("rate-limiter lock poisoned");
+        let mut buckets = match self.buckets.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         // Lazy GC: evict idle buckets so the map can't grow unbounded.
         // O(N) per call but N is bounded by the number of distinct
@@ -88,7 +96,7 @@ impl RateLimiter {
     /// `capacity` if the IP has never been seen.
     #[cfg(test)]
     pub fn tokens_for(&self, ip: IpAddr) -> f64 {
-        let buckets = self.buckets.lock().unwrap();
+        let buckets = self.lock_buckets();
         buckets.get(&ip).map(|b| b.tokens).unwrap_or(self.quota.capacity)
     }
 }
@@ -150,5 +158,18 @@ mod tests {
         assert!(rl.check(addr));
         assert!(rl.check(addr));
         assert!(!rl.check(addr));
+    }
+
+    #[test]
+    fn check_recovers_after_bucket_lock_poison() {
+        let rl = RateLimiter::new(Quota::per_minute(1, 60));
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = rl.buckets.lock().unwrap();
+            panic!("poison rate limiter");
+        });
+        assert!(poisoned.is_err());
+
+        assert!(rl.check(ip("203.0.113.4")));
+        assert_eq!(rl.tokens_for(ip("203.0.113.4")), 0.0);
     }
 }

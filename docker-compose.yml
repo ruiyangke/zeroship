@@ -57,15 +57,22 @@ services:
         --bundles /data/bundles
         --control-key platform-key
         --master-key master-key
+        --dev-insecure
+        --hydra-admin-url http://hydra:4445
+        --bootstrap-builder-client
+        --builder-client-secret-file /data/builder-client-secret
     ports:
       - "9090:9090"
     volumes:
       - bundles:/data/bundles
+      - ./data:/data
     security_opt:
       - seccomp:unconfined
     depends_on:
       postgres:
         condition: service_healthy
+      hydra:
+        condition: service_started
 
   gateway:
     build: .
@@ -87,14 +94,31 @@ services:
           --control-key platform-key \
           --worker-key worker-key \
           --workers "$$WORKERS" \
-          --poll-interval 3
+          --poll-interval 3 \
+          --hydra-public http://hydra:4444 \
+          --auth-public http://auth:9092 \
+          --db postgres://postgres:zeroship@postgres:5432/zeroship \
+          --insecure-dev true
+    environment:
+      # OAuth2 client_secret registered for the `gateway` client in
+      # ops/auth-clients.example.toml. The gateway exchanges this on
+      # the per-app OIDC code-exchange (Phase 3 §10.2).
+      GATEWAY_OIDC_SECRET: ${GATEWAY_OIDC_SECRET:-dev-secret-rotate-me-too}
+      # HMAC key signing the per-request __Host-zs_oidc_stash cookie.
+      # Tampering is rejected at decode time; rotating this key
+      # invalidates any in-flight OIDC dances.
+      STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-key-please-rotate}
     ports:
       - "8000:8000"
     security_opt:
       - seccomp:unconfined
     depends_on:
-      - control
-      - worker
+      postgres:
+        condition: service_healthy
+      control:
+        condition: service_started
+      worker:
+        condition: service_started
 
   worker:
     build: .
@@ -120,6 +144,46 @@ services:
       - seccomp:unconfined
     depends_on:
       - control
+
+  # ory/hydra — OIDC kernel sidecar for crates/auth.
+  # public port 4444 (proxied via gateway at auth.zeroship.ai/oauth2/*)
+  # admin port 4445 (production: loopback only; in compose we share the network)
+  # Config lives at ops/hydra.yaml; secrets come from env.
+  hydra:
+    image: oryd/hydra:v25.4.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hydra-migrate:
+        condition: service_completed_successfully
+    environment:
+      DSN: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+      SECRETS_SYSTEM: ${SECRETS_SYSTEM:-dev-secret-please-change-this-please}
+      SECRETS_COOKIE: ${SECRETS_COOKIE:-dev-secret-please-change-this-please}
+    volumes:
+      - ./ops/hydra.yaml:/etc/config/hydra/hydra.yaml:ro
+    command: serve all --dev --config /etc/config/hydra/hydra.yaml
+    ports:
+      - "4444:4444"
+      # Admin port 4445 IS mapped for dev convenience (running smoke
+      # tests like `cargo test -p zeroship-auth --test
+      # hydra_client_smoke` from the host). In production we bind to
+      # 127.0.0.1 and gate access via firewall — the admin API is
+      # privileged and must never face the public internet.
+      - "4445:4445"
+
+  # One-shot migrator. Runs hydra's own schema migrations into the
+  # shared zeroship Postgres database (creates the hydra_* tables
+  # alongside the auth.* schema we own).
+  hydra-migrate:
+    image: oryd/hydra:v25.4.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DSN: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+    command: migrate sql up -e --yes
+    restart: on-failure
 
   # zeroship-sandbox — Docker-backed dev containers for the AI builder.
   # Spawns sibling containers (Docker-out-of-Docker) by mounting
@@ -151,6 +215,53 @@ services:
     security_opt:
       - seccomp:unconfined
 
+  builder:
+    image: node:22-bookworm
+    working_dir: /workspace
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        corepack enable
+        pnpm config set store-dir /pnpm/store
+        for i in $$(seq 1 60); do
+          [ -s /data/builder-client-secret ] && break
+          sleep 1
+        done
+        if [ ! -s /data/builder-client-secret ]; then
+          echo "[builder] missing /data/builder-client-secret" >&2
+          exit 1
+        fi
+        export BUILDER_CLIENT_SECRET="$$(cat /data/builder-client-secret)"
+        pnpm install --frozen-lockfile
+        exec pnpm --dir apps/zeroship-builder dev -- --host 0.0.0.0 --port 3001 --strictPort
+    environment:
+      CONTROL_URL: http://control:9090
+      CONTROL_KEY: platform-key
+      HYDRA_AUTHORIZE_URL: http://localhost:4444/oauth2/auth
+      HYDRA_TOKEN_URL: http://hydra:4444/oauth2/token
+      HYDRA_REVOKE_URL: http://hydra:4444/oauth2/revoke
+      BUILDER_CLIENT_ID: zeroship-builder
+      BUILDER_REDIRECT_URI: http://localhost:3001/auth/callback
+      BUILDER_INSTANCE_ID: docker-compose
+      BUILDER_TOKEN_ENCRYPTION_KEY: ${BUILDER_TOKEN_ENCRYPTION_KEY:-dev-builder-token-encryption-key-change}
+      SANDBOX_URL: http://sandbox:9091
+      SANDBOX_TOKEN: sandbox-key
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      - .:/workspace
+      - ./data:/data:ro
+      - builder-pnpm-store:/pnpm/store
+    depends_on:
+      control:
+        condition: service_started
+      hydra:
+        condition: service_started
+      sandbox:
+        condition: service_started
+
 networks:
   zeroship-sandbox-net:
     name: zeroship-sandbox-net
@@ -159,3 +270,4 @@ networks:
 volumes:
   bundles:
   verdaccio_storage:
+  builder-pnpm-store:

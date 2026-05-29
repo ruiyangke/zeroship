@@ -65,6 +65,8 @@ pub async fn get_app_env(
     state: State<Arc<AppState>>,
     app_id: Path<String>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: workers authenticate with the
+    // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
@@ -89,6 +91,8 @@ pub async fn get_versions(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: workers authenticate with the
+    // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
@@ -104,6 +108,8 @@ pub async fn get_app_version(
     state: State<Arc<AppState>>,
     app_id: Path<String>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: workers authenticate with the
+    // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
@@ -129,6 +135,8 @@ pub async fn get_routes(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: gateways authenticate with the
+    // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
@@ -146,6 +154,8 @@ pub async fn report_usage(
     state: State<Arc<AppState>>,
     body: Json<UsageReport>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: workers authenticate with the
+    // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }

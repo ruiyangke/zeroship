@@ -58,7 +58,7 @@ test.describe("State — onboarding intent", () => {
 
 test.describe("State — product tour completion flag", () => {
   test("tour completion stored under zeroship_tour_completed", async ({ page }) => {
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     await page.evaluate(() => localStorage.removeItem("zeroship_tour_completed"));
     await page.getByTestId("topbar-tour").click();
     await expect(page.getByTestId("product-tour")).toBeVisible();
@@ -79,16 +79,11 @@ test.describe("State — pending prompt sessionStorage", () => {
     await prompt.fill("test prompt content");
     await page.getByTestId("home-submit").click();
     await expect(page).toHaveURL(/\/new\?prompt=test%20prompt%20content/);
-    // The wizard surface (`WizardWorkspace`) doesn't currently consume
-    // `zeroship_pending_prompt` — only the legacy NewProject page did.
-    // The query-string `?prompt=` is the canonical channel today; the
-    // sessionStorage stash exists as a belt-and-braces backup.
-    // Verify either the URL carries the prompt, OR the stash exists.
+    await expect(page.getByTestId("wizard-prompt")).toHaveValue("test prompt content");
     const stash = await page.evaluate(() =>
       sessionStorage.getItem("zeroship_pending_prompt"),
     );
-    const url = page.url();
-    expect(stash !== null || /prompt=/.test(url)).toBe(true);
+    expect(stash).toBeNull();
   });
 
   test("/home submit URL-encodes special characters", async ({ page }) => {
@@ -119,10 +114,10 @@ test.describe("State — auth dev-bypass loads synthetic user", () => {
 
 test.describe("State — first-deploy celebration localStorage flag", () => {
   test("flag key follows zeroship_first_deploy_celebrated_<appId> pattern", async ({ page }) => {
-    // We can only verify the catch-all shell mounts; the real flag
+    // We can only verify the dev shell mounts; the real flag
     // fires only once per appId once a deploy_hash arrives. Confirm
     // the storage key prefix is referenced in the bundle source.
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     await page.evaluate(() => {
       // Pre-set a stale flag to verify it's harmless on a no-app shell.
       localStorage.setItem("zeroship_first_deploy_celebrated_app_x", "true");
@@ -138,7 +133,7 @@ test.describe("State — wizard pending brief", () => {
   test("zeroship_pending_brief sessionStorage is one-shot consume on /p/:id mount", async ({
     page,
   }) => {
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     // Stash a fake brief.
     await page.evaluate(() => {
       sessionStorage.setItem(
@@ -150,8 +145,8 @@ test.describe("State — wizard pending brief", () => {
         }),
       );
     });
-    // Catch-all does not consume the brief (no appId). Reload the
-    // catch-all path — value persists.
+    // The dev shell does not consume the brief (no appId). Reload the
+    // dev shell path — value persists.
     await page.reload();
     const stillThere = await page.evaluate(() =>
       sessionStorage.getItem("zeroship_pending_brief"),

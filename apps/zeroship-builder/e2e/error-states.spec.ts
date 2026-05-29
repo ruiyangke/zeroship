@@ -6,10 +6,10 @@ import { test, expect } from "@playwright/test";
 //   - Empty composer submit is a no-op (button disabled).
 //   - Templates filter that yields zero results shows an empty state
 //     and a "show all" reset.
-//   - 404-ish unknown route hits the catch-all WorkspaceShell.
+//   - Unknown routes render the public NotFound page.
 //   - Onboarding intent: clicking nothing keeps the picker visible.
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 test.describe("Error states — workspace project routes", () => {
   test("/p/<unknown>/preview shows error or graceful loading", async ({ page }) => {
@@ -120,10 +120,10 @@ test.describe("Error states — Home empty gallery", () => {
 });
 
 test.describe("Error states — ErrorBoundary contract", () => {
-  test("the shell renders without throwing on any unknown route", async ({ page }) => {
+  test("unknown routes render NotFound, not an empty workspace", async ({ page }) => {
     await page.goto("/some/totally/unknown/path/xyz");
-    // Catch-all. Should mount canvas-area, NOT a blank screen.
-    await expect(page.getByTestId("canvas-area")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("not-found-page")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("canvas-area")).toHaveCount(0);
   });
 
   test("the auth-guard loading state is short and resolves to dev-bypass", async ({ page }) => {

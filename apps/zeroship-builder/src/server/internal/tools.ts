@@ -31,13 +31,14 @@ import { z } from "zod";
 // Schema is shared with the wizard runtime — see `survey-wire.ts` for
 // why and the cross-runtime contract.
 import { surveyInputSchema } from "./survey-wire.js";
-import { CONTROL_KEY, CONTROL_URL, OPENAI_API_KEY } from "./env.js";
+import { OPENAI_API_KEY } from "./env.js";
 import { REVIEWER_PROMPT } from "./prompts.js";
 import {
   normalizeReviewerGate,
   reviewerResponseSchema,
   type ReviewerResponse,
 } from "./reviewer.js";
+import { getControlClient } from "../control-client.js";
 
 interface ToolExecuteResponse {
   output: string;
@@ -60,18 +61,6 @@ export interface CreateDeployToolOptions {
   backend: DeploySandboxBackend;
   appId?: string | null;
   apiKey?: string;
-}
-
-interface AppRecordForDeploy {
-  id: string;
-  name: string;
-  deploy_hash: string | null;
-}
-
-interface DeployResponse {
-  deploy_hash: string;
-  blobs_uploaded?: number;
-  blobs_deduped?: number;
 }
 
 const deployInputSchema = z.object({
@@ -169,6 +158,7 @@ export function createDeployTool(options: CreateDeployToolOptions) {
         );
       }
 
+      const control = getControlClient();
       const snapshot = await collectReviewSnapshot(backend);
       const review = await runReviewerGate({
         apiKey: reviewerApiKey,
@@ -198,8 +188,8 @@ export function createDeployTool(options: CreateDeployToolOptions) {
       }
 
       const artifact = await downloadArtifact(backend, DEPLOY_ARTIFACT_PATH);
-      const appRecord = await fetchAppRecord(appId).catch(() => null);
-      const deploy = await postZshipDeploy(appId, artifact);
+      const appRecord = await control.getApp(appId).catch(() => null);
+      const deploy = await control.deploy(appId, artifact);
       const name = appRecord?.name ?? appId;
 
       return JSON.stringify({
@@ -285,39 +275,6 @@ async function downloadArtifact(
     );
   }
   return artifact.content;
-}
-
-async function fetchAppRecord(appId: string): Promise<AppRecordForDeploy> {
-  const res = await fetch(`${CONTROL_URL()}/api/apps/${encodeURIComponent(appId)}`, {
-    headers: {
-      authorization: `Bearer ${CONTROL_KEY()}`,
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`get app failed (${res.status}): ${body}`);
-  }
-  return (await res.json()) as AppRecordForDeploy;
-}
-
-async function postZshipDeploy(
-  appId: string,
-  artifact: Uint8Array,
-): Promise<DeployResponse> {
-  const res = await fetch(`${CONTROL_URL()}/api/apps/${encodeURIComponent(appId)}/deploy`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${CONTROL_KEY()}`,
-      "content-type": "application/x-zship",
-    },
-    body: new Blob([artifact as BlobPart]),
-  });
-
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`deploy failed (${res.status}): ${text}`);
-  }
-  return JSON.parse(text) as DeployResponse;
 }
 
 function capText(value: string, max: number): string {

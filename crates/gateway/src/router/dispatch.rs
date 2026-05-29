@@ -22,9 +22,11 @@ use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use uuid::Uuid;
 
-use crate::{enforce, idempotency, proxy, user_auth, GateState};
+use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
-use super::auth::{auth_satisfied, extract_session_cookie, jwt_subject_unverified};
+use super::auth::{
+    extract_session_cookie, jwt_subject_unverified, resolve_auth, AuthOutcome,
+};
 use super::cors::{build_preflight_response, inject_cors_response_headers};
 use super::helpers::resource_key_hash;
 use super::static_serve::serve_resource_tree_static;
@@ -92,41 +94,56 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 ///
 /// * `RateLimitPer::Ip` — request's client IP. Falls back to "unknown"
 ///   when the connection has no peer address (test fixtures, exotic
-///   transports). Reads from `connection_info().remote()` so a trusted
-///   proxy's `X-Forwarded-For` is honored when present (matches what
-///   the gateway already does for scheme detection a few lines below).
-/// * `RateLimitPer::Session` — the `__zs_session` cookie value.
-///   Anonymous callers (no cookie) fall back to the IP so an
-///   unauthenticated burst still gets bucketed; without the fallback
-///   they'd all share one "" key.
+///   transports). Uses the peer socket unless `trust_proxy` is enabled.
+/// * `RateLimitPer::Session` — the `__Host-zs_app_session` cookie
+///   value (the per-origin session id the gateway mints on
+///   `/__zs/auth/callback`). Anonymous callers (no cookie) fall back
+///   to the IP so an unauthenticated burst still gets bucketed;
+///   without the fallback they'd all share one "" key.
 /// * `RateLimitPer::App` — constant `"app"`. One bucket platform-wide;
 ///   `(app_id, rule_idx, "app")` is the key, equivalent to a global
 ///   per-app limit at the rule level.
 pub(crate) fn compute_bucket_id(
     req: &HttpRequest,
     per: zeroship_bundle::RateLimitPer,
+    insecure_dev: bool,
+    trust_proxy: bool,
 ) -> String {
     use zeroship_bundle::RateLimitPer;
     match per {
-        RateLimitPer::Ip => req
-            .connection_info()
-            .remote()
-            .unwrap_or("unknown")
-            .to_string(),
+        RateLimitPer::Ip => client_ip(req, trust_proxy),
         RateLimitPer::Session => {
             let cookie = req
                 .headers()
                 .get("cookie")
                 .and_then(|v| v.to_str().ok());
-            extract_session_cookie(cookie).unwrap_or_else(|| {
-                req.connection_info()
-                    .remote()
-                    .unwrap_or("unknown")
-                    .to_string()
-            })
+            extract_session_cookie(cookie, insecure_dev)
+                .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::App => "app".to_string(),
     }
+}
+
+pub(crate) fn client_ip(req: &HttpRequest, trust_proxy: bool) -> String {
+    let peer_ip = req.peer_addr().map(|addr| addr.ip().to_string());
+    let conn = req.connection_info();
+    let proxy_remote = if trust_proxy { conn.remote() } else { None };
+    client_ip_from(peer_ip, proxy_remote, trust_proxy)
+}
+
+fn client_ip_from(
+    peer_ip: Option<String>,
+    proxy_remote: Option<&str>,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy {
+        if let Some(remote) = proxy_remote {
+            if !remote.is_empty() {
+                return remote.to_string();
+            }
+        }
+    }
+    peer_ip.unwrap_or_else(|| "unknown".to_string())
 }
 
 /// True when the request carries the RFC 6455 upgrade headers we
@@ -163,12 +180,16 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///   1. JWT subject (extracted from `Authorization: Bearer <jwt>` —
 ///      we do NOT verify the signature here; the gateway's auth
 ///      gate already ran and treats verification failures as 401).
-///   2. `__zs_session` cookie value (browser tab affinity).
+///   2. `__Host-zs_app_session` cookie value (browser tab affinity).
 ///   3. `Sec-WebSocket-Key` (per-connection nonce — same connection
 ///      always hashes to the same bucket; reconnects vary).
 ///   4. Client IP (last-resort fallback for unauthenticated callers
 ///      hitting subscriptions on `publicly_accessible` resources).
-pub(crate) fn subscription_affinity_key(req: &HttpRequest) -> String {
+pub(crate) fn subscription_affinity_key(
+    req: &HttpRequest,
+    insecure_dev: bool,
+    trust_proxy: bool,
+) -> String {
     if let Some(auth) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(rest) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
             if let Some(sub) = jwt_subject_unverified(rest.trim()) {
@@ -180,7 +201,7 @@ pub(crate) fn subscription_affinity_key(req: &HttpRequest) -> String {
         .headers()
         .get("cookie")
         .and_then(|v| v.to_str().ok());
-    if let Some(token) = extract_session_cookie(cookie) {
+    if let Some(token) = extract_session_cookie(cookie, insecure_dev) {
         return format!("sess:{token}");
     }
     if let Some(key) = req
@@ -190,11 +211,7 @@ pub(crate) fn subscription_affinity_key(req: &HttpRequest) -> String {
     {
         return format!("wsk:{key}");
     }
-    let ip = req
-        .connection_info()
-        .remote()
-        .unwrap_or("unknown")
-        .to_string();
+    let ip = client_ip(req, trust_proxy);
     format!("ip:{ip}")
 }
 
@@ -222,6 +239,22 @@ pub async fn handle_subdomain(
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
+    // `auth.zeroship.ai` is a platform-internal host, not a creator app.
+    // The gateway proxies OIDC protocol endpoints (`/oauth2/*`,
+    // `/.well-known/*`, `/userinfo`) to Ory Hydra; everything else
+    // (login UI, OAuth2 consent handlers, webhooks) goes to crates/auth.
+    if is_auth_host(&req) {
+        return route_auth_host(req, state, body).await;
+    }
+
+    // OIDC callback for hosted creator apps. Intercepted *before*
+    // manifest dispatch so the path can never collide with a route
+    // the creator wrote (the `/__zs/` prefix is reserved). See
+    // U5.3 / proposal §10.2.
+    if req.uri().path() == "/__zs/auth/callback" {
+        return handle_auth_callback(req, state).await;
+    }
+
     let app_name = match extract_app_name(&req, None) {
         Some(name) => name,
         None => {
@@ -231,6 +264,91 @@ pub async fn handle_subdomain(
     };
     let tail = path.into_inner();
     handle_request(req, state, &app_name, &tail, body).await
+}
+
+// ---------------------------------------------------------------------------
+// auth.zeroship.ai routing
+// ---------------------------------------------------------------------------
+
+/// Which upstream a given `auth.zeroship.ai` request path should be
+/// forwarded to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthUpstream {
+    /// OIDC protocol endpoints implemented by Ory Hydra.
+    Hydra,
+    /// Login UI, OAuth2 consent handlers, and webhooks — implemented
+    /// by `crates/auth`.
+    Auth,
+}
+
+/// Classify an inbound `auth.zeroship.ai` path. The protocol endpoints
+/// listed here are the public hydra contract:
+///
+///   * `/oauth2/auth`, `/oauth2/token`, `/oauth2/revoke`, …
+///   * `/.well-known/openid-configuration`, `/.well-known/jwks.json`
+///   * `/userinfo`
+///
+/// Everything else is handled by `crates/auth` (login HTML, consent
+/// callbacks, signup, password reset, …).
+pub(crate) fn classify_auth_path(path: &str) -> AuthUpstream {
+    if path.starts_with("/oauth2/")
+        || path.starts_with("/.well-known/")
+        || path == "/userinfo"
+    {
+        AuthUpstream::Hydra
+    } else {
+        AuthUpstream::Auth
+    }
+}
+
+/// True when the request's Host header is the auth.zeroship.ai
+/// platform host. Strips an optional port. Tolerates dev hostnames
+/// like `auth.zeroship.localhost` by matching the `auth.zeroship.`
+/// prefix as well — exact-match on `auth.zeroship.ai` is the
+/// production case.
+fn is_auth_host(req: &HttpRequest) -> bool {
+    let Some(host_hdr) = req.headers().get("host").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let host = host_hdr.split(':').next().unwrap_or(host_hdr);
+    let host_lc = host.to_ascii_lowercase();
+    host_lc == "auth.zeroship.ai" || host_lc.starts_with("auth.zeroship.")
+}
+
+async fn route_auth_host(
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+    body: Bytes,
+) -> HttpResponse {
+    let path = req.uri().path();
+    let upstream_base = match classify_auth_path(path) {
+        AuthUpstream::Hydra => state.config.hydra_public.as_str(),
+        AuthUpstream::Auth => state.config.auth_public.as_str(),
+    };
+
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            headers.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+
+    let method = req.method().as_str();
+
+    match proxy::forward_http(upstream_base, method, path_and_query, &headers, &body).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(error = %e, upstream = %upstream_base, "auth-host proxy error");
+            HttpResponse::BadGateway()
+                .json(&serde_json::json!({"error": format!("auth proxy: {e}")}))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,13 +499,21 @@ async fn execute_resource_tree(
 
     // 3. Auth gate. `anon` always passes (subject to
     //    `publicly_accessible` being set, which is enforced at
-    //    validate-time). `user`/`admin` require a session cookie.
-    //    Richer admin-vs-user role checks will arrive with the auth
-    //    tier.
-    if !auth_satisfied(&req, policy, &state.config.auth_secret, app_id) {
-        return HttpResponse::Unauthorized()
-            .json(&serde_json::json!({"error": "authentication required"}));
-    }
+    //    validate-time). `user`/`admin` require a valid
+    //    `__Host-zs_app_session` cookie. Richer admin-vs-user role
+    //    checks will arrive with the auth tier.
+    //
+    //    On miss for an HTML navigation we kick off the OIDC dance via
+    //    a 302 → hydra; API clients see a 401 with a `WWW-Authenticate`
+    //    challenge so they can prompt the user out-of-band.
+    let request_id = Uuid::new_v4();
+    let user_header_from_gate =
+        match resolve_auth(&req, &state, policy, app_id, &request_id).await {
+            AuthOutcome::Allowed { user_header } => user_header,
+            AuthOutcome::Unauthenticated => {
+                return unauthenticated_response(&req, &state);
+            }
+        };
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
@@ -429,7 +555,12 @@ async fn execute_resource_tree(
             .lookup_resource_key(dispatch_path)
             .unwrap_or_default();
         let rule_idx = resource_key_hash(&resource_key);
-        let bucket_id = compute_bucket_id(&req, rl.per);
+        let bucket_id = compute_bucket_id(
+            &req,
+            rl.per,
+            state.config.insecure_dev,
+            state.config.trust_proxy,
+        );
         if let Err(resp) = state.per_rule_rate_limits.check(
             app_id,
             rule_idx,
@@ -509,7 +640,9 @@ async fn execute_resource_tree(
                     app_id,
                     &compiled_route.entry,
                     tail,
+                    request_id,
                     body,
+                    user_header_from_gate.clone(),
                     wall_start,
                 )
                 .await
@@ -538,7 +671,9 @@ async fn execute_resource_tree(
                 app_id,
                 &compiled_route.entry,
                 tail,
+                request_id,
                 body,
+                user_header_from_gate.clone(),
                 wall_start,
             )
             .await
@@ -910,7 +1045,11 @@ async fn handle_subscription_dispatch(
     // Affinity selection — exercised even when the proxy itself
     // returns 501, so tests against this path can verify that the
     // hashing decision is correct.
-    let affinity = subscription_affinity_key(&_req);
+    let affinity = subscription_affinity_key(
+        &_req,
+        state.config.insecure_dev,
+        state.config.trust_proxy,
+    );
     let (idx, _worker_url) = state.hash_ring.select_with_affinity(app_id, &affinity);
     state.hash_ring.acquire(idx);
     // Release immediately — see comment below; we never actually
@@ -940,13 +1079,16 @@ async fn handle_subscription_dispatch(
 /// `_rpc/*` URLs (routed inside the kernel via the bootstrap) and plain
 /// HTTP requests. Enables streaming responses (e.g., SSE for LLM token
 /// streaming).
+#[allow(clippy::too_many_arguments)] // post-U5 arg count; refactor candidate for U6+.
 async fn handle_dispatch(
     req: HttpRequest,
-    state: &GateState,
+    state: &Arc<GateState>,
     app_id: &Uuid,
     route: &zeroship_core::types::RouteEntry,
     tail: &str,
+    request_id: Uuid,
     body: Bytes,
+    user_header_value: Option<String>,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     // Rate limit
@@ -958,19 +1100,6 @@ async fn handle_dispatch(
     let _guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
         Ok(guard) => guard,
         Err(resp) => return resp,
-    };
-
-    // Extract user from __zs_session cookie
-    let user_header_value = if !state.config.auth_secret.is_empty() {
-        let cookie = req
-            .headers()
-            .get("cookie")
-            .and_then(|v| v.to_str().ok());
-        let app_id_str = app_id.to_string();
-        user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
-            .map(|u| user_auth::encode_user_header(&u, &state.config.worker_key))
-    } else {
-        None
     };
 
     // Reconstruct the URL the JS handler will see.
@@ -994,7 +1123,6 @@ async fn handle_dispatch(
     let body_str = String::from_utf8_lossy(&body);
 
     // Proxy to worker via CHWBL hash ring.
-    let request_id = Uuid::new_v4();
     let mut response = match proxy::forward_dispatch(
         &state.hash_ring,
         app_id,
@@ -1016,24 +1144,14 @@ async fn handle_dispatch(
         }
     };
 
-    // Handle 401 response: redirect browser requests to the auth page.
-    if response.status() == ntex::http::StatusCode::UNAUTHORIZED {
-        let accepts_html = req
-            .headers()
-            .get("accept")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/html"));
-
-        if accepts_html {
-            let original_path = req.uri().path();
-            let auth_url = format!(
-                "{}/auth/authorize?app_id={}&return={}",
-                state.config.control_url, app_id, original_path
-            );
-            return HttpResponse::Found()
-                .header("location", auth_url)
-                .finish();
-        }
+    // 401 from worker on an HTML navigation → start the OIDC dance.
+    // The worker reaches this branch on resources its own JS code
+    // gated as `user`/`admin` when the gateway forwarded without a
+    // `ZeroShip-User` header. (Resource-tree `user`/`admin` are
+    // already short-circuited by `auth_satisfied` upstream, so they
+    // never reach the worker.) API clients still see the 401 verbatim.
+    if response.status() == ntex::http::StatusCode::UNAUTHORIZED && wants_html(&req) {
+        return start_oidc_redirect(&req, state);
     }
 
     // Add response headers.
@@ -1048,6 +1166,262 @@ async fn handle_dispatch(
     );
 
     response
+}
+
+// ---------------------------------------------------------------------------
+// Unauthenticated request handling — HTML vs API split
+// ---------------------------------------------------------------------------
+
+/// True when the request looks like an HTML navigation rather than an
+/// API call. The classification rule is the canonical browser
+/// signature: `Accept: text/html` somewhere in the header value. The
+/// gateway only triggers the OIDC redirect dance on these — `fetch()`
+/// callers see a 401 with `WWW-Authenticate: Bearer` so they can
+/// surface an in-app login prompt themselves.
+fn wants_html(req: &HttpRequest) -> bool {
+    req.headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/html"))
+}
+
+/// Build the unauthenticated response: 302 → `auth.zeroship.ai/oauth2/auth`
+/// for HTML navigations, 401 with a `WWW-Authenticate` challenge for
+/// API clients. Sets the `__Host-zs_oidc_stash` cookie carrying PKCE,
+/// state, and the original path so `/__zs/auth/callback` can finish
+/// the dance.
+fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+    if wants_html(req) {
+        start_oidc_redirect(req, state)
+    } else {
+        HttpResponse::Unauthorized()
+            .header("www-authenticate", "Bearer realm=\"zeroship\"")
+            .json(&serde_json::json!({
+                "code": "UNAUTHENTICATED",
+                "message": "authentication required",
+            }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /__zs/auth/callback — the gateway-owned OIDC callback per hosted app
+// ---------------------------------------------------------------------------
+
+/// Handle `/__zs/auth/callback` on any `{app}.zeroship.ai` host. Reads
+/// the signed stash cookie + `code`/`state` query, exchanges with
+/// hydra via `OidcRp::finish_callback`, persists a row in
+/// `auth.gateway_sessions`, sets the per-origin
+/// `__Host-zs_app_session` cookie, clears the stash cookie, and 302s
+/// back to the original path the user was trying to reach when the
+/// dance started.
+async fn handle_auth_callback(
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+) -> HttpResponse {
+    // app_id is the subdomain — same logic the manifest dispatcher
+    // uses for normal requests.
+    let Some(app_id) = extract_app_name(&req, None) else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "host header missing or unparseable",
+        );
+    };
+
+    // 1. Parse query (code + state). Hydra may also send `error=...`
+    //    for user-denied consent; surface it directly.
+    let query_str = req.uri().query().unwrap_or("");
+    let mut code: Option<String> = None;
+    let mut state_param: Option<String> = None;
+    let mut oauth_error: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state_param = Some(v.into_owned()),
+            "error" => oauth_error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(e) = oauth_error {
+        return render_callback_error(state.config.insecure_dev, &format!("oauth error: {e}"));
+    }
+    let (Some(code), Some(state_param)) = (code, state_param) else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "missing code or state query parameter",
+        );
+    };
+
+    // 2. Read the signed stash cookie.
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(stash) = oidc_rp::parse_stash_cookie(cookie_header, state.config.insecure_dev) else {
+        return render_callback_error(state.config.insecure_dev, "missing stash cookie");
+    };
+
+    // 3. Exchange the code with hydra + verify the ID token.
+    let (claims, original_path) = match state
+        .oidc_rp
+        .finish_callback(&code, &state_param, &stash)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "gateway: oidc callback failed");
+            return render_callback_error(
+                state.config.insecure_dev,
+                oidc_callback_public_error(&e),
+            );
+        }
+    };
+
+    // 4. Create a per-origin session row.
+    let Some(db) = state.db.as_ref() else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "gateway not configured with a session database",
+        );
+    };
+    let session = match crate::sessions::create(
+        db,
+        &crate::sessions::NewSession {
+            user_id: &claims.sub,
+            app_id: &app_id,
+            email: claims.email.as_deref(),
+            name: claims.name.as_deref(),
+            avatar_url: claims.picture.as_deref(),
+            email_verified: claims.email_verified.unwrap_or(false),
+        },
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "gateway: session create failed");
+            return render_callback_error(state.config.insecure_dev, "session create failed");
+        }
+    };
+
+    // 5. 302 back to the original path, set app-session cookie, clear
+    //    the stash cookie. Two `Set-Cookie` headers on one response is
+    //    valid per RFC 6265 §3 (and is how hydra emits its own cookies).
+    let mut builder = HttpResponse::Found();
+    builder.header("location", sanitize_oidc_original_path(&original_path));
+    builder.header(
+        "set-cookie",
+        oidc_rp::set_app_session_cookie(&session.id, state.config.insecure_dev),
+    );
+    builder.header(
+        "set-cookie",
+        oidc_rp::clear_stash_cookie(state.config.insecure_dev),
+    );
+    builder.finish()
+}
+
+/// Render the failed-callback page. Generic on purpose — leaking
+/// hydra's error string to the user would be a noisy debugging tool
+/// for an attacker. The structured error is already in the gateway log
+/// at warn / error.
+fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\
+        <h1>Sign-in failed</h1><p>{}</p>\
+        <p><a href=\"/\">Back to app</a></p>",
+        html_escape(msg),
+    );
+    HttpResponse::BadRequest()
+        .content_type("text/html; charset=utf-8")
+        .body(body)
+}
+
+fn oidc_callback_public_error(e: &oidc_rp::OidcRpError) -> &'static str {
+    match e {
+        oidc_rp::OidcRpError::StashInvalid
+        | oidc_rp::OidcRpError::StateMismatch
+        | oidc_rp::OidcRpError::TokenExchange(_)
+        | oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
+    }
+}
+
+/// Minimal HTML-escape — enough to make the rendered error page safe
+/// when the upstream message contains user input (state token,
+/// query-string echo, etc).
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Build the 302 → hydra redirect that kicks off the OIDC dance.
+/// Stash cookie carries the PKCE verifier + state + original_path so
+/// the callback can resume.
+fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+    let original_path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let original_path = sanitize_oidc_original_path(&original_path);
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let scheme = if state.config.insecure_dev {
+        "http"
+    } else {
+        "https"
+    };
+    let redirect_uri = format!("{scheme}://{host}/__zs/auth/callback");
+
+    let (auth_url, stash) = state
+        .oidc_rp
+        .build_authorize_redirect(&original_path, &redirect_uri);
+
+    let mut builder = HttpResponse::Found();
+    builder.header("location", auth_url);
+    builder.header(
+        "set-cookie",
+        oidc_rp::set_stash_cookie(&stash, state.config.insecure_dev),
+    );
+    builder.finish()
+}
+
+fn sanitize_oidc_original_path(path: &str) -> String {
+    if is_safe_oidc_original_path(path) {
+        path.to_string()
+    } else {
+        "/".to_string()
+    }
+}
+
+fn is_safe_oidc_original_path(path: &str) -> bool {
+    if path == "/" {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'/' {
+        return false;
+    }
+
+    if !matches!(
+        bytes[1],
+        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'
+    ) {
+        return false;
+    }
+
+    let first_segment_end = path[1..]
+        .find('/')
+        .map(|idx| idx + 1)
+        .unwrap_or(path.len());
+    !path[1..first_segment_end].contains(':')
 }
 
 #[cfg(test)]
@@ -1152,6 +1526,11 @@ mod tests {
                 poll_interval_secs: 5,
                 auth_secret: String::new(),
                 worker_key: String::new(),
+                hydra_public: String::new(),
+                auth_public: String::new(),
+                insecure_dev: true,
+                trust_proxy: false,
+                public_url: "https://api.zeroship.ai".into(),
             },
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
@@ -1162,6 +1541,18 @@ mod tests {
             blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
             disk_cache: disk,
             idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
+            oidc_rp: Arc::new(crate::oidc_rp::OidcRp::new(
+                "http://auth.test",
+                "gateway",
+                "test-secret",
+                b"test-stash-key-32-bytes-long----".to_vec(),
+            )),
+            db: None,
+            dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
+            logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            signing_key: None,
+            wrapper_issuer: None,
+            wrapper_verifier: None,
         })
     }
 
@@ -1174,9 +1565,9 @@ mod tests {
         // RateLimitPer::App always returns "app" regardless of IP or
         // cookie state — every caller shares the same bucket.
         let req = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=abc")
+            .header("cookie", "__Host-zs_app_session=abc")
             .to_http_request();
-        assert_eq!(compute_bucket_id(&req, RateLimitPer::App), "app");
+        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, false), "app");
     }
 
     #[test]
@@ -1184,8 +1575,29 @@ mod tests {
         // The TestRequest has no peer addr → "unknown" sentinel keeps
         // the bucket lookup well-defined instead of crashing.
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Ip);
+        let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false);
         assert_eq!(id, "unknown");
+    }
+
+    #[test]
+    fn client_ip_ignores_forwarded_headers_without_trust_proxy() {
+        assert_eq!(
+            client_ip_from(Some("192.0.2.10".to_string()), Some("203.0.113.77"), false),
+            "192.0.2.10"
+        );
+    }
+
+    #[test]
+    fn client_ip_honors_proxy_headers_only_with_trust_proxy() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "203.0.113.77")
+            .to_http_request();
+
+        assert_eq!(client_ip(&req, true), "203.0.113.77");
+        assert_eq!(
+            compute_bucket_id(&req, RateLimitPer::Ip, false, true),
+            "203.0.113.77"
+        );
     }
 
     #[test]
@@ -1193,21 +1605,21 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header(
                 "cookie",
-                "other=foo; __zs_session=abc123; trailing=x",
+                "other=foo; __Host-zs_app_session=abc123; trailing=x",
             )
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
         assert_eq!(id, "abc123");
     }
 
     #[test]
     fn compute_bucket_id_session_falls_back_to_ip_when_cookie_missing() {
-        // Anonymous caller (no __zs_session) → fall back to IP. The
+        // Anonymous caller (no __Host-zs_app_session) → fall back to IP. The
         // TestRequest has no peer → "unknown".
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "other=foo")
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
         assert_eq!(id, "unknown");
     }
 
@@ -1234,10 +1646,10 @@ mod tests {
         let app_id = uuid::Uuid::nil();
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let bucket_id = compute_bucket_id(&req, rl.per);
+        let bucket_id = compute_bucket_id(&req, rl.per, false, false);
         assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
         // Second call with the same request → same bucket id → drained.
-        let bucket_id2 = compute_bucket_id(&req, rl.per);
+        let bucket_id2 = compute_bucket_id(&req, rl.per, false, false);
         assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
         let err = reg
             .check(&app_id, 0, rl.per, &bucket_id2, &rl)
@@ -1247,7 +1659,7 @@ mod tests {
 
     #[test]
     fn router_wiring_session_buckets_separate_from_ip_buckets() {
-        // Two requests carrying distinct __zs_session cookies under
+        // Two requests carrying distinct __Host-zs_app_session cookies under
         // RateLimitPer::Session must hit independent buckets even when
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
@@ -1255,13 +1667,13 @@ mod tests {
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
 
         let req_a = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=user-a")
+            .header("cookie", "__Host-zs_app_session=user-a")
             .to_http_request();
         let req_b = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=user-b")
+            .header("cookie", "__Host-zs_app_session=user-b")
             .to_http_request();
-        let bucket_a = compute_bucket_id(&req_a, rl.per);
-        let bucket_b = compute_bucket_id(&req_b, rl.per);
+        let bucket_a = compute_bucket_id(&req_a, rl.per, false, false);
+        let bucket_b = compute_bucket_id(&req_b, rl.per, false, false);
         assert_eq!(bucket_a, "user-a");
         assert_eq!(bucket_b, "user-b");
         assert!(reg.check(&app_id, 0, rl.per, &bucket_a, &rl).is_ok());
@@ -1731,17 +2143,17 @@ mod tests {
         let jwt = format!("h.{payload}.s");
         let req = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {jwt}"))
-            .header("cookie", "__zs_session=cookieval")
+            .header("cookie", "__Host-zs_app_session=cookieval")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req), "sub:alice");
+        assert_eq!(subscription_affinity_key(&req, false, false), "sub:alice");
     }
 
     #[test]
     fn subscription_affinity_falls_back_to_cookie() {
         let req = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=tok123")
+            .header("cookie", "__Host-zs_app_session=tok123")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req), "sess:tok123");
+        assert_eq!(subscription_affinity_key(&req, false, false), "sess:tok123");
     }
 
     #[test]
@@ -1749,11 +2161,11 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("sec-websocket-key", "abc==")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req), "wsk:abc==");
+        assert_eq!(subscription_affinity_key(&req, false, false), "wsk:abc==");
 
         let req = ntex::web::test::TestRequest::default().to_http_request();
         // No headers, no remote — falls back to "ip:unknown".
-        assert_eq!(subscription_affinity_key(&req), "ip:unknown");
+        assert_eq!(subscription_affinity_key(&req, false, false), "ip:unknown");
     }
 
     /// Session-affinity invariant: the same `(app_id, principal)` always
@@ -1850,5 +2262,197 @@ mod tests {
             .lookup_resource("/_zs/v1/todoTicker")
             .expect("subscription resource");
         assert_eq!(p.kind, Some(ProcedureKind::Subscription));
+    }
+
+    // ----------------------------------------------------------------------
+    // auth.zeroship.ai routing — classify_auth_path
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn classify_auth_path_oauth2_routes_to_hydra() {
+        assert_eq!(classify_auth_path("/oauth2/auth"), AuthUpstream::Hydra);
+        assert_eq!(classify_auth_path("/oauth2/token"), AuthUpstream::Hydra);
+        assert_eq!(classify_auth_path("/oauth2/revoke"), AuthUpstream::Hydra);
+        assert_eq!(
+            classify_auth_path("/oauth2/sessions/logout"),
+            AuthUpstream::Hydra
+        );
+    }
+
+    #[test]
+    fn classify_auth_path_well_known_routes_to_hydra() {
+        assert_eq!(
+            classify_auth_path("/.well-known/openid-configuration"),
+            AuthUpstream::Hydra
+        );
+        assert_eq!(
+            classify_auth_path("/.well-known/jwks.json"),
+            AuthUpstream::Hydra
+        );
+    }
+
+    #[test]
+    fn classify_auth_path_userinfo_routes_to_hydra() {
+        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Hydra);
+    }
+
+    #[test]
+    fn classify_auth_path_ui_and_callbacks_route_to_auth() {
+        assert_eq!(classify_auth_path("/login"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/signup"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/consent"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/static/main.css"), AuthUpstream::Auth);
+        // A path that contains but does not start with `/oauth2/` must
+        // still go to auth — the prefix match is anchored.
+        assert_eq!(
+            classify_auth_path("/something/oauth2/auth"),
+            AuthUpstream::Auth
+        );
+        // `/userinfo` is exact-match; substring matches must not steal.
+        assert_eq!(classify_auth_path("/userinfo/foo"), AuthUpstream::Auth);
+    }
+
+    // -----------------------------------------------------------------------
+    // OIDC RP integration — auth redirect + callback handler
+    // -----------------------------------------------------------------------
+
+    /// `wants_html` should fire on `text/html`-containing Accept
+    /// headers and ignore everything else. The classifier drives the
+    /// 302-vs-401 split for unauthenticated requests.
+    #[test]
+    fn wants_html_recognizes_browser_accept() {
+        let html = ntex::web::test::TestRequest::default()
+            .header("accept", "text/html,application/xhtml+xml;q=0.9")
+            .to_http_request();
+        assert!(wants_html(&html));
+
+        let json = ntex::web::test::TestRequest::default()
+            .header("accept", "application/json")
+            .to_http_request();
+        assert!(!wants_html(&json));
+
+        let none = ntex::web::test::TestRequest::default().to_http_request();
+        assert!(!wants_html(&none));
+    }
+
+    /// `unauthenticated_response` returns 401+WWW-Authenticate for API
+    /// callers (no `Accept: text/html`). This is the contract that
+    /// lets `fetch()` callers surface their own login UI instead of
+    /// following a 302 into hydra they can't render.
+    #[test]
+    fn unauthenticated_response_returns_401_for_api_clients() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept", "application/json")
+            .to_http_request();
+        let state = build_idempotency_state();
+        let resp = unauthenticated_response(&req, &state);
+        assert_eq!(resp.status(), ntex::http::StatusCode::UNAUTHORIZED);
+        let wa = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(wa.contains("Bearer"), "got www-authenticate = {wa:?}");
+    }
+
+    /// HTML navigations get a 302 → hydra with the stash cookie set.
+    /// The redirect target carries the gateway's client_id, the PKCE
+    /// challenge, and the per-app `redirect_uri` derived from the Host
+    /// header.
+    #[test]
+    fn unauthenticated_response_redirects_html_clients_to_hydra() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept", "text/html")
+            .header("host", "myapp.zeroship.localhost")
+            .uri("/dashboard?welcome=true")
+            .to_http_request();
+        let state = build_idempotency_state();
+        let resp = unauthenticated_response(&req, &state);
+        assert_eq!(resp.status(), ntex::http::StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("/oauth2/auth?"),
+            "location must point at hydra's /oauth2/auth; got {location:?}"
+        );
+        assert!(location.contains("client_id=gateway"));
+        assert!(location.contains("code_challenge="));
+        // `redirect_uri` is the per-host callback path; insecure_dev=true
+        // in the test fixture, so scheme is http.
+        assert!(
+            location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zs%2Fauth%2Fcallback"),
+            "redirect_uri must include the per-host callback path; got {location:?}"
+        );
+        // Stash cookie set.
+        let set_cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        // `insecure_dev=true` in the test fixture → no `__Host-` prefix
+        // (RFC 6265bis §4.1.3.2: `__Host-` requires `Secure`, dev runs
+        // over plain HTTP without it).
+        assert!(
+            set_cookie.starts_with("zs_oidc_stash="),
+            "must set the dev stash cookie; got {set_cookie:?}"
+        );
+    }
+
+    #[test]
+    fn oidc_original_path_rejects_protocol_relative_redirects() {
+        assert_eq!(sanitize_oidc_original_path("//evil.com/path"), "/");
+        assert_eq!(sanitize_oidc_original_path("/\\evil.com/path"), "/");
+        assert_eq!(sanitize_oidc_original_path("/foo:bar/baz"), "/");
+        assert_eq!(sanitize_oidc_original_path("https://evil.com/path"), "/");
+    }
+
+    #[test]
+    fn oidc_original_path_keeps_origin_relative_paths() {
+        assert_eq!(sanitize_oidc_original_path("/"), "/");
+        assert_eq!(
+            sanitize_oidc_original_path("/dashboard?welcome=true"),
+            "/dashboard?welcome=true"
+        );
+        assert_eq!(
+            sanitize_oidc_original_path("/_zs/auth/callback"),
+            "/_zs/auth/callback"
+        );
+    }
+
+    /// `render_callback_error` returns a 400 HTML page and escapes
+    /// the inserted message so a malicious upstream cannot smuggle
+    /// markup through the failure path.
+    #[test]
+    fn render_callback_error_returns_html_400_and_escapes_message() {
+        let resp = render_callback_error(true, "<script>alert(1)</script>");
+        assert_eq!(resp.status(), ntex::http::StatusCode::BAD_REQUEST);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.starts_with("text/html"), "got content-type {ct:?}");
+    }
+
+    #[test]
+    fn oidc_callback_token_exchange_error_is_generic() {
+        let err = oidc_rp::OidcRpError::TokenExchange(
+            "HTTP 500: hydra says postgres://internal".into(),
+        );
+        assert_eq!(
+            oidc_callback_public_error(&err),
+            "sign-in could not be completed",
+        );
+    }
+
+    #[test]
+    fn html_escape_neutralizes_tags_and_quotes() {
+        assert_eq!(
+            html_escape(r#"<script>alert("x" & 'y')</script>"#),
+            "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;",
+        );
     }
 }

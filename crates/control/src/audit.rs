@@ -6,9 +6,7 @@
 //! audited later, do it at the gateway layer with a sampling
 //! middleware instead.
 //!
-//! `actor` today is always `"admin"` (we don't have multi-actor auth on
-//! the master key yet). When that lands, plumb the user identity in.
-
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::registry::{Registry, RegistryError};
@@ -46,7 +44,8 @@ impl Action {
 pub struct AuditEntry<'a> {
     pub app_id: Option<Uuid>,
     pub creator_id: Option<Uuid>,
-    pub actor: &'a str,
+    pub actor_user_id: Option<Uuid>,
+    pub actor_token_id: Option<Uuid>,
     pub action: Action,
     pub resource: Option<&'a str>,
     pub source_ip: Option<&'a str>,
@@ -56,6 +55,24 @@ pub struct AuditEntry<'a> {
 /// because we couldn't write an audit row — if the DB is partially down
 /// the user-facing op should still succeed and we log to stderr instead.
 pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
+    log_with_detail(registry, entry, &Value::Null).await;
+}
+
+/// Best-effort audit insert with structured detail JSON for operations where
+/// `resource` alone is not enough to reconstruct the mutation.
+pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
+    let stdout_payload = json!({
+        "app_id": entry.app_id,
+        "creator_id": entry.creator_id,
+        "actor_user_id": entry.actor_user_id,
+        "actor_token_id": entry.actor_token_id,
+        "action": entry.action.as_str(),
+        "resource": entry.resource,
+        "source_ip": entry.source_ip,
+        "detail": detail,
+    });
+    tracing::info!(target: "control.audit", payload = %stdout_payload, "app audit event");
+
     let conn = match registry.conn().await {
         Ok(c) => c,
         Err(e) => {
@@ -65,15 +82,17 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
     };
     let result = conn
         .execute(
-            "INSERT INTO app_audit(app_id, creator_id, actor, action, resource, source_ip)
+            "INSERT INTO control.app_audit(app_id, creator_id, actor, action, resource, source_ip)
              VALUES($1, $2, $3, $4, $5, $6)",
             &[
                 &entry.app_id,
                 &entry.creator_id,
-                &entry.actor,
+                &entry.actor_user_id,
+                &entry.actor_token_id,
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
+                &detail,
             ],
         )
         .await;
@@ -92,9 +111,9 @@ pub async fn recent_for_app(
     let conn = registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT id, actor, action, resource, source_ip,
+            "SELECT id, actor_user_id, actor_token_id, action, resource, source_ip,
                     to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at_text
-             FROM app_audit
+             FROM control.app_audit
              WHERE app_id = $1
              ORDER BY at DESC
              LIMIT $2",
@@ -105,7 +124,8 @@ pub async fn recent_for_app(
         .iter()
         .map(|r| AuditRow {
             id: r.get("id"),
-            actor: r.get("actor"),
+            actor_user_id: r.get("actor_user_id"),
+            actor_token_id: r.get("actor_token_id"),
             action: r.get("action"),
             resource: r.get("resource"),
             source_ip: r.get("source_ip"),
@@ -117,7 +137,8 @@ pub async fn recent_for_app(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRow {
     pub id: Uuid,
-    pub actor: String,
+    pub actor_user_id: Option<Uuid>,
+    pub actor_token_id: Option<Uuid>,
     pub action: String,
     pub resource: Option<String>,
     pub source_ip: Option<String>,

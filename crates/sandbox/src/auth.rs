@@ -2,9 +2,10 @@
 //!
 //! The editor app / control plane holds the token (populated from
 //! its env at deploy time) and sends `Authorization: Bearer <token>`
-//! on every call. Constant-time comparison after a length check so
-//! an attacker timing the response can't recover the token byte by
-//! byte.
+//! on every call. Comparison hashes both presented and expected
+//! bearers with SHA-256 and constant-time compares the fixed-size
+//! digests, so token length is not exposed through a raw `ct_eq`
+//! short-circuit.
 //!
 //! ## Why startup refuses an empty token unless explicitly opted out
 //!
@@ -20,9 +21,16 @@
 //! but the prod foot-gun no longer fires by accident.
 
 use ntex::web::HttpRequest;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
+
+pub(crate) fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
+    let p_digest = Sha256::digest(presented);
+    let e_digest = Sha256::digest(expected);
+    p_digest.ct_eq(&e_digest).into()
+}
 
 /// Returns `true` if the request bears a valid token. The
 /// "auth disabled" path is reached **only** when the operator
@@ -42,12 +50,23 @@ pub fn check(req: &HttpRequest, state: &AppState) -> bool {
         .unwrap_or("");
     let presented = header.strip_prefix("Bearer ").unwrap_or("").as_bytes();
     let expected = state.config.token.as_bytes();
-    // `ct_eq`'s implementations short-circuit on length mismatch,
-    // which leaks length via timing. Rejecting unequal-length
-    // up-front is honest about the property and stops the empty-
-    // header path from looking different from a wrong-length one.
-    if presented.len() != expected.len() {
-        return false;
+    constant_time_bearer_eq(presented, expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_bearer_eq;
+
+    #[test]
+    fn constant_time_bearer_eq_correctness() {
+        assert!(constant_time_bearer_eq(b"right-token", b"right-token"));
+        assert!(!constant_time_bearer_eq(b"right-token", b"wrong-token"));
+        assert!(!constant_time_bearer_eq(b"short", b"right-token"));
+        assert!(!constant_time_bearer_eq(
+            b"right-token-with-extra",
+            b"right-token",
+        ));
+        assert!(!constant_time_bearer_eq(b"", b"right-token"));
+        assert!(constant_time_bearer_eq(b"", b""));
     }
-    presented.ct_eq(expected).into()
 }

@@ -15,7 +15,7 @@
 //      the stash and seeds ChatRail with a synthesised first message.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useChat } from "@ai-sdk/react";
 import { useMutation } from "@tanstack/react-query";
 import { createApp, rpc, wizardTransport } from "../api";
@@ -27,6 +27,7 @@ import { lsGet, lsSet } from "../lib/storage";
 import { track } from "../lib/analytics";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
+const PENDING_PROMPT_KEY = "zeroship_pending_prompt";
 const FIRST_RUN_KEY = "zeroship_first_run";
 
 // Wall budget after which we surface a "stuck?" retry. Generous so
@@ -70,13 +71,34 @@ function deriveProjectName(idea: string): string {
 // session in some flows), so a lightweight standalone frame fits.
 
 export function WizardWorkspace() {
+  const [searchParams] = useSearchParams();
   // Stable session id for the wizard's checkpointer. One id per
   // mount — refresh = clean wizard. The id is also threaded through
   // the resume protocol (server uses it as LangGraph thread_id).
   const sessionId = useMemo(() => crypto.randomUUID(), []);
   const navigate = useNavigate();
 
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => {
+    const fromUrl = searchParams.get("prompt")?.trim();
+    if (fromUrl) {
+      try {
+        sessionStorage.removeItem(PENDING_PROMPT_KEY);
+      } catch {
+        // Storage can be disabled; the URL param path still works.
+      }
+      return fromUrl;
+    }
+    try {
+      const fromStorage = sessionStorage.getItem(PENDING_PROMPT_KEY)?.trim();
+      if (fromStorage) {
+        sessionStorage.removeItem(PENDING_PROMPT_KEY);
+        return fromStorage;
+      }
+    } catch {
+      // Storage can be disabled; the URL param path still works.
+    }
+    return "";
+  });
   const [committedBrief, setCommittedBrief] = useState<Brief | null>(null);
   const [answeredSurveys, setAnsweredSurveys] = useState<Set<string>>(() => new Set());
   const [validationHint, setValidationHint] = useState<string | null>(null);

@@ -567,3 +567,233 @@ fn decode_next_chunk(buf: &[u8]) -> ChunkDecode {
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\r\n")
 }
+
+// ---------------------------------------------------------------------------
+// Generic HTTP proxy — used for `auth.zeroship.ai` → hydra / crates/auth
+// ---------------------------------------------------------------------------
+//
+// Unlike `forward_to_worker_dispatch`, which packages requests into a JSON
+// envelope for the worker kernel, this path is a transparent HTTP/1.1
+// reverse proxy: it preserves the request method, path+query, headers,
+// and body verbatim, then streams the response back. Set-Cookie and
+// Location headers MUST pass through untouched — Hydra's session cookie
+// (scoped to `auth.zeroship.ai`) and its OAuth2 302 redirects depend on
+// the client seeing them as if they came directly from hydra.
+
+/// Hop-by-hop headers from RFC 7230 §6.1. These are NOT forwarded in
+/// either direction (request to upstream, or response back to client).
+const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+    "proxy-authorization",
+    "proxy-authenticate",
+    // Strip `host` from the inbound headers — we set our own.
+    "host",
+    // `content-length` is determined by the body we forward, not by the
+    // inbound header (which may disagree if upstream filters tamper).
+    "content-length",
+];
+
+/// Forward an HTTP/1.1 request to `upstream_base` and return the response
+/// verbatim. `upstream_base` is the full base URL of the upstream
+/// (scheme/host/optional-port, e.g., `http://hydra:4444`); the inbound
+/// request's path+query and method/headers/body are used as-is.
+pub async fn forward_http(
+    upstream_base: &str,
+    method: &str,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<HttpResponse, String> {
+    let host_hdr = extract_host_with_port(upstream_base);
+
+    let (mut stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(upstream_base))
+        .await
+        .map_err(|_| "connect timeout".to_string())?
+        .map_err(|e| format!("connect: {e}"))?;
+
+    let request = build_forward_request(method, path_and_query, &host_hdr, headers, body);
+    stream
+        .write_all(request)
+        .await
+        .map_err(|e| format!("write: {e}"))?;
+
+    let parsed = compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream))
+        .await
+        .map_err(|_| "read timeout".to_string())?
+        .map_err(|e| format!("read: {e}"))?;
+
+    let mut builder = HttpResponse::build(
+        ntex::http::StatusCode::from_u16(parsed.status)
+            .unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
+    );
+    for (name, value) in &parsed.headers {
+        let lname = name.to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&lname.as_str()) {
+            continue;
+        }
+        // Preserve Set-Cookie and Location verbatim; ntex's set_header
+        // appends rather than replaces for multi-valued headers like
+        // Set-Cookie when used via .header() (HttpResponseBuilder).
+        builder.header(name.as_str(), value.as_str());
+    }
+
+    if parsed.is_chunked {
+        let (tx, rx) = ntex::channel::mpsc::channel();
+
+        compio::runtime::spawn(async move {
+            let mut leftover = parsed.trailing;
+
+            loop {
+                while let ChunkDecode::Complete(data, consumed) = decode_next_chunk(&leftover) {
+                    if data.is_empty() {
+                        return;
+                    }
+                    let item: Result<ntex::util::Bytes, std::io::Error> =
+                        Ok(ntex::util::Bytes::from(data));
+                    if tx.send(item).is_err() {
+                        return;
+                    }
+                    leftover = leftover[consumed..].to_vec();
+                }
+
+                let read_buf = vec![0u8; 4096];
+                let BufResult(r, returned) = stream.read(read_buf).await;
+                match r {
+                    Ok(0) => return,
+                    Ok(n) => leftover.extend_from_slice(&returned[..n]),
+                    Err(_) => return,
+                }
+            }
+        })
+        .detach();
+
+        Ok(builder.streaming(rx))
+    } else {
+        let response_body = compio::time::timeout(
+            WORKER_TIMEOUT,
+            read_body_buffered(&mut stream, parsed.content_length, parsed.trailing),
+        )
+        .await
+        .map_err(|_| "read timeout".to_string())?
+        .map_err(|e| format!("read: {e}"))?;
+
+        Ok(builder.body(response_body))
+    }
+}
+
+/// Build a raw HTTP/1.1 request to forward.
+fn build_forward_request(
+    method: &str,
+    path_and_query: &str,
+    host: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Vec<u8> {
+    let mut req = String::with_capacity(256 + headers.len() * 32 + body.len());
+    req.push_str(method);
+    req.push(' ');
+    req.push_str(path_and_query);
+    req.push_str(" HTTP/1.1\r\n");
+    req.push_str("Host: ");
+    req.push_str(host);
+    req.push_str("\r\n");
+
+    for (name, value) in headers {
+        let lname = name.to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&lname.as_str()) {
+            continue;
+        }
+        req.push_str(name);
+        req.push_str(": ");
+        req.push_str(value);
+        req.push_str("\r\n");
+    }
+
+    req.push_str("Content-Length: ");
+    req.push_str(&body.len().to_string());
+    req.push_str("\r\n");
+    // Close after one round-trip — keeps the proxy path simple, no
+    // pool, no half-open retries. The auth host's request rate is low
+    // (OIDC discovery / token exchange / userinfo) so pooling isn't
+    // worth the complexity here.
+    req.push_str("Connection: close\r\n\r\n");
+
+    let mut bytes = req.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+/// Extract `host:port` from an upstream URL for the `Host:` header.
+/// Falls back to `localhost` on parse failure (mirrors `extract_host`'s
+/// posture for the worker dispatch path).
+fn extract_host_with_port(upstream_url: &str) -> String {
+    url::Url::parse(upstream_url)
+        .ok()
+        .and_then(|u| {
+            let host = u.host_str()?.to_string();
+            Some(match u.port() {
+                Some(p) => format!("{host}:{p}"),
+                None => host,
+            })
+        })
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+#[cfg(test)]
+mod forward_http_tests {
+    use super::*;
+
+    #[test]
+    fn extract_host_with_port_includes_port() {
+        assert_eq!(
+            extract_host_with_port("http://hydra:4444"),
+            "hydra:4444"
+        );
+    }
+
+    #[test]
+    fn extract_host_with_port_omits_default_port() {
+        // The url crate normalizes :80 / :443 away when they're the
+        // default for the scheme — that's fine for forwarding because
+        // upstream will still resolve the host.
+        assert_eq!(extract_host_with_port("http://hydra"), "hydra");
+    }
+
+    #[test]
+    fn extract_host_with_port_falls_back_on_garbage() {
+        assert_eq!(extract_host_with_port("not a url"), "localhost");
+    }
+
+    #[test]
+    fn build_forward_request_omits_hop_by_hop_and_host() {
+        let headers = vec![
+            ("Cookie".to_string(), "abc=1".to_string()),
+            ("Host".to_string(), "client-supplied:9999".to_string()),
+            ("Connection".to_string(), "keep-alive".to_string()),
+            ("Content-Length".to_string(), "999".to_string()),
+            ("Accept".to_string(), "application/json".to_string()),
+        ];
+        let body = b"x=1";
+        let req = build_forward_request("POST", "/oauth2/token", "hydra:4444", &headers, body);
+        let s = String::from_utf8(req).unwrap();
+
+        assert!(s.starts_with("POST /oauth2/token HTTP/1.1\r\n"));
+        assert!(s.contains("Host: hydra:4444\r\n"));
+        assert!(s.contains("Cookie: abc=1\r\n"));
+        assert!(s.contains("Accept: application/json\r\n"));
+        // Hop-by-hop and host headers from the inbound side must be dropped.
+        assert!(!s.contains("client-supplied"));
+        assert!(!s.contains("keep-alive"));
+        // Content-Length recomputed from the actual body length.
+        assert!(s.contains("Content-Length: 3\r\n"));
+        // Always close — single-shot proxy.
+        assert!(s.contains("Connection: close\r\n"));
+        // Body follows the blank line.
+        assert!(s.ends_with("\r\n\r\nx=1"));
+    }
+}
