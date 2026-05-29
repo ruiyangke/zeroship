@@ -2,24 +2,29 @@
  * Menubar — horizontal (or vertical) strip of menu triggers.
  *
  * Anatomy:
- *   .zs-menubar                     flex row of children (Menu siblings)
- *     └─ Menu.Trigger[data-chrome="menubar"]   each child renders a real <button>
+ *   .zs-menubar                                       flex row of children (Menu siblings)
+ *     └─ button[data-chrome="menubar"]                each child renders a real <button>
  *
  * Visual rhythm:
  *   - Sits on a translucent fill (matches Toolbar so the chrome reads
  *     as one family). The menubar's triggers paint on hover/open;
- *     the trigger paint is keyed off `data-chrome="menubar"` so consumers
- *     don't need a separate className.
- *   - Triggers are sized to the body-tall hit target (≥ 1.75rem) by
- *     padding alone; no border, so the strip stays low-chrome.
+ *     the trigger paint is keyed off the trigger-only selector
+ *     `button[data-chrome="menubar"]` so popups (which also carry
+ *     `data-chrome="menubar"` for Menu.css-scoped variants) don't
+ *     accidentally inherit trigger sizing/layout.
+ *   - Triggers are sized to the body-tall hit target
+ *     (`--zs-menubar-trigger-min-size`) by padding alone; no border, so
+ *     the strip stays low-chrome.
  *
  * The Menu popup chrome itself is owned by `Menu.css` — Menubar-scoped
  * Menus pass `data-chrome="menubar"` on their `Menu.Popup` so any
  * Menubar-specific visual deltas hang off that attribute in Menu.css.
  *
  * Forced-colors: Canvas/CanvasText for the chrome, Highlight/HighlightText
- * for the active trigger. Reduced-motion: disable the hover transition
- * on the trigger.
+ * for the active trigger, and a `:focus-visible` ring painted with
+ * Highlight system color so the focus indicator stays visible after
+ * `forced-color-adjust: none`. Reduced-motion: disable the hover
+ * transition on the trigger.
  *
  * RTL: logical paddings; arrow-key roving is owned by Base UI which
  * mirrors the keymap for `direction: rtl`.
@@ -39,6 +44,14 @@
   color: var(--zs-label);
   font-family: var(--zs-font-system);
   outline: none;
+
+  /* Body-tall trigger floor — the desktop-menubar reading rhythm wants a
+     trigger noticeably shorter than `--zs-control-h-sm` while still
+     meeting the body line-height; `1.75rem` is the floor (matches the
+     Toolbar button rhythm). This token also lets consumers retune the
+     strip density via the `--zs-menubar-trigger-min-size` custom
+     property without forking the rule set. */
+  --zs-menubar-trigger-min-size: 1.75rem;
 }
 
 .zs-menubar--vertical {
@@ -49,18 +62,23 @@
 /* ─── Trigger paint ─────────────────────────────────────────────────── *
  *
  * Menubar triggers are `Menu.Trigger` instances tagged with
- * `data-chrome="menubar"`. The Menu wrapper applies no class by
- * default, so the menubar owns the trigger layout / chrome here. The
+ * `data-chrome="menubar"`. We scope every trigger rule to
+ * `button[data-chrome="menubar"]` — popups also carry
+ * `data-chrome="menubar"` (so Menu.css can paint Menubar-flavored
+ * popup variants) but render as `<div>`, not `<button>`. The
  * `:where()` lifts specificity to (0,1,0) so the consumer's `className`
- * can override individual properties without `!important`. */
-.zs-menubar :where([data-chrome="menubar"]) {
+ * can override individual properties without `!important`; reduced-
+ * motion / forced-colors mirrors below match the same `:where()`
+ * specificity so they don't accidentally overrule the base rule set
+ * by being more specific. */
+.zs-menubar :where(button[data-chrome="menubar"]) {
   appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--zs-space-1);
-  block-size: 1.75rem;
-  min-inline-size: 1.75rem;
+  block-size: var(--zs-menubar-trigger-min-size);
+  min-inline-size: var(--zs-menubar-trigger-min-size);
   padding-inline: var(--zs-space-3);
   border: 0;
   border-radius: var(--zs-radius-2);
@@ -74,54 +92,66 @@
   transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
-.zs-menubar [data-chrome="menubar"]:hover:not([data-disabled]) {
+.zs-menubar :where(button[data-chrome="menubar"]):hover:not([data-disabled]) {
   background-color: var(--zs-fill-tertiary);
 }
 
-.zs-menubar [data-chrome="menubar"][data-popup-open],
-.zs-menubar [data-chrome="menubar"][data-highlighted] {
+.zs-menubar :where(button[data-chrome="menubar"])[data-popup-open],
+.zs-menubar :where(button[data-chrome="menubar"])[data-highlighted] {
   background-color: var(--zs-fill-secondary);
 }
 
-.zs-menubar [data-chrome="menubar"]:focus-visible {
+.zs-menubar :where(button[data-chrome="menubar"]):focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
-.zs-menubar [data-chrome="menubar"][data-disabled] {
+.zs-menubar :where(button[data-chrome="menubar"])[data-disabled] {
   color: var(--zs-label-tertiary);
   cursor: not-allowed;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .zs-menubar [data-chrome="menubar"] {
+  .zs-menubar :where(button[data-chrome="menubar"]) {
     transition: none;
   }
 }
 
-/* ─── forced-colors mirror ─────────────────────────────────────────── */
+/* ─── forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Selectors mirror the base rule set's `:where(...)` specificity so the
+ * forced-colors paint replaces (rather than over-specifies) the
+ * token-colored chrome. We also mirror `:focus-visible` here because
+ * `forced-color-adjust: none` opts the trigger out of the system focus
+ * indicator — without an explicit mirror the focus ring would stay
+ * token-colored under forced colors.
+ */
 @media (forced-colors: active) {
   .zs-menubar {
     background-color: Canvas;
     color: CanvasText;
-    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    box-shadow: inset 0 0 0 var(--zs-selection-hairline) CanvasText;
     forced-color-adjust: none;
   }
-  .zs-menubar [data-chrome="menubar"] {
+  .zs-menubar :where(button[data-chrome="menubar"]) {
     color: CanvasText;
     background-color: Canvas;
     forced-color-adjust: none;
   }
-  .zs-menubar [data-chrome="menubar"]:hover:not([data-disabled]) {
+  .zs-menubar :where(button[data-chrome="menubar"]):hover:not([data-disabled]) {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-menubar [data-chrome="menubar"][data-popup-open],
-  .zs-menubar [data-chrome="menubar"][data-highlighted] {
+  .zs-menubar :where(button[data-chrome="menubar"])[data-popup-open],
+  .zs-menubar :where(button[data-chrome="menubar"])[data-highlighted] {
     background-color: Highlight;
     color: HighlightText;
   }
-  .zs-menubar [data-chrome="menubar"][data-disabled] {
+  .zs-menubar :where(button[data-chrome="menubar"]):focus-visible {
+    outline: var(--zs-focus-ring-width) solid Highlight;
+    outline-offset: var(--zs-focus-ring-offset);
+  }
+  .zs-menubar :where(button[data-chrome="menubar"])[data-disabled] {
     color: GrayText;
   }
 }
