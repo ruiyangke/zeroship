@@ -3,12 +3,15 @@
 
 [auth]
 hydra_admin_url       = "http://hydra:4445"
-# COMPOSE-INTERNAL value: inside the docker network hydra's public/issuer
-# endpoint is reachable as http://hydra:4444. This intentionally differs from
-# the production template in ops/zeroship.example.toml, which shows the public
-# issuer https://auth.zeroship.ai. One file per environment — do not copy this
-# value into a prod overlay.
-hydra_public_url      = "http://hydra:4444"
+# COMPOSE-INTERNAL value: the public issuer is the Caddy-fronted dev host
+# http://auth.zeroship.localhost. Caddy proxies /oauth2/* + /.well-known/* on
+# that host to hydra:4444, and a docker network ALIAS makes the same hostname
+# resolve to Caddy from inside the network — so server-side RPs (control,
+# gateway) verify tokens against the SAME issuer the browser sees. This
+# intentionally differs from the prod template (https://auth.zeroship.ai) and
+# from the old compose value (http://hydra:4444). One file per environment —
+# do not copy this value into a prod overlay.
+hydra_public_url      = "http://auth.zeroship.localhost"
 trusted_oauth_clients = ["zeroship-builder"]
 
 [observability]

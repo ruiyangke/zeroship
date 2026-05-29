@@ -1,10 +1,21 @@
-# zeroship platform — multi-node simulation
+# zeroship platform — full-stack local simulation, fronted by Caddy on the
+# *.zeroship.localhost dev domain.
 #
 # Usage:
-#   docker compose up -d                          # default: 1 gw + 3 workers
+#   docker compose up --build                     # build + boot the whole stack
 #   docker compose up -d --scale worker=10        # scale to 10 workers
 #   docker compose logs -f                        # watch all logs
 #   docker compose down -v                        # tear down
+#
+# Once up, browse (any *.localhost auto-resolves to 127.0.0.1):
+#   http://builder.zeroship.localhost   — AI builder (needs OPENAI_API_KEY)
+#   http://console.zeroship.localhost   — creator dashboard / control plane
+#   http://auth.zeroship.localhost      — login / OIDC
+#   http://<app>.zeroship.localhost     — a deployed creator app (via gateway)
+#
+# Caddy also carries network ALIASES for the auth/console/api/builder hosts so
+# CONTAINERS resolve those same names to Caddy — required for server-side OIDC
+# token exchange / JWKS fetch to hit the same issuer the browser sees.
 
 services:
   verdaccio:
@@ -59,9 +70,15 @@ services:
         --control-key platform-key
         --master-key master-key
         --dev-insecure
+        --hydra-public-url http://auth.zeroship.localhost
+        --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
         --bootstrap-builder-client
         --builder-client-secret-file /data/builder-client-secret
+    environment:
+      # The bootstrapped zeroship-builder OAuth client is registered with this
+      # redirect URI so the builder's localhost OIDC callback is accepted.
+      BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
     ports:
       - "9090:9090"
     volumes:
@@ -100,7 +117,9 @@ services:
           --workers "$$WORKERS" \
           --blob-store /data/bundles \
           --poll-interval 3 \
-          --auth-ui-url http://auth:9092 \
+          --auth-ui-url http://auth.zeroship.localhost \
+          --hydra-public-url http://auth.zeroship.localhost \
+          --gateway-public-url http://api.zeroship.localhost \
           --db postgres://postgres:zeroship@postgres:5432/zeroship \
           --dev-insecure
     volumes:
@@ -174,17 +193,20 @@ services:
         --addr 0.0.0.0:9092
         --db-url postgres://postgres:zeroship@postgres:5432/zeroship
         --dev-insecure
+        --hydra-public-url http://auth.zeroship.localhost
+        --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
         --bootstrap
     ports:
       - "9092:9092"
     volumes:
-      # hydra_admin_url / hydra_public_url come from the shared overlay,
-      # auto-discovered at the well-known path (no --config needed).
+      # hydra_admin_url / hydra_public_url also come from the shared overlay,
+      # auto-discovered at the well-known path; the explicit flags above win.
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
-      # Declarative OIDC client config; auth reconciles it against hydra
-      # admin at boot. --clients-config defaults to this well-known path.
-      - ./ops/auth-clients.example.toml:/etc/zeroship/auth-clients.toml:ro
+      # Declarative OIDC client config (localhost dev variant); auth reconciles
+      # it against hydra admin at boot. Mounted at the well-known
+      # --clients-config default path.
+      - ./ops/auth-clients-dev.toml:/etc/zeroship/auth-clients.toml:ro
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -194,9 +216,10 @@ services:
         condition: service_started
 
   # ory/hydra — OIDC kernel sidecar for crates/auth.
-  # public port 4444 (proxied via gateway at auth.zeroship.ai/oauth2/*)
+  # public port 4444 (proxied by Caddy at auth.zeroship.localhost/oauth2/* +
+  #                   /.well-known/*)
   # admin port 4445 (production: loopback only; in compose we share the network)
-  # Config lives at ops/hydra.yaml; secrets come from env.
+  # Config lives at ops/hydra-dev.yaml (localhost issuer); secrets come from env.
   hydra:
     image: oryd/hydra:v25.4.0
     depends_on:
@@ -209,7 +232,7 @@ services:
       SECRETS_SYSTEM: ${SECRETS_SYSTEM:-dev-secret-please-change-this-please}
       SECRETS_COOKIE: ${SECRETS_COOKIE:-dev-secret-please-change-this-please}
     volumes:
-      - ./ops/hydra.yaml:/etc/config/hydra/hydra.yaml:ro
+      - ./ops/hydra-dev.yaml:/etc/config/hydra/hydra.yaml:ro
     command: serve all --dev --config /etc/config/hydra/hydra.yaml
     ports:
       - "4444:4444"
@@ -286,11 +309,17 @@ services:
     environment:
       CONTROL_URL: http://control:9090
       CONTROL_KEY: platform-key
-      HYDRA_AUTHORIZE_URL: http://localhost:4444/oauth2/auth
-      HYDRA_TOKEN_URL: http://hydra:4444/oauth2/token
-      HYDRA_REVOKE_URL: http://hydra:4444/oauth2/revoke
+      # All four OIDC endpoints use the Caddy-fronted issuer host. The
+      # authorize URL is browser-facing; token / revoke / JWKS run server-side
+      # inside this container — both resolve auth.zeroship.localhost to Caddy
+      # (browser → 127.0.0.1; container → Caddy network alias), so the issuer
+      # the browser sees matches the one the server verifies against.
+      HYDRA_AUTHORIZE_URL: http://auth.zeroship.localhost/oauth2/auth
+      HYDRA_TOKEN_URL: http://auth.zeroship.localhost/oauth2/token
+      HYDRA_REVOKE_URL: http://auth.zeroship.localhost/oauth2/revoke
+      HYDRA_JWKS_URL: http://auth.zeroship.localhost/.well-known/jwks.json
       BUILDER_CLIENT_ID: zeroship-builder
-      BUILDER_REDIRECT_URI: http://localhost:3001/auth/callback
+      BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
       BUILDER_INSTANCE_ID: docker-compose
       BUILDER_TOKEN_ENCRYPTION_KEY: ${BUILDER_TOKEN_ENCRYPTION_KEY:-dev-builder-token-encryption-key-change}
       SANDBOX_URL: http://sandbox:9091
@@ -308,6 +337,38 @@ services:
       hydra:
         condition: service_started
       sandbox:
+        condition: service_started
+
+  # caddy — dev reverse proxy on :80 for the *.zeroship.localhost domain.
+  # Routes auth/console/api/builder + the {app}.zeroship.localhost catch-all
+  # to the right upstream (see ops/Caddyfile). The network ALIASES make those
+  # public hostnames ALSO resolve to Caddy from INSIDE the compose network, so
+  # server-side OIDC (control/gateway/builder verifying tokens, fetching JWKS,
+  # exchanging codes against http://auth.zeroship.localhost) hits the same
+  # issuer the browser does.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default:
+        aliases:
+          - auth.zeroship.localhost
+          - console.zeroship.localhost
+          - api.zeroship.localhost
+          - builder.zeroship.localhost
+    depends_on:
+      control:
+        condition: service_started
+      gateway:
+        condition: service_started
+      auth:
+        condition: service_started
+      hydra:
+        condition: service_started
+      builder:
         condition: service_started
 
 networks:

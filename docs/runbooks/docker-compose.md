@@ -2,17 +2,57 @@
 
 ## Platform stack
 
-`docker-compose.yml` is the day-to-day local platform stack. From the repo root:
+`docker-compose.yml` is the day-to-day local platform stack — the whole
+zeroship stack, fronted by a Caddy reverse proxy on the `*.zeroship.localhost`
+dev domain. From the repo root:
 
 ```bash
-docker compose up -d
+docker compose up --build              # build + boot the whole stack
 docker compose up -d --scale worker=10
 docker compose logs -f
 docker compose down -v
 ```
 
-Services and host ports from the live file:
+The first `up` runs `--build` because the image now also compiles the SDKs
+(needed by the runtime crate) and `zeroship-auth` — see [Image build](#image-build).
 
+### Dev domain (via Caddy)
+
+A `caddy` service listens on host `:80` and reverse-proxies the
+`*.zeroship.localhost` domain. Browsers resolve any `*.localhost` hostname to
+`127.0.0.1` automatically, so **no `/etc/hosts` edits are needed**. Once the
+stack is up, open:
+
+- **`http://builder.zeroship.localhost`** — the AI builder; describe an app and
+  it builds + deploys it (requires `OPENAI_API_KEY`, see below)
+- **`http://console.zeroship.localhost`** — creator dashboard / control plane
+- **`http://auth.zeroship.localhost`** — login / OIDC (Caddy splits this host:
+  `/oauth2/*` and `/.well-known/*` go to Hydra `:4444`, everything else to the
+  `zeroship-auth` UI on `:9092`)
+- **`http://api.zeroship.localhost`** — the gateway (explicit API host)
+- **`http://<app>.zeroship.localhost`** — any deployed creator app; the
+  `*.zeroship.localhost` catch-all routes app subdomains to the gateway
+
+Caddy chooses the most-specific matching site, so the explicit hosts above
+always win over the `*.zeroship.localhost` catch-all. Site addresses use the
+`http://` scheme so Caddy serves plain HTTP and never tries to provision TLS
+for `.localhost`. Config: `ops/Caddyfile`.
+
+#### Caddy network-alias trick (container-side OIDC)
+
+Server-side OIDC steps — control/gateway/builder exchanging codes, fetching
+JWKS, and verifying tokens against the issuer `http://auth.zeroship.localhost` —
+run *inside* the compose network, where that hostname would not otherwise
+resolve. The `caddy` service therefore carries **network aliases** for
+`auth.zeroship.localhost`, `console.zeroship.localhost`, `api.zeroship.localhost`,
+and `builder.zeroship.localhost` on the default network, so containers resolve
+those names to Caddy too. The net effect: the issuer URL the browser sees and
+the one the servers verify against are identical, which OIDC requires.
+
+Services and host ports from the live file (the proxy is the primary entry
+point; these raw ports remain mapped for direct debugging):
+
+- `caddy` → `localhost:80` (the dev domain front door)
 - `postgres` → `localhost:5440`
 - `control` (`zeroship-control`) → `localhost:9090`
 - `gateway` (`zeroship-gate`) → `localhost:8000`
@@ -20,6 +60,37 @@ Services and host ports from the live file:
 - `sandbox` (`zeroship-sandbox`) → `localhost:9091`
 - `builder` (`apps/zeroship-builder` Vite dev server) → `localhost:3001`
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
+
+### Image build
+
+The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
+`zeroship-gate`, `zeroship-worker`, `zeroship-auth`, `zeroship-sandbox`, and the
+`zeroship` CLI) in three stages:
+
+1. **`sdks` (node:22)** runs `pnpm install --frozen-lockfile && pnpm build` to
+   emit `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`. The runtime crate
+   `include_str!`s those files at compile time
+   (`crates/runtime/src/core/init.rs`), so they must exist before cargo touches
+   `zeroship-runtime`.
+2. **`builder` (rust)** copies `crates/`, the freshly-built `sdks/`, and the
+   `policies/` tree (`crates/authz/build.rs` parses `policies/*.cedar` at build
+   time) and compiles the six binaries.
+3. The runtime stage copies all six binaries plus the docker CLI (for the
+   sandbox's Docker-out-of-Docker).
+
+Because the SDK dist files are gitignored and absent from a fresh checkout, the
+image must be (re)built with `--build` the first time; `docker compose build`
+regenerates them inside the image.
+
+### OpenAI key (builder)
+
+The builder calls OpenAI to generate apps. Export `OPENAI_API_KEY` before
+`docker compose up` (it is passed through to the `builder` service):
+
+```bash
+export OPENAI_API_KEY=sk-...
+docker compose up --build
+```
 
 ### Bind addresses
 
@@ -34,16 +105,25 @@ non-loopback because app/admin auth is relaxed — only do this on a trusted net
 ### Auth service
 
 The `auth` service runs `zeroship-auth`, the OIDC IdP UI + RP that sits in front
-of the hydra kernel. The gateway redirects unauthenticated end users to it
-(`--auth-ui-url http://auth:9092`). It runs with `--dev-insecure` (relaxes
-cookie/secret guards for the private compose network), `--bootstrap` (first-boot
-JWK + client creation), and `--allow-remote-hydra-admin` because the shared
-overlay points it at the non-loopback `http://hydra:4445` admin API. It mounts
-the shared overlay (for `hydra_admin_url` / `hydra_public_url`) and
-`ops/auth-clients.example.toml` at the well-known `--clients-config` path
-(`/etc/zeroship/auth-clients.toml`), which it reconciles against hydra admin at
-boot. The stash signing key is unset; under `--dev-insecure` it falls back to
-the built-in dev key.
+of the hydra kernel. The gateway redirects unauthenticated end users to it via
+the Caddy-fronted host (`--auth-ui-url http://auth.zeroship.localhost`). It runs
+with `--dev-insecure` (relaxes cookie/secret guards for the private compose
+network), `--bootstrap` (first-boot JWK + client creation),
+`--hydra-public-url http://auth.zeroship.localhost`,
+`--hydra-admin-url http://hydra:4445`, and `--allow-remote-hydra-admin` (the
+admin API lives at the non-loopback `http://hydra:4445`). It mounts the
+localhost OIDC client config, `ops/auth-clients-dev.toml`, at the well-known
+`--clients-config` path (`/etc/zeroship/auth-clients.toml`), which it reconciles
+against hydra admin at boot. That file declares the `console`, `cli`, and
+`gateway` clients with `*.zeroship.localhost` redirect/logout URIs. The stash
+signing key is unset; under `--dev-insecure` it falls back to the built-in dev
+key.
+
+The hydra kernel itself mounts `ops/hydra-dev.yaml` (not the prod
+`ops/hydra.yaml`): same `:4444`/`:4445` listeners, but the issuer/public base is
+`http://auth.zeroship.localhost` and `strategies.access_token` is `jwt` so RPs
+verify tokens locally against the JWKS at
+`http://auth.zeroship.localhost/.well-known/jwks.json`.
 
 ### Blob store
 
@@ -54,10 +134,14 @@ and writes the same content-addressed deploy blobs.
 The compose file already sets the current service names, keys, and sandbox env vars. Use it as the source of truth before copying flags into ad-hoc commands.
 
 Control starts with `--bootstrap-builder-client` in this stack. On first boot it
-registers the `zeroship-builder` OAuth client with Hydra admin and writes the
-generated dev client secret to `data/builder-client-secret`. That file is
-mounted into the Builder container, which exports it as `BUILDER_CLIENT_SECRET`
-before starting Vite. The file is local dev state and is ignored by git.
+registers the `zeroship-builder` OAuth client with Hydra admin (using the
+`BUILDER_REDIRECT_URI=http://builder.zeroship.localhost/auth/callback` env so
+the client's redirect matches the dev domain) and writes the generated dev
+client secret to `data/builder-client-secret`. That file is mounted into the
+Builder container, which exports it as `BUILDER_CLIENT_SECRET` before starting
+Vite. The file is local dev state and is ignored by git. The builder's Vite dev
+server allowlists `.zeroship.localhost` (`server.allowedHosts` in
+`apps/zeroship-builder/vite.config.ts`) so it accepts the proxied Host header.
 
 ### Configuration overlay
 
@@ -72,9 +156,13 @@ at the well-known path.)
 
 The overlay provides the shared `[auth]` Hydra URLs, `trusted_oauth_clients`,
 and `[observability]` defaults so those values are defined once instead of per
-service. Copy `ops/zeroship.example.toml` to `ops/zeroship.toml` when
-customizing an environment. Secrets do not belong in this file; keep them in
-env, CLI flags, or secret file paths.
+service. In this stack `[auth].hydra_public_url` is
+`http://auth.zeroship.localhost` (the Caddy-fronted issuer), while
+`hydra_admin_url` stays `http://hydra:4445` (admin API, network-internal).
+`control`, `gateway`, and `auth` also pass the public URL explicitly on the
+command line, which wins over the overlay. Copy `ops/zeroship.example.toml` to
+`ops/zeroship.toml` when customizing an environment. Secrets do not belong in
+this file; keep them in env, CLI flags, or secret file paths.
 
 Validate a web binary's resolved config by adding `--check-config` to the
 normal command. It runs the same startup guards, so include the same required
