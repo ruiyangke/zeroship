@@ -44,6 +44,16 @@ RUN test -f sdks/bootstrap/dist/runtime-entry.js \
 # ---------------------------------------------------------------------------
 FROM rust:latest AS builder
 WORKDIR /build
+# System build deps not in rust:latest:
+#   clang + libclang-dev  → bindgen (libsqlite3-sys, aws-lc-sys)
+#   cmake                 → aws-lc-sys / ring native build
+#   perl                  → aws-lc-sys / openssl-style asm generation
+#   nasm                  → aws-lc-sys x86_64 assembly
+#   pkg-config            → -sys crate probing
+# (gcc/g++/make come with rust:latest's buildpack-deps base.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang libclang-dev cmake perl nasm pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 # Cedar authz policies — crates/authz/build.rs parses these at build time.
