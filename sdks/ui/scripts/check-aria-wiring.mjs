@@ -7854,6 +7854,73 @@ await open("components-toolbar--separator-orientation-lock-regression");
   );
 }
 
+/* ─── Wave 8 fix — Tooltip detached handle carries aria-describedby ────
+ *
+ * Regression for the 🔴 detached-handle wiring drop. Pre-fix,
+ * `Tooltip.Trigger` only read the popup id off `TooltipRootRuntimeCtx`;
+ * a Trigger mounted outside any Root subtree (`createTooltipHandle()`
+ * pairing) had `rootCtx === null`, so the wrapper silently rendered
+ * the trigger WITHOUT the popup id in `aria-describedby`. End users
+ * relying on AT to announce the tooltip label on focus got nothing.
+ *
+ * Post-fix `createTooltipHandle()` augments Base UI's handle with a
+ * stable `popupId`. The Root prefers the handle's id over its own
+ * `useId()` when a handle is supplied (so both paths reference the
+ * same id), and the Trigger falls back to `handle.popupId` when no
+ * Root context is present.
+ *
+ * The DetachedHandle story splits Trigger and Root into separate
+ * subtrees paired via the augmented handle. We assert:
+ *   1. The Trigger's `aria-describedby` token list contains a non-
+ *      empty id.
+ *   2. After hover, that id resolves to the mounted Popup element. */
+await open("components-tooltip--detached-handle");
+{
+  const trigger = page.locator(
+    '[data-testid="tooltip-detached-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Park the cursor first so the upcoming hover() fires a fresh
+  // pointerenter — Storybook's autoplay may have left the cursor on
+  // the trigger.
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(120);
+  await trigger.hover();
+  const popup = page.locator('[data-testid="tooltip-detached-popup"]');
+  await popup.waitFor({ state: "attached", timeout: 1500 });
+  const wiring = await page.evaluate(() => {
+    const t = document.querySelector(
+      '[data-testid="tooltip-detached-trigger"]',
+    );
+    const p = document.querySelector(
+      '[data-testid="tooltip-detached-popup"]',
+    );
+    if (!t) return null;
+    const describedBy = t.getAttribute("aria-describedby") ?? "";
+    const popupId = p ? p.id : "";
+    const tokens = describedBy.split(/\s+/).filter(Boolean);
+    const resolves =
+      popupId.length > 0 && document.getElementById(popupId) !== null;
+    return {
+      describedBy,
+      popupId,
+      hasToken: popupId.length > 0 && tokens.includes(popupId),
+      resolves,
+    };
+  });
+  const ok =
+    wiring !== null &&
+    wiring.popupId.length > 0 &&
+    wiring.hasToken &&
+    wiring.resolves;
+  report(
+    "Tooltip detached handle — aria-describedby on Trigger refs Popup id (Wave 8 fix)",
+    ok,
+    `describedBy="${wiring?.describedBy ?? ""}" popupId="${wiring?.popupId ?? ""}" ` +
+      `hasToken=${wiring?.hasToken ?? false} resolves=${wiring?.resolves ?? false}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
-import type { ReactNode } from "react";
-import { Button, Input, Tooltip } from "../components";
+import { useMemo, type ReactNode } from "react";
+import { Button, Input, Tooltip, createTooltipHandle } from "../components";
 
 /* Storybook 8.6 doesn't expose a global decorator slot for arbitrary
  * providers, and the brief contingency requires each Tooltip story to
@@ -511,4 +511,110 @@ export const Rtl: Story = {
       </div>
     </Wrap>
   ),
+};
+
+/* ─── 9. DetachedHandle ─────────────────────────────────────────────── *
+ *
+ * Imperative-pairing surface (`createTooltipHandle()`) for the case
+ * where the Trigger renders in a different React subtree from the
+ * Root (toolbar in one cell, tooltip mounted from a parent layout,
+ * etc.). The story exercises the invariant the wrapper owns:
+ *
+ *   `aria-describedby` on the detached Trigger still references the
+ *   Popup id — the augmented handle carries `popupId` across the gap
+ *   that React context cannot bridge.
+ *
+ * Pre-fix the detached Trigger only read `popupId` off the Root
+ * runtime context (`rootCtx === null` outside a Root subtree), so the
+ * `aria-describedby` link silently dropped. */
+export const DetachedHandle: Story = {
+  name: "Detached handle (aria-describedby through handle)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Trigger and Root are paired via `createTooltipHandle()` across " +
+          "separate subtrees. The augmented handle carries the popup id " +
+          "so the detached Trigger's `aria-describedby` still resolves to " +
+          "the mounted popup — React context cannot bridge the gap so the " +
+          "handle is the only carrier.",
+      },
+    },
+  },
+  render: () => {
+    function DetachedRow() {
+      // `useMemo` so the handle is stable across renders — recreating
+      // it on every render would tear down the pairing on each commit.
+      const handle = useMemo(() => createTooltipHandle(), []);
+      return (
+        <Wrap>
+          <div
+            className="zs-story-row"
+            role="group"
+            aria-label="Detached tooltip handle"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: "2rem",
+              padding: "2rem",
+            }}
+          >
+            {/* Trigger subtree — no Root, only the imperative handle.
+                A detached Trigger lives outside the Root's React subtree
+                so it cannot read the Root's `delay` via context. We pass
+                `delay={0}` explicitly so the regression test settles
+                within Storybook's play budget; the wiring assertion is
+                independent of timing. */}
+            <div data-testid="tooltip-detached-trigger-subtree">
+              <Tooltip.Trigger
+                handle={handle}
+                delay={0}
+                render={
+                  <Button
+                    aria-label="Tooltip detached"
+                    data-testid="tooltip-detached-trigger"
+                  >
+                    Hover me (detached)
+                  </Button>
+                }
+              />
+            </div>
+            {/* Root subtree — same handle, separate location in the
+                tree. Delay=0 keeps the hover-to-mount window tight so
+                the regression test can settle within play-budget. */}
+            <div data-testid="tooltip-detached-root-subtree">
+              <Tooltip handle={handle} delay={0}>
+                <Tooltip.Portal>
+                  <Tooltip.Popup data-testid="tooltip-detached-popup">
+                    Detached tooltip body
+                  </Tooltip.Popup>
+                </Tooltip.Portal>
+              </Tooltip>
+            </div>
+          </div>
+        </Wrap>
+      );
+    }
+    return <DetachedRow />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /tooltip detached/i });
+    await userEvent.hover(trigger);
+    const popup = await body.findByTestId("tooltip-detached-popup");
+    await expect(popup).toBeInTheDocument();
+    // aria-describedby crosses the handle: the Trigger must reference
+    // the Popup's actual mounted id.
+    const describedBy = trigger.getAttribute("aria-describedby") ?? "";
+    const popupId = popup.id;
+    await expect(popupId.length).toBeGreaterThan(0);
+    await expect(describedBy.split(/\s+/)).toContain(popupId);
+    await userEvent.unhover(trigger);
+    await waitFor(() =>
+      expect(
+        body.queryByTestId("tooltip-detached-popup"),
+      ).not.toBeInTheDocument(),
+    );
+  },
 };

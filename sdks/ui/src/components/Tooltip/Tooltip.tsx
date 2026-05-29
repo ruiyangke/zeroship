@@ -58,12 +58,44 @@ export type TooltipSide = "top" | "right" | "bottom" | "left";
 export type TooltipAlign = "start" | "center" | "end";
 
 type BaseRootProps = ComponentPropsWithRef<typeof BaseTooltip.Root>;
+type BaseTooltipHandle<Payload> = ReturnType<typeof BaseTooltip.createHandle<Payload>>;
 
 /**
- * Re-export Base UI's `createHandle` so consumers can imperatively pair
- * a Trigger to a Root.
+ * Wrapper handle. Base UI's `createHandle` returns a `TooltipHandle`
+ * that pairs a detached Trigger with a Root. We augment it with a
+ * stable `popupId` so a Trigger mounted outside the Root's React
+ * subtree can still wire `aria-describedby` to the popup the same way
+ * Triggers inside a Root context do — without it, a detached Trigger
+ * would silently lose the wiring (Root's runtime context is the only
+ * other carrier of the popup id). Mirrors the PreviewCard pattern.
  */
-export const createTooltipHandle = BaseTooltip.createHandle;
+export type TooltipHandle<Payload = unknown> = BaseTooltipHandle<Payload> & {
+  /** Stable id used for `aria-describedby` ↔ Popup `id` wiring. */
+  readonly popupId: string;
+};
+
+/**
+ * Create an imperative handle for pairing a Root with a detached
+ * Trigger. The returned handle carries a stable `popupId` so a
+ * Trigger outside the Root's React subtree still publishes
+ * `aria-describedby={handle.popupId}` — the wiring Root context
+ * normally provides is preserved via the handle instead.
+ *
+ * Mirrors `createPreviewCardHandle`. The id only needs to be unique
+ * per handle instance; collisions across handles are harmless because
+ * each instance pairs a single Root with its own Trigger.
+ */
+export function createTooltipHandle<Payload = unknown>(): TooltipHandle<Payload> {
+  const handle = BaseTooltip.createHandle<Payload>() as TooltipHandle<Payload>;
+  const id = `zs-tooltip-${Math.random().toString(36).slice(2, 10)}`;
+  Object.defineProperty(handle, "popupId", {
+    value: id,
+    writable: false,
+    enumerable: true,
+    configurable: false,
+  });
+  return handle;
+}
 
 /**
  * Props for the Tooltip root. Mirrors Base UI's `Tooltip.Root` so every
@@ -134,7 +166,16 @@ const TooltipRootRuntimeCtx =
   createContext<TooltipRootRuntimeContext | null>(null);
 
 function TooltipRoot({ delay, children, ...rest }: TooltipProps) {
-  const popupId = useId();
+  // When a `handle` is supplied, prefer its stable popupId so a
+  // detached Trigger (which reads popupId off the handle directly)
+  // and a Trigger inside this Root's React subtree (which reads it
+  // off the runtime context) end up referencing the SAME id. Without
+  // this, a handle-paired Root would publish one id via context and
+  // the handle would carry another, splitting the aria-describedby
+  // wiring. Mirrors the PreviewCard wrapper.
+  const handle = (rest as { handle?: TooltipHandle }).handle;
+  const generatedId = useId();
+  const popupId = handle?.popupId ?? generatedId;
   const ctxValue = useMemo<TooltipRootRuntimeContext>(
     () => ({ delay, popupId }),
     [delay, popupId],
@@ -173,13 +214,22 @@ const TooltipTrigger = forwardRef<HTMLElement, TooltipTriggerProps>(
     // be safe today, but the explicit omission documents the contract.
     const rootCtx = useContext(TooltipRootRuntimeCtx);
     const resolvedDelay = delayProp ?? rootCtx?.delay;
+    // Detached-trigger fallback: when a Trigger lives outside any
+    // Tooltip Root subtree (`createTooltipHandle()` pairing), the Root
+    // runtime context is null. The wrapper's augmented handle carries
+    // a stable `popupId` so we can still wire `aria-describedby` to it
+    // — without this, detached Triggers would silently lose the
+    // wiring (the 🔴 review-3 regression). Mirrors PreviewCard.
+    const handleFromProps =
+      (rest as { handle?: TooltipHandle }).handle ?? undefined;
+    const resolvedPopupId = rootCtx?.popupId ?? handleFromProps?.popupId;
     // Compose any consumer-supplied aria-describedby with our internal
     // tooltip-popup id so screen readers announce the tooltip when the
     // trigger receives focus.
     const ariaDescribedBy =
-      ariaDescribedByProp && rootCtx?.popupId
-        ? `${ariaDescribedByProp} ${rootCtx.popupId}`
-        : (ariaDescribedByProp ?? rootCtx?.popupId);
+      ariaDescribedByProp && resolvedPopupId
+        ? `${ariaDescribedByProp} ${resolvedPopupId}`
+        : (ariaDescribedByProp ?? resolvedPopupId);
     return (
       <BaseTooltip.Trigger
         ref={ref as Ref<HTMLButtonElement>}
