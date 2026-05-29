@@ -778,6 +778,121 @@ await openStoryAndTrigger(
   );
 }
 
+/* ─── 9f. AlertDialog popup forced-colors mirror (wave-7 🔴 #2) ────────
+ *
+ * Regression for the wave-7 focused-review 🔴 #2: AlertDialog.css set
+ * `.zs-alertdialog-popup { box-shadow: var(--zs-shadow-4); }` and is
+ * imported AFTER Dialog.css. Both rules have equal specificity, so
+ * the AlertDialog rule clobbered Dialog's
+ * `@media (forced-colors: active) .zs-dialog-popup { box-shadow:
+ * 0 0 0 0.0625rem CanvasText inset; }` mirror — the popup lost its
+ * system-colored ring in Windows High Contrast.
+ *
+ * Why this assertion inspects the STYLESHEET, not computed style:
+ * Chromium's forced-colors mode strips `box-shadow` from the computed
+ * style regardless of which rule matches (verified locally — both
+ * Dialog and AlertDialog popups report `box-shadow: none` under
+ * Playwright's `emulateMedia({ forcedColors: 'active' })`). The
+ * computed-style approach used elsewhere works for `background-color`
+ * because the OS substitutes system swatches at paint, but the rule
+ * itself never reaches the resolved-value table for `box-shadow`.
+ *
+ * The cascade fix is therefore proved by walking
+ * `document.styleSheets` and confirming a `.zs-alertdialog-popup`
+ * rule nested inside a `forced-colors` media block declares a
+ * `CanvasText`-keyed box-shadow that LANDS AFTER the base
+ * `.zs-alertdialog-popup` rule that set `var(--zs-shadow-4)`. That
+ * combination — same selector, system-color value, later source
+ * order — is what restores parity with Dialog's mirror in HCM
+ * environments that paint `forced-color-adjust: auto` shadows.
+ *
+ * Pre-fix: no forced-colors block targets `.zs-alertdialog-popup`,
+ * so the only rule for `.zs-alertdialog-popup { box-shadow }` is the
+ * token rule — the assertion fails because no system-color rule is
+ * found. Post-fix: the mirror block at the bottom of AlertDialog.css
+ * supplies the matching forced-colors rule and the assertion passes.
+ */
+await openStoryAndTrigger(
+  "components-alertdialog--forced-colors",
+  '[data-testid="alertdialog-trigger"]',
+);
+{
+  const popup = page.locator(
+    '[data-testid="alertdialog-forced-colors-popup"]',
+  );
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  // Walk every stylesheet for a rule whose selector matches
+  // `.zs-alertdialog-popup`, whose `box-shadow` references
+  // `CanvasText`, and that is nested inside a `forced-colors: active`
+  // @media block. Also record the source order of the BASE
+  // `.zs-alertdialog-popup { box-shadow: var(--zs-shadow-...) }` rule
+  // so we can prove the forced-colors mirror lands AFTER it (same
+  // specificity → source order wins).
+  const cascade = await page.evaluate(() => {
+    const SEL = ".zs-alertdialog-popup";
+    let baseShadowIndex = -1;
+    let mirrorShadowIndex = -1;
+    let mirrorShadowValue = null;
+    let mirrorMedia = null;
+    let cursor = 0;
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        continue; // cross-origin sheet — skip.
+      }
+      const walk = (rules, mediaCondition) => {
+        for (const rule of Array.from(rules ?? [])) {
+          cursor += 1;
+          if (rule instanceof CSSMediaRule) {
+            walk(rule.cssRules, rule.conditionText || mediaCondition);
+            continue;
+          }
+          if (!(rule instanceof CSSStyleRule)) continue;
+          if (!rule.selectorText) continue;
+          // Match selector strings that contain `.zs-alertdialog-popup`
+          // as a token (e.g. `.zs-alertdialog-popup`,
+          // `.zs-alertdialog-popup[data-size="md"]`).
+          if (!rule.selectorText.includes(SEL)) continue;
+          const shadow = rule.style.getPropertyValue("box-shadow").trim();
+          if (!shadow) continue;
+          // Treat the BASE selector (no attribute) as the one that
+          // sets the token shadow; the forced-colors mirror also uses
+          // the base selector but inside a media block.
+          const isInForcedColors = /forced-colors/i.test(
+            mediaCondition || "",
+          );
+          if (isInForcedColors && /CanvasText/i.test(shadow)) {
+            mirrorShadowIndex = cursor;
+            mirrorShadowValue = shadow;
+            mirrorMedia = mediaCondition;
+          } else if (!isInForcedColors && /var\(--zs-shadow/.test(shadow)) {
+            baseShadowIndex = cursor;
+          }
+        }
+      };
+      walk(rules, null);
+    }
+    return {
+      baseShadowIndex,
+      mirrorShadowIndex,
+      mirrorShadowValue,
+      mirrorMedia,
+    };
+  });
+  const mirrorPresent = cascade.mirrorShadowIndex !== -1;
+  const mirrorAfterBase =
+    cascade.baseShadowIndex !== -1 &&
+    cascade.mirrorShadowIndex > cascade.baseShadowIndex;
+  const ok = mirrorPresent && mirrorAfterBase;
+  report(
+    "AlertDialog popup forced-colors mirror (wave-7 🔴 #2)",
+    ok,
+    `mirror="${cascade.mirrorShadowValue}" media="${cascade.mirrorMedia}" baseIdx=${cascade.baseShadowIndex} mirrorIdx=${cascade.mirrorShadowIndex} mirrorAfterBase=${mirrorAfterBase}`,
+  );
+}
+
 /* ─── 11. Card interactive keyboard — Enter activates onClick (slice-3 fix 1) ── */
 await open("components-card--interactive-with-keyboard");
 {

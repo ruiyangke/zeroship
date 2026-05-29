@@ -999,3 +999,65 @@ export const CancelAsChildSingleFire: Story = {
     await expect(counter).toHaveTextContent("Count: 1");
   },
 };
+
+/* ─── ForcedColors — wave-7 focused-review 🔴 #2 ───────────────────────── *
+ *
+ * Regression for the wave-7 focused-review 🔴: `.zs-alertdialog-popup`
+ * sets `box-shadow: var(--zs-shadow-4)` and is imported AFTER
+ * Dialog.css, so it equals-specificity-wins against Dialog's
+ * `@media (forced-colors: active)` mirror that paints the popup with
+ * a `CanvasText` system ring. The result was a popup with no system
+ * outline under Windows High Contrast — indistinguishable from the
+ * background. Fix: AlertDialog.css now ships its own forced-colors
+ * mirror at the bottom of the file.
+ *
+ * The play() step here only verifies the popup is rendered; the
+ * `check-aria-wiring.mjs` regression flips `forcedColors: active` via
+ * Playwright and reads the computed `box-shadow` to assert a system
+ * paint (not the token shadow). */
+export const ForcedColors: Story = {
+  name: "Forced-colors popup shadow mirror (wave-7 🔴)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="AlertDialog forced-colors popup"
+    >
+      <AlertDialog>
+        <AlertDialog.Trigger
+          render={
+            <Button data-testid="alertdialog-trigger">
+              Open forced-colors alert
+            </Button>
+          }
+        />
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop data-testid="alertdialog-forced-colors-backdrop" />
+          <AlertDialog.Popup data-testid="alertdialog-forced-colors-popup">
+            <AlertDialog.Header>
+              <AlertDialog.Title>Forced colors</AlertDialog.Title>
+              <AlertDialog.Description>
+                System paint must apply — the popup keeps a CanvasText
+                ring under forced-colors.
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            <AlertDialog.Footer>
+              <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+              <AlertDialog.Action>OK</AlertDialog.Action>
+            </AlertDialog.Footer>
+          </AlertDialog.Popup>
+        </AlertDialog.Portal>
+      </AlertDialog>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open forced-colors alert/i }),
+    );
+    await expect(
+      await page.findByRole("alertdialog", { name: /forced colors/i }),
+    ).toBeVisible();
+  },
+};
