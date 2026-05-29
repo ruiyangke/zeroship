@@ -917,3 +917,85 @@ export const DestructiveWithoutCancelWarns: Story = {
     </div>
   ),
 };
+
+/* ─── CancelAsChildSingleFire — Round 5 fix #3 (AlertDialog) ─────────── *
+ *
+ * Regression for Round 5 fix #3 (AlertDialog.Cancel). Pre-fix, the
+ * asChild branch manually extracted the child's onClick and called it
+ * inside a hand-rolled `slotOnClick`, while ALSO passing the child to
+ * Slot — whose `mergeProps` ALREADY composes the child's onClick with
+ * `ours`. Result: the child's onClick fired TWICE per click. Post-fix,
+ * we drop the manual extraction and let `_slot.ts` own the composition,
+ * so the counter increments exactly once. */
+function CancelAsChildSingleFireStory() {
+  const [count, setCount] = useState(0);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="AlertDialog Cancel asChild single-fire"
+    >
+      <p
+        role="status"
+        aria-label="Cancel single-fire counter"
+        data-testid="cancel-singlefire-counter"
+      >
+        Count: {count}
+      </p>
+      <AlertDialog>
+        <AlertDialog.Trigger
+          render={
+            <Button data-testid="alertdialog-singlefire-trigger">
+              Open single-fire alert
+            </Button>
+          }
+        />
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop />
+          <AlertDialog.Popup data-testid="alertdialog-singlefire-popup">
+            <AlertDialog.Header>
+              <AlertDialog.Title>Single-fire Cancel</AlertDialog.Title>
+              <AlertDialog.Description>
+                Click the custom Cancel target ONCE. The child onClick
+                must fire exactly once (Round 5 fix #3 regression).
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            <AlertDialog.Footer>
+              <AlertDialog.Cancel asChild>
+                <button
+                  type="button"
+                  className="zs-button zs-button--gray zs-button--medium"
+                  data-testid="alertdialog-singlefire-target"
+                  onClick={() => setCount((value) => value + 1)}
+                >
+                  Cancel once
+                </button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action>Proceed</AlertDialog.Action>
+            </AlertDialog.Footer>
+          </AlertDialog.Popup>
+        </AlertDialog.Portal>
+      </AlertDialog>
+    </div>
+  );
+}
+export const CancelAsChildSingleFire: Story = {
+  name: "Cancel — asChild single-fire (Round 5 regression)",
+  render: () => <CancelAsChildSingleFireStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const counter = canvas.getByRole("status", {
+      name: /cancel single-fire counter/i,
+    });
+
+    await expect(counter).toHaveTextContent("Count: 0");
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open single-fire alert/i }),
+    );
+    await page.findByRole("alertdialog", { name: /single-fire cancel/i });
+    const target = page.getByRole("button", { name: /cancel once/i });
+    await userEvent.click(target);
+    await expect(counter).toHaveTextContent("Count: 1");
+  },
+};

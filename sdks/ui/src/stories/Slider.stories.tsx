@@ -557,3 +557,56 @@ export const RTL: Story = {
     await waitFor(() => expect(slider).toHaveAttribute("aria-valuenow", "59"));
   },
 };
+
+/* ─── 13. ConsumerStylePreserved — Round 5 regression ───────────────── *
+ *
+ * Regression for Round 5 fix #5. Pre-fix, the Slider wrapper spread
+ * `{...rest}` BEFORE its own `style={valuePositionStyle}`, so a
+ * caller-passed `style={{ background: "red" }}` was wiped — even when
+ * `valuePositionStyle` was undefined (because `style` itself was
+ * blanked by the explicit prop). The aria-wiring runner asserts that
+ * the consumer-set `background-color` survives onto the slider root. */
+export const ConsumerStylePreserved: Story = {
+  name: "Consumer style preserved (Round 5 regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Caller-passed `style` must reach the slider root, alongside " +
+          "the wrapper's `--zs-slider-value-position` custom property.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Slider consumer style"
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Slider
+          defaultValue={40}
+          min={0}
+          max={100}
+          step={1}
+          showValue
+          aria-label="Styled slider"
+          data-testid="slider-consumer-style"
+          style={{
+            backgroundColor: "rgb(255, 0, 0)",
+            paddingInline: "0.5rem",
+          }}
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("slider-consumer-style");
+    // Walk to the BaseSlider.Root element — Base UI renders it as the
+    // element with data-testid (no extra wrapper).
+    await expect(root).toHaveStyle({
+      backgroundColor: "rgb(255, 0, 0)",
+    });
+  },
+};

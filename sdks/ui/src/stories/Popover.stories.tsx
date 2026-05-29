@@ -633,3 +633,66 @@ export const CloseAsChildComposition: Story = {
     );
   },
 };
+
+/* ─── 12. CloseAsChildForwardsRest — Round 5 fix #3 (Popover) ─────────── *
+ *
+ * Regression for Round 5 fix #3 (Popover.Close). Pre-fix, the asChild
+ * branch only forwarded `closeProps` + `ref` + `onClick` to the Slot,
+ * dropping wrapper-level `rest` props (className, data-*, aria-*,
+ * disabled, style). Post-fix, `{...rest}` reaches the Slot so the
+ * rendered child carries the className AND data-side-effect attribute
+ * the caller set on `<Popover.Close>`. */
+export const CloseAsChildForwardsRest: Story = {
+  name: "Close asChild forwards wrapper rest (Round 5 regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Wrapper-level `className`, `data-side-effect`, and " +
+          "`aria-keyshortcuts` set on `<Popover.Close asChild>` must " +
+          "land on the rendered child via Slot.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Close asChild rest">
+      <Popover>
+        <Popover.Trigger render={<Button>Open close-with-rest</Button>} />
+        <Popover.Portal>
+          <Popover.Popup data-testid="popover-close-rest-popup">
+            <Popover.Title>Close forwards rest</Popover.Title>
+            <Popover.Description>
+              The wrapper-level className and data-attribute must reach
+              the child button through Slot.
+            </Popover.Description>
+            <Popover.Close
+              asChild
+              className="custom-close-class"
+              data-side-effect="logged"
+              aria-keyshortcuts="Escape"
+            >
+              <button
+                type="button"
+                data-testid="popover-close-rest-target"
+              >
+                Got it
+              </button>
+            </Popover.Close>
+          </Popover.Popup>
+        </Popover.Portal>
+      </Popover>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open close-with-rest/i }),
+    );
+    const target = await body.findByTestId("popover-close-rest-target");
+    await expect(target).toHaveClass("custom-close-class");
+    await expect(target).toHaveAttribute("data-side-effect", "logged");
+    await expect(target).toHaveAttribute("aria-keyshortcuts", "Escape");
+  },
+};

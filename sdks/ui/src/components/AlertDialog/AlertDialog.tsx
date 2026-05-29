@@ -41,13 +41,12 @@ import {
   type ComponentPropsWithRef,
   type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
-  type ReactElement,
   type ReactNode,
   type Ref,
 } from "react";
 import { AlertDialog as BaseAlertDialog } from "@base-ui/react/alert-dialog";
 import { Button, type ButtonProps } from "../Button";
-import { Slot, composeRefs, getElementRef } from "../_slot";
+import { Slot, composeRefs } from "../_slot";
 import { classnames, composeBaseClass } from "../_classnames";
 
 export type AlertDialogSize = "sm" | "md" | "lg";
@@ -576,25 +575,13 @@ const AlertDialogCancel = forwardRef<HTMLElement, AlertDialogCancelProps>(
 
           if (asChild) {
             if (!isValidElement(children)) return <></>;
-            // Slot handles className / style / event composition and
-            // ref fan-out, including React 19's `element.props.ref`
-            // shape (review-fix item 7). Caller's onClick on the
-            // <AlertDialog.Cancel> AND the child's onClick both
-            // compose with the close handler.
-            const childOnClick = (
-              (children as ReactElement).props as {
-                onClick?: typeof composedOnClick;
-              }
-            ).onClick;
-            const slotOnClick = (event: ReactMouseEvent<HTMLElement>) => {
-              childOnClick?.(event);
-              if (!event.defaultPrevented) {
-                callerOnClick?.(event as ReactMouseEvent<HTMLButtonElement>);
-                if (!event.defaultPrevented) {
-                  closePropsOnClick?.(event);
-                }
-              }
-            };
+            // Slot's mergeProps composes the child's onClick with the
+            // one we hand it (theirs first; if not preventDefault'd,
+            // ours runs). We pass `composedOnClick` — caller's onClick
+            // + Base UI close — and let Slot handle the child's
+            // onClick. Manually extracting & calling the child's
+            // onClick AGAIN here double-fires it (Slot still composes).
+            // Mirrors Dialog.Close 3a64a726.
             return (
               <Slot
                 {...closeProps}
@@ -602,10 +589,9 @@ const AlertDialogCancel = forwardRef<HTMLElement, AlertDialogCancelProps>(
                 ref={composeRefs(
                   ref as Ref<unknown>,
                   cancelRef as Ref<unknown>,
-                  getElementRef(children),
                   closePropsRef,
                 )}
-                onClick={slotOnClick}
+                onClick={composedOnClick}
               >
                 {children}
               </Slot>

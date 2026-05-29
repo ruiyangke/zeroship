@@ -65,9 +65,15 @@ type BaseToolbarRootProps = ComponentPropsWithoutRef<typeof BaseToolbar.Root>;
  *     element props last (rightmost-wins), so a `<Toolbar role="…">`
  *     consumer would otherwise overwrite the contract. The `Omit` here
  *     plus the runtime strip in `ToolbarRoot` together enforce it.
+ *   - `aria-orientation`: LOCKED to track the `orientation` prop. Base
+ *     UI computes the attribute from the resolved orientation; allowing
+ *     a caller to pass it directly would let `<Toolbar orientation=
+ *     "horizontal" aria-orientation="vertical">` ship inconsistent ARIA.
+ *     The `Omit` is the compile-time guard and the runtime strip below
+ *     is the spread-injection guard.
  */
 export interface ToolbarProps
-  extends Omit<BaseToolbarRootProps, "render" | "role"> {
+  extends Omit<BaseToolbarRootProps, "render" | "role" | "aria-orientation"> {
   /**
    * Layout axis.
    *
@@ -110,14 +116,23 @@ const ToolbarRoot = forwardRef<HTMLDivElement, ToolbarProps>(
       children,
       ...rest
     } = props;
-    // Strip `role` defensively in case a caller bypasses the type system
-    // (e.g., `<Toolbar {...untypedProps}>`). The `Omit<…, "role">` above
-    // makes this a compile-time error in normal use; this guard keeps
-    // the contract intact under runtime spread.
-    const { role: _role, ...restNoRole } = rest as Record<string, unknown> & {
+    // Strip `role` AND `aria-orientation` defensively in case a caller
+    // bypasses the type system (e.g., `<Toolbar {...untypedProps}>`).
+    // The `Omit<…, "role" | "aria-orientation">` above makes both
+    // compile-time errors in normal use; this guard keeps the contract
+    // intact under runtime spread. Base UI computes `aria-orientation`
+    // from `orientation`, so letting a caller-passed `aria-orientation`
+    // through `mergeProps` (rightmost-wins) would ship inconsistent ARIA.
+    const {
+      role: _role,
+      "aria-orientation": _ariaOrientation,
+      ...restNoRole
+    } = rest as Record<string, unknown> & {
       role?: string;
+      "aria-orientation"?: string;
     };
     void _role;
+    void _ariaOrientation;
     return (
       <BaseToolbar.Root
         {...(restNoRole as BaseToolbarRootProps)}
