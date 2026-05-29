@@ -2,11 +2,8 @@
  * @zeroship/ui — public surface.
  *
  * Mid-rebuild. The exports below are intentionally narrow: theme primitives
- * plus the styled components that have landed so far, plus temporary
- * native-HTML placeholders for the names other packages still import.
- *
- * As styled components land they replace the corresponding placeholder
- * exports in this file.
+ * plus the styled components, layout primitives, and composed blocks that
+ * have landed so far.
  */
 import "./styles.css";
 
@@ -354,12 +351,7 @@ export {
   type ScrollAreaCornerProps,
 } from "./components";
 
-// Layout primitives + compositions, and composed blocks.
+// Layout primitives + compositions, and composed blocks (Badge + Tag
+// chip blocks are exported from ./blocks).
 export * from "./layouts";
 export * from "./blocks";
-
-// Temporary placeholders — see ./placeholders.tsx for migration tracking.
-export {
-  Badge,
-  type BadgeProps,
-} from "./placeholders";

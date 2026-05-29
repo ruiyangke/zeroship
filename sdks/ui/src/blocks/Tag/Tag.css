@@ -1,0 +1,213 @@
+/*
+ * Tag — interactive chip (removable / static, or filter toggle).
+ *
+ * Anatomy:
+ *   .zs-tag                       — root (span in removable/static mode,
+ *                                   button in filter mode)
+ *     ├─ .zs-tag__icon            — optional decorative leading slot
+ *     ├─ .zs-tag__label           — the text token
+ *     └─ .zs-tag__remove          — trailing remove button (removable
+ *                                   mode only); .zs-tag__remove-glyph
+ *                                   holds the aria-hidden × glyph
+ *
+ * Glass / axe-contrast invariant: the resting chip paints an OPAQUE
+ * tinted base (the neutral fill blended INTO --zs-surface) so axe's
+ * color-contrast walk resolves against a known background. The filter
+ * selected state swaps to the opaque --zs-accent fill.
+ *
+ * Motion: hover/selected background transitions, honored down to none
+ * under prefers-reduced-motion via the --zs-motion-* tokens (which the
+ * root stylesheet collapses to 1ms under reduce). The remove button's
+ * tap-target uses the standard active-scale guarded the same way.
+ */
+
+.zs-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  white-space: nowrap;
+  font-family: var(--zs-font-system);
+  font-weight: 600;
+  border-radius: var(--zs-radius-full);
+  border: var(--zs-selection-hairline) solid transparent;
+  /* OPAQUE tinted base (neutral fill mixed into the surface) — never
+     alpha-over-page. */
+  background: color-mix(in oklch, var(--zs-label) 8%, var(--zs-surface));
+  color: var(--zs-label);
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* ─── sizes ────────────────────────────────────────────────────────────── */
+.zs-tag--sm {
+  padding-block: var(--zs-space-half);
+  padding-inline: var(--zs-space-2);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+.zs-tag--md {
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+/* Tighten the trailing edge when a remove button rides along so the ×
+   doesn't sit too far from the chip edge. */
+.zs-tag--removable.zs-tag--sm {
+  padding-inline-end: var(--zs-space-1);
+}
+.zs-tag--removable.zs-tag--md {
+  padding-inline-end: var(--zs-space-2);
+}
+
+.zs-tag__icon {
+  display: inline-flex;
+  align-items: center;
+  font-size: 1em;
+  line-height: 1;
+}
+.zs-tag__icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+
+.zs-tag__label {
+  display: block;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── remove button ──────────────────────────────────────────────────────
+ * A real <button>. Square-ish, pill-clipped, sits inside the tag's
+ * trailing edge. The glyph is centered; the button grows a subtle
+ * hover/active wash so the affordance reads.
+ */
+.zs-tag__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+  border-radius: var(--zs-radius-full);
+  background: transparent;
+  color: inherit;
+  /* Quieter than the label so the × reads as secondary chrome until
+     hovered. */
+  opacity: 0.7;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-tag__remove[data-size="sm"] {
+  inline-size: 1rem;
+  block-size: 1rem;
+  font-size: var(--zs-text-footnote-size);
+}
+.zs-tag__remove[data-size="md"] {
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  font-size: var(--zs-text-callout-size);
+}
+.zs-tag__remove-glyph {
+  line-height: 1;
+}
+@media (hover: hover) {
+  .zs-tag__remove:hover {
+    opacity: 1;
+    background: color-mix(in oklch, var(--zs-label) 14%, transparent);
+  }
+}
+.zs-tag__remove:active {
+  background: color-mix(in oklch, var(--zs-label) 20%, transparent);
+}
+.zs-tag__remove:focus-visible {
+  outline: var(--zs-button-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+  opacity: 1;
+}
+
+/* ─── filter mode ────────────────────────────────────────────────────────
+ * Root is a <button aria-pressed>. Unselected reads like the neutral
+ * resting chip; selected swaps to the opaque accent fill.
+ */
+.zs-tag--filter {
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .zs-tag--filter:hover:not([data-selected]) {
+    background: color-mix(in oklch, var(--zs-label) 12%, var(--zs-surface));
+  }
+}
+.zs-tag--filter:focus-visible {
+  outline: var(--zs-button-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+.zs-tag--filter[data-selected] {
+  background: var(--zs-accent);
+  color: var(--zs-accent-ink);
+  border-color: var(--zs-accent);
+}
+@media (hover: hover) {
+  .zs-tag--filter[data-selected]:hover {
+    background: var(--zs-accent-hover);
+    border-color: var(--zs-accent-hover);
+  }
+}
+
+/* ─── forced-colors ──────────────────────────────────────────────────────
+ * Keep the chip outline and the selected state visible without relying
+ * on token colors. The remove glyph stays CanvasText; the selected
+ * filter state maps to the Highlight pair.
+ */
+@media (forced-colors: active) {
+  .zs-tag {
+    forced-color-adjust: none;
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
+  .zs-tag__remove {
+    color: CanvasText;
+    opacity: 1;
+  }
+  .zs-tag__remove:hover,
+  .zs-tag__remove:active {
+    background: transparent;
+  }
+  .zs-tag--filter[data-selected] {
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+  /* Specificity mirror (wave-2b 🔴). The normal-mode filter hover
+     selectors `.zs-tag--filter:hover:not([data-selected])` and
+     `.zs-tag--filter[data-selected]:hover` outrank the plain
+     `.zs-tag` / `.zs-tag--filter[data-selected]` system-color rules
+     above, so without a same-shape mirror a HOVERED filter chip would
+     paint the OKLCH `--zs-label`/`--zs-accent-hover` mix instead of the
+     system colors. Each mirror reuses the SAME selector shape so
+     specificity ties and source order (this block is last) wins. */
+  .zs-tag--filter:hover:not([data-selected]) {
+    forced-color-adjust: none;
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
+  .zs-tag--filter[data-selected]:hover {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+  .zs-tag--filter:focus-visible,
+  .zs-tag__remove:focus-visible {
+    outline-color: CanvasText;
+  }
+}

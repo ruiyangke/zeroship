@@ -1,0 +1,168 @@
+/*
+ * Badge — static status/label chip. Intent × Variant × Size.
+ *
+ * Anatomy: a single inline-flex `<span>` (or asChild element). No
+ * subparts, no pseudo-element overlays (axe-glass rule — a ::before
+ * tint would break the color-contrast walk).
+ *
+ * Token plumbing: each intent block resolves a small set of locals —
+ *
+ *   --zs-badge-solid-bg     opaque fill for the solid variant
+ *   --zs-badge-solid-ink    ink on the solid fill
+ *   --zs-badge-soft-bg      OPAQUE tinted base for soft (mixed INTO the
+ *                           surface token, never alpha-over-page)
+ *   --zs-badge-soft-ink     intent-toned ink on the soft base
+ *   --zs-badge-border       border color for the outline variant
+ *
+ * The variant rules below consume those locals so the intent × variant
+ * matrix stays a single declaration per cell. The "soft"/"outline"
+ * backgrounds are blended into `--zs-surface` (the opaque theme surface)
+ * rather than `transparent` so every cell has a computable opaque base.
+ *
+ * Contrast notes (verified axe-clean across all 5×3 cells):
+ *   - solid success/warning: system-green (L≈0.6) and system-orange
+ *     (L≈0.7) are too light to carry near-white ink at 4.5:1, so the
+ *     solid fill is DEEPENED toward --zs-label before the ink lands on
+ *     it. info/danger/neutral are already deep enough for white ink.
+ *   - soft/outline ink: pulled to the intent's deepest tone (the
+ *     -active system step, or --zs-label for neutral) so the intent
+ *     ink clears 4.5:1 on the light tinted base.
+ */
+
+.zs-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-1);
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  white-space: nowrap;
+  font-family: var(--zs-font-system);
+  font-weight: 600;
+  /* Pill radius — the canonical chip shape. */
+  border-radius: var(--zs-radius-full);
+  /* Outline variant adds a visible border; solid/soft keep a
+     transparent same-width border so the box size is identical across
+     variants (no layout shift when a consumer swaps variant). */
+  border: var(--zs-selection-hairline) solid transparent;
+  /* Long-label safety: clip + ellipsize rather than wrap (a chip is a
+     single token). */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── sizes ────────────────────────────────────────────────────────────── */
+.zs-badge--sm {
+  padding-block: var(--zs-space-half);
+  padding-inline: var(--zs-space-2);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+.zs-badge--md {
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+/* ─── intent palettes ────────────────────────────────────────────────────
+ * Each intent resolves the five locals consumed by the variant rules.
+ * `--zs-surface` is the opaque theme surface; mixing a tint INTO it
+ * keeps every soft/outline base opaque for axe.
+ */
+
+/* neutral — label/fill greys. */
+.zs-badge--neutral {
+  --zs-badge-solid-bg: var(--zs-label-secondary);
+  --zs-badge-solid-ink: var(--zs-accent-ink);
+  --zs-badge-soft-bg: color-mix(in oklch, var(--zs-label) 10%, var(--zs-surface));
+  --zs-badge-soft-ink: var(--zs-label);
+  --zs-badge-border: var(--zs-separator-strong);
+}
+
+/* info — accent palette. */
+.zs-badge--info {
+  --zs-badge-solid-bg: var(--zs-accent);
+  --zs-badge-solid-ink: var(--zs-accent-ink);
+  --zs-badge-soft-bg: color-mix(in oklch, var(--zs-accent) 14%, var(--zs-surface));
+  --zs-badge-soft-ink: var(--zs-accent-active);
+  --zs-badge-border: var(--zs-accent);
+}
+
+/* success — system-green. Solid fill deepened so near-white ink clears AA. */
+.zs-badge--success {
+  /* Deepening toward --zs-label uses rectangular oklab so the hue stays
+     green (polar oklch would rotate it toward teal). */
+  --zs-badge-solid-bg: color-mix(in oklab, var(--zs-system-green) 78%, var(--zs-label));
+  --zs-badge-solid-ink: var(--zs-accent-ink);
+  --zs-badge-soft-bg: color-mix(in oklch, var(--zs-system-green) 16%, var(--zs-surface));
+  --zs-badge-soft-ink: color-mix(in oklab, var(--zs-system-green) 60%, var(--zs-label));
+  --zs-badge-border: var(--zs-system-green);
+}
+
+/* warning — system-orange. Lightest intent; solid fill deepened most. */
+.zs-badge--warning {
+  /* Deepening toward --zs-label uses rectangular oklab so the hue stays
+     orange (polar oklch would rotate it toward magenta/red). */
+  --zs-badge-solid-bg: color-mix(in oklab, var(--zs-system-orange) 64%, var(--zs-label));
+  --zs-badge-solid-ink: var(--zs-accent-ink);
+  --zs-badge-soft-bg: color-mix(in oklch, var(--zs-system-orange) 18%, var(--zs-surface));
+  --zs-badge-soft-ink: color-mix(in oklab, var(--zs-system-orange) 48%, var(--zs-label));
+  --zs-badge-border: var(--zs-system-orange);
+}
+
+/* danger — system-red. */
+.zs-badge--danger {
+  --zs-badge-solid-bg: var(--zs-system-red);
+  --zs-badge-solid-ink: var(--zs-accent-ink);
+  --zs-badge-soft-bg: color-mix(in oklch, var(--zs-system-red) 14%, var(--zs-surface));
+  --zs-badge-soft-ink: var(--zs-system-red-active);
+  --zs-badge-border: var(--zs-system-red);
+}
+
+/* ─── variants ───────────────────────────────────────────────────────────
+ * Each consumes the intent locals. Backgrounds are always opaque.
+ */
+.zs-badge--solid {
+  background: var(--zs-badge-solid-bg);
+  color: var(--zs-badge-solid-ink);
+}
+
+.zs-badge--soft {
+  background: var(--zs-badge-soft-bg);
+  color: var(--zs-badge-soft-ink);
+}
+
+.zs-badge--outline {
+  /* Opaque surface base so axe always has something to measure against;
+     the intent shows through the border + ink, not via alpha. */
+  background: var(--zs-surface);
+  color: var(--zs-badge-soft-ink);
+  border-color: var(--zs-badge-border);
+}
+
+/* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ───
+ * System palettes have no green/orange/red slot, so defer to system
+ * colors. The text carries the status meaning; the chip stays a
+ * legible bordered token. solid maps to the Highlight pair; soft /
+ * outline map to the Canvas pair with a visible CanvasText border so
+ * the chip shape survives.
+ */
+@media (forced-colors: active) {
+  .zs-badge {
+    forced-color-adjust: none;
+    border-color: CanvasText;
+  }
+  .zs-badge--solid {
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+  .zs-badge--soft,
+  .zs-badge--outline {
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
+}

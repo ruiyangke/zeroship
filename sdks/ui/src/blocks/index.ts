@@ -17,3 +17,13 @@ export {
 } from "./ErrorState";
 export { Skeleton, type SkeletonProps, type SkeletonVariant } from "./Skeleton";
 export { Spinner, type SpinnerProps, type SpinnerSize } from "./Spinner";
+
+// Chip blocks (Wave 2b) — static status/label chip + interactive chip.
+export {
+  Badge,
+  type BadgeProps,
+  type BadgeIntent,
+  type BadgeVariant,
+  type BadgeSize,
+} from "./Badge";
+export { Tag, type TagProps, type TagSize } from "./Tag";

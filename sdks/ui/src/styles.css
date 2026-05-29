@@ -65,6 +65,8 @@
 @import "./blocks/ErrorState/ErrorState.css";
 @import "./blocks/Skeleton/Skeleton.css";
 @import "./blocks/Spinner/Spinner.css";
+@import "./blocks/Badge/Badge.css";
+@import "./blocks/Tag/Tag.css";
 
 *,
 *::before,
