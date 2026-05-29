@@ -47,6 +47,11 @@ pub struct FileConfig {
     /// Observability configuration shared by platform binaries.
     #[serde(default)]
     pub observability: ObsSection,
+    /// Secret-reference overlay: optional `urn:`/`arn:` references for each
+    /// platform secret. Every field is reference-only (a literal is rejected at
+    /// resolve); absent fields fall back to CLI/env/default.
+    #[serde(default)]
+    pub secrets: SecretSection,
 }
 
 /// Auth-domain values that can be supplied by the shared file overlay.
@@ -62,6 +67,47 @@ pub struct AuthSection {
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
     /// means exactly that set, where an empty vec is "no trusted clients".
     pub trusted_oauth_clients: Option<Vec<String>>,
+}
+
+/// Secret references that can be supplied by the shared file overlay.
+///
+/// Every field is an OPTIONAL secret REFERENCE (`urn:`/`arn:`). Absent => the
+/// secret comes from CLI/env/default. A literal value here is rejected at resolve
+/// by [`crate::config::secrets::obtain_secret`]: the config file must never carry
+/// a plaintext secret.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SecretSection {
+    /// Bundle/master encryption key reference.
+    pub master_key: Option<String>,
+    /// Control-plane shared secret reference.
+    pub control_key: Option<String>,
+    /// Worker shared secret reference.
+    pub worker_key: Option<String>,
+    /// Stash signing key reference.
+    pub stash_signing_key: Option<String>,
+    /// Gateway OIDC relying-party client secret reference.
+    pub gateway_oidc_secret: Option<String>,
+    /// Console OIDC relying-party client secret reference.
+    pub console_oidc_secret: Option<String>,
+    /// Stripe webhook signing secret reference.
+    pub stripe_webhook_secret: Option<String>,
+    /// Primary database URL reference.
+    pub database_url: Option<String>,
+    /// Auth database URL reference.
+    pub auth_db_url: Option<String>,
+    /// Legacy master keys (for key rotation) reference.
+    pub legacy_master_keys: Option<String>,
+    /// Google OAuth client secret reference.
+    pub google_client_secret: Option<String>,
+    /// GitHub OAuth client secret reference.
+    pub github_client_secret: Option<String>,
+    /// SMTP password reference.
+    pub smtp_password: Option<String>,
+    /// Resend API key reference.
+    pub resend_api_key: Option<String>,
+    /// Postmark inbound webhook basic-auth password reference.
+    pub postmark_webhook_password: Option<String>,
 }
 
 /// Observability values that can be supplied by the shared file overlay.
@@ -321,5 +367,60 @@ trusted_oauth_clients = ["a", "b"]
             config.auth.trusted_oauth_clients,
             Some(vec!["a".to_string(), "b".to_string()])
         );
+    }
+
+    // [secrets] absent => all-None section (defaults).
+    #[test]
+    fn secrets_section_absent_is_all_none() {
+        let config = FileConfig::load(None).expect("load default config");
+        assert!(config.secrets.master_key.is_none());
+        assert!(config.secrets.database_url.is_none());
+        assert!(config.secrets.resend_api_key.is_none());
+    }
+
+    // [secrets] parses a reference value into the matching field.
+    #[test]
+    fn secrets_section_parses_reference() {
+        let file = TempFile::write(
+            "secrets.toml",
+            r#"
+[secrets]
+master_key = "urn:zeroship:vault:secret/x"
+database_url = "urn:zeroship:env:DATABASE_URL"
+stripe_webhook_secret = "arn:aws:secretsmanager:us-east-1:123:secret:whsec"
+"#,
+        );
+
+        let config = FileConfig::load(Some(&file.path)).expect("load config");
+        assert_eq!(
+            config.secrets.master_key.as_deref(),
+            Some("urn:zeroship:vault:secret/x")
+        );
+        assert_eq!(
+            config.secrets.database_url.as_deref(),
+            Some("urn:zeroship:env:DATABASE_URL")
+        );
+        assert_eq!(
+            config.secrets.stripe_webhook_secret.as_deref(),
+            Some("arn:aws:secretsmanager:us-east-1:123:secret:whsec")
+        );
+        // Unmentioned fields stay None.
+        assert!(config.secrets.control_key.is_none());
+    }
+
+    // deny_unknown_fields on [secrets]: an unknown key is a parse error, not a
+    // silent ignore.
+    #[test]
+    fn deny_unknown_fields_in_secrets_section_is_parse_error() {
+        let file = TempFile::write(
+            "unknown-secret-key.toml",
+            r#"
+[secrets]
+maser_key = "urn:zeroship:vault:secret/x"
+"#,
+        );
+
+        let err = FileConfig::load(Some(&file.path)).expect_err("unknown key rejected");
+        assert!(matches!(err, ConfigError::Parse { .. }));
     }
 }

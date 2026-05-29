@@ -10,8 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, resolve_secret_or_exit, validate_secret_ref_or_exit, validate_stash_key,
-    CheckConfigReport, CheckFormat, CheckValue,
+    bootstrap_or_exit, obtain_secret, validate_stash_key, CheckConfigReport, CheckFormat,
+    CheckValue, SecretSection,
 };
 use zeroship_core::oidc_verify::JwksCache;
 
@@ -36,6 +36,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info,zeroship_auth=debug",
         "auth",
     );
+    // Snapshot the [secrets] file overlay so each secret can consult its file-tier
+    // reference. `file` stays a shared borrow of the overlay and `cfg.resolve` below
+    // gets a clone of the `[auth]` section, so nothing is moved out of the overlay;
+    // this `.clone()` of `.secrets` is a small defensive snapshot for clarity.
+    let file_secrets = boot.overlay.config.secrets.clone();
     let file = &boot.overlay.config;
     cfg.resolve(file.auth.clone());
 
@@ -46,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // plain literal passes through byte-identically in both modes. Pure file-PATH
     // fields (none in auth today) are excluded; these are the exact fields the
     // redacting Debug impl prints as "<redacted>" minus the OAuth client *IDs*.
-    resolve_auth_secrets(&mut cfg);
+    resolve_auth_secrets(&mut cfg, &file_secrets);
 
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
@@ -197,73 +202,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Each field here is one the redacting [`AuthConfig`] `Debug` impl prints as
 /// `<redacted>` (DSN, stash signing key, OAuth client *secrets*, SMTP/Resend
-/// keys, webhook password) — never the cleartext OAuth client *IDs*. On real
-/// boot the value is resolved to its literal (env/file read via
-/// [`resolve_secret_or_exit`]); under `--check-config` only the reference FORMAT
-/// is validated ([`validate_secret_ref_or_exit`]) and the raw ref is kept so no
-/// side effects fire. A plain literal is byte-identical in both modes.
+/// keys, webhook password) — never the cleartext OAuth client *IDs*. Each secret
+/// is obtained via [`obtain_secret`] with precedence CLI/env > `[secrets]` file
+/// (reference-only) > default. On real boot the value is resolved to its literal
+/// (env/file read); under `--check-config` only the reference FORMAT is validated
+/// and the raw ref is kept so no side effects fire. A plain literal CLI/env value
+/// is byte-identical in both modes.
 ///
-/// `Option<String>` secrets are resolved only when present and non-empty; an
-/// absent OAuth/mailer credential stays `None` (its provider arm is disabled).
-fn resolve_auth_secrets(cfg: &mut AuthConfig) {
+/// `Option<String>` secrets fall back to the `[secrets]` file tier only when the
+/// CLI/env value is absent or empty; when neither tier supplies a value the field
+/// stays `None` (its provider arm is disabled).
+fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
     let check = cfg.check_config;
 
     // Required-string secrets (always present on the CLI struct).
-    resolve_required(check, "AUTH_DB_URL / --db-url", &mut cfg.db_url);
-    resolve_required(
+    cfg.db_url = obtain_secret(
+        "AUTH_DB_URL / --db-url",
+        &cfg.db_url,
+        file_secrets.auth_db_url.as_deref(),
         check,
+    );
+    cfg.stash_signing_key = obtain_secret(
         "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
-        &mut cfg.stash_signing_key,
+        &cfg.stash_signing_key,
+        file_secrets.stash_signing_key.as_deref(),
+        check,
     );
 
-    // Optional secrets — resolve in place only when set & non-empty.
-    resolve_optional(
+    // Optional secrets — obtain only when the CLI/env or file tier supplies a
+    // value; an all-empty result leaves the provider arm disabled (`None`).
+    cfg.google_client_secret = resolve_optional(
         check,
         "AUTH_GOOGLE_CLIENT_SECRET / --google-client-secret",
-        &mut cfg.google_client_secret,
+        cfg.google_client_secret.as_deref(),
+        file_secrets.google_client_secret.as_deref(),
     );
-    resolve_optional(
+    cfg.github_client_secret = resolve_optional(
         check,
         "AUTH_GITHUB_CLIENT_SECRET / --github-client-secret",
-        &mut cfg.github_client_secret,
+        cfg.github_client_secret.as_deref(),
+        file_secrets.github_client_secret.as_deref(),
     );
-    resolve_optional(
+    cfg.smtp_password = resolve_optional(
         check,
         "AUTH_SMTP_PASSWORD / --smtp-password",
-        &mut cfg.smtp_password,
+        cfg.smtp_password.as_deref(),
+        file_secrets.smtp_password.as_deref(),
     );
-    resolve_optional(
+    cfg.resend_api_key = resolve_optional(
         check,
         "AUTH_RESEND_API_KEY / --resend-api-key",
-        &mut cfg.resend_api_key,
+        cfg.resend_api_key.as_deref(),
+        file_secrets.resend_api_key.as_deref(),
     );
-    resolve_optional(
+    cfg.postmark_webhook_password = resolve_optional(
         check,
         "AUTH_POSTMARK_WEBHOOK_PASSWORD / --postmark-webhook-password",
-        &mut cfg.postmark_webhook_password,
+        cfg.postmark_webhook_password.as_deref(),
+        file_secrets.postmark_webhook_password.as_deref(),
     );
 }
 
-/// Resolve one required-string secret in place (see [`resolve_auth_secrets`]).
-fn resolve_required(check_config: bool, label: &str, field: &mut String) {
-    if check_config {
-        validate_secret_ref_or_exit(label, field);
-    } else {
-        *field = resolve_secret_or_exit(label, field);
-    }
-}
-
-/// Resolve one optional secret in place. Absent/empty values are left untouched
-/// (the corresponding provider arm stays disabled); see [`resolve_auth_secrets`].
-fn resolve_optional(check_config: bool, label: &str, field: &mut Option<String>) {
-    let Some(raw) = field.as_deref() else { return };
-    if raw.is_empty() {
-        return;
-    }
-    if check_config {
-        validate_secret_ref_or_exit(label, raw);
-    } else {
-        *field = Some(resolve_secret_or_exit(label, raw));
+/// Obtain one optional secret across the CLI/env and `[secrets]` file tiers.
+///
+/// Preserves the original optional behaviour byte-for-byte when no file tier is
+/// involved: an absent field stays `None`, and a present-but-empty CLI/env value
+/// stays `Some("")` (untouched). The `[secrets]` file tier is consulted only when
+/// the CLI/env value is empty AND a file reference exists; in that case the file
+/// reference is resolved via [`obtain_secret`]. A non-empty CLI/env value always
+/// wins over a file reference (see [`obtain_secret`]).
+fn resolve_optional(
+    check_config: bool,
+    label: &str,
+    cli: Option<&str>,
+    file: Option<&str>,
+) -> Option<String> {
+    match cli {
+        // Present, non-empty ⇒ CLI/env wins (file is ignored by obtain_secret).
+        Some(raw) if !raw.is_empty() => Some(obtain_secret(label, raw, file, check_config)),
+        // Empty/absent CLI with a file reference ⇒ obtain from the file tier.
+        _ if file.is_some() => Some(obtain_secret(label, cli.unwrap_or(""), file, check_config)),
+        // No file tier ⇒ leave the field exactly as it was (None stays None,
+        // Some("") stays Some("")), matching pre-[secrets] behaviour.
+        other => other.map(str::to_string),
     }
 }
 
@@ -322,9 +343,9 @@ fn is_loopback_addr(addr: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_loopback_addr;
+    use super::{is_loopback_addr, resolve_optional};
     use zeroship_core::config::{
-        is_secret_ref, resolve_secret, validate_secret_ref, validate_stash_key,
+        is_secret_ref, obtain_secret, resolve_secret, validate_secret_ref, validate_stash_key,
     };
 
     #[test]
@@ -412,5 +433,71 @@ mod tests {
         assert!(validate_secret_ref("urn:bogus:x").is_err());
         // A well-formed env reference is NOT malformed (format-only check).
         assert!(validate_secret_ref("urn:zeroship:env:MY_VAR").is_ok());
+    }
+
+    // [secrets] file tier (d): a required secret falls back to its [secrets]
+    // file reference when the CLI/env value is empty. This is the exact wiring
+    // resolve_auth_secrets uses for db_url / stash_signing_key. Asserted through
+    // the public obtain_secret so the test does not depend on env-var visibility
+    // of the binary's own AUTH_* names.
+    #[test]
+    fn secrets_file_ref_used_when_cli_empty() {
+        // Unique per-process var name; edition 2021: set_var is safe (no unsafe
+        // block; workspace denies unsafe_code).
+        let var = format!("ZS_AUTH_TEST_FILE_TIER_{}", std::process::id());
+        std::env::set_var(&var, "from-secrets-file");
+        let reference = format!("urn:zeroship:env:{var}");
+
+        // Empty CLI/env => the [secrets] file reference is resolved.
+        let out = obtain_secret("AUTH_DB_URL / --db-url", "", Some(&reference), false);
+        assert_eq!(out, "from-secrets-file");
+        std::env::remove_var(&var);
+    }
+
+    // [secrets] file tier precedence: a non-empty CLI/env value WINS over the
+    // [secrets] file reference (CLI/env > file). The file ref is never resolved.
+    #[test]
+    fn cli_value_wins_over_secrets_file_ref() {
+        // A literal CLI value beats the file reference; the env ref is ignored
+        // (never read), so an unset env var must not cause a failure.
+        let reference = "urn:zeroship:env:ZS_AUTH_UNSET_PROVES_CLI_WINS";
+        let out = obtain_secret(
+            "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
+            "literal-cli-secret",
+            Some(reference),
+            false,
+        );
+        assert_eq!(out, "literal-cli-secret");
+    }
+
+    // Optional secret across the file tier: an empty CLI value with a [secrets]
+    // file reference resolves the file tier; an empty CLI with NO file leaves the
+    // field exactly as it was (None stays None, Some("") stays Some("")) —
+    // matching pre-[secrets] optional behaviour byte-for-byte.
+    #[test]
+    fn resolve_optional_uses_file_tier_and_preserves_empty() {
+        let var = format!("ZS_AUTH_TEST_OPT_TIER_{}", std::process::id());
+        std::env::set_var(&var, "opt-from-file");
+        let reference = format!("urn:zeroship:env:{var}");
+
+        // Empty/absent CLI + file ref => obtained from the file tier.
+        assert_eq!(
+            resolve_optional(false, "AUTH_RESEND_API_KEY", None, Some(&reference)),
+            Some("opt-from-file".to_string())
+        );
+        // Non-empty CLI wins over the file ref.
+        assert_eq!(
+            resolve_optional(false, "AUTH_RESEND_API_KEY", Some("cli-wins"), Some(&reference)),
+            Some("cli-wins".to_string())
+        );
+        // No CLI, no file => stays disabled (None), unchanged from before.
+        assert_eq!(resolve_optional(false, "AUTH_RESEND_API_KEY", None, None), None);
+        // Present-but-empty CLI, no file => stays Some("") (untouched), matching
+        // the original resolve_optional empty-passthrough behaviour.
+        assert_eq!(
+            resolve_optional(false, "AUTH_RESEND_API_KEY", Some(""), None),
+            Some(String::new())
+        );
+        std::env::remove_var(&var);
     }
 }

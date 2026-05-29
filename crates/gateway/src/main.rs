@@ -189,6 +189,11 @@ fn main() -> std::io::Result<()> {
         "gateway",
     );
     let file = &boot.overlay.config;
+    // `[secrets]` file-tier overlay — bound ONCE before any secret resolution.
+    // The gateway never partially moves `boot.overlay.config`, so a reference
+    // is sufficient (no clone needed). Precedence per field: CLI/env > this
+    // reference-only file tier > default, applied by `obtain_secret`.
+    let file_secrets = &file.secrets;
 
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
@@ -207,32 +212,23 @@ fn main() -> std::io::Result<()> {
     // at real boot. During `--check-config` we only validate the reference
     // FORMAT (no env/file/network reads), keeping the local as the raw ref
     // string for the (non-secret) report.
-    let control_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "CONTROL_KEY / --control-key",
-            &cli.control_key,
-        );
-        cli.control_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "CONTROL_KEY / --control-key",
-            &cli.control_key,
-        )
-    };
+    let control_key = zeroship_core::config::obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cli.control_key,
+        file_secrets.control_key.as_deref(),
+        cli.check_config,
+    );
     // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
     // entries) and reuse it for both the check-config count and the
     // runtime hash ring, so the two can never disagree.
     let worker_urls = parse_worker_urls(&cli.workers);
     let poll_interval = cli.poll_interval;
-    let worker_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "WORKER_KEY / --worker-key",
-            &cli.worker_key,
-        );
-        cli.worker_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("WORKER_KEY / --worker-key", &cli.worker_key)
-    };
+    let worker_key = zeroship_core::config::obtain_secret(
+        "WORKER_KEY / --worker-key",
+        &cli.worker_key,
+        file_secrets.worker_key.as_deref(),
+        cli.check_config,
+    );
     let blob_store_root = cli.blob_store;
     let blob_cache_mem_mb = cli.blob_cache_mem_mb;
     let blob_cache_disk_gb = cli.blob_cache_disk_gb;
@@ -240,36 +236,24 @@ fn main() -> std::io::Result<()> {
     let auth_ui_url = cli.auth_ui_url;
     // DSN carries the database password, so it is resolved like any other
     // secret (literals — including colon-laden DSNs — pass through unchanged).
-    let pg_dsn = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("DATABASE_URL / --db", &cli.db);
-        cli.db
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("DATABASE_URL / --db", &cli.db)
-    };
-    let oidc_client_secret = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-            &cli.gateway_oidc_secret,
-        );
-        cli.gateway_oidc_secret
-    } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-            &cli.gateway_oidc_secret,
-        )
-    };
-    let stash_signing_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "STASH_SIGNING_KEY / --stash-signing-key",
-            &cli.stash_signing_key,
-        );
-        cli.stash_signing_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "STASH_SIGNING_KEY / --stash-signing-key",
-            &cli.stash_signing_key,
-        )
-    };
+    let pg_dsn = zeroship_core::config::obtain_secret(
+        "DATABASE_URL / --db",
+        &cli.db,
+        file_secrets.database_url.as_deref(),
+        cli.check_config,
+    );
+    let oidc_client_secret = zeroship_core::config::obtain_secret(
+        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+        &cli.gateway_oidc_secret,
+        file_secrets.gateway_oidc_secret.as_deref(),
+        cli.check_config,
+    );
+    let stash_signing_key = zeroship_core::config::obtain_secret(
+        "STASH_SIGNING_KEY / --stash-signing-key",
+        &cli.stash_signing_key,
+        file_secrets.stash_signing_key.as_deref(),
+        cli.check_config,
+    );
     // File-PATH field (names a file to read), NOT a secret value — left
     // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
@@ -799,5 +783,49 @@ mod tests {
             .expect("well-formed ref is format-valid");
         zeroship_core::config::validate_secret_ref("a-plain-literal")
             .expect("a literal is format-valid");
+    }
+
+    // (d) `[secrets]` file tier — the gateway maps control_key/worker_key/
+    // database_url/gateway_oidc_secret/stash_signing_key through
+    // `obtain_secret`. When the CLI/env value is empty, a `[secrets]` file
+    // reference is used; when both are present, the CLI/env value WINS.
+    // Asserted directly against the public `obtain_secret` (the exact helper
+    // each gateway field now calls) so the precedence contract is pinned
+    // without standing up a full process boot.
+    #[test]
+    fn secrets_file_tier_used_when_cli_empty() {
+        // Empty CLI + a `[secrets]` env-reference => the reference resolves.
+        let var = format!("ZS_GW_SECRETS_TIER_{}", std::process::id());
+        std::env::set_var(&var, "resolved-from-secrets-file");
+        let reference = format!("urn:zeroship:env:{var}");
+        let out = zeroship_core::config::obtain_secret(
+            "MASTER_KEY",
+            "",
+            Some(&reference),
+            false,
+        );
+        std::env::remove_var(&var);
+        assert_eq!(
+            out, "resolved-from-secrets-file",
+            "an empty CLI value must fall through to the [secrets] file reference"
+        );
+    }
+
+    #[test]
+    fn cli_env_secret_beats_secrets_file_entry() {
+        // A non-empty CLI/env value WINS over any `[secrets]` file reference:
+        // the file reference is never even resolved (note the env var below is
+        // intentionally never set — if precedence were wrong, resolving the
+        // ref would fail/exit instead of returning the literal).
+        let out = zeroship_core::config::obtain_secret(
+            "MASTER_KEY",
+            "literal-from-cli",
+            Some("urn:zeroship:env:ZS_GW_SECRETS_TIER_NEVER_SET"),
+            false,
+        );
+        assert_eq!(
+            out, "literal-from-cli",
+            "a CLI/env secret must win over the [secrets] file entry"
+        );
     }
 }

@@ -263,6 +263,10 @@ fn main() -> std::io::Result<()> {
         "control",
     );
     let file = &boot.overlay.config;
+    // `[secrets]` file-overlay tier for the secret-reference resolver. Cloned once
+    // up front so individual `obtain_secret` calls can borrow the per-field refs
+    // (CLI/env > [secrets] file ref > default) without re-borrowing `boot`.
+    let file_secrets = boot.overlay.config.secrets.clone();
     let filter = &boot.log_filter;
 
     // CLI presence overrides env, so `--dev-insecure=false` disables a stray
@@ -320,98 +324,99 @@ fn main() -> std::io::Result<()> {
     // in both modes. DSN fields (`--db`, `--auth-db`) carry passwords, so they go
     // through the same path. Pure file-PATH fields (`--signing-key-file`,
     // `--builder-client-secret-file`) name a file to read and are NOT resolved here.
-    let db_url = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("DATABASE_URL / --db", &cli.db);
-        cli.db
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("DATABASE_URL / --db", &cli.db)
-    };
+    let db_url = zeroship_core::config::obtain_secret(
+        "DATABASE_URL / --db",
+        &cli.db,
+        file_secrets.database_url.as_deref(),
+        cli.check_config,
+    );
     let blob_store_root = cli.blob_store;
-    let control_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("CONTROL_KEY / --control-key", &cli.control_key);
-        cli.control_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("CONTROL_KEY / --control-key", &cli.control_key)
-    };
-    let master_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("MASTER_KEY / --master-key", &cli.master_key);
-        cli.master_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("MASTER_KEY / --master-key", &cli.master_key)
-    };
+    let control_key = zeroship_core::config::obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cli.control_key,
+        file_secrets.control_key.as_deref(),
+        cli.check_config,
+    );
+    let master_key = zeroship_core::config::obtain_secret(
+        "MASTER_KEY / --master-key",
+        &cli.master_key,
+        file_secrets.master_key.as_deref(),
+        cli.check_config,
+    );
     let workers_str = cli.workers;
-    let worker_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("WORKER_KEY / --worker-key", &cli.worker_key);
-        cli.worker_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("WORKER_KEY / --worker-key", &cli.worker_key)
-    };
+    let worker_key = zeroship_core::config::obtain_secret(
+        "WORKER_KEY / --worker-key",
+        &cli.worker_key,
+        file_secrets.worker_key.as_deref(),
+        cli.check_config,
+    );
     let signing_key_file = cli.signing_key_file;
-    let stripe_webhook_secret = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
-            &cli.stripe_webhook_secret,
+    let stripe_webhook_secret = zeroship_core::config::obtain_secret(
+        "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
+        &cli.stripe_webhook_secret,
+        file_secrets.stripe_webhook_secret.as_deref(),
+        cli.check_config,
+    );
+    // Comma-separated list of previous master keys, tried as fallbacks on decrypt
+    // failure during a rotation grace period. A CLI/env value is a comma-list where
+    // EACH entry may be a literal or its own secret reference (resolved per entry); an
+    // absent CLI/env value falls back to a single `[secrets]` file reference that
+    // dereferences to a comma-list string (entries are then literal).
+    let legacy_label = "LEGACY_MASTER_KEYS / --legacy-master-keys";
+    let legacy_keys: Vec<String> = if cli.legacy_master_keys.is_empty() {
+        let csv = zeroship_core::config::obtain_secret(
+            legacy_label,
+            "",
+            file_secrets.legacy_master_keys.as_deref(),
+            cli.check_config,
         );
-        cli.stripe_webhook_secret
+        // In --check-config the file reference is only format-validated (csv is then
+        // the raw ref, which must not be split); split only a resolved/literal value.
+        if cli.check_config && zeroship_core::config::is_secret_ref(&csv) {
+            Vec::new()
+        } else {
+            csv.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        }
     } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
-            &cli.stripe_webhook_secret,
-        )
+        cli.legacy_master_keys
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|entry| {
+                if cli.check_config {
+                    zeroship_core::config::validate_secret_ref_or_exit(legacy_label, entry);
+                    entry.to_owned()
+                } else {
+                    zeroship_core::config::resolve_secret_or_exit(legacy_label, entry)
+                }
+            })
+            .collect()
     };
-    // Comma-separated list of previous master keys, tried as fallbacks
-    // on decrypt failure during a rotation grace period. Each non-empty entry is
-    // resolved/validated like a standalone secret (validate-format under
-    // check-config, dereference on real boot).
-    let legacy_master_keys_raw = cli.legacy_master_keys;
-    let legacy_keys: Vec<String> = legacy_master_keys_raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .enumerate()
-        .map(|(idx, entry)| {
-            let label = format!("LEGACY_MASTER_KEYS[{idx}]");
-            if cli.check_config {
-                zeroship_core::config::validate_secret_ref_or_exit(&label, entry);
-                entry.to_owned()
-            } else {
-                zeroship_core::config::resolve_secret_or_exit(&label, entry)
-            }
-        })
-        .collect();
     let builder_redirect_uri = cli.builder_redirect_uri;
     let builder_client_secret_path = cli.builder_client_secret_file;
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
-    let console_oidc_secret = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "CONSOLE_OIDC_SECRET / --console-oidc-secret",
-            &cli.console_oidc_secret,
-        );
-        cli.console_oidc_secret
-    } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "CONSOLE_OIDC_SECRET / --console-oidc-secret",
-            &cli.console_oidc_secret,
-        )
-    };
-    let stash_signing_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "STASH_SIGNING_KEY / --stash-signing-key",
-            &cli.stash_signing_key,
-        );
-        cli.stash_signing_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "STASH_SIGNING_KEY / --stash-signing-key",
-            &cli.stash_signing_key,
-        )
-    };
-    let auth_db_url = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("AUTH_DB_URL / --auth-db", &cli.auth_db_url);
-        cli.auth_db_url
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("AUTH_DB_URL / --auth-db", &cli.auth_db_url)
-    };
+    let console_oidc_secret = zeroship_core::config::obtain_secret(
+        "CONSOLE_OIDC_SECRET / --console-oidc-secret",
+        &cli.console_oidc_secret,
+        file_secrets.console_oidc_secret.as_deref(),
+        cli.check_config,
+    );
+    let stash_signing_key = zeroship_core::config::obtain_secret(
+        "STASH_SIGNING_KEY / --stash-signing-key",
+        &cli.stash_signing_key,
+        file_secrets.stash_signing_key.as_deref(),
+        cli.check_config,
+    );
+    let auth_db_url = zeroship_core::config::obtain_secret(
+        "AUTH_DB_URL / --auth-db",
+        &cli.auth_db_url,
+        file_secrets.auth_db_url.as_deref(),
+        cli.check_config,
+    );
     let expected_oauth_audience = cli.oauth_audience;
 
     // Pure path resolution only — the writability PROBE (create_dir_all + probe
@@ -1127,5 +1132,58 @@ mod tests {
         // A well-formed reference and a plain literal both validate.
         assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:MY_VAR").is_ok());
         assert!(zeroship_core::config::validate_secret_ref(&"00".repeat(32)).is_ok());
+    }
+
+    // (d) The `[secrets]` file tier. Control now obtains every secret via
+    // `obtain_secret(label, cli, file_secrets.<field>.as_deref(), check_config)`.
+    // This pins the two wiring guarantees that would regress if the file tier were
+    // dropped or the precedence inverted:
+    //   1. an empty CLI/env value falls back to the `[secrets]` file reference, and
+    //   2. a present CLI/env value WINS over the file entry.
+    // Resolution itself (env/file deref) lives in core; here we use a real env-backed
+    // reference end-to-end so the fallback actually produces a value.
+    #[test]
+    fn secrets_file_tier_used_when_cli_empty_and_cli_wins_over_file() {
+        // Serialize against any other env-touching test in this binary.
+        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_GUARD.lock().expect("env guard");
+
+        let key = format!("ZEROSHIP_CONTROL_SECRETS_TIER_{}", std::process::id());
+        let file_ref = format!("urn:zeroship:env:{key}");
+        std::env::set_var(&key, "value-from-file-tier");
+
+        // Mirror control's wiring exactly: a `SecretSection` carries the file ref.
+        let file_secrets = zeroship_core::config::SecretSection {
+            master_key: Some(file_ref.clone()),
+            ..Default::default()
+        };
+
+        // (1) Empty CLI/env => the [secrets] file reference is consulted and resolved
+        //     (real-boot path, check_config = false).
+        let resolved = zeroship_core::config::obtain_secret(
+            "MASTER_KEY / --master-key",
+            "",
+            file_secrets.master_key.as_deref(),
+            false,
+        );
+        assert_eq!(
+            resolved, "value-from-file-tier",
+            "empty CLI must fall back to the [secrets] file reference"
+        );
+
+        // (2) A present CLI/env literal WINS over the file entry, byte-for-byte.
+        let cli_literal = "00".repeat(32);
+        let won = zeroship_core::config::obtain_secret(
+            "MASTER_KEY / --master-key",
+            &cli_literal,
+            file_secrets.master_key.as_deref(),
+            false,
+        );
+        assert_eq!(
+            won, cli_literal,
+            "a present CLI/env value must take precedence over the [secrets] file entry"
+        );
+
+        std::env::remove_var(&key);
     }
 }

@@ -187,42 +187,42 @@ fn main() -> std::io::Result<()> {
         "worker",
     );
 
+    // `[secrets]` overlay tier: reference-only values that back-fill any secret
+    // the CLI/env leaves empty (CLI/env still wins). Clone the section once,
+    // early, so later partial moves of the overlay config can't invalidate it.
+    let file_secrets = boot.overlay.config.secrets.clone();
+
     // CLI presence overrides env: `--dev-insecure=false` disables even a stray
     // `ZEROSHIP_DEV_INSECURE=1` (S1).
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let port = cli.port;
     let workers_count = resolve_worker_threads(cli.worker_threads);
     let control_url = cli.control;
-    // Secret-reference resolution (env:/file:/vault:/awssm: indirection). On the
-    // real boot path we resolve to the live value (side effects: env/file read);
-    // under --check-config we only validate the reference FORMAT, leaving the raw
-    // ref string in place so no env/file/network read happens during a dry run.
-    let control_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit(
-            "CONTROL_KEY / --control-key",
-            &cli.control_key,
-        );
-        cli.control_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit(
-            "CONTROL_KEY / --control-key",
-            &cli.control_key,
-        )
-    };
+    // Secret-reference resolution (env:/file:/vault:/awssm: indirection) with a
+    // `[secrets]` overlay tier: CLI/env > `[secrets]` file (reference-only) > unset.
+    // On the real boot path we resolve to the live value (side effects: env/file
+    // read); under --check-config we only validate the reference FORMAT, leaving the
+    // raw ref string in place so no env/file/network read happens during a dry run.
+    let control_key = zeroship_core::config::obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cli.control_key,
+        file_secrets.control_key.as_deref(),
+        cli.check_config,
+    );
     let max_isolates = cli.max_isolates;
     let poll_interval = cli.poll_interval;
-    let db_url = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("DATABASE_URL / --db", &cli.db);
-        cli.db
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("DATABASE_URL / --db", &cli.db)
-    };
-    let worker_key = if cli.check_config {
-        zeroship_core::config::validate_secret_ref_or_exit("WORKER_KEY / --worker-key", &cli.worker_key);
-        cli.worker_key
-    } else {
-        zeroship_core::config::resolve_secret_or_exit("WORKER_KEY / --worker-key", &cli.worker_key)
-    };
+    let db_url = zeroship_core::config::obtain_secret(
+        "DATABASE_URL / --db",
+        &cli.db,
+        file_secrets.database_url.as_deref(),
+        cli.check_config,
+    );
+    let worker_key = zeroship_core::config::obtain_secret(
+        "WORKER_KEY / --worker-key",
+        &cli.worker_key,
+        file_secrets.worker_key.as_deref(),
+        cli.check_config,
+    );
     let shutdown_timeout = cli.shutdown_timeout;
     let blob_store_root = cli.blob_store;
     let bind_host = cli.bind;
@@ -530,6 +530,51 @@ mod tests {
         // A well-formed reference and a plain literal both validate cleanly.
         assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:WORKER_KEY").is_ok());
         assert!(zeroship_core::config::validate_secret_ref("a-plain-literal").is_ok());
+    }
+
+    // Serialise env-touching `[secrets]` tier tests; they set/remove a process
+    // env var that `obtain_secret` resolves a `urn:zeroship:env:` reference from.
+    static SECRETS_TIER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `[secrets]` file tier regression: when the CLI/env secret is empty, the
+    /// `[secrets]` overlay reference (e.g. `control_key`/`worker_key`/`database_url`)
+    /// is resolved and used. Pre-fix the worker called `resolve_secret_or_exit`
+    /// with only the CLI value, so a `[secrets]` entry could never back-fill an
+    /// empty CLI/env secret. Mirrors `file_secrets.<NAME>` wiring on the boot path.
+    #[test]
+    fn worker_secrets_file_tier_backfills_empty_cli() {
+        let _guard = SECRETS_TIER_ENV_LOCK.lock().unwrap();
+        std::env::set_var("WORKER_TEST_SECRETS_TIER_VAR", "from-secrets-file");
+
+        // Empty CLI/env + a `[secrets]` reference → resolves to the referenced value.
+        let resolved = zeroship_core::config::obtain_secret(
+            "WORKER_KEY / --worker-key",
+            "",
+            Some("urn:zeroship:env:WORKER_TEST_SECRETS_TIER_VAR"),
+            false,
+        );
+        assert_eq!(resolved, "from-secrets-file");
+
+        std::env::remove_var("WORKER_TEST_SECRETS_TIER_VAR");
+    }
+
+    /// `[secrets]` file tier precedence: a CLI/env secret WINS over a `[secrets]`
+    /// overlay entry. The file reference must not even be consulted (so its env
+    /// var being unset is irrelevant). This locks `CLI/env > [secrets]`.
+    #[test]
+    fn worker_cli_secret_wins_over_secrets_file() {
+        let _guard = SECRETS_TIER_ENV_LOCK.lock().unwrap();
+        // Deliberately do NOT set the env the file ref points at: if precedence
+        // were wrong and the file tier were consulted, resolution would exit(1).
+        std::env::remove_var("WORKER_TEST_SECRETS_TIER_VAR");
+
+        let resolved = zeroship_core::config::obtain_secret(
+            "WORKER_KEY / --worker-key",
+            "literal-cli-worker-key",
+            Some("urn:zeroship:env:WORKER_TEST_SECRETS_TIER_VAR"),
+            false,
+        );
+        assert_eq!(resolved, "literal-cli-worker-key");
     }
 
     /// Bare `--dev-insecure` (no value) enables insecure mode via the

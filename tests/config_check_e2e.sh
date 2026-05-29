@@ -135,6 +135,28 @@ cat >"$TMPDIR/bad-filter.toml" <<'TOML'
 rust_log = '!!!not a valid filter!!!'
 TOML
 
+# A [secrets] overlay whose master_key is a well-formed env REFERENCE. The
+# referenced var is deliberately left UNSET: --check-config validates the
+# reference FORMAT only and must NOT read the env, so exit 0 proves no fetch.
+cat >"$TMPDIR/secrets-ref.toml" <<'TOML'
+[auth]
+hydra_admin_url = "http://hydra-from-file:4445"
+
+[secrets]
+master_key = "urn:zeroship:env:E2E_MASTER"
+TOML
+
+# A [secrets] overlay whose master_key is a LITERAL. The config file must never
+# carry a plaintext secret, so obtain_secret must reject this (file-must-be-a-
+# reference) — exit non-zero even under --check-config.
+cat >"$TMPDIR/secrets-literal.toml" <<'TOML'
+[auth]
+hydra_admin_url = "http://hydra-from-file:4445"
+
+[secrets]
+master_key = "plainsecret"
+TOML
+
 echo "============================================"
 echo "  zeroship config --check-config E2E"
 echo "============================================"
@@ -292,6 +314,40 @@ LAST_STATUS=$?
 set -e
 show_last_output
 expect_nonzero "control rejects a malformed MASTER_KEY secret reference under --check-config"
+echo ""
+
+echo "=== Case 11: [secrets] file tier with a REFERENCE validates (no fetch) ==="
+# master_key comes from the [secrets] overlay as urn:zeroship:env:E2E_MASTER.
+# The env var is intentionally absent (env -i wipes the environment), so exit 0
+# can only be reached if --check-config validates the FORMAT and never reads it.
+run_cmd control-secrets-file-ref "$CONTROL" --check-config --config "$TMPDIR/secrets-ref.toml" --dev-insecure --allow-remote-hydra-admin
+show_last_output
+expect_status 0 "control accepts a [secrets] master_key env reference under --check-config without resolving it"
+echo ""
+
+echo "=== Case 12: [secrets] file tier with a LITERAL rejected (file must be a reference) ==="
+# A plaintext literal in [secrets] is a configuration error: the file must never
+# carry a secret value, only a urn:/arn: reference. obtain_secret rejects it.
+run_cmd control-secrets-file-literal "$CONTROL" --check-config --config "$TMPDIR/secrets-literal.toml" --dev-insecure --allow-remote-hydra-admin
+show_last_output
+expect_nonzero "control rejects a literal master_key in the [secrets] file (must be a urn:/arn: reference)"
+echo ""
+
+echo "=== Case 13: LEGACY_MASTER_KEYS comma-list is resolved PER ENTRY ==="
+# A comma-list where the 2nd entry is a malformed reference must be rejected. This
+# proves per-entry handling: the list is split FIRST, then each entry validated.
+# (A whole-CSV-as-one-reference bug would parse the 1st scheme and wrongly accept.)
+LAST_STDOUT="$TMPDIR/control-legacy.stdout"
+LAST_STDERR="$TMPDIR/control-legacy.stderr"
+set +e
+env -i PATH="$PATH" HOME="${HOME:-}" \
+    LEGACY_MASTER_KEYS="urn:zeroship:env:LEGACY_A,urn:zeroship:bogus:x" \
+    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --allow-remote-hydra-admin \
+    >"$LAST_STDOUT" 2>"$LAST_STDERR"
+LAST_STATUS=$?
+set -e
+show_last_output
+expect_nonzero "control rejects a malformed per-entry reference in a LEGACY_MASTER_KEYS comma-list"
 echo ""
 
 echo "============================================"

@@ -354,6 +354,39 @@ pub fn validate_secret_ref_or_exit(label: &str, raw: &str) {
     }
 }
 
+/// Obtain a secret with precedence CLI/env > `[secrets]` file (reference-only) > default.
+///
+/// `cli` is the clap-merged CLI/env value (`""` when unset). `file` is the optional
+/// `[secrets]` overlay value, which MUST be a `urn:`/`arn:` reference — a literal there
+/// is rejected (the config file must never carry a plaintext secret). With
+/// `check_config` true, validates the resulting reference FORMAT only (no env/file/
+/// network read) and returns the raw value; otherwise resolves it. Exits(1) on any
+/// error (fail-closed).
+#[must_use]
+pub fn obtain_secret(label: &str, cli: &str, file: Option<&str>, check_config: bool) -> String {
+    let raw = if !cli.is_empty() {
+        cli.to_string()
+    } else if let Some(f) = file.filter(|f| !f.trim().is_empty()) {
+        // An empty/whitespace `[secrets]` entry means "no override" (fall through to
+        // the compiled default), NOT a rejected literal.
+        if !is_secret_ref(f) {
+            let m = format!("config: {label}: a secret in the [secrets] config section must be a urn:/arn: reference, not a literal value");
+            tracing::error!("{m}");
+            eprintln!("{m}");
+            std::process::exit(1);
+        }
+        f.to_string()
+    } else {
+        String::new()
+    };
+    if check_config {
+        validate_secret_ref_or_exit(label, &raw);
+        raw
+    } else {
+        resolve_secret_or_exit(label, &raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
@@ -362,7 +395,7 @@ mod tests {
     use base64::Engine as _;
 
     use super::{
-        decoded_master_key_len, is_loopback_url, is_secret_ref, parse_secret_ref,
+        decoded_master_key_len, is_loopback_url, is_secret_ref, obtain_secret, parse_secret_ref,
         require_unless_dev, resolve_secret, validate_master_key_material, validate_secret_ref,
         validate_stash_key, SecretError, SecretRef, DEV_STASH_SIGNING_KEY,
     };
@@ -643,5 +676,111 @@ mod tests {
             validate_secret_ref("urn:zeroship:nope:x"),
             Err(SecretError::Malformed(_))
         ));
+    }
+
+    // obtain_secret: CLI/env value (non-empty) wins over any file reference and
+    // is returned verbatim. Use check_config so we never touch env/file.
+    #[test]
+    fn obtain_secret_cli_beats_file_ref() {
+        let out = obtain_secret(
+            "MASTER_KEY",
+            "literal-from-cli",
+            Some("urn:zeroship:env:SHOULD_BE_IGNORED"),
+            true,
+        );
+        assert_eq!(out, "literal-from-cli");
+    }
+
+    // obtain_secret: empty CLI + a file reference => the reference is used. In
+    // check-config mode it is returned raw (no resolution).
+    #[test]
+    fn obtain_secret_empty_cli_uses_file_ref_check_config() {
+        let out = obtain_secret(
+            "MASTER_KEY",
+            "",
+            Some("urn:zeroship:env:SOME_VAR"),
+            true,
+        );
+        assert_eq!(out, "urn:zeroship:env:SOME_VAR");
+    }
+
+    // obtain_secret: empty CLI + a file env-reference => resolves the env var in
+    // non-check mode (real boot path).
+    #[test]
+    fn obtain_secret_empty_cli_resolves_file_env_ref() {
+        let _guard = ENV_GUARD.lock().expect("env guard");
+        let key = format!("ZEROSHIP_TEST_OBTAIN_ENV_{}", std::process::id());
+        let reference = format!("urn:zeroship:env:{key}");
+
+        std::env::set_var(&key, "resolved-from-env");
+        let out = obtain_secret("MASTER_KEY", "", Some(&reference), false);
+        std::env::remove_var(&key);
+
+        assert_eq!(out, "resolved-from-env");
+    }
+
+    // obtain_secret: empty CLI + a file file-reference => resolves the file
+    // contents in non-check mode.
+    #[test]
+    fn obtain_secret_empty_cli_resolves_file_file_ref() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zeroship_obtain_secret_{}.txt", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.clone());
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp secret");
+            f.write_all(b"secret-from-file\n").expect("write secret");
+        }
+        let reference = format!("urn:zeroship:file:{}", path.to_str().expect("utf8 path"));
+
+        let out = obtain_secret("MASTER_KEY", "", Some(&reference), false);
+        assert_eq!(out, "secret-from-file");
+    }
+
+    // obtain_secret: empty CLI + no file => empty string (caller's default logic
+    // takes over). Holds in both check and non-check modes (an empty value is a
+    // valid literal, not a reference, so resolution is a no-op passthrough).
+    #[test]
+    fn obtain_secret_empty_cli_empty_file_is_empty() {
+        assert_eq!(obtain_secret("MASTER_KEY", "", None, true), "");
+        assert_eq!(obtain_secret("MASTER_KEY", "", None, false), "");
+    }
+
+    #[test]
+    fn obtain_secret_empty_file_value_is_no_override() {
+        // An empty/whitespace `[secrets]` entry means "no override" (fall through to
+        // the default), NOT a rejected literal. Pre-fix this hit the literal-reject
+        // exit path and would have aborted the test process.
+        assert_eq!(obtain_secret("MASTER_KEY", "", Some(""), false), "");
+        assert_eq!(obtain_secret("MASTER_KEY", "", Some("   "), true), "");
+    }
+
+    // obtain_secret: the literal-in-file rejection path calls std::process::exit,
+    // which cannot run in-process. Instead, pin the predicate that gates it:
+    // a plaintext literal in `[secrets]` is NOT a reference (=> rejected), while
+    // a urn:/arn: value IS a reference (=> accepted).
+    #[test]
+    fn obtain_secret_file_literal_is_the_rejected_path() {
+        // A plaintext literal is not a secret reference: obtain_secret would exit.
+        assert!(!is_secret_ref("plainsecret"));
+        // A DSN-looking literal (colons) is still a literal, not a reference.
+        assert!(!is_secret_ref("postgres://u:p@h/db"));
+        // A urn:/arn: value is a reference and is accepted by obtain_secret.
+        assert!(is_secret_ref("urn:zeroship:env:X"));
+        assert!(is_secret_ref("urn:zeroship:vault:secret/x"));
+        assert!(is_secret_ref("arn:aws:secretsmanager:us-east-1:123:secret:x"));
+    }
+
+    // obtain_secret: a well-formed file reference is accepted as a reference
+    // (check-config returns it raw without resolution).
+    #[test]
+    fn obtain_secret_accepts_env_ref_as_reference() {
+        let out = obtain_secret("CONTROL_KEY", "", Some("urn:zeroship:env:X"), true);
+        assert_eq!(out, "urn:zeroship:env:X");
     }
 }
