@@ -51,6 +51,10 @@ services:
     environment:
       POSTGRES_PASSWORD: zeroship
       POSTGRES_DB: zeroship
+    # Sets the role default search_path so control's migrations resolve their
+    # unqualified `control.*` references in the shared multi-schema DB.
+    volumes:
+      - ./ops/postgres-init.sql:/docker-entrypoint-initdb.d/00-search-path.sql:ro
     ports:
       - "5440:5432"
     healthcheck:
@@ -61,6 +65,9 @@ services:
 
   control:
     build: .
+    # Self-heal transient boot races (hydra-admin not ready yet; concurrent
+    # first-boot migrations with auth on the shared control/authz schema).
+    restart: on-failure
     command: >
       zeroship-control
         --port 9090
@@ -96,6 +103,7 @@ services:
 
   gateway:
     build: .
+    restart: on-failure
     entrypoint: /bin/sh
     command:
       - -c
@@ -188,6 +196,9 @@ services:
   # --addr 0.0.0.0:9092 to be reachable across the container network.
   auth:
     build: .
+    # Self-heal the transient race where auth starts before hydra's admin API
+    # is accepting connections (client-side bootstrap of JWKs/clients).
+    restart: on-failure
     command: >
       zeroship-auth
         --addr 0.0.0.0:9092
@@ -264,11 +275,12 @@ services:
   # `write_file` ops bypass docker exec for performance).
   sandbox:
     build: .
+    restart: on-failure
     command: >
       zeroship-sandbox
     environment:
       SANDBOX_PORT: "9091"
-      SANDBOX_TOKEN: sandbox-key
+      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
       SANDBOX_IMAGE: zeroship/sandbox-base:latest
       SANDBOX_WORKSPACE_ROOT: /var/zeroship/projects
       SANDBOX_NETWORK: zeroship-sandbox-net
@@ -288,6 +300,9 @@ services:
 
   builder:
     image: node:22-bookworm
+    # Self-heal: builder waits for control to write /data/builder-client-secret;
+    # if control is still bootstrapping, retry rather than exit.
+    restart: on-failure
     working_dir: /workspace
     entrypoint: /bin/sh
     command:
@@ -305,6 +320,12 @@ services:
         fi
         export BUILDER_CLIENT_SECRET="$$(cat /data/builder-client-secret)"
         pnpm install --frozen-lockfile
+        # Build the workspace SDK packages so their dist/ exists — the builder's
+        # vite.config.ts imports @zeroship/vite-plugin, which vite resolves via
+        # its package.json "exports" → dist. Without this, `vite dev` fails with
+        # "Failed to resolve entry for package @zeroship/vite-plugin". dist is
+        # written into the mounted repo, so a restart reuses it (build once).
+        pnpm build
         exec pnpm --dir apps/zeroship-builder dev -- --host 0.0.0.0 --port 3001 --strictPort
     environment:
       CONTROL_URL: http://control:9090
@@ -323,7 +344,7 @@ services:
       BUILDER_INSTANCE_ID: docker-compose
       BUILDER_TOKEN_ENCRYPTION_KEY: ${BUILDER_TOKEN_ENCRYPTION_KEY:-dev-builder-token-encryption-key-change}
       SANDBOX_URL: http://sandbox:9091
-      SANDBOX_TOKEN: sandbox-key
+      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "3001:3001"
