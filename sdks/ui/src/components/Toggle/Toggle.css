@@ -548,6 +548,16 @@
     outline-color: Highlight;
   }
   .zs-toggle[data-disabled] {
+    /* Item-C fix: re-stamp `background-color: Canvas` inside the
+     * forced-colors disabled mirror. The base oklch rule
+     * `.zs-toggle[data-disabled]` paints a token-derived
+     * `color-mix(in oklch, var(--zs-label) 4%, transparent)` background
+     * with higher specificity than the bare `.zs-toggle { background:
+     * Canvas }` reset at the top of this @media block. Without the
+     * explicit Canvas paint here, a disabled unpressed Toggle under
+     * high-contrast mode keeps the token mix instead of resolving to
+     * the system Canvas color. */
+    background-color: Canvas;
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
