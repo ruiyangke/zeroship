@@ -5200,6 +5200,88 @@ await open("components-menubar--basic");
   );
 }
 
+/* ─── 79f. Wave10 rework 🔴 #1: Menubar modal default — non-modal ─────
+ *
+ * Regression for wave10 rework 🔴 #1. Base UI's Menubar defaults `modal`
+ * to `true`, which scroll-locks the page and installs an
+ * `InternalBackdrop` (a `<div data-base-ui-inert role="presentation">`)
+ * every time a menu opens. That's wrong for a desktop menubar pinned
+ * to application chrome.
+ *
+ * Pre-fix, the wrapper destructured `modal` with no default and
+ * forwarded it as-is, so omitted-prop callers inherited Base UI's
+ * `modal=true`. The fix sets `modal = false` as the wrapper default.
+ *
+ * This block opens a Menubar trigger on a story that passes NO `modal`
+ * prop and asserts: (a) no `InternalBackdrop` mounts (scoped to the
+ * Base UI signature `[data-base-ui-inert][role="presentation"]` —
+ * Storybook itself uses `data-base-ui-inert` on preview wrappers with
+ * no `role`, so we must scope) AND (b) `document.body` does not
+ * receive an inline `overflow: hidden` style (Floating UI's scroll-
+ * lock). On pre-fix code, both checks would fail because Base UI's
+ * modal default would mount the backdrop and lock the body scroll. */
+await open("components-menubar--non-modal-default-regression");
+{
+  const file = page.locator(
+    '[data-testid="menubar-modal-default-file"]',
+  );
+  await file.waitFor({ state: "visible", timeout: 5000 });
+  await file.click();
+  await page.waitForTimeout(300);
+  const popup = page.locator(
+    '[data-testid="menubar-modal-default-file-popup"]',
+  );
+  await popup.waitFor({ state: "attached", timeout: 5000 });
+  // Scope to the InternalBackdrop signature — Storybook uses
+  // `data-base-ui-inert` on its own preview wrappers (no role), so a
+  // bare `[data-base-ui-inert]` count is contaminated. Base UI's
+  // InternalBackdrop is the only `[data-base-ui-inert]` with
+  // `role="presentation"`.
+  const backdropCount = await page
+    .locator('[data-base-ui-inert][role="presentation"]')
+    .count();
+  const bodyOverflow = await page.evaluate(
+    () => document.body.style.overflow,
+  );
+  const ok = backdropCount === 0 && bodyOverflow === "";
+  report(
+    "Menubar — modal default is non-modal (no backdrop, no scroll-lock)",
+    ok,
+    `backdropCount=${backdropCount} bodyOverflow="${bodyOverflow}"`,
+  );
+}
+
+/* ─── 79g. Wave10 rework 🔴 #2: Menubar aria-orientation lock ─────────
+ *
+ * Regression for wave10 rework 🔴 #2. Base UI computes `aria-orientation`
+ * from the `orientation` prop, so letting a caller-passed
+ * `aria-orientation` through `mergeProps` (rightmost-wins) would ship
+ * contradictory ARIA state. Pre-fix, the wrapper did NOT strip
+ * `aria-orientation` — a caller bypassing the type system with
+ * `<Menubar orientation="horizontal" aria-orientation="vertical">`
+ * would end up with the `orientation` prop driving keyboard roving but
+ * the AT announcing the opposite axis.
+ *
+ * The fix omits `aria-orientation` from `MenubarProps` and strips it at
+ * runtime alongside `role`/`render` (mirror Toolbar). This block uses a
+ * story that passes `orientation="horizontal"` and spread-injects
+ * `aria-orientation="vertical"`. We assert the rendered DOM still
+ * carries `aria-orientation="horizontal"`. */
+await open("components-menubar--aria-orientation-lock-regression");
+{
+  const menubar = page.locator(
+    '[data-testid="menubar-aria-orientation-lock"]',
+  );
+  await menubar.waitFor({ state: "visible", timeout: 5000 });
+  const ariaOrientation = await menubar.getAttribute("aria-orientation");
+  const ok = ariaOrientation === "horizontal";
+  report(
+    "Menubar — aria-orientation lock strips caller-passed value (horizontal)",
+    ok,
+    `aria-orientation=${ariaOrientation}`,
+  );
+}
+
 /* ─── 80. Slice 12: NavigationMenu — Trigger click opens Content ───
  *
  * Brief assertion 4: click a NavigationMenu.Trigger and the Content

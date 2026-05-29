@@ -99,10 +99,10 @@ export const Basic: Story = {
     docs: {
       description: {
         story:
-          "Three Menu siblings as the canonical macOS-style strip. Click " +
-          "any trigger to open its menu; once one is open, hovering an " +
-          "adjacent trigger swaps the menu without an intermediate click " +
-          "(Base UI's auto-open-on-hover-after-first-click).",
+          "Three Menu siblings as the canonical desktop menubar strip. " +
+          "Click any trigger to open its menu; once one is open, hovering " +
+          "an adjacent trigger swaps the menu without an intermediate " +
+          "click (Base UI's auto-open-on-hover-after-first-click).",
       },
     },
   },
@@ -552,6 +552,234 @@ export const RoleLockRegression: Story = {
       "role",
       "menubar",
     );
+  },
+};
+
+/* ─── 8b. RenderInjectionRegression — wave10 🔴 ────────────────────── *
+ *
+ * Defensive coverage for the `render` lock. The public type
+ * `Omit<…, "render">` already rejects a literal `<Menubar render={…}>`,
+ * but a caller could still bypass via a `{...untypedProps}` spread.
+ * Pre-fix, the wrapper stripped only `role` at runtime — `render` was
+ * forwarded into `<BaseMenubar>`, replacing our locked `<div>` with
+ * whatever element the caller supplied. Worse, Base UI's mergeProps
+ * rightmost-wins ordering let the injected render-prop element's
+ * `role` overrule the `role="menubar"` lock. The fix strips `render`
+ * alongside `role`; this story injects a render-prop that would
+ * otherwise change the rendered tag and role, then asserts the DOM
+ * still carries `role="menubar"` AND a `<div>` host element. */
+export const RenderInjectionRegression: Story = {
+  name: "Render lock — caller-passed render is stripped",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for wave10 🔴. The Menubar wrapper strips a " +
+          "user-passed `render` at runtime so a `{...spread}` injection " +
+          "cannot replace our `<div>` host or override the locked " +
+          "`role=\"menubar\"`.",
+      },
+    },
+  },
+  render: () => {
+    // Untyped bypass — TS rejects `<Menubar render={…}>` at the public
+    // surface; this spread re-enters via `Record<string, unknown>` so
+    // the runtime strip is what enforces the lock.
+    const bypass = {
+      render: (props: Record<string, unknown>) => {
+        // The injected render would, pre-fix, produce a <nav> with
+        // role="navigation" — both should be discarded by the runtime
+        // strip; Base UI then falls back to its default <div
+        // role="menubar"> path.
+        return (
+          <nav
+            {...props}
+            role="navigation"
+            data-testid="menubar-render-injected"
+          />
+        );
+      },
+    } as Record<string, unknown>;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Menubar render injection regression"
+      >
+        <Menubar data-testid="menubar-render-lock" {...bypass}>
+          <Menu>
+            <MenubarMenuTrigger label="File" />
+            <MenubarMenuPopup>
+              <Menu.Item>New</Menu.Item>
+            </MenubarMenuPopup>
+          </Menu>
+        </Menubar>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const menubar = canvas.getByRole("menubar");
+    // Locked role + locked tag — pre-fix, the injected render-prop
+    // would have produced a <nav role="navigation"> via the bypass
+    // spread.
+    await expect(menubar).toHaveAttribute("role", "menubar");
+    await expect(menubar.tagName.toLowerCase()).toBe("div");
+    // The injected element from the bypass MUST NOT mount; the strip
+    // discards `render` entirely so Base UI uses its default render
+    // path.
+    await expect(
+      canvasElement.querySelector('[data-testid="menubar-render-injected"]'),
+    ).toBeNull();
+  },
+};
+
+/* ─── 8c. NonModalDefaultRegression — wave10 rework 🔴 ─────────────── *
+ *
+ * Defensive coverage for the `modal = false` default. Base UI's Menubar
+ * defaults `modal` to `true`, which scroll-locks the page and installs
+ * a `data-base-ui-inert` interaction scrim every time a menu opens.
+ * That's wrong for a desktop menubar pinned to application chrome.
+ *
+ * Pre-fix, the wrapper destructured `modal` with no default and
+ * forwarded it as-is, so omitted-prop callers inherited Base UI's
+ * `modal=true`. The fix sets `modal = false` as the wrapper default.
+ *
+ * This story renders a Menubar with NO `modal` prop and asserts that
+ * after opening the menu, no `InternalBackdrop` (the
+ * `[data-base-ui-inert]` element Base UI mounts when modal=true) is
+ * present anywhere in the document. We also assert that `document.body`
+ * has not received a scroll-lock `overflow: hidden` style.
+ */
+export const NonModalDefaultRegression: Story = {
+  name: "Modal default — wrapper overrides Base UI to non-modal",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for wave10 rework 🔴. The Menubar wrapper defaults " +
+          "`modal` to `false` so omitted-prop callers get the non-modal " +
+          "desktop-style behavior — opening a menu must NOT scroll-lock " +
+          "the page or install Base UI's interaction backdrop.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Menubar modal default regression"
+    >
+      <Menubar data-testid="menubar-modal-default">
+        <Menu>
+          <MenubarMenuTrigger
+            label="File"
+            testId="menubar-modal-default-file"
+          />
+          <MenubarMenuPopup testId="menubar-modal-default-file-popup">
+            <Menu.Item>New</Menu.Item>
+            <Menu.Item>Open…</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+      </Menubar>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const doc = canvasElement.ownerDocument;
+    // Use the testid — the trigger element renders as a real <button>
+    // tag but Base UI's Menubar overlays `role="menuitem"`, so
+    // `getByRole("button"...)` is brittle; the testid is canonical.
+    const file = await canvas.findByTestId("menubar-modal-default-file");
+    await userEvent.click(file);
+    // Wait for the popup to mount — Base UI portals it under document.body,
+    // we look it up by testid (queryable via the document scope).
+    await waitFor(() =>
+      expect(
+        doc.querySelector('[data-testid="menubar-modal-default-file-popup"]'),
+      ).not.toBeNull(),
+    );
+    // No interaction backdrop — Base UI's InternalBackdrop carries
+    // `data-base-ui-inert=""` AND `role="presentation"`. Storybook also
+    // uses `data-base-ui-inert` on its own preview wrappers (no role),
+    // so we scope to the Base UI signature with `role="presentation"`.
+    await expect(
+      doc.querySelectorAll('[data-base-ui-inert][role="presentation"]').length,
+    ).toBe(0);
+    // No scroll-lock on body — Base UI's floating-ui-react scroll lock
+    // sets `overflow: hidden` on the body when modal=true. Assert the
+    // body's inline `overflow` stays empty.
+    await expect(doc.body.style.overflow).toBe("");
+    await userEvent.keyboard("{Escape}");
+  },
+};
+
+/* ─── 8d. AriaOrientationLockRegression — wave10 rework 🔴 ─────────── *
+ *
+ * Defensive coverage for the `aria-orientation` lock. Base UI computes
+ * `aria-orientation` from the `orientation` prop, so letting a
+ * caller-passed `aria-orientation` through `mergeProps` (rightmost-
+ * wins) would ship contradictory ARIA state. Pre-fix, the wrapper
+ * did NOT strip `aria-orientation` — a caller bypassing the type
+ * system with `<Menubar orientation="horizontal" aria-orientation=
+ * "vertical">` would end up with the orientation prop driving keyboard
+ * roving but the AT announcing the opposite axis.
+ *
+ * The fix omits `aria-orientation` from the public type and strips it
+ * at runtime (mirror the Toolbar pattern). This story injects
+ * `aria-orientation="vertical"` via an untyped spread on a horizontal
+ * menubar and asserts the rendered DOM still carries
+ * `aria-orientation="horizontal"`.
+ */
+export const AriaOrientationLockRegression: Story = {
+  name: "aria-orientation lock — caller-passed value is stripped",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for wave10 rework 🔴. The Menubar wrapper omits " +
+          "`aria-orientation` from the public type AND strips it at " +
+          "runtime so a `{...spread}` injection cannot contradict the " +
+          "`orientation` prop's computed ARIA state.",
+      },
+    },
+  },
+  render: () => {
+    // Untyped bypass — TS rejects `<Menubar aria-orientation="…">` at
+    // the public surface; this spread re-enters via `Record<string,
+    // unknown>` so the runtime strip is what enforces the lock.
+    const bypass = { "aria-orientation": "vertical" } as Record<
+      string,
+      unknown
+    >;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Menubar aria-orientation lock regression"
+      >
+        <Menubar
+          data-testid="menubar-aria-orientation-lock"
+          orientation="horizontal"
+          {...bypass}
+        >
+          <Menu>
+            <MenubarMenuTrigger label="File" />
+            <MenubarMenuPopup>
+              <Menu.Item>New</Menu.Item>
+            </MenubarMenuPopup>
+          </Menu>
+        </Menubar>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const menubar = canvas.getByRole("menubar");
+    // The wrapper's `orientation="horizontal"` must drive the ARIA
+    // state; the spread-injected `aria-orientation="vertical"` must be
+    // stripped before Base UI's mergeProps sees it.
+    await expect(menubar).toHaveAttribute("aria-orientation", "horizontal");
   },
 };
 
