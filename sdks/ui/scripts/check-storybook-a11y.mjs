@@ -335,6 +335,9 @@ const stories = [
   "components-contextmenu--with-disabled-item",
   "components-contextmenu--custom-anchor",
   "components-contextmenu--rtl",
+  "components-contextmenu--positioned-popup-override",
+  "components-contextmenu--disabled-trigger",
+  "components-contextmenu--as-child",
   // Slice 13: Tabs. 12 stories.
   "components-tabs--basic",
   "components-tabs--all-variants",

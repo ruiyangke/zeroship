@@ -252,6 +252,7 @@ export {
   ContextMenu,
   type ContextMenuProps,
   type ContextMenuTriggerProps,
+  type ContextMenuPopupProps,
   type ContextMenuComponent,
   Tabs,
   type TabsProps,

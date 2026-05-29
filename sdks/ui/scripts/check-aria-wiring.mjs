@@ -9059,6 +9059,101 @@ await openStoryAndTrigger(
   );
 }
 
+/* ─── Wave 9 fix (ContextMenu 🔴 #1) — public root export surface ───── */
+{
+  const fs = await import("node:fs/promises");
+  const srcIndexUrl = new URL("../src/index.ts", import.meta.url);
+  const distUrl = new URL("../dist/index.js", import.meta.url);
+  let importError = null;
+  let mod = null;
+  let srcText = "";
+  try {
+    srcText = await fs.readFile(srcIndexUrl, "utf8");
+    mod = await import(distUrl.href);
+  } catch (err) {
+    importError = err instanceof Error ? err.message : String(err);
+  }
+  const hasContextMenuValue =
+    !!(mod && (typeof mod.ContextMenu === "function" || typeof mod.ContextMenu === "object")) &&
+    mod.ContextMenu !== null;
+  const hasPopupPropsTypeReExport = /\btype\s+ContextMenuPopupProps\b/.test(srcText);
+  const hasTriggerPropsTypeReExport = /\btype\s+ContextMenuTriggerProps\b/.test(srcText);
+  const ok =
+    !importError && hasContextMenuValue && hasPopupPropsTypeReExport && hasTriggerPropsTypeReExport;
+  report(
+    "@zeroship/ui public root re-exports ContextMenu + ContextMenuPopupProps (Wave 9 fix #1)",
+    ok,
+    importError
+      ? `importError=${importError}`
+      : `ContextMenu=${hasContextMenuValue} PopupProps=${hasPopupPropsTypeReExport} TriggerProps=${hasTriggerPropsTypeReExport}`,
+  );
+}
+
+/* ─── Wave 9 fix (ContextMenu 🔴 #2) — Root `disabled` blocks open ──── */
+await open("components-contextmenu--disabled-trigger");
+{
+  const trigger = page.locator('[data-testid="contextmenu-disabled-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const ariaDisabled = await trigger.getAttribute("aria-disabled");
+  const tabIndex = await trigger.getAttribute("tabindex");
+  await trigger.dispatchEvent("contextmenu", { button: 2 });
+  await page.waitForTimeout(300);
+  const popup = page.locator('[data-testid="contextmenu-disabled-popup"]');
+  const popupVisible = await popup.first().isVisible().catch(() => false);
+  const menuItemCount = await page.locator('[role="menuitem"]').count();
+  const ok = ariaDisabled === "true" && tabIndex === "-1" && !popupVisible && menuItemCount === 0;
+  report(
+    "ContextMenu — Root `disabled` stamps ARIA + blocks right-click open (Wave 9 fix #2)",
+    ok,
+    `aria-disabled=${ariaDisabled} tabindex=${tabIndex} popupVisible=${popupVisible} menuItemCount=${menuItemCount}`,
+  );
+}
+
+/* ─── Wave 9 fix (ContextMenu 🟡 #3) — asChild routes through Slot ──── */
+await open("components-contextmenu--as-child");
+{
+  const card = page.locator('[data-testid="contextmenu-aschild-card"]');
+  await card.waitFor({ state: "visible", timeout: 5000 });
+  const cardTag = await card.evaluate((el) => el.tagName.toLowerCase());
+  const cardClassName = (await card.getAttribute("class")) ?? "";
+  const hasTriggerClass = /\bzs-contextmenu-trigger\b/.test(cardClassName);
+  const stillCardSurface = /\bzs-card\b/.test(cardClassName);
+  await card.click({ button: "right" });
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="contextmenu-aschild-popup"]');
+  const popupVisible = await popup.first().isVisible().catch(() => false);
+  const item = page.locator('[data-testid="contextmenu-aschild-item-open"]');
+  const itemVisible = await item.first().isVisible().catch(() => false);
+  const ok = hasTriggerClass && stillCardSurface && popupVisible && itemVisible;
+  report(
+    "ContextMenu.Trigger asChild — Slot fan-out routes binding onto the Card (Wave 9 fix #3)",
+    ok,
+    `tag=${cardTag} hasTriggerClass=${hasTriggerClass} stillCard=${stillCardSurface} popupVisible=${popupVisible} itemVisible=${itemVisible}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
+/* ─── Wave 9 fix (ContextMenu 🟡 #4) — prefers-reduced-motion ──────── */
+await page.emulateMedia({ reducedMotion: "reduce" });
+await open("components-contextmenu--basic-right-click-area");
+{
+  const trigger = page.locator('[data-testid="contextmenu-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const transition = await trigger.evaluate((el) => getComputedStyle(el).transition);
+  const transitionProperty = await trigger.evaluate((el) => getComputedStyle(el).transitionProperty);
+  const transitionDuration = await trigger.evaluate((el) => getComputedStyle(el).transitionDuration);
+  const propertyNone = /\bnone\b/.test(transitionProperty);
+  const durationZero = /^0s\b/.test(transitionDuration);
+  const ok = propertyNone || durationZero;
+  report(
+    "ContextMenu.Trigger — prefers-reduced-motion disables focus-ring transition (Wave 9 fix #4)",
+    ok,
+    `transition="${transition}" property="${transitionProperty}" duration="${transitionDuration}"`,
+  );
+}
+await page.emulateMedia({ reducedMotion: "no-preference" });
+
 await ctx.close();
 await browser.close();
 

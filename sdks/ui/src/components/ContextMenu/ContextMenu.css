@@ -35,3 +35,15 @@
     forced-color-adjust: none;
   }
 }
+
+/* ─── Reduced motion ───────────────────────────────────────────────── *
+ *
+ * Wave-9 🟡 fix. Users who request `prefers-reduced-motion: reduce`
+ * should NOT see the focus-ring transition; the ring should appear
+ * instantly. Matching selector specificity so this override wins
+ * deterministically against the base rule above. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-contextmenu-trigger {
+    transition: none;
+  }
+}
