@@ -408,4 +408,18 @@
   .zs-drawer__header-close:focus-visible {
     outline-color: Highlight;
   }
+  /* Child text selectors paint their own color tokens (`--zs-label`,
+   * `--zs-label-secondary`), which forced-colors-active replaces with
+   * system colors per-element. Inheriting `CanvasText` from the
+   * Content alone does NOT override these explicit color declarations
+   * — the cascade picks the more specific child rule. Mirror each
+   * painted-text child here so Title / Description / Body all resolve
+   * to system colors in the high-contrast pass. */
+  .zs-drawer__title,
+  .zs-drawer__body {
+    color: CanvasText;
+  }
+  .zs-drawer__description {
+    color: GrayText;
+  }
 }

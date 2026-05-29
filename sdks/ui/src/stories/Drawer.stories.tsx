@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Button, Drawer, Field, Input } from "../components";
 
@@ -725,11 +725,30 @@ export const RTL: Story = {
  *     reaches the child via Slot;
  *   - the wrapper's onClick AND the child's onClick BOTH run, in
  *     order: child first → wrapper → Base UI close;
- *   - a status side-effect mutation proves both handlers fired before
- *     the dialog tore down.
+ *   - each handler fires EXACTLY ONCE per click. Wave 9 regression
+ *     for the asChild double-fire bug: the pre-fix implementation
+ *     invoked the child onClick once via Slot's `mergeProps`
+ *     composition AND a second time manually inside `slotOnClick`,
+ *     so the child handler ran twice per click. A state-machine
+ *     status string ("both-handlers-ran") could not detect this —
+ *     the second run was idempotent in the old story. We track
+ *     per-handler counts in a ref-backed counter (rendered into the
+ *     DOM as `<data-testid="drawer-close-aschild-counts">`) so the
+ *     play() can assert child === 1 and wrapper === 1.
+ *
+ *     Counters live in a `useRef` so React's commit batching does
+ *     not collapse two synchronous `setState(s + 1)` calls into one,
+ *     which would mask the bug. The ref bump is mirrored into a
+ *     string in state so the rendered text updates for the assertion.
  */
 function CloseAsChildStory() {
-  const [clicked, setClicked] = useState<string>("not-clicked");
+  const [counts, setCounts] = useState("child=0 wrapper=0");
+  const countsRef = useRef({ child: 0, wrapper: 0 });
+  const sync = () => {
+    setCounts(
+      `child=${countsRef.current.child} wrapper=${countsRef.current.wrapper}`,
+    );
+  };
   return (
     <div
       className="zs-story-row"
@@ -738,10 +757,10 @@ function CloseAsChildStory() {
     >
       <p
         role="status"
-        aria-label="Drawer close asChild status"
-        data-testid="drawer-close-aschild-status"
+        aria-label="Drawer close asChild counts"
+        data-testid="drawer-close-aschild-counts"
       >
-        Status: {clicked}
+        {counts}
       </p>
       <Drawer>
         <Drawer.Trigger
@@ -756,7 +775,7 @@ function CloseAsChildStory() {
                 The asChild Slot routes className, style, refs, AND
                 onClick composition through the shared `_slot.ts`
                 helper. Wrapper `...rest` + child onClick BOTH reach
-                the child.
+                the child — each exactly once.
               </Drawer.Description>
             </Drawer.Header>
             <Drawer.Footer>
@@ -769,15 +788,19 @@ function CloseAsChildStory() {
                 data-side-effect="wrapper-rest-forwarded"
                 // Wrapper-level onClick — composes with the child's
                 // own onClick below and with Base UI's close handler.
-                onClick={() => setClicked((s) =>
-                  s === "child-onclick-ran" ? "both-handlers-ran" : "wrapper-only"
-                )}
+                onClick={() => {
+                  countsRef.current.wrapper += 1;
+                  sync();
+                }}
               >
                 <button
                   type="button"
                   className="zs-button zs-button--gray zs-button--medium"
                   data-testid="drawer-close-aschild-target"
-                  onClick={() => setClicked("child-onclick-ran")}
+                  onClick={() => {
+                    countsRef.current.child += 1;
+                    sync();
+                  }}
                 >
                   Done
                 </button>
@@ -809,10 +832,13 @@ export const CloseAsChild: Story = {
     await userEvent.click(done);
     await waitForDrawerClosed(canvasElement, /custom close target/i);
     // Both child + wrapper onClick fired and composed in order.
+    // Each EXACTLY ONCE — pre-Wave-9 the child handler fired twice
+    // (Slot mergeProps + manual call), and this assertion would
+    // read `child=2 wrapper=1`.
     const canvas = within(canvasElement);
     const status = canvas.getByRole("status", {
-      name: /drawer close aschild status/i,
+      name: /drawer close aschild counts/i,
     });
-    await expect(status).toHaveTextContent("Status: both-handlers-ran");
+    await expect(status).toHaveTextContent("child=1 wrapper=1");
   },
 };

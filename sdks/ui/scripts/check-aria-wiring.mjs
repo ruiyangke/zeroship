@@ -6485,12 +6485,15 @@ await open("components-scrollarea--rtl");
  * The wrapper's own `onClick` (caller-passed to <Drawer.Close>) and the
  * child's `onClick` were not both composed with Base UI's close handler.
  *
- * This block exercises the same CloseAsChild story expanded to track a
- * status side-effect that flips ONLY if the wrapper's onClick fires
- * AFTER the child's (proving both composed in order: child → wrapper →
- * close). The class hook and `data-side-effect` attribute on the
- * wrapper must appear on the rendered child via Slot — mirrors
- * AlertDialog.Cancel asChild coverage style at block 9e.
+ * This block exercises the same CloseAsChild story. The story tracks
+ * per-handler counters (child + wrapper) — pre-Wave-9 the child
+ * counter would read 2 because Slot's mergeProps composed the child
+ * handler AND the wrapper's manual `slotOnClick` invoked it a second
+ * time. The exact-once assertion is the Wave 9 regression.
+ *
+ * The class hook and `data-side-effect` attribute on the wrapper must
+ * appear on the rendered child via Slot — mirrors AlertDialog.Cancel
+ * asChild coverage style at block 9e.
  */
 await openStoryAndTrigger(
   "components-drawer--close-as-child",
@@ -6508,36 +6511,44 @@ await openStoryAndTrigger(
     el.classList.contains("zs-drawer-close-aschild-extra"),
   );
   const sideEffectAttr = await customClose.getAttribute("data-side-effect");
-  const statusBefore = (
-    await page
-      .locator('[data-testid="drawer-close-aschild-status"]')
-      .innerText()
-  ).trim();
+  const countsLocator = page.locator(
+    '[data-testid="drawer-close-aschild-counts"]',
+  );
+  // Storybook's autoplay clicks the asChild target before our
+  // explicit interaction, so absolute counts may be > 1. Snapshot
+  // the baseline, then assert each handler fires EXACTLY +1 across
+  // the explicit click.
+  const parseCounts = (text) => {
+    const m = /^child=(\d+)\s+wrapper=(\d+)$/.exec(text.trim());
+    return m ? { child: Number(m[1]), wrapper: Number(m[2]) } : null;
+  };
+  const before = parseCounts(await countsLocator.innerText());
   await customClose.click();
   await page.waitForTimeout(500);
   const contentHidden =
     (await content.count()) === 0 ||
     !(await content.first().isVisible().catch(() => false));
-  const statusAfter = (
-    await page
-      .locator('[data-testid="drawer-close-aschild-status"]')
-      .innerText()
-  ).trim();
-  // status === "both-handlers-ran" proves child onClick fired FIRST
-  // (set "child-onclick-ran") and the wrapper onClick ran AFTER (saw
-  // that state and upgraded to "both-handlers-ran"). The close
+  const afterText = (await countsLocator.innerText()).trim();
+  const after = parseCounts(afterText);
+  // Each handler must increment by exactly +1 across one click.
+  // Pre-Wave-9 the child delta would be +2 (Slot mergeProps + the
+  // manual `slotOnClick(childOnClick)` second call). The close
   // composed last because contentHidden is also true.
-  const bothComposed = statusAfter.includes("both-handlers-ran");
+  const childDelta = before && after ? after.child - before.child : -1;
+  const wrapperDelta = before && after ? after.wrapper - before.wrapper : -1;
+  const bothComposedExactlyOnce = childDelta === 1 && wrapperDelta === 1;
+  const countsBefore = before ? `child=${before.child} wrapper=${before.wrapper}` : "<unparsed>";
+  const countsAfter = after ? `child=${after.child} wrapper=${after.wrapper}` : afterText;
   const ok =
     tag === "BUTTON" &&
     hasWrapperClass &&
     sideEffectAttr === "wrapper-rest-forwarded" &&
     contentHidden &&
-    bothComposed;
+    bothComposedExactlyOnce;
   report(
-    "Drawer.Close asChild Slot composes (className + data-*, child+wrapper onClick, close)",
+    "Drawer.Close asChild Slot composes (className + data-*, child+wrapper onClick once each, close)",
     ok,
-    `tag=${tag} class=${hasWrapperClass} data-side-effect="${sideEffectAttr}" hidden=${contentHidden} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+    `tag=${tag} class=${hasWrapperClass} data-side-effect="${sideEffectAttr}" hidden=${contentHidden} countsBefore="${countsBefore}" countsAfter="${countsAfter}"`,
   );
 }
 
@@ -8674,6 +8685,98 @@ await open("components-select--invalid-focus-ring");
     "Select invalid + open — focus ring slot stays non-transparent (Wave 8 fix #2)",
     ok,
     `invalidOpen=${invalidOpen} shadows=${shadows.length} ringSlot="${ringSlot}"`,
+  );
+}
+
+/* ─── Wave 9 fix (Drawer #1) — Close asChild fires child + wrapper
+ *
+ * Pre-fix bug: `Drawer.Close asChild` invoked the child onClick once
+ * via Slot's mergeProps composition AND a second time manually
+ * inside `slotOnClick`, so the child handler ran twice per click —
+ * a violation of `_slot.ts`'s onClick composition contract. The
+ * pre-Wave-9 story used a state-machine string ("both-handlers-ran")
+ * that was idempotent under the duplicate call, so the bug slipped
+ * through Storybook play().
+ *
+ * Post-fix: child === 1 and wrapper === 1. We open the
+ * `close-as-child` story, click the asChild target, and verify the
+ * status string reports `child=1 wrapper=1`. Pre-fix this would
+ * read `child=2 wrapper=1`.
+ */
+await openStoryAndTrigger(
+  "components-drawer--close-as-child",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-close-aschild-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  const target = page.locator('[data-testid="drawer-close-aschild-target"]');
+  await target.waitFor({ state: "visible", timeout: 5000 });
+  const counts = page.locator('[data-testid="drawer-close-aschild-counts"]');
+  // Storybook autoplay may have clicked the target once before this
+  // assertion runs; snapshot the baseline and assert each handler
+  // increments by exactly +1 across the explicit click.
+  const parseCounts = (text) => {
+    const m = /^child=(\d+)\s+wrapper=(\d+)$/.exec(text.trim());
+    return m ? { child: Number(m[1]), wrapper: Number(m[2]) } : null;
+  };
+  const before = parseCounts(await counts.innerText().catch(() => ""));
+  await target.click();
+  await page.waitForTimeout(500);
+  const after = parseCounts(await counts.innerText().catch(() => ""));
+  const childDelta = before && after ? after.child - before.child : -1;
+  const wrapperDelta = before && after ? after.wrapper - before.wrapper : -1;
+  const ok = childDelta === 1 && wrapperDelta === 1;
+  report(
+    "Drawer.Close asChild — child + wrapper each fire exactly once per click (Wave 9 fix #1)",
+    ok,
+    `childDelta=${childDelta} wrapperDelta=${wrapperDelta} before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+  );
+}
+
+/* ─── Wave 9 fix (Drawer #2) — Drawer reachable from package root
+ *
+ * Pre-fix concern (review): the root barrel must re-export `Drawer`
+ * so `import { Drawer } from "@zeroship/ui"` resolves. The
+ * exhaustive surface check above (Round 5 fix #1) already catches
+ * any silent drop; this assertion makes the Drawer case an explicit
+ * named probe so a future move/rename failure points directly at
+ * the right symbol set.
+ */
+{
+  const distUrl = new URL("../dist/index.js", import.meta.url);
+  let mod = null;
+  let importError = null;
+  try {
+    mod = await import(distUrl.href);
+  } catch (err) {
+    importError = err instanceof Error ? err.message : String(err);
+  }
+  const isComponentExport = (value) =>
+    value !== undefined &&
+    value !== null &&
+    (typeof value === "function" || typeof value === "object");
+  const hasDrawer = !!(mod && isComponentExport(mod.Drawer));
+  // Each subcomponent must hang off the namespace.
+  const hasParts =
+    hasDrawer &&
+    isComponentExport(mod.Drawer.Trigger) &&
+    isComponentExport(mod.Drawer.Portal) &&
+    isComponentExport(mod.Drawer.Backdrop) &&
+    isComponentExport(mod.Drawer.Content) &&
+    isComponentExport(mod.Drawer.Header) &&
+    isComponentExport(mod.Drawer.Title) &&
+    isComponentExport(mod.Drawer.Description) &&
+    isComponentExport(mod.Drawer.Body) &&
+    isComponentExport(mod.Drawer.Footer) &&
+    isComponentExport(mod.Drawer.Close);
+  const ok = !importError && hasDrawer && hasParts;
+  report(
+    "@zeroship/ui public root re-exports Drawer + subcomponents (Wave 9 fix #2)",
+    ok,
+    importError
+      ? `importError=${importError}`
+      : `Drawer=${hasDrawer} parts=${hasParts}`,
   );
 }
 

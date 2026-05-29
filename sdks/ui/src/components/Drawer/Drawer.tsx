@@ -56,13 +56,12 @@ import {
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type MouseEvent as ReactMouseEvent,
-  type ReactElement,
   type ReactNode,
   type Ref,
 } from "react";
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Button, type ButtonProps } from "../Button";
-import { Slot, composeRefs, getElementRef } from "../_slot";
+import { Slot, composeRefs } from "../_slot";
 import { classnames, composeBaseClass } from "../_classnames";
 
 /**
@@ -440,43 +439,37 @@ const DrawerClose = forwardRef<HTMLButtonElement, DrawerCloseProps>(
               return <></>;
             }
             // Slot handles className / style / event composition and
-            // ref fan-out, including React 19's `element.props.ref`
-            // shape. Mirrors AlertDialog.Cancel's pattern: wrapper
-            // `...rest` (className, data-*, aria-*, style, disabled)
-            // and the child's own onClick BOTH reach the child.
+            // ref fan-out — including the child's own onClick AND ref
+            // via `mergeProps` + `composeRefs(ourRef, childRef)`
+            // (see `_slot.ts`). We MUST therefore pass only the
+            // wrapper-level composed handler (caller → close) to Slot
+            // and let Slot stitch the child's onClick in front of it.
+            // The previous implementation invoked `childOnClick`
+            // manually inside `slotOnClick`, so the child handler ran
+            // twice per click — a violation of the _slot.ts contract.
+            // It also re-included `getElementRef(children)` in the
+            // composeRefs chain even though Slot already composes the
+            // child ref internally, causing a redundant setRef call
+            // on the same node.
             //
             // Slot prop order:
             //   1. closeProps   — Base UI's nativeButton/role bits.
             //   2. ...rest      — consumer props on <Drawer.Close>.
             //   3. ref + onClick — composed last so they win.
             //
-            // onClick composition order: child onClick first → caller
-            // onClick → Base UI close. Any preventDefault short-circuits
-            // the remaining handlers (mirrors Dialog.Close 3a64a726).
-            const childOnClick = (
-              (children as ReactElement).props as {
-                onClick?: (event: ReactMouseEvent<HTMLElement>) => void;
-              }
-            ).onClick;
-            const slotOnClick = (event: ReactMouseEvent<HTMLElement>) => {
-              childOnClick?.(event);
-              if (!event.defaultPrevented) {
-                callerOnClick?.(event as ReactMouseEvent<HTMLButtonElement>);
-                if (!event.defaultPrevented) {
-                  closePropsOnClick?.(event);
-                }
-              }
-            };
+            // onClick composition order (Slot-driven): child onClick
+            // → caller onClick → Base UI close. Any preventDefault
+            // short-circuits the remaining handlers (mirrors
+            // Dialog.Close 3a64a726).
             return (
               <Slot
                 {...closeProps}
                 {...rest}
                 ref={composeRefs(
                   ref as Ref<unknown>,
-                  getElementRef(children),
                   closePropsRef,
                 )}
-                onClick={slotOnClick}
+                onClick={composedOnClick}
               >
                 {children}
               </Slot>
