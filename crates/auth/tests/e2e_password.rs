@@ -36,7 +36,6 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
 
 mod common;
 use common::{
@@ -76,7 +75,7 @@ async fn e2e_password_flow() {
     let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
-    // 1. Connect PG and run migrations.
+    // 1. Connect PG.
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("connect pg");
@@ -86,7 +85,6 @@ async fn e2e_password_flow() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
 
     let pg_client = Arc::new(pg_client);
     let admin = HydraAdmin::new(&hydra_admin_url);

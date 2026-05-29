@@ -28,7 +28,7 @@ use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
-use zeroship_auth::store::{migrations, sessions, users};
+use zeroship_auth::store::{sessions, users};
 
 mod common;
 use common::test_auth_config;
@@ -96,7 +96,6 @@ async fn logout_route_is_registered_returns_not_404() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);
@@ -190,7 +189,6 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);
@@ -261,7 +259,6 @@ async fn logout_post_revokes_local_session_cookie() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let email = format!("logout-local-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&pg_client, &email, "Logout User", None)
         .await

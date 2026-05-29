@@ -70,6 +70,27 @@ services:
       timeout: 5s
       retries: 10
 
+  # Platform schema migrations (control/auth/platform schemas). One-shot, like
+  # hydra-migrate: runs `liquibase update` against the shared DB then exits 0.
+  # control/auth gate on its successful completion, so they only ever boot
+  # against a fully-migrated schema. Hydra owns its own schema separately
+  # (hydra-migrate). Hand-authored changesets live in db/changelog/.
+  migrate:
+    image: liquibase/liquibase:4.31
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/changelog:/liquibase/changelog:ro
+    command:
+      - --url=jdbc:postgresql://postgres:5432/zeroship
+      - --username=postgres
+      - --password=zeroship
+      - --changelog-file=changelog/db.changelog-master.yaml
+      - --liquibase-schema-name=public
+      - update
+    restart: on-failure
+
   control:
     build: .
     # All five native services share ONE built image (built+tagged once,
@@ -108,6 +129,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       hydra:
         condition: service_started
 
@@ -236,6 +259,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       hydra:
         condition: service_started
 

@@ -19,7 +19,6 @@ use compio_postgres::{connect, Client, NoTls};
 use std::sync::Mutex;
 use zeroship_auth::cron::jwk_rotation;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::store::migrations;
 
 // The hydra-backed tests in this file mutate the same `auth.cron_state` rows
 // (`hydra.openid.id-token`, `hydra.jwt.access-token`) and the same
@@ -78,7 +77,6 @@ async fn rotation_first_tick_records_baseline_no_action() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
 
     // Ensure no prior cron_state for these sets so we exercise the
     // first-observation branch.
@@ -142,7 +140,6 @@ async fn rotation_due_prepends_new_keys() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);
@@ -216,7 +213,6 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     clear_jwk_state(&client).await;
 
     let id_token_set = "hydra.openid.id-token";
@@ -291,7 +287,6 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);

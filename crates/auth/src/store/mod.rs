@@ -1,9 +1,8 @@
-//! `auth.*` schema CRUD. Phase 1 only creates the migrations; per-table
-//! CRUD modules are added in later phases as they're needed.
+//! `auth.*` schema CRUD. The schema itself is owned by Liquibase
+//! (`db/changelog`); these modules are the per-table read/write helpers.
 
 pub mod audit;
 pub mod identities;
-pub mod migrations;
 pub mod ratelimit;
 pub mod sessions;
 pub mod suppressions;

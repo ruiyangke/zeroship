@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::mailer::{Email, Mailer, MailerError, MessageId};
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 #[derive(Debug, Default)]
 struct CountingMailer {
@@ -84,7 +84,6 @@ async fn pg() -> Option<(String, compio_postgres::Client)> {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     Some((dsn, client))
 }
 

@@ -13,7 +13,7 @@ use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::linker::{PendingLink, PENDING_LINK_TTL_SECS};
 use zeroship_auth::identity::password;
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 fn test_cfg(db_url: &str) -> AuthConfig {
     let mut cfg = AuthConfig::parse_from([
@@ -92,7 +92,6 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
 
     let email = format!("link-limit-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash("correct link password phrase").expect("hash password");

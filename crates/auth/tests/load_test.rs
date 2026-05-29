@@ -107,8 +107,8 @@ async fn auth_login_throughput() {
     }
 
     // 4. Drain LOGIN_IP + LOGIN_EIP + LOGIN_EMAIL buckets so prior runs
-    //    don't bleed in. Best-effort — table may not exist on a fresh PG
-    //    but migrations::migrate() in Fixture::boot guarantees it does.
+    //    don't bleed in. Best-effort — the schema is pre-applied by
+    //    Liquibase before the test connects, so the table exists.
     pg.execute(
         "DELETE FROM auth.rate_limits WHERE bucket_key LIKE 'login:%'",
         &[],

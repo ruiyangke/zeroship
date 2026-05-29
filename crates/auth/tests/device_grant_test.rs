@@ -15,7 +15,7 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
-use zeroship_auth::store::{migrations, sessions as session_store, users};
+use zeroship_auth::store::{sessions as session_store, users};
 
 #[derive(Debug, serde::Deserialize)]
 struct DeviceAuthorizationResponse {
@@ -56,7 +56,6 @@ async fn boot() -> Option<(
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);

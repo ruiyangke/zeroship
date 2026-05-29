@@ -1,7 +1,7 @@
 //! `auth.email_suppressions` CRUD — the bounce/complaint blocklist that
 //! every `Mailer` impl consults before transport.
 //!
-//! Schema (created in `migrations.rs`):
+//! Schema (owned by Liquibase — `db/changelog/`):
 //!
 //! ```sql
 //! CREATE TABLE auth.email_suppressions (

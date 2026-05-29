@@ -41,10 +41,6 @@ impl AdminPat {
 }
 
 pub async fn admin_pat(state: &AppState) -> AdminPat {
-    zeroship_auth::store::migrations::migrate(&state.auth_pg)
-        .await
-        .expect("auth migrations");
-
     let user_id = Uuid::new_v4();
     let email = format!("admin-pat-{user_id}@zeroship.test");
     state

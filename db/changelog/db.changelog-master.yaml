@@ -1,0 +1,20 @@
+# zeroship platform schema — Liquibase master changelog.
+#
+# Single entry point Liquibase reads
+# (`--changelog-file=db/changelog/db.changelog-master.yaml`). It owns the
+# control / auth / platform schemas. Hydra owns its own schema via
+# `hydra migrate` (the hydra-migrate compose service) — do NOT add hydra
+# tables here.
+#
+# Every migration is a formatted-SQL file under changesets/, applied in
+# lexicographic filename order (0001_, 0002_, …). To add a migration, create
+# the next-numbered file there with a `--changeset author:id` header and a
+# matching `--rollback`; includeAll picks it up automatically.
+#
+# These are hand-authored (not generated from a DB dump): the SQL is the
+# source of truth, reviewable and rollback-able.
+databaseChangeLog:
+  - includeAll:
+      path: changesets/
+      relativeToChangelogFile: true
+      errorIfMissingOrEmpty: true

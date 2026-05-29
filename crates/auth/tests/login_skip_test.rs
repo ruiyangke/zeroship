@@ -11,7 +11,7 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::password;
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 const CHALLENGE: &str = "skip-disabled-challenge";
 const ACCEPT_REDIRECT: &str = "https://client.example/callback?code=accepted";
@@ -116,7 +116,6 @@ async fn skip_login_rejects_disabled_user_subject() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let email = format!("skip-disabled-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&pg_client, &email, "Skip Disabled", None)
         .await
@@ -210,7 +209,6 @@ async fn password_login_rejects_locked_user_without_session() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let email = format!("pwd-locked-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash("correct locked password phrase").expect("hash password");
     let user = users::create(&pg_client, &email, "Password Locked", Some(&phc))

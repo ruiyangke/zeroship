@@ -21,7 +21,7 @@ use ntex::web;
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::store::{migrations, suppressions};
+use zeroship_auth::store::{suppressions};
 
 /// Build an `AuthConfig` for the webhook tests. Only the
 /// `postmark_webhook_*` fields are interesting; everything else takes
@@ -69,7 +69,6 @@ async fn boot(
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     let pg = Arc::new(client);
 
     let cfg = Arc::new(test_cfg(user, pass));

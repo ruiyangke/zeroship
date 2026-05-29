@@ -32,7 +32,6 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
 
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
@@ -320,7 +319,6 @@ impl Fixture {
             }
         })
         .detach();
-        migrations::migrate(&pg_client).await.expect("migrate");
         let pg = Arc::new(pg_client);
 
         let admin = HydraAdmin::new(&hydra_admin_url);

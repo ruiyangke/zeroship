@@ -37,9 +37,6 @@ async fn pg(db_url: &str) -> Client {
         let _ = conn.run().await;
     })
     .detach();
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("auth migrations");
     cleanup_builder_client(&client).await;
     client
 }

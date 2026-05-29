@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_auth::identity::{magic_link, password_reset};
-use zeroship_auth::store::migrations;
 use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 
 // `compio_postgres::Client` is `!Send` — the futures inherit that
@@ -30,7 +29,6 @@ async fn pg_connect(dsn: &str) -> compio_postgres::Client {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     client
 }
 

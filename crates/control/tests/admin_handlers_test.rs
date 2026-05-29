@@ -58,10 +58,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     })
     .detach();
 
-    zeroship_auth::store::migrations::migrate(&auth_pg_client)
-        .await
-        .expect("auth migrations");
-
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");

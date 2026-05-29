@@ -198,8 +198,19 @@ docker compose -f docker-compose.cluster.yml down -v
 
 The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`. These use `network_mode: host` (not a `ports:` mapping), so the ports can't be remapped and must be free on the host before you start the stack.
 
+## Database migrations
+
+The shared Postgres schema (`control`/`auth`/`platform`) is owned by Liquibase.
+The one-shot `migrate` service runs `liquibase update` (changesets in
+`db/changelog/`) after Postgres is healthy and before control/auth start — they
+`depends_on` it with `service_completed_successfully`, so they only ever boot
+against a fully-migrated schema. Hydra migrates its own schema separately
+(`hydra-migrate`). See [Database migrations](db-migrations.md) for the layout,
+`ops/db-migrate.sh`, and how to add a migration.
+
 ## Related docs
 
+- [Database migrations](db-migrations.md) — Liquibase changesets, the `migrate` service, `ops/db-migrate.sh`.
 - [Local dev setup](../runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
 - [Nomad + Cloud Hypervisor sandbox](../runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
 - [Distributed architecture](../architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.

@@ -10,7 +10,6 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::magic_link;
-use zeroship_auth::store::migrations;
 
 fn test_cfg(db_url: &str) -> AuthConfig {
     let mut cfg = AuthConfig::parse_from([
@@ -35,7 +34,6 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     Some(client)
 }
 

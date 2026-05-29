@@ -20,7 +20,7 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::{magic_link, verification};
 use zeroship_auth::server;
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 const MAGIC_ACCEPT_REDIRECT: &str = "https://client.example/callback?code=magic";
 
@@ -130,7 +130,6 @@ impl M4TestCtx {
             }
         })
         .detach();
-        migrations::migrate(&pg_client).await.expect("migrate");
         let pg = Arc::new(pg_client);
 
         let hydra = BlockingHydra::start();

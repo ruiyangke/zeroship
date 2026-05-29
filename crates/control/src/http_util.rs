@@ -113,9 +113,6 @@ mod tests {
             let _ = conn.run().await;
         })
         .detach();
-        zeroship_auth::store::migrations::migrate(&client)
-            .await
-            .expect("auth migrations");
         Some(client)
     }
 

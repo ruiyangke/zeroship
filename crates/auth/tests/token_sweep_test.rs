@@ -6,7 +6,7 @@
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_auth::cron::token_sweep;
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
@@ -18,7 +18,6 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     Some(client)
 }
 

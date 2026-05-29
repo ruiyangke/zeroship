@@ -739,12 +739,8 @@ fn main() -> std::io::Result<()> {
     };
 
     if bootstrap_builder_client {
-        zeroship_auth::store::migrations::migrate(&auth_pg)
-            .await
-            .map_err(|err| {
-                tracing::error!(error = %err, "control: auth/control migrations failed");
-                std::io::Error::other(err.to_string())
-            })?;
+        // Schema (incl. the control.* authz/oauth tables) is owned by Liquibase
+        // (db/changelog), applied out of band before boot — not here.
         let cfg = bootstrap_builder::BuilderClientBootstrapConfig {
             enabled: true,
             hydra_admin_url: hydra_admin_url.clone(),

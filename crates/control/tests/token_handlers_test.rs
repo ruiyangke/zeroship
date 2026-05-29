@@ -72,9 +72,6 @@ impl Fixture {
         })
         .detach();
         let auth_pg = Arc::new(auth_pg_client);
-        zeroship_auth::store::migrations::migrate(&auth_pg)
-            .await
-            .expect("migrate auth-pg");
 
         let state = Arc::new(AppState {
             registry,
