@@ -130,11 +130,35 @@
     0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 
-/* ─── invalid ──────────────────────────────────────────────────────── */
+/* ─── invalid ──────────────────────────────────────────────────────── *
+ *
+ * Wave-8 review-fix 🔴 #2: pre-fix the base `[data-invalid]` selector
+ * lived AFTER the focus / open rules above, so the cascade reset the
+ * second box-shadow slot (the focus ring) to `0 0 0 0 transparent` —
+ * an invalid focused-or-open trigger silently lost the visible focus
+ * ring. Post-fix we mirror the focus / open variants under
+ * `[data-invalid]` with EQUAL specificity (single class + attribute
+ * selectors) so they outrank the bare `[data-invalid]` reset AND keep
+ * the invalid border colour on the inner shadow slot. */
 .zs-select-trigger[data-invalid] {
   box-shadow:
     inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
     0 0 0 0 transparent;
+}
+.zs-select-trigger[data-invalid]:focus-visible,
+.zs-select-trigger[data-invalid][data-popup-open] {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+  outline: none;
+}
+.zs-select-trigger--outline[data-invalid]:focus-visible,
+.zs-select-trigger--outline[data-invalid][data-popup-open] {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 
 /* ─── disabled ─────────────────────────────────────────────────────── */

@@ -7854,6 +7854,147 @@ await open("components-toolbar--separator-orientation-lock-regression");
   );
 }
 
+/* ─── Wave 8 fix #1 — Select FieldAriaAutowiring (no consumer aria-*) ─
+ *
+ * Pre-fix the Select wrapper passed `aria-labelledby={undefined}` and
+ * `aria-describedby={undefined}` to `<BaseSelect.Trigger>` even when
+ * the consumer didn't provide them. Base UI's `mergeProps` treated the
+ * explicit `undefined`s as overrides and clobbered the ids the Field
+ * bridge auto-wired via `resolveAriaLabelledBy` and
+ * `validation.getValidationProps`. The focused combobox-role trigger
+ * then had no label / no description. Post-fix the wrapper only spreads
+ * aria-* keys when they're defined; this assertion checks the trigger
+ * carries BOTH `aria-labelledby` and `aria-describedby` with non-empty
+ * ids when the consumer passes none. */
+await open("components-select--field-aria-autowiring");
+{
+  const trigger = page.locator(
+    '[data-testid="select-field-aria-autowiring"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = (await trigger.getAttribute("aria-labelledby")) ?? "";
+  const describedBy = (await trigger.getAttribute("aria-describedby")) ?? "";
+  const hasLabelledBy = labelledBy.trim().length > 0;
+  const hasDescribedBy = describedBy.trim().length > 0;
+  // Also assert the labelledby resolves to the actual Field.Label text
+  // so a broken pointer is caught (not just a non-empty string).
+  let labelText = "";
+  if (hasLabelledBy) {
+    const firstId = labelledBy.trim().split(/\s+/)[0];
+    labelText = await page.evaluate((id) => {
+      const el = document.getElementById(id);
+      return el ? (el.textContent ?? "").trim() : "";
+    }, firstId);
+  }
+  const labelResolves = /favorite fruit/i.test(labelText);
+  const ok = hasLabelledBy && hasDescribedBy && labelResolves;
+  report(
+    "Select FieldAriaAutowiring — Field-wired aria-labelledby + aria-describedby survive on trigger (Wave 8 fix #1a)",
+    ok,
+    `aria-labelledby="${labelledBy}" aria-describedby="${describedBy}" labelText="${labelText}"`,
+  );
+}
+
+/* ─── Wave 8 fix #1 — Select aria-describedby caller-union ───────────
+ *
+ * Companion to the autowiring assertion: when the consumer DOES pass an
+ * explicit `aria-describedby`, the wrapper's trigger `render` callback
+ * unions it with Base UI's auto-wired one. Pre-fix the caller id was
+ * routed through `elementProps` and `mergeProps` clobbered Base UI's
+ * validation-derived `aria-describedby` with it — Field.Description's
+ * id was dropped. Post-fix BOTH ids must appear on the trigger (caller
+ * + Field-wired). */
+await open("components-select--aria-described-by-merge");
+{
+  const trigger = page.locator('[data-testid="select-described-by-merge"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const describedBy = (await trigger.getAttribute("aria-describedby")) ?? "";
+  const ids = describedBy.split(/\s+/).filter(Boolean);
+  const hasExternal = ids.includes("select-external-help");
+  const hasFieldDescription = ids.some(
+    (id) => id !== "select-external-help" && id.length > 0,
+  );
+  const ok = hasExternal && hasFieldDescription;
+  report(
+    "Select aria-describedby — caller id UNIONS with Field-wired ids (Wave 8 fix #1b)",
+    ok,
+    `aria-describedby="${describedBy}" ids=[${ids.join(",")}]`,
+  );
+}
+
+/* ─── Wave 8 fix #2 — Select invalid + open keeps focus ring ─────────
+ *
+ * Pre-fix the `[data-invalid]` rule in `Select.css` lived AFTER the
+ * focus / open block; it reset the second box-shadow slot to
+ * `0 0 0 0 transparent`, killing the focus ring for any invalid trigger
+ * that was focused OR open. The InvalidFocusRing story auto-submits a
+ * required form (which paints `[data-invalid]`); the auto-click in its
+ * useEffect tries to open the popup, but the aria-wiring `open()`
+ * helper presses ESC during navigation cleanup which may close it. We
+ * therefore drive the popup open ourselves AFTER the helper finishes:
+ *
+ *   1. Wait for the submit-ref click to flush — read `data-invalid`.
+ *   2. Click the trigger to open the popup — read `data-popup-open`.
+ *
+ * Then sample the computed `box-shadow` and assert the focus-ring slot
+ * still carries the ring colour rather than `transparent`. Post-fix
+ * the `[data-invalid]:focus-visible` / `[data-invalid][data-popup-open]`
+ * rules outrank the bare reset and reinstate the ring. */
+await open("components-select--invalid-focus-ring");
+{
+  const trigger = page.locator(
+    '[data-testid="select-invalid-focus-ring"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Wait for `data-invalid` to land via Base UI's validity commit
+  // (driven by the story's rAF-chained submit button click).
+  let invalid = false;
+  for (let i = 0; i < 60 && !invalid; i += 1) {
+    invalid = await trigger
+      .evaluate((el) => el.hasAttribute("data-invalid"))
+      .catch(() => false);
+    if (!invalid) await page.waitForTimeout(50);
+  }
+  // Now drive the popup open ourselves. The story's auto-click may
+  // have raced with the open() helper's ESC cleanup; clicking here is
+  // idempotent and brings us into the `[data-invalid][data-popup-open]`
+  // cascade we want to assert.
+  if (invalid) {
+    await trigger.click();
+    await page.waitForTimeout(200);
+  }
+  const invalidOpen = await trigger
+    .evaluate(
+      (el) =>
+        el.hasAttribute("data-invalid") &&
+        el.hasAttribute("data-popup-open"),
+    )
+    .catch(() => false);
+  const boxShadow = invalidOpen
+    ? await trigger.evaluate(
+        (el) => getComputedStyle(el).boxShadow ?? "",
+      )
+    : "";
+  // The second slot is the focus ring (not transparent). A reliable
+  // proxy: the resolved `box-shadow` contains at least TWO comma-
+  // separated shadows, AND the second one is NOT entirely transparent
+  // (`rgba(0, 0, 0, 0)` or `transparent`). Pre-fix the second shadow
+  // was `0 0 0 0 transparent` — its rgba would be `rgba(0, 0, 0, 0)`.
+  const shadows = boxShadow.split(/,(?![^()]*\))/).map((s) => s.trim());
+  const ringSlot = shadows[1] ?? "";
+  const ringIsTransparent =
+    ringSlot === "" ||
+    /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(ringSlot) ||
+    /\btransparent\b/.test(ringSlot);
+  const hasTwoSlots = shadows.length >= 2;
+  const ok = invalidOpen && hasTwoSlots && !ringIsTransparent;
+  report(
+    "Select invalid + open — focus ring slot stays non-transparent (Wave 8 fix #2)",
+    ok,
+    `invalidOpen=${invalidOpen} shadows=${shadows.length} ringSlot="${ringSlot}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
