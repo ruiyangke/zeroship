@@ -5707,6 +5707,114 @@ await open("components-collapsible--basic");
   );
 }
 
+/* ─── 85h. Wave 10 fix #1: Collapsible.Trigger asChild routes through
+ *                    the canonical `_slot.ts` Slot.
+ *
+ * Pre-fix: Collapsible.tsx explicitly omitted Base UI's `render` prop
+ * from BOTH Trigger and Panel and documented "No asChild surface."
+ * The standard requires asChild via _slot.ts (mirroring Dialog.Close
+ * commit 3a64a726). The fix adds `asChild?: boolean` on both subparts
+ * and routes the consumer's element through Slot.
+ *
+ * This block exercises the TriggerAsChild story:
+ *   - the rendered element keeps both the consumer's className and
+ *     the internal `.zs-collapsible-trigger` class (Slot's mergeProps
+ *     concatenates them),
+ *   - clicking the asChild element flips `aria-expanded` (Base UI's
+ *     open handler reached the consumer element via Slot),
+ *   - the consumer's own onClick fired EXACTLY ONCE (the status
+ *     readout flips to `child-onclick-ran`). Pre-fix this story does
+ *     not even type-check; post-fix all three signals must hold. */
+await open("components-collapsible--trigger-as-child");
+{
+  const target = page.locator(
+    '[data-testid="collapsible-trigger-aschild-target"]',
+  );
+  const status = page.locator('[data-testid="collapsible-aschild-status"]');
+  await target.waitFor({ state: "visible", timeout: 5000 });
+  const tag = await target.evaluate((el) => el.tagName);
+  const hasConsumerClass = await target.evaluate((el) =>
+    el.classList.contains("zs-collapsible-aschild-target"),
+  );
+  const hasInternalClass = await target.evaluate((el) =>
+    el.classList.contains("zs-collapsible-trigger"),
+  );
+  // Storybook autoplay already clicked once; capture the baseline so
+  // our +1 click leaves a single increment on the status.
+  const statusBefore = ((await status.innerText()) || "").trim();
+  const expandedBefore = await target.getAttribute("aria-expanded");
+  // Reset to a known closed state so the click below opens the panel.
+  if (expandedBefore === "true") {
+    await target.click();
+    await page.waitForTimeout(150);
+  }
+  const expandedAtClosed = await target.getAttribute("aria-expanded");
+  await target.click();
+  await page.waitForTimeout(300);
+  const expandedAfterClick = await target.getAttribute("aria-expanded");
+  const statusAfter = ((await status.innerText()) || "").trim();
+  const childOnClickRan = /child-onclick-ran/.test(statusAfter);
+  const ok =
+    tag === "BUTTON" &&
+    hasConsumerClass &&
+    hasInternalClass &&
+    expandedAtClosed === "false" &&
+    expandedAfterClick === "true" &&
+    childOnClickRan;
+  report(
+    "Collapsible.Trigger asChild Slot composes (className + aria-expanded flip + child onClick fired) (wave 10 fix #1)",
+    ok,
+    `tag=${tag} consumerClass=${hasConsumerClass} internalClass=${hasInternalClass} expanded=${expandedAtClosed}→${expandedAfterClick} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+  );
+}
+
+/* ─── 85i. Wave 10 fix #1 mirror: Collapsible.Panel asChild routes
+ *                    through Slot and drops the inner padding wrapper.
+ *
+ * Pre-fix: Collapsible.Panel had no `asChild` surface; the consumer
+ * always got `<div class="zs-collapsible-panel"><div class="...inner">`.
+ * The fix lets the consumer render-as `<section>` (or any other host
+ * element). The aria-controls round-trip (Trigger → Panel id) must
+ * still resolve. */
+await open("components-collapsible--panel-as-child");
+{
+  const trigger = page.locator(
+    '[data-testid="collapsible-panel-aschild-trigger"]',
+  );
+  const panelTarget = page.locator(
+    '[data-testid="collapsible-panel-aschild-target"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await panelTarget.waitFor({ state: "visible", timeout: 5000 });
+  const tag = await panelTarget.evaluate((el) => el.tagName);
+  const hasConsumerClass = await panelTarget.evaluate((el) =>
+    el.classList.contains("zs-collapsible-aschild-section"),
+  );
+  const hasInternalClass = await panelTarget.evaluate((el) =>
+    el.classList.contains("zs-collapsible-panel"),
+  );
+  // The asChild element IS the panel — no `.zs-collapsible-panel-inner`
+  // wrapper is auto-injected when asChild is set.
+  const hasInnerWrapper = await panelTarget.evaluate((el) =>
+    el.querySelector(".zs-collapsible-panel-inner") !== null,
+  );
+  const ariaControls = await trigger.getAttribute("aria-controls");
+  const panelId = await panelTarget.getAttribute("id");
+  const ok =
+    tag === "SECTION" &&
+    hasConsumerClass &&
+    hasInternalClass &&
+    !hasInnerWrapper &&
+    ariaControls !== null &&
+    panelId !== null &&
+    ariaControls === panelId;
+  report(
+    "Collapsible.Panel asChild Slot — renders consumer element + drops inner wrapper + aria-controls round-trip (wave 10 fix #1)",
+    ok,
+    `tag=${tag} consumerClass=${hasConsumerClass} internalClass=${hasInternalClass} hasInnerWrapper=${hasInnerWrapper} ariaControls=${ariaControls} panelId=${panelId}`,
+  );
+}
+
 /* ─── 82. Slice 16: Toast — role/aria-live polite for default variant ─ *
  *
  * Brief assertion 1+2: triggering `toast()` with no variant renders a
@@ -9429,6 +9537,140 @@ await open("components-navigationmenu--popup-min-width-clamp-regression");
   await page.waitForTimeout(100);
 }
 
+
+/* ─── Wave 10 rework — Collapsible 🔴 #2: onOpenChange details forward ── *
+ *
+ * Pre-rework: Collapsible.tsx narrowed `onOpenChange` to
+ * `(open: boolean) => void` AND called it with only `next`, so Base
+ * UI's `details` argument (reason / native event / `cancel()`) never
+ * reached the consumer — consumers could not inspect the change or
+ * veto it. The rework derives the signature from
+ * `BaseCollapsibleRootProps['onOpenChange']` and forwards
+ * `(next, details)`.
+ *
+ * The RegressionOnOpenChangeDetails story renders a Collapsible with
+ * a readout that captures `typeof eventDetails` AND the `reason`
+ * field on the FIRST `onOpenChange` call. We click the Trigger once
+ * and assert:
+ *   - the readout no longer says `no-details-yet` (the callback ran),
+ *   - the readout no longer says `details-missing` (typeof object),
+ *   - the readout shows `reason=...` (a `reason` field on the details
+ *     object). */
+await open(
+  "components-collapsible--regression-on-open-change-details",
+);
+{
+  const trigger = page.locator(
+    '[data-testid="collapsible-details-trigger"]',
+  );
+  const readout = page.locator(
+    '[data-testid="collapsible-details-readout"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await readout.waitFor({ state: "visible", timeout: 5000 });
+  const initial = ((await readout.innerText()) || "").trim();
+  await trigger.click();
+  await page.waitForTimeout(200);
+  const after = ((await readout.innerText()) || "").trim();
+  const calledBack = !/no-details-yet/.test(after);
+  const detailsArrived = !/details-missing/.test(after);
+  const hasReason = /reason=/.test(after);
+  const ok = calledBack && detailsArrived && hasReason;
+  report(
+    "Collapsible onOpenChange forwards Base UI details (reason field) (Wave 10 rework fix #2)",
+    ok,
+    `initial="${initial}" after="${after}" calledBack=${calledBack} detailsArrived=${detailsArrived} hasReason=${hasReason}`,
+  );
+}
+
+/* ─── Wave 10 rework — Collapsible 🔴 #3: forced-colors disabled+open ── *
+ *
+ * Pre-rework: under `@media (forced-colors: active)` the
+ * `[data-panel-open]` selector painted HighlightText/Highlight at the
+ * SAME specificity (0,2,0) as `[data-disabled]` AND sat later in
+ * source, so an open + disabled Trigger painted Highlight instead of
+ * GrayText. The rework adds `:not([data-disabled])` to every open
+ * selector AND moves the disabled rules to sit after the open block.
+ *
+ * We emulate `forced-colors: active`, open the
+ * RegressionDisabledOpenForcedColors story (which mounts an open
+ * disabled Collapsible), then read computed color on both the
+ * Trigger AND the chevron. Both must resolve to GrayText, NOT to a
+ * highlight-class color.
+ *
+ * Cross-browser signal: under forced-colors:active, GrayText
+ * resolves to a specific rgb() the browser supplies. We do NOT pin
+ * an exact rgb() value (Chromium and WebKit emit different palettes
+ * for the same keyword); instead we assert that the computed color
+ * matches a probe element whose own `color` is set to `GrayText` in
+ * an inline style. Same-page probe = same browser palette. */
+await page.emulateMedia({ forcedColors: "active" });
+await open(
+  "components-collapsible--regression-disabled-open-forced-colors",
+);
+{
+  const trigger = page.locator(
+    '[data-testid="collapsible-disabled-open-hcm-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Settle a frame so the forced-colors repaint lands.
+  await page.waitForTimeout(200);
+
+  // Inject probe elements with explicit system-color values, then
+  // read their computed color so we can compare apples to apples
+  // regardless of browser palette.
+  const palette = await page.evaluate(() => {
+    const mk = (color) => {
+      const el = document.createElement("span");
+      el.style.color = color;
+      el.style.forcedColorAdjust = "none";
+      el.textContent = "x";
+      document.body.appendChild(el);
+      const computed = getComputedStyle(el).color;
+      el.remove();
+      return computed;
+    };
+    return {
+      gray: mk("GrayText"),
+      highlight: mk("HighlightText"),
+      canvas: mk("CanvasText"),
+    };
+  });
+
+  const triggerColor = await trigger.evaluate(
+    (el) => getComputedStyle(el).color,
+  );
+  const chevronColor = await page.evaluate(() => {
+    const t = document.querySelector(
+      '[data-testid="collapsible-disabled-open-hcm-trigger"]',
+    );
+    if (!t) return null;
+    const ch = t.querySelector(".zs-collapsible-trigger-chevron");
+    return ch ? getComputedStyle(ch).color : null;
+  });
+
+  // Open + disabled MUST paint GrayText on both trigger AND chevron.
+  // Reject any colour matching HighlightText (the pre-fix bleed).
+  // Reject oklch token bleed (token paint slipped past forced-colors).
+  const triggerIsGray = triggerColor === palette.gray;
+  const triggerIsHighlight = triggerColor === palette.highlight;
+  const chevronIsGray = chevronColor === palette.gray;
+  const chevronIsHighlight = chevronColor === palette.highlight;
+  const isOklch = (s) => typeof s === "string" && /oklch\(/i.test(s);
+  const noOklch = !isOklch(triggerColor) && !isOklch(chevronColor);
+  const ok =
+    triggerIsGray &&
+    chevronIsGray &&
+    !triggerIsHighlight &&
+    !chevronIsHighlight &&
+    noOklch;
+  report(
+    "Collapsible forced-colors — disabled+open trigger AND chevron paint GrayText, not HighlightText (Wave 10 rework fix #3)",
+    ok,
+    `palette.gray="${palette.gray}" palette.highlight="${palette.highlight}" triggerColor="${triggerColor}" chevronColor="${chevronColor}" triggerIsGray=${triggerIsGray} triggerIsHighlight=${triggerIsHighlight} chevronIsGray=${chevronIsGray} chevronIsHighlight=${chevronIsHighlight} noOklch=${noOklch}`,
+  );
+}
+await page.emulateMedia({ forcedColors: "none" });
 await ctx.close();
 await browser.close();
 

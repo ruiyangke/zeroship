@@ -385,6 +385,12 @@
      a narrower 0.125rem outline (vs the default 0.1875rem) in
      Button.css so the visible mass drops further. */
   --zs-button-focus-ring-color: oklch(0.52 0.18 250 / 0.28);
+  /* Button-style focus-ring outline width. Narrower than the
+     foundation --zs-focus-ring-width (0.1875rem) so button-like
+     affordances (Button, Toggle, Collapsible.Trigger) read with a
+     lighter ring than form fields. Mirrors the alpha pairing on
+     --zs-button-focus-ring-color. */
+  --zs-button-focus-ring-width: 0.125rem;      /* 2 */
 
   /* ─── Material — glass. Crystal is the light glass, so a less intense
      saturation is gentler than the root default. */
