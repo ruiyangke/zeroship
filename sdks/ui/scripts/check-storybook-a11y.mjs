@@ -114,6 +114,11 @@ const stories = [
   "components-checkbox--inside-form",
   "components-checkbox--disabled",
   "components-checkbox--rtl",
+  // Wave-7 red #1 regression — RTL glyph centering. Renders a checked
+  // + an indeterminate chip under dir="rtl" so the aria-wiring script
+  // can measure the glyph stays centered inside the chip. The story
+  // also needs to be axe-clean.
+  "components-checkbox--rtl-glyph-centering",
   "components-switch--all-states",
   "components-switch--all-sizes",
   "components-switch--with-external-label",
