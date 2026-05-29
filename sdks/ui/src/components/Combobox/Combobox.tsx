@@ -250,6 +250,47 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
     required: required || undefined,
   };
 
+  /*
+   * Wave-6 review-fix A: build the aria-* prop bag CONDITIONALLY.
+   *
+   * Previously the wrapper unconditionally passed
+   *
+   *     aria-label={ariaLabel}
+   *     aria-labelledby={ariaLabelledBy}
+   *     aria-describedby={ariaDescribedBy}
+   *
+   * to `BaseCombobox.Input`. When the consumer didn't pass any of
+   * these (e.g. inside `<Field><Field.Label>…</Field.Label>…</Field>`),
+   * Base UI's `mergeProps` saw an EXPLICIT `aria-labelledby={undefined}`
+   * on the wrapper side and clobbered the Field-auto-wired id Base UI's
+   * Field-Combobox bridge had merged in. The focused input then had no
+   * accessible name. Only spreading defined keys lets Base UI's Field
+   * wiring shine through.
+   *
+   * Wave-6 review-fix B: when no Field, no explicit `aria-label`, and no
+   * explicit `aria-labelledby`, fall back to `aria-label={placeholder}`
+   * so an unlabeled standalone Combobox still has an accessible name.
+   * Placeholder text is not an accessible name on its own (axe
+   * `aria-input-field-name`), so we promote it to one. Inside a Field we
+   * skip the fallback — Field already auto-wires `aria-labelledby` at
+   * the input, and a duplicate stale aria-label that drifts when the
+   * placeholder changes is dead weight (same shape as Select).
+   */
+  const ariaLabelFallback: string | undefined =
+    ariaLabel ??
+    (fieldCtx || ariaLabelledBy ? undefined : placeholder);
+  const inputAriaProps: {
+    "aria-label"?: string;
+    "aria-labelledby"?: string;
+    "aria-describedby"?: string;
+  } = {};
+  if (ariaLabelFallback !== undefined)
+    inputAriaProps["aria-label"] = ariaLabelFallback;
+  if (ariaLabelledBy !== undefined)
+    inputAriaProps["aria-labelledby"] = ariaLabelledBy;
+  if (ariaDescribedBy !== undefined)
+    inputAriaProps["aria-describedby"] = ariaDescribedBy;
+
   return (
     <ComboboxContext.Provider value={ctxValue}>
       <BaseCombobox.Root {...rootProps}>
@@ -279,9 +320,7 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
                     <BaseCombobox.Input
                       className="zs-combobox-input"
                       placeholder={placeholder}
-                      aria-label={ariaLabel}
-                      aria-labelledby={ariaLabelledBy}
-                      aria-describedby={ariaDescribedBy}
+                      {...inputAriaProps}
                     />
                   </>
                 )}
@@ -291,9 +330,7 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
             <BaseCombobox.Input
               className="zs-combobox-input"
               placeholder={placeholder}
-              aria-label={ariaLabel}
-              aria-labelledby={ariaLabelledBy}
-              aria-describedby={ariaDescribedBy}
+              {...inputAriaProps}
             />
           )}
           <BaseCombobox.Icon
