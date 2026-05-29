@@ -193,6 +193,10 @@ const stories = [
   "components-select--align-start-center-end",
   "components-select--placement",
   "components-select--rtl",
+  // Wave-8 review-fix 🔴 #1 / 🔴 #2 regression stories.
+  "components-select--field-aria-autowiring",
+  "components-select--aria-described-by-merge",
+  "components-select--invalid-focus-ring",
   "components-combobox--basic",
   "components-combobox--multiple",
   "components-combobox--all-sizes",
@@ -496,12 +500,36 @@ const context = await browser.newContext({ viewport: { width: 1280, height: 900 
 const page = await context.newPage();
 const failures = [];
 
+/*
+ * Per-story axe rule disables. Some stories must leave the popup open
+ * for their regression to read computed styles. Base UI's
+ * `data-base-ui-focus-guard` spans (`tabindex=0 aria-hidden=true`) are
+ * part of floating-ui's focus trap and not part of our public surface;
+ * we disable just the `aria-hidden-focus` rule for those stories.
+ *
+ * Mirrors the per-story `parameters.a11y.config.rules` knob the Test
+ * Runner reads via `getStoryContext` — but `check-storybook-a11y.mjs`
+ * uses AxeBuilder directly and cannot reach the story context, so the
+ * disable list lives here. Keep this list short and document each
+ * entry.
+ */
+const ruleDisables = {
+  // Wave-8 🔴 #2 regression: needs `[data-popup-open]` to read the
+  // trigger's computed focus-ring slot.
+  "components-select--invalid-focus-ring": ["aria-hidden-focus"],
+};
+
 for (const theme of themes) {
   for (const storyId of stories) {
     const themeGlobal = encodeURIComponent(theme.label);
     const url = `${baseUrl}/iframe.html?id=${storyId}&globals=theme:${themeGlobal}`;
     await page.goto(url, { waitUntil: "networkidle" });
-    const results = await new AxeBuilder({ page }).analyze();
+    let builder = new AxeBuilder({ page });
+    const disabledRules = ruleDisables[storyId];
+    if (disabledRules && disabledRules.length > 0) {
+      builder = builder.disableRules(disabledRules);
+    }
+    const results = await builder.analyze();
     const blockingViolations = results.violations.filter((violation) =>
       violation.impact === "serious" || violation.impact === "critical"
     );

@@ -6,7 +6,7 @@
  * a Dialog (same `--zs-shadow-dialog`, same opaque-surface invariant).
  *
  *   <Select value={v} onValueChange={setV}>
- *     <Select.Item value="apple">Apple</Select.Item>
+ *     <Select.Item value="mango">Mango</Select.Item>
  *     <Select.Group label="Citrus">
  *       <Select.Item value="orange">Orange</Select.Item>
  *       <Select.Item value="lemon">Lemon</Select.Item>
@@ -53,6 +53,7 @@ import {
   forwardRef,
   useContext,
   useMemo,
+  type ButtonHTMLAttributes,
   type ComponentPropsWithoutRef,
   type ReactNode,
   type Ref,
@@ -245,27 +246,56 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
     modal: modalProp ?? false,
   };
 
+  /*
+   * Wave-8 review-fix 🔴 #1: build the aria-* prop bag CONDITIONALLY.
+   *
+   * Pre-fix the wrapper unconditionally stamped
+   *
+   *     aria-label={…}
+   *     aria-labelledby={ariaLabelledBy}
+   *     aria-describedby={ariaDescribedBy}
+   *
+   * on `<BaseSelect.Trigger>`. When the consumer didn't pass any of
+   * those (e.g. inside `<Field><Field.Label>…</Field.Label>
+   * <Field.Description>…</Field.Description></Field>`), Base UI's
+   * `mergeProps` treated the explicit `undefined`s as overrides and
+   * clobbered the ids the Field bridge had auto-wired through
+   * `resolveAriaLabelledBy` (`aria-labelledby`) and
+   * `validation.getValidationProps` (`aria-describedby`). The focused
+   * trigger then had no label / no description.
+   *
+   * Post-fix we only spread keys that are actually defined, so Base
+   * UI's Field wiring shines through. When the consumer DOES pass an
+   * explicit `aria-describedby`, we union it with Base UI's auto-wired
+   * one via the trigger `render` callback so external help-text ids
+   * don't replace Field.Description / Field.Error ids.
+   *
+   * Accessible-name fallback (axe `button-name`): when there is no
+   * explicit `aria-label`, no explicit `aria-labelledby`, AND no Field
+   * wrapping us, fall back to `aria-label={placeholder}` so an empty
+   * standalone Select still announces something. Inside a Field, skip
+   * the fallback entirely — the Field's `aria-labelledby` already
+   * names the trigger and a stale duplicate `aria-label` that drifts
+   * when the placeholder changes is dead weight (same shape Combobox
+   * uses).
+   */
+  const ariaLabelFallback: string | undefined =
+    ariaLabel ??
+    (fieldCtx || ariaLabelledBy ? undefined : placeholder);
+  const triggerAriaProps: {
+    "aria-label"?: string;
+    "aria-labelledby"?: string;
+  } = {};
+  if (ariaLabelFallback !== undefined)
+    triggerAriaProps["aria-label"] = ariaLabelFallback;
+  if (ariaLabelledBy !== undefined)
+    triggerAriaProps["aria-labelledby"] = ariaLabelledBy;
+
   return (
     <SelectContext.Provider value={ctxValue}>
       <BaseSelect.Root {...rootProps}>
         <BaseSelect.Trigger
-          /*
-           * Accessible-name fallback (axe `button-name`): Base UI renders
-           * the trigger as `<button role="combobox">`. The placeholder
-           * lives in an inner `<span>` (via Select.Value), but the
-           * `role="combobox"` button doesn't auto-name from descendant
-           * text on every screen reader. When no explicit `aria-label`
-           * is provided AND no Field is wrapping us (Field auto-wires
-           * `aria-labelledby` at the Trigger level), we default
-           * `aria-label` to the placeholder so an empty Select still
-           * announces something. Inside a Field, we skip the placeholder
-           * fallback entirely — the Field's `aria-labelledby` already
-           * names the trigger, and a stale duplicate aria-label that
-           * drifts when the placeholder changes is dead weight.
-           */
-          aria-label={ariaLabel ?? (fieldCtx ? undefined : placeholder)}
-          aria-labelledby={ariaLabelledBy}
-          aria-describedby={ariaDescribedBy}
+          {...triggerAriaProps}
           data-testid={dataTestid}
           className={classnames(
             "zs-select-trigger",
@@ -275,6 +305,33 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
           )}
           data-variant={variant}
           data-size={size}
+          /*
+           * Union caller's `aria-describedby` with Base UI's auto-wired
+           * value. Base UI's `SelectTrigger` runs `mergeProps(triggerProps,
+           * {…}, validation.getValidationProps, elementProps, getButtonProps)`
+           * — `validation.getValidationProps` is what stamps the Field
+           * description / error ids onto the button. If we pass
+           * `aria-describedby` through `elementProps`, mergeProps clobbers
+           * the Field-auto-wired value. Routing through `render` lets us
+           * read Base UI's resolved `aria-describedby` AFTER the validation
+           * merge and union it with the consumer's id(s).
+           */
+          render={(triggerProps) => {
+            const baseDescribedBy =
+              (triggerProps as { "aria-describedby"?: string })[
+                "aria-describedby"
+              ];
+            const mergedDescribedBy =
+              [baseDescribedBy, ariaDescribedBy].filter(Boolean).join(" ") ||
+              undefined;
+            return (
+              <button
+                type="button"
+                {...(triggerProps as ButtonHTMLAttributes<HTMLButtonElement>)}
+                aria-describedby={mergedDescribedBy}
+              />
+            );
+          }}
         >
           <BaseSelect.Value
             className="zs-select-trigger__value"

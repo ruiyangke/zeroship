@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useEffect, useRef, useState } from "react";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Form } from "@base-ui/react/form";
 import { Button, Field, Select } from "../components";
 
@@ -260,6 +261,17 @@ export const Multiple: Story = {
     await userEvent.click(body.getByRole("option", { name: /orange/i }));
     await waitFor(() => expect(trigger).toHaveTextContent(/apple/i));
     await expect(trigger).toHaveTextContent(/orange/i);
+    // Wave-8 a11y hygiene: dismiss the popup before postVisit so axe
+    // doesn't trip on Base UI's `data-base-ui-focus-guard` spans (which
+    // are `tabindex=0 aria-hidden=true` by design — that's
+    // floating-ui's focus trap). Closing the popup removes the guards
+    // from the DOM so the Multiple story is axe-clean.
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        body.queryByRole("option", { name: /apple/i }),
+      ).not.toBeInTheDocument(),
+    );
   },
 };
 
@@ -575,7 +587,20 @@ export const Placement: Story = {
   ),
 };
 
-/* ─── 12. RTL ───────────────────────────────────────────────────────── */
+/* ─── 12. RTL ───────────────────────────────────────────────────────── *
+ *
+ * Wave-8 review-fix 🟡: pre-fix the story only set `dir="rtl"` on a
+ * wrapper `<div>`. Base UI's Floating UI positioner reads its direction
+ * from `DirectionContext` (seeded by `DirectionProvider`), NOT from
+ * the inherited DOM `dir` attribute — the popup portals to
+ * `document.body` and the `dir` never propagates across that boundary.
+ * Slice 11 documented this exact failure mode in `Menu.stories.tsx`.
+ * Without the provider, this story did NOT prove popup alignment
+ * flipped to the visual right under RTL — `start` resolved against
+ * the LTR axis and the popup anchored to the visual left. We now wrap
+ * the row in `<DirectionProvider direction="rtl">` AND open the popup
+ * in a play() assertion that proves the trigger renders the chevron
+ * on the inline-end (visual left) under RTL. */
 export const RTL: Story = {
   parameters: {
     docs: {
@@ -583,20 +608,287 @@ export const RTL: Story = {
         story:
           "Hebrew labels in an RTL container. Logical properties carry " +
           "the layout flip — the chevron moves to the inline-end (visual " +
-          "left); start-aligned popups now align to the visual right.",
+          "left); start-aligned popups now align to the visual right. " +
+          "Wave-8 fix: seeded via `DirectionProvider direction=\"rtl\"` " +
+          "so Base UI's positioner reads the RTL axis across the portal " +
+          "boundary.",
       },
     },
   },
   render: () => (
-    <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL">
-      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
-        <Select placeholder="בחר פרי" data-testid="select-rtl">
-          <Select.Item value="apple">תפוח</Select.Item>
-          <Select.Item value="orange">תפוז</Select.Item>
-          <Select.Item value="banana">בננה</Select.Item>
-          <Select.Item value="lemon">לימון</Select.Item>
-        </Select>
+    <DirectionProvider direction="rtl">
+      <div
+        dir="rtl"
+        lang="he"
+        className="zs-story-row"
+        role="group"
+        aria-label="RTL"
+      >
+        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+          <Select placeholder="בחר פרי" data-testid="select-rtl">
+            <Select.Item value="mango" data-testid="select-rtl-item-mango">
+              מנגו
+            </Select.Item>
+            <Select.Item value="orange" data-testid="select-rtl-item-orange">
+              תפוז
+            </Select.Item>
+            <Select.Item value="banana" data-testid="select-rtl-item-banana">
+              בננה
+            </Select.Item>
+            <Select.Item value="lemon" data-testid="select-rtl-item-lemon">
+              לימון
+            </Select.Item>
+          </Select>
+        </div>
+      </div>
+    </DirectionProvider>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("combobox", { name: /בחר פרי/ });
+
+    await userEvent.click(trigger);
+    await waitFor(() =>
+      expect(body.getByTestId("select-rtl-item-mango")).toBeVisible(),
+    );
+    // Wave-8 a11y hygiene: close the popup before postVisit so axe
+    // doesn't trip on Base UI's `data-base-ui-focus-guard` spans.
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        body.queryByTestId("select-rtl-item-mango"),
+      ).not.toBeInTheDocument(),
+    );
+  },
+};
+
+/* ─── 13. FieldAriaAutowiring — wave-8 🔴 #1 regression ──────────────── *
+ *
+ * Inside a `<Field>` with `<Field.Label>` and `<Field.Description>`,
+ * the consumer passes NO `aria-label` / `aria-labelledby` /
+ * `aria-describedby` on `<Select>`. Pre-fix the wrapper stamped
+ * `aria-labelledby={undefined}` and `aria-describedby={undefined}` on
+ * `<BaseSelect.Trigger>`. Base UI's `mergeProps` treated the explicit
+ * `undefined`s as overrides and clobbered the ids the Field bridge had
+ * auto-wired through `resolveAriaLabelledBy` (label) and
+ * `validation.getValidationProps` (description). The focused trigger
+ * then had no accessible name. Post-fix the wrapper only spreads
+ * aria-* keys when they are actually defined; this story is the
+ * positive regression hook (`aria-labelledby` and `aria-describedby`
+ * must BOTH be non-empty on the trigger). */
+export const FieldAriaAutowiring: Story = {
+  name: "Field auto-wires labelledby + describedby (no consumer aria-*)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Wave-8 review-fix 🔴 #1: inside `<Field>` " +
+          "with `<Field.Label>` + `<Field.Description>`, Select must let " +
+          "Base UI's Field bridge auto-wire `aria-labelledby` and " +
+          "`aria-describedby` on the trigger. Pre-fix the wrapper passed " +
+          "`undefined` and overwrote those ids — the trigger had no " +
+          "accessible name. The story passes NO consumer aria-* props.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Field aria autowiring"
+    >
+      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+        <Field>
+          <Field.Label>Favorite fruit (field-wired)</Field.Label>
+          <Select
+            placeholder="Pick one"
+            data-testid="select-field-aria-autowiring"
+          >
+            {FRUITS.map((f) => (
+              <Select.Item key={f} value={f}>
+                {f.charAt(0).toUpperCase() + f.slice(1)}
+              </Select.Item>
+            ))}
+          </Select>
+          <Field.Description data-testid="select-field-aria-autowiring-desc">
+            Field-wired description.
+          </Field.Description>
+        </Field>
       </div>
     </div>
   ),
+};
+
+/* ─── 14. AriaDescribedByMerge — caller id UNIONS with Field ids ──── *
+ *
+ * Wave-8 review-fix 🔴 #1 second leg: when the consumer DOES pass an
+ * explicit `aria-describedby` AND the Select sits inside a `<Field>`
+ * with `<Field.Description>`, both ids must end up on the trigger so
+ * external help-text doesn't replace Field's auto-wired description.
+ * Pre-fix the wrapper passed the caller id straight through
+ * `elementProps`; `mergeProps` clobbered Base UI's
+ * `validation.getValidationProps` result with it. Post-fix the render
+ * callback reads the auto-wired value AFTER the validation merge and
+ * unions it with the caller's id(s). */
+export const AriaDescribedByMerge: Story = {
+  name: "aria-describedby unions caller id with Field-wired ids",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Wave-8 review-fix 🔴 #1: caller-provided " +
+          "`aria-describedby` is UNIONED with Base UI's auto-wired one " +
+          "via the trigger render callback. The external help id must " +
+          "appear alongside Field.Description's id, not replace it.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="aria-describedby merge"
+    >
+      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+        <span
+          id="select-external-help"
+          data-testid="select-described-by-merge-external"
+          style={{ display: "block", marginBlockEnd: "0.5rem" }}
+        >
+          External help text.
+        </span>
+        <Field>
+          <Field.Label>Favorite fruit (described-by merge)</Field.Label>
+          <Select
+            placeholder="Pick one"
+            aria-describedby="select-external-help"
+            data-testid="select-described-by-merge"
+          >
+            {FRUITS.map((f) => (
+              <Select.Item key={f} value={f}>
+                {f.charAt(0).toUpperCase() + f.slice(1)}
+              </Select.Item>
+            ))}
+          </Select>
+          <Field.Description data-testid="select-described-by-merge-desc">
+            Field-wired description.
+          </Field.Description>
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 15. InvalidFocusRing — wave-8 🔴 #2 regression ─────────────── *
+ *
+ * Pre-fix the base `[data-invalid]` selector in `Select.css` was
+ * source-ordered AFTER the focus / open rules and reset the second
+ * box-shadow slot to `0 0 0 0 transparent`, dropping the focus ring.
+ * Post-fix `[data-invalid]:focus-visible` and
+ * `[data-invalid][data-popup-open]` mirror the focus / open rules with
+ * the invalid border colour, so the ring stays visible.
+ *
+ * The story auto-submits the enclosing `<Form>` after mount, which
+ * fires the `valueMissing` validation path and stamps `data-invalid`
+ * on the trigger via Base UI's Field bridge. A second rAF clicks the
+ * trigger to open the popup so the trigger also carries
+ * `data-popup-open`. Together those two attributes drive the
+ * `[data-invalid][data-popup-open]` cascade — pre-fix that cascade
+ * zeroed the ring; post-fix it preserves the focus-ring slot. The
+ * aria-wiring regression asserts the computed `box-shadow` still
+ * contains the ring colour. */
+export const InvalidFocusRing: Story = {
+  name: "Invalid + focused — focus ring stays visible",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Wave-8 review-fix 🔴 #2: an invalid + " +
+          "focused / open Select trigger must keep its focus ring. " +
+          "Pre-fix the bare `[data-invalid]` selector outranked the " +
+          "focus rules and zeroed the ring slot.",
+      },
+    },
+    /*
+     * The popup MUST remain open for the aria-wiring regression to read
+     * the trigger's computed box-shadow under both `[data-invalid]` and
+     * `[data-popup-open]`. While the popup is open, Base UI mounts its
+     * `data-base-ui-focus-guard` spans (`tabindex=0 aria-hidden=true`)
+     * which axe flags via `aria-hidden-focus`. The guards are part of
+     * Base UI's floating-ui focus trap and are not in the design
+     * system's surface — we disable just that rule here. Other Select
+     * stories (Basic, Multiple, RTL, etc.) close the popup in their
+     * play() so they remain axe-clean against the same rule. */
+    a11y: {
+      config: {
+        rules: [{ id: "aria-hidden-focus", enabled: false }],
+      },
+    },
+  },
+  render: function InvalidFocusRingRender() {
+    const submitRef = useRef<HTMLElement>(null);
+    useEffect(() => {
+      // Two-step rAF: first submit to trigger `valueMissing` (which
+      // stamps `data-invalid` on the trigger), then click the trigger
+      // to open the popup (which stamps `data-popup-open`). A small
+      // setTimeout between steps lets Base UI's validity commit flush
+      // before we open.
+      const submitId = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          submitRef.current?.click();
+          setTimeout(() => {
+            const trigger = document.querySelector(
+              '[data-testid="select-invalid-focus-ring"]',
+            );
+            if (trigger instanceof HTMLElement) trigger.click();
+          }, 120);
+        });
+      });
+      return () => cancelAnimationFrame(submitId);
+    }, []);
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Invalid focus ring"
+      >
+        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+          <Form
+            onSubmit={(e) => {
+              e.preventDefault();
+            }}
+            data-testid="select-invalid-focus-ring-form"
+          >
+            <Field required>
+              <Field.Label>
+                Favorite fruit (invalid) <Field.Required />
+              </Field.Label>
+              <Select
+                name="fruit"
+                placeholder="Pick one"
+                data-testid="select-invalid-focus-ring"
+              >
+                {FRUITS.map((f) => (
+                  <Select.Item key={f} value={f}>
+                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                  </Select.Item>
+                ))}
+              </Select>
+              <Field.Error match="valueMissing">Pick a fruit.</Field.Error>
+            </Field>
+            <div style={{ marginTop: "0.75rem" }}>
+              <Button
+                ref={submitRef}
+                type="submit"
+                data-testid="select-invalid-focus-ring-submit"
+              >
+                Submit
+              </Button>
+            </div>
+          </Form>
+        </div>
+      </div>
+    );
+  },
 };

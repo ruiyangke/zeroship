@@ -8591,6 +8591,92 @@ await open("components-radio--required");
   );
 }
 
+/* ─── Wave 8 fix (Select #1a) — Field aria autowiring on trigger ─── */
+await open("components-select--field-aria-autowiring");
+{
+  const trigger = page.locator('[data-testid="select-field-aria-autowiring"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = (await trigger.getAttribute("aria-labelledby")) ?? "";
+  const describedBy = (await trigger.getAttribute("aria-describedby")) ?? "";
+  const hasLabelledBy = labelledBy.trim().length > 0;
+  const hasDescribedBy = describedBy.trim().length > 0;
+  let labelText = "";
+  if (hasLabelledBy) {
+    const firstId = labelledBy.trim().split(/\s+/)[0];
+    labelText = await page.evaluate((id) => {
+      const el = document.getElementById(id);
+      return el ? (el.textContent ?? "").trim() : "";
+    }, firstId);
+  }
+  const labelResolves = /favorite fruit/i.test(labelText);
+  const ok = hasLabelledBy && hasDescribedBy && labelResolves;
+  report(
+    "Select FieldAriaAutowiring — Field-wired aria-labelledby + aria-describedby survive on trigger (Wave 8 fix #1a)",
+    ok,
+    `aria-labelledby="${labelledBy}" aria-describedby="${describedBy}" labelText="${labelText}"`,
+  );
+}
+
+/* ─── Wave 8 fix (Select #1b) — aria-describedby caller-union ─── */
+await open("components-select--aria-described-by-merge");
+{
+  const trigger = page.locator('[data-testid="select-described-by-merge"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const describedBy = (await trigger.getAttribute("aria-describedby")) ?? "";
+  const ids = describedBy.split(/\s+/).filter(Boolean);
+  const hasExternal = ids.includes("select-external-help");
+  const hasFieldDescription = ids.some(
+    (id) => id !== "select-external-help" && id.length > 0,
+  );
+  const ok = hasExternal && hasFieldDescription;
+  report(
+    "Select aria-describedby — caller id UNIONS with Field-wired ids (Wave 8 fix #1b)",
+    ok,
+    `aria-describedby="${describedBy}" ids=[${ids.join(",")}]`,
+  );
+}
+
+/* ─── Wave 8 fix (Select #2) — invalid + open keeps focus ring ─── */
+await open("components-select--invalid-focus-ring");
+{
+  const trigger = page.locator('[data-testid="select-invalid-focus-ring"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  let invalid = false;
+  for (let i = 0; i < 60 && !invalid; i += 1) {
+    invalid = await trigger
+      .evaluate((el) => el.hasAttribute("data-invalid"))
+      .catch(() => false);
+    if (!invalid) await page.waitForTimeout(50);
+  }
+  if (invalid) {
+    await trigger.click();
+    await page.waitForTimeout(200);
+  }
+  const invalidOpen = await trigger
+    .evaluate(
+      (el) =>
+        el.hasAttribute("data-invalid") &&
+        el.hasAttribute("data-popup-open"),
+    )
+    .catch(() => false);
+  const boxShadow = invalidOpen
+    ? await trigger.evaluate((el) => getComputedStyle(el).boxShadow ?? "")
+    : "";
+  const shadows = boxShadow.split(/,(?![^()]*\))/).map((s) => s.trim());
+  const ringSlot = shadows[1] ?? "";
+  const ringIsTransparent =
+    ringSlot === "" ||
+    /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(ringSlot) ||
+    /\btransparent\b/.test(ringSlot);
+  const hasTwoSlots = shadows.length >= 2;
+  const ok = invalidOpen && hasTwoSlots && !ringIsTransparent;
+  report(
+    "Select invalid + open — focus ring slot stays non-transparent (Wave 8 fix #2)",
+    ok,
+    `invalidOpen=${invalidOpen} shadows=${shadows.length} ringSlot="${ringSlot}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
