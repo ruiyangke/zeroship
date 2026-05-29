@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
@@ -661,6 +661,157 @@ export const WithLinkItemAsChild: Story = {
       "https://example.com/support",
     );
     await expect(support.tagName).toBe("A");
+    await userEvent.keyboard("{Escape}");
+  },
+};
+
+/* ─── 13b. LinkItemAsChildSingleAttach (wave9 🔴 2 regression) ──────── *
+ *
+ * Pre-fix, `Menu.LinkItem` passed the forwarded `ref` to
+ * `<BaseMenu.LinkItem>` AND then composed that same ref with
+ * `linkProps.ref` inside the render-prop. Base UI round-tripped the
+ * outer ref back through `linkProps.ref` (see Base UI's
+ * `useRenderElement` — the forwarded ref is in the `[linkRef, buttonRef,
+ * forwardedRef, listItem.ref]` merge that becomes `linkProps.ref`), so
+ * `composeRefs(outerRef, linkProps.ref)` invoked the caller's callback
+ * ref TWICE per attach. The fix drops the outer `ref={…}` on
+ * `<BaseMenu.LinkItem>` so `linkProps.ref` is Base UI's internal element
+ * ref only — each side of `composeRefs` fires the caller exactly once.
+ *
+ * Test design — we measure a RATIO, not an absolute count. The Menu
+ * popup mounts/remounts a few times during open animation, so the same
+ * DOM `<a>` may be attached more than once. The bug doubled the rate
+ * per attach; we install:
+ *
+ *   - `wrapperRef` on `<Menu.LinkItem ref={…}>` — the path the review
+ *     flagged. Pre-fix this fires TWICE per attach event.
+ *   - `domRef` on the rendered DOM `<a>` (via `asChild`) — fires ONCE
+ *     per attach event regardless of the bug.
+ *
+ * Post-fix: `wrapperRef === domRef`. Pre-fix: `wrapperRef === 2 *
+ * domRef`. Aria-wiring reads both counters and asserts equality. */
+function LinkItemAsChildSingleAttachImpl() {
+  // Keep counts in a useRef so we don't trigger a re-render — Slot
+  // recomputes `composeRefs(...)` on every commit, and React treats the
+  // new callback identity as detach-old / attach-new. Any setState in
+  // the callback would loop the mount. Mirrors the Card story comment.
+  const wrapperRefCalls = useRef(0);
+  const domRefCalls = useRef(0);
+  const statusRef = useRef<HTMLSpanElement | null>(null);
+  const writeStatus = () => {
+    if (statusRef.current) {
+      statusRef.current.textContent =
+        `wrapper=${wrapperRefCalls.current} ` +
+        `dom=${domRefCalls.current}`;
+    }
+  };
+  const stableWrapperRef = useCallback((node: HTMLAnchorElement | null) => {
+    if (node) {
+      wrapperRefCalls.current += 1;
+      writeStatus();
+    }
+  }, []);
+  const stableDomRef = useCallback((node: HTMLAnchorElement | null) => {
+    if (node) {
+      domRefCalls.current += 1;
+      writeStatus();
+    }
+  }, []);
+  const stableStatusRef = useCallback((node: HTMLSpanElement | null) => {
+    statusRef.current = node;
+    writeStatus();
+  }, []);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="LinkItem asChild single attach"
+    >
+      <Menu>
+        <Menu.Trigger
+          render={
+            <Button data-testid="menu-link-attach-trigger">Help</Button>
+          }
+        />
+        <Menu.Portal>
+          <Menu.Popup data-testid="menu-link-attach-popup">
+            <Menu.LinkItem
+              asChild
+              // Wrapper-level ref — the surface the review flagged.
+              // Pre-fix this fires twice per attach (linkProps.ref
+              // round-trips the forwarded ref back through composeRefs);
+              // post-fix once per attach. */
+              ref={stableWrapperRef}
+            >
+              <a
+                // DOM-level ref — fires once per attach regardless of
+                // the wrapper bug. Acts as the denominator in the
+                // ratio assertion. */
+                ref={stableDomRef}
+                href="https://example.com/single-attach"
+                data-testid="menu-link-attach-anchor"
+              >
+                Single attach
+              </a>
+            </Menu.LinkItem>
+          </Menu.Popup>
+        </Menu.Portal>
+      </Menu>
+      {/* Visible outside the popup so aria-wiring can read the snapshot
+       *  even after Escape closes the popup. */}
+      <p>
+        <span
+          role="status"
+          aria-label="LinkItem attach count"
+          data-testid="menu-link-attach-count"
+          ref={stableStatusRef}
+        >
+          wrapper=0 dom=0
+        </span>
+      </p>
+    </div>
+  );
+}
+export const LinkItemAsChildSingleAttach: Story = {
+  name: "LinkItem asChild single ref attach",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Menu.LinkItem double-ref-compose bug " +
+          "(wave9 🔴 2). The wrapper-level ref on `<Menu.LinkItem ref>` " +
+          "must fire exactly once per attach event; the DOM-level ref " +
+          "is the denominator the wrapper ratio is compared against.",
+      },
+    },
+  },
+  render: () => <LinkItemAsChildSingleAttachImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /help/i });
+    await userEvent.click(trigger);
+    // Wait for the popup → mounts the asChild <a> → fires the callback
+    // refs.
+    await body.findByTestId("menu-link-attach-popup");
+    const status = canvas.getByRole("status", {
+      name: /linkitem attach count/i,
+    });
+    // Post-fix: wrapper == dom (each attaches the wrapper ref once).
+    // Pre-fix: wrapper == 2 * dom (linkProps.ref round-tripped the
+    // forwarded ref so composeRefs fired it twice per attach event).
+    await waitFor(() => {
+      const text = (status.textContent ?? "").trim();
+      const match = text.match(/wrapper=(\d+)\s+dom=(\d+)/);
+      expect(match).not.toBeNull();
+      if (match) {
+        const wrapper = Number(match[1]);
+        const dom = Number(match[2]);
+        // dom must have fired at least once; wrapper must equal dom.
+        expect(dom).toBeGreaterThan(0);
+        expect(wrapper).toBe(dom);
+      }
+    });
     await userEvent.keyboard("{Escape}");
   },
 };
