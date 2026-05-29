@@ -1,11 +1,18 @@
-# zeroship platform — full-stack local simulation, fronted by Caddy on the
+# zeroship platform — full-stack LOCAL DEV stack, fronted by Caddy on the
 # *.zeroship.localhost dev domain.
 #
+# ⚠️  DEV ONLY — NOT for production. Hardcodes weak secrets (platform-key,
+#     master-key, worker-key), runs every service with --dev-insecure (admin /
+#     internal auth relaxed), and publishes the privileged hydra admin API
+#     (:4445). All of this is gated behind --dev-insecure and a private box.
+#
 # Usage:
-#   docker compose up --build                     # build + boot the whole stack
-#   docker compose up -d --scale worker=10        # scale to 10 workers
+#   docker compose build && docker compose pull   # build/pull all images AHEAD
+#   docker compose up -d                          # boot the whole stack (build-free)
+#   docker compose up -d --scale worker=10        # scale workers
 #   docker compose logs -f                        # watch all logs
-#   docker compose down -v                        # tear down
+#   docker compose down                           # stop (keeps pnpm/verdaccio/bundle caches)
+#   docker compose down -v                        # stop + WIPE volumes (slow next boot)
 #
 # Once up, browse (any *.localhost auto-resolves to 127.0.0.1):
 #   http://builder.zeroship.localhost   — AI builder (needs OPENAI_API_KEY)
@@ -65,6 +72,9 @@ services:
 
   control:
     build: .
+    # All five native services share ONE built image (built+tagged once,
+    # not five times) — they differ only by `command`.
+    image: zeroship-platform:dev
     # Self-heal transient boot races (hydra-admin not ready yet; concurrent
     # first-boot migrations with auth on the shared control/authz schema).
     restart: on-failure
@@ -103,6 +113,7 @@ services:
 
   gateway:
     build: .
+    image: zeroship-platform:dev
     restart: on-failure
     entrypoint: /bin/sh
     command:
@@ -160,6 +171,7 @@ services:
 
   worker:
     build: .
+    image: zeroship-platform:dev
     # Worker defaults to binding 127.0.0.1 for safety. In the Docker
     # network the gateway reaches the worker via the `worker` DNS name,
     # so we explicitly opt in to 0.0.0.0 AND set a WORKER_KEY — without
@@ -190,12 +202,13 @@ services:
     depends_on:
       - control
 
-  # zeroship-auth — OIDC IdP UI + RP in front of the hydra kernel. The
-  # gateway redirects unauthenticated end users here (--auth-ui-url
-  # http://auth:9092). Binds loopback by default, so compose must pass
-  # --addr 0.0.0.0:9092 to be reachable across the container network.
+  # zeroship-auth — OIDC IdP UI + RP in front of the hydra kernel. The gateway
+  # redirects unauthenticated end users to it (gateway's
+  # --auth-ui-url http://auth.zeroship.localhost). Binds loopback by default, so
+  # compose passes --addr 0.0.0.0:9092 to be reachable across the network.
   auth:
     build: .
+    image: zeroship-platform:dev
     # Self-heal the transient race where auth starts before hydra's admin API
     # is accepting connections (client-side bootstrap of JWKs/clients).
     restart: on-failure
@@ -275,6 +288,7 @@ services:
   # `write_file` ops bypass docker exec for performance).
   sandbox:
     build: .
+    image: zeroship-platform:dev
     restart: on-failure
     command: >
       zeroship-sandbox
@@ -304,6 +318,7 @@ services:
     build:
       context: .
       target: frontend
+    image: zeroship-frontend:dev
     # Self-heal: builder waits for control to write /data/builder-client-secret;
     # if control is still bootstrapping, retry rather than exit.
     restart: on-failure
