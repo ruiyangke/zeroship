@@ -4836,12 +4836,18 @@ await open("components-scrollarea--basic-vertical");
 {
   const root = page.locator('[data-testid="scrollarea-basic-vertical"]');
   await root.waitFor({ state: "visible", timeout: 5000 });
-  // Give Base UI's ResizeObserver a frame to detect the overflow.
-  await page.waitForTimeout(200);
+  // Wait on the actual Scrollbar locator instead of a fixed sleep so
+  // slower CI runs don't lose the race against Base UI's ResizeObserver.
   const bar = root.locator(
     '[data-orientation="vertical"].zs-scrollarea__scrollbar',
   );
-  const present = (await bar.count()) > 0;
+  let present = false;
+  try {
+    await bar.first().waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
   const visibility = await root.getAttribute("data-visibility");
   report(
     "ScrollArea type=auto vertical bar present on overflow",
@@ -4860,10 +4866,17 @@ await open("components-scrollarea--always-visible");
 {
   const root = page.locator('[data-testid="scrollarea-always-visible"]');
   await root.waitFor({ state: "visible", timeout: 5000 });
-  await page.waitForTimeout(200);
   const thumb = root.locator(".zs-scrollarea__thumb").first();
   const viewport = root.locator(".zs-scrollarea__viewport").first();
-  const present = (await thumb.count()) > 0;
+  // Poll on the thumb itself instead of a fixed 200ms — the
+  // ResizeObserver / overflow detection can lag a frame on slow CI.
+  let present = false;
+  try {
+    await thumb.waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
   if (!present) {
     report("ScrollArea thumb drag updates scrollTop", false, "thumb-missing");
   } else {
@@ -4926,11 +4939,30 @@ await open("components-scrollarea--hover-only");
   await root.waitFor({ state: "visible", timeout: 5000 });
   // Park the pointer outside any interactive surface before measuring.
   await page.mouse.move(5, 5);
-  await page.waitForTimeout(300);
   const bar = root.locator(
     '[data-orientation="vertical"].zs-scrollarea__scrollbar',
   );
-  const present = (await bar.count()) > 0;
+  let present = false;
+  try {
+    await bar.first().waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
+  // Wait for the opacity transition to settle to the resting state.
+  // The `--zs-motion-base` transition runs ~250ms; we poll for a
+  // resting opacity below 0.5 instead of sleeping a fixed window.
+  if (present) {
+    try {
+      await page.waitForFunction(
+        (el) => parseFloat(getComputedStyle(el).opacity || "0") < 0.5,
+        await bar.first().elementHandle(),
+        { timeout: 2000 },
+      );
+    } catch {
+      /* fall through — assertion below will FAIL with the measured value */
+    }
+  }
   if (!present) {
     report("ScrollArea hover policy reveals bar", false, "bar-missing");
   } else {
@@ -4938,13 +4970,161 @@ await open("components-scrollarea--hover-only");
       (el) => parseFloat(getComputedStyle(el).opacity || "0"),
     );
     await root.hover();
-    await page.waitForTimeout(350);
+    // Poll for the hover transition instead of a fixed 350ms sleep.
+    try {
+      await page.waitForFunction(
+        (el) => parseFloat(getComputedStyle(el).opacity || "0") > 0.5,
+        await bar.first().elementHandle(),
+        { timeout: 2000 },
+      );
+    } catch {
+      /* fall through */
+    }
     const hoveredOpacity = await bar.evaluate(
       (el) => parseFloat(getComputedStyle(el).opacity || "0"),
     );
     const ok = restingOpacity < 0.5 && hoveredOpacity > 0.5;
     report(
       "ScrollArea type=hover bar reveals on hover",
+      ok,
+      `resting=${restingOpacity}, hovered=${hoveredOpacity}`,
+    );
+  }
+}
+
+/* ─── 91. Slice 18 review-fix 🔴 1: hidden scrollbar must not intercept
+ *        pointer/touch input ───────────────────────────────────────────── *
+ *
+ * Pre-fix: `.zs-scrollarea__scrollbar` defaulted to `pointer-events: auto`
+ * and no visibility selector lifted it back to `none` when the bar was
+ * faded out via `opacity: 0`. Even though invisible, the bar still
+ * occupied layout over the Viewport edge and intercepted clicks/touches
+ * aimed at content under the gutter.
+ *
+ * Post-fix: the base rule is `pointer-events: none`; only the visible
+ * states (data-visibility=always, [data-scrolling], or hover-reveal
+ * selectors) re-enable `pointer-events: auto`. We assert the computed
+ * style on the resting `type="hover"` Scrollbar reports `"none"`. */
+await open("components-scrollarea--hover-only");
+{
+  const root = page.locator('[data-testid="scrollarea-hover-only"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  await page.mouse.move(5, 5);
+  const bar = root.locator(
+    '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+  );
+  let present = false;
+  try {
+    await bar.first().waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
+  if (!present) {
+    report(
+      "ScrollArea hidden bar drops pointer-events",
+      false,
+      "bar-missing",
+    );
+  } else {
+    // Poll for the bar to settle into the hidden state (opacity < 0.5).
+    try {
+      await page.waitForFunction(
+        (el) => parseFloat(getComputedStyle(el).opacity || "0") < 0.5,
+        await bar.first().elementHandle(),
+        { timeout: 2000 },
+      );
+    } catch {
+      /* fall through */
+    }
+    const measured = await bar.first().evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        pe: cs.pointerEvents,
+        op: parseFloat(cs.opacity || "0"),
+      };
+    });
+    const ok = measured.pe === "none" && measured.op < 0.5;
+    report(
+      "ScrollArea hidden bar drops pointer-events",
+      ok,
+      `pointer-events=${measured.pe}, opacity=${measured.op}`,
+    );
+  }
+}
+
+/* ─── 92. Slice 18 review-fix 🔴 2: hover policy `[data-hovering]` on
+ *        Scrollbar reveals bar (not on Root) ────────────────────────────── *
+ *
+ * Pre-fix: the hover policy selector keyed off `[data-hovering]` on the
+ * `.zs-scrollarea` Root — but Base UI emits `data-hovering` on the
+ * Scrollbar, not the Root (verified against
+ * `ScrollAreaScrollbarDataAttributes`). Only the `:hover` fallback on
+ * the Root accidentally masked the dead selector.
+ *
+ * Post-fix: the selector is `.zs-scrollarea[data-visibility="hover"]
+ * .zs-scrollarea__scrollbar[data-hovering]`. We exercise it WITHOUT
+ * triggering `:hover` on the Root by setting `data-hovering` directly
+ * on the Scrollbar via the DOM. With the buggy selector, the rule
+ * never matches and the bar stays at opacity 0. */
+await open("components-scrollarea--hover-only");
+{
+  const root = page.locator('[data-testid="scrollarea-hover-only"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  // Park the pointer far away so neither Root nor Scrollbar gets a
+  // real :hover. The CSS reveal must come from `[data-hovering]` alone.
+  await page.mouse.move(5, 5);
+  const bar = root.locator(
+    '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+  );
+  let present = false;
+  try {
+    await bar.first().waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
+  if (!present) {
+    report(
+      "ScrollArea [data-hovering] on Scrollbar reveals bar",
+      false,
+      "bar-missing",
+    );
+  } else {
+    // Settle into the resting (hidden) state.
+    try {
+      await page.waitForFunction(
+        (el) => parseFloat(getComputedStyle(el).opacity || "0") < 0.5,
+        await bar.first().elementHandle(),
+        { timeout: 2000 },
+      );
+    } catch {
+      /* fall through */
+    }
+    const restingOpacity = await bar.first().evaluate(
+      (el) => parseFloat(getComputedStyle(el).opacity || "0"),
+    );
+    // Set data-hovering directly on the Scrollbar — same DOM signal
+    // Base UI emits when pointer hovers the bar, without us hovering
+    // anything (so :hover on the Root does NOT fire).
+    await bar.first().evaluate((el) => el.setAttribute("data-hovering", ""));
+    try {
+      await page.waitForFunction(
+        (el) => parseFloat(getComputedStyle(el).opacity || "0") > 0.5,
+        await bar.first().elementHandle(),
+        { timeout: 2000 },
+      );
+    } catch {
+      /* fall through */
+    }
+    const hoveredOpacity = await bar.first().evaluate(
+      (el) => parseFloat(getComputedStyle(el).opacity || "0"),
+    );
+    // Clean up so the attribute doesn't bleed into later assertions.
+    await bar.first().evaluate((el) => el.removeAttribute("data-hovering"));
+    const ok = restingOpacity < 0.5 && hoveredOpacity > 0.5;
+    report(
+      "ScrollArea [data-hovering] on Scrollbar reveals bar",
       ok,
       `resting=${restingOpacity}, hovered=${hoveredOpacity}`,
     );

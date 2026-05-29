@@ -591,18 +591,23 @@ export const RTL: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("scrollarea-rtl");
     // The Scrollbar mounts after Base UI's overflow observer fires —
-    // poll for both the element and its computed inline-start.
+    // poll for both the element and its PHYSICAL position.
     await waitFor(() => {
       const bar = root.querySelector(
         '[data-orientation="vertical"].zs-scrollarea__scrollbar',
       );
       expect(bar).not.toBeNull();
-      const styles = window.getComputedStyle(bar as HTMLElement);
-      // Under RTL the vertical bar is pinned to inline-start (== the
-      // LEFT physical edge), via the [dir="rtl"] specificity mirror.
-      expect(
-        styles.insetInlineStart === "0px" || styles.left === "0px",
-      ).toBe(true);
+      // Under RTL the vertical bar is pinned to inline-start, which is
+      // the LEFT physical edge — so the bar's bounding box should sit on
+      // the left half of the Root, not the right. Asserting the computed
+      // `insetInlineStart === "0px"` would pass even under LTR, where
+      // that value is also "0px" while the bar paints on the right.
+      // Compare bounding boxes instead to detect the physical edge.
+      const rootBox = (root as HTMLElement).getBoundingClientRect();
+      const barBox = (bar as HTMLElement).getBoundingClientRect();
+      const rootCenterX = rootBox.left + rootBox.width / 2;
+      const barCenterX = barBox.left + barBox.width / 2;
+      expect(barCenterX).toBeLessThan(rootCenterX);
     });
   },
 };

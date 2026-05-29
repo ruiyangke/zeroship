@@ -87,6 +87,12 @@
  *
  * `touch-action: none` keeps the bar from initiating a scroll gesture
  * — Base UI handles the synthetic scroll on thumb drag instead.
+ *
+ * Pointer-events default OFF — every hidden state (`opacity: 0`) MUST
+ * NOT intercept touches/clicks aimed at content under the gutter.
+ * Each visibility selector that lifts opacity to 1 below also lifts
+ * `pointer-events: auto` so the bar accepts thumb drags and track
+ * clicks when (and only when) it is actually visible.
  */
 .zs-scrollarea__scrollbar {
   position: absolute;
@@ -106,7 +112,9 @@
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
-  pointer-events: auto;
+  /* Default to non-interactive. Visible-state selectors below re-enable
+   * pointer-events so an invisible gutter never blocks content input. */
+  pointer-events: none;
 }
 
 /* Vertical bar — pinned to the inline-end edge, full block height. */
@@ -134,26 +142,38 @@
 /* ─── Visibility policies ──────────────────────────────────────────────── *
  *
  * The Root carries `data-visibility="auto|always|scroll|hover"`.
- * Base UI emits `data-scrolling` on the Root while scrolling is active
- * and `data-hovering` while the Root is hovered (the same attribute set
- * the Scrollbar's `state.scrolling` / `state.hovering` shapes).
+ * Base UI emits `data-scrolling` on the Root while scrolling is active.
+ * It also emits `data-hovering` — but on the SCROLLBAR (verified
+ * against `ScrollAreaScrollbarDataAttributes`), NOT the Root. The
+ * Root does not advertise `hovering` at all (see
+ * `ScrollAreaRootDataAttributes`). So the `hover` policy keys off the
+ * Scrollbar's own `[data-hovering]` for native bar-hover reveal, plus
+ * `:hover` on the Root for the broader area-hover reveal, plus
+ * `[data-scrolling]` so flicks keep the bar lit.
  *
- * For maximum compatibility we also key off `:hover` on the Root so the
- * `hover` policy still works in environments where Base UI hasn't
- * emitted the data attribute yet.
+ * The hide-delay token (`--zs-scrollarea-hide-delay`) is ALWAYS set by
+ * the Root inline style — `ScrollAreaRootInner` writes it on mount —
+ * so the transition-delay reads it without a fallback.
+ *
+ * Every visible-state selector also sets `pointer-events: auto` so the
+ * bar accepts thumb drags and track clicks only when it is actually on
+ * screen. Hidden states keep the base `pointer-events: none` set on
+ * `.zs-scrollarea__scrollbar` above.
  */
 
 /* type=auto — visible by default, fades after the hide-delay. */
 .zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar {
   opacity: 1;
+  pointer-events: auto;
   transition:
     opacity var(--zs-motion-base) var(--zs-motion-ease)
-      var(--zs-scrollarea-hide-delay, 600ms),
+      var(--zs-scrollarea-hide-delay),
     transform var(--zs-motion-base) var(--zs-motion-ease);
 }
 .zs-scrollarea[data-visibility="auto"][data-scrolling]
   .zs-scrollarea__scrollbar {
   opacity: 1;
+  pointer-events: auto;
   /* While actively scrolling, drop the delay — keep the bar visible
    * immediately. */
   transition:
@@ -166,33 +186,64 @@
    * the hide-delay behavior — bar stays at opacity 1 through the
    * delay window then fades over motion-base. */
   opacity: 0;
+  pointer-events: none;
 }
 
 /* type=always — bar is always visible. */
 .zs-scrollarea[data-visibility="always"] .zs-scrollarea__scrollbar {
   opacity: 1;
+  pointer-events: auto;
 }
 
 /* type=scroll — visible only while actively scrolling. */
 .zs-scrollarea[data-visibility="scroll"] .zs-scrollarea__scrollbar {
   opacity: 0;
+  pointer-events: none;
 }
 .zs-scrollarea[data-visibility="scroll"][data-scrolling]
   .zs-scrollarea__scrollbar {
   opacity: 1;
+  pointer-events: auto;
 }
 
-/* type=hover — visible while pointer hovers the Root or while
- * actively scrolling. */
+/* type=hover — visible while pointer hovers the Root or the bar
+ * itself, or while actively scrolling. */
 .zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar {
   opacity: 0;
+  pointer-events: none;
 }
+.zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar[data-hovering],
 .zs-scrollarea[data-visibility="hover"]:hover .zs-scrollarea__scrollbar,
-.zs-scrollarea[data-visibility="hover"][data-hovering]
-  .zs-scrollarea__scrollbar,
 .zs-scrollarea[data-visibility="hover"][data-scrolling]
   .zs-scrollarea__scrollbar {
   opacity: 1;
+  pointer-events: auto;
+}
+
+/* When a `keepMounted` bar is rendered but Base UI reports no overflow
+ * on the relevant axis, hide it regardless of policy — `always`/`hover`
+ * shorthand mount the chrome eagerly (`keepMounted` is forced on for
+ * those policies in the shorthand), but nonfunctional chrome over
+ * non-scrollable content reads as broken. The `data-has-overflow-x|y`
+ * attribute flips on the Scrollbar (verified against
+ * `ScrollAreaScrollbarDataAttributes`) once the overflow observer
+ * fires; absence of the attribute means "no overflow on this axis".
+ *
+ * Selectors mirror the highest-specificity visibility rule (the
+ * `hover` policy's `[data-hovering]` reveal is (0,4,0) — two classes
+ * plus two attributes) so cascade order doesn't matter: when there is
+ * no overflow on the axis, the bar is hidden no matter which
+ * visibility selector tried to lift it. */
+.zs-scrollarea[data-visibility="always"]
+  .zs-scrollarea__scrollbar[data-orientation="vertical"]:not([data-has-overflow-y]),
+.zs-scrollarea[data-visibility="always"]
+  .zs-scrollarea__scrollbar[data-orientation="horizontal"]:not([data-has-overflow-x]),
+.zs-scrollarea[data-visibility="hover"]
+  .zs-scrollarea__scrollbar[data-orientation="vertical"]:not([data-has-overflow-y]),
+.zs-scrollarea[data-visibility="hover"]
+  .zs-scrollarea__scrollbar[data-orientation="horizontal"]:not([data-has-overflow-x]) {
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* ─── Thumb ────────────────────────────────────────────────────────────── *
@@ -298,7 +349,7 @@
     .zs-scrollarea__scrollbar,
   .zs-scrollarea[data-visibility="hover"]:hover .zs-scrollarea__scrollbar {
     background-color: ButtonFace;
-    border: 0.0625rem solid ButtonText;
+    border: var(--zs-selection-hairline) solid ButtonText;
   }
   .zs-scrollarea__thumb,
   .zs-scrollarea__thumb[data-dragging],
@@ -307,7 +358,7 @@
   }
   .zs-scrollarea__corner {
     background-color: ButtonFace;
-    border: 0.0625rem solid ButtonText;
+    border: var(--zs-selection-hairline) solid ButtonText;
   }
   .zs-scrollarea__viewport:focus-visible {
     outline-color: Highlight;

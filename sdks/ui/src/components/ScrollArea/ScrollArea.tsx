@@ -147,7 +147,7 @@ function useScrollAreaContext(): ScrollAreaContextValue {
 type BaseRootProps = ComponentPropsWithRef<typeof BaseScrollArea.Root>;
 
 export interface ScrollAreaRootProps
-  extends Omit<BaseRootProps, "render" | "className"> {
+  extends Omit<BaseRootProps, "render" | "className" | "onScroll"> {
   /**
    * Visibility policy for the scrollbar chrome. Drives `data-visibility`
    * on the Root which CSS scopes to. Native scroll behavior (inertia,
@@ -212,12 +212,7 @@ function ScrollAreaRootInner(
         {...rest}
         ref={ref}
         style={rootStyle}
-        className={classnames(
-          "zs-scrollarea",
-          `zs-scrollarea--${type}`,
-          `zs-scrollarea--${orientation}`,
-          className,
-        )}
+        className={classnames("zs-scrollarea", className)}
         data-visibility={type}
         data-orientation={orientation}
       >
@@ -241,17 +236,11 @@ export interface ScrollAreaViewportProps
 
 const ScrollAreaViewport = forwardRef<HTMLDivElement, ScrollAreaViewportProps>(
   function ScrollAreaViewport({ className, ...rest }, ref) {
-    const ctx = useScrollAreaContext();
     return (
       <BaseScrollArea.Viewport
         {...rest}
         ref={ref}
-        className={classnames(
-          "zs-scrollarea__viewport",
-          `zs-scrollarea__viewport--${ctx.type}`,
-          className,
-        )}
-        data-visibility={ctx.type}
+        className={classnames("zs-scrollarea__viewport", className)}
       />
     );
   },
@@ -324,7 +313,6 @@ const ScrollAreaScrollbar = forwardRef<
   { orientation = "vertical", className, ...rest },
   ref,
 ) {
-  const ctx = useScrollAreaContext();
   return (
     <BaseScrollArea.Scrollbar
       {...rest}
@@ -333,11 +321,9 @@ const ScrollAreaScrollbar = forwardRef<
       className={classnames(
         "zs-scrollarea__scrollbar",
         `zs-scrollarea__scrollbar--${orientation}`,
-        `zs-scrollarea__scrollbar--${ctx.type}`,
         className,
       )}
       data-orientation={orientation}
-      data-visibility={ctx.type}
     />
   );
 });
@@ -481,7 +467,7 @@ function ScrollAreaShorthand(
       orientation={orientation}
       className={className}
     >
-      <ScrollAreaViewport className="zs-scrollarea__viewport--shorthand">
+      <ScrollAreaViewport>
         <ScrollAreaContent>{children}</ScrollAreaContent>
       </ScrollAreaViewport>
       {showVertical ? (
