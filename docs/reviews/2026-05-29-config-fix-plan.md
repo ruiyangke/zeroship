@@ -1,5 +1,10 @@
 # Config-system fix plan — target shapes + task order (2026-05-29)
 
+> **Status: IMPLEMENTED** (commits `ea7d740b`, `c44529a7`, `f33f4bb5`). All phases landed;
+> per-item disposition is in the resolution table of `2026-05-29-config-system-critique.md`.
+> Only O3 (pre-tracing structured warning, Low) remains; full `zeroship-config` crate
+> extraction was deliberately deferred in favor of the in-`core` submodule split.
+
 Implements every finding in `2026-05-29-config-system-critique.md`. Pre-launch: rename/delete,
 **no shims, no @deprecated, no back-compat**. Every behavioral fix gets a regression test that
 would fail pre-fix. Commit-only, **never push**.

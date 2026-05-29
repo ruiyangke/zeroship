@@ -32,6 +32,46 @@ into a Critical-class exposure under a single stray env var.
 
 ---
 
+## Resolution status (2026-05-29)
+
+Fixed on `feat/server-config-unification` across commits `ea7d740b` (auto-discovery),
+`c44529a7` (core refactor + security hardening), `f33f4bb5` (bind hardening + compose/docs/ops).
+
+| Item | Status | Where |
+| --- | --- | --- |
+| S1 dev-insecure precedence + bind | ✅ fixed | `Option<bool>` (CLI>env), `--bind` default 127.0.0.1 on control/gateway, auth `--addr` loopback, warn on non-loopback+insecure |
+| S2 secret leakage (DSN/Debug) | ✅ fixed | `hide_env_values` on all DSN fields; CLI structs drop `derive(Debug)` / use redacting manual Debug |
+| S3 WORKER_KEY one-sided | ✅ fixed | `require_unless_dev` on control AND gateway |
+| S4 auth not unified | ✅ fixed | `--dev-insecure`, shared `validate_stash_key`, `resolve_overlay_string`, empty stash default |
+| S5 discovery try_exists Err fatal | ✅ fixed | Err on discovered path ⇒ warn + defaults; explicit path stays fatal |
+| S6 log_format silent fallback | ✅ fixed | `LogFormat` typed, fatal on invalid (clap + file `InvalidLogFormat`) |
+| S7 deny_unknown_fields off | ✅ fixed | `#[serde(deny_unknown_fields)]` on all 3 file sections |
+| S8 Hydra loopback DNS + control gap | ✅ fixed | `is_loopback_url` literal-only; applied to control + auth; control no longer dev-bypassed |
+| M1 check-config side effects | ✅ fixed | control probe + signing-key load moved after the early return |
+| M2 ad-hoc check-config output | ✅ fixed | `CheckConfigReport` (text/json) across all 4 |
+| M3 key-strength semantics | ✅ fixed | one `validate_stash_key`; master validators in `core::config::secrets` |
+| M4 invalid-state encodings | ✅ fixed | `ConfigSource` enum; `trusted_oauth_clients: Option<Vec>` |
+| M5 domain default disagreement | ✅ fixed | gateway default ⇒ prod URL; ops files reconciled/documented |
+| M6 dead --auth-secret | ✅ fixed | flag + field + all uses deleted |
+| M7 worker-URL double parse | ✅ fixed | parsed once (empties rejected), reused |
+| M8 god-module + duplication | ✅ mostly | submodule split + `bootstrap()`/`CheckConfigReport` dedup + Result-not-exit; full `zeroship-config` crate extraction deliberately deferred |
+| O1 compose gaps | ✅ fixed | added `auth` service; blob-store + overlay mounts; `--bind 0.0.0.0` |
+| O2 runbooks don't boot | ✅ fixed | local-dev + docker-compose runbooks corrected |
+| O3 pre-tracing eprintln unstructured | ⏳ remaining | Low: the invalid-filter/overlay warning is still `eprintln!` (pre-tracing), not a JSON log event |
+| O4 entropy wording | ✅ fixed | "random bytes" ⇒ "bytes" |
+| O5 no --no-config opt-out | ✅ fixed | `--no-config` disables discovery |
+| O6 dangling D8 | ✅ fixed | D8 row added to the proposal table |
+| O7 proposal self-contradiction | ✅ fixed | line 60 corrected (auto-discovery commit) |
+
+**Not part of config (flagged separately):** the full `cargo test -p zeroship-auth` integration
+suite has pre-existing compile breakage in `device_grant_test`/`logout_test`/`magic_link_test`/
+`consent_ui_test`/`migrations_smoke` (`CreateSession.expected_credential_version`, `pg_connect`
+duplicate, `audit_event_count`) — present at base `70a077d7`, outside this diff, untouched here.
+The workspace also carries pre-existing deny-level clippy debt in `runtime-macros`/gateway/auth libs
+unrelated to config (a fix-agent's attempt to chase it was reverted to keep this change focused).
+
+---
+
 ## HIGH / CRITICAL (security & correctness)
 
 ### S1. `--dev-insecure` is un-overridable from the CLI **and** control/gateway/auth bind `0.0.0.0` → a single leftover `ZEROSHIP_DEV_INSECURE=1` exposes an unauthenticated control plane. ✔ verified
