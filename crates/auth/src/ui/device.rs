@@ -56,7 +56,7 @@ pub async fn post(
         return render_form("", Some("invalid or expired code"), StatusCode::BAD_REQUEST);
     }
 
-    let verified = match verify_user_code(&cfg.hydra_public, user_code).await {
+    let verified = match verify_user_code(cfg.hydra_public_url(), user_code).await {
         Ok(v) => v,
         Err(DeviceVerifyError::Rejected) => {
             return render_form(

@@ -37,11 +37,11 @@ docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usa
 
 # Start platform
 "$BIN/zeroship-control" --port 9090 --db "postgres://postgres:test@localhost:5434/postgres" \
-    --bundles /tmp/zeroship-bench-bundles --control-key bk --master-key bm > /dev/null 2>&1 &
+    --blob-store /tmp/zeroship-bench-bundles --control-key bk --master-key bm > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
-"$BIN/zeroship-worker" --port 8080 --workers $CORES --control http://localhost:9090 \
+"$BIN/zeroship-worker" --port 8080 --worker-threads $CORES --control http://localhost:9090 \
     --control-key bk --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 2

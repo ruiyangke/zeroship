@@ -9,10 +9,14 @@ use std::sync::Arc;
 
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
+use zeroship_core::config::{
+    bootstrap_or_exit, obtain_secret, validate_stash_key, CheckConfigReport, CheckFormat,
+    CheckValue, SecretSection,
+};
 use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
-use zeroship_auth::config::{validate_stash_key, AuthConfig};
+use zeroship_auth::config::AuthConfig;
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
@@ -23,22 +27,118 @@ use zeroship_auth::server;
 use zeroship_auth::startup_validation::validate_hydra_admin_url;
 use zeroship_auth::store;
 
-#[ntex::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    zeroship_core::observability::init_tracing("info,zeroship_auth=debug");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cfg = AuthConfig::parse();
+    let boot = bootstrap_or_exit(
+        cfg.config_path.as_deref(),
+        !cfg.no_config,
+        &cfg.obs,
+        "info,zeroship_auth=debug",
+        "auth",
+    );
+    // Snapshot the [secrets] file overlay so each secret can consult its file-tier
+    // reference. `file` stays a shared borrow of the overlay and `cfg.resolve` below
+    // gets a clone of the `[auth]` section, so nothing is moved out of the overlay;
+    // this `.clone()` of `.secrets` is a small defensive snapshot for clarity.
+    let file_secrets = boot.overlay.config.secrets.clone();
+    let file = &boot.overlay.config;
+    cfg.resolve(file.auth.clone());
 
-    let cfg = AuthConfig::parse();
+    // Resolve secret-reference inputs (urn:zeroship:env|file|vault, arn:…) before
+    // any guard or use. On real boot we resolve to the literal value (env/file
+    // read); under --check-config we only validate the reference FORMAT and keep
+    // the raw ref string so no side effects fire (mirrors bootstrap_or_exit). A
+    // plain literal passes through byte-identically in both modes. Pure file-PATH
+    // fields (none in auth today) are excluded; these are the exact fields the
+    // redacting Debug impl prints as "<redacted>" minus the OAuth client *IDs*.
+    resolve_auth_secrets(&mut cfg, &file_secrets);
+
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
-    if let Err(message) = validate_stash_key(&cfg) {
-        tracing::error!("{message}");
-        std::process::exit(1);
+    // Loopback is the default; a non-loopback bind under --dev-insecure is
+    // intentional (compose dev on a private network) but must shout (S1).
+    if cfg.insecure_dev && !is_loopback_addr(&cfg.addr) {
+        tracing::warn!(
+            addr = %cfg.addr,
+            "auth: binding a non-loopback address with --dev-insecure; admin/cookie guards are relaxed — NEVER in production"
+        );
+    }
+
+    // Strength guard runs on the RESOLVED value at real boot (cfg.stash_signing_key
+    // is already the literal there). During --check-config a secret REFERENCE is
+    // still the raw `urn:`/`arn:` string — running a strength check on it would
+    // wrongly fail, so skip it for a reference in that mode only (format was
+    // already validated by resolve_auth_secrets).
+    if !cfg.check_config || !zeroship_core::config::is_secret_ref(&cfg.stash_signing_key) {
+        if let Err(message) = validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev) {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
     }
     if let Err(message) = validate_hydra_admin_url(&cfg) {
         tracing::error!("{message}");
         std::process::exit(1);
     }
 
+    // Mailer config validation is cheap and should fail before any DB/Hydra
+    // work. The constructed driver is reused below on normal startup.
+    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.mailer, "mailer ready");
+
+    if cfg.check_config {
+        let mut report = CheckConfigReport::new();
+        report.field("addr", CheckValue::Plain(cfg.addr.clone()));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
+        );
+        report.field(
+            "hydra_admin_url",
+            CheckValue::Plain(cfg.hydra_admin_url().to_string()),
+        );
+        report.field(
+            "hydra_public_url",
+            CheckValue::Plain(cfg.hydra_public_url().to_string()),
+        );
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field(
+            "log_format",
+            CheckValue::Plain(
+                boot.log_format
+                    .map_or_else(|| "auto".to_string(), |f| f.to_string()),
+            ),
+        );
+        report.field("insecure_dev", CheckValue::Flag(cfg.insecure_dev));
+        report.field(
+            "allow_remote_hydra_admin",
+            CheckValue::Flag(cfg.allow_remote_hydra_admin),
+        );
+        report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
+        report.field("public_url", CheckValue::Plain(cfg.public_url()));
+        report.field("clients_config", CheckValue::Plain(cfg.clients_config.clone()));
+        report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
+        report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));
+        report.field(
+            "google_oauth_configured",
+            CheckValue::Flag(cfg.google_client_id.is_some()),
+        );
+        report.field(
+            "github_oauth_configured",
+            CheckValue::Flag(cfg.github_client_id.is_some()),
+        );
+        let fmt = if cfg.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-auth")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
     // OAuth provider credentials are optional. We log a warning per disabled
     // provider so it's obvious during boot which federation arms aren't wired
     // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
@@ -67,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("auth.* migrations applied");
 
     // 3. Bootstrap: keys + client reconciliation.
-    let admin = HydraAdmin::new(&cfg.hydra_admin);
+    let admin = HydraAdmin::new(cfg.hydra_admin_url());
     bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
     tracing::info!("bootstrap complete");
 
@@ -80,15 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // 5. Build the mailer driver. `--mailer=stdout` is the dev default;
-    //    `smtp` and `resend` are the production drivers. Missing creds
-    //    for the selected driver is a fatal config error — we'd rather
-    //    fail loudly at boot than silently swallow magic-link / reset
-    //    mails at request time.
-    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
-    tracing::info!(driver = %cfg.mailer, "mailer ready");
-
-    // 6. Spawn in-process cron tasks. Detached on
+    // 5. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared with the server
@@ -98,11 +190,102 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
     tracing::info!("cron tasks spawned");
 
-    // 7. Serve. `Arc`s keep the PG client + config alive across the
+    // 6. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
     server::run(cfg, admin, db, google_jwks, mailer).await?;
-    Ok(())
+    Ok::<(), Box<dyn std::error::Error>>(())
+        })
+}
+
+/// Resolve every secret-reference-bearing input in place.
+///
+/// Each field here is one the redacting [`AuthConfig`] `Debug` impl prints as
+/// `<redacted>` (DSN, stash signing key, OAuth client *secrets*, SMTP/Resend
+/// keys, webhook password) — never the cleartext OAuth client *IDs*. Each secret
+/// is obtained via [`obtain_secret`] with precedence CLI/env > `[secrets]` file
+/// (reference-only) > default. On real boot the value is resolved to its literal
+/// (env/file read); under `--check-config` only the reference FORMAT is validated
+/// and the raw ref is kept so no side effects fire. A plain literal CLI/env value
+/// is byte-identical in both modes.
+///
+/// `Option<String>` secrets fall back to the `[secrets]` file tier only when the
+/// CLI/env value is absent or empty; when neither tier supplies a value the field
+/// stays `None` (its provider arm is disabled).
+fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
+    let check = cfg.check_config;
+
+    // Required-string secrets (always present on the CLI struct).
+    cfg.db_url = obtain_secret(
+        "AUTH_DB_URL / --db-url",
+        &cfg.db_url,
+        file_secrets.auth_db_url.as_deref(),
+        check,
+    );
+    cfg.stash_signing_key = obtain_secret(
+        "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
+        &cfg.stash_signing_key,
+        file_secrets.stash_signing_key.as_deref(),
+        check,
+    );
+
+    // Optional secrets — obtain only when the CLI/env or file tier supplies a
+    // value; an all-empty result leaves the provider arm disabled (`None`).
+    cfg.google_client_secret = resolve_optional(
+        check,
+        "AUTH_GOOGLE_CLIENT_SECRET / --google-client-secret",
+        cfg.google_client_secret.as_deref(),
+        file_secrets.google_client_secret.as_deref(),
+    );
+    cfg.github_client_secret = resolve_optional(
+        check,
+        "AUTH_GITHUB_CLIENT_SECRET / --github-client-secret",
+        cfg.github_client_secret.as_deref(),
+        file_secrets.github_client_secret.as_deref(),
+    );
+    cfg.smtp_password = resolve_optional(
+        check,
+        "AUTH_SMTP_PASSWORD / --smtp-password",
+        cfg.smtp_password.as_deref(),
+        file_secrets.smtp_password.as_deref(),
+    );
+    cfg.resend_api_key = resolve_optional(
+        check,
+        "AUTH_RESEND_API_KEY / --resend-api-key",
+        cfg.resend_api_key.as_deref(),
+        file_secrets.resend_api_key.as_deref(),
+    );
+    cfg.postmark_webhook_password = resolve_optional(
+        check,
+        "AUTH_POSTMARK_WEBHOOK_PASSWORD / --postmark-webhook-password",
+        cfg.postmark_webhook_password.as_deref(),
+        file_secrets.postmark_webhook_password.as_deref(),
+    );
+}
+
+/// Obtain one optional secret across the CLI/env and `[secrets]` file tiers.
+///
+/// Preserves the original optional behaviour byte-for-byte when no file tier is
+/// involved: an absent field stays `None`, and a present-but-empty CLI/env value
+/// stays `Some("")` (untouched). The `[secrets]` file tier is consulted only when
+/// the CLI/env value is empty AND a file reference exists; in that case the file
+/// reference is resolved via [`obtain_secret`]. A non-empty CLI/env value always
+/// wins over a file reference (see [`obtain_secret`]).
+fn resolve_optional(
+    check_config: bool,
+    label: &str,
+    cli: Option<&str>,
+    file: Option<&str>,
+) -> Option<String> {
+    match cli {
+        // Present, non-empty ⇒ CLI/env wins (file is ignored by obtain_secret).
+        Some(raw) if !raw.is_empty() => Some(obtain_secret(label, raw, file, check_config)),
+        // Empty/absent CLI with a file reference ⇒ obtain from the file tier.
+        _ if file.is_some() => Some(obtain_secret(label, cli.unwrap_or(""), file, check_config)),
+        // No file tier ⇒ leave the field exactly as it was (None stays None,
+        // Some("") stays Some("")), matching pre-[secrets] behaviour.
+        other => other.map(str::to_string),
+    }
 }
 
 /// Translate `--mailer` + per-driver flags into a concrete
@@ -139,5 +322,182 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
         other => Err(AuthError::Config(format!(
             "unknown mailer: {other:?}; use stdout|smtp|resend"
         ))),
+    }
+}
+
+/// Return true when the bind address (`host:port`) is a literal loopback host
+/// (`localhost` or a loopback IP). Mirrors the literal-only policy in
+/// `zeroship_core::config::is_loopback_url`; no DNS resolution. Used only to
+/// decide whether to shout about a non-loopback `--dev-insecure` bind.
+fn is_loopback_addr(addr: &str) -> bool {
+    let host = match addr.rsplit_once(':') {
+        // Strip the IPv6 brackets from `[::1]:9092` style addresses.
+        Some((host, _)) => host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host),
+        None => addr,
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_loopback_addr, resolve_optional};
+    use zeroship_core::config::{
+        is_secret_ref, obtain_secret, resolve_secret, validate_secret_ref, validate_stash_key,
+    };
+
+    #[test]
+    fn loopback_addr_recognises_literal_loopback_only() {
+        assert!(is_loopback_addr("127.0.0.1:9092"));
+        assert!(is_loopback_addr("localhost:9092"));
+        assert!(is_loopback_addr("[::1]:9092"));
+        // non-loopback binds (the ones the dev-insecure warn fires on)
+        assert!(!is_loopback_addr("0.0.0.0:9092"));
+        assert!(!is_loopback_addr("10.0.0.5:9092"));
+    }
+
+    // (a) A literal secret passes through the resolver byte-identically — the
+    // wiring (resolve_required/resolve_optional → resolve_secret_or_exit) must
+    // not mangle a plain value. Asserts via the public resolver the *_or_exit
+    // helpers delegate to.
+    #[test]
+    fn literal_secret_resolves_to_itself() {
+        let literal = "0123456789abcdef0123456789abcdef"; // strong, ≥32 bytes
+        assert_eq!(
+            resolve_secret(literal).expect("literal resolves"),
+            literal,
+            "a literal secret must pass through unchanged"
+        );
+        // A DSN literal (the db_url shape) is also a literal, not a ref.
+        let dsn = "postgres://u:p@h/db";
+        assert_eq!(resolve_secret(dsn).expect("dsn resolves"), dsn);
+        assert!(!is_secret_ref(dsn), "a DSN literal is not a reference");
+    }
+
+    // (b) The is_secret_ref-gated guard logic. The guard at boot is:
+    //     if !check_config || !is_secret_ref(&stash_signing_key) { validate_stash_key(..) }
+    // A ref'd stash key under --check-config must SKIP the strength guard
+    // (the local is the raw `urn:…` ref, which would wrongly fail length/format
+    // checks); a literal must STILL be guarded even under --check-config.
+    fn stash_guard_runs(check_config: bool, stash_key: &str) -> bool {
+        !check_config || !is_secret_ref(stash_key)
+    }
+
+    #[test]
+    fn refd_stash_key_skips_strength_guard_in_check_config() {
+        // A short env ref: valid reference FORMAT, but only 18 bytes — so the
+        // strength guard (length ≥ 32) would WRONGLY reject it if it ran on the
+        // raw ref string. That is exactly why the guard is skipped for a
+        // reference under --check-config.
+        let reference = "urn:zeroship:env:K";
+        assert!(is_secret_ref(reference), "the test fixture must be a reference");
+        assert!(
+            validate_secret_ref(reference).is_ok(),
+            "the ref FORMAT itself is valid (only the strength guard would reject it)"
+        );
+        assert!(
+            validate_stash_key(reference, false).is_err(),
+            "raw ref string must fail the strength guard if (wrongly) checked"
+        );
+
+        // check-config + reference ⇒ guard is skipped.
+        assert!(
+            !stash_guard_runs(true, reference),
+            "a ref'd stash key under --check-config must skip the strength guard"
+        );
+        // check-config + literal ⇒ guard still runs (a weak literal must fail).
+        assert!(
+            stash_guard_runs(true, "weak"),
+            "a literal stash key must still be guarded under --check-config"
+        );
+        // Real boot (not check-config) ⇒ guard ALWAYS runs, even on a reference
+        // (the local is the resolved literal there, so this is correct).
+        assert!(
+            stash_guard_runs(false, reference),
+            "outside --check-config the guard always runs (value is resolved)"
+        );
+        assert!(stash_guard_runs(false, "literal"));
+    }
+
+    // (c) A malformed reference is rejected by the format validator the
+    // check-config path uses (validate_secret_ref_or_exit delegates to this).
+    #[test]
+    fn malformed_secret_ref_is_rejected() {
+        // Reserved prefix but unrecognized scheme ⇒ malformed.
+        assert!(validate_secret_ref("urn:zeroship:nope:x").is_err());
+        // Recognized scheme with an empty body ⇒ malformed.
+        assert!(validate_secret_ref("urn:zeroship:env:").is_err());
+        // A bare reserved prefix ⇒ malformed.
+        assert!(validate_secret_ref("urn:bogus:x").is_err());
+        // A well-formed env reference is NOT malformed (format-only check).
+        assert!(validate_secret_ref("urn:zeroship:env:MY_VAR").is_ok());
+    }
+
+    // [secrets] file tier (d): a required secret falls back to its [secrets]
+    // file reference when the CLI/env value is empty. This is the exact wiring
+    // resolve_auth_secrets uses for db_url / stash_signing_key. Asserted through
+    // the public obtain_secret so the test does not depend on env-var visibility
+    // of the binary's own AUTH_* names.
+    #[test]
+    fn secrets_file_ref_used_when_cli_empty() {
+        // Unique per-process var name; edition 2021: set_var is safe (no unsafe
+        // block; workspace denies unsafe_code).
+        let var = format!("ZS_AUTH_TEST_FILE_TIER_{}", std::process::id());
+        std::env::set_var(&var, "from-secrets-file");
+        let reference = format!("urn:zeroship:env:{var}");
+
+        // Empty CLI/env => the [secrets] file reference is resolved.
+        let out = obtain_secret("AUTH_DB_URL / --db-url", "", Some(&reference), false);
+        assert_eq!(out, "from-secrets-file");
+        std::env::remove_var(&var);
+    }
+
+    // [secrets] file tier precedence: a non-empty CLI/env value WINS over the
+    // [secrets] file reference (CLI/env > file). The file ref is never resolved.
+    #[test]
+    fn cli_value_wins_over_secrets_file_ref() {
+        // A literal CLI value beats the file reference; the env ref is ignored
+        // (never read), so an unset env var must not cause a failure.
+        let reference = "urn:zeroship:env:ZS_AUTH_UNSET_PROVES_CLI_WINS";
+        let out = obtain_secret(
+            "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
+            "literal-cli-secret",
+            Some(reference),
+            false,
+        );
+        assert_eq!(out, "literal-cli-secret");
+    }
+
+    // Optional secret across the file tier: an empty CLI value with a [secrets]
+    // file reference resolves the file tier; an empty CLI with NO file leaves the
+    // field exactly as it was (None stays None, Some("") stays Some("")) —
+    // matching pre-[secrets] optional behaviour byte-for-byte.
+    #[test]
+    fn resolve_optional_uses_file_tier_and_preserves_empty() {
+        let var = format!("ZS_AUTH_TEST_OPT_TIER_{}", std::process::id());
+        std::env::set_var(&var, "opt-from-file");
+        let reference = format!("urn:zeroship:env:{var}");
+
+        // Empty/absent CLI + file ref => obtained from the file tier.
+        assert_eq!(
+            resolve_optional(false, "AUTH_RESEND_API_KEY", None, Some(&reference)),
+            Some("opt-from-file".to_string())
+        );
+        // Non-empty CLI wins over the file ref.
+        assert_eq!(
+            resolve_optional(false, "AUTH_RESEND_API_KEY", Some("cli-wins"), Some(&reference)),
+            Some("cli-wins".to_string())
+        );
+        // No CLI, no file => stays disabled (None), unchanged from before.
+        assert_eq!(resolve_optional(false, "AUTH_RESEND_API_KEY", None, None), None);
+        // Present-but-empty CLI, no file => stays Some("") (untouched), matching
+        // the original resolve_optional empty-passthrough behaviour.
+        assert_eq!(
+            resolve_optional(false, "AUTH_RESEND_API_KEY", Some(""), None),
+            Some(String::new())
+        );
+        std::env::remove_var(&var);
     }
 }

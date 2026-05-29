@@ -15,6 +15,7 @@ zeroship-authz = { workspace = true }
 # Builder OAuth bootstrap reuses auth/control migrations for
 # `control.oauth_clients` in dev-mode startup.
 zeroship-auth = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so the console_sessions store can pull
 # `TIMESTAMPTZ` columns into `chrono::DateTime<Utc>` directly.
 compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }

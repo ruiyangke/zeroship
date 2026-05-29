@@ -4,6 +4,7 @@ pub mod types;
 pub mod auth;
 pub mod typed_id;
 pub mod crypto;
+pub mod config;
 pub mod dpop;
 pub mod observability;
 pub mod logout_token;

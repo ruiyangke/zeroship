@@ -83,10 +83,10 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
 /// the 503 path needs it `None`; the other paths need `Some` so the
 /// handler progresses past the first guard.
 fn build_state(with_issuer: bool) -> Arc<GateState> {
-    build_state_with_auth_public(with_issuer, "http://auth.test")
+    build_state_with_auth_ui_url(with_issuer, "http://auth.test")
 }
 
-fn build_state_with_auth_public(with_issuer: bool, auth_public: &str) -> Arc<GateState> {
+fn build_state_with_auth_ui_url(with_issuer: bool, auth_ui_url: &str) -> Arc<GateState> {
     // Unique tmpdir per test invocation — disk cache writes here on
     // construction, even though the exchange handler never hits it.
     let mut tmp = std::env::temp_dir();
@@ -116,10 +116,9 @@ fn build_state_with_auth_public(with_issuer: bool, auth_public: &str) -> Arc<Gat
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            auth_secret: String::new(),
             worker_key: String::new(),
-            hydra_public: String::new(),
-            auth_public: auth_public.to_string(),
+            hydra_public_url: String::new(),
+            auth_ui_url: auth_ui_url.to_string(),
             insecure_dev: true,
             trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),
@@ -134,7 +133,7 @@ fn build_state_with_auth_public(with_issuer: bool, auth_public: &str) -> Arc<Gat
         disk_cache: disk,
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp: Arc::new(OidcRp::new(
-            auth_public,
+            auth_ui_url,
             "gateway",
             "test-secret",
             b"test-stash-key-32-bytes-long----".to_vec(),
@@ -361,8 +360,8 @@ async fn returns_401_when_introspection_has_no_sub() {
         )
     })
     .await;
-    let auth_public = srv.url("").trim_end_matches('/').to_string();
-    let state = build_state_with_auth_public(true, &auth_public);
+    let auth_ui_url = srv.url("").trim_end_matches('/').to_string();
+    let state = build_state_with_auth_ui_url(true, &auth_ui_url);
     let app = test::init_service(
         web::App::new()
             .state(state)

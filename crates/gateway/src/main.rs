@@ -5,7 +5,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use ntex::web;
+use zeroship_core::config::{
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_overlay_string,
+    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_STASH_SIGNING_KEY,
+};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
     backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
@@ -15,109 +20,276 @@ use zeroship_gateway::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
+const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
+const DEV_GATEWAY_OIDC_SECRET: &str = "dev-secret-rotate-me-too";
 
-fn dev_insecure_enabled(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--dev-insecure")
-        || std::env::var("ZEROSHIP_DEV_INSECURE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        || arg_or_env(args, "--insecure-dev", "INSECURE_DEV", "false").eq_ignore_ascii_case("true")
+/// zeroship gateway startup configuration.
+#[derive(Parser)]
+#[command(name = "zeroship-gate")]
+struct GateCli {
+    /// HTTP listen port.
+    #[arg(long, env = "GATE_PORT", default_value_t = 80)]
+    port: u16,
+
+    /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
+    #[arg(long, env = "GATE_BIND", default_value = "127.0.0.1")]
+    bind: String,
+
+    /// Control-plane API base URL.
+    #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
+    control: String,
+
+    /// Admin/control API shared secret.
+    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
+    control_key: String,
+
+    /// Comma-separated worker base URLs.
+    #[arg(long = "workers", env = "WORKER_URLS", default_value = "http://localhost:8080")]
+    workers: String,
+
+    /// Route-table polling interval in seconds.
+    #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
+    poll_interval: u64,
+
+    /// Shared secret for worker admin endpoints.
+    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
+    worker_key: String,
+
+    /// Root directory for content-addressed deploy blobs.
+    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
+    blob_store: String,
+
+    /// In-memory blob cache budget in MiB.
+    #[arg(long = "blob-cache-mem-mb", env = "BLOB_CACHE_MEM_MB", default_value = "256")]
+    blob_cache_mem_mb: usize,
+
+    /// On-disk blob cache budget in GiB.
+    #[arg(long = "blob-cache-disk-gb", env = "BLOB_CACHE_DISK_GB", default_value = "20")]
+    blob_cache_disk_gb: u64,
+
+    /// Root directory for the on-disk blob cache.
+    #[arg(
+        long = "blob-cache-disk-root",
+        env = "BLOB_CACHE_DISK_ROOT",
+        default_value = "./blob-cache"
+    )]
+    blob_cache_disk_root: String,
+
+    /// `PostgreSQL` DSN for gateway session validation.
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
+    db: String,
+
+    /// PEM/PKCS#8 signing key file for gateway-issued wrapper tokens.
+    #[arg(
+        long = "signing-key-file",
+        env = "GATEWAY_SIGNING_KEY_FILE",
+        default_value = ""
+    )]
+    gateway_signing_key_file: String,
+
+    /// Public URL advertised as the gateway wrapper-token issuer.
+    #[arg(
+        long = "gateway-public-url",
+        env = "GATEWAY_PUBLIC_URL",
+        default_value = "https://api.zeroship.ai"
+    )]
+    gateway_public_url: String,
+
+    /// Hydra public issuer/base URL.
+    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
+    hydra_public_url: Option<String>,
+
+    /// Upstream URL for the auth service UI and OAuth surfaces.
+    #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
+    auth_ui_url: String,
+
+    /// Gateway OIDC client secret.
+    #[arg(
+        long = "gateway-oidc-secret",
+        env = "GATEWAY_OIDC_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    gateway_oidc_secret: String,
+
+    /// HMAC key for short-lived OIDC stash cookies.
+    #[arg(
+        long = "stash-signing-key",
+        env = "STASH_SIGNING_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    stash_signing_key: String,
+
+    /// Allow explicitly insecure local development startup.
+    /// CLI presence overrides the env var, so `--dev-insecure=false`
+    /// disables a stray `ZEROSHIP_DEV_INSECURE=1`.
+    #[arg(
+        long = "dev-insecure",
+        env = "ZEROSHIP_DEV_INSECURE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    dev_insecure: Option<bool>,
+
+    /// Trust `X-Forwarded-For` from an upstream proxy. CLI presence
+    /// overrides the env var.
+    #[arg(
+        long = "trust-proxy",
+        env = "ZEROSHIP_TRUST_PROXY",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    trust_proxy: Option<bool>,
+
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    config_path: Option<PathBuf>,
+
+    /// Disable auto-discovery of the well-known config overlay
+    /// (`/etc/zeroship/zeroship.toml`); use compiled defaults instead.
+    #[arg(long = "no-config")]
+    no_config: bool,
+
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    check_config: bool,
+
+    /// Output format for `--check-config`: `text` (default) or `json`.
+    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
+    check_config_format: String,
+
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    obs: zeroship_core::observability::ObservabilityFlags,
 }
 
-fn validate_gateway_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev || !value.is_empty() {
-        return Ok(());
-    }
-    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
+/// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
+/// vector, trimming whitespace and dropping empty entries. Parsed ONCE so
+/// the check-config count and the runtime hash ring can never disagree
+/// (M7) — previously check-config filtered empties while the runtime kept
+/// them, so `a,,b` reported 2 workers but routed across 3 (one empty URL).
+fn parse_worker_urls(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
-fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev {
-        return Ok(());
-    }
-    if value.is_empty() {
-        return Err(
-            "STASH_SIGNING_KEY is required outside INSECURE_DEV=true; set a strong (>=32 byte) value"
-                .to_string(),
-        );
-    }
-    if value == DEV_STASH_SIGNING_KEY {
-        return Err(
-            "STASH_SIGNING_KEY is the dev default; refusing to boot without INSECURE_DEV=true"
-                .to_string(),
-        );
-    }
-    if value.len() < 32 {
-        return Err(format!(
-            "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
-            value.len()
-        ));
-    }
-    Ok(())
-}
+fn main() -> std::io::Result<()> {
+    let cli = GateCli::parse();
+    let boot = bootstrap_or_exit(
+        cli.config_path.as_deref(),
+        !cli.no_config,
+        &cli.obs,
+        "info,zeroship_gateway=debug",
+        "gateway",
+    );
+    let file = &boot.overlay.config;
+    // `[secrets]` file-tier overlay — bound ONCE before any secret resolution.
+    // The gateway never partially moves `boot.overlay.config`, so a reference
+    // is sufficient (no clone needed). Precedence per field: CLI/env > this
+    // reference-only file tier > default, applied by `obtain_secret`.
+    let file_secrets = &file.secrets;
 
-#[ntex::main]
-async fn main() -> std::io::Result<()> {
-    zeroship_core::observability::init_tracing("info,zeroship_gateway=debug");
-
-    let args: Vec<String> = std::env::args().collect();
-    let port = arg_or_env(&args, "--port", "GATE_PORT", "80");
-    let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
-    let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
-    let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
-    let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
-    let auth_secret = arg_or_env(&args, "--auth-secret", "AUTH_SECRET", "");
-    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
-    let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
-    let blob_cache_mem_mb = arg_or_env(&args, "--blob-cache-mem-mb", "BLOB_CACHE_MEM_MB", "256");
-    let blob_cache_disk_gb = arg_or_env(&args, "--blob-cache-disk-gb", "BLOB_CACHE_DISK_GB", "20");
-    let blob_cache_disk_root = arg_or_env(
-        &args,
-        "--blob-cache-disk-root",
-        "BLOB_CACHE_DISK_ROOT",
-        "./blob-cache",
-    );
-    let hydra_public = arg_or_env(&args, "--hydra-public", "HYDRA_PUBLIC", "http://hydra:4444");
-    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "http://auth:9092");
-    let pg_dsn = arg_or_env(&args, "--db", "DATABASE_URL", "");
-    let oidc_client_secret = arg_or_env(
-        &args,
-        "--gateway-oidc-secret",
-        "GATEWAY_OIDC_SECRET",
-        "dev-secret-rotate-me-too",
-    );
-    let stash_signing_key = arg_or_env(
-        &args,
-        "--stash-signing-key",
-        "STASH_SIGNING_KEY",
-        "",
-    );
-    let insecure_dev = dev_insecure_enabled(&args);
-    let trust_proxy =
-        args.iter().any(|a| a == "--trust-proxy")
-            || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
-    let signing_key_path = arg_or_env(
-        &args,
-        "--signing-key-file",
-        "GATEWAY_SIGNING_KEY_FILE",
-        "",
-    );
-    let public_url = arg_or_env(
-        &args,
-        "--gateway-public-url",
-        "GATEWAY_PUBLIC_URL",
-        "https://api.zeroship.ai",
+    let insecure_dev = cli.dev_insecure.unwrap_or(false);
+    let trust_proxy = cli.trust_proxy.unwrap_or(false);
+    let hydra_public_url = resolve_overlay_string(
+        cli.hydra_public_url,
+        file.auth.hydra_public_url.clone(),
+        Some(DEFAULT_HYDRA_PUBLIC_URL),
     );
 
-    if let Err(message) = validate_gateway_control_key(&control_key, insecure_dev) {
+    let port = cli.port;
+    let bind_host = cli.bind;
+    let control_url = cli.control;
+    // Secret-bearing inputs are resolved through the secret-reference
+    // resolver: a literal value passes through byte-identically, while a
+    // `urn:zeroship:{env|file|...}:…` / `arn:…` reference is dereferenced
+    // at real boot. During `--check-config` we only validate the reference
+    // FORMAT (no env/file/network reads), keeping the local as the raw ref
+    // string for the (non-secret) report.
+    let control_key = zeroship_core::config::obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cli.control_key,
+        file_secrets.control_key.as_deref(),
+        cli.check_config,
+    );
+    // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
+    // entries) and reuse it for both the check-config count and the
+    // runtime hash ring, so the two can never disagree.
+    let worker_urls = parse_worker_urls(&cli.workers);
+    let poll_interval = cli.poll_interval;
+    let worker_key = zeroship_core::config::obtain_secret(
+        "WORKER_KEY / --worker-key",
+        &cli.worker_key,
+        file_secrets.worker_key.as_deref(),
+        cli.check_config,
+    );
+    let blob_store_root = cli.blob_store;
+    let blob_cache_mem_mb = cli.blob_cache_mem_mb;
+    let blob_cache_disk_gb = cli.blob_cache_disk_gb;
+    let blob_cache_disk_root = cli.blob_cache_disk_root;
+    let auth_ui_url = cli.auth_ui_url;
+    // DSN carries the database password, so it is resolved like any other
+    // secret (literals — including colon-laden DSNs — pass through unchanged).
+    let pg_dsn = zeroship_core::config::obtain_secret(
+        "DATABASE_URL / --db",
+        &cli.db,
+        file_secrets.database_url.as_deref(),
+        cli.check_config,
+    );
+    let oidc_client_secret = zeroship_core::config::obtain_secret(
+        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+        &cli.gateway_oidc_secret,
+        file_secrets.gateway_oidc_secret.as_deref(),
+        cli.check_config,
+    );
+    let stash_signing_key = zeroship_core::config::obtain_secret(
+        "STASH_SIGNING_KEY / --stash-signing-key",
+        &cli.stash_signing_key,
+        file_secrets.stash_signing_key.as_deref(),
+        cli.check_config,
+    );
+    // File-PATH field (names a file to read), NOT a secret value — left
+    // unresolved; the signing key is loaded from this path below.
+    let signing_key_path = cli.gateway_signing_key_file;
+    let public_url = cli.gateway_public_url;
+
+    if let Err(message) =
+        require_unless_dev("CONTROL_KEY / --control-key", &control_key, insecure_dev)
+    {
         tracing::error!(error = %message, "gateway: refusing to start without control key");
         std::process::exit(1);
     }
 
-    if let Err(message) = validate_gateway_stash_key(&stash_signing_key, insecure_dev) {
-        tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
+    if let Err(message) = require_unless_dev(
+        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+        &oidc_client_secret,
+        insecure_dev,
+    ) {
+        tracing::error!(error = %message, "gateway: refusing to start without gateway OIDC secret");
         std::process::exit(1);
+    }
+    let oidc_client_secret = if oidc_client_secret.is_empty() {
+        DEV_GATEWAY_OIDC_SECRET.to_string()
+    } else {
+        oidc_client_secret
+    };
+
+    // STRENGTH guard. At real boot `stash_signing_key` is the resolved value,
+    // so the length/sentinel checks apply to the real material. During
+    // `--check-config` the local is still the raw reference string (we only
+    // format-validated it above); a reference's text is not the secret, so
+    // running a strength check on it would wrongly fail — skip it then.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
+        if let Err(message) = validate_stash_key(&stash_signing_key, insecure_dev) {
+            tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
+            std::process::exit(1);
+        }
     }
     let stash_signing_key = if stash_signing_key.is_empty() {
         DEV_STASH_SIGNING_KEY.to_string()
@@ -125,10 +297,16 @@ async fn main() -> std::io::Result<()> {
         stash_signing_key
     };
 
-    if worker_key.is_empty() {
-        tracing::warn!(
-            "WORKER_KEY not set — worker endpoints are unauthenticated"
-        );
+    // S3 — symmetric WORKER_KEY enforcement. The worker refuses a
+    // non-loopback bind without a key; the gateway is the caller of those
+    // worker admin endpoints, so it must fail just as hard rather than
+    // shipping `Authorization: Bearer ` (empty) into a cluster that
+    // believes dispatch is authenticated.
+    if let Err(message) =
+        require_unless_dev("WORKER_KEY / --worker-key", &worker_key, insecure_dev)
+    {
+        tracing::error!(error = %message, "gateway: refusing to start without worker key");
+        std::process::exit(1);
     }
 
     // Phase 8 U1 — load the gateway's wrapper-token signing key. The
@@ -174,14 +352,65 @@ async fn main() -> std::io::Result<()> {
         Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
     });
 
-    let blob_cache_bytes: usize = blob_cache_mem_mb
-        .parse::<usize>()
-        .unwrap_or(256)
-        .saturating_mul(1024 * 1024);
-    let disk_cache_bytes: u64 = blob_cache_disk_gb
-        .parse::<u64>()
-        .unwrap_or(20)
-        .saturating_mul(1024 * 1024 * 1024);
+    if cli.check_config {
+        let log_format = boot
+            .log_format
+            .map_or_else(|| "auto".to_string(), |f| f.to_string());
+        let mut report = CheckConfigReport::new();
+        report.field("port", CheckValue::Count(usize::from(port)));
+        report.field("bind", CheckValue::Plain(bind_host.clone()));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
+        );
+        report.field("control_url", CheckValue::Plain(control_url));
+        report.field(
+            "hydra_public_url",
+            CheckValue::Plain(hydra_public_url),
+        );
+        report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field("log_format", CheckValue::Plain(log_format));
+        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
+        report.field("trust_proxy", CheckValue::Flag(trust_proxy));
+        report.field("blob_store", CheckValue::Plain(blob_store_root));
+        report.field(
+            "blob_cache_mem_mb",
+            CheckValue::Count(blob_cache_mem_mb),
+        );
+        report.field(
+            "blob_cache_disk_gb",
+            CheckValue::Count(usize::try_from(blob_cache_disk_gb).unwrap_or(usize::MAX)),
+        );
+        report.field(
+            "blob_cache_disk_root",
+            CheckValue::Plain(blob_cache_disk_root),
+        );
+        report.field(
+            "poll_interval_secs",
+            CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
+        );
+        report.field("workers_count", CheckValue::Count(worker_urls.len()));
+        report.field("db_configured", CheckValue::Secret(!pg_dsn.is_empty()));
+        report.field(
+            "signing_key_configured",
+            CheckValue::Secret(!signing_key_path.is_empty()),
+        );
+        let fmt = if cli.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-gate")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+    let blob_cache_bytes: usize = blob_cache_mem_mb.saturating_mul(1024 * 1024);
+    let disk_cache_bytes: u64 = blob_cache_disk_gb.saturating_mul(1024 * 1024 * 1024);
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
             .expect("failed to initialise blob store"),
@@ -198,11 +427,6 @@ async fn main() -> std::io::Result<()> {
         blob_cache_disk_gb = %blob_cache_disk_gb,
         "gateway blob store + cache configured"
     );
-
-    let worker_urls: Vec<String> = workers_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
 
     let num_workers = worker_urls.len();
     // Bounded load: each worker handles at most 125% of average load
@@ -246,7 +470,7 @@ async fn main() -> std::io::Result<()> {
     // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
     // built at the dispatch site.
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
-        &auth_public,
+        &auth_ui_url,
         "gateway",
         oidc_client_secret,
         stash_signing_key.into_bytes(),
@@ -258,18 +482,17 @@ async fn main() -> std::io::Result<()> {
             let pg = zeroship_core::dpop::PgJtiCache::new(client.clone());
             zeroship_core::dpop::TieredJtiCache::with_pg(pg)
         })
-        .unwrap_or_else(zeroship_core::dpop::TieredJtiCache::default);
+        .unwrap_or_default();
 
     let state = Arc::new(GateState {
         config: GateConfig {
             control_url,
             control_key,
             worker_urls,
-            poll_interval_secs: poll_interval.parse().unwrap_or(5),
-            auth_secret,
+            poll_interval_secs: poll_interval,
             worker_key,
-            hydra_public,
-            auth_public,
+            hydra_public_url,
+            auth_ui_url,
             insecure_dev,
             trust_proxy,
             public_url,
@@ -294,7 +517,14 @@ async fn main() -> std::io::Result<()> {
 
     sync::start_sync(state.clone());
 
-    let bind_addr = format!("0.0.0.0:{port}");
+    let bind_addr = format!("{bind_host}:{port}");
+    if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
+        tracing::warn!(
+            bind = %bind_addr,
+            "gateway: binding a non-loopback address under --dev-insecure on an untrusted \
+             network is unsafe"
+        );
+    }
     tracing::info!(bind = %bind_addr, "gateway listening");
 
     web::server(async move || {
@@ -337,64 +567,265 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run()
     .await
-}
-
-fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return pair[1].clone();
-        }
-    }
-    std::env::var(env_key).unwrap_or_else(|_| default.to_string())
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
+    // overridable from the CLI. `--dev-insecure=false` resolves to false.
+    // NB: `GateCli` deliberately has no `Debug` (S2 — it holds raw secret
+    // strings), so we can't `.expect()` the Ok arm; match instead.
+    #[test]
+    fn dev_insecure_cli_false_overrides_env_one() {
+        // Single-threaded test: env set + cleared within this fn.
+        // (Edition 2021 — `set_var`/`remove_var` are safe here.)
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+        let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure=false"]);
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+
+        let Ok(cli) = parsed else {
+            panic!("parse with explicit false should succeed");
+        };
+        let insecure_dev = cli.dev_insecure.unwrap_or(false);
+        assert!(!insecure_dev, "CLI --dev-insecure=false must beat env=1");
+    }
+
+    #[test]
+    fn dev_insecure_env_one_enables_when_cli_absent() {
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+        let parsed = GateCli::try_parse_from(["zeroship-gate"]);
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+
+        let Ok(cli) = parsed else {
+            panic!("parse with env only should succeed");
+        };
+        assert_eq!(cli.dev_insecure, Some(true));
+    }
+
+    // S3: a missing WORKER_KEY is fatal outside dev, allowed inside dev.
+    #[test]
+    fn missing_worker_key_is_fatal_outside_dev() {
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", false).is_err());
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "", true).is_ok());
+        assert!(require_unless_dev("WORKER_KEY / --worker-key", "k", false).is_ok());
+    }
+
+    // M6: `--auth-secret` is a deleted legacy knob — clap must reject it
+    // as an unknown argument, not silently accept it.
+    #[test]
+    fn auth_secret_flag_is_rejected() {
+        let parsed = GateCli::try_parse_from(["zeroship-gate", "--auth-secret", "x"]);
+        let err = match parsed {
+            Ok(_) => panic!("--auth-secret must be rejected as an unknown argument"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    // M7: the worker URL list is parsed ONCE; empty/whitespace entries are
+    // dropped so the check-config count and runtime hash ring agree.
+    #[test]
+    fn worker_urls_drops_empty_entries() {
+        let parsed = parse_worker_urls("http://a:8080,,http://b:8080");
+        assert_eq!(parsed, vec!["http://a:8080", "http://b:8080"]);
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn worker_urls_trims_whitespace_entries() {
+        let parsed = parse_worker_urls(" http://a:8080 ,  , http://b:8080 ");
+        assert_eq!(parsed, vec!["http://a:8080", "http://b:8080"]);
+    }
+
     #[test]
     fn gateway_stash_key_rejects_missing_in_non_dev() {
-        let err = validate_gateway_stash_key("", false).unwrap_err();
+        let err = validate_stash_key("", false).unwrap_err();
         assert!(err.contains("required"), "{err}");
     }
 
     #[test]
     fn gateway_control_key_rejects_missing_in_non_dev() {
-        let err = validate_gateway_control_key("", false).unwrap_err();
+        let err =
+            require_unless_dev("CONTROL_KEY / --control-key", "", false).unwrap_err();
         assert!(err.contains("CONTROL_KEY"), "{err}");
     }
 
     #[test]
     fn gateway_control_key_accepts_nonempty_in_non_dev() {
-        assert!(validate_gateway_control_key("secret", false).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "secret", false).is_ok());
     }
 
     #[test]
     fn gateway_control_key_allows_missing_in_insecure_dev() {
-        assert!(validate_gateway_control_key("", true).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
+    }
+
+    #[test]
+    fn gateway_oidc_secret_rejects_missing_in_non_dev() {
+        let err = require_unless_dev(
+            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+            "",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("GATEWAY_OIDC_SECRET"), "{err}");
+    }
+
+    #[test]
+    fn gateway_oidc_secret_allows_missing_in_insecure_dev() {
+        assert!(
+            require_unless_dev("GATEWAY_OIDC_SECRET / --gateway-oidc-secret", "", true).is_ok()
+        );
+    }
+
+    #[test]
+    fn gateway_oidc_secret_accepts_nonempty_in_non_dev() {
+        assert!(
+            require_unless_dev(
+                "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+                "secret",
+                false
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn gateway_stash_key_rejects_dev_default_in_non_dev() {
-        let err = validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
+        let err = validate_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
         assert!(err.contains("dev default"), "{err}");
     }
 
     #[test]
     fn gateway_stash_key_rejects_short_in_non_dev() {
-        let err = validate_gateway_stash_key("short", false).unwrap_err();
+        let err = validate_stash_key("short", false).unwrap_err();
         assert!(err.contains("too short"), "{err}");
     }
 
     #[test]
     fn gateway_stash_key_accepts_strong_in_non_dev() {
         let key = "0123456789abcdef0123456789abcdef";
-        assert!(validate_gateway_stash_key(key, false).is_ok());
+        assert!(validate_stash_key(key, false).is_ok());
     }
 
     #[test]
     fn gateway_stash_key_allows_dev_default_in_insecure_dev() {
-        assert!(validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
-        assert!(validate_gateway_stash_key("", true).is_ok());
+        assert!(validate_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
+        assert!(validate_stash_key("", true).is_ok());
+    }
+
+    // --- secret-reference resolver wiring (server-config) ---
+
+    // (a) A literal secret passes through the resolver byte-identically.
+    // This is the guarantee that wiring the resolver does not change
+    // behavior for the existing literal-secret deployments.
+    #[test]
+    fn literal_secret_resolves_to_itself() {
+        let literal = "super-secret-control-key-value";
+        assert_eq!(
+            zeroship_core::config::resolve_secret(literal).expect("literal resolves"),
+            literal,
+        );
+        // A colon-laden DSN literal must NOT be mistaken for a reference.
+        let dsn = "postgres://user:pass@host:5432/db";
+        assert_eq!(
+            zeroship_core::config::resolve_secret(dsn).expect("dsn resolves"),
+            dsn,
+        );
+    }
+
+    // (b) The exact boolean the stash-key strength guard is gated on. In
+    // check-config, a REFERENCE skips the strength guard (the local is the
+    // raw ref string, not the material) while a LITERAL still runs it.
+    // Mirrors `!cli.check_config || !is_secret_ref(&stash_signing_key)`.
+    #[test]
+    fn check_config_ref_skips_strength_guard_literal_still_runs() {
+        let check_config = true;
+        // A short literal in check-config: guard must RUN (and would reject it).
+        let literal = "short";
+        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(literal);
+        assert!(runs_guard, "literal in check-config must run the strength guard");
+        assert!(
+            validate_stash_key(literal, false).is_err(),
+            "the short literal would fail the guard once it runs"
+        );
+
+        // A reference in check-config: guard must be SKIPPED (the raw ref
+        // string `urn:…` is not the secret material and would wrongly fail
+        // the length check).
+        let reference = "urn:zeroship:env:STASH_SIGNING_KEY";
+        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(reference);
+        assert!(!runs_guard, "reference in check-config must skip the strength guard");
+
+        // Outside check-config the guard always runs, ref or not.
+        let check_config = false;
+        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(reference);
+        assert!(runs_guard, "outside check-config the guard always runs");
+    }
+
+    // (c) A malformed reference is rejected by the format validator used on
+    // the check-config path (validate_secret_ref_or_exit calls this).
+    #[test]
+    fn malformed_secret_ref_is_rejected() {
+        assert!(
+            zeroship_core::config::validate_secret_ref("urn:zeroship:nope:x").is_err(),
+            "an unrecognized urn: scheme must be rejected"
+        );
+        assert!(
+            zeroship_core::config::validate_secret_ref("urn:zeroship:env:").is_err(),
+            "a recognized scheme with an empty body must be rejected"
+        );
+        // A well-formed reference and a plain literal both pass format check.
+        zeroship_core::config::validate_secret_ref("urn:zeroship:env:MY_VAR")
+            .expect("well-formed ref is format-valid");
+        zeroship_core::config::validate_secret_ref("a-plain-literal")
+            .expect("a literal is format-valid");
+    }
+
+    // (d) `[secrets]` file tier — the gateway maps control_key/worker_key/
+    // database_url/gateway_oidc_secret/stash_signing_key through
+    // `obtain_secret`. When the CLI/env value is empty, a `[secrets]` file
+    // reference is used; when both are present, the CLI/env value WINS.
+    // Asserted directly against the public `obtain_secret` (the exact helper
+    // each gateway field now calls) so the precedence contract is pinned
+    // without standing up a full process boot.
+    #[test]
+    fn secrets_file_tier_used_when_cli_empty() {
+        // Empty CLI + a `[secrets]` env-reference => the reference resolves.
+        let var = format!("ZS_GW_SECRETS_TIER_{}", std::process::id());
+        std::env::set_var(&var, "resolved-from-secrets-file");
+        let reference = format!("urn:zeroship:env:{var}");
+        let out = zeroship_core::config::obtain_secret(
+            "MASTER_KEY",
+            "",
+            Some(&reference),
+            false,
+        );
+        std::env::remove_var(&var);
+        assert_eq!(
+            out, "resolved-from-secrets-file",
+            "an empty CLI value must fall through to the [secrets] file reference"
+        );
+    }
+
+    #[test]
+    fn cli_env_secret_beats_secrets_file_entry() {
+        // A non-empty CLI/env value WINS over any `[secrets]` file reference:
+        // the file reference is never even resolved (note the env var below is
+        // intentionally never set — if precedence were wrong, resolving the
+        // ref would fail/exit instead of returning the literal).
+        let out = zeroship_core::config::obtain_secret(
+            "MASTER_KEY",
+            "literal-from-cli",
+            Some("urn:zeroship:env:ZS_GW_SECRETS_TIER_NEVER_SET"),
+            false,
+        );
+        assert_eq!(
+            out, "literal-from-cli",
+            "a CLI/env secret must win over the [secrets] file entry"
+        );
     }
 }

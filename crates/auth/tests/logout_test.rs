@@ -79,12 +79,12 @@ async fn mock_accept_logout(
 async fn logout_route_is_registered_returns_not_404() {
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[logout_test] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[logout_test] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
@@ -173,12 +173,12 @@ async fn logout_route_is_registered_returns_not_404() {
 async fn logout_post_is_registered_returns_not_404_or_405() {
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[logout_test] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[logout_test] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)

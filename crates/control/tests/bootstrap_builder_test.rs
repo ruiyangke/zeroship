@@ -54,7 +54,7 @@ async fn cleanup_builder_client(pg: &Client) {
 }
 
 fn config(
-    db_url: &str,
+    _db_url: &str,
     hydra: &MockHydra,
     secret_path: PathBuf,
     enabled: bool,
@@ -64,7 +64,7 @@ fn config(
         hydra_admin_url: hydra.base.clone(),
         redirect_uri: DEFAULT_BUILDER_REDIRECT_URI.to_string(),
         client_secret_path: secret_path,
-        
+        skip_consent: true,
     }
 }
 

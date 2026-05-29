@@ -51,7 +51,7 @@ pub async fn handle(
     state: State<Arc<GateState>>,
 ) -> HttpResponse {
     // `state.oidc_rp.issuer` is the canonical hydra issuer string
-    // (built from `auth_public` at boot, optionally overridden via
+    // (built from `auth_ui_url` at boot, optionally overridden via
     // `OidcRp::with_issuer` in tests). `client_id` matches the OIDC
     // client registered for the gateway in
     // `ops/auth-clients.example.toml` (currently `"gateway"`).

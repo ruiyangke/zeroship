@@ -234,10 +234,9 @@ fn build_state(
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            auth_secret: String::new(),
             worker_key: "wk-test-e2e".into(),
-            hydra_public: introspect_base_url.clone(),
-            auth_public: introspect_base_url.clone(),
+            hydra_public_url: introspect_base_url.clone(),
+            auth_ui_url: introspect_base_url.clone(),
             // `insecure_dev: true` so the gateway builds `htu` with
             // scheme `http` — matching what we sign client-side over
             // the loopback test server (which has no TLS).

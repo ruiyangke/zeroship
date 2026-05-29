@@ -13,7 +13,6 @@ use zeroship_authz::{Action, Resource, Scope};
 
 use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
-use crate::trusted_clients;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -103,7 +102,7 @@ pub async fn create_oauth_client(
     if let Err(resp) = ensure_client_absent(&state, &body.client_id).await {
         return resp;
     }
-    let skip_consent = trusted_clients::is_trusted(&body.client_id);
+    let skip_consent = state.is_trusted(&body.client_id);
 
     let hydra_body = HydraCreateClientRequest {
         client_id: &body.client_id,

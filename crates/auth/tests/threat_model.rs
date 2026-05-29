@@ -12,7 +12,7 @@
 //! Rows like "Open redirect on `redirect_uri`" and "Refresh-token reuse" are
 //! [hydra]-owned per §13 and live outside this harness.
 //!
-//! Every test skips when `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` aren't both set
+//! Every test skips when `AUTH_DB_URL` and `HYDRA_ADMIN_URL` aren't both set
 //! (mirroring `e2e_password.rs`).
 
 use uuid::Uuid;
@@ -31,7 +31,7 @@ use common::{
 #[ntex::test]
 async fn login_csrf_missing_field_rejected() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::csrf_missing] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[threat_model::csrf_missing] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -83,7 +83,7 @@ async fn login_csrf_missing_field_rejected() {
 #[ntex::test]
 async fn login_csrf_mismatched_token_rejected() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::csrf_mismatch] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[threat_model::csrf_mismatch] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -139,7 +139,7 @@ async fn login_csrf_mismatched_token_rejected() {
 #[ntex::test]
 async fn login_clickjacking_headers_present() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::clickjacking] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[threat_model::clickjacking] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -182,7 +182,7 @@ async fn login_clickjacking_headers_present() {
 #[ntex::test]
 async fn login_referrer_policy_set() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::referrer] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[threat_model::referrer] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -216,7 +216,7 @@ async fn login_referrer_policy_set() {
 #[ntex::test]
 async fn login_rate_limit_kicks_in() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::rate_limit] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[threat_model::rate_limit] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -361,7 +361,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
 #[ntex::test]
 async fn session_id_rotates_post_login_success() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::rotate] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[threat_model::rotate] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 

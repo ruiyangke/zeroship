@@ -53,12 +53,13 @@ services:
     command: >
       zeroship-control
         --port 9090
+        --bind 0.0.0.0
         --db postgres://postgres:zeroship@postgres:5432/zeroship
-        --bundles /data/bundles
+        --blob-store /data/bundles
         --control-key platform-key
         --master-key master-key
         --dev-insecure
-        --hydra-admin-url http://hydra:4445
+        --allow-remote-hydra-admin
         --bootstrap-builder-client
         --builder-client-secret-file /data/builder-client-secret
     ports:
@@ -66,6 +67,8 @@ services:
     volumes:
       - bundles:/data/bundles
       - ./data:/data
+      # mounted at the well-known path => auto-discovered, no --config needed
+      - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -90,15 +93,21 @@ services:
         echo "[gateway] workers: $$WORKERS"
         exec zeroship-gate \
           --port 8000 \
+          --bind 0.0.0.0 \
           --control http://control:9090 \
           --control-key platform-key \
           --worker-key worker-key \
           --workers "$$WORKERS" \
+          --blob-store /data/bundles \
           --poll-interval 3 \
-          --hydra-public http://hydra:4444 \
-          --auth-public http://auth:9092 \
+          --auth-ui-url http://auth:9092 \
           --db postgres://postgres:zeroship@postgres:5432/zeroship \
-          --insecure-dev true
+          --dev-insecure
+    volumes:
+      # Same content-addressed blob store control writes to (asset proxy).
+      - bundles:/data/bundles
+      # mounted at the well-known path => auto-discovered, no --config needed
+      - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     environment:
       # OAuth2 client_secret registered for the `gateway` client in
       # ops/auth-clients.example.toml. The gateway exchanges this on
@@ -119,6 +128,8 @@ services:
         condition: service_started
       worker:
         condition: service_started
+      auth:
+        condition: service_started
 
   worker:
     build: .
@@ -131,19 +142,56 @@ services:
     command: >
       zeroship-worker
         --port 8080
-        --workers 4
+        --worker-threads 4
         --bind 0.0.0.0
         --worker-key worker-key
         --control http://control:9090
         --control-key platform-key
+        --blob-store /data/bundles
         --max-isolates 200
         --poll-interval 3
+    volumes:
+      # Same content-addressed blob store control writes to (deploy blobs).
+      - bundles:/data/bundles
+      # Mounted at the well-known path => auto-discovered, so the worker
+      # picks up the shared [observability] defaults with no --config.
+      - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     deploy:
       replicas: 3
     security_opt:
       - seccomp:unconfined
     depends_on:
       - control
+
+  # zeroship-auth — OIDC IdP UI + RP in front of the hydra kernel. The
+  # gateway redirects unauthenticated end users here (--auth-ui-url
+  # http://auth:9092). Binds loopback by default, so compose must pass
+  # --addr 0.0.0.0:9092 to be reachable across the container network.
+  auth:
+    build: .
+    command: >
+      zeroship-auth
+        --addr 0.0.0.0:9092
+        --db-url postgres://postgres:zeroship@postgres:5432/zeroship
+        --dev-insecure
+        --allow-remote-hydra-admin
+        --bootstrap
+    ports:
+      - "9092:9092"
+    volumes:
+      # hydra_admin_url / hydra_public_url come from the shared overlay,
+      # auto-discovered at the well-known path (no --config needed).
+      - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+      # Declarative OIDC client config; auth reconciles it against hydra
+      # admin at boot. --clients-config defaults to this well-known path.
+      - ./ops/auth-clients.example.toml:/etc/zeroship/auth-clients.toml:ro
+    security_opt:
+      - seccomp:unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hydra:
+        condition: service_started
 
   # ory/hydra — OIDC kernel sidecar for crates/auth.
   # public port 4444 (proxied via gateway at auth.zeroship.ai/oauth2/*)

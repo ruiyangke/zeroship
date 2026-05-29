@@ -10,8 +10,6 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroship_authz::Scope;
 
-use crate::trusted_clients;
-
 pub const BUILDER_CLIENT_ID: &str = "zeroship-builder";
 pub const BUILDER_CLIENT_NAME: &str = "zeroship builder";
 pub const DEFAULT_BUILDER_REDIRECT_URI: &str = "http://localhost:3001/auth/callback";
@@ -35,6 +33,7 @@ pub struct BuilderClientBootstrapConfig {
     pub hydra_admin_url: String,
     pub redirect_uri: String,
     pub client_secret_path: PathBuf,
+    pub skip_consent: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,7 +148,6 @@ async fn insert_oauth_client(
         .map(|scope| scope.as_str())
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
-    let skip_consent = trusted_clients::is_trusted(BUILDER_CLIENT_ID);
     pg.execute(
         "INSERT INTO control.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
@@ -160,7 +158,7 @@ async fn insert_oauth_client(
             &BUILDER_CLIENT_NAME,
             &redirect_uris,
             &scopes,
-            &skip_consent,
+            &cfg.skip_consent,
             &created_by,
         ],
     )
@@ -251,7 +249,7 @@ async fn create_hydra_client(
         scope: &scope,
         token_endpoint_auth_method: "client_secret_basic",
         subject_type: "public",
-        skip_consent: trusted_clients::is_trusted(BUILDER_CLIENT_ID),
+        skip_consent: cfg.skip_consent,
     };
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|err| BuilderClientBootstrapError::Encode(err.to_string()))?;

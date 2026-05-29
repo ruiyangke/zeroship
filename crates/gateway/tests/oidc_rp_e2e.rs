@@ -29,7 +29,7 @@
 //! `iss: https://auth.zeroship.ai/` regardless of which interface a token
 //! request came in on. The gateway's `OidcRp` dials hydra at
 //! `http://127.0.0.1:4444` (loopback admin/public) during tests, so the
-//! `auth_public` URL and the expected `iss` differ. We use
+//! OIDC dial URL and the expected `iss` differ. We use
 //! `OidcRp::with_issuer` (added alongside this test) to override the
 //! verifier's expected issuer to the canonical
 //! `https://auth.zeroship.ai/`.
@@ -182,11 +182,12 @@ async fn gateway_oidc_rp_full_dance() {
     let cfg = Arc::new(AuthConfig {
         addr: "127.0.0.1:0".to_string(),
         db_url: db_url.clone(),
-        hydra_admin: hydra_admin_url.clone(),
+        hydra_admin_url: Some(hydra_admin_url.clone()),
         allow_remote_hydra_admin: false,
-        hydra_public: hydra_public.clone(),
+        hydra_public_url: Some(hydra_public.clone()),
         clients_config: "ops/auth-clients.example.toml".to_string(),
         bootstrap: false,
+        dev_insecure: Some(true),
         insecure_dev: true,
         stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
         google_client_id: None,
@@ -219,6 +220,11 @@ async fn gateway_oidc_rp_full_dance() {
         jwk_retain_days: 31,
         cron_tick_secs: 86400,
         audit_retention_check_secs: 3600,
+        config_path: None,
+        no_config: true,
+        check_config: false,
+        check_config_format: "text".to_string(),
+        obs: Default::default(),
     });
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();
@@ -291,7 +297,7 @@ async fn gateway_oidc_rp_full_dance() {
 
     // 5. Build the OidcRp under test.
     //
-    // `auth_public` is the loopback hydra (the only place we can actually
+    // The OIDC dial URL is loopback hydra (the only place we can actually
     // dial); `with_issuer` overrides the expected `iss` to hydra's
     // configured value so verification matches what hydra emits.
     let rp = OidcRp::new(

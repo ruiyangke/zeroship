@@ -69,6 +69,10 @@ askama = "0.12"
 # `zeroship-core`) and `ed25519-dalek` (with the `pkcs8` feature so we
 # can hand the JWT encoder a PKCS#8-DER-encoded private key).
 [dev-dependencies]
+# Auth unit tests include `#[compio::test]` live-PG tests. The polling fallback
+# keeps them runnable in sandboxes that block io_uring; production builds use
+# the normal workspace compio dependency above the dev-dependency boundary.
+compio = { workspace = true, features = ["polling"] }
 jsonwebtoken = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 # `tests/load_test.rs` uses `futures::future::join_all` to drive N parallel

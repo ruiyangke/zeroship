@@ -5,7 +5,7 @@
 //!
 //! These tests mutate the live hydra's JWKS for the test database — they
 //! must run against the integration hydra (the smoke fixture's hydra),
-//! NOT a production instance. CI gates them on `AUTH_DB_URL`+`AUTH_HYDRA_ADMIN`
+//! NOT a production instance. CI gates them on `AUTH_DB_URL`+`HYDRA_ADMIN_URL`
 //! being set; absent either, the tests print `skip` and pass.
 
 // Holding a sync mutex across awaits is the entire point of
@@ -72,8 +72,8 @@ async fn rotation_first_tick_records_baseline_no_action() {
         eprintln!("skip: AUTH_DB_URL unset");
         return;
     };
-    let Ok(admin_url) = std::env::var("AUTH_HYDRA_ADMIN") else {
-        eprintln!("skip: AUTH_HYDRA_ADMIN unset");
+    let Ok(admin_url) = std::env::var("HYDRA_ADMIN_URL") else {
+        eprintln!("skip: HYDRA_ADMIN_URL unset");
         return;
     };
 
@@ -136,8 +136,8 @@ async fn rotation_due_prepends_new_keys() {
         eprintln!("skip: AUTH_DB_URL unset");
         return;
     };
-    let Ok(admin_url) = std::env::var("AUTH_HYDRA_ADMIN") else {
-        eprintln!("skip: AUTH_HYDRA_ADMIN unset");
+    let Ok(admin_url) = std::env::var("HYDRA_ADMIN_URL") else {
+        eprintln!("skip: HYDRA_ADMIN_URL unset");
         return;
     };
 
@@ -210,8 +210,8 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
         eprintln!("skip: AUTH_DB_URL unset");
         return;
     };
-    let Ok(admin_url) = std::env::var("AUTH_HYDRA_ADMIN") else {
-        eprintln!("skip: AUTH_HYDRA_ADMIN unset");
+    let Ok(admin_url) = std::env::var("HYDRA_ADMIN_URL") else {
+        eprintln!("skip: HYDRA_ADMIN_URL unset");
         return;
     };
 
@@ -285,8 +285,8 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
         eprintln!("skip: AUTH_DB_URL unset");
         return;
     };
-    let Ok(admin_url) = std::env::var("AUTH_HYDRA_ADMIN") else {
-        eprintln!("skip: AUTH_HYDRA_ADMIN unset");
+    let Ok(admin_url) = std::env::var("HYDRA_ADMIN_URL") else {
+        eprintln!("skip: HYDRA_ADMIN_URL unset");
         return;
     };
 

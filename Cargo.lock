@@ -6513,6 +6513,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "clap",
  "compio",
  "compio-postgres",
  "cyper",
@@ -6549,6 +6550,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64",
+ "clap",
  "compio",
  "compio-postgres",
  "cyper",
@@ -6566,6 +6568,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "toml 0.8.23",
  "tracing",
  "tracing-bunyan-formatter",
  "tracing-log 0.2.0",
@@ -6585,6 +6588,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "clap",
  "compio",
  "compio-postgres",
  "cyper",
@@ -6778,6 +6782,7 @@ name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "clap",
  "compio",
  "cyper",
  "futures",

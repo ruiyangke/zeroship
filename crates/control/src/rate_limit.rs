@@ -49,7 +49,10 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn new(quota: Quota) -> Self {
-        Self { quota, buckets: Mutex::new(HashMap::new()) }
+        Self {
+            quota,
+            buckets: Mutex::new(HashMap::new()),
+        }
     }
 
     #[must_use]
@@ -57,14 +60,18 @@ impl RateLimiter {
         self.quota
     }
 
+    fn lock_buckets(&self) -> MutexGuard<'_, HashMap<IpAddr, Bucket>> {
+        match self.buckets.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Try to consume one token for `ip`. Returns true if allowed,
     /// false if the bucket was empty.
     pub fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut buckets = match self.buckets.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut buckets = self.lock_buckets();
 
         // Lazy GC: evict idle buckets so the map can't grow unbounded.
         // O(N) per call but N is bounded by the number of distinct

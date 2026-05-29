@@ -21,7 +21,7 @@ async fn create_test_app(registry: &Registry) -> Uuid {
 }
 
 async fn pg_connect(dsn: &str) -> compio_postgres::Client {
-    let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+    let (client, conn) = connect(dsn, NoTls)
         .await
         .expect("connect");
     compio::runtime::spawn(async move {
@@ -29,6 +29,10 @@ async fn pg_connect(dsn: &str) -> compio_postgres::Client {
     })
     .detach();
     client
+}
+
+async fn raw_conn(dsn: &str) -> compio_postgres::Client {
+    pg_connect(dsn).await
 }
 
 #[compio::test]

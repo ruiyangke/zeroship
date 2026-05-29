@@ -2,7 +2,7 @@
 //! in-process `crates/auth` server + an in-process mock GitHub provider.
 //!
 //! Two tests, both skipping cleanly without `AUTH_DB_URL` +
-//! `AUTH_HYDRA_ADMIN`:
+//! `HYDRA_ADMIN_URL`:
 //!
 //!   1. `github_federation_creates_new_user` — happy path. The mock
 //!      returns a verified primary non-noreply email; the auth server
@@ -62,11 +62,11 @@ impl GithubFixture {
     async fn boot(mock: &MockProvider) -> Option<Self> {
         let (Ok(db_url), Ok(hydra_admin_url)) = (
             std::env::var("AUTH_DB_URL"),
-            std::env::var("AUTH_HYDRA_ADMIN"),
+            std::env::var("HYDRA_ADMIN_URL"),
         ) else {
             return None;
         };
-        let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+        let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
         let (pg_client, pg_connection) =
@@ -209,7 +209,7 @@ async fn github_federation_creates_new_user() {
     eprintln!("[e2e_github happy] mock provider at {}", mock.base);
 
     let Some(fx) = GithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github happy] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_github happy] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
     eprintln!("[e2e_github happy] auth server at {}", fx.auth_base);
@@ -350,7 +350,7 @@ async fn github_callback_invalid_hydra_challenge_has_no_local_side_effects() {
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
 
     let Some(fx) = GithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github invalid challenge] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_github invalid challenge] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
 
@@ -453,7 +453,7 @@ async fn github_federation_rejects_noreply_only_email() {
     eprintln!("[e2e_github noreply] mock provider at {}", mock.base);
 
     let Some(fx) = GithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github noreply] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_github noreply] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
     eprintln!("[e2e_github noreply] auth server at {}", fx.auth_base);
@@ -574,7 +574,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     eprintln!("[e2e_github unverified] mock provider at {}", mock.base);
 
     let Some(fx) = GithubFixture::boot(&mock).await else {
-        eprintln!("[e2e_github unverified] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_github unverified] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
     eprintln!("[e2e_github unverified] auth server at {}", fx.auth_base);

@@ -1,21 +1,50 @@
 //! Auth server configuration.
 
-use clap::Parser;
+use std::path::PathBuf;
 
-#[derive(Debug, Clone, Parser)]
+use clap::Parser;
+use zeroship_core::config::{
+    parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY,
+};
+use zeroship_core::observability::ObservabilityFlags;
+
+const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
+const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
+
+#[derive(Clone, Parser)]
 #[command(name = "zeroship-auth")]
 pub struct AuthConfig {
-    /// Listen address.
-    #[arg(long, env = "AUTH_ADDR", default_value = "0.0.0.0:9092")]
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    pub config_path: Option<PathBuf>,
+
+    /// Disable well-known config auto-discovery (`/etc/zeroship/zeroship.toml`).
+    #[arg(long = "no-config")]
+    pub no_config: bool,
+
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    pub check_config: bool,
+
+    /// `--check-config` output format: `text` (default) or `json`.
+    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
+    pub check_config_format: String,
+
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    pub obs: ObservabilityFlags,
+
+    /// Listen address. Defaults to loopback; compose passes `0.0.0.0:9092`.
+    #[arg(long, env = "AUTH_ADDR", default_value = "127.0.0.1:9092")]
     pub addr: String,
 
     /// `PostgreSQL` DSN.
-    #[arg(long, env = "AUTH_DB_URL")]
+    #[arg(long, env = "AUTH_DB_URL", hide_env_values = true)]
     pub db_url: String,
 
     /// Hydra admin base URL (loopback).
-    #[arg(long, env = "AUTH_HYDRA_ADMIN", default_value = "http://127.0.0.1:4445")]
-    pub hydra_admin: String,
+    #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
+    pub hydra_admin_url: Option<String>,
 
     /// Permit a non-loopback Hydra admin URL. Production deployments that
     /// enable this must protect Hydra admin externally with mTLS, firewall
@@ -31,8 +60,8 @@ pub struct AuthConfig {
     pub allow_remote_hydra_admin: bool,
 
     /// Hydra public base URL (issuer).
-    #[arg(long, env = "AUTH_HYDRA_PUBLIC", default_value = "https://auth.zeroship.ai")]
-    pub hydra_public: String,
+    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
+    pub hydra_public_url: Option<String>,
 
     /// Path to clients config TOML.
     #[arg(long, env = "AUTH_CLIENTS_CONFIG", default_value = "/etc/zeroship/auth-clients.toml")]
@@ -43,20 +72,35 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_BOOTSTRAP")]
     pub bootstrap: bool,
 
-    /// Dev mode: drop the Secure flag on cookies. ONLY for localhost.
-    #[arg(long, env = "AUTH_INSECURE_DEV")]
+    /// Dev mode: drop the Secure flag on cookies + relax secret guards.
+    /// ONLY for localhost. `--dev-insecure` (no value) enables it;
+    /// `--dev-insecure=false` disables a stray `ZEROSHIP_DEV_INSECURE=1`.
+    #[arg(
+        long = "dev-insecure",
+        env = "ZEROSHIP_DEV_INSECURE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    pub dev_insecure: Option<bool>,
+
+    /// Resolved dev-insecure flag (CLI presence > env > default false).
+    /// Not a CLI/env arg of its own; populated by [`AuthConfig::resolve`].
+    #[arg(skip)]
     pub insecure_dev: bool,
 
     /// HMAC key (≥32 bytes recommended) used to sign the short-lived
     /// federation stash cookie (`__Host-zsidp_google_stash` etc.). A weak
     /// or default value lets an attacker forge stash cookies and bypass
     /// the OAuth state/PKCE check, so production deployments MUST set
-    /// this explicitly. The dev default is accepted only with
-    /// `--insecure-dev=true`.
+    /// this explicitly. Empty default keeps the dev sentinel out of
+    /// `--help`; the dev fallback (`DEV_STASH_SIGNING_KEY`) is applied in
+    /// code under `--dev-insecure`.
     #[arg(
         long,
         env = "AUTH_STASH_SIGNING_KEY",
-        default_value = "dev-only-stash-signing-key-not-for-production-use!!"
+        default_value = "",
+        hide_env_values = true
     )]
     pub stash_signing_key: String,
 
@@ -67,7 +111,7 @@ pub struct AuthConfig {
     pub google_client_id: Option<String>,
 
     /// Google OAuth 2.0 client secret.
-    #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET")]
+    #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET", hide_env_values = true)]
     pub google_client_secret: Option<String>,
 
     /// Redirect URI registered with Google. Must match the value configured in
@@ -125,7 +169,7 @@ pub struct AuthConfig {
     pub github_client_id: Option<String>,
 
     /// GitHub OAuth App client secret.
-    #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET")]
+    #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET", hide_env_values = true)]
     pub github_client_secret: Option<String>,
 
     /// Callback URL registered on the GitHub OAuth App. Must match what's set
@@ -188,7 +232,7 @@ pub struct AuthConfig {
     pub smtp_username: Option<String>,
 
     /// SMTP password (paired with `--smtp-username`).
-    #[arg(long, env = "AUTH_SMTP_PASSWORD")]
+    #[arg(long, env = "AUTH_SMTP_PASSWORD", hide_env_values = true)]
     pub smtp_password: Option<String>,
 
     /// `true` ⇒ open plaintext then upgrade with STARTTLS (port 587).
@@ -197,7 +241,7 @@ pub struct AuthConfig {
     pub smtp_starttls: bool,
 
     /// Resend API key (required when `--mailer=resend`).
-    #[arg(long, env = "AUTH_RESEND_API_KEY")]
+    #[arg(long, env = "AUTH_RESEND_API_KEY", hide_env_values = true)]
     pub resend_api_key: Option<String>,
 
     /// `From` address every transactional mail uses.
@@ -237,7 +281,11 @@ pub struct AuthConfig {
 
     /// HTTP Basic-auth password paired with [`Self::postmark_webhook_user`].
     /// See that field for the rationale.
-    #[arg(long, env = "AUTH_POSTMARK_WEBHOOK_PASSWORD")]
+    #[arg(
+        long,
+        env = "AUTH_POSTMARK_WEBHOOK_PASSWORD",
+        hide_env_values = true
+    )]
     pub postmark_webhook_password: Option<String>,
 
     // ─── Cron (P6-U1: jwk_rotation; future units add audit retention) ───
@@ -276,6 +324,51 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
+    /// file overlay.
+    ///
+    /// Hydra URLs follow CLI/env > file > default precedence via the shared
+    /// [`resolve_overlay_string`] primitive (same idiom as control). The
+    /// dev-insecure flag resolves CLI presence > env > default-false: a CLI
+    /// `--dev-insecure=false` overrides a stray `ZEROSHIP_DEV_INSECURE=1`.
+    ///
+    /// Under `--dev-insecure` an empty stash key falls back to the shared
+    /// [`DEV_STASH_SIGNING_KEY`] in code (the clap default is empty so no
+    /// secret leaks into `--help`); outside dev the empty key is rejected by
+    /// `validate_stash_key` before this fallback would matter.
+    pub fn resolve(&mut self, auth: AuthSection) {
+        self.insecure_dev = self.dev_insecure.unwrap_or(false);
+        if self.insecure_dev && self.stash_signing_key.is_empty() {
+            self.stash_signing_key = DEV_STASH_SIGNING_KEY.to_string();
+        }
+        self.hydra_admin_url = Some(resolve_overlay_string(
+            self.hydra_admin_url.take(),
+            auth.hydra_admin_url,
+            Some(DEFAULT_HYDRA_ADMIN_URL),
+        ));
+        self.hydra_public_url = Some(resolve_overlay_string(
+            self.hydra_public_url.take(),
+            auth.hydra_public_url,
+            Some(DEFAULT_HYDRA_PUBLIC_URL),
+        ));
+    }
+
+    /// Resolved Hydra admin API base URL.
+    #[must_use]
+    pub fn hydra_admin_url(&self) -> &str {
+        self.hydra_admin_url
+            .as_deref()
+            .unwrap_or(DEFAULT_HYDRA_ADMIN_URL)
+    }
+
+    /// Resolved Hydra public issuer/base URL.
+    #[must_use]
+    pub fn hydra_public_url(&self) -> &str {
+        self.hydra_public_url
+            .as_deref()
+            .unwrap_or(DEFAULT_HYDRA_PUBLIC_URL)
+    }
+
     /// External origin of this auth server (no trailing slash). Returns
     /// [`Self::public_url`] with any trailing `/` trimmed so callers can
     /// freely concatenate `/magic/verify?…`.
@@ -285,54 +378,138 @@ impl AuthConfig {
     }
 }
 
-pub fn validate_stash_key(cfg: &AuthConfig) -> Result<(), String> {
-    if cfg.insecure_dev {
-        if cfg.stash_signing_key.starts_with("dev-only-") {
-            tracing::warn!(
-                "AUTH_STASH_SIGNING_KEY is the dev default — OK only because --insecure-dev=true"
-            );
-        }
-        return Ok(());
+impl std::fmt::Debug for AuthConfig {
+    /// Hand-written so secrets (DSN, stash/OAuth/SMTP/Resend keys, webhook
+    /// creds) never appear in `{:?}` output. The derive would print raw
+    /// `String` secrets in plaintext (S2), so it is deliberately absent.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("addr", &self.addr)
+            .field("db_url", &"<redacted>")
+            .field("hydra_admin_url", &self.hydra_admin_url)
+            .field("hydra_public_url", &self.hydra_public_url)
+            .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
+            .field("clients_config", &self.clients_config)
+            .field("bootstrap", &self.bootstrap)
+            .field("dev_insecure", &self.dev_insecure)
+            .field("insecure_dev", &self.insecure_dev)
+            .field("stash_signing_key", &"<redacted>")
+            .field("google_client_id", &self.google_client_id)
+            .field("google_client_secret", &"<redacted>")
+            .field("github_client_id", &self.github_client_id)
+            .field("github_client_secret", &"<redacted>")
+            .field("mailer", &self.mailer)
+            .field("smtp_password", &"<redacted>")
+            .field("resend_api_key", &"<redacted>")
+            .field("public_url", &self.public_url)
+            .field("postmark_webhook_password", &"<redacted>")
+            .finish_non_exhaustive()
     }
-
-    if cfg.stash_signing_key.starts_with("dev-only-") {
-        return Err(
-            "AUTH_STASH_SIGNING_KEY is the dev default; refusing to boot without --insecure-dev=true. Set a strong (≥32 byte) value."
-                .to_string(),
-        );
-    }
-
-    if cfg.stash_signing_key.len() < 32 {
-        return Err(format!(
-            "AUTH_STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes. Set a stronger key or pass --insecure-dev=true.",
-            cfg.stash_signing_key.len()
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use zeroship_core::config::FileConfig;
+
+    static HYDRA_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TempFile {
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        fn write(name: &str, contents: &str) -> Self {
+            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+            let path = std::env::temp_dir().join(format!(
+                "zeroship-auth-config-{name}-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(path.as_path(), contents).expect("write temp config");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.path.as_path());
+        }
+    }
+
+    fn set_env_opt(key: &str, value: Option<&str>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn with_hydra_env<T>(
+        hydra_admin_url: Option<&str>,
+        hydra_public_url: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = HYDRA_ENV_LOCK.lock().expect("hydra env lock poisoned");
+        let old_admin = std::env::var_os("HYDRA_ADMIN_URL");
+        let old_public = std::env::var_os("HYDRA_PUBLIC_URL");
+
+        set_env_opt("HYDRA_ADMIN_URL", hydra_admin_url);
+        set_env_opt("HYDRA_PUBLIC_URL", hydra_public_url);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        restore_env("HYDRA_ADMIN_URL", old_admin);
+        restore_env("HYDRA_PUBLIC_URL", old_public);
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn resolve_from_file(mut cfg: AuthConfig) -> AuthConfig {
+        let file = FileConfig::load(cfg.config_path.as_deref()).expect("load config file");
+        cfg.resolve(file.auth);
+        cfg
+    }
 
     fn test_config() -> AuthConfig {
         AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
     }
 
-    #[test]
-    fn stash_key_default_rejected_in_production() {
-        let cfg = test_config();
+    // The stash validator now lives in `zeroship_core::config`; these tests
+    // assert auth's resolved key + flag interact with it correctly (S4).
+    // `DEV_STASH_SIGNING_KEY` is already in scope via `use super::*`.
+    use zeroship_core::config::validate_stash_key;
 
-        assert!(validate_stash_key(&cfg).is_err());
+    #[test]
+    fn stash_key_empty_default_rejected_in_production() {
+        let cfg = test_config();
+        // Empty default (no secret printed in --help) is rejected outside dev.
+        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_err());
     }
 
     #[test]
-    fn stash_key_default_accepted_in_dev() {
+    fn stash_key_empty_default_accepted_in_dev() {
         let mut cfg = test_config();
         cfg.insecure_dev = true;
 
-        assert!(validate_stash_key(&cfg).is_ok());
+        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_ok());
     }
 
     #[test]
@@ -340,7 +517,7 @@ mod tests {
         let mut cfg = test_config();
         cfg.stash_signing_key = "a".repeat(20);
 
-        assert!(validate_stash_key(&cfg).is_err());
+        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_err());
     }
 
     #[test]
@@ -348,7 +525,82 @@ mod tests {
         let mut cfg = test_config();
         cfg.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
 
-        assert!(validate_stash_key(&cfg).is_ok());
+        assert!(validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev).is_ok());
+    }
+
+    // (d) The dev stash default is no longer a clap `default_value`, so it
+    // cannot leak in `--help`. The empty default must still be rejected by the
+    // shared validator outside dev.
+    #[test]
+    fn stash_key_default_is_empty_not_dev_sentinel() {
+        let cfg = test_config();
+        assert_eq!(cfg.stash_signing_key, "");
+        assert_ne!(cfg.stash_signing_key, DEV_STASH_SIGNING_KEY);
+        // The empty default is rejected outside dev (no clap default secret).
+        assert!(validate_stash_key(&cfg.stash_signing_key, false).is_err());
+    }
+
+    // (a) `--dev-insecure` (bare) and `ZEROSHIP_DEV_INSECURE` both enable the
+    // resolved flag, and a CLI `--dev-insecure=false` overrides a stray env=1.
+    #[test]
+    fn dev_insecure_cli_bare_enables() {
+        let mut cfg =
+            AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test", "--dev-insecure"]);
+        cfg.resolve(AuthSection::default());
+        assert!(cfg.insecure_dev);
+    }
+
+    #[test]
+    fn dev_insecure_cli_explicit_true_enables() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--dev-insecure=true",
+        ]);
+        cfg.resolve(AuthSection::default());
+        assert!(cfg.insecure_dev);
+    }
+
+    #[test]
+    fn dev_insecure_env_enables_and_cli_false_overrides() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+
+        // env=1 alone enables.
+        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"]);
+        cfg.resolve(AuthSection::default());
+        assert!(cfg.insecure_dev, "ZEROSHIP_DEV_INSECURE=1 should enable");
+
+        // CLI presence overrides env: --dev-insecure=false disables it.
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--dev-insecure=false",
+        ]);
+        cfg.resolve(AuthSection::default());
+        assert!(
+            !cfg.insecure_dev,
+            "--dev-insecure=false must override ZEROSHIP_DEV_INSECURE=1"
+        );
+
+        restore_env("ZEROSHIP_DEV_INSECURE", old);
+    }
+
+    // (b) The old `--insecure-dev` / `AUTH_INSECURE_DEV` flag is gone.
+    #[test]
+    fn old_insecure_dev_flag_is_rejected() {
+        let err = AuthConfig::try_parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--insecure-dev",
+        ])
+        .expect_err("--insecure-dev no longer accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -373,5 +625,88 @@ mod tests {
         ]);
 
         assert!(cfg.allow_remote_hydra_admin);
+    }
+
+    #[test]
+    fn auth_file_overlay_supplies_hydra_urls_when_unset() {
+        with_hydra_env(None, None, || {
+            let file = TempFile::write(
+                "auth-overlay.toml",
+                r#"
+[auth]
+hydra_admin_url = "http://hydra-file:4445"
+hydra_public_url = "https://hydra-file.example"
+"#,
+            );
+
+            let cfg = resolve_from_file(AuthConfig::parse_from([
+                "zeroship-auth",
+                "--db-url",
+                "postgres://test",
+                "--config",
+                file.path.to_str().expect("utf-8 temp path"),
+            ]));
+
+            assert_eq!(cfg.hydra_admin_url(), "http://hydra-file:4445");
+            assert_eq!(cfg.hydra_public_url(), "https://hydra-file.example");
+        });
+    }
+
+    #[test]
+    fn cli_hydra_urls_override_file_overlay() {
+        with_hydra_env(None, None, || {
+            let file = TempFile::write(
+                "auth-cli-override.toml",
+                r#"
+[auth]
+hydra_admin_url = "http://hydra-file:4445"
+hydra_public_url = "https://hydra-file.example"
+"#,
+            );
+
+            let cfg = resolve_from_file(AuthConfig::parse_from([
+                "zeroship-auth",
+                "--db-url",
+                "postgres://test",
+                "--config",
+                file.path.to_str().expect("utf-8 temp path"),
+                "--hydra-admin-url",
+                "http://hydra-cli:4445",
+                "--hydra-public-url",
+                "https://hydra-cli.example",
+            ]));
+
+            assert_eq!(cfg.hydra_admin_url(), "http://hydra-cli:4445");
+            assert_eq!(cfg.hydra_public_url(), "https://hydra-cli.example");
+        });
+    }
+
+    #[test]
+    fn env_hydra_urls_override_file_overlay() {
+        with_hydra_env(
+            Some("http://hydra-env:4445"),
+            Some("https://hydra-env.example"),
+            || {
+                let file = TempFile::write(
+                    "auth-env-override.toml",
+                    r#"
+[auth]
+hydra_admin_url = "http://hydra-file:4445"
+hydra_public_url = "https://hydra-file.example"
+"#,
+                );
+
+                let cfg = resolve_from_file(AuthConfig::parse_from([
+                    "zeroship-auth",
+                    "--db-url",
+                    "postgres://test",
+                    "--config",
+                    file.path.to_str().expect("utf-8 temp path"),
+                ]));
+
+                assert_eq!(cfg.hydra_admin_url(), "http://hydra-env:4445");
+                assert_eq!(cfg.hydra_public_url(), "https://hydra-env.example");
+            },
+        );
     }
 }

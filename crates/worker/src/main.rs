@@ -6,7 +6,12 @@ mod logs;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use clap::Parser;
 use ntex::web;
+use zeroship_core::config::{
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, CheckConfigReport, CheckFormat,
+    CheckValue,
+};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
 
@@ -15,18 +20,134 @@ use crate::sync::{SharedEnvs, SharedVersions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn dev_insecure_enabled(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--dev-insecure")
-        || std::env::var("ZEROSHIP_DEV_INSECURE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+/// zeroship worker startup configuration.
+///
+/// No `#[derive(Debug)]`: this struct holds raw secrets (`control_key`,
+/// `worker_key`, `db`) before they are consumed, and a `{:?}` would print
+/// them in plaintext (S2).
+#[derive(Parser)]
+#[command(name = "zeroship-worker")]
+struct WorkerCli {
+    /// HTTP listen port.
+    #[arg(long, env = "WORKER_PORT", default_value_t = 8080)]
+    port: u16,
+
+    /// Number of ntex worker threads.
+    #[arg(long = "worker-threads", env = "WORKER_THREADS")]
+    worker_threads: Option<usize>,
+
+    /// Control-plane API base URL.
+    #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
+    control: String,
+
+    /// Admin/control API shared secret.
+    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
+    control_key: String,
+
+    /// Allow explicitly insecure local development startup.
+    ///
+    /// `--dev-insecure` / `--dev-insecure=true` enables; `--dev-insecure=false`
+    /// disables even when `ZEROSHIP_DEV_INSECURE=1` is set in the environment
+    /// (CLI presence overrides env — proper `CLI > env` precedence, S1).
+    #[arg(
+        long = "dev-insecure",
+        env = "ZEROSHIP_DEV_INSECURE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = parse_bool_flag
+    )]
+    dev_insecure: Option<bool>,
+
+    // No --trust-proxy: the worker has no client-facing IP logic.
+
+    /// Maximum number of cached app isolates.
+    #[arg(long = "max-isolates", env = "MAX_ISOLATES", default_value = "200")]
+    max_isolates: usize,
+
+    /// Control-plane polling interval in seconds.
+    #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
+    poll_interval: u64,
+
+    /// PostgreSQL DSN for runtime env/db state.
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
+    db: String,
+
+    /// Shared secret for gateway dispatch endpoints.
+    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
+    worker_key: String,
+
+    /// Shutdown drain timeout in seconds.
+    #[arg(long = "shutdown-timeout", env = "SHUTDOWN_TIMEOUT", default_value = "30")]
+    shutdown_timeout: u64,
+
+    /// Root directory for content-addressed deploy blobs.
+    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
+    blob_store: String,
+
+    /// HTTP bind host.
+    #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
+    bind: String,
+
+    /// Optional Unix domain socket path.
+    #[arg(long = "socket", env = "WORKER_SOCKET", default_value = "")]
+    socket: String,
+
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    config_path: Option<PathBuf>,
+
+    /// Disable auto-discovery of the well-known overlay path; use compiled
+    /// defaults even if `/etc/zeroship/zeroship.toml` exists (O5).
+    #[arg(long = "no-config")]
+    no_config: bool,
+
+    /// Validate config (CLI + overlay + guards) and print the resolved non-secret config, then exit without starting the server.
+    #[arg(long = "check-config")]
+    check_config: bool,
+
+    /// Output format for `--check-config`: `text` (default) or `json`.
+    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
+    check_config_format: String,
+
+    /// Observability CLI/env overrides.
+    #[command(flatten)]
+    obs: zeroship_core::observability::ObservabilityFlags,
 }
 
-fn validate_worker_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
-    if insecure_dev || !value.is_empty() {
-        return Ok(());
+// Hand-written Debug that redacts the raw-secret fields (`control_key`,
+// `worker_key`, `db`) so a `{:?}` never leaks credentials (S2). The derived
+// Debug is intentionally NOT used.
+impl std::fmt::Debug for WorkerCli {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerCli")
+            .field("port", &self.port)
+            .field("worker_threads", &self.worker_threads)
+            .field("control", &self.control)
+            .field("control_key", &"<redacted>")
+            .field("dev_insecure", &self.dev_insecure)
+            .field("max_isolates", &self.max_isolates)
+            .field("poll_interval", &self.poll_interval)
+            .field("db", &"<redacted>")
+            .field("worker_key", &"<redacted>")
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field("blob_store", &self.blob_store)
+            .field("bind", &self.bind)
+            .field("socket", &self.socket)
+            .field("config_path", &self.config_path)
+            .field("no_config", &self.no_config)
+            .field("check_config", &self.check_config)
+            .field("check_config_format", &self.check_config_format)
+            .field("obs", &self.obs)
+            .finish()
     }
-    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
+}
+
+fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
+    worker_threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    })
 }
 
 #[allow(missing_debug_implementations)]
@@ -56,39 +177,60 @@ pub struct WorkerConfig {
     pub blob_store: Arc<dyn BlobStore>,
 }
 
-#[ntex::main]
-async fn main() -> std::io::Result<()> {
-    zeroship_core::observability::init_tracing("info,zeroship_worker=debug,zeroship_runtime=info");
-    init_v8();
-
-    let args: Vec<String> = std::env::args().collect();
-    let port = arg_or_env(&args, "--port", "WORKER_PORT", "8080");
-    let workers = arg_or_env(
-        &args,
-        "--workers",
-        "WORKER_THREADS",
-        &std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .to_string(),
+fn main() -> std::io::Result<()> {
+    let cli = WorkerCli::parse();
+    let boot = bootstrap_or_exit(
+        cli.config_path.as_deref(),
+        !cli.no_config,
+        &cli.obs,
+        "info,zeroship_worker=debug,zeroship_runtime=info",
+        "worker",
     );
-    let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
-    let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
-    let insecure_dev = dev_insecure_enabled(&args);
-    let max_isolates = arg_or_env(&args, "--max-isolates", "MAX_ISOLATES", "200");
-    let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
-    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "");
-    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
-    let shutdown_timeout = arg_or_env(&args, "--shutdown-timeout", "SHUTDOWN_TIMEOUT", "30");
-    // Same default + flag name as zeroship-control / zeroship-gate so a
-    // single-host dev box can point all three at one shared volume.
-    let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
-    // Default to loopback. Operators must explicitly opt into a public bind
-    // (--bind 0.0.0.0) after ensuring WORKER_KEY is set; without the shared
-    // secret, any network-reachable caller can impersonate users and run code.
-    let bind_host = arg_or_env(&args, "--bind", "WORKER_BIND", "127.0.0.1");
 
-    if let Err(message) = validate_worker_control_key(&control_key, insecure_dev) {
+    // `[secrets]` overlay tier: reference-only values that back-fill any secret
+    // the CLI/env leaves empty (CLI/env still wins). Clone the section once,
+    // early, so later partial moves of the overlay config can't invalidate it.
+    let file_secrets = boot.overlay.config.secrets.clone();
+
+    // CLI presence overrides env: `--dev-insecure=false` disables even a stray
+    // `ZEROSHIP_DEV_INSECURE=1` (S1).
+    let insecure_dev = cli.dev_insecure.unwrap_or(false);
+    let port = cli.port;
+    let workers_count = resolve_worker_threads(cli.worker_threads);
+    let control_url = cli.control;
+    // Secret-reference resolution (env:/file:/vault:/awssm: indirection) with a
+    // `[secrets]` overlay tier: CLI/env > `[secrets]` file (reference-only) > unset.
+    // On the real boot path we resolve to the live value (side effects: env/file
+    // read); under --check-config we only validate the reference FORMAT, leaving the
+    // raw ref string in place so no env/file/network read happens during a dry run.
+    let control_key = zeroship_core::config::obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cli.control_key,
+        file_secrets.control_key.as_deref(),
+        cli.check_config,
+    );
+    let max_isolates = cli.max_isolates;
+    let poll_interval = cli.poll_interval;
+    let db_url = zeroship_core::config::obtain_secret(
+        "DATABASE_URL / --db",
+        &cli.db,
+        file_secrets.database_url.as_deref(),
+        cli.check_config,
+    );
+    let worker_key = zeroship_core::config::obtain_secret(
+        "WORKER_KEY / --worker-key",
+        &cli.worker_key,
+        file_secrets.worker_key.as_deref(),
+        cli.check_config,
+    );
+    let shutdown_timeout = cli.shutdown_timeout;
+    let blob_store_root = cli.blob_store;
+    let bind_host = cli.bind;
+    let socket_path = cli.socket;
+
+    if let Err(message) =
+        require_unless_dev("CONTROL_KEY / --control-key", &control_key, insecure_dev)
+    {
         tracing::error!(error = %message, "worker: refusing to start without control key");
         std::process::exit(1);
     }
@@ -108,6 +250,50 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    if cli.check_config {
+        let log_format = boot
+            .log_format
+            .map_or_else(|| "auto".to_string(), |f| f.to_string());
+        let mut report = CheckConfigReport::new();
+        report.field("bind", CheckValue::Plain(bind_host.clone()));
+        report.field("port", CheckValue::Count(usize::from(port)));
+        report.field(
+            "config_source",
+            CheckValue::Plain(boot.overlay.source.to_string()),
+        );
+        report.field("control_url", CheckValue::Plain(control_url.clone()));
+        report.field("worker_threads", CheckValue::Count(workers_count));
+        report.field("max_isolates", CheckValue::Count(max_isolates));
+        report.field(
+            "poll_interval_secs",
+            CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
+        );
+        report.field(
+            "shutdown_timeout_secs",
+            CheckValue::Count(usize::try_from(shutdown_timeout).unwrap_or(usize::MAX)),
+        );
+        report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
+        report.field("log_format", CheckValue::Plain(log_format));
+        report.field("insecure_dev", CheckValue::Flag(insecure_dev));
+        report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
+        report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
+        report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
+
+        let fmt = if cli.check_config_format == "json" {
+            CheckFormat::Json
+        } else {
+            CheckFormat::Text
+        };
+        report.emit(fmt);
+        return Ok(());
+    }
+
+    ntex::rt::System::build()
+        .name("zeroship-worker")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+    init_v8();
+
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
             .expect("failed to initialise blob store"),
@@ -118,15 +304,13 @@ async fn main() -> std::io::Result<()> {
         control_url,
         control_key,
         db_url: if db_url.is_empty() { None } else { Some(db_url) },
-        max_isolates: max_isolates.parse().unwrap_or(200),
-        poll_interval_secs: poll_interval.parse().unwrap_or(5),
+        max_isolates,
+        poll_interval_secs: poll_interval,
         worker_key,
-        shutdown_timeout_secs: shutdown_timeout.parse().unwrap_or(30),
+        shutdown_timeout_secs: shutdown_timeout,
         blob_store,
     });
 
-    let socket_path = arg_or_env(&args, "--socket", "WORKER_SOCKET", "");
-    let workers_count: usize = workers.parse().unwrap_or(1);
     let bind_addr = format!("{bind_host}:{port}");
 
     // Shared version snapshot populated by a SINGLE process-wide poller and
@@ -211,15 +395,7 @@ async fn main() -> std::io::Result<()> {
     let run_result = server.run().await;
     tracing::info!("worker shutdown complete");
     run_result
-}
-
-fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return pair[1].clone();
-        }
-    }
-    std::env::var(env_key).unwrap_or_else(|_| default.to_string())
+        })
 }
 
 #[cfg(test)]
@@ -228,17 +404,193 @@ mod tests {
 
     #[test]
     fn worker_control_key_rejects_missing_in_non_dev() {
-        let err = validate_worker_control_key("", false).unwrap_err();
+        let err =
+            require_unless_dev("CONTROL_KEY / --control-key", "", false).unwrap_err();
         assert!(err.contains("CONTROL_KEY"), "{err}");
     }
 
     #[test]
     fn worker_control_key_accepts_nonempty_in_non_dev() {
-        assert!(validate_worker_control_key("secret", false).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "secret", false).is_ok());
     }
 
     #[test]
     fn worker_control_key_allows_missing_in_insecure_dev() {
-        assert!(validate_worker_control_key("", true).is_ok());
+        assert!(require_unless_dev("CONTROL_KEY / --control-key", "", true).is_ok());
+    }
+
+    #[test]
+    fn worker_threads_default_resolves_to_positive_count() {
+        assert!(resolve_worker_threads(None) > 0);
+        assert_eq!(resolve_worker_threads(Some(3)), 3);
+    }
+
+    #[test]
+    fn worker_thread_flag_uses_unambiguous_name() {
+        let cli = WorkerCli::try_parse_from([
+            "zeroship-worker",
+            "--worker-threads",
+            "3",
+            "--max-isolates",
+            "200",
+            "--poll-interval",
+            "5",
+            "--shutdown-timeout",
+            "30",
+        ])
+        .expect("--worker-threads should parse");
+        assert_eq!(cli.worker_threads, Some(3));
+
+        let old_flag = WorkerCli::try_parse_from(["zeroship-worker", "--workers", "3"]);
+        assert!(old_flag.is_err(), "--workers must not parse for worker threads");
+    }
+
+    #[test]
+    fn worker_numeric_fields_reject_bad_input() {
+        let err = WorkerCli::try_parse_from(["zeroship-worker", "--max-isolates", "abc"])
+            .expect_err("bad max-isolates should be a clap error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    // Serialise the tests that mutate the shared `ZEROSHIP_DEV_INSECURE`
+    // process environment so they don't race each other.
+    static DEV_INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// S1 regression: an explicit `--dev-insecure=false` on the CLI overrides a
+    /// stray `ZEROSHIP_DEV_INSECURE=1` in the environment. Pre-fix the env half
+    /// was a separate `SetTrue`-OR-`env_is_exact` pair, so env always won and the
+    /// CLI could not turn insecure mode back off. Now both share one
+    /// `Option<bool>` field and CLI presence wins.
+    #[test]
+    fn worker_dev_insecure_cli_false_overrides_env_one() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().unwrap();
+        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
+
+        let cli = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure=false"])
+            .expect("--dev-insecure=false should parse");
+        // CLI presence overrides the env var.
+        assert_eq!(cli.dev_insecure, Some(false));
+        assert!(
+            !cli.dev_insecure.unwrap_or(false),
+            "resolved insecure_dev must be false"
+        );
+
+        // Sanity: with no CLI flag the env var still flows through to `Some(true)`.
+        let env_only = WorkerCli::try_parse_from(["zeroship-worker"])
+            .expect("env-only parse should succeed");
+        assert_eq!(env_only.dev_insecure, Some(true));
+
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+    }
+
+    // --- secret-reference resolver wiring (control_key / worker_key / db) ---
+
+    /// A literal secret resolves to itself byte-for-byte: the resolver is a
+    /// pass-through for any value that is not a `urn:`/`arn:` reference. This is
+    /// the contract the real boot path relies on — literal secrets must behave
+    /// exactly as they did before the resolver was wired in.
+    #[test]
+    fn worker_literal_secret_resolves_to_itself() {
+        let literal = "super-secret-control-key-value";
+        let resolved =
+            zeroship_core::config::resolve_secret(literal).expect("literal must resolve");
+        assert_eq!(resolved, literal);
+    }
+
+    /// `is_secret_ref` distinguishes a reference from a literal. The
+    /// check-config guard-skip in other binaries keys off this; here we lock the
+    /// boolean so a literal is never mistaken for a reference (which would
+    /// wrongly skip a strength guard) and a reference is always recognised
+    /// (so a raw `env:`/`file:` string is never fed to a strength check during
+    /// `--check-config`).
+    #[test]
+    fn worker_is_secret_ref_gates_literal_vs_reference() {
+        // Literal: NOT a reference — a strength guard `!check || !is_ref` would
+        // still RUN for a literal under check-config.
+        assert!(!zeroship_core::config::is_secret_ref(
+            "super-secret-control-key-value"
+        ));
+        // References: urn:zeroship:{env,file}: forms are recognised, so the
+        // `!is_ref` half of the guard skip is true (guard skipped under check).
+        assert!(zeroship_core::config::is_secret_ref(
+            "urn:zeroship:env:CONTROL_KEY"
+        ));
+        assert!(zeroship_core::config::is_secret_ref(
+            "urn:zeroship:file:/etc/zeroship/key"
+        ));
+    }
+
+    /// A malformed reference is rejected by the format validator used on the
+    /// `--check-config` path (`validate_secret_ref_or_exit` calls this and
+    /// exits non-zero). A reserved `urn:`/`arn:` prefix that does not name a
+    /// recognised scheme is malformed.
+    #[test]
+    fn worker_malformed_secret_ref_is_rejected() {
+        assert!(zeroship_core::config::validate_secret_ref("urn:bogus:nope").is_err());
+        // A well-formed reference and a plain literal both validate cleanly.
+        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:WORKER_KEY").is_ok());
+        assert!(zeroship_core::config::validate_secret_ref("a-plain-literal").is_ok());
+    }
+
+    // Serialise env-touching `[secrets]` tier tests; they set/remove a process
+    // env var that `obtain_secret` resolves a `urn:zeroship:env:` reference from.
+    static SECRETS_TIER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `[secrets]` file tier regression: when the CLI/env secret is empty, the
+    /// `[secrets]` overlay reference (e.g. `control_key`/`worker_key`/`database_url`)
+    /// is resolved and used. Pre-fix the worker called `resolve_secret_or_exit`
+    /// with only the CLI value, so a `[secrets]` entry could never back-fill an
+    /// empty CLI/env secret. Mirrors `file_secrets.<NAME>` wiring on the boot path.
+    #[test]
+    fn worker_secrets_file_tier_backfills_empty_cli() {
+        let _guard = SECRETS_TIER_ENV_LOCK.lock().unwrap();
+        std::env::set_var("WORKER_TEST_SECRETS_TIER_VAR", "from-secrets-file");
+
+        // Empty CLI/env + a `[secrets]` reference → resolves to the referenced value.
+        let resolved = zeroship_core::config::obtain_secret(
+            "WORKER_KEY / --worker-key",
+            "",
+            Some("urn:zeroship:env:WORKER_TEST_SECRETS_TIER_VAR"),
+            false,
+        );
+        assert_eq!(resolved, "from-secrets-file");
+
+        std::env::remove_var("WORKER_TEST_SECRETS_TIER_VAR");
+    }
+
+    /// `[secrets]` file tier precedence: a CLI/env secret WINS over a `[secrets]`
+    /// overlay entry. The file reference must not even be consulted (so its env
+    /// var being unset is irrelevant). This locks `CLI/env > [secrets]`.
+    #[test]
+    fn worker_cli_secret_wins_over_secrets_file() {
+        let _guard = SECRETS_TIER_ENV_LOCK.lock().unwrap();
+        // Deliberately do NOT set the env the file ref points at: if precedence
+        // were wrong and the file tier were consulted, resolution would exit(1).
+        std::env::remove_var("WORKER_TEST_SECRETS_TIER_VAR");
+
+        let resolved = zeroship_core::config::obtain_secret(
+            "WORKER_KEY / --worker-key",
+            "literal-cli-worker-key",
+            Some("urn:zeroship:env:WORKER_TEST_SECRETS_TIER_VAR"),
+            false,
+        );
+        assert_eq!(resolved, "literal-cli-worker-key");
+    }
+
+    /// Bare `--dev-insecure` (no value) enables insecure mode via the
+    /// `default_missing_value = "true"`.
+    #[test]
+    fn worker_dev_insecure_bare_flag_enables() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+
+        let cli = WorkerCli::try_parse_from(["zeroship-worker", "--dev-insecure"])
+            .expect("bare --dev-insecure should parse");
+        assert_eq!(cli.dev_insecure, Some(true));
+
+        // Absent flag + absent env resolves to false (secure default).
+        let bare = WorkerCli::try_parse_from(["zeroship-worker"]).expect("bare parse");
+        assert_eq!(bare.dev_insecure, None);
+        assert!(!bare.dev_insecure.unwrap_or(false));
     }
 }

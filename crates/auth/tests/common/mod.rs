@@ -50,19 +50,19 @@ use zeroship_auth::store::migrations;
 // 8 more CLI args).
 #[must_use]
 pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> AuthConfig {
-    AuthConfig::parse_from([
+    let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
         "--db-url",
         db_url,
-        "--hydra-admin",
+        "--hydra-admin-url",
         hydra_admin,
-        "--hydra-public",
+        "--hydra-public-url",
         hydra_public,
         "--clients-config",
         "ops/auth-clients.example.toml",
-        "--insecure-dev",
+        "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
         "--mail-from-email",
@@ -71,7 +71,11 @@ pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> 
         "Test",
         "--public-url",
         "http://localhost:0",
-    ])
+    ]);
+    // Populate the resolved `insecure_dev` field handlers read (and apply the
+    // hydra-url overlay defaults), the same step `main` runs after parse.
+    cfg.resolve(zeroship_core::config::AuthSection::default());
+    cfg
 }
 
 // ─── PKCE ────────────────────────────────────────────────────────────────
@@ -288,7 +292,7 @@ pub struct Fixture {
 
 impl Fixture {
     /// Boot a fresh fixture. Returns `None` if `AUTH_DB_URL` and
-    /// `AUTH_HYDRA_ADMIN` aren't both set (env-skip).
+    /// `HYDRA_ADMIN_URL` aren't both set (env-skip).
     ///
     /// `client_id_prefix` is used to disambiguate the registered hydra
     /// client across concurrent tests / binaries (e.g. `"threat"`, `"enum"`).
@@ -299,11 +303,11 @@ impl Fixture {
     pub async fn boot(client_id_prefix: &str) -> Option<Self> {
         let (Ok(db_url), Ok(hydra_admin_url)) = (
             std::env::var("AUTH_DB_URL"),
-            std::env::var("AUTH_HYDRA_ADMIN"),
+            std::env::var("HYDRA_ADMIN_URL"),
         ) else {
             return None;
         };
-        let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+        let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
         let (pg_client, pg_connection) =

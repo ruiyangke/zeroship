@@ -63,10 +63,10 @@ Terminal 1:
 ./target/release/zeroship-control \
   --port 9090 \
   --db postgres://localhost:5432/zeroship \
-  --bundles ./bundles \
+  --blob-store ./bundles \
   --control-key dev-control \
   --master-key dev-master \
-  --jwt-secret dev-jwt-secret
+  --dev-insecure
 ```
 
 Terminal 2:
@@ -74,7 +74,7 @@ Terminal 2:
 ```bash
 ./target/release/zeroship-worker \
   --port 8080 \
-  --workers 4 \
+  --worker-threads 4 \
   --control http://localhost:9090 \
   --control-key dev-control \
   --blob-store ./bundles
@@ -88,14 +88,31 @@ Terminal 3:
   --control http://localhost:9090 \
   --control-key dev-control \
   --workers http://localhost:8080 \
-  --auth-secret dev-jwt-secret \
-  --blob-store ./bundles
+  --blob-store ./bundles \
+  --dev-insecure
 ```
 
 Notes:
 
-- `zeroship-control` uses `--jwt-secret`; `zeroship-gate` must use the same value via `--auth-secret`.
-- `zeroship-worker` binds `127.0.0.1` by default. Only add `--bind 0.0.0.0` together with `--worker-key`.
+- `--dev-insecure` is intentional here: it relaxes the production secret-strength
+  and OIDC guards so the short dev keys above (`dev-control`, `dev-master`) boot.
+  Without it, control rejects the weak `--master-key` and gateway requires a
+  strong `GATEWAY_OIDC_SECRET` / stash key. Never pass `--dev-insecure` outside
+  local dev. There is no `--auth-secret` flag — the gateway no longer takes one.
+- `zeroship-worker` binds `127.0.0.1` by default (loopback, as above). Only add
+  `--bind 0.0.0.0` together with `--worker-key` if another host must reach it.
+- `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
+  overlay; add `--check-config` to the normal command for a read-only dry run
+  that validates CLI/env/file config and the startup guards, then exits before
+  binding a port. `--check-config --check-config-format json` emits the resolved
+  non-secret config as JSON instead of text.
+- Absent an explicit `--config`/`ZEROSHIP_CONFIG`, the binaries auto-discover the
+  fixed well-known path `/etc/zeroship/zeroship.toml` (the only auto-discovered
+  location — no CWD/env redirect). Pass `--no-config` to disable discovery and
+  use compiled defaults even if that file exists. A missing well-known file is
+  fine (defaults apply); a present-but-broken one is a hard startup error. Dev
+  usually just passes `--config ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
+  rather than installing into `/etc`.
 - To seed the Builder OAuth client in local dev, start control with
   `BOOTSTRAP_BUILDER_OAUTH_CLIENT=1` or `--bootstrap-builder-client` while
   Hydra admin is reachable. Control registers `zeroship-builder` in Hydra and

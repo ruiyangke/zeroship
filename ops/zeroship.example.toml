@@ -1,0 +1,103 @@
+# zeroship shared config overlay. Copy to ops/zeroship.toml (one per environment)
+# and pass via --config / ZEROSHIP_CONFIG.
+#
+# Placing this file at the well-known path /etc/zeroship/zeroship.toml makes
+# --config unnecessary: the binaries auto-discover that fixed system path when no
+# explicit --config / ZEROSHIP_CONFIG is given. (That is the ONLY auto-discovered
+# location — there is no CWD/env redirect.)
+#
+# All keys are optional. Absent keys use the binary's compiled default.
+# Scalar key precedence: CLI flag > env > this file > default.
+# Secret VALUES never go in this file. The [secrets] section below holds only
+# REFERENCES (urn:/arn:) that point at where each secret actually lives; a
+# plaintext literal there is rejected at startup.
+
+[auth]
+# Hydra admin API base URL used by control for OAuth client management,
+# builder bootstrap, and bearer-token introspection.
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+hydra_admin_url = "http://hydra:4445"
+
+# Hydra public issuer/base URL used by control and gateway for OIDC
+# protocol endpoints and token verification.
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+hydra_public_url = "https://auth.zeroship.ai"
+
+# First-party OAuth client IDs that skip Hydra consent screens.
+# Option<Vec<String>> semantics: OMIT this key entirely => the platform's
+# compiled default set is used; a PRESENT list => exactly that set (no merge
+# with the default); a present-but-EMPTY list (`trusted_oauth_clients = []`)
+# => no trusted clients at all. This key is file/default ONLY — there is no
+# CLI flag or env var that overrides it.
+trusted_oauth_clients = ["zeroship-builder"]
+
+[observability]
+# Tracing filter passed to Rust tracing subscribers, equivalent to RUST_LOG.
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+rust_log = "info,zeroship_=debug"
+
+# Log output format. Use "json" for production log pipelines. Supported
+# values include "pretty", "compact", "json", "logfmt", and "bunyan".
+# Optional; absent => compiled default.
+# Precedence: CLI flag > env > this file > default.
+log_format = "json"
+
+[secrets]
+# Secret-reference overlay. PORTABILITY NOTE: this file holds REFERENCES only,
+# NEVER literal secret values. Every key below is an optional pointer to where
+# the real secret lives (env var, file path, Vault, AWS Secrets Manager). A
+# plaintext literal here is rejected at startup — the config file must never
+# carry a secret. That keeps the file safe to commit per-environment alongside
+# the rest of ops/.
+#
+# Precedence for every secret: CLI flag > env var > this file > compiled default.
+# References here are RESOLVED AT BOOT (the env var is read, the file is opened,
+# the backend is fetched). Under `--check-config` only the reference FORMAT is
+# validated — nothing is read or fetched — so a dry run never needs the secret
+# backends to be reachable.
+#
+# Reference forms (a value NOT starting with urn:/arn: is treated as a literal
+# and rejected):
+#   urn:zeroship:env:<VARNAME>     read the named environment variable
+#   urn:zeroship:file:/abs/path    read the file contents (trailing \n trimmed)
+#   urn:zeroship:vault:<namespace> HashiCorp Vault (resolution not yet implemented)
+#   urn:zeroship:awssm:<namespace> AWS Secrets Manager, short form (not yet implemented)
+#   arn:aws:secretsmanager:<...>   AWS Secrets Manager, full ARN (not yet implemented)
+#
+# Every key is OPTIONAL; omit a key to fall back to CLI/env/default. The
+# examples below show each reference form — pick whichever backend an
+# environment uses.
+
+# Bundle/master encryption key.
+master_key = "urn:zeroship:env:MASTER_KEY"
+# Control-plane shared secret.
+control_key = "urn:zeroship:env:CONTROL_KEY"
+# Worker shared secret.
+worker_key = "urn:zeroship:env:WORKER_KEY"
+# Stash signing key.
+stash_signing_key = "urn:zeroship:file:/etc/zeroship/secrets/stash_signing_key"
+# Gateway OIDC relying-party client secret.
+gateway_oidc_secret = "urn:zeroship:file:/etc/zeroship/secrets/gateway_oidc_secret"
+# Console OIDC relying-party client secret.
+console_oidc_secret = "urn:zeroship:vault:secret/data/zeroship/console#oidc_secret"
+# Stripe webhook signing secret.
+stripe_webhook_secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:zeroship/stripe_webhook-AbCdEf"
+# Primary database URL.
+database_url = "urn:zeroship:env:DATABASE_URL"
+# Auth database URL.
+auth_db_url = "urn:zeroship:env:AUTH_DB_URL"
+# Legacy master keys (comma-separated, for key rotation).
+legacy_master_keys = "urn:zeroship:env:LEGACY_MASTER_KEYS"
+# Google OAuth client secret.
+google_client_secret = "urn:zeroship:vault:secret/data/zeroship/google#client_secret"
+# GitHub OAuth client secret.
+github_client_secret = "urn:zeroship:vault:secret/data/zeroship/github#client_secret"
+# SMTP password.
+smtp_password = "urn:zeroship:file:/etc/zeroship/secrets/smtp_password"
+# Resend API key.
+resend_api_key = "urn:zeroship:awssm:zeroship/resend_api_key"
+# Postmark inbound webhook basic-auth password.
+postmark_webhook_password = "urn:zeroship:env:POSTMARK_WEBHOOK_PASSWORD"

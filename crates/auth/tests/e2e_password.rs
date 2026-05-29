@@ -1,7 +1,7 @@
 //! End-to-end OIDC code+PKCE flow against a live hydra + the in-process
 //! `crates/auth` server.
 //!
-//! Skips if `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` aren't both set. Live path
+//! Skips if `AUTH_DB_URL` and `HYDRA_ADMIN_URL` aren't both set. Live path
 //! drives every component built across Phase 1 + Phase 2:
 //!
 //! - hydra admin client (create client, get login/consent challenges, accept)
@@ -68,12 +68,12 @@ async fn e2e_password_flow() {
     // 0. Env-skip check.
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
-        std::env::var("AUTH_HYDRA_ADMIN"),
+        std::env::var("HYDRA_ADMIN_URL"),
     ) else {
-        eprintln!("[e2e_password] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        eprintln!("[e2e_password] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
         return;
     };
-    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     // 1. Connect PG and run migrations.
@@ -90,7 +90,7 @@ async fn e2e_password_flow() {
 
     let pg_client = Arc::new(pg_client);
     let admin = HydraAdmin::new(&hydra_admin_url);
-    // `--insecure-dev` drops Secure flag so the cyper client sees cookies on http://
+    // `--dev-insecure` drops Secure flag so the cyper client sees cookies on http://
     let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
 
     // 2. Boot the auth server via `ntex::web::test::server` — runs the
