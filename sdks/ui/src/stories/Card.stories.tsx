@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, within } from "@storybook/test";
-import { useRef, useState, type CSSProperties } from "react";
+import { useCallback, useRef, useState, type CSSProperties } from "react";
 import { Button, Card, Field, Input } from "../components";
 
 const meta: Meta<typeof Card> = {
@@ -305,10 +305,15 @@ export const InteractiveWithKeyboard: Story = {
 };
 
 /* ─── 5c. Interactive without onClick (CAUTION) ──────────────────────── */
-/* DOCUMENTED ANTI-PATTERN: `interactive` without `onClick` puts a
- * focusable card in the tab order with no way to activate it. The
- * Card emits a dev-mode console.warn on render; keep this story so
- * the warning is exercised in the aria-wiring check. */
+/* DOCUMENTED ANTI-PATTERN: `interactive` without `onClick` would (pre
+ * wave-7) put a focusable card in the tab order with no way to
+ * activate it. Wave-7 🔴 1 hardens this: Card now derives
+ * `ownsActivation = interactive && !asChild && typeof onClick === "function"`
+ * and only emits `role="button"` + `tabIndex=0` + keyboard wiring when
+ * it owns activation. Without `onClick`, `interactive` degrades to a
+ * pure visual modifier (cursor pointer, hover tint) and stays out of
+ * the tab order. The dev-mode console.warn still fires to point the
+ * consumer at `asChild` with a real link/button. */
 function InteractiveWithoutOnClickImpl() {
   return (
     <div
@@ -325,8 +330,9 @@ function InteractiveWithoutOnClickImpl() {
         <Card.Header>
           <Card.Title>Caution</Card.Title>
           <Card.Description>
-            interactive=true without onClick — keyboard users can't
-            activate. Dev console emits a warning.
+            interactive=true without onClick — Card degrades to a visual
+            modifier (no role, no tabindex) so it never enters the tab
+            order. Dev console emits a warning.
           </Card.Description>
         </Card.Header>
         <Card.Content>
@@ -342,12 +348,85 @@ export const InteractiveWithoutOnClick: Story = {
   render: () => <InteractiveWithoutOnClickImpl />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const card = canvas.getByRole("button", { name: /caution/i });
+    const card = canvas.getByTestId("card-interactive-no-onclick");
 
-    await userEvent.tab();
-    await expect(card).toHaveFocus();
+    // Wave-7 🔴 1: without onClick, Card MUST NOT emit role="button"
+    // or tabindex=0 — those would create a focusable fake control.
+    await expect(card).not.toHaveAttribute("role", "button");
+    await expect(card).not.toHaveAttribute("tabindex", "0");
+    // The data-interactive marker DOES stay so CSS hover/cursor still
+    // applies — the failure mode is "fake focusable control", not
+    // "no visual feedback".
+    await expect(card).toHaveAttribute("data-interactive");
+  },
+};
+
+/* ─── 5d. Interactive aria-disabled — keyboard suppressed (wave-7 🔴 2) ─ */
+/* Pre wave-7, `aria-disabled="true"` got CSS pointer-events:none (mouse
+ * blocked) and a dimmed surface — but Enter/Space still fired onClick
+ * because the keyboard handler didn't check aria-disabled. This story
+ * proves the wave-7 fix: when aria-disabled is true the Card neither
+ * activates from Enter/Space nor from a synthetic click. */
+function InteractiveAriaDisabledImpl() {
+  const [count, setCount] = useState(0);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Interactive card aria-disabled"
+    >
+      <Card
+        interactive
+        aria-disabled="true"
+        variant="elevated"
+        onClick={() => setCount((n) => n + 1)}
+        data-testid="card-interactive-aria-disabled"
+        style={{ inlineSize: "20rem" }}
+      >
+        <Card.Header>
+          <Card.Title>Disabled card</Card.Title>
+          <Card.Description>
+            aria-disabled=true — Enter/Space and synthetic clicks are
+            both suppressed.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content>
+          <p
+            role="status"
+            aria-label="Aria disabled card activation count"
+            data-testid="card-aria-disabled-counter"
+          >
+            Activations: <strong>{count}</strong>
+          </p>
+        </Card.Content>
+      </Card>
+    </div>
+  );
+}
+export const InteractiveAriaDisabled: Story = {
+  name: "Interactive aria-disabled (suppressed)",
+  render: () => <InteractiveAriaDisabledImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const card = canvas.getByRole("button", { name: /disabled card/i });
+    const status = canvas.getByRole("status", {
+      name: /aria disabled card activation count/i,
+    });
+
+    await expect(status).toHaveTextContent("Activations: 0");
+
+    // Keyboard: focus the card, press Enter then Space — neither should
+    // increment the counter.
+    await card.focus();
     await userEvent.keyboard("{Enter}");
-    await expect(card).toHaveFocus();
+    await expect(status).toHaveTextContent("Activations: 0");
+    await userEvent.keyboard(" ");
+    await expect(status).toHaveTextContent("Activations: 0");
+
+    // Synthetic click bypasses CSS pointer-events:none — must still be
+    // blocked at the React handler level (wave-7 🔴 2).
+    await card.click();
+    await expect(status).toHaveTextContent("Activations: 0");
   },
 };
 
@@ -528,6 +607,106 @@ export const KeyboardPreventDefault: Story = {
 
     await userEvent.keyboard("{Enter}");
     await expect(status).toHaveTextContent("activated");
+  },
+};
+
+/* ─── 6c. Title asChild single ref attach (wave-7 🟡 4) ──────────────── */
+/* Slot composes the child's ref internally via getElementRef. Pre
+ * wave-7, Card.Title asChild ALSO ran composeRefs(ref, getElementRef
+ * (children)) on the Slot's `ref` prop — Slot then composed that with
+ * the child ref AGAIN, so a callback ref on the child fired twice per
+ * attach (and twice per detach). This story counts attach calls on a
+ * child callback ref and asserts exactly one attach. */
+function TitleAsChildSingleAttachImpl() {
+  // The challenge: any setState inside the child callback ref creates
+  // an infinite render loop (React #185), because Slot passes a NEW
+  // `composeRefs(ourRef, childRef)` to React on every commit, which
+  // React treats as a fresh callback — it detaches the old and
+  // attaches the new on EVERY commit. So a setState in the callback
+  // → re-render → React re-attaches → setState again → ad infinitum.
+  //
+  // Workaround: keep the count in a `useRef` (no re-render) and write
+  // the result to the DOM via a SECOND stable callback ref on a
+  // status span. We bypass React's render path for the count display
+  // entirely. The play() / aria-wiring script reads textContent
+  // directly — no button click, no extra render, so we measure the
+  // attach count AT MOUNT, before any other React commit can mutate
+  // the count.
+  //
+  // Pre wave-7: Slot composed the child ref AND Card.Title pre-
+  // composed it again, so mount fired the child callback twice
+  // (count = 2). Post-fix: a single attach (count = 1).
+  const refCalls = useRef(0);
+  const statusRef = useRef<HTMLSpanElement | null>(null);
+  const writeStatus = () => {
+    if (statusRef.current) {
+      statusRef.current.textContent = `attach-count:${refCalls.current}`;
+    }
+  };
+  const stableChildRef = useCallback((node: HTMLHeadingElement | null) => {
+    if (node) {
+      refCalls.current += 1;
+      writeStatus();
+    }
+  }, []);
+  const stableStatusRef = useCallback((node: HTMLSpanElement | null) => {
+    statusRef.current = node;
+    writeStatus();
+  }, []);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Card title asChild single attach"
+    >
+      <Card variant="outline" style={{ inlineSize: "22rem" }}>
+        <Card.Header>
+          <Card.Title asChild>
+            <h2
+              ref={stableChildRef}
+              data-testid="card-title-aschild-heading"
+            >
+              Single attach
+            </h2>
+          </Card.Title>
+          <Card.Description>
+            The child callback ref should fire exactly once on mount.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content>
+          <p>
+            <span
+              role="status"
+              aria-label="Title attach count"
+              data-testid="card-title-aschild-attach-count"
+              ref={stableStatusRef}
+            >
+              attach-count:pending
+            </span>
+          </p>
+        </Card.Content>
+        {/* A focusable footer keeps the story canvas from tripping
+         * the axe `scrollable-region-focusable` rule. */}
+        <Card.Footer>
+          <Button size="small" variant="plain">
+            Acknowledge
+          </Button>
+        </Card.Footer>
+      </Card>
+    </div>
+  );
+}
+export const TitleAsChildSingleAttach: Story = {
+  name: "Title asChild single ref attach",
+  render: () => <TitleAsChildSingleAttachImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // The child callback ref writes the count into the status span
+    // synchronously during the mount commit, so by the time play()
+    // runs the textContent is already "attach-count:1" (post-fix) or
+    // "attach-count:2" (pre-fix wave-7 🟡 4).
+    const status = canvas.getByRole("status", { name: /title attach count/i });
+    await expect(status).toHaveTextContent("attach-count:1");
   },
 };
 

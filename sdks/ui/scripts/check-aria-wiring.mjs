@@ -895,6 +895,110 @@ await open("components-card--as-child-ref-composition");
   );
 }
 
+/* ─── 14a. Card interactive without onClick — no fake control
+ * (wave-7 🔴 1) ──
+ *
+ * Pre-fix, `interactive` always added `role="button"` and
+ * `tabIndex=0` — even without an `onClick`, creating a focusable
+ * control with no activation path. The wave-7 fix derives
+ * `ownsActivation` from (interactive && !asChild && typeof onClick ===
+ * "function") and only applies the role/tabindex/keyboard surface
+ * then. Without `onClick`, `interactive` degrades to a visual-only
+ * modifier — no role, no tabindex, no keyboard wiring. The
+ * data-interactive marker still applies (CSS hover/cursor still fire),
+ * so the failure mode is "fake focusable control", not "no visual
+ * feedback". */
+await open("components-card--interactive-without-on-click");
+{
+  const card = page.locator('[data-testid="card-interactive-no-onclick"]');
+  await card.waitFor({ state: "visible", timeout: 5000 });
+  const role = await card.getAttribute("role");
+  const tabIndex = await card.getAttribute("tabindex");
+  const dataInteractive = await card.getAttribute("data-interactive");
+  // Must NOT be a focusable fake control.
+  const noRole = role === null;
+  const noTabIndex = tabIndex === null;
+  // Visual modifier still present.
+  const stillInteractiveVisually = dataInteractive !== null;
+  const ok = noRole && noTabIndex && stillInteractiveVisually;
+  report(
+    "Card interactive without onClick — no fake control (wave-7 🔴 1)",
+    ok,
+    `role=${role} tabindex=${tabIndex} data-interactive=${dataInteractive}`,
+  );
+}
+
+/* ─── 14b. Card aria-disabled — keyboard + click suppressed
+ * (wave-7 🔴 2) ──
+ *
+ * Pre-fix, the Card CSS for `[aria-disabled="true"]` set
+ * `pointer-events:none` + dimmed opacity, but the React keyboard
+ * handler had no aria-disabled check. Enter/Space STILL fired
+ * `onClick`, and synthetic .click() bypassed pointer-events too.
+ * Wave-7 short-circuits both paths when aria-disabled is true. */
+await open("components-card--interactive-aria-disabled");
+{
+  const card = page.locator('[data-testid="card-interactive-aria-disabled"]');
+  await card.waitFor({ state: "visible", timeout: 5000 });
+  const counter = page.locator('[data-testid="card-aria-disabled-counter"]');
+  const before = (await counter.innerText()).trim();
+
+  // Focus the card and try Enter / Space — must NOT increment.
+  await card.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(50);
+  const afterEnter = (await counter.innerText()).trim();
+
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(50);
+  const afterSpace = (await counter.innerText()).trim();
+
+  // Synthetic click (bypasses pointer-events:none) — must still be
+  // blocked at the React handler level.
+  await card.evaluate((el) => (el).click());
+  await page.waitForTimeout(50);
+  const afterClick = (await counter.innerText()).trim();
+
+  const ok =
+    before === afterEnter &&
+    before === afterSpace &&
+    before === afterClick;
+  report(
+    "Card aria-disabled — keyboard + click suppressed (wave-7 🔴 2)",
+    ok,
+    `before="${before}" enter="${afterEnter}" space="${afterSpace}" click="${afterClick}"`,
+  );
+}
+
+/* ─── 14c. Card.Title asChild — single ref attach (wave-7 🟡 4) ──
+ *
+ * Pre-fix, Card.Title asChild passed
+ * `composeRefs(ref, getElementRef(children))` to Slot. Slot itself
+ * composes the child ref internally, so callback refs on the child
+ * fired twice per attach / twice per detach. The fix passes only the
+ * forwarded ref to Slot. The story counts every callback-ref
+ * invocation in a useRef (no setState in the ref → no re-render loop)
+ * and exposes the snapshot via a Button. Click → status reads
+ * "attach-count:1". */
+await open("components-card--title-as-child-single-attach");
+{
+  const status = page.locator(
+    '[data-testid="card-title-aschild-attach-count"]',
+  );
+  await status.waitFor({ state: "visible", timeout: 5000 });
+  // The child callback ref writes the count into the status span via
+  // a SECOND stable callback ref on the span — no React commit needed,
+  // so the textContent reflects the mount-time attach count directly.
+  const text = (await status.innerText()).trim();
+  // Pre-fix: "attach-count:2". Post-fix: "attach-count:1".
+  const ok = /attach-count:\s*1\b/.test(text);
+  report(
+    "Card.Title asChild — single ref attach (wave-7 🟡 4)",
+    ok,
+    `status="${text}"`,
+  );
+}
+
 /* ─── 15. Dialog.Close onClick composes with close (Phase 2.B fix 1) ─
  *
  * The CloseWithSaveOnClick story has a Save button whose onClick flips
