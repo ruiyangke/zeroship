@@ -540,10 +540,11 @@ export const RTL: Story = {
     docs: {
       description: {
         story:
-          "Right-to-left direction flips the vertical scrollbar to " +
-          "`inset-inline-start: 0` via the `[dir=\"rtl\"]` specificity " +
-          "mirror. Horizontal bar's logical anchors handle RTL " +
-          "automatically.",
+          "Right-to-left direction places the vertical scrollbar on the " +
+          "physical LEFT edge — the conventional RTL mirror. We rely on " +
+          "the `inset-inline-end` logical-property cascade alone (no " +
+          "explicit `[dir=\"rtl\"]` override) so the bar tracks the " +
+          "browser's text-direction without a specificity battle.",
       },
     },
   },
