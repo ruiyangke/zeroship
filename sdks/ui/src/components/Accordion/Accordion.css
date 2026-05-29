@@ -199,58 +199,56 @@
 
 /* ─── panel ─────────────────────────────────────────────────────────── *
  *
- * The Panel animates `block-size: 0 ↔ var(--accordion-panel-height)`.
- * Base UI emits the natural block-size on the panel element via the
- * `--accordion-panel-height` CSS custom property (a pixel value during
- * measurement / transition windows, `auto` while fully open) AND tags
- * the element with the transient `data-starting-style` /
- * `data-ending-style` attributes during the first / last paint of
- * each transition.
+ * The Panel animates between `0` and the measured natural length on the
+ * orientation axis. Base UI emits the measurement as a CSS custom
+ * property (`--accordion-panel-height` for vertical roots,
+ * `--accordion-panel-width` for horizontal) AND tags the element with
+ * the transient `data-starting-style` / `data-ending-style` attributes
+ * during the first / last paint of each transition.
  *
- * The pattern (matching Base UI's documented usage): keep block-size
- * pinned to the var ALWAYS, then override to `0` only during the
- * starting / ending style frames. This gives the browser:
+ * Pattern (matching Base UI's documented usage): keep the animated
+ * axis pinned to the var ALWAYS, then override to `0` only during the
+ * starting / ending style frames. Base UI keeps the var resolved to a
+ * measured pixel value across the transition window (it flips to
+ * `auto` only once the Item is fully open) so the browser always has
+ * an interpolatable length to transition between — sidestepping CSS's
+ * "no interpolation from `auto`" rule.
  *
- *   - on OPEN: block-size flips from 0 (starting-style) to the
- *     measured px (var resolves to px before becoming auto). The
- *     transition runs from 0 to the px value.
- *   - on CLOSE: Base UI re-renders with the measured px in the var,
- *     adds `data-ending-style` for one frame. The block-size goes
- *     from the px value to 0 — the transition runs in reverse.
+ * Per-orientation scoping is load-bearing: the vertical rules only
+ * touch `block-size`, and the horizontal rules only touch
+ * `inline-size`. An earlier shape had a generic
+ * `.zs-accordion-panel[data-starting-style], [data-ending-style] {
+ * block-size: 0 }` rule that ran on ALL panels regardless of
+ * orientation — and there was no later horizontal override for
+ * `block-size`, so horizontal panels collapsed on the BLOCK axis
+ * during transition frames (the rail visually disappeared even though
+ * the close was on the inline axis). Scoping the zeroing per
+ * orientation eliminates the cross-axis clobber.
  *
- * If we keyed block-size off `data-open` only, the close transition
- * would start from `auto` (the open-state computed value) instead of
- * px — and CSS does not interpolate from `auto`, so the panel would
- * snap shut. That was the pre-fix regression.
- *
- * The inner wrapper carries the padding so the 0-height state stays
+ * The inner wrapper carries the padding so the 0-length state stays
  * clean (padding on the outer would create a visible step at the end
  * of the transition). */
 .zs-accordion-panel {
   overflow: hidden;
-  block-size: var(--accordion-panel-height);
-  transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
 }
 
-.zs-accordion-panel[data-starting-style],
-.zs-accordion-panel[data-ending-style] {
+/* Vertical (default) — block-size animates between 0 and measured. */
+.zs-accordion-panel--vertical {
+  block-size: var(--accordion-panel-height);
+  transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-accordion-panel--vertical[data-starting-style],
+.zs-accordion-panel--vertical[data-ending-style] {
   block-size: 0;
 }
 
-.zs-accordion-panel-inner {
-  padding-block: var(--zs-accordion-panel-pad-block);
-  padding-inline: var(--zs-accordion-panel-pad-inline);
-}
-
-/* Horizontal orientation — the panel animates inline-size instead of
-   block-size. Base UI emits `--accordion-panel-width` for horizontal
-   roots. Same starting/ending-style pin keeps both directions
-   transitioning. */
+/* Horizontal — inline-size animates between 0 and measured. Block-size
+   stays content-driven so the row keeps its full height across every
+   frame of the transition. */
 .zs-accordion-panel--horizontal {
-  block-size: auto;
   inline-size: var(--accordion-panel-width);
   transition: inline-size var(--zs-motion-base) var(--zs-motion-ease);
 }
@@ -259,11 +257,16 @@
   inline-size: 0;
 }
 
+.zs-accordion-panel-inner {
+  padding-block: var(--zs-accordion-panel-pad-block);
+  padding-inline: var(--zs-accordion-panel-pad-inline);
+}
+
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .zs-accordion-trigger,
   .zs-accordion-trigger-chevron,
-  .zs-accordion-panel,
+  .zs-accordion-panel--vertical,
   .zs-accordion-panel--horizontal {
     transition: none;
   }

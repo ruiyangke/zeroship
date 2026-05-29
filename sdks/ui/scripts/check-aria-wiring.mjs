@@ -5163,6 +5163,71 @@ await open("components-accordion--basic");
   );
 }
 
+/* ─── 85g. Wave 7 fix: horizontal Accordion Panel keeps its block-size
+ *                    during starting-style / ending-style frames.
+ *
+ * Pre-fix regression: the generic `.zs-accordion-panel[data-starting-
+ * style], [data-ending-style] { block-size: 0 }` rule was unscoped, so
+ * horizontal panels collapsed on the BLOCK axis (the row visually
+ * disappeared) during transition frames even though the close was
+ * happening on the inline axis. The fix scopes the zeroing per
+ * orientation modifier — only `--vertical` panels touch block-size and
+ * only `--horizontal` panels touch inline-size.
+ *
+ * Strategy: open the horizontal regression story (pre-opened on
+ * `shipping`). Let the mount-time enter transition settle so we have
+ * a stable baseline. Click `returns` to trigger a cross-transition —
+ * shipping enters `data-ending-style` (closing on inline axis) and
+ * returns enters `data-starting-style` (opening on inline axis). Sample
+ * shipping's computed `block-size` ~60ms in: post-fix it stays content-
+ * driven (>0); pre-fix the generic rule zeroes it. */
+await open("components-accordion--regression-horizontal-transition");
+{
+  const shippingTrigger = page.locator(
+    '[data-testid="accordion-regression-horizontal-trigger-shipping"]',
+  );
+  const shippingPanel = page.locator(
+    '[data-testid="accordion-regression-horizontal-panel-shipping"]',
+  );
+  const returnsTrigger = page.locator(
+    '[data-testid="accordion-regression-horizontal-trigger-returns"]',
+  );
+  await shippingTrigger.waitFor({ state: "visible", timeout: 5000 });
+  // Settle the mount-time enter transition so the open-state block-size
+  // baseline is stable.
+  await page.waitForTimeout(500);
+  const openBlockSize = await shippingPanel
+    .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+    .catch(() => 0);
+  // Trigger the cross-transition. In single mode, clicking `returns`
+  // closes `shipping` (puts it in data-ending-style for one frame).
+  await returnsTrigger.click();
+  // Sample shipping's block-size mid-transition. With the fix the
+  // horizontal panel keeps block-size content-driven; pre-fix the
+  // generic data-ending-style rule zeroes block-size for one frame.
+  await page.waitForTimeout(60);
+  const midBlockSize = await shippingPanel
+    .count()
+    .then(async (n) =>
+      n === 0
+        ? 0
+        : shippingPanel
+            .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+            .catch(() => 0),
+    );
+  // Post-fix: midBlockSize stays close to the open content-height (the
+  // panel does not visually collapse on the block axis). Pre-fix:
+  // midBlockSize drops to 0 because the unscoped starting/ending-style
+  // rule clobbers block-size. Allow a small floor for sub-pixel
+  // rounding but reject anything close to the snap-shut value.
+  const ok = openBlockSize > 0 && midBlockSize > openBlockSize * 0.5;
+  report(
+    "Accordion horizontal Panel keeps block-size during ending-style frame (wave 7 fix)",
+    ok,
+    `openBlockSize=${openBlockSize} midBlockSize=${midBlockSize}`,
+  );
+}
+
 /* ─── 85f. Slice 14 review fix #7 mirror: Collapsible aria-controls. */
 await open("components-collapsible--basic");
 {
