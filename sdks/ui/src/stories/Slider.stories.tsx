@@ -610,3 +610,152 @@ export const ConsumerStylePreserved: Story = {
     });
   },
 };
+
+/* ─── 14. RequiredCascade — Field required → thumb input aria-required ─ *
+ *
+ * Wave 5 🔴 regression. Pre-fix, `Slider` read Field context for `size`
+ * and `disabled` but not `required`, so a `<Field required><Slider/></
+ * Field>` thumb input carried no `aria-required` and AT users could not
+ * tell the slider was required. Post-fix: `requiredProp ?? fieldCtx
+ * ?.required ?? false` cascades, and the resolved boolean is attached
+ * to each Thumb's nested `<input type="range">` via the `inputRef`
+ * callback (Base UI's Slider.Root has no `required` prop). The
+ * aria-wiring runner asserts the input carries `aria-required="true"`. */
+export const RequiredCascade: Story = {
+  name: "Required cascade (Wave 5 regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`<Field required>` cascades into Slider so the thumb's nested " +
+          "<input type=range> carries `aria-required=\"true\"`. Mirrors " +
+          "Input.tsx's required cascade — explicit prop wins, then " +
+          "Field context, then false.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Slider required cascade"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Field required — cascades</span>
+        <Field required>
+          <Field.Label>Volume</Field.Label>
+          <Slider
+            defaultValue={50}
+            min={0}
+            max={100}
+            step={1}
+            data-testid="slider-required-field"
+          />
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Explicit required prop</span>
+        <Slider
+          required
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Mandatory level"
+          data-testid="slider-required-explicit"
+        />
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">No required — control</span>
+        <Slider
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Optional level"
+          data-testid="slider-required-none"
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Field branch — the Field.Label gives the input its accessible
+    // name; the slider role is the input itself.
+    const fieldThumb = canvas.getByRole("slider", { name: /volume/i });
+    await expect(fieldThumb).toHaveAttribute("aria-required", "true");
+
+    const explicitThumb = canvas.getByRole("slider", {
+      name: /mandatory level/i,
+    });
+    await expect(explicitThumb).toHaveAttribute("aria-required", "true");
+
+    const optionalThumb = canvas.getByRole("slider", {
+      name: /optional level/i,
+    });
+    await expect(optionalThumb).not.toHaveAttribute("aria-required");
+  },
+};
+
+/* ─── 15. RangeLabelledBy — distinct names with aria-labelledby ──────── *
+ *
+ * Wave 5 🔴 regression. Pre-fix, range thumbs forwarded the SAME
+ * `aria-labelledby` on both Thumb wrappers; Base UI puts
+ * `aria-labelledby` ahead of `aria-label` on the input, so both thumbs
+ * ended up with the same accessible name. Post-fix: we render a
+ * visually-hidden per-thumb suffix span (" (1 of 2)" / " (2 of 2)") and
+ * append its id to each thumb's `aria-labelledby` chain, so each thumb
+ * announces "<external label> (n of N)" distinctly. The aria-wiring
+ * runner asserts the two thumb inputs have distinct accessible names. */
+export const RangeLabelledBy: Story = {
+  name: "Range with aria-labelledby (Wave 5 regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Range mode with an external label wired through " +
+          "`aria-labelledby`. Each thumb gets a visually-hidden suffix " +
+          "id appended so both thumbs receive distinct accessible " +
+          "names, not the same one.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Range slider labelledby"
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span id="zs-slider-range-label" className="zs-story-label">
+          Price range
+        </span>
+        <Slider
+          defaultValue={[20, 60]}
+          min={0}
+          max={100}
+          step={1}
+          aria-labelledby="zs-slider-range-label"
+          data-testid="slider-range-labelledby"
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const minThumb = canvas.getByRole("slider", {
+      name: /price range \(1 of 2\)/i,
+    });
+    const maxThumb = canvas.getByRole("slider", {
+      name: /price range \(2 of 2\)/i,
+    });
+
+    await expect(minThumb).toHaveAttribute("aria-valuenow", "20");
+    await expect(maxThumb).toHaveAttribute("aria-valuenow", "60");
+    // Names must be distinct — pre-fix they were identical.
+    const nameA = minThumb.getAttribute("aria-labelledby");
+    const nameB = maxThumb.getAttribute("aria-labelledby");
+    await expect(nameA).not.toEqual(nameB);
+  },
+};
