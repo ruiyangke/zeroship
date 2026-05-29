@@ -156,6 +156,22 @@
   opacity: 0.55;
 }
 
+/* ─── reduced-motion ──────────────────────────────────────────────────── */
+/* "Reduced-motion + forced-colors specificity mirror" standard
+ * (wave-7 🟡 3). Users who prefer reduced motion should not see the
+ * transition fades or the active-press scale transform. Zero out both
+ * so an interactive Card still REFLECTS state (hover tint, focus ring)
+ * but doesn't ANIMATE between them. The :active selector loses its
+ * transform but keeps its cursor signal. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-card[data-interactive] {
+    transition: none;
+  }
+  .zs-card[data-interactive]:active {
+    transform: none;
+  }
+}
+
 /* ─── Header ───────────────────────────────────────────────────────────── */
 /* Grid: Title + Description stack in column 1; Action lives in column 2
  * and spans both rows, centered. The previous flex-row layout couldn't
@@ -401,6 +417,15 @@
 }
 
 /* ─── forced-colors ────────────────────────────────────────────────────── */
+/* Mirror specificity with the variant-scoped interactive hover rules
+ * above (wave-7 🟡 3). Without these per-variant overrides, the
+ * `.zs-card--surface[data-interactive]:hover` selector (and the
+ * elevated/outline siblings) win the cascade and re-apply
+ * `box-shadow: inset 0 0 0 100rem var(--zs-card-hover-tint), …` —
+ * which paints a color in forced-colors mode. Each variant's hover
+ * state under forced-colors gets a system-color outline instead, so
+ * the interactive affordance still reads without using a custom tint
+ * value. */
 @media (forced-colors: active) {
   .zs-card {
     background: Canvas;
@@ -413,5 +438,15 @@
   }
   .zs-card[data-interactive]:focus-visible {
     outline-color: Highlight;
+  }
+  @media (hover: hover) {
+    .zs-card[data-interactive]:hover {
+      box-shadow: 0 0 0 0.125rem Highlight inset;
+    }
+    .zs-card--surface[data-interactive]:hover,
+    .zs-card--elevated[data-interactive]:hover,
+    .zs-card--outline[data-interactive]:hover {
+      box-shadow: 0 0 0 0.125rem Highlight inset;
+    }
   }
 }

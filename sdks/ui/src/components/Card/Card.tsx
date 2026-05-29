@@ -61,7 +61,7 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { Slot, composeRefs, getElementRef } from "../_slot";
+import { Slot } from "../_slot";
 import { classnames } from "../_classnames";
 
 export type CardVariant = "surface" | "elevated" | "outline" | "ghost";
@@ -134,6 +134,11 @@ export interface CardProps extends ComponentPropsWithoutRef<"div"> {
    */
   asChild?: boolean;
 
+  /**
+   * Card contents — typically a composition of `Card.Header`,
+   * `Card.Media`, `Card.Content`, `Card.Footer`, etc. When `asChild` is
+   * true, this MUST be a single React element (the render-as target).
+   */
   children?: ReactNode;
 }
 
@@ -167,6 +172,26 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     "data-interactive": interactive ? "" : undefined,
   } as Record<string, string | undefined>;
 
+  // `ownsActivation` is the precise predicate for "Card itself owns the
+  // focusable/keyboard surface": interactive AND not asChild (asChild
+  // delegates to the child's native semantics) AND a real `onClick`
+  // handler is wired. Without `onClick`, applying `role="button"` +
+  // `tabIndex=0` would ship a focusable fake control with no way to
+  // activate it — a keyboard trap. The dev-mode console.warn at L176
+  // surfaces this to consumers; here we degrade `interactive` to a
+  // visual-only modifier (cursor, hover tint) instead.
+  const ownsActivation =
+    interactive && !asChild && typeof onClick === "function";
+
+  // `aria-disabled` is observed via the rest spread so the CSS rule
+  // .zs-card[data-interactive][aria-disabled="true"] (pointer-events
+  // none, dimmed) is paired with JS-level suppression: pointer-events
+  // blocks the mouse, but keyboard activation runs JS-side, so we must
+  // also short-circuit `onClick` and the Enter/Space handler.
+  const ariaDisabled =
+    (rest as { "aria-disabled"?: boolean | "true" | "false" })["aria-disabled"];
+  const isAriaDisabled = ariaDisabled === true || ariaDisabled === "true";
+
   // Dev-mode validation surfaces guidance the AI agent / consumer can
   // act on. Gated to non-production via `process.env.NODE_ENV` —
   // bundlers (Vite, Webpack, Rollup, tsup-via-downstream) replace this
@@ -195,26 +220,33 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
 
   // Keyboard activation: when we own a non-native interactive div, Enter
   // and Space MUST fire onClick — otherwise tabIndex=0 + focus ring is
-  // a "fake control" trap (review-fix items 1 + 20).
-  const handleKeyDown =
-    interactive && !asChild && typeof onClick === "function"
-      ? (event: KeyboardEvent<HTMLDivElement>) => {
-          if (typeof onKeyDown === "function") {
-            onKeyDown(event);
-            if (event.defaultPrevented) return;
-          }
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            // Synthesize a click — onClick is typed for the div, so the
-            // KeyboardEvent stand-in is the closest thing to "the user
-            // activated this control". React's synthetic-event base type
-            // is compatible enough that the handler can read .currentTarget.
-            onClick(
-              event as unknown as MouseEvent<HTMLDivElement>,
-            );
-          }
+  // a "fake control" trap (review-fix items 1 + 20). When
+  // `aria-disabled` is true we drop the activation entirely so keyboard
+  // can't bypass the visual/pointer-events disabled state (wave-7 🔴 2).
+  const handleKeyDown = ownsActivation
+    ? (event: KeyboardEvent<HTMLDivElement>) => {
+        if (typeof onKeyDown === "function") {
+          onKeyDown(event);
+          if (event.defaultPrevented) return;
         }
-      : onKeyDown;
+        if (isAriaDisabled) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          // Synthesize a click — onClick is typed for the div, so the
+          // KeyboardEvent stand-in is the closest thing to "the user
+          // activated this control". React's synthetic-event base type
+          // is compatible enough that the handler can read .currentTarget.
+          onClick(event as unknown as MouseEvent<HTMLDivElement>);
+        }
+      }
+    : onKeyDown;
+
+  // Click suppression mirrors the keyboard path: aria-disabled cards
+  // shouldn't activate from a click either. Pointer-events:none in CSS
+  // already blocks most mouse clicks, but synthetic clicks (assistive
+  // tech, programmatic .click()) bypass pointer-events and still reach
+  // React's onClick — so guard at the handler level too.
+  const handleClick = isAriaDisabled ? undefined : onClick;
 
   if (asChild) {
     if (!isValidElement(children)) {
@@ -237,7 +269,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
         {...dataProps}
         ref={ref as Ref<unknown>}
         className={composedClassName}
-        onClick={onClick}
+        onClick={handleClick}
         onKeyDown={onKeyDown}
       >
         {children}
@@ -245,7 +277,13 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     );
   }
 
-  const interactiveAriaProps = interactive
+  // Only own the focusable/keyboard surface when `ownsActivation` —
+  // applying `role="button"` + `tabIndex=0` without an `onClick` would
+  // create a focusable element with no activation path (wave-7 🔴 1).
+  // Without `ownsActivation`, `interactive` degrades to a visual-only
+  // hover/cursor modifier; the dev-mode warn at L176 tells consumers to
+  // pass `onClick` or switch to `asChild` with a real link/button.
+  const interactiveAriaProps = ownsActivation
     ? ({ role: "button" } as const)
     : undefined;
 
@@ -256,8 +294,8 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
       {...interactiveAriaProps}
       ref={ref as Ref<HTMLDivElement>}
       className={composedClassName}
-      tabIndex={interactive ? 0 : undefined}
-      onClick={onClick}
+      tabIndex={ownsActivation ? 0 : undefined}
+      onClick={handleClick}
       onKeyDown={handleKeyDown}
     >
       {children}
@@ -279,12 +317,17 @@ export type CardDescriptionProps = ParagraphProps;
 
 const CardHeader = forwardRef<HTMLDivElement, CardHeaderProps>(
   function CardHeader({ className, ...rest }, ref) {
+    // Rest spread BEFORE internal data-slot so callers cannot overwrite
+    // the documented `data-slot="card-header"` contract via `{...rest}`
+    // (wave-7 🟢 6). ClassName stays composed via `classnames` so
+    // consumer `className` augments rather than replaces the internal
+    // class.
     return (
       <div
+        {...rest}
         ref={ref}
         data-slot="card-header"
         className={classnames("zs-card__header", className)}
-        {...rest}
       />
     );
   },
@@ -313,13 +356,15 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
       // Route asChild through Slot so className composition, style
       // shallow-merge, event composition with defaultPrevented short-
       // circuit, and React-19 ref access all behave identically to
-      // Card root (review-fix item 8). composeRefs is wired into Slot;
-      // we still pass our ref so a parent forwarding into Card.Title
-      // lands at the rendered element.
+      // Card root (review-fix item 8). Slot itself composes the child
+      // ref via getElementRef internally, so we pass ONLY the
+      // forwarded `ref` here — composing again would attach the child's
+      // callback ref twice, firing twice per attach/detach
+      // (wave-7 🟡 4).
       return (
         <Slot
           {...rest}
-          ref={composeRefs(ref as Ref<unknown>, getElementRef(children))}
+          ref={ref as Ref<unknown>}
           data-slot="card-title"
           className={classnames("zs-card__title", className)}
         >
@@ -327,12 +372,14 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
         </Slot>
       );
     }
+    // Rest spread BEFORE internal data-slot so callers cannot overwrite
+    // the documented `data-slot="card-title"` contract (wave-7 🟢 6).
     return (
       <h3
+        {...rest}
         ref={ref}
         data-slot="card-title"
         className={classnames("zs-card__title", className)}
-        {...rest}
       >
         {children}
       </h3>
@@ -343,12 +390,13 @@ CardTitle.displayName = "Card.Title";
 
 const CardDescription = forwardRef<HTMLParagraphElement, CardDescriptionProps>(
   function CardDescription({ className, ...rest }, ref) {
+    // Rest spread BEFORE internal data-slot (wave-7 🟢 6).
     return (
       <p
+        {...rest}
         ref={ref}
         data-slot="card-description"
         className={classnames("zs-card__description", className)}
-        {...rest}
       />
     );
   },
@@ -357,12 +405,13 @@ CardDescription.displayName = "Card.Description";
 
 const CardAction = forwardRef<HTMLDivElement, CardActionProps>(
   function CardAction({ className, ...rest }, ref) {
+    // Rest spread BEFORE internal data-slot (wave-7 🟢 6).
     return (
       <div
+        {...rest}
         ref={ref}
         data-slot="card-action"
         className={classnames("zs-card__action", className)}
-        {...rest}
       />
     );
   },
@@ -379,19 +428,23 @@ const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(
     // `side="fill"` is a decorative background layer — default it to
     // aria-hidden so AT doesn't double-announce the card surface
     // (review-fix item 16). Consumers wanting a meaningful fill-mode
-    // media override via the `rest` spread (which runs last, so
-    // {...rest} wins over the hard-coded value here? No — JSX spread
-    // semantics are last-write-wins; we put the spread LAST below so
-    // explicit aria-hidden={false} from the consumer applies).
+    // media override via the `rest` spread — JSX last-write-wins, so
+    // putting `aria-hidden` BEFORE rest lets explicit
+    // `aria-hidden={false}` from the consumer apply.
+    //
+    // `data-slot`/`data-side` are internal contract attrs — they sit
+    // AFTER rest so callers cannot desync them via raw spread; the
+    // documented surface for `data-side` is the `side` prop
+    // (wave-7 🟢 6).
     const isDecorative = side === "fill";
     return (
       <div
-        ref={ref}
         aria-hidden={isDecorative ? true : undefined}
         {...rest}
+        ref={ref}
         data-slot="card-media"
-        className={classnames("zs-card__media", className)}
         data-side={side}
+        className={classnames("zs-card__media", className)}
       />
     );
   },
@@ -400,12 +453,13 @@ CardMedia.displayName = "Card.Media";
 
 const CardContent = forwardRef<HTMLDivElement, CardContentProps>(
   function CardContent({ className, ...rest }, ref) {
+    // Rest spread BEFORE internal data-slot (wave-7 🟢 6).
     return (
       <div
+        {...rest}
         ref={ref}
         data-slot="card-content"
         className={classnames("zs-card__content", className)}
-        {...rest}
       />
     );
   },
@@ -422,14 +476,18 @@ export interface CardFooterProps extends DivProps {
 
 const CardFooter = forwardRef<HTMLDivElement, CardFooterProps>(
   function CardFooter({ align = "end", divider, className, ...rest }, ref) {
+    // Rest spread BEFORE internal data-slot / data-align / data-divider
+    // so callers cannot desync those contract attrs via raw spread —
+    // the documented surface is the `align` and `divider` props
+    // (wave-7 🟢 6).
     return (
       <div
+        {...rest}
         ref={ref}
         data-slot="card-footer"
-        className={classnames("zs-card__footer", className)}
         data-align={align}
         data-divider={divider}
-        {...rest}
+        className={classnames("zs-card__footer", className)}
       />
     );
   },

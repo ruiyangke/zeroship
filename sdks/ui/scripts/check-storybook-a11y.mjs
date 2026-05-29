@@ -54,6 +54,10 @@ const stories = [
   "components-card--interactive",
   "components-card--interactive-with-keyboard",
   "components-card--interactive-without-on-click",
+  // wave-7 🔴 2 + 🟡 4: aria-disabled keyboard suppression and Title
+  // asChild single ref attach.
+  "components-card--interactive-aria-disabled",
+  "components-card--title-as-child-single-attach",
   "components-card--as-child",
   "components-card--as-child-ref-composition",
   "components-card--ghost",
