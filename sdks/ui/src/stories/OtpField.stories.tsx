@@ -316,6 +316,43 @@ export const Disabled: Story = {
   },
 };
 
+/* ─── 7.5 Readonly — non-editable presentation ──────────────────────── */
+export const Readonly: Story = {
+  name: "Readonly",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Readonly state — the code is presented but cannot be edited. " +
+          "Used for confirmation screens where the entered code is " +
+          "echoed back. The forced-colors mirror keeps the row legible " +
+          "under Windows High Contrast.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Readonly">
+      <div className="zs-story-cell">
+        <Field>
+          <Field.Label style={srOnly}>Readonly code</Field.Label>
+          <OtpField
+            readOnly
+            defaultValue="123456"
+            data-testid="otp-readonly"
+          />
+        </Field>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cells = canvas.getAllByRole("textbox");
+    for (const cell of cells) {
+      await expect(cell).toHaveAttribute("readonly");
+    }
+  },
+};
+
 /* ─── 8. Standalone aria paths ─────────────────────────────────────── */
 export const StandaloneAriaPaths: Story = {
   name: "Standalone aria paths",

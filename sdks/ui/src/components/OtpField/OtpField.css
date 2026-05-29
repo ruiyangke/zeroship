@@ -48,15 +48,25 @@
   gap: var(--zs-space-2);
 }
 
-/* Coarse-pointer hit-target floor — touch users need at least 44px
- * (--zs-hit-min, 2.75rem) on every cell. The sm size's 2rem cell would
- * otherwise undershoot the WCAG 2.5.5 target-size floor on a phone or
- * tablet. We bump --zs-otp-cell-size on sm specifically (md/lg already
- * clear the floor) so each square cell grows to hit-min on a coarse
- * pointer without disturbing the desktop sm density. */
+/* Coarse-pointer hit-target floor — touch users need at least
+ * `--zs-hit-min` (2.75rem, equivalent to 44 device-units) on every
+ * cell. The sm cell at 2rem AND the default md cell at
+ * `--zs-control-h-md` (2.5rem) both undershoot the WCAG 2.5.5
+ * target-size floor on a phone or tablet; only lg (3rem) clears it
+ * unconditionally. We floor `--zs-otp-cell-size` against
+ * `--zs-hit-min` on every size under a coarse pointer so the square
+ * cell always meets the touch target without disturbing the desktop
+ * density. The `max()` clamp on the lg cell is a no-op (3rem already
+ * wins) so applying it uniformly stays cheap. */
 @media (pointer: coarse) {
+  .zs-otp-field {
+    --zs-otp-cell-size: max(var(--zs-control-h-md), var(--zs-hit-min));
+  }
   .zs-otp-field--sm {
-    --zs-otp-cell-size: var(--zs-hit-min);
+    --zs-otp-cell-size: max(var(--zs-control-h-sm), var(--zs-hit-min));
+  }
+  .zs-otp-field--lg {
+    --zs-otp-cell-size: max(var(--zs-control-h-lg), var(--zs-hit-min));
   }
 }
 
@@ -283,6 +293,39 @@
   .zs-otp-field[data-complete] .zs-otp-field__input {
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0 transparent;
+  }
+  /* Completed-focus mirror — the focused cell while the row is
+   * complete still has to wear the Highlight focus ring at the same
+   * specificity as the bare-focus mirror above. Without this rule,
+   * `[data-complete] .input` (2-class) outranked `.input:focus`
+   * (1-class) and the focus ring disappeared under high-contrast
+   * once the row went complete. */
+  .zs-otp-field[data-complete] .zs-otp-field__input:focus {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+
+  /* Readonly mirror — the readonly state outside forced-colors paints
+   * `--zs-input-bg-readonly` + italic ink; under forced-colors that
+   * pair resolves to oklch tokens that the system palette will not
+   * honour, so we re-paint with the standard `Field` / `GrayText`
+   * system colors. Specificity matches `.zs-otp-field[data-readonly]
+   * .zs-otp-field__input` (the outside-forced-colors selector) so the
+   * cascade resolves cleanly. */
+  .zs-otp-field[data-readonly] .zs-otp-field__input {
+    background: Field;
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-otp-field--outline[data-readonly] .zs-otp-field__input {
+    background: Canvas;
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
       0 0 0 0 transparent;
   }
 
