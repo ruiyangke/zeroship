@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
+use clap::Parser;
 use ntex::web;
+use zeroship_core::config::FileConfig;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
@@ -16,25 +18,185 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+const DEV_HYDRA_PUBLIC_URL: &str = "http://localhost:4444";
+const DEV_HYDRA_ADMIN_URL: &str = "http://localhost:4445";
+const DEV_CONSOLE_OIDC_SECRET: &str = "dev-console-oidc-secret";
+const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
+
+/// zeroship control-plane startup configuration.
+#[derive(Debug, Parser)]
+#[command(name = "zeroship-control")]
+struct ControlCli {
+    /// HTTP listen port.
+    #[arg(long, env = "CONTROL_PORT", default_value = "9090")]
+    port: String,
+
+    /// PostgreSQL DSN for control-plane data.
+    #[arg(long = "db", env = "DATABASE_URL", default_value = "postgres://localhost/zeroship")]
+    db: String,
+
+    /// Root directory for bundles and content-addressed deploy blobs.
+    #[arg(long = "bundles", env = "BUNDLES_DIR", default_value = "./bundles")]
+    bundles: String,
+
+    /// Admin/control API shared secret.
+    #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
+    control_key: String,
+
+    /// Master key used for control-plane encrypted env/secrets.
+    #[arg(long = "master-key", env = "MASTER_KEY", default_value = "", hide_env_values = true)]
+    master_key: String,
+
+    /// Comma-separated worker base URLs.
+    #[arg(long = "workers", env = "WORKER_URLS", default_value = "http://localhost:8080")]
+    workers: String,
+
+    /// Shared secret for worker admin endpoints.
+    #[arg(long = "worker-key", env = "WORKER_KEY", default_value = "", hide_env_values = true)]
+    worker_key: String,
+
+    /// PEM/PKCS#8 signing key file for PAT issuance.
+    #[arg(long = "signing-key-file", env = "SIGNING_KEY_FILE", default_value = "")]
+    signing_key_file: String,
+
+    /// Stripe webhook signing secret.
+    #[arg(
+        long = "stripe-webhook-secret",
+        env = "STRIPE_WEBHOOK_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    stripe_webhook_secret: String,
+
+    /// Comma-separated previous master keys accepted during key rotation.
+    #[arg(
+        long = "legacy-master-keys",
+        env = "LEGACY_MASTER_KEYS",
+        default_value = "",
+        hide_env_values = true
+    )]
+    legacy_master_keys: String,
+
+    /// Allow explicitly insecure local development startup.
+    #[arg(long = "dev-insecure", action = clap::ArgAction::SetTrue)]
+    dev_insecure: bool,
+
+    /// Environment half of `--dev-insecure`; only `1` is truthy.
+    #[arg(skip = env_is_exact("ZEROSHIP_DEV_INSECURE", "1"))]
+    dev_insecure_env: bool,
+
+    /// Trust `X-Forwarded-For` from an upstream proxy.
+    #[arg(long = "trust-proxy", action = clap::ArgAction::SetTrue)]
+    trust_proxy: bool,
+
+    /// Environment half of `--trust-proxy`; only `1` is truthy.
+    #[arg(skip = env_is_exact("TRUST_PROXY", "1"))]
+    trust_proxy_env: bool,
+
+    /// Bootstrap the first-party builder OAuth client at startup.
+    #[arg(long = "bootstrap-builder-client", action = clap::ArgAction::SetTrue)]
+    bootstrap_builder_client: bool,
+
+    /// Environment half of `--bootstrap-builder-client`; `1`/`true` are truthy.
+    #[arg(skip = env_is_1_or_true("BOOTSTRAP_BUILDER_OAUTH_CLIENT"))]
+    bootstrap_builder_client_env: bool,
+
+    /// Redirect URI for the bootstrapped builder OAuth client.
+    #[arg(
+        long = "builder-redirect-uri",
+        env = "BUILDER_REDIRECT_URI",
+        default_value = bootstrap_builder::DEFAULT_BUILDER_REDIRECT_URI
+    )]
+    builder_redirect_uri: String,
+
+    /// File path used to persist the bootstrapped builder client secret.
+    #[arg(
+        long = "builder-client-secret-file",
+        env = "BUILDER_CLIENT_SECRET_FILE",
+        default_value = bootstrap_builder::DEFAULT_BUILDER_CLIENT_SECRET_PATH
+    )]
+    builder_client_secret_file: PathBuf,
+
+    /// Directory for in-flight deploy bodies; empty means the OS temp dir.
+    #[arg(long = "deploy-tmp-dir", env = "DEPLOY_TMP_DIR", default_value = "")]
+    deploy_tmp_dir: String,
+
+    /// Optional shared config overlay path.
+    #[arg(long = "config", env = "ZEROSHIP_CONFIG")]
+    config_path: Option<PathBuf>,
+
+    /// Hydra admin API base URL.
+    #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
+    hydra_admin_url: Option<String>,
+
+    /// Hydra public issuer/base URL used by the console OIDC RP.
+    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
+    hydra_public_url: Option<String>,
+
+    /// Console OIDC client secret.
+    #[arg(
+        long = "console-oidc-secret",
+        env = "CONSOLE_OIDC_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    console_oidc_secret: String,
+
+    /// HMAC key for short-lived OIDC stash cookies.
+    #[arg(
+        long = "stash-signing-key",
+        env = "STASH_SIGNING_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    stash_signing_key: String,
+
+    /// PostgreSQL DSN for auth/console session tables.
+    #[arg(long = "auth-db", env = "AUTH_DB_URL", default_value = "")]
+    auth_db_url: String,
+
+    /// Expected OAuth access-token audience for control bearer auth.
+    #[arg(long = "oauth-audience", env = "OAUTH_AUDIENCE", default_value = "control.zeroship.ai")]
+    oauth_audience: String,
 }
 
-/// Parse a simple `--flag value` pair from the argument list.
-fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return pair[1].clone();
-        }
+impl ControlCli {
+    fn insecure_dev(&self) -> bool {
+        self.dev_insecure || self.dev_insecure_env
     }
-    env_or(env_key, default)
+
+    fn trust_proxy(&self) -> bool {
+        self.trust_proxy || self.trust_proxy_env
+    }
+
+    fn bootstrap_builder_client(&self) -> bool {
+        self.bootstrap_builder_client || self.bootstrap_builder_client_env
+    }
 }
 
-fn flag_or_env(args: &[String], flag: &str, env_key: &str) -> bool {
-    args.iter().any(|arg| arg == flag)
-        || std::env::var(env_key)
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+fn env_is_exact(key: &str, expected: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| value == expected)
+}
+
+fn env_is_1_or_true(key: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn resolve_file_overlay_string(
+    cli_value: Option<String>,
+    file_value: Option<String>,
+    insecure_dev: bool,
+    dev_default: &str,
+) -> String {
+    cli_value
+        .or(file_value)
+        .unwrap_or_else(|| {
+            if insecure_dev {
+                dev_default.to_string()
+            } else {
+                String::new()
+            }
+        })
 }
 
 fn decoded_master_key_len(value: &str) -> Option<usize> {
@@ -81,62 +243,54 @@ fn validate_master_key_material(
 async fn main() -> std::io::Result<()> {
     zeroship_core::observability::init_tracing("info,zeroship_control=debug");
 
-    let args: Vec<String> = std::env::args().collect();
+    let cli = ControlCli::parse();
+    let file = match FileConfig::load(cli.config_path.as_deref()) {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::error!(error = %err, "control: failed to load config file");
+            std::process::exit(1);
+        }
+    };
 
-    let port = arg_or_env(&args, "--port", "CONTROL_PORT", "9090");
-    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "postgres://localhost/zeroship");
-    let bundles_dir = arg_or_env(&args, "--bundles", "BUNDLES_DIR", "./bundles");
-    let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
-    let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
-    let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
-    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
-    let signing_key_file = arg_or_env(&args, "--signing-key-file", "SIGNING_KEY_FILE", "");
-    let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
+    let insecure_dev = cli.insecure_dev();
+    let trust_proxy = cli.trust_proxy();
+    let bootstrap_builder_client = cli.bootstrap_builder_client();
+
+    let hydra_admin_url = resolve_file_overlay_string(
+        cli.hydra_admin_url,
+        file.auth.hydra_admin_url.clone(),
+        insecure_dev,
+        DEV_HYDRA_ADMIN_URL,
+    );
+    let hydra_public_url = resolve_file_overlay_string(
+        cli.hydra_public_url,
+        file.auth.hydra_public_url.clone(),
+        insecure_dev,
+        DEV_HYDRA_PUBLIC_URL,
+    );
+    let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
+
+    let port = cli.port;
+    let db_url = cli.db;
+    let bundles_dir = cli.bundles;
+    let control_key = cli.control_key;
+    let master_key = cli.master_key;
+    let workers_str = cli.workers;
+    let worker_key = cli.worker_key;
+    let signing_key_file = cli.signing_key_file;
+    let stripe_webhook_secret = cli.stripe_webhook_secret;
     // Comma-separated list of previous master keys, tried as fallbacks
     // on decrypt failure during a rotation grace period.
-    let legacy_master_keys_raw = arg_or_env(&args, "--legacy-master-keys", "LEGACY_MASTER_KEYS", "");
-    // Opt-in: explicit "I know this is insecure" flag. Must be set to
-    // run without control_key / master_key / stripe_webhook_secret.
-    // Production refuses to boot without either the real secrets or
-    // this sentinel.
-    let insecure_dev =
-        args.iter().any(|a| a == "--dev-insecure")
-            || std::env::var("ZEROSHIP_DEV_INSECURE").map(|v| v == "1").unwrap_or(false);
+    let legacy_master_keys_raw = cli.legacy_master_keys;
     let legacy_keys: Vec<&str> = legacy_master_keys_raw
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    // Default: do NOT trust X-Forwarded-For. Operators behind a real
-    // load balancer opt in explicitly via --trust-proxy; everyone else
-    // gets the safe behavior (peer_addr only, no spoof surface).
-    let trust_proxy =
-        args.iter().any(|a| a == "--trust-proxy")
-            || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
-    let bootstrap_builder_client = flag_or_env(
-        &args,
-        "--bootstrap-builder-client",
-        "BOOTSTRAP_BUILDER_OAUTH_CLIENT",
-    );
-    let builder_redirect_uri = arg_or_env(
-        &args,
-        "--builder-redirect-uri",
-        "BUILDER_REDIRECT_URI",
-        bootstrap_builder::DEFAULT_BUILDER_REDIRECT_URI,
-    );
-    let builder_client_secret_path = PathBuf::from(arg_or_env(
-        &args,
-        "--builder-client-secret-file",
-        "BUILDER_CLIENT_SECRET_FILE",
-        bootstrap_builder::DEFAULT_BUILDER_CLIENT_SECRET_PATH,
-    ));
+    let builder_redirect_uri = cli.builder_redirect_uri;
+    let builder_client_secret_path = cli.builder_client_secret_file;
+    let deploy_tmp_dir_str = cli.deploy_tmp_dir;
 
-    let deploy_tmp_dir_str = arg_or_env(
-        &args,
-        "--deploy-tmp-dir",
-        "DEPLOY_TMP_DIR",
-        "", // empty -> fall back to std::env::temp_dir() below
-    );
     let deploy_tmp_dir: std::path::PathBuf = if deploy_tmp_dir_str.is_empty() {
         std::env::temp_dir()
     } else {
@@ -277,41 +431,15 @@ async fn main() -> std::io::Result<()> {
     // surface. Control also needs hydra-admin for OAuth bearer
     // introspection. Refuses to boot unless these pieces are configured
     // (`--dev-insecure` permits localhost defaults only).
-    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
-    let legacy_hydra_admin_url = arg_or_env(
-        &args,
-        "--hydra-admin",
-        "AUTH_HYDRA_ADMIN",
-        "",
-    );
-    let console_oidc_secret =
-        arg_or_env(&args, "--console-oidc-secret", "CONSOLE_OIDC_SECRET", "");
-    let stash_signing_key = arg_or_env(
-        &args,
-        "--stash-signing-key",
-        "STASH_SIGNING_KEY",
-        "",
-    );
-    let auth_db_url = arg_or_env(&args, "--auth-db", "AUTH_DB_URL", "");
-    let hydra_admin_url = {
-        let value = arg_or_env(&args, "--hydra-admin-url", "HYDRA_ADMIN_URL", "");
-        if value.is_empty() {
-            legacy_hydra_admin_url
-        } else {
-            value
-        }
-    };
-    let expected_oauth_audience = arg_or_env(
-        &args,
-        "--oauth-audience",
-        "OAUTH_AUDIENCE",
-        "control.zeroship.ai",
-    );
+    let console_oidc_secret = cli.console_oidc_secret;
+    let stash_signing_key = cli.stash_signing_key;
+    let auth_db_url = cli.auth_db_url;
+    let expected_oauth_audience = cli.oauth_audience;
 
     if !insecure_dev {
         let mut missing = Vec::new();
-        if auth_public.is_empty() {
-            missing.push("--auth-public / AUTH_PUBLIC");
+        if hydra_public_url.is_empty() {
+            missing.push("--hydra-public-url / HYDRA_PUBLIC_URL");
         }
         if console_oidc_secret.is_empty() {
             missing.push("--console-oidc-secret / CONSOLE_OIDC_SECRET");
@@ -333,47 +461,44 @@ async fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
+
+        // D5: control adopts the shared stash-key strength check (gateway
+        // already had it). Empty is reported by the missing-secrets block
+        // above; this additionally rejects a present-but-weak key (<32
+        // bytes), which also catches the dev sentinel (27 bytes) in prod.
+        if let Err(message) =
+            zeroship_core::config::validate_stash_key(&stash_signing_key, insecure_dev)
+        {
+            tracing::error!(error = %message, "control: refusing to start with weak STASH_SIGNING_KEY");
+            std::process::exit(1);
+        }
     }
 
     let stash_key_bytes = if stash_signing_key.is_empty() {
         // Dev-only fallback. Ephemeral keys are fine for the 10-minute
         // stash window during local development; in prod the guard
         // above already exited.
-        b"dev-stash-key-please-rotate".to_vec()
+        DEV_STASH_SIGNING_KEY.as_bytes().to_vec()
     } else {
         stash_signing_key.into_bytes()
     };
-    let auth_public_value = if auth_public.is_empty() {
-        // Dev-only fallback so a `--dev-insecure` boot succeeds without
-        // a configured hydra. Production exited above.
-        "http://localhost:4444".to_string()
-    } else {
-        auth_public.clone()
-    };
-    let hydra_admin_url_value = if hydra_admin_url.is_empty() {
-        // Dev-only fallback: Hydra's default admin listener in local
-        // docker-compose. Production exited above.
-        "http://localhost:4445".to_string()
-    } else {
-        hydra_admin_url
-    };
     let console_oidc_secret_value = if console_oidc_secret.is_empty() {
-        "dev-console-oidc-secret".to_string()
+        DEV_CONSOLE_OIDC_SECRET.to_string()
     } else {
         console_oidc_secret
     };
     tracing::info!(
-        auth_public = %auth_public_value,
+        hydra_public_url = %hydra_public_url,
         "control: console OIDC RP enabled"
     );
     let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        &auth_public_value,
+        &hydra_public_url,
         "console.zeroship.ai",
         console_oidc_secret_value,
         stash_key_bytes,
     ));
     let hydra_introspector = Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-        &hydra_admin_url_value,
+        &hydra_admin_url,
     ));
 
     let auth_db_url_resolved = if auth_db_url.is_empty() {
@@ -407,9 +532,11 @@ async fn main() -> std::io::Result<()> {
             })?;
         let cfg = bootstrap_builder::BuilderClientBootstrapConfig {
             enabled: true,
-            hydra_admin_url: hydra_admin_url_value.clone(),
+            hydra_admin_url: hydra_admin_url.clone(),
             redirect_uri: builder_redirect_uri,
             client_secret_path: builder_client_secret_path,
+            skip_consent: trusted_oauth_clients
+                .contains(bootstrap_builder::BUILDER_CLIENT_ID),
         };
         bootstrap_builder::bootstrap_builder_oauth_client(&auth_pg, &cfg)
             .await
@@ -443,7 +570,8 @@ async fn main() -> std::io::Result<()> {
         oidc_rp,
         auth_pg,
         auth_db_url: auth_db_url_resolved,
-        hydra_admin_url: hydra_admin_url_value,
+        hydra_admin_url,
+        trusted_oauth_clients,
         expected_oauth_audience,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),

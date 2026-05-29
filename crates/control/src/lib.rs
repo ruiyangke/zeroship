@@ -26,10 +26,11 @@ pub mod registry;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod token_handlers;
-pub mod trusted_clients;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use zeroship_core::config::AuthSection;
 use zeroize::Zeroizing;
 use zeroship_bundle::{BlobStore, BundleStore};
 
@@ -37,6 +38,26 @@ pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};
 pub use registry::Registry;
 pub use stripe_store::StripeStore;
+
+/// Compiled default for first-party OAuth clients that skip Hydra consent.
+///
+/// The shared `[auth].trusted_oauth_clients` file overlay replaces this list
+/// when present. Keeping the builder client as the no-file default preserves
+/// local/dev behavior for deployments that have not opted into the overlay.
+#[must_use]
+pub fn default_trusted_oauth_clients() -> HashSet<String> {
+    [bootstrap_builder::BUILDER_CLIENT_ID.to_string()].into()
+}
+
+/// Resolve trusted OAuth clients from the optional shared auth config.
+#[must_use]
+pub fn resolve_trusted_oauth_clients(auth: &AuthSection) -> HashSet<String> {
+    if auth.trusted_oauth_clients.is_empty() {
+        default_trusted_oauth_clients()
+    } else {
+        auth.trusted_oauth_clients.iter().cloned().collect()
+    }
+}
 
 /// String that zeroizes its heap buffer on drop AND refuses to leak
 /// via `Display` / `Debug` / `serde::Serialize`. Use for any secret
@@ -143,6 +164,8 @@ pub struct AppState {
     /// client registration/deletion; Hydra remains the source of truth for
     /// generated client secrets.
     pub hydra_admin_url: String,
+    /// OAuth client IDs that get `skip_consent=true` when registered.
+    pub trusted_oauth_clients: HashSet<String>,
     /// Expected audience for OAuth access tokens accepted by the control
     /// plane's bearer-token introspection path.
     pub expected_oauth_audience: String,
@@ -161,4 +184,21 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
+}
+
+impl AppState {
+    /// Return whether `client_id` is configured as a trusted OAuth client.
+    #[must_use]
+    pub fn is_trusted(&self, client_id: &str) -> bool {
+        Self::is_trusted_client_id(&self.trusted_oauth_clients, client_id)
+    }
+
+    /// Return whether `client_id` is present in a trusted-client set.
+    #[must_use]
+    pub fn is_trusted_client_id(
+        trusted_oauth_clients: &HashSet<String>,
+        client_id: &str,
+    ) -> bool {
+        trusted_oauth_clients.contains(client_id)
+    }
 }

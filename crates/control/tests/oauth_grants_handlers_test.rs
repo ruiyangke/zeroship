@@ -93,6 +93,7 @@ impl Fixture {
             auth_pg: Arc::new(auth_pg_client),
             auth_db_url: db_url.to_string(),
             hydra_admin_url: hydra.base.clone(),
+            trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
