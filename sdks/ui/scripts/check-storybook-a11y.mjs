@@ -220,6 +220,9 @@ const stories = [
   "components-autocomplete--required",
   "components-autocomplete--required-invalid",
   "components-autocomplete--aria-propagation",
+  // Wave-10 review-fix 🔴 #A / 🔴 #B regression stories.
+  "components-autocomplete--field-aria-autowiring",
+  "components-autocomplete--placeholder-fallback",
   // Slice 7: NumberField + Slider. 10 stories each = 20 new entries.
   "components-numberfield--basic",
   "components-numberfield--all-sizes",

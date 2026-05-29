@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, within } from "@storybook/test";
 import { useEffect, useRef } from "react";
 import { Form } from "@base-ui/react/form";
 import { Autocomplete, Button, Field } from "../components";
@@ -442,4 +443,119 @@ export const AriaPropagation: Story = {
       </div>
     </div>
   ),
+};
+
+/* ─── 11. FieldAriaAutowiring ───────────────────────────────────────── *
+ *
+ * Wave-10 review-fix A regression: inside a `<Field>` with `<Field.Label>`
+ * and `<Field.Description>`, the consumer passes NO `aria-label` /
+ * `aria-labelledby` / `aria-describedby` on `<Autocomplete>`. Pre-fix
+ * the wrapper unconditionally stamped `aria-labelledby={undefined}` and
+ * `aria-describedby={undefined}` on the Input, which clobbered the ids
+ * Base UI's Field bridge had auto-wired through `mergeProps`. The
+ * focused input then had no accessible name. The aria-wiring script
+ * resolves the input by its accessible name (`/email \(field-wired\)/i`,
+ * supplied by `<Field.Label>`) and asserts BOTH `aria-labelledby` and
+ * `aria-describedby` are non-empty on the input. */
+export const FieldAriaAutowiring: Story = {
+  name: "Field auto-wires labelledby + describedby (no consumer aria-*)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Wave-10 review-fix A: inside `<Field>` with " +
+          "`<Field.Label>` + `<Field.Description>`, Autocomplete must let " +
+          "Base UI's Field bridge auto-wire `aria-labelledby` and " +
+          "`aria-describedby` on the input. Pre-fix the wrapper passed " +
+          "`undefined` and overwrote those ids — the input had no " +
+          "accessible name. The story passes NO consumer aria-* props.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Field aria autowiring"
+    >
+      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+        <Field>
+          <Field.Label>Email (field-wired)</Field.Label>
+          <Autocomplete
+            placeholder="email@example.com"
+            items={EMAIL_DOMAINS}
+            data-testid="autocomplete-field-aria-autowiring"
+          >
+            {(d: string) => (
+              <Autocomplete.Item key={d} value={d}>
+                {d}
+              </Autocomplete.Item>
+            )}
+          </Autocomplete>
+          <Field.Description data-testid="autocomplete-field-aria-autowiring-desc">
+            Field-wired description.
+          </Field.Description>
+        </Field>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("combobox", {
+      name: /email \(field-wired\)/i,
+    });
+    await expect(input).toHaveAttribute("aria-labelledby", /\S+/);
+    await expect(input).toHaveAttribute("aria-describedby", /\S+/);
+  },
+};
+
+/* ─── 12. PlaceholderFallback ───────────────────────────────────────── *
+ *
+ * Wave-10 review-fix B regression: a standalone `<Autocomplete>` with NO
+ * Field, NO `aria-label`, and NO `aria-labelledby` must still expose an
+ * accessible name. Placeholder text is not an accessible name on its
+ * own (axe `aria-input-field-name`), so the wrapper promotes
+ * `placeholder` → `aria-label` as a last-resort fallback. The
+ * aria-wiring script resolves the input by `role="combobox"` + name
+ * matching the placeholder string. */
+export const PlaceholderFallback: Story = {
+  name: "Placeholder falls back to aria-label (no Field, no aria-*)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Wave-10 review-fix B: a standalone " +
+          "Autocomplete without a Field wrapper, without `aria-label`, " +
+          "and without `aria-labelledby` falls back to using " +
+          "`placeholder` as its accessible name so screen readers still " +
+          "announce it.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Placeholder fallback"
+    >
+      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+        <Autocomplete
+          placeholder="Search emails"
+          items={EMAIL_DOMAINS}
+          data-testid="autocomplete-placeholder-fallback"
+        >
+          {(d: string) => (
+            <Autocomplete.Item key={d} value={d}>
+              {d}
+            </Autocomplete.Item>
+          )}
+        </Autocomplete>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("combobox", { name: /search emails/i });
+    await expect(input).toHaveAttribute("aria-label", "Search emails");
+  },
 };

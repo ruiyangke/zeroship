@@ -2369,6 +2369,58 @@ await open("components-autocomplete--aria-propagation");
   );
 }
 
+/* ─── 45a. Autocomplete FieldAriaAutowiring — Field-wired ids survive ── *
+ *
+ * Wave-10 review-fix A regression: inside `<Field><Field.Label>…<Field.Description>…`
+ * with NO consumer-passed aria-*, the wrapper used to stamp
+ * `aria-labelledby={undefined}` / `aria-describedby={undefined}` on
+ * `<BaseAutocomplete.Input>`. Base UI's `mergeProps` treated those
+ * `undefined`s as explicit overrides and clobbered the ids Field's
+ * bridge had auto-wired. Post-fix, the wrapper only spreads aria-*
+ * keys when they are actually defined. The story renders Field +
+ * Field.Label + Field.Description and passes NO aria-* on Autocomplete.
+ * We assert the focusable input carries BOTH `aria-labelledby` and
+ * `aria-describedby` with non-empty ids. */
+await open("components-autocomplete--field-aria-autowiring");
+{
+  const input = page.locator(
+    '[data-testid="autocomplete-field-aria-autowiring"] input',
+  );
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = (await input.getAttribute("aria-labelledby")) ?? "";
+  const describedBy = (await input.getAttribute("aria-describedby")) ?? "";
+  const hasLabelledBy = labelledBy.trim().length > 0;
+  const hasDescribedBy = describedBy.trim().length > 0;
+  const ok = hasLabelledBy && hasDescribedBy;
+  report(
+    "Autocomplete FieldAriaAutowiring — Field-wired aria-labelledby + aria-describedby survive on input",
+    ok,
+    `aria-labelledby="${labelledBy}" aria-describedby="${describedBy}"`,
+  );
+}
+
+/* ─── 45b. Autocomplete PlaceholderFallback — placeholder → aria-label ── *
+ *
+ * Wave-10 review-fix B regression: a standalone `<Autocomplete placeholder="…">`
+ * with no Field, no `aria-label`, and no `aria-labelledby` had no
+ * accessible name (placeholder is not one). The wrapper now promotes
+ * placeholder text to `aria-label` as a last-resort fallback. Assert
+ * the input carries `aria-label="Search emails"`. */
+await open("components-autocomplete--placeholder-fallback");
+{
+  const input = page.locator(
+    '[data-testid="autocomplete-placeholder-fallback"] input',
+  );
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const ariaLabel = await input.getAttribute("aria-label");
+  const ok = ariaLabel === "Search emails";
+  report(
+    "Autocomplete PlaceholderFallback — placeholder promotes to aria-label when unlabeled",
+    ok,
+    `aria-label="${ariaLabel}"`,
+  );
+}
+
 /* ─── 46. Combobox Multiple — chip <div> has NO `value=` attribute ──── *
  *
  * Slice-6 review-fix 5 regression: `<Combobox.Chip value=…>` was leaking
