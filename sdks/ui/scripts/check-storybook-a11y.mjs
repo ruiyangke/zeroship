@@ -303,6 +303,7 @@ const stories = [
   "components-meter--with-value",
   "components-meter--ranges",
   "components-meter--disabled",
+  "components-meter--external-aria-labelling",
   "components-meter--rtl",
   "components-progress--determinate",
   "components-progress--indeterminate",
