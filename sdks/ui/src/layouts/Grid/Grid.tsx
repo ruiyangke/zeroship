@@ -74,6 +74,12 @@ export interface GridProps extends ComponentPropsWithoutRef<"div"> {
   minColWidth?: string;
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * Root `data-slot` value. Defaults to `"grid"`. A composing block can
+   * override it so consumers target the outer element via the block's own
+   * slot vocabulary. Mirrors Stack/Card.
+   */
+  "data-slot"?: string;
 }
 
 const GRID_AUTO_FLOW: Record<NonNullable<GridProps["flow"]>, string> = {
@@ -98,6 +104,7 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
     className,
     style,
     children,
+    "data-slot": dataSlot = "grid",
     ...rest
   },
   ref,
@@ -160,7 +167,7 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot="grid"
+      data-slot={dataSlot}
       data-responsive={responsive ? "" : undefined}
       className={composedClassName}
       style={layoutVars}

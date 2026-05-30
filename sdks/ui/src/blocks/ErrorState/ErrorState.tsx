@@ -56,15 +56,20 @@ import { classnames } from "../../components/_classnames";
 import { Center } from "../../layouts/Center";
 import { Stack } from "../../layouts/Stack";
 import { Button } from "../../components/Button";
+import type { Intent } from "../_intent";
 
-export type ErrorStateIntent = "error" | "warning";
+/**
+ * ErrorState narrows the shared {@link Intent} vocabulary to the two
+ * failure severities it paints: `"danger"` (red) and `"warning"` (orange).
+ */
+export type ErrorStateIntent = Extract<Intent, "warning" | "danger">;
 
 export interface ErrorStateProps
   extends Omit<ComponentPropsWithoutRef<"div">, "title"> {
   /**
    * Severity — tints the icon and (under forced-colors) the system
    * color mapping.
-   * - `error` (default): system-red — a failure the user must act on.
+   * - `danger` (default): system-red — a failure the user must act on.
    * - `warning`: system-orange — a degraded-but-recoverable condition.
    */
   intent?: ErrorStateIntent;
@@ -107,7 +112,7 @@ export interface ErrorStateProps
 const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
   function ErrorStateRoot(
     {
-      intent = "error",
+      intent = "danger",
       title,
       description,
       onRetry,
@@ -133,7 +138,7 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
     };
 
     const column = (
-      <Center asChild>
+      <Center asChild data-slot="error-state-column">
         <Stack className="zs-error-state__column" align="center" gap={3}>
           <ErrorStateIcon intent={intent} />
           {title != null ? <ErrorStateTitle>{title}</ErrorStateTitle> : null}
@@ -209,7 +214,7 @@ const ErrorStateTitle = forwardRef<HTMLHeadingElement, ErrorStateTitleProps>(
       if (!isValidElement(children)) {
         if (process.env.NODE_ENV !== "production") {
           // eslint-disable-next-line no-console
-          console.error(
+          console.warn(
             "ErrorState.Title asChild expects a single React element child; received " +
               typeof children +
               "; rendering nothing.",

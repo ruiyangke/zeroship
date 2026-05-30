@@ -6,7 +6,7 @@ import { Tag } from "../blocks";
 const meta: Meta<typeof Tag> = {
   title: "Blocks/Tag",
   component: Tag,
-  parameters: { layout: "centered" },
+  parameters: { layout: "fullscreen" },
   argTypes: {
     size: { control: "inline-radio", options: ["sm", "md"] },
   },

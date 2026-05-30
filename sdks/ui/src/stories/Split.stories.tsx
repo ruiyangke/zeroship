@@ -18,7 +18,7 @@ const panel = (label: string) => (
 const meta: Meta<typeof Split> = {
   title: "Layouts/Split",
   component: Split,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
 };
 
 export default meta;

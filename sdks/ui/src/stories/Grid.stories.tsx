@@ -19,7 +19,7 @@ const box = (label: string) => (
 const meta: Meta<typeof Grid> = {
   title: "Layouts/Grid",
   component: Grid,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
 };
 
 export default meta;

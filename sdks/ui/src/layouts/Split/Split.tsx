@@ -42,9 +42,10 @@ import {
 } from "react";
 import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
-import { type Gap, spaceVar } from "../_layout-primitives";
+import { type Gap, type Side, spaceVar } from "../_layout-primitives";
 
-export type SplitSide = "start" | "end";
+/** Which edge the fixed-size side sits on — the shared {@link Side}. */
+export type SplitSide = Side;
 export type SplitCollapse = "sm" | "md" | "lg";
 
 export interface SplitProps extends ComponentPropsWithoutRef<"div"> {

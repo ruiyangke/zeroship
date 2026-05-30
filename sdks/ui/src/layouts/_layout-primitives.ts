@@ -13,6 +13,12 @@ export type Justify =
   | "between"
   | "around"
   | "evenly";
+/**
+ * Which inline edge a fixed-size region sits on. Shared by the layouts
+ * that pin one part to an edge (`Split.side`, `AppShell.sidebarSide`).
+ * Logical (`start`/`end`), so it follows the writing direction under RTL.
+ */
+export type Side = "start" | "end";
 
 /** Map a Gap/Pad token to its `--zs-space-*` custom property reference. */
 export function spaceVar(token: Gap): string {

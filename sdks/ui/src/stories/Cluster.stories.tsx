@@ -20,7 +20,7 @@ const chip = (label: string) => (
 const meta: Meta<typeof Cluster> = {
   title: "Layouts/Cluster",
   component: Cluster,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
 };
 
 export default meta;

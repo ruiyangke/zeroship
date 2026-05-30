@@ -1,5 +1,5 @@
 // Layout primitives + compositions. Filled per slice.
-export type { Gap, Pad, Align, Justify } from "./_layout-primitives";
+export type { Gap, Pad, Align, Justify, Side } from "./_layout-primitives";
 
 export { Stack } from "./Stack";
 export type { StackProps } from "./Stack";

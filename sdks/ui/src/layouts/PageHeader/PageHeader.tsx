@@ -169,7 +169,7 @@ const PageHeaderTitle = forwardRef<HTMLHeadingElement, PageHeaderTitleProps>(
       if (!isValidElement(children)) {
         if (process.env.NODE_ENV !== "production") {
           // eslint-disable-next-line no-console
-          console.error(
+          console.warn(
             "PageHeader.Title asChild expects a single React element child; received " +
               typeof children +
               "; rendering nothing.",

@@ -4,7 +4,7 @@ import { Badge, type BadgeIntent, type BadgeVariant } from "../blocks";
 const meta: Meta<typeof Badge> = {
   title: "Blocks/Badge",
   component: Badge,
-  parameters: { layout: "centered" },
+  parameters: { layout: "fullscreen" },
   argTypes: {
     intent: {
       control: "inline-radio",

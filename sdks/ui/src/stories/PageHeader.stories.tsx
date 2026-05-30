@@ -6,7 +6,7 @@ import { Button } from "../components";
 const meta: Meta<typeof PageHeader> = {
   title: "Layouts/PageHeader",
   component: PageHeader,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
 };
 
 export default meta;

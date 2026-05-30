@@ -51,8 +51,14 @@ import {
 } from "react";
 import { classnames } from "../../components/_classnames";
 import { Stack } from "../../layouts/Stack";
+import type { Intent } from "../_intent";
 
-export type BannerIntent = "info" | "success" | "warning" | "danger";
+/**
+ * Banner derives from the shared {@link Intent} vocabulary but excludes
+ * `"neutral"` — a neutral banner carries no status, which is meaningless
+ * for a page-level message that exists to flag something.
+ */
+export type BannerIntent = Exclude<Intent, "neutral">;
 
 export interface BannerProps
   extends Omit<ComponentPropsWithoutRef<"div">, "title"> {
@@ -158,12 +164,13 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
   const body = (
     <Stack
       className="zs-banner__row"
+      data-slot="banner-row"
       direction="row"
       align="start"
       gap={3}
     >
       <BannerIcon intent={intent} />
-      <Stack className="zs-banner__text" gap={1}>
+      <Stack className="zs-banner__text" data-slot="banner-text" gap={1}>
         {title != null ? <BannerTitle>{title}</BannerTitle> : null}
         {description != null ? (
           <BannerDescription>{description}</BannerDescription>

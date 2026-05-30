@@ -108,7 +108,7 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
     // inner `Stack` governs the icon→title→description→actions gap. The
     // ergonomic-prop content renders first, then any compound children.
     const column = (
-      <Center asChild>
+      <Center asChild data-slot="empty-state-column">
         <Stack className="zs-empty-state__column" align="center" gap={3}>
           {icon != null ? <EmptyStateIcon>{icon}</EmptyStateIcon> : null}
           {title != null ? <EmptyStateTitle>{title}</EmptyStateTitle> : null}
@@ -175,7 +175,7 @@ const EmptyStateTitle = forwardRef<HTMLHeadingElement, EmptyStateTitleProps>(
       if (!isValidElement(children)) {
         if (process.env.NODE_ENV !== "production") {
           // eslint-disable-next-line no-console
-          console.error(
+          console.warn(
             "EmptyState.Title asChild expects a single React element child; received " +
               typeof children +
               "; rendering nothing.",

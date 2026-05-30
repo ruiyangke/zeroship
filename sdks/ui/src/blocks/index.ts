@@ -1,3 +1,6 @@
+// Shared status-intent vocabulary — Badge/Banner/ErrorState derive from it.
+export type { Intent } from "./_intent";
+
 // Composed blocks — empty/error/loading state family (Wave 2a).
 export {
   EmptyState,
@@ -60,4 +63,5 @@ export {
   type DataTableSort,
   type DataTableSelectionMode,
   type DataTableAlign,
+  type DataTableDensity,
 } from "./DataTable";

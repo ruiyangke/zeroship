@@ -58,8 +58,14 @@ import { Checkbox } from "../../components/Checkbox";
 import { Skeleton } from "../Skeleton";
 import { EmptyState } from "../EmptyState";
 
-/** Horizontal alignment of a column's header + cells. */
+/**
+ * Horizontal alignment of a column's header + cells. Intentionally
+ * narrows the shared layout `Align` — a table cell can't `"stretch"`.
+ */
 export type DataTableAlign = "start" | "center" | "end";
+
+/** Row density — changes cell padding only. */
+export type DataTableDensity = "comfortable" | "compact";
 
 export interface DataTableColumn<T> {
   /** Stable column identity. Used as the React key, the `sort.key`
@@ -151,7 +157,7 @@ export interface DataTableProps<T>
 
   /** Row density. `"comfortable"` (default) or `"compact"` — changes
    *  cell padding only. */
-  density?: "comfortable" | "compact";
+  density?: DataTableDensity;
 
   /**
    * Loading state. When true, the tbody renders `loadingRowCount`

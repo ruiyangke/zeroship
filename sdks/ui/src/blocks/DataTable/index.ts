@@ -5,4 +5,5 @@ export {
   type DataTableSort,
   type DataTableSelectionMode,
   type DataTableAlign,
+  type DataTableDensity,
 } from "./DataTable";

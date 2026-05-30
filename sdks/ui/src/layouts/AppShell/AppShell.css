@@ -49,7 +49,7 @@
 .zs-app-shell__header {
   flex: 0 0 auto;
   background: var(--zs-surface-raised);
-  border-block-end: 0.0625rem solid var(--zs-separator);
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-4);
 }
@@ -90,7 +90,7 @@
 /* ─── Footer — top hairline ───────────────────────────────────────────── */
 .zs-app-shell__footer {
   flex: 0 0 auto;
-  border-block-start: 0.0625rem solid var(--zs-separator);
+  border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-4);
 }

@@ -128,7 +128,7 @@
   background: color-mix(in oklch, var(--zs-label) 20%, transparent);
 }
 .zs-tag__remove:focus-visible {
-  outline: var(--zs-button-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
   opacity: 1;
 }
@@ -146,7 +146,7 @@
   }
 }
 .zs-tag--filter:focus-visible {
-  outline: var(--zs-button-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 .zs-tag--filter[data-selected] {

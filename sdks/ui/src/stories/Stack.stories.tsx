@@ -23,7 +23,7 @@ const box = (label: string) => (
 const meta: Meta<typeof Stack> = {
   title: "Layouts/Stack",
   component: Stack,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
 };
 
 export default meta;

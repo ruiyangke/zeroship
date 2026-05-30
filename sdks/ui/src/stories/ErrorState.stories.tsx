@@ -12,14 +12,14 @@ export default meta;
 
 type Story = StoryObj<typeof ErrorState>;
 
-/* ─── 1. Default (error) with Retry ─────────────────────────────────── */
+/* ─── 1. Default (danger) with Retry ────────────────────────────────── */
 export const WithRetry: Story = {
-  name: "Error + Retry",
+  name: "Danger + Retry",
   parameters: {
     docs: {
       description: {
         story:
-          "Default `intent='error'` (red icon). Passing `onRetry` renders " +
+          "Default `intent='danger'` (red icon). Passing `onRetry` renders " +
           "a real `Retry` Button. The play() clicks it and asserts the " +
           "handler fires. Statically rendered → NOT a live region " +
           "(`live` is false), so there is no `role='alert'`.",
@@ -40,7 +40,7 @@ export const WithRetry: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("error-retry");
-    await expect(root).toHaveAttribute("data-intent", "error");
+    await expect(root).toHaveAttribute("data-intent", "danger");
     // Not a live region by default.
     await expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
 

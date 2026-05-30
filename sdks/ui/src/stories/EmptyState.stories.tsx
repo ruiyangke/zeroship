@@ -49,6 +49,11 @@ export const Default: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("empty-default");
     await expect(root).toHaveAttribute("data-slot", "empty-state");
+    // The centered column carries the block's own slot label (the Center
+    // asChild-merges `empty-state-column` onto the rendered column node) —
+    // NOT the generic `center`/`stack` it would read pre-relabel.
+    const column = root.querySelector("[data-slot='empty-state-column']");
+    await expect(column).not.toBeNull();
     // Title is a real h2 heading; icon is not in the AT tree.
     const heading = canvas.getByRole("heading", { name: /no messages yet/i });
     await expect(heading.tagName).toBe("H2");

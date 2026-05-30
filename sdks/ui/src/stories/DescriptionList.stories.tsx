@@ -5,7 +5,7 @@ import { DescriptionList } from "../blocks";
 const meta: Meta<typeof DescriptionList> = {
   title: "Blocks/DescriptionList",
   component: DescriptionList,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
   argTypes: {
     orientation: {
       control: "inline-radio",

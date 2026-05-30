@@ -10,7 +10,7 @@
  *         └─ .zs-error-state__actions      — action row (Retry Button)
  *
  * Modifier classes (intent):
- *   --error    → icon tinted system-red   (default)
+ *   --danger   → icon tinted system-red   (default)
  *   --warning  → icon tinted system-orange
  *
  * Intent only colors the icon — title/description stay in the label

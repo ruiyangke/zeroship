@@ -43,6 +43,13 @@ export interface CenterProps extends ComponentPropsWithoutRef<"div"> {
   minHeight?: string;
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * Root `data-slot` value. Defaults to `"center"`. A composing block
+   * (e.g. `ErrorState`/`EmptyState` centering their column) overrides it
+   * so consumers can target the outer element via the block's own slot
+   * vocabulary. Mirrors Stack/Card.
+   */
+  "data-slot"?: string;
 }
 
 /**
@@ -57,6 +64,7 @@ export const Center = forwardRef<HTMLDivElement, CenterProps>(function Center(
     className,
     style,
     children,
+    "data-slot": dataSlot = "center",
     ...rest
   },
   ref,
@@ -89,7 +97,7 @@ export const Center = forwardRef<HTMLDivElement, CenterProps>(function Center(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot="center"
+      data-slot={dataSlot}
       data-inline={inline ? "" : undefined}
       className={composedClassName}
       style={layoutVars}

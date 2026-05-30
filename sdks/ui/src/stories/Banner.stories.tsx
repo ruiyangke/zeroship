@@ -6,7 +6,7 @@ import { Button } from "../components";
 const meta: Meta<typeof Banner> = {
   title: "Blocks/Banner",
   component: Banner,
-  parameters: { layout: "padded" },
+  parameters: { layout: "fullscreen" },
   argTypes: {
     intent: {
       control: "inline-radio",

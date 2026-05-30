@@ -42,8 +42,10 @@ import {
 } from "react";
 import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
+import type { Intent } from "../_intent";
 
-export type BadgeIntent = "neutral" | "info" | "success" | "warning" | "danger";
+/** Badge spans the full shared {@link Intent} vocabulary. */
+export type BadgeIntent = Intent;
 export type BadgeVariant = "solid" | "soft" | "outline";
 export type BadgeSize = "sm" | "md";
 

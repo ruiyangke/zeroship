@@ -97,9 +97,10 @@ import {
 import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
 import { Split } from "../Split";
+import type { Side } from "../_layout-primitives";
 
-/** Which inline edge the sidebar rail sits on. */
-export type AppShellSidebarSide = "start" | "end";
+/** Which inline edge the sidebar rail sits on — the shared {@link Side}. */
+export type AppShellSidebarSide = Side;
 
 /* ─── context — Main id + sidebar state for parts/consumers ───────────── */
 

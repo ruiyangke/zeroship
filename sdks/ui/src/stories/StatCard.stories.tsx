@@ -5,7 +5,7 @@ import { StatCard } from "../blocks";
 const meta: Meta<typeof StatCard> = {
   title: "Blocks/StatCard",
   component: StatCard,
-  parameters: { layout: "centered" },
+  parameters: { layout: "fullscreen" },
   argTypes: {
     variant: {
       control: "inline-radio",

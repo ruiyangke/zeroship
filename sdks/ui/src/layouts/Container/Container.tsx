@@ -45,6 +45,12 @@ export interface ContainerProps extends ComponentPropsWithoutRef<"div"> {
   center?: boolean;
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * Root `data-slot` value. Defaults to `"container"`. A composing block
+   * can override it so consumers target the outer element via the block's
+   * own slot vocabulary. Mirrors Stack/Card.
+   */
+  "data-slot"?: string;
 }
 
 // `full` resolves to `none`; every other size resolves to its width
@@ -72,6 +78,7 @@ export const Container = forwardRef<HTMLDivElement, ContainerProps>(
       className,
       style,
       children,
+      "data-slot": dataSlot = "container",
       ...rest
     },
     ref,
@@ -102,7 +109,7 @@ export const Container = forwardRef<HTMLDivElement, ContainerProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot="container"
+        data-slot={dataSlot}
         data-size={size}
         className={composedClassName}
         style={layoutVars}
