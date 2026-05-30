@@ -99,3 +99,12 @@ export {
   type FormSectionFooterProps,
   type FormSectionFooterAlign,
 } from "./FormSection";
+
+// AuthForm block — centered sign-in / sign-up form composing
+// Card · Form · Field · Input · Button · Banner · Separator.
+export {
+  AuthForm,
+  type AuthFormProps,
+  type AuthFormMode,
+  type AuthFormValues,
+} from "./AuthForm";

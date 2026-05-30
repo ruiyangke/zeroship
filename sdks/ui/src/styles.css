@@ -81,6 +81,7 @@
 @import "./blocks/FilterBar/FilterBar.css";
 @import "./blocks/ListView/ListView.css";
 @import "./blocks/FormSection/FormSection.css";
+@import "./blocks/AuthForm/AuthForm.css";
 
 *,
 *::before,
