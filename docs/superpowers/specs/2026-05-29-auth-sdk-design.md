@@ -2298,12 +2298,17 @@ The `pws_` is never non-deterministic, so the Bearer path can always derive it w
 
 ## 7. Subsystem 5 — relay email service
 
-> **Split into its own spec (`2026-05-29-relay-email-design.md`).** Subsystem 5 is large
+> **Split into its own spec — `2026-05-29-relay-email-design.md`, which now EXISTS and is the
+> authoritative, buildable detail for everything below.** This §7 is a one-screen summary for the
+> whole-vision picture; **the sub-spec is the source of truth** for the inbound provider, the
+> `Email`/`Mailer` contract extension, the deliverability/header plan, and the revocation cascade.
+> Where this summary and the sub-spec differ, **the sub-spec wins** (it corrected several claims here
+> against the actual `crates/auth/src/mailer` code — see the sub-spec §0). Subsystem 5 is large
 > (a deliverability-sensitive inbound-mail subsystem), depends on Subsystem 4's
 > `auth.app_user_identities` mapping (the `(app, global_user) → relay_email` lookup the gateway
 > reads when projecting `ZeroShip-User.email`, §6.2/§7.1), and is the least SDK-coupled piece. It is
-> **summarized** here for the whole-vision picture but **slated as a separate spec + separate review
-> gate** so the browser SDK can ship without waiting on MX warm-up. ⚠️ **Round-2 dependency note:**
+> **slated as a separate spec + separate review gate** so the browser SDK can ship without waiting on
+> MX warm-up. ⚠️ **Round-2 dependency note:**
 > the alias substitution rides the same gateway projection step as the `pws_` sub (both are
 > `(app, global_user)` lookups), so Subsystem 5's email-claim swap is **unblocked** by the round-2
 > pairwise relocation rather than blocked by the old accept_consent mis-location. Slice 5 in §9
@@ -2399,15 +2404,24 @@ parts AGENTS.md classifies as an npm/managed concern (`@zeroship/email` "calls f
 native kernel surface. Owning a bespoke inbound MX means owning all of that, which is out of
 proportion to this spec. <!-- Added in round 1: addressing MAJOR — prefer managed inbound provider over bespoke MX -->
 
-**The design uses a managed inbound-email provider** (SES inbound rule → SNS/HTTPS, **or** Postmark
-inbound, **or** Mailgun routes) that POSTs parsed inbound messages to a **thin compio HTTPS
-handler** (`crates/control` or a small `crates/relay` handler — no SMTP server, no IP warm-up):
+**The design uses ONE managed inbound-email provider — Postmark Inbound** (parsed-JSON payload,
+HTTP Basic auth = the existing `verify_basic_auth`), posting to a **thin compio HTTPS handler** on the
+auth service (`/webhooks/relay-inbound`, next to the existing webhooks — no SMTP server, no IP warm-up).
+The sub-spec §4 pins the exact `InboundMessage` schema and explains why Mailgun (no HMAC verifier in
+the tree) and SES-inbound (raw MIME to S3, not parsed JSON) are **not** used.
 
-- The handler looks up `alias → real inbox` via `auth.app_user_identities` (active only).
-- If active, it forwards via the **existing outbound path** (`crates/auth/src/mailer` /
-  the managed provider's send API), rewriting `From:` to `{app-name} via relay <alias>` and
-  `Reply-To:` to the alias. The provider handles DKIM/SPF/DMARC alignment and ARC for the
-  `{relay_domain}` sending identity.
+- The handler resolves `alias → real inbox` via a **JOIN** (`auth.app_user_identities i JOIN
+  auth.users u ON u.id = i.global_user_id WHERE i.relay_email = $1 AND i.revoked_at IS NULL`), then a
+  **suppression gate** (`check_suppression(real_inbox)`) — sub-spec §4.5. `app_user_identities` does
+  **not** store the real inbox; it's `auth.users.email`.
+- If forwardable, it forwards via the **outbound `Mailer`** — but first the `Email`/`Mailer` contract
+  is **extended** (sub-spec §3) so `reply_to`, `envelope_from`, and `headers` are actually emittable
+  (the Resend/SMTP drivers drop them today). The forward rewrites `From:` → relay, sets `Reply-To:` →
+  alias, **pins the envelope-from (Return-Path) to a relay bounce mailbox**, and strips the
+  real-inbox-leaking headers (`Sender`/`X-Original-To`/`Delivered-To`/`Received`/`Authentication-Results`)
+  — sub-spec §5.3. DKIM/SPF/DMARC align on the **relay domain's own** identity (we publish its DKIM
+  selector + SPF + DMARC + MX, sub-spec §5.1); SRS-style envelope rewrite keeps SPF aligned and routes
+  forwarded-mail bounces to **our** bounce handler.
 - **v1 scope = app → user forwarding only (O7, DECIDED — round-4 pilot).** Inbound user replies to a
   relay alias are **BOUNCED** with a clear "replies not yet supported" message — **never silently
   dropped**. A bounce gives the sender a delivery failure they can act on, instead of a black hole.
@@ -2440,24 +2454,39 @@ dev topology is defined here: <!-- Added in round 1: addressing MAJOR — define
 
 ### 7.4 Abuse / deliverability
 
-- **Bounce handling**: forwarding bounces (provider webhook) feed `auth.email_suppressions`
-  (existing table); a suppressed real inbox disables forwarding for that user across all aliases.
-- **Loop protection**: drop messages already carrying our `X-ZS-Relay:` header; per-alias rate
-  limit; max hop count.
-- **Abuse**: per-app and per-alias volume caps; an alias forwarding to a suppressed/complained
-  inbox is auto-revoked.
-- **Deliverability**: the managed provider owns IP warm-up, SPF/DKIM/DMARC for `{relay_domain}`,
-  and ARC. We publish the DNS records the provider requires; warm-up is the provider's concern.
+- **Bounce handling**: forwarded-mail bounces feed `auth.email_suppressions` through the **existing
+  delivery-event webhooks** (`/webhooks/postmark`, `/webhooks/ses-sns` — the bounce/complaint ones, NOT
+  the inbound-receive webhook; these are distinct products, sub-spec §0/§7). A suppressed real inbox
+  disables forwarding for that user across all aliases (via the §4.5 suppression gate).
+- **Loop protection**: stamp `X-ZS-Relay` on every forward (now emittable via the §3 contract
+  extension) and drop inbound already carrying it; hop-count cap. Tied to the header fix, not the
+  delivery-webhook reuse (sub-spec §7).
+- **Rate limits / abuse**: per-alias (`relay:alias:{alias}`) and per-app (`relay:app:{app_id}`) leaky
+  buckets on the **existing `auth.rate_limits` store** (`store::ratelimit::consume`, the same primitive
+  the login paths use). Sustained abuse auto-revokes the alias.
+- **Deliverability**: the **relay domain's own** DKIM selector + SPF include + DMARC + MX are published
+  (sub-spec §5.1); the provider owns IP warm-up. Because v1 rewrites `From:` to the relay, DMARC aligns
+  on the relay's DKIM (no dependence on the third party's broken upstream signature); ARC is a v2
+  concern (only if we ever forward without rewriting From).
 
 ### 7.5 Lifecycle / revocation
 
-Revoking a grant (deleting the `control.oauth_grants` row for `(subject, client_id)` — the single
-ledger, round-3) cascades: set `app_user_identities.revoked_at = now()`, which disables the relay
-alias (subsequent inbound mail to the alias bounces) and frees its partial-unique slot. Re-granting
-**reuses the deterministic `pws_` sub** (the row is upserted, `revoked_at` cleared — §6.4) but mints a
-**fresh relay alias** (Apple Hide-My-Email applies to the *alias*, not the sub). App delete cascades
-to revoke all the app's aliases and pairwise rows, and to delete the `control.oauth_grants` rows for
-that `client_id`. <!-- Added in round 2: addressing MINOR — fresh ALIAS on re-grant, deterministic sub reused (reconciles §6.4 / DDL PK); Updated in round 3: revocation keys on control.oauth_grants, the single ledger -->
+Revoking a grant is owned by **control's `revoke_grant` handler**, which already writes
+`control.oauth_grants` through `state.auth_pg` — and that **same handle reaches the `auth` schema in
+the one shared Postgres** (it already reads `auth.users`, touches `auth.gateway_sessions`). So the
+cascade is **ONE transaction over both schemas**: `DELETE FROM control.oauth_grants …` **and**
+`UPDATE auth.app_user_identities SET revoked_at = now() …` commit atomically — there is no window where
+the grant is gone but the alias still forwards (the privacy failure the round-1 design risked). The
+best-effort Hydra consent-revoke runs **after** commit, as today. Setting `revoked_at` disables the
+relay alias (subsequent inbound 422-bounces, sub-spec §4.5) and frees its partial-unique slot. The
+**mechanism, owner, and failure semantics are fully specified in sub-spec §6** (signout is NOT a
+revoke; app-delete revokes all the app's aliases in the app-delete txn). Re-granting **reuses the
+deterministic `pws_` sub** AND — per the sub-spec's authoritative §6.1 decision — **keeps the SAME
+relay alias** (un-revokes the row, `revoked_at` cleared): rotating to a fresh alias on every re-grant
+would leave dead aliases bouncing for newsletters/receipts that still hold them. Rotation to a new
+address happens **only on an explicit user action** (the Apple Hide-My-Email management model). This
+**supersedes** the earlier "mints a fresh relay alias on re-grant" wording.
+<!-- Added in round 2: addressing MINOR — deterministic sub reused; Updated in round 3: revocation keys on control.oauth_grants; Updated in relay sub-spec round: name the owner+single-txn mechanism+failure semantics (sub-spec §6); re-grant KEEPS the alias (Apple model, §6.1) rather than rotating — supersedes "fresh alias on re-grant" -->
 
 ## 8. Cross-cutting — data model, error model, security, testing
 
@@ -3084,11 +3113,17 @@ re-login, that all three arms (cookie/raw-Hydra/wrapper) project the same `pws_`
 browser token carries no global UUID. F4-A (Hydra-native) stays a future optimization gated on the
 S2 spike.
 
-**Slice 5 — relay email (Subsystem 5) — SEPARATE SPEC.** Tracked in
-`2026-05-29-relay-email-design.md` (split per §7). Alias generation on first consent (partial-unique
-+ generate-and-retry); **managed inbound provider + thin compio webhook handler** (not a bespoke
-MX); suppression + loop/abuse guards; grant-revoke cascade; dev MX-sink topology (§7.3). e2e against
-the local mailpit/inbucket sink.
+**Slice 5 — relay email (Subsystem 5) — SEPARATE SPEC (now written).** Implemented against
+`2026-05-29-relay-email-design.md`, which carries the full build order (its §12). Summary: extend the
+`Email`/`Mailer` contract so `reply_to`/`envelope_from`/`headers` are emittable across all drivers
+(sub-spec §3); **Postmark Inbound** as the single inbound provider (parsed JSON + Basic auth =
+`verify_basic_auth`) with a NEW `/webhooks/relay-inbound` route + `InboundMessage` payload (§4); the
+`alias → real inbox` JOIN + suppression + revocation gates (§4.5); From/Reply-To/envelope-from rewrite
++ header strip for privacy and the relay-domain DKIM/SPF/DMARC/MX identity plan (§5);
+`X-ZS-Relay` loop guard + `auth.rate_limits` per-alias/per-app buckets (§7); the **transactional
+grant-revoke cascade in control's `revoke_grant` over both schemas** (§6); dev mailpit-sink topology +
+faithful e2e posting the literal Postmark `InboundMessage` shape (§9/§10). e2e against the local
+mailpit/inbucket sink.
 
 A `writing-plans` doc converts each slice into ordered tasks before implementation; each slice is
 implemented by a background subagent (opus), reviewed (diff + tests + decisions) before the next.
