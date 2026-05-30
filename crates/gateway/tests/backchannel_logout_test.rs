@@ -35,6 +35,7 @@ use uuid::Uuid;
 use zeroship_gateway::{
     backchannel_logout,
     blob_cache::{BlobCache, DiskBlobCache},
+    db::DbConfig,
     enforce, idempotency,
     oidc_rp::OidcRp,
     proxy::HashRing,
@@ -313,7 +314,7 @@ fn sign_logout_token(key: &TestKey, issuer: &str, sub: &str, jti: &str) -> Strin
     encode(&header, &claims, &key.encoding).expect("encode logout_token")
 }
 
-fn build_handler_state(db: Arc<Client>, auth_base: &str) -> Arc<GateState> {
+fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
     let mut tmp = std::env::temp_dir();
     tmp.push(format!("zsgate-bcl-{}", Uuid::new_v4().simple()));
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -394,7 +395,12 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         }
     })
     .detach();
+    // `db` (single client) drives the test's direct seed/assert/cleanup
+    // helpers (all `&Client`); `db_cfg` backs the handler's `GateState`,
+    // which now holds a `DbConfig` (the handler builds its own per-thread
+    // pool from it). Both point at the same rows.
     let db = Arc::new(client);
+    let db_cfg = DbConfig::new(dsn.clone(), 4);
 
     let key = make_key();
     let jwks_key = Arc::new(key.clone());
@@ -429,7 +435,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token = sign_logout_token(&key, &issuer, &target_user_string, &jti);
-    let state = build_handler_state(db.clone(), &auth_base);
+    let state = build_handler_state(db_cfg.clone(), &auth_base);
     let app = test::init_service(
         web::App::new()
             .state(state.clone())

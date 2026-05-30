@@ -339,12 +339,34 @@ async fn resolve_dpop_user_header(
                     tracing::warn!("DPoP wrapper token missing sub — rejecting");
                     return None;
                 }
-                if let (Some(db), Some(subject)) = (
+                if let (Some(db_cfg), Some(subject)) = (
                     state.db.as_ref(),
                     zeroship_core::wrapper_revocation::subject_uuid(&claims.sub),
                 ) {
+                    // Check out a pooled connection for just this
+                    // revocation lookup and release it on drop.
+                    let pool = match crate::db::checkout(db_cfg).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "DPoP wrapper revocation: pg pool checkout failed"
+                            );
+                            return None;
+                        }
+                    };
+                    let conn = match pool.get().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "DPoP wrapper revocation: pg pool checkout failed"
+                            );
+                            return None;
+                        }
+                    };
                     match zeroship_core::wrapper_revocation::is_subject_revoked_since(
-                        db.as_ref(),
+                        &conn,
                         subject,
                         claims.iat,
                     )
@@ -584,9 +606,25 @@ async fn resolve_bearer_user_header(
         // `pws_…` pairwise subject — which the UUID-only subject denylist
         // could never match. Per-app: a marker for this app's client_id
         // does not affect the same user on a sibling app.
-        if let Some(db) = state.db.as_ref() {
+        if let Some(db_cfg) = state.db.as_ref() {
+            // Check out a pooled connection for just this family-marker
+            // lookup and release it on drop.
+            let pool = match crate::db::checkout(db_cfg).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Bearer wrapper revocation: pg pool checkout failed");
+                    return BearerOutcome::Invalid;
+                }
+            };
+            let conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Bearer wrapper revocation: pg pool checkout failed");
+                    return BearerOutcome::Invalid;
+                }
+            };
             match zeroship_core::wrapper_revocation::is_family_revoked_since(
-                db.as_ref(),
+                &conn,
                 &claims.client_id,
                 &claims.sub,
                 claims.iat,
@@ -662,9 +700,25 @@ async fn resolve_bearer_user_header(
         // binding above already proved they agree (or the aud fallback did),
         // and the marker is written against the route's client. The sub is
         // the global Hydra UUID today; Slice 4 will project it to a pws_.
-        if let Some(db) = state.db.as_ref() {
+        if let Some(db_cfg) = state.db.as_ref() {
+            // Check out a pooled connection for just this family-marker
+            // lookup and release it on drop.
+            let pool = match crate::db::checkout(db_cfg).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "raw-Hydra Bearer revocation: pg pool checkout failed");
+                    return BearerOutcome::Invalid;
+                }
+            };
+            let conn = match pool.get().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "raw-Hydra Bearer revocation: pg pool checkout failed");
+                    return BearerOutcome::Invalid;
+                }
+            };
             match zeroship_core::wrapper_revocation::is_family_revoked_since(
-                db.as_ref(),
+                &conn,
                 expected_client_id,
                 &claims.sub,
                 claims.iat,
@@ -786,8 +840,24 @@ async fn resolve_app_session_user_header_inner(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let session_id = oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)?;
-    let db = state.db.as_ref()?;
-    let session = match sessions::validate(db, session_id, app_id_str).await {
+    // Check out a pooled connection for just this validate (which slides
+    // the idle window) and release it on drop.
+    let db_cfg = state.db.as_ref()?;
+    let pool = match crate::db::checkout(db_cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "gateway: pg pool checkout failed (session validate)");
+            return None;
+        }
+    };
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "gateway: pg pool checkout failed (session validate)");
+            return None;
+        }
+    };
+    let session = match sessions::validate(&conn, session_id, app_id_str).await {
         Ok(Some(s)) => s,
         Ok(None) => return None,
         Err(e) => {
@@ -798,6 +868,7 @@ async fn resolve_app_session_user_header_inner(
             return None;
         }
     };
+    drop(conn);
     let user = oidc_rp::WorkerUser {
         id: &session.user_id,
         email: session.email.as_deref().unwrap_or(""),
@@ -1149,7 +1220,7 @@ mod tests {
     fn build_state_with_wrapper_and_auth_ui_url_and_db(
         signing: ed25519_dalek::SigningKey,
         auth_ui_url: &str,
-        db: Option<std::sync::Arc<compio_postgres::Client>>,
+        db: Option<crate::db::DbConfig>,
     ) -> std::sync::Arc<crate::GateState> {
         // Preserve the historical behavior: `auth_ui_url` drives the
         // OidcRp dial URL (and JWKS), with the issuer derived from it.
@@ -1170,7 +1241,7 @@ mod tests {
     fn build_state_with_wrapper_and_oidc_and_db(
         signing: ed25519_dalek::SigningKey,
         oidc_rp: crate::oidc_rp::OidcRp,
-        db: Option<std::sync::Arc<compio_postgres::Client>>,
+        db: Option<crate::db::DbConfig>,
     ) -> std::sync::Arc<crate::GateState> {
         use std::sync::Arc as StdArc;
 
@@ -1474,14 +1545,7 @@ mod tests {
             eprintln!("skipping (no AUTH_DB_URL)");
             return;
         };
-        let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
-            .await
-            .expect("connect auth db");
-        compio::runtime::spawn(async move {
-            let _ = connection.run().await;
-        })
-        .detach();
-        let db = std::sync::Arc::new(client);
+        let db_cfg = crate::db::DbConfig::new(dsn.clone(), 4);
 
         let subject = Uuid::new_v4();
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -1489,7 +1553,7 @@ mod tests {
         let state = build_state_with_wrapper_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
-            Some(db.clone()),
+            Some(db_cfg.clone()),
         );
 
         let jkt = client_jkt(&client_key);
@@ -1519,9 +1583,13 @@ mod tests {
             "wrapper should resolve before subject revocation"
         );
 
-        zeroship_core::wrapper_revocation::revoke_subject(&db, subject)
-            .await
-            .expect("revoke subject");
+        {
+            let pool = crate::db::checkout(&db_cfg).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            zeroship_core::wrapper_revocation::revoke_subject(&conn, subject)
+                .await
+                .expect("revoke subject");
+        }
 
         let second_proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
         let second_req = ntex::web::test::TestRequest::default()
@@ -1537,7 +1605,9 @@ mod tests {
             "revoked wrapper subject must be rejected"
         );
 
-        db.execute(
+        let pool = crate::db::checkout(&db_cfg).await.expect("pool checkout");
+        let conn = pool.get().await.expect("pool checkout");
+        conn.execute(
             "DELETE FROM auth.wrapper_revoked_subjects WHERE subject = $1",
             &[&subject],
         )
@@ -2415,16 +2485,9 @@ mod tests {
     // denylist silently no-op'd it); (2) revocation is PER-APP — revoking a
     // user on app A does NOT revoke the same sub on app B.
 
-    async fn connect_auth_db() -> Option<std::sync::Arc<compio_postgres::Client>> {
+    async fn connect_auth_db() -> Option<crate::db::DbConfig> {
         let dsn = std::env::var("AUTH_DB_URL").ok()?;
-        let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
-            .await
-            .expect("connect auth db");
-        compio::runtime::spawn(async move {
-            let _ = connection.run().await;
-        })
-        .detach();
-        Some(std::sync::Arc::new(client))
+        Some(crate::db::DbConfig::new(dsn, 4))
     }
 
     #[compio::test]
@@ -2460,9 +2523,13 @@ mod tests {
         );
 
         // Revoke the (client_id, pws_sub) family AFTER the token's iat.
-        zeroship_core::wrapper_revocation::revoke_family(&db, client_id, &pws_sub)
-            .await
-            .expect("revoke_family");
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws_sub)
+                .await
+                .expect("revoke_family");
+        }
 
         // After revocation: Invalid (the dead branch is now alive for pws_).
         assert!(
@@ -2473,7 +2540,9 @@ mod tests {
             "revoked pws_ family must be Invalid on the wrapper path"
         );
 
-        db.execute(
+        let pool = crate::db::checkout(&db).await.expect("pool checkout");
+        let conn = pool.get().await.expect("pool checkout");
+        conn.execute(
             "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
             &[&client_id, &pws_sub],
         )
@@ -2530,9 +2599,13 @@ mod tests {
         let request_id = Uuid::new_v4();
 
         // Revoke ONLY app A's family for this sub.
-        zeroship_core::wrapper_revocation::revoke_family(&db, "oac_app_a", &sub)
-            .await
-            .expect("revoke_family app A");
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, "oac_app_a", &sub)
+                .await
+                .expect("revoke_family app A");
+        }
 
         // App A token: revoked → Invalid.
         assert!(
@@ -2551,12 +2624,15 @@ mod tests {
             "app A revocation must NOT revoke the same sub on app B"
         );
 
-        db.execute(
+        let pool = crate::db::checkout(&db).await.expect("pool checkout");
+        let conn = pool.get().await.expect("pool checkout");
+        conn.execute(
             "DELETE FROM auth.token_revocations WHERE sub = $1",
             &[&sub],
         )
         .await
         .ok();
+        drop(conn);
         drop(srv);
     }
 
@@ -2676,19 +2752,23 @@ mod tests {
 
         // Mint a REAL, currently-valid cookie session for a user.
         let user_id = Uuid::new_v4();
-        let session = crate::sessions::create(
-            &db,
-            &crate::sessions::NewSession {
-                user_id: &user_id.to_string(),
-                app_id: &app_id_str,
-                email: Some("cookie-user@example.com"),
-                name: Some("Cookie User"),
-                avatar_url: None,
-                email_verified: true,
-            },
-        )
-        .await
-        .expect("create cookie session");
+        let session = {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            crate::sessions::create(
+                &conn,
+                &crate::sessions::NewSession {
+                    user_id: &user_id.to_string(),
+                    app_id: &app_id_str,
+                    email: Some("cookie-user@example.com"),
+                    name: Some("Cookie User"),
+                    avatar_url: None,
+                    email_verified: true,
+                },
+            )
+            .await
+            .expect("create cookie session")
+        };
 
         // Sanity: that cookie ALONE (no Bearer) authenticates the User route.
         let cookie_name = oidc_rp::app_session_cookie_name(true); // insecure_dev
@@ -2768,6 +2848,10 @@ mod tests {
             "Invalid Bearer on User route must 401, NOT fall back to the valid cookie, got {outcome:?}"
         );
 
-        crate::sessions::revoke(&db, session.id).await.ok();
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            crate::sessions::revoke(&conn, session.id).await.ok();
+        }
     }
 }

@@ -115,7 +115,35 @@ pub async fn handle(
     // Revoke. The verifier guarantees at least one of sub/sid is
     // present, but only sub maps to a row filter today (the
     // `gateway_sessions.user_id` column).
-    if let Some(db) = state.db.as_ref() {
+    // Check out ONE pooled connection for the whole revocation block.
+    // Every DB touch below (session revoke, wrapper-subject revoke, audit
+    // insert) runs sequentially with no outbound HTTP in between — the
+    // `logout_token` verify (which may fetch JWKS) already completed
+    // above — so a single short-lived checkout covers the block and is
+    // released on drop at the end of the `if let`. `pool` is bound first
+    // so it outlives the `conn` borrowed from it (drop is reverse
+    // declaration order).
+    let pool = match state.db.as_ref() {
+        Some(db_cfg) => match crate::db::checkout(db_cfg).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");
+                None
+            }
+        },
+        None => None,
+    };
+    let conn = match pool.as_ref() {
+        Some(pool) => match pool.get().await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(conn) = conn.as_deref() {
         match token.sub.as_deref() {
             Some(sub) => {
                 let revoked = match revoke_scope.as_deref() {
@@ -124,7 +152,7 @@ pub async fn handle(
                     // into the global wrapper denylist — that is a cross-app
                     // nuke; a per-app BCL must not log the user out of other
                     // apps.
-                    Some(app_name) => sessions::revoke_app_sessions_for_user(db, app_name, sub)
+                    Some(app_name) => sessions::revoke_app_sessions_for_user(conn, app_name, sub)
                         .await
                         .unwrap_or_else(|e| {
                             tracing::error!(
@@ -141,8 +169,7 @@ pub async fn handle(
                         if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub)
                         {
                             if let Err(e) = zeroship_core::wrapper_revocation::revoke_subject(
-                                db.as_ref(),
-                                subject,
+                                conn, subject,
                             )
                             .await
                             {
@@ -158,7 +185,7 @@ pub async fn handle(
                                 "backchannel_logout: non-UUID sub cannot enter wrapper denylist"
                             );
                         }
-                        sessions::revoke_all_for_user(db, sub).await.unwrap_or_else(|e| {
+                        sessions::revoke_all_for_user(conn, sub).await.unwrap_or_else(|e| {
                             tracing::error!(
                                 error = %e,
                                 "backchannel_logout: revoke_all_for_user failed"
@@ -174,7 +201,7 @@ pub async fn handle(
                     revoked,
                     "backchannel_logout: sessions revoked"
                 );
-                emit_revocation_audit(db, &aud, sub, token.sid.as_deref(), &token.jti, revoked)
+                emit_revocation_audit(conn, &aud, sub, token.sid.as_deref(), &token.jti, revoked)
                     .await;
             }
             None => {

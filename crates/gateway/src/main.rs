@@ -79,6 +79,13 @@ struct GateCli {
     #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
 
+    /// Maximum number of pooled PostgreSQL connections the gateway
+    /// keeps open for session/anchor/revocation work. Bounds concurrent
+    /// DB fan-out so a Hydra brownout (or any stalled query) cannot pile
+    /// up unbounded checkouts. Ignored when `--db` is empty.
+    #[arg(long = "db-pool-size", env = "DB_POOL_SIZE", default_value_t = 16)]
+    db_pool_size: usize,
+
     /// PEM/PKCS#8 signing key file for gateway-issued wrapper tokens.
     #[arg(
         long = "signing-key-file",
@@ -234,6 +241,7 @@ fn main() -> std::io::Result<()> {
     let blob_cache_disk_gb = cli.blob_cache_disk_gb;
     let blob_cache_disk_root = cli.blob_cache_disk_root;
     let auth_ui_url = cli.auth_ui_url;
+    let db_pool_size = cli.db_pool_size.max(1);
     // DSN carries the database password, so it is resolved like any other
     // secret (literals — including colon-laden DSNs — pass through unchanged).
     let pg_dsn = zeroship_core::config::obtain_secret(
@@ -453,26 +461,53 @@ fn main() -> std::io::Result<()> {
 
     let hash_ring = proxy::HashRing::new(worker_urls.clone(), max_per_worker);
 
-    // Postgres client for the per-origin session store. The binary
-    // accepts an empty DSN (`--db ""`) for dev / smoke modes that don't
-    // exercise the OIDC RP path; downstream handlers gracefully return
-    // 401 when `db` is None instead of panicking.
-    let db: Option<Arc<compio_postgres::Client>> = if pg_dsn.is_empty() {
+    // Postgres connection config for the per-origin session store and the
+    // anchor/revocation read/write paths. The binary accepts an empty
+    // DSN (`--db ""`) for dev / smoke modes that don't exercise the OIDC
+    // RP path; downstream handlers gracefully return 401 when `db` is
+    // None instead of panicking.
+    //
+    // `GateState.db` carries only the `Send + Sync` connection params: the
+    // compio-postgres `Pool` is `!Send`, so the real pool is built lazily
+    // **per ntex worker thread** in a thread-local (see `crate::db`).
+    // Every per-request DB touch checks out a pooled connection for ONE
+    // operation and releases it on drop, so no single shared connection
+    // serializes gateway DB work.
+    //
+    // `dpop_jti_cache` keeps its own dedicated single connection: the
+    // `PgJtiCache` type (in zeroship-core) owns an `Arc<Client>` (which
+    // *is* `Send + Sync`), and its DPoP replay-insert path is unchanged
+    // by this slice — so it stays exactly as it was before the pool
+    // migration.
+    let (db, dpop_jti_cache): (
+        Option<zeroship_gateway::db::DbConfig>,
+        zeroship_core::dpop::TieredJtiCache,
+    ) = if pg_dsn.is_empty() {
         tracing::warn!(
             "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
         );
-        None
+        (None, zeroship_core::dpop::TieredJtiCache::default())
     } else {
-        let (pg_client, pg_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
+        let db_cfg = zeroship_gateway::db::DbConfig::new(pg_dsn.clone(), db_pool_size);
+        tracing::info!(
+            db_pool_size = db_cfg.pool_size(),
+            "gateway pg connection pool configured (per-worker)"
+        );
+
+        // Dedicated single connection for the DPoP jti replay cache.
+        let (jti_client, jti_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
             .await
-            .expect("gateway: pg connect");
+            .expect("gateway: pg connect (dpop jti cache)");
         compio::runtime::spawn(async move {
-            if let Err(e) = pg_conn.run().await {
-                tracing::error!(error = %e, "gateway/pg connection ended");
+            if let Err(e) = jti_conn.run().await {
+                tracing::error!(error = %e, "gateway/pg dpop-jti connection ended");
             }
         })
         .detach();
-        Some(Arc::new(pg_client))
+        let pg = zeroship_core::dpop::PgJtiCache::new(Arc::new(jti_client));
+        let dpop_jti_cache = zeroship_core::dpop::TieredJtiCache::with_pg(pg);
+
+        (Some(db_cfg), dpop_jti_cache)
     };
 
     // OIDC RP — services every `{app}.zeroship.ai` host. The
@@ -485,14 +520,6 @@ fn main() -> std::io::Result<()> {
         oidc_client_secret,
         stash_signing_key.into_bytes(),
     ));
-
-    let dpop_jti_cache = db
-        .as_ref()
-        .map(|client| {
-            let pg = zeroship_core::dpop::PgJtiCache::new(client.clone());
-            zeroship_core::dpop::TieredJtiCache::with_pg(pg)
-        })
-        .unwrap_or_default();
 
     let state = Arc::new(GateState {
         config: GateConfig {

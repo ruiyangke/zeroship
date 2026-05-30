@@ -14,6 +14,7 @@ pub mod auth;
 pub mod backchannel_logout;
 pub mod blob_cache;
 pub mod compiled;
+pub mod db;
 pub mod dispatch;
 pub mod dpop_exchange;
 pub mod enforce;
@@ -109,11 +110,27 @@ pub struct GateState {
     /// `{app}.zeroship.ai` host — the per-app `redirect_uri` is the
     /// only thing that changes per request.
     pub oidc_rp: Arc<oidc_rp::OidcRp>,
-    /// Postgres client used by the gateway's per-origin session store
-    /// (`auth.gateway_sessions`). `Option` because the binary supports
-    /// a dev "no-DB" mode (when `--db` is empty); test fixtures also
-    /// rely on `None` to construct `GateState` without a live PG.
-    pub db: Option<Arc<compio_postgres::Client>>,
+    /// Postgres connection-**pool** handle for the gateway's per-origin
+    /// session store (`auth.gateway_sessions`) and the anchor/revocation
+    /// read/write paths.
+    ///
+    /// The compio-postgres [`Pool`](compio_postgres::Pool) is `!Send`
+    /// (single-threaded, `Rc`/`Cell` internals), so it cannot live in the
+    /// `Arc<GateState>` shared across ntex's worker arbiter threads.
+    /// Instead `GateState.db` carries only the connection *parameters*
+    /// (DSN + max size, both `Send + Sync`); the actual `Pool` is built
+    /// lazily **per worker thread**, wrapped in an `Rc`, and stashed in a
+    /// thread-local — the same pattern the sandbox controller uses for
+    /// its per-compio-worker pool (`crates/sandbox/src/db.rs`). Handlers
+    /// reach a checked-out connection via
+    /// [`db::checkout`](crate::db::checkout); each checkout covers ONE
+    /// operation and releases on drop, so no single shared connection
+    /// serializes gateway DB work.
+    ///
+    /// `Option` because the binary supports a dev "no-DB" mode (when
+    /// `--db` is empty); test fixtures also rely on `None` to construct
+    /// `GateState` without a live PG.
+    pub db: Option<db::DbConfig>,
     /// Tiered replay cache for `DPoP` proof `jti` claims (RFC 9449
     /// §11.1). The local tier rejects hot repeats without a DB round-trip;
     /// the PG tier rejects replays that land on a sibling gateway process.

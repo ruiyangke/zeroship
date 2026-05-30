@@ -1287,15 +1287,30 @@ async fn handle_auth_callback(
         }
     };
 
-    // 4. Create a per-origin session row.
-    let Some(db) = state.db.as_ref() else {
+    // 4. Create a per-origin session row. Check out a pooled connection
+    //    for just this insert and release it on drop.
+    let Some(db_cfg) = state.db.as_ref() else {
         return render_callback_error(
             state.config.insecure_dev,
             "gateway not configured with a session database",
         );
     };
+    let pool = match crate::db::checkout(db_cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");
+            return render_callback_error(state.config.insecure_dev, "session create failed");
+        }
+    };
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");
+            return render_callback_error(state.config.insecure_dev, "session create failed");
+        }
+    };
     let session = match crate::sessions::create(
-        db,
+        &conn,
         &crate::sessions::NewSession {
             user_id: &claims.sub,
             app_id: &app_id,
@@ -1313,6 +1328,9 @@ async fn handle_auth_callback(
             return render_callback_error(state.config.insecure_dev, "session create failed");
         }
     };
+    // Release the pooled connection before building the response — no
+    // further DB work happens on this path.
+    drop(conn);
 
     // 5. 302 back to the original path, set app-session cookie, clear
     //    the stash cookie. Two `Set-Cookie` headers on one response is
