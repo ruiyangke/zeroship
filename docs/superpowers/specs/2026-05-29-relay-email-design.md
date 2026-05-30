@@ -82,18 +82,25 @@ reads and writes is:
 
 ```sql
 auth.app_user_identities (
-  id              text PRIMARY KEY,    -- pws_… pairwise sub (deterministic)
-  app_id          text NOT NULL,
+  app_client_id   text NOT NULL,        -- per-app OAuth client_id (oac_<base62>); §6.2
   global_user_id  uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  pairwise_sub    text NOT NULL,        -- pws_… pairwise sub (deterministic); indexed for reverse-lookup
   relay_email     text,                -- {token}@{relay_domain}; NULL until email scope granted
   created_at      timestamptz NOT NULL DEFAULT now(),
   revoked_at      timestamptz,
-  UNIQUE (app_id, global_user_id)
+  PRIMARY KEY (app_client_id, global_user_id)
 )
+CREATE INDEX app_user_identities_pairwise_sub_idx
+  ON auth.app_user_identities (pairwise_sub);
 -- partial-unique: active aliases only
-CREATE UNIQUE INDEX app_user_identities_relay_active
+CREATE UNIQUE INDEX app_user_identities_relay_active_idx
   ON auth.app_user_identities (relay_email) WHERE relay_email IS NOT NULL AND revoked_at IS NULL;
 ```
+
+> Slice-4 reconciliation: `app_client_id` (the `oac_` client_id, §6.2) replaces the round-2 `app_id`
+> column name, and `pairwise_sub` is its own column (the natural key is `(app_client_id,
+> global_user_id)`, NOT the `pws_`). The §6.2 pin and the three keying sites below are unchanged —
+> all key on `app_client_id` = the `oac_` client_id.
 
 The relay alias is the value the gateway projects into `ZeroShip-User.email` and the id_token `email`
 claim, so **no real address ever reaches an app** (main spec §7.1 substitution table). This spec covers
@@ -483,7 +490,7 @@ The exact query the handler runs (active map only, then suppression-gated):
 
 ```sql
 -- Step 5: alias → real inbox, ACTIVE map only.
-SELECT u.email::text AS real_inbox, i.app_id, i.global_user_id
+SELECT u.email::text AS real_inbox, i.app_client_id, i.global_user_id
 FROM auth.app_user_identities i
 JOIN auth.users u ON u.id = i.global_user_id
 WHERE i.relay_email = $1            -- $1 = normalize_alias(OriginalRecipient) (§4.4a), lowercased, +tag stripped
@@ -763,13 +770,13 @@ let mut tx = conn.transaction().await?;               // &mut conn — compiles;
 tx.execute(
     "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
     &[&authz.principal_id, &client_id]).await?;
-// SAME txn — revoke the relay alias for THIS (app, user). app_user_identities.app_id holds the
-// per-app OAuth client_id (oac_<base62>, §6.2), so the alias row is keyed DIRECTLY by client_id —
+// SAME txn — revoke the relay alias for THIS (app, user). app_user_identities.app_client_id holds
+// the per-app OAuth client_id (oac_<base62>, §6.2), so the alias row is keyed DIRECTLY by client_id —
 // no join, exact-match on the SAME value the explicit-revoke path already has in hand.
 tx.execute(
     "UPDATE auth.app_user_identities
         SET revoked_at = now()
-      WHERE app_id = $2                                 -- $2 = client_id (oac_…), §6.2
+      WHERE app_client_id = $2                          -- $2 = client_id (oac_…), §6.2
         AND global_user_id = $1
         AND revoked_at IS NULL",
     &[&authz.principal_id, &client_id]).await?;
@@ -786,18 +793,19 @@ hydra_revoke_consent_sessions(...).await;
 > Either option is real infrastructure; §12 lists it as explicit Slice-5 work. The round-2 "needs no
 > new infrastructure" claim is retracted.
 
-**`app_user_identities.app_id` holds the per-app OAuth `client_id` (`oac_<base62-app-id>`) — pinned
-(major closed).** The main-spec DDL types `app_id` as `TEXT` "to match `auth.gateway_sessions.app_id`"
-but did not pin *what* text. This sub-spec pins it to the **per-app client_id** for three reasons:
-(1) the explicit-revoke path has `client_id` directly as its path param, so the UPDATE is a plain
-equality with **no cross-schema join** (round 2's `JOIN control.app_oauth_clients … c.app_id::text`
-was both an extra dependency and a *different key* than the app-delete companion used — the bug the
-critique flagged); (2) control can map a deleted app's `uuid → client_id` deterministically via
-`client_id_for_app(uuid)` (`app_oauth_client.rs:133`, `oac_<base62(uuid)>`) so app-delete keys the
-**same** column the same way; (3) the gateway already has `route.client_id` in hand when it upserts
-the identity row (`auth_token.rs:426`), so the WRITE and both revoke paths agree on one value. **All
-three sites (gateway upsert, explicit-revoke UPDATE, app-delete UPDATE) key on `client_id`.** The §10
-matrix asserts the gateway writes `client_id` into `app_id` and that both UPDATEs match it.
+**`app_user_identities.app_client_id` holds the per-app OAuth `client_id` (`oac_<base62-app-id>`) —
+pinned (major closed); the column is NAMED `app_client_id` (Slice 4) so the pin is explicit.** The
+main-spec DDL types it as `TEXT`; this sub-spec pins its content to the **per-app client_id** for
+three reasons: (1) the explicit-revoke path has `client_id` directly as its path param, so the
+UPDATE is a plain equality with **no cross-schema join** (round 2's `JOIN control.app_oauth_clients
+… c.app_id::text` was both an extra dependency and a *different key* than the app-delete companion
+used — the bug the critique flagged); (2) control can map a deleted app's `uuid → client_id`
+deterministically via `client_id_for_app(uuid)` (`app_oauth_client.rs:133`, `oac_<base62(uuid)>`) so
+app-delete keys the **same** column the same way; (3) the gateway already has `route.oauth_client_id`
+in hand when it upserts the identity row (Slice 4, `router::identities::upsert`), so the WRITE and
+both revoke paths agree on one value. **All three sites (gateway upsert, explicit-revoke UPDATE,
+app-delete UPDATE) key on `app_client_id` = the `oac_` client_id.** The §10 matrix asserts the
+gateway writes `client_id` into `app_client_id` and that both UPDATEs match it.
 
 **Failure semantics (named, per the review's demand):**
 
@@ -838,7 +846,7 @@ matrix asserts the gateway writes `client_id` into `app_id` and that both UPDATE
     app-delete companion UPDATE is the ONLY thing preventing orphaned live aliases.** `delete_app`
     resolves the deleted app's `client_id = client_id_for_app(uuid)` and runs, **in the app-delete
     path**, the same-keyed UPDATE on a dedicated `auth_db_url` client:
-    `UPDATE auth.app_user_identities SET revoked_at = now() WHERE app_id = <oac_client_id> AND
+    `UPDATE auth.app_user_identities SET revoked_at = now() WHERE app_client_id = <oac_client_id> AND
     revoked_at IS NULL` — revoking **all** of that app's aliases (every user), keyed on the **same
     `client_id`** the explicit path uses. (It cannot be in the `delete_app` control-schema transaction
     because that txn runs on the control registry client, not `auth_db_url`; it runs as an immediately-
@@ -888,26 +896,25 @@ dead-alias bounce stream for the common re-grant case.
 
 <!-- Added: minor — re-grant keeps the alias stable (Apple Hide-My-Email model) instead of rotating, avoiding the dead-alias bounce stream; supersedes §7.5's "fresh alias on re-grant" -->
 
-### 6.2 What `app_user_identities.app_id` holds — the per-app `client_id` (authoritative)
+### 6.2 What `app_user_identities.app_client_id` holds — the per-app `client_id` (authoritative)
 
-The main-spec DDL (`§8.1`) types `app_user_identities.app_id` as **`TEXT`** "to match
-`auth.gateway_sessions.app_id`" but leaves *which* text value undefined — the ambiguity the critique
-flagged (uuid-as-text vs. the `oac_` client_id). **This sub-spec pins it to the per-app OAuth
-`client_id`, `oac_<base62-app-id>`** (`client_id_for_app(uuid)`, `app_oauth_client.rs:133`). Rationale
-and the three consistent sites:
+The main-spec DDL (`§8.1`) types `app_user_identities.app_client_id` as **`TEXT`**. **This sub-spec
+pins its content to the per-app OAuth `client_id`, `oac_<base62-app-id>`** (`client_id_for_app(uuid)`,
+`app_oauth_client.rs:133`) — and Slice 4 NAMES the column `app_client_id` so the pin is explicit at
+the schema level (no uuid-as-text ambiguity). Rationale and the three consistent sites:
 
-| Site | Has in hand | Keys `app_id` as |
+| Site | Has in hand | Keys `app_client_id` as |
 |---|---|---|
-| **Gateway upsert** of the identity row (when projecting `ZeroShip-User`, `auth_token.rs:426`) | `route.client_id` | writes `client_id` |
-| **Explicit revoke** (`revoke_grant`, §6) | the `{client_id}` path param | `WHERE app_id = client_id` (no join) |
-| **App delete** (`delete_app`, §6) | the app `uuid` → `client_id_for_app(uuid)` | `WHERE app_id = client_id` (same value) |
+| **Gateway upsert** of the identity row (when projecting `ZeroShip-User`, `router::identities::upsert`) | `route.oauth_client_id` | writes `client_id` |
+| **Explicit revoke** (`revoke_grant`, §6) | the `{client_id}` path param | `WHERE app_client_id = client_id` (no join) |
+| **App delete** (`delete_app`, §6) | the app `uuid` → `client_id_for_app(uuid)` | `WHERE app_client_id = client_id` (same value) |
 
 Because `client_id` is **deterministic from the app uuid** (`oac_<base62(uuid)>`), control can always
 reconstruct it from a deleted app's uuid without a lookup, so the app-delete companion UPDATE keys on
 **exactly the same value** as the gateway wrote and the explicit-revoke path uses. This closes the
 critique's "the 'same UPDATE' is not actually the same key" hazard: there is now **one** key,
-`client_id`, at all three sites. (The main-spec DDL comment is updated to read "TEXT — holds the
-per-app `client_id` (`oac_…`)" so the type's *content* is pinned, not just its type.)
+`app_client_id` = the `oac_` client_id, at all three sites. (Slice 4 implements the gateway-upsert
+leg in `crates/gateway/src/identities.rs`, keyed on `(app_client_id, global_user_id)`.)
 
 <!-- Added: major — pin app_user_identities.app_id to the per-app oac_ client_id; make the gateway write, explicit-revoke UPDATE, and app-delete UPDATE all key on that single deterministic value (no cross-schema join, no key mismatch); note the absence of a cross-schema FK makes the app-delete companion UPDATE the sole guard against orphaned live aliases -->
 
@@ -1172,8 +1179,10 @@ side-effect (closes the spoof-oracle).
    alternative, migrate `auth_pg` to a `Pool` and check out a `mut` conn; the app-delete companion
    UPDATE keyed on `client_id`; the cross-service grant-row-lock concurrency contract; the
    re-grant-stability upsert (§6.1). **This is real infra work, not assumed-away.**
-7. **`app_user_identities.app_id = client_id` pin** (§6.2): the gateway upsert writes `client_id`; the
-   main-spec DDL comment is updated to say the TEXT column holds the `oac_` client_id.
+7. **`app_user_identities.app_client_id = client_id` pin** (§6.2): the column is NAMED `app_client_id`
+   (Slice 4) and the gateway upsert (`router::identities::upsert`) writes the `oac_` client_id into it;
+   the main-spec DDL is reconciled to the same shape (`app_client_id`, `pairwise_sub` column, PK
+   `(app_client_id, global_user_id)`).
 8. **Dev topology + faithful e2e** (§9, §10): compose mailpit sink, the Postmark-shaped injector, the
    full §10 matrix (14 cases).
 9. **DNS/identity + reputation isolation** (§5.1/§5.5): publish the relay-domain DKIM/SPF (covering the

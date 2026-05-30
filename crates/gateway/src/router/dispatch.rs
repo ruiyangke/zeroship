@@ -516,12 +516,16 @@ async fn execute_resource_tree(
             app_id,
             &request_id,
             compiled_route.entry.oauth_client_id.as_deref(),
+            compiled_route.entry.sector_identifier.as_deref(),
         )
         .await
         {
             AuthOutcome::Allowed { user_header } => user_header,
             AuthOutcome::Unauthenticated => {
                 return unauthenticated_response(&req, &state);
+            }
+            AuthOutcome::ClientNotProvisioned => {
+                return client_not_provisioned_response();
             }
         };
 
@@ -1211,6 +1215,23 @@ fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpRe
                 "message": "authentication required",
             }))
     }
+}
+
+/// `503 client_not_provisioned` — a request resolved a real authenticated
+/// user, but the route has no `sector_identifier` yet, so the gateway
+/// CANNOT derive the per-app pairwise `pws_…` (auth-sdk Slice 4, §6.2).
+/// We fail CLOSED — never project the global UUID into `ZeroShip-User.id`
+/// — and answer 503 with the same retryable `client_not_provisioned`
+/// shape the browser-token endpoints use (`auth_token.rs`). Once control
+/// finishes provisioning the app's OAuth client + sector, the retry
+/// succeeds.
+fn client_not_provisioned_response() -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .header("cache-control", "no-store")
+        .json(&serde_json::json!({
+            "error": "client_not_provisioned",
+            "error_description": "app has no sector_identifier yet",
+        }))
 }
 
 // ---------------------------------------------------------------------------

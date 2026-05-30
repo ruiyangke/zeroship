@@ -29,6 +29,14 @@ pub(crate) enum AuthOutcome {
     /// Policy required `User`/`Admin` and no valid session was found.
     /// Caller decides between a 401 (API) and a 302 → hydra (HTML).
     Unauthenticated,
+    /// A request resolved a real user (cookie / raw-Hydra / DPoP-introspect)
+    /// but the route has no `sector_identifier` yet, so the gateway CANNOT
+    /// derive the per-app pairwise `pws_…` (auth-sdk Slice 4, §6.2). We FAIL
+    /// CLOSED — never project the global UUID into `ZeroShip-User.id` — and
+    /// answer `503 client_not_provisioned`, the same retryable posture the
+    /// browser-token path uses (`auth_token.rs`). The SDK keeps its
+    /// breadcrumb and retries once control finishes provisioning the app.
+    ClientNotProvisioned,
 }
 
 /// Resolve the per-request auth gate. Returns `Allowed` when the
@@ -58,6 +66,7 @@ pub(crate) async fn resolve_auth(
     app_id: &Uuid,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
+    sector_identifier: Option<&str>,
 ) -> AuthOutcome {
     use zeroship_bundle::AuthLevel;
 
@@ -73,13 +82,22 @@ pub(crate) async fn resolve_auth(
     //    deferred — hydra doesn't currently issue `cnf.jkt` on access
     //    tokens, so Phase 7 ships proof-of-possession verification only.
     //    Phase 8+ adds the binding step.
-    let dpop_user_header = resolve_dpop_user_header(req, state, request_id).await;
-    if let Some(header) = dpop_user_header {
-        // DPoP succeeded — short-circuit. We treat a DPoP-authed request
-        // as fully authenticated regardless of policy (anon or user).
-        return AuthOutcome::Allowed {
-            user_header: Some(header),
-        };
+    let dpop_user_header =
+        resolve_dpop_user_header(req, state, request_id, oauth_client_id, sector_identifier).await;
+    match dpop_user_header {
+        DpopOutcome::Allowed(header) => {
+            // DPoP succeeded — short-circuit. We treat a DPoP-authed request
+            // as fully authenticated regardless of policy (anon or user).
+            return AuthOutcome::Allowed {
+                user_header: Some(header),
+            };
+        }
+        DpopOutcome::ClientNotProvisioned => {
+            // A valid DPoP-introspected user, but no sector_identifier yet ⇒
+            // cannot derive the per-app pws_. Fail closed (§6.2).
+            return AuthOutcome::ClientNotProvisioned;
+        }
+        DpopOutcome::None => {}
     }
     // If an Authorization: DPoP header WAS present but verification
     // failed, treat the request as unauthenticated rather than falling
@@ -107,11 +125,18 @@ pub(crate) async fn resolve_auth(
     //        DIFFERENT scheme, not an expired user session).
     //      - `NotBearer`          → no `Authorization: Bearer`. Fall
     //        through to the cookie arm.
-    match resolve_bearer_user_header(req, state, request_id, oauth_client_id).await {
+    match resolve_bearer_user_header(req, state, request_id, oauth_client_id, sector_identifier)
+        .await
+    {
         BearerOutcome::Allowed(header) => {
             return AuthOutcome::Allowed {
                 user_header: Some(header),
             };
+        }
+        BearerOutcome::ClientNotProvisioned => {
+            // A valid raw-Hydra Bearer user, but no sector_identifier yet ⇒
+            // cannot derive the per-app pws_. Fail closed (§6.2).
+            return AuthOutcome::ClientNotProvisioned;
         }
         BearerOutcome::NotUserSession => {
             // Reserved scheme — 401 regardless of route policy.
@@ -140,8 +165,24 @@ pub(crate) async fn resolve_auth(
     }
 
     let app_id_str = app_id.to_string();
-    let session_user_header =
-        resolve_app_session_user_header_inner(req, state, &app_id_str, request_id).await;
+    let session_user_header = resolve_app_session_user_header_inner(
+        req,
+        state,
+        &app_id_str,
+        request_id,
+        oauth_client_id,
+        sector_identifier,
+    )
+    .await;
+    let session_user_header = match session_user_header {
+        // A cookie session resolved a real user but the route has no
+        // sector_identifier yet ⇒ cannot derive the per-app pws_. Fail
+        // closed (§6.2) on EVERY policy, including Anon — an authenticated
+        // request must never have its global UUID projected outward.
+        CookieOutcome::ClientNotProvisioned => return AuthOutcome::ClientNotProvisioned,
+        CookieOutcome::Allowed(header) => Some(header),
+        CookieOutcome::None => None,
+    };
     match policy.auth {
         AuthLevel::Anon => AuthOutcome::Allowed {
             user_header: session_user_header,
@@ -156,6 +197,80 @@ pub(crate) async fn resolve_auth(
             }
         }
     }
+}
+
+/// Outcome of projecting a global user id to its per-app pairwise `pws_…`
+/// (auth-sdk Slice 4, §6.2). Either the route is provisioned with a
+/// `sector_identifier` (and we derived + persisted the `pws_`), or it is
+/// not — in which case the caller MUST fail closed (`503
+/// client_not_provisioned`) rather than ever leak the global UUID.
+enum PairwiseProjection {
+    /// The derived per-app `pws_…` subject. The global UUID never appears
+    /// in this value (HMAC of the UUID under the platform salt).
+    Pws(String),
+    /// No `sector_identifier` on the route yet ⇒ no `pws_` derivation
+    /// possible. Fail closed.
+    Unprovisioned,
+}
+
+/// Derive the per-app pairwise `pws_…` for `global_user_id` under the
+/// route's `sector_identifier`, and idempotently UPSERT the mapping into
+/// `auth.app_user_identities` so support tooling / the relay handler /
+/// revocation can reverse `pws_ → (app, global_user)` (§6.2/§6.3).
+///
+/// Fail-closed contract: returns [`PairwiseProjection::Unprovisioned`]
+/// when the route has no `sector_identifier` (the caller answers `503`),
+/// matching the browser-token path in `auth_token.rs`. The derivation is
+/// a pure HMAC (no DB round-trip); the mapping UPSERT is best-effort —
+/// a DB failure is logged and the (already-correct) `pws_` is still
+/// returned, because the persisted row is a reverse-lookup cache, not
+/// part of the per-request trust decision.
+///
+/// The UPSERT checks out a pooled connection for JUST the write and
+/// releases it on drop — never held across an outbound HTTP call.
+async fn project_pairwise(
+    state: &Arc<GateState>,
+    app_client_id: Option<&str>,
+    sector_identifier: Option<&str>,
+    global_user_id: &str,
+) -> PairwiseProjection {
+    let Some(sector) = sector_identifier else {
+        return PairwiseProjection::Unprovisioned;
+    };
+    let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
+
+    // Persist the (app_client_id, global_user_id) → pws_ mapping, keyed on
+    // the per-app oac_ client_id (§6.2). Best-effort: log-and-continue on
+    // any failure so a transient mapping-write error never breaks auth.
+    if let (Some(app_client_id), Some(db_cfg)) = (app_client_id, state.db.as_ref()) {
+        if let Ok(uuid) = Uuid::parse_str(global_user_id) {
+            match crate::db::checkout(db_cfg).await {
+                Ok(pool) => match pool.get().await {
+                    Ok(conn) => {
+                        if let Err(e) =
+                            crate::identities::upsert(&conn, app_client_id, uuid, &pws).await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                app_client_id = %app_client_id,
+                                "app_user_identities upsert failed (non-fatal; pws_ already projected)"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "app_user_identities upsert: pg pool checkout failed (non-fatal)"
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "app_user_identities upsert: pg pool checkout failed (non-fatal)"
+                ),
+            }
+        }
+    }
+
+    PairwiseProjection::Pws(pws)
 }
 
 /// Whether the request carries an `Authorization: DPoP <token>` header.
@@ -198,6 +313,24 @@ fn looks_like_wrapper(token: &str) -> bool {
     header.get("typ").and_then(|v| v.as_str()) == Some("at+jwt")
 }
 
+/// Outcome of the DPoP arm ([`resolve_dpop_user_header`]).
+#[derive(Debug)]
+enum DpopOutcome {
+    /// A verified DPoP-bound user (wrapper fast-path or introspection
+    /// fallback). Carries the signed `ZeroShip-User` header. The wrapper
+    /// fast-path's `sub` is ALREADY the `pws_`; the introspection fallback
+    /// projects the global UUID to the per-app `pws_` (§6.2).
+    Allowed(String),
+    /// A verified raw-Hydra-introspected user, but the route has no
+    /// `sector_identifier` yet ⇒ no `pws_` derivation possible. Fail
+    /// closed (`503`) rather than project the global UUID.
+    ClientNotProvisioned,
+    /// No DPoP credential (or it failed verification / replay / binding).
+    /// `resolve_auth` falls through to the Bearer/cookie arms unless an
+    /// `Authorization: DPoP` header was present (then it 401s).
+    None,
+}
+
 /// Resolve the `ZeroShip-User` header from a DPoP-bound access token.
 ///
 /// Returns `Some(header)` when:
@@ -213,9 +346,19 @@ fn looks_like_wrapper(token: &str) -> bool {
 ///      configured AND hydra's `/oauth2/introspect` returns
 ///      `active: true` (P7-U5 fallback, no `cnf.jkt` enforcement).
 ///
-/// Returns `None` for "no `DPoP` token in this request" AND for every
-/// failure mode above. The caller distinguishes the two via
-/// [`has_dpop_authorization`].
+/// Returns [`DpopOutcome::None`] for "no `DPoP` token in this request"
+/// AND for every failure mode above. The caller distinguishes the two
+/// via [`has_dpop_authorization`].
+///
+/// ## Pairwise projection (auth-sdk Slice 4, §6.2)
+///
+/// The wrapper fast-path's `sub` is ALREADY the per-app `pws_` (minted
+/// that way at `/token` / `?mint=1`), so it forwards unchanged. The
+/// introspection fallback carries the GLOBAL Hydra UUID `sub`, so it
+/// projects to the per-app `pws_` via [`project_pairwise`] before
+/// encoding the header — and fails closed
+/// ([`DpopOutcome::ClientNotProvisioned`] → `503`) when the route has no
+/// `sector_identifier` yet, so the global UUID is never emitted.
 ///
 /// ## Wrapper-vs-raw branching (Phase 8 U4)
 ///
@@ -236,18 +379,25 @@ async fn resolve_dpop_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
     request_id: &Uuid,
-) -> Option<String> {
+    oauth_client_id: Option<&str>,
+    sector_identifier: Option<&str>,
+) -> DpopOutcome {
     // 1. Authorization: DPoP <token>
-    let auth_header = req
+    let Some(auth_header) = req
         .headers()
         .get(http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())?;
-    let access_token = auth_header.strip_prefix("DPoP ")?;
+        .and_then(|v| v.to_str().ok())
+    else {
+        return DpopOutcome::None;
+    };
+    let Some(access_token) = auth_header.strip_prefix("DPoP ") else {
+        return DpopOutcome::None;
+    };
 
     // 2. DPoP proof header
     let Some(proof) = req.headers().get("dpop").and_then(|v| v.to_str().ok()) else {
         tracing::warn!("Authorization: DPoP present but DPoP proof header missing");
-        return None;
+        return DpopOutcome::None;
     };
 
     // 3. Build expected htu = scheme://host/path (RFC 9449 §4.2 — query
@@ -279,7 +429,7 @@ async fn resolve_dpop_user_header(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "DPoP proof verification failed");
-            return None;
+            return DpopOutcome::None;
         }
     };
 
@@ -289,11 +439,11 @@ async fn resolve_dpop_user_header(
         Ok(true) => {}
         Ok(false) => {
             tracing::warn!(jti = %verified.jti, "DPoP jti replay detected");
-            return None;
+            return DpopOutcome::None;
         }
         Err(e) => {
             tracing::warn!(error = %e, "DPoP jti replay check failed");
-            return None;
+            return DpopOutcome::None;
         }
     }
 
@@ -325,7 +475,7 @@ async fn resolve_dpop_user_header(
                     tracing::warn!(
                         "DPoP wrapper token has no cnf.jkt — rejecting on DPoP path"
                     );
-                    return None;
+                    return DpopOutcome::None;
                 };
                 if cnf.jkt != verified.jkt {
                     tracing::warn!(
@@ -333,11 +483,11 @@ async fn resolve_dpop_user_header(
                         actual = %verified.jkt,
                         "DPoP proof jkt does not match wrapper cnf.jkt — rejecting"
                     );
-                    return None;
+                    return DpopOutcome::None;
                 }
                 if claims.sub.is_empty() {
                     tracing::warn!("DPoP wrapper token missing sub — rejecting");
-                    return None;
+                    return DpopOutcome::None;
                 }
                 if let (Some(db_cfg), Some(subject)) = (
                     state.db.as_ref(),
@@ -352,7 +502,7 @@ async fn resolve_dpop_user_header(
                                 error = %e,
                                 "DPoP wrapper revocation: pg pool checkout failed"
                             );
-                            return None;
+                            return DpopOutcome::None;
                         }
                     };
                     let conn = match pool.get().await {
@@ -362,7 +512,7 @@ async fn resolve_dpop_user_header(
                                 error = %e,
                                 "DPoP wrapper revocation: pg pool checkout failed"
                             );
-                            return None;
+                            return DpopOutcome::None;
                         }
                     };
                     match zeroship_core::wrapper_revocation::is_subject_revoked_since(
@@ -377,7 +527,7 @@ async fn resolve_dpop_user_header(
                                 sub = %claims.sub,
                                 "DPoP wrapper subject was revoked after wrapper issue"
                             );
-                            return None;
+                            return DpopOutcome::None;
                         }
                         Ok(false) => {}
                         Err(e) => {
@@ -386,13 +536,17 @@ async fn resolve_dpop_user_header(
                                 sub = %claims.sub,
                                 "DPoP wrapper revocation check failed"
                             );
-                            return None;
+                            return DpopOutcome::None;
                         }
                     }
                 }
+                // DPoP wrapper fast-path: the wrapper's `sub` is ALREADY
+                // the per-app `pws_` (the gateway minted it that way at
+                // /token / ?mint=1, §6.2) — no pairwise re-derivation, the
+                // same consistent `pws_` the Bearer-wrapper arm reads.
                 let owned = build_worker_user_from_wrapper(&claims);
                 let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-                return Some(oidc_rp::encode_user_header(
+                return DpopOutcome::Allowed(oidc_rp::encode_user_header(
                     &user,
                     &state.config.worker_key,
                     *request_id,
@@ -404,7 +558,7 @@ async fn resolve_dpop_user_header(
                         error = %e,
                         "wrapper-shaped DPoP token failed verification — rejecting"
                     );
-                    return None;
+                    return DpopOutcome::None;
                 }
                 tracing::debug!(
                     error = %e,
@@ -424,22 +578,29 @@ async fn resolve_dpop_user_header(
         Ok(i) if i.active => i,
         Ok(_) => {
             tracing::warn!("DPoP access token introspected as inactive");
-            return None;
+            return DpopOutcome::None;
         }
         Err(e) => {
             tracing::warn!(error = %e, "DPoP introspect call failed");
-            return None;
+            return DpopOutcome::None;
         }
     };
     if !matches!(info.sub.as_deref(), Some(sub) if !sub.is_empty()) {
         tracing::warn!("DPoP introspection response missing sub");
-        return None;
+        return DpopOutcome::None;
     }
 
     // 7. Build the `ZeroShip-User` header from the introspection result.
-    let owned = build_worker_user_from_introspection(&info);
+    //    The introspected `sub` is the GLOBAL Hydra UUID — project it to
+    //    the per-app `pws_` (§6.2) so the worker header never carries the
+    //    global id. Fail closed (503) when the route has no sector yet.
+    let mut owned = build_worker_user_from_introspection(&info);
+    match project_pairwise(state, oauth_client_id, sector_identifier, &owned.id).await {
+        PairwiseProjection::Pws(pws) => owned.id = pws,
+        PairwiseProjection::Unprovisioned => return DpopOutcome::ClientNotProvisioned,
+    }
     let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-    Some(oidc_rp::encode_user_header(
+    DpopOutcome::Allowed(oidc_rp::encode_user_header(
         &user,
         &state.config.worker_key,
         *request_id,
@@ -464,6 +625,10 @@ enum BearerOutcome {
     /// A Bearer token whose `iss` is neither the gateway nor Hydra — the
     /// reserved API-key path (a future `zsk_…` shape). 401 on every route.
     NotUserSession,
+    /// A valid raw-Hydra Bearer user, but the route has no
+    /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
+    /// Fail closed (`503`) rather than project the global UUID (§6.2).
+    ClientNotProvisioned,
     /// No `Authorization: Bearer` header. Fall through to the cookie arm.
     NotBearer,
 }
@@ -524,14 +689,21 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// UUID-only subject denylist could not). Per-app scoping means a
 /// revocation on app A leaves the same user's tokens on app B valid.
 ///
-/// Slice 1c does NOT derive pairwise subjects (Slice 4) nor enforce
-/// scopes (Slice 3): the raw-Hydra `sub` is used directly as the worker
-/// user id, mirroring the introspection fallback in the DPoP arm.
+/// Pairwise projection (Slice 4, §6.2): the WRAPPER path's `sub` is
+/// ALREADY the per-app `pws_` (the gateway minted it that way), so it
+/// forwards unchanged — the same consistent `pws_` for a given
+/// `(user, app)`. The RAW-HYDRA path's `sub` is the GLOBAL Hydra UUID,
+/// so it is projected to the per-app `pws_` via [`project_pairwise`]
+/// before encoding the header (and the mapping row is upserted). The
+/// raw-Hydra arm fails closed ([`BearerOutcome::ClientNotProvisioned`] →
+/// `503`) when the route has no `sector_identifier` yet, so the global
+/// UUID never reaches the worker header.
 async fn resolve_bearer_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
+    sector_identifier: Option<&str>,
 ) -> BearerOutcome {
     // a. Extract `Authorization: Bearer <token>`.
     let Some(auth_header) = req
@@ -740,7 +912,26 @@ async fn resolve_bearer_user_header(
                 }
             }
         }
-        let owned = build_worker_user_from_access_claims(&claims);
+        // Slice 4 (§6.2): the raw-Hydra `sub` is the GLOBAL Hydra UUID —
+        // project it to the per-app `pws_` (and upsert the mapping) before
+        // the header is built, so the worker never sees the global id. Fail
+        // closed (503) when the route has no sector yet. `expected_client_id`
+        // is the route's bound oac_ client (the binding above proved the
+        // token agrees), so the mapping is keyed on it.
+        let mut owned = build_worker_user_from_access_claims(&claims);
+        match project_pairwise(
+            state,
+            Some(expected_client_id),
+            sector_identifier,
+            &owned.id,
+        )
+        .await
+        {
+            PairwiseProjection::Pws(pws) => owned.id = pws,
+            PairwiseProjection::Unprovisioned => {
+                return BearerOutcome::ClientNotProvisioned;
+            }
+        }
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
         return BearerOutcome::Allowed(oidc_rp::encode_user_header(
             &user,
@@ -756,9 +947,11 @@ async fn resolve_bearer_user_header(
 
 /// Materialise a `WorkerUser` from a verified raw-Hydra access JWT.
 ///
-/// Slice 1c uses the `sub` (global UUID) directly as the worker user id;
-/// Slice 4 will project it to a per-app `pws_` first. The profile fields
-/// come straight from the verified claims.
+/// `id` is the raw `sub` (the GLOBAL Hydra UUID) here; the caller
+/// ([`resolve_bearer_user_header`]) projects it to the per-app `pws_`
+/// via [`project_pairwise`] (Slice 4, §6.2) BEFORE the header is built,
+/// so the global UUID never reaches the worker. The profile fields come
+/// straight from the verified claims.
 fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -> OwnedWorkerUser {
     OwnedWorkerUser {
         id: claims.sub.clone(),
@@ -843,52 +1036,99 @@ fn split_scope_claim(scope: &str) -> Vec<String> {
     scope.split_whitespace().map(str::to_string).collect()
 }
 
+/// Outcome of the cookie arm ([`resolve_app_session_user_header_inner`]).
+#[derive(Debug)]
+enum CookieOutcome {
+    /// A valid cookie session resolved a real user and the per-app `pws_`
+    /// projected cleanly. Carries the signed `ZeroShip-User` header.
+    Allowed(String),
+    /// A valid cookie session resolved a real user, but the route has no
+    /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
+    /// Fail closed (`503`) rather than project the global UUID (§6.2).
+    ClientNotProvisioned,
+    /// No cookie, no DB configured, validate miss, or a DB error
+    /// (fail-closed-as-unauthenticated). The caller treats this as
+    /// no-identity.
+    None,
+}
+
 /// Resolve the `ZeroShip-User` header value from the per-origin app
-/// session cookie. Returns `None` if no cookie, validate fails, or no
-/// DB is configured. Logs DB errors at warn — never panics.
+/// session cookie. Returns [`CookieOutcome::None`] if no cookie, validate
+/// fails, or no DB is configured. Logs DB errors at warn — never panics.
+///
+/// Pairwise projection (Slice 4, §6.2): `auth.gateway_sessions.user_id`
+/// is the GLOBAL user UUID (internal storage stays global). The cookie
+/// arm derives the per-app `pws_` from it via [`project_pairwise`] (and
+/// upserts the mapping) and writes THAT into `ZeroShip-User.id`, so the
+/// worker never sees the global UUID. Fails closed
+/// ([`CookieOutcome::ClientNotProvisioned`] → `503`) when the route has
+/// no `sector_identifier` yet.
 async fn resolve_app_session_user_header_inner(
     req: &HttpRequest,
     state: &Arc<GateState>,
     app_id_str: &str,
     request_id: &Uuid,
-) -> Option<String> {
+    oauth_client_id: Option<&str>,
+    sector_identifier: Option<&str>,
+) -> CookieOutcome {
     let cookie_header = req
         .headers()
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let session_id = oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)?;
+    let Some(session_id) =
+        oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)
+    else {
+        return CookieOutcome::None;
+    };
     // Check out a pooled connection for just this validate (which slides
     // the idle window) and release it on drop.
-    let db_cfg = state.db.as_ref()?;
+    let Some(db_cfg) = state.db.as_ref() else {
+        return CookieOutcome::None;
+    };
     let pool = match crate::db::checkout(db_cfg).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "gateway: pg pool checkout failed (session validate)");
-            return None;
+            return CookieOutcome::None;
         }
     };
     let conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "gateway: pg pool checkout failed (session validate)");
-            return None;
+            return CookieOutcome::None;
         }
     };
     let session = match sessions::validate(&conn, session_id, app_id_str).await {
         Ok(Some(s)) => s,
-        Ok(None) => return None,
+        Ok(None) => return CookieOutcome::None,
         Err(e) => {
             // Fail-closed on DB errors. Returning None forces the auth
             // gate to treat the request as unauthenticated; the caller
             // either 401s (API) or redirects to login (HTML).
             tracing::warn!(error = %e, "gateway: session validate failed");
-            return None;
+            return CookieOutcome::None;
         }
     };
     drop(conn);
+
+    // Project the GLOBAL session user_id to the per-app `pws_` (§6.2) and
+    // upsert the mapping. Fail closed when the route has no sector yet.
+    let pws = match project_pairwise(
+        state,
+        oauth_client_id,
+        sector_identifier,
+        &session.user_id,
+    )
+    .await
+    {
+        PairwiseProjection::Pws(pws) => pws,
+        PairwiseProjection::Unprovisioned => return CookieOutcome::ClientNotProvisioned,
+    };
+
     let user = oidc_rp::WorkerUser {
-        id: &session.user_id,
+        id: &pws,
         email: session.email.as_deref().unwrap_or(""),
         name: session.name.as_deref().unwrap_or(""),
         avatar: session.avatar_url.as_deref(),
@@ -897,7 +1137,7 @@ async fn resolve_app_session_user_header_inner(
         // (Slice 3, §1.4) — no control.oauth_grants hot-path join.
         scopes: session.granted_scopes.iter().map(String::as_str).collect(),
     };
-    Some(oidc_rp::encode_user_header(
+    CookieOutcome::Allowed(oidc_rp::encode_user_header(
         &user,
         &state.config.worker_key,
         *request_id,
@@ -1592,8 +1832,8 @@ mod tests {
             .to_http_request();
 
         let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
-        assert!(header.is_some(), "wrapper path must accept matched jkt");
+        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(matches!(header, DpopOutcome::Allowed(_)), "wrapper path must accept matched jkt");
     }
 
     #[compio::test]
@@ -1644,11 +1884,8 @@ mod tests {
             .to_http_request();
 
         let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
-        assert!(
-            header.is_none(),
-            "DPoP path must reject a cnf-less plain-Bearer wrapper"
-        );
+        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(matches!(header, DpopOutcome::None), "DPoP path must reject a cnf-less plain-Bearer wrapper");
     }
 
     #[compio::test]
@@ -1689,9 +1926,10 @@ mod tests {
             .to_http_request();
         let request_id = Uuid::new_v4();
         assert!(
-            resolve_dpop_user_header(&first_req, &state, &request_id)
-                .await
-                .is_some(),
+            matches!(
+                resolve_dpop_user_header(&first_req, &state, &request_id, None, None).await,
+                DpopOutcome::Allowed(_)
+            ),
             "wrapper should resolve before subject revocation"
         );
 
@@ -1711,9 +1949,10 @@ mod tests {
             .header("dpop", second_proof)
             .to_http_request();
         assert!(
-            resolve_dpop_user_header(&second_req, &state, &request_id)
-                .await
-                .is_none(),
+            matches!(
+                resolve_dpop_user_header(&second_req, &state, &request_id, None, None).await,
+                DpopOutcome::None
+            ),
             "revoked wrapper subject must be rejected"
         );
 
@@ -1755,11 +1994,8 @@ mod tests {
             .to_http_request();
 
         let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
-        assert!(
-            header.is_none(),
-            "wrapper path must reject tokens with an empty sub"
-        );
+        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(matches!(header, DpopOutcome::None), "wrapper path must reject tokens with an empty sub");
     }
 
     #[compio::test]
@@ -1798,11 +2034,8 @@ mod tests {
             .to_http_request();
 
         let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
-        assert!(
-            header.is_none(),
-            "wrapper path must reject when cnf.jkt does not match proof jkt"
-        );
+        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(matches!(header, DpopOutcome::None), "wrapper path must reject when cnf.jkt does not match proof jkt");
     }
 
     #[ntex::test]
@@ -1874,11 +2107,8 @@ mod tests {
             .to_http_request();
 
         let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
-        assert!(
-            header.is_none(),
-            "malformed wrapper must hard-reject instead of downgrading to introspection"
-        );
+        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(matches!(header, DpopOutcome::None), "malformed wrapper must hard-reject instead of downgrading to introspection");
         assert_eq!(
             hits.load(Ordering::SeqCst),
             0,
@@ -2095,7 +2325,7 @@ mod tests {
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         let BearerOutcome::Allowed(header) = outcome else {
             panic!("expected Allowed, got {outcome:?}");
         };
@@ -2124,7 +2354,7 @@ mod tests {
         let request_id = Uuid::new_v4();
         // Route expects app B's client_id.
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_app_b")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_app_b"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
             "client_id mismatch must be Invalid, got {outcome:?}"
@@ -2143,7 +2373,7 @@ mod tests {
 
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
-        let outcome = resolve_bearer_user_header(&req, &state, &request_id, None).await;
+        let outcome = resolve_bearer_user_header(&req, &state, &request_id, None, None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
             "wrapper with None client_id must be Invalid, got {outcome:?}"
@@ -2160,7 +2390,7 @@ mod tests {
         let req = bearer_req("zsk_opaque_api_key_value", "myapp.zeroship.ai");
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::NotUserSession),
             "opaque token must be NotUserSession, got {outcome:?}"
@@ -2182,7 +2412,7 @@ mod tests {
         let req = bearer_req(&token, "myapp.zeroship.ai");
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::NotUserSession),
             "foreign-iss JWT must be NotUserSession, got {outcome:?}"
@@ -2245,6 +2475,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         assert!(
@@ -2260,6 +2491,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         assert!(
@@ -2285,6 +2517,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         assert!(
@@ -2297,17 +2530,21 @@ mod tests {
     async fn bearer_valid_raw_hydra_jwt_emits_zeroship_user() {
         // Happy path (raw Hydra): a real EdDSA-signed access JWT,
         // JWKS-verified against a live JWKS server, with a matching
-        // client_id claim → Allowed + ZeroShip-User from the JWT sub.
+        // client_id claim → Allowed + ZeroShip-User whose id is the per-app
+        // pairwise pws_ (Slice 4 §6.2 — the global UUID sub is projected,
+        // never emitted on the worker header).
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // Hydra's key
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]); // gateway wrapper key
         let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_hydra(gateway_signing, &base);
 
+        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let sector = "https://myapp.zeroship.ai";
         let aud = "myapp.zeroship.ai";
         let token = sign_hydra_access_jwt(
             &jwks_signing,
-            "usr_global_uuid",
+            global_sub,
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]), // resource-server aud, NOT the client
             "user@example.com",
@@ -2317,8 +2554,14 @@ mod tests {
 
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
-        let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+        let outcome = resolve_bearer_user_header(
+            &req,
+            &state,
+            &request_id,
+            Some("oac_myapp"),
+            Some(sector),
+        )
+        .await;
         let BearerOutcome::Allowed(header) = outcome else {
             panic!("expected Allowed, got {outcome:?}");
         };
@@ -2328,8 +2571,19 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // Slice 1c: raw-Hydra sub used directly (no pairwise yet).
-        assert_eq!(user["id"], "usr_global_uuid");
+        // Slice 4: the raw-Hydra global UUID is projected to the per-app pws_.
+        let expected_pws =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+        assert_eq!(user["id"], expected_pws);
+        assert!(
+            expected_pws.starts_with("pws_"),
+            "id must be a pws_, got {expected_pws}"
+        );
+        // The global UUID must NOT appear anywhere in the worker header JSON.
+        assert!(
+            !json.contains(global_sub),
+            "global UUID leaked into ZeroShip-User: {json}"
+        );
         assert_eq!(user["email"], "user@example.com");
 
         drop(srv);
@@ -2360,8 +2614,17 @@ mod tests {
 
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
-        let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+        // Provisioned route (sector present) so the pairwise projection
+        // succeeds — this test exercises the aud-fallback BINDING, not the
+        // fail-closed path.
+        let outcome = resolve_bearer_user_header(
+            &req,
+            &state,
+            &request_id,
+            Some("oac_myapp"),
+            Some("https://myapp.zeroship.ai"),
+        )
+        .await;
         assert!(
             matches!(outcome, BearerOutcome::Allowed(_)),
             "aud-fallback binding must Allow, got {outcome:?}"
@@ -2394,7 +2657,7 @@ mod tests {
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_app_b")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_app_b"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
             "raw-Hydra client_id mismatch must be Invalid, got {outcome:?}"
@@ -2427,7 +2690,7 @@ mod tests {
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
             "expired raw-Hydra JWT must be Invalid, got {outcome:?}"
@@ -2463,7 +2726,7 @@ mod tests {
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
             "bad-signature raw-Hydra JWT must be Invalid, got {outcome:?}"
@@ -2493,6 +2756,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         assert!(matches!(anon, AuthOutcome::Allowed { user_header: None }));
@@ -2503,6 +2767,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         assert!(matches!(gated, AuthOutcome::Unauthenticated));
@@ -2533,7 +2798,7 @@ mod tests {
         let req = bearer_req(&wrapper, aud);
         let request_id = Uuid::new_v4();
         let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("gateway")).await;
+            resolve_bearer_user_header(&req, &state, &request_id, Some("gateway"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
             "DPoP-bound wrapper on plain Bearer must be Invalid (no PoP), got {outcome:?}"
@@ -2558,7 +2823,7 @@ mod tests {
         let request_id = Uuid::new_v4();
         assert!(
             matches!(
-                resolve_bearer_user_header(&bearer, &state, &request_id, Some("gateway")).await,
+                resolve_bearer_user_header(&bearer, &state, &request_id, Some("gateway"), None).await,
                 BearerOutcome::Invalid
             ),
             "plain Bearer leg must reject the DPoP-bound wrapper"
@@ -2581,9 +2846,10 @@ mod tests {
             .header("dpop", proof)
             .to_http_request();
         assert!(
-            resolve_dpop_user_header(&dpop_req, &state, &request_id)
-                .await
-                .is_some(),
+            matches!(
+                resolve_dpop_user_header(&dpop_req, &state, &request_id, None, None).await,
+                DpopOutcome::Allowed(_)
+            ),
             "DPoP arm must accept the same wrapper with a valid proof"
         );
     }
@@ -2628,7 +2894,7 @@ mod tests {
         // Before revocation: Allowed.
         assert!(
             matches!(
-                resolve_bearer_user_header(&req, &state, &request_id, Some(client_id)).await,
+                resolve_bearer_user_header(&req, &state, &request_id, Some(client_id), None).await,
                 BearerOutcome::Allowed(_)
             ),
             "pre-revocation wrapper must be Allowed"
@@ -2646,7 +2912,7 @@ mod tests {
         // After revocation: Invalid (the dead branch is now alive for pws_).
         assert!(
             matches!(
-                resolve_bearer_user_header(&req, &state, &request_id, Some(client_id)).await,
+                resolve_bearer_user_header(&req, &state, &request_id, Some(client_id), None).await,
                 BearerOutcome::Invalid
             ),
             "revoked pws_ family must be Invalid on the wrapper path"
@@ -2719,10 +2985,18 @@ mod tests {
                 .expect("revoke_family app A");
         }
 
-        // App A token: revoked → Invalid.
+        // App A token: revoked → Invalid. (Sector present so the projection
+        // would succeed; revocation rejects BEFORE the pairwise projection.)
         assert!(
             matches!(
-                resolve_bearer_user_header(&req_a, &state, &request_id, Some("oac_app_a")).await,
+                resolve_bearer_user_header(
+                    &req_a,
+                    &state,
+                    &request_id,
+                    Some("oac_app_a"),
+                    Some("https://app-a.zeroship.ai")
+                )
+                .await,
                 BearerOutcome::Invalid
             ),
             "revoked (oac_app_a, sub) family must reject app A's token"
@@ -2730,7 +3004,14 @@ mod tests {
         // App B token, SAME sub: NOT revoked → Allowed (per-app scoping).
         assert!(
             matches!(
-                resolve_bearer_user_header(&req_b, &state, &request_id, Some("oac_app_b")).await,
+                resolve_bearer_user_header(
+                    &req_b,
+                    &state,
+                    &request_id,
+                    Some("oac_app_b"),
+                    Some("https://app-b.zeroship.ai")
+                )
+                .await,
                 BearerOutcome::Allowed(_)
             ),
             "app A revocation must NOT revoke the same sub on app B"
@@ -2771,6 +3052,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         let AuthOutcome::Allowed {
@@ -2796,10 +3078,12 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_hydra(gateway_signing, &base);
 
+        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let sector = "https://myapp.zeroship.ai";
         let aud = "myapp.zeroship.ai";
         let token = sign_hydra_access_jwt(
             &jwks_signing,
-            "usr_global_uuid",
+            global_sub,
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
@@ -2817,6 +3101,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            Some(sector),
         )
         .await;
         let AuthOutcome::Allowed {
@@ -2831,7 +3116,13 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        assert_eq!(user["id"], "usr_global_uuid");
+        // Slice 4: the raw-Hydra global UUID is projected to the per-app pws_
+        // end-to-end through resolve_auth (the global UUID never reaches the
+        // worker header).
+        let expected_pws =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+        assert_eq!(user["id"], expected_pws);
+        assert!(!json.contains(global_sub), "global UUID leaked: {json}");
 
         drop(srv);
     }
@@ -2900,6 +3191,7 @@ mod tests {
                     &app_id,
                     &request_id,
                     Some("oac_myapp"),
+                    Some("https://myapp.zeroship.ai"),
                 )
                 .await,
                 AuthOutcome::Allowed {
@@ -2954,6 +3246,7 @@ mod tests {
             &app_id,
             &request_id,
             Some("oac_myapp"),
+            None,
         )
         .await;
         assert!(
@@ -2966,5 +3259,434 @@ mod tests {
             let conn = pool.get().await.expect("pool checkout");
             crate::sessions::revoke(&conn, session.id).await.ok();
         }
+    }
+
+    // ─── Slice 4 — pairwise subject projection (§6.2) ─────────────────────
+    //
+    // These cover the four properties of the consistent `pws_` projection:
+    // (1) cross-app divergence (same user, two apps → different pws_);
+    // (2) cross-arm + re-login consistency (cookie vs raw-Hydra vs wrapper →
+    //     the SAME pws_ for the same (user, app));
+    // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
+    // (4) fail-closed 503 when the route has no sector yet.
+    // The DB upsert + cookie arm are PG-gated (skip when AUTH_DB_URL is
+    // unset, like the revocation tests); the in-memory arms run always.
+
+    /// A fixed global UUID + two distinct app sectors. A `pws_` derived for
+    /// the SAME user under DIFFERENT sectors MUST differ — no cross-app
+    /// correlation (G4). This is the cross-app divergence property at the
+    /// gateway projection boundary, asserted against the raw-Hydra arm's
+    /// emitted header (the path that actually projects).
+    #[ntex::test]
+    async fn raw_hydra_same_user_two_apps_get_different_pws() {
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_hydra(gateway_signing, &base);
+
+        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0042";
+
+        // App A.
+        let token_a = sign_hydra_access_jwt(
+            &jwks_signing,
+            global_sub,
+            Some("oac_app_a"),
+            serde_json::json!(["http://api.zeroship.localhost"]),
+            "user@example.com",
+            "User",
+            3600,
+        );
+        let req_a = bearer_req(&token_a, "app-a.zeroship.ai");
+        let rid = Uuid::new_v4();
+        let BearerOutcome::Allowed(header_a) = resolve_bearer_user_header(
+            &req_a,
+            &state,
+            &rid,
+            Some("oac_app_a"),
+            Some("https://app-a.zeroship.ai"),
+        )
+        .await
+        else {
+            panic!("app A must Allow");
+        };
+        let id_a = decode_header_id(&state, &header_a);
+
+        // App B — SAME user, different sector/client.
+        let token_b = sign_hydra_access_jwt(
+            &jwks_signing,
+            global_sub,
+            Some("oac_app_b"),
+            serde_json::json!(["http://api.zeroship.localhost"]),
+            "user@example.com",
+            "User",
+            3600,
+        );
+        let req_b = bearer_req(&token_b, "app-b.zeroship.ai");
+        let BearerOutcome::Allowed(header_b) = resolve_bearer_user_header(
+            &req_b,
+            &state,
+            &rid,
+            Some("oac_app_b"),
+            Some("https://app-b.zeroship.ai"),
+        )
+        .await
+        else {
+            panic!("app B must Allow");
+        };
+        let id_b = decode_header_id(&state, &header_b);
+
+        assert!(id_a.starts_with("pws_"), "app A id must be pws_: {id_a}");
+        assert!(id_b.starts_with("pws_"), "app B id must be pws_: {id_b}");
+        assert_ne!(
+            id_a, id_b,
+            "same user on two apps must get DIFFERENT pws_ (cross-app divergence)"
+        );
+        // The global UUID never appears in either outward header.
+        assert!(!id_a.contains(global_sub) && !id_b.contains(global_sub));
+
+        drop(srv);
+    }
+
+    /// Cross-arm + re-login consistency: the SAME (user, app) yields the
+    /// SAME `pws_` whether the gateway resolves it via the raw-Hydra arm or
+    /// derives it directly (the cookie arm uses the identical derivation on
+    /// the SAME global UUID + sector). Re-login is modelled by deriving
+    /// twice — `derive_pairwise` is deterministic, so a fresh token for the
+    /// same user re-projects to the same id.
+    #[ntex::test]
+    async fn raw_hydra_pws_is_consistent_across_arms_and_relogin() {
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_hydra(gateway_signing, &base);
+
+        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0077";
+        let sector = "https://myapp.zeroship.ai";
+        let aud = "myapp.zeroship.ai";
+
+        // Raw-Hydra arm projection.
+        let token = sign_hydra_access_jwt(
+            &jwks_signing,
+            global_sub,
+            Some("oac_myapp"),
+            serde_json::json!(["http://api.zeroship.localhost"]),
+            "user@example.com",
+            "User",
+            3600,
+        );
+        let req = bearer_req(&token, aud);
+        let rid = Uuid::new_v4();
+        let BearerOutcome::Allowed(header) =
+            resolve_bearer_user_header(&req, &state, &rid, Some("oac_myapp"), Some(sector)).await
+        else {
+            panic!("must Allow");
+        };
+        let arm_id = decode_header_id(&state, &header);
+
+        // The cookie arm and the browser-wrapper mint use the SAME
+        // derivation on the SAME (global UUID, sector). Re-login (a second
+        // fresh token) re-derives the identical value.
+        let direct = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+        let relogin =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+
+        assert_eq!(
+            arm_id, direct,
+            "raw-Hydra arm must project the same pws_ the cookie/wrapper arms derive"
+        );
+        assert_eq!(direct, relogin, "re-login must re-derive the SAME pws_");
+        assert!(arm_id.starts_with("pws_"));
+
+        drop(srv);
+    }
+
+    /// Fail-closed: a VALID raw-Hydra user whose route has NO
+    /// `sector_identifier` yet must NOT be projected — the arm returns
+    /// `ClientNotProvisioned` (which `resolve_auth` maps to 503), never the
+    /// global UUID. Mirrors the browser-token path's posture.
+    #[ntex::test]
+    async fn raw_hydra_unprovisioned_sector_fails_closed() {
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_hydra(gateway_signing, &base);
+
+        let token = sign_hydra_access_jwt(
+            &jwks_signing,
+            "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
+            Some("oac_myapp"),
+            serde_json::json!(["http://api.zeroship.localhost"]),
+            "user@example.com",
+            "User",
+            3600,
+        );
+        let req = bearer_req(&token, "myapp.zeroship.ai");
+        let rid = Uuid::new_v4();
+        // No sector → fail closed.
+        let outcome =
+            resolve_bearer_user_header(&req, &state, &rid, Some("oac_myapp"), None).await;
+        assert!(
+            matches!(outcome, BearerOutcome::ClientNotProvisioned),
+            "no sector_identifier must fail closed (ClientNotProvisioned), got {outcome:?}"
+        );
+
+        // And end-to-end through resolve_auth → AuthOutcome::ClientNotProvisioned.
+        let app_id = Uuid::new_v4();
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy(),
+            &app_id,
+            &rid,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(outcome, AuthOutcome::ClientNotProvisioned),
+            "resolve_auth must surface ClientNotProvisioned (→ 503), got {outcome:?}"
+        );
+
+        drop(srv);
+    }
+
+    /// The browser-wrapper Bearer arm carries a `pws_` `sub` straight from
+    /// the minted wrapper (no re-derivation) and the global UUID is absent.
+    /// Confirms cross-arm CONSISTENCY: a wrapper minted with the same `pws_`
+    /// the raw-Hydra arm derives projects the SAME id.
+    #[compio::test]
+    async fn wrapper_arm_carries_pws_and_omits_global_uuid() {
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0077";
+        let sector = "https://myapp.zeroship.ai";
+        let aud = "myapp.zeroship.ai";
+        // The /token mint derives this exact pws_ for the wrapper sub.
+        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+        let token = issue_plain_wrapper(&state, &pws, "oac_myapp", aud);
+
+        let req = bearer_req(&token, aud);
+        let rid = Uuid::new_v4();
+        // The wrapper arm reads the pws_ straight from the wrapper; sector is
+        // irrelevant to it (it never re-derives), so even None sector works.
+        let BearerOutcome::Allowed(header) =
+            resolve_bearer_user_header(&req, &state, &rid, Some("oac_myapp"), None).await
+        else {
+            panic!("wrapper must Allow");
+        };
+        let id = decode_header_id(&state, &header);
+        assert_eq!(id, pws, "wrapper arm forwards the minted pws_ unchanged");
+        assert!(!id.contains(global_sub), "global UUID must not appear: {id}");
+    }
+
+    /// Decode the signed `ZeroShip-User` header and pull `.id` out.
+    fn decode_header_id(state: &crate::GateState, header: &str) -> String {
+        let json = zeroship_core::auth::verify_zeroship_user_header(
+            state.config.worker_key.as_bytes(),
+            header,
+        )
+        .expect("ZeroShip-User MAC verifies");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("user json");
+        v["id"].as_str().expect("id is a string").to_string()
+    }
+
+    // ─── PG-gated: the cookie arm + the app_user_identities upsert ────────
+
+    /// The cookie arm projects the GLOBAL session user_id to the per-app
+    /// `pws_`, emits THAT in `ZeroShip-User.id` (never the UUID), and
+    /// UPSERTS the `(app_client_id, global_user_id) → pws_` mapping. A
+    /// second resolution is idempotent (one row, same pws_). PG-gated.
+    #[compio::test]
+    async fn cookie_arm_projects_pws_and_upserts_mapping_idempotently() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        let aud = "myapp.zeroship.ai";
+        let app_id = Uuid::new_v4();
+        let app_id_str = app_id.to_string();
+        let client_id = "oac_myapp";
+        let sector = "https://myapp.zeroship.ai";
+
+        // Mint a REAL cookie session for a global user.
+        let user_id = Uuid::new_v4();
+        let session = {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            crate::sessions::create(
+                &conn,
+                &crate::sessions::NewSession {
+                    user_id: &user_id.to_string(),
+                    app_id: &app_id_str,
+                    email: Some("cookie-user@example.com"),
+                    name: Some("Cookie User"),
+                    avatar_url: None,
+                    email_verified: true,
+                    granted_scopes: &[],
+                },
+            )
+            .await
+            .expect("create session")
+        };
+
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let rid = Uuid::new_v4();
+
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &app_id_str,
+            &rid,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        let CookieOutcome::Allowed(header) = outcome else {
+            panic!("cookie must Allow, got {outcome:?}");
+        };
+        let emitted_id = decode_header_id(&state, &header);
+        let expected_pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id.to_string(),
+            sector,
+        );
+        assert_eq!(emitted_id, expected_pws, "cookie arm must emit the pws_");
+        assert!(
+            !header.contains(&user_id.to_string()),
+            "global UUID must not appear in the cookie-arm header"
+        );
+
+        // The mapping row exists with the right (app_client_id, global, pws_).
+        let stored = {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            crate::identities::lookup_pairwise_sub(&conn, client_id, user_id)
+                .await
+                .expect("lookup")
+        };
+        assert_eq!(
+            stored.as_deref(),
+            Some(expected_pws.as_str()),
+            "app_user_identities must hold the projected pws_"
+        );
+
+        // Idempotent: a SECOND resolution leaves exactly ONE row, same pws_.
+        let _ = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &app_id_str,
+            &rid,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        let (count, again) = {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            let rows = conn
+                .query(
+                    "SELECT pairwise_sub FROM auth.app_user_identities \
+                     WHERE app_client_id = $1 AND global_user_id = $2",
+                    &[&client_id, &user_id],
+                )
+                .await
+                .expect("count query");
+            let again: Option<String> = rows.first().map(|r| r.get("pairwise_sub"));
+            (rows.len(), again)
+        };
+        assert_eq!(count, 1, "upsert must be idempotent (exactly one row)");
+        assert_eq!(again.as_deref(), Some(expected_pws.as_str()));
+
+        // Cleanup.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "DELETE FROM auth.app_user_identities WHERE app_client_id = $1 AND global_user_id = $2",
+                &[&client_id, &user_id],
+            )
+            .await
+            .ok();
+            crate::sessions::revoke(&conn, session.id).await.ok();
+        }
+    }
+
+    /// The cookie arm fails closed (no `pws_`) when the route has no
+    /// `sector_identifier` — even for a fully-valid cookie session, the
+    /// global UUID is never projected. PG-gated.
+    #[compio::test]
+    async fn cookie_arm_unprovisioned_sector_fails_closed() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        let aud = "myapp.zeroship.ai";
+        let app_id = Uuid::new_v4();
+        let app_id_str = app_id.to_string();
+
+        let user_id = Uuid::new_v4();
+        let session = {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            crate::sessions::create(
+                &conn,
+                &crate::sessions::NewSession {
+                    user_id: &user_id.to_string(),
+                    app_id: &app_id_str,
+                    email: Some("cookie-user@example.com"),
+                    name: Some("Cookie User"),
+                    avatar_url: None,
+                    email_verified: true,
+                    granted_scopes: &[],
+                },
+            )
+            .await
+            .expect("create session")
+        };
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let rid = Uuid::new_v4();
+
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &app_id_str,
+            &rid,
+            Some("oac_myapp"),
+            None, // no sector → fail closed
+        )
+        .await;
+        assert!(
+            matches!(outcome, CookieOutcome::ClientNotProvisioned),
+            "cookie arm must fail closed without a sector, got {outcome:?}"
+        );
+
+        let pool = crate::db::checkout(&db).await.expect("pool");
+        let conn = pool.get().await.expect("pool");
+        crate::sessions::revoke(&conn, session.id).await.ok();
     }
 }

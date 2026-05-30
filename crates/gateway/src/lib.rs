@@ -23,6 +23,7 @@ pub mod dpop_exchange;
 pub mod enforce;
 pub mod error;
 pub mod hydra_client;
+pub mod identities;
 pub mod idempotency;
 pub mod oidc_rp;
 pub mod proxy;

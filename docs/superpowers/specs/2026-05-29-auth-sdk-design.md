@@ -2252,10 +2252,12 @@ located at the **header projection**, the only place that is per-app.
 
 ### 6.3 Mapping table + the `ZeroShip-User.id` type change
 
-`auth.app_user_identities` (DDL §8) keyed on `(app_id, global_user_id)`. The `id` column **is** the
-derived `pws_…` value (no separate `pairwise_sub` column). The platform's `/me`, sessions, audit,
-BCL, and Hydra all still key on the **global** UUID; only the gateway-projected
-`ZeroShip-User`/`User.id` carries the pairwise sub.
+`auth.app_user_identities` (DDL §8) keyed on `(app_client_id, global_user_id)`, where
+`app_client_id` is the per-app `oac_` client_id (relay sub-spec §6.2). The derived `pws_…` value
+lives in the `pairwise_sub` column (deterministic — re-derived from `(global_user_id, sector)` each
+projection, UPSERTed under the natural key, indexed for the relay reverse-lookup). The platform's
+`/me`, sessions, audit, BCL, and Hydra all still key on the **global** UUID; only the
+gateway-projected `ZeroShip-User`/`User.id` carries the pairwise sub.
 
 ⚠️ **`ZeroShip-User.id` becomes a `pws_…` text id — a deliberate wire-format break, called out.**
 Today the gateway cookie path puts a UUID into `ZeroShip-User.id`. With pairwise, the gateway derives
@@ -2286,8 +2288,10 @@ row's PK. Round 2 resolves it decisively in favor of **determinism**: <!-- Added
 
 - The pairwise **sub** is deterministic and **reused** across revoke→re-grant: re-granting the same
   `(user, app)` yields the **same** `pws_…`. The `auth.app_user_identities` row is **upserted** (its
-  `revoked_at` cleared) rather than inserting a colliding second row — so `id` (the `pws_`) being
-  the PK is fine, because there is exactly one row per `(app, global_user)` and re-grant reuses it.
+  `revoked_at` cleared) rather than inserting a colliding second row — and because the PRIMARY KEY is
+  `(app_client_id, global_user_id)` (NOT the `pairwise_sub`), the deterministic re-derivation lands
+  on the exact same row, with `pairwise_sub` re-asserted to its (unchanged) value. There is exactly
+  one row per `(app, global_user)` and re-grant reuses it.
 - Only the **relay email alias** is minted fresh on re-grant (Apple Hide-My-Email applies to the
   *alias*, not the sub): the old alias is freed (partial-unique, §7.1/§7.5) and a new token issued.
   This is the correct reading of Apple's model — the *email relay* rotates; a deterministic per-app
@@ -2354,15 +2358,15 @@ contradicting §6.2's no-round-trip property for the email half. So: <!-- Added 
 
 - **Alias is created when the `email` scope is granted, in the consent handler's `accept_consent`
   path** (off the per-request hot path), upserting the `relay_email` into the
-  `(app_id, global_user_id)` row of `auth.app_user_identities`. This is the same boundary that writes
-  the grant, so it is a one-time cost at consent, not per request.
+  `(app_client_id, global_user_id)` row of `auth.app_user_identities`. This is the same boundary that
+  writes the grant, so it is a one-time cost at consent, not per request.
 - **The gateway projection is READ-THROUGH cached.** The gateway keeps an in-process LRU keyed by
-  `(app_id, global_user_id) → relay_email` (alongside the route cache). A hit ⇒ **no DB round-trip**
-  for the email half (matching the `pws_` derivation's no-round-trip property). A miss ⇒ one
-  `SELECT` (cached thereafter); the alias already exists from consent, so projection **never writes**
-  on the hot path.
+  `(app_client_id, global_user_id) → relay_email` (alongside the route cache). A hit ⇒ **no DB
+  round-trip** for the email half (matching the `pws_` derivation's no-round-trip property). A miss ⇒
+  one `SELECT` (cached thereafter); the alias already exists from consent, so projection **never
+  writes** on the hot path.
 - **Concurrency contract for the consent-time create:** the upsert is
-  `INSERT … ON CONFLICT (app_id, global_user_id) DO UPDATE SET relay_email = COALESCE(existing,
+  `INSERT … ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET relay_email = COALESCE(existing,
   excluded) … RETURNING relay_email` under the same advisory lock the consent grant uses, so two
   concurrent first-consents for the same `(app, user)` mint **exactly one** alias (the second sees
   the first's value). On the rare *active-alias* unique collision the generate-and-retry above
@@ -2529,34 +2533,44 @@ CREATE TABLE control.app_scope_defs (
 );
 ```
 
-`auth.app_user_identities` (pairwise + relay mapping). ⚠️ **`app_id` is `TEXT`** to match the
-existing `auth.gateway_sessions.app_id TEXT` (the auth schema keys app_id as text throughout — the
-gateway store binds it as a string). The redundant `pairwise_sub` column is **dropped**: the
-typed-id `id` (a `pws_…` value) **is** the pairwise sub — one value, one column, no consistency
-hazard. `relay_email` uniqueness is **partial** (active aliases only) so revoked aliases free their
-slot. <!-- Added in round 1: addressing MAJOR — app_id TEXT consistency, drop redundant pairwise_sub, partial relay_email UNIQUE -->
+`auth.app_user_identities` (pairwise + relay mapping). ⚠️ **`app_client_id` is `TEXT` holding the
+per-app OAuth `client_id` (`oac_<base62>`)** — pinned by the relay sub-spec §6.2 so the gateway
+upsert (which has `route.oauth_client_id` in hand), control's explicit-revoke (`{client_id}` path
+param), and app-delete (`client_id_for_app(uuid)`) all key on ONE deterministic value with no
+cross-schema join. The column is **named `app_client_id`** (not `app_id`) so the content — the
+`oac_` client_id, not the app uuid-as-text — is explicit at the column level. **`pairwise_sub` is a
+column** (not the PK): the natural key is `(app_client_id, global_user_id)`, so a deterministic
+re-derivation after revoke UPSERTs the one row (clears `revoked_at`) instead of colliding; the
+`pairwise_sub` index serves the relay reverse-lookup. `relay_email` uniqueness is **partial** (active
+aliases only) so revoked aliases free their slot. <!-- Reconciled in Slice 4: pin app_id→app_client_id (the oac_ client_id, per relay sub-spec §6.2); pairwise_sub is its own column keyed under (app_client_id, global_user_id); partial relay_email UNIQUE -->
 
 ```sql
 CREATE TABLE auth.app_user_identities (
-  id              text        PRIMARY KEY,           -- pws_… == derive_pairwise(global_user, app.sector); DETERMINISTIC, one row per (app, global_user)
-  app_id          text        NOT NULL,              -- TEXT to match auth.gateway_sessions.app_id
-  global_user_id  uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,  -- UUID like auth.users.id
-  relay_email     text,                              -- {token}@{relay_domain}; NULL until email scope granted
+  app_client_id   text        NOT NULL,              -- per-app OAuth client_id (oac_<base62>); see above
+  global_user_id  uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,  -- GLOBAL Hydra subject (UUID like auth.users.id)
+  pairwise_sub    text        NOT NULL,              -- pws_… == derive_pairwise(salt, global_user_id, sector); DETERMINISTIC
+  relay_email     text,                              -- {token}@{relay_domain}; NULL until email scope granted (Slice 5)
   created_at      timestamptz NOT NULL DEFAULT now(),
   revoked_at      timestamptz,
-  UNIQUE (app_id, global_user_id)
+  PRIMARY KEY (app_client_id, global_user_id)        -- one row per (app, global_user); re-grant UPSERTs it
 );
--- pws_ is DETERMINISTIC (§6.2/§6.4): re-grant UPSERTs the same row (clears revoked_at) rather than
--- inserting a colliding second pws_, so `id` being the PK is correct — there is exactly one row per
--- (app, global_user). No "fresh sub on re-grant"; only the relay alias rotates.
+-- pairwise_sub is DETERMINISTIC (§6.2/§6.4): re-grant UPSERTs the (app_client_id, global_user_id)
+-- row (clears revoked_at) rather than inserting a colliding second pws_, so there is exactly one row
+-- per (app, global_user). No "fresh sub on re-grant"; only the relay alias rotates.
+-- Relay reverse-lookup (Slice 5: pws_ / alias → (app, global_user)).
+CREATE INDEX app_user_identities_pairwise_sub_idx
+  ON auth.app_user_identities (pairwise_sub);
 -- relay alias unique only among ACTIVE aliases → a revoked alias frees its slot for the fresh alias
-CREATE UNIQUE INDEX app_user_identities_relay_active
+CREATE UNIQUE INDEX app_user_identities_relay_active_idx
   ON auth.app_user_identities (relay_email) WHERE relay_email IS NOT NULL AND revoked_at IS NULL;
 ```
 
-> Note: `global_user_id` is `uuid` here to match `auth.users.id` (UUID); `app_id` is `text` to
-> match `auth.gateway_sessions.app_id`. These two are intentionally different types because they
-> reference two differently-typed columns — both pinned to their referent, no guessing.
+> Note: `global_user_id` is `uuid` here to match `auth.users.id` (UUID); `app_client_id` is `text`
+> (the `oac_` client_id). These two are intentionally different types because they reference two
+> differently-typed referents — both pinned, no guessing. The gateway UPSERTs this row whenever it
+> projects a `pws_` (every cookie / raw-Hydra / DPoP-introspect arm), keyed on
+> `(app_client_id = route.oauth_client_id, global_user_id)`; the `pws_` is the deterministic
+> projection (§6.2), so the row is a reverse-lookup cache, not part of the per-request trust path.
 
 ⚠️ **Round-3: there is NO `auth.app_grants` table.** The per-app remembered-grant ledger is the
 **existing `control.oauth_grants`** keyed by `(subject, client_id)` (the live consent fast path's
@@ -3106,8 +3120,9 @@ keeps `subject_type: public` and emits the global UUID; the gateway projects `pw
 `ZeroShip-User` header boundary (cookie arm from `gateway_sessions.user_id`, raw-Hydra Bearer arm from
 the JWT `sub`) **and mints the browser-held WRAPPER access token with sub=`pws_`** so no global UUID
 ever reaches app JS (round-3 §1.2/G4). **No `accept_login`/`accept_consent` change, no UUID-parsing
-consumer touched.** `auth.app_user_identities` (app_id TEXT; `id` IS the deterministic `pws_`, one row
-per `(app, global_user)`, upserted on re-grant §6.4); gateway emits `pws_…` in `ZeroShip-User.id`
+consumer touched.** `auth.app_user_identities` (`app_client_id` = the `oac_` client_id; `pairwise_sub`
+holds the deterministic `pws_`; PK `(app_client_id, global_user_id)`, one row per `(app, global_user)`,
+upserted on every projection / re-grant §6.4); gateway emits `pws_…` in `ZeroShip-User.id`
 (opaque text, wire-format break §6.3); e2e asserts cross-app sub divergence + stability across
 re-login, that all three arms (cookie/raw-Hydra/wrapper) project the same `pws_`, and that the
 browser token carries no global UUID. F4-A (Hydra-native) stays a future optimization gated on the

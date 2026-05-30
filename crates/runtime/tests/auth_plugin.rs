@@ -132,6 +132,41 @@ fn get_user_exposes_scopes_to_app_code() {
     assert_eq!(v["first"], "openid", "body: {body}");
 }
 
+/// Slice 4 (§6.2/§6.3): after the pairwise projection the gateway ALWAYS
+/// emits a per-app `pws_…` id in `ZeroShip-User.id` (never the global
+/// `usr_…` UUID), and the worker treats `User.id` as an OPAQUE string.
+/// This feeds the exact post-Slice-4 header shape (`id: "pws_…"`) through
+/// the REAL plumbing and asserts `env.auth.getUser().id` is that `pws_`
+/// string verbatim — the global UUID is absent from anything app code can
+/// read.
+#[test]
+fn get_user_id_is_the_per_app_pairwise_pws() {
+    // The gateway projects the global UUID to this opaque per-app id; app
+    // code only ever sees the pws_.
+    const PAIRWISE_USER_JSON: &str = r#"{"id":"pws_3Qk7xWf2bN0aLpZrT9cD","email":"alias@relay.zeroship.ai","name":"Jane Doe","email_verified":true,"scopes":["openid"]}"#;
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                const u = env.auth.getUser();
+                return Response.json({
+                    id: u?.id ?? null,
+                    idIsString: typeof u?.id === "string",
+                    isPws: (u?.id ?? "").startsWith("pws_"),
+                });
+            }
+        };
+    "#,
+    );
+
+    let (status, body) = dispatch_with_user(&runtime, Some(PAIRWISE_USER_JSON.to_string()));
+    assert_eq!(status, 200, "body: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(v["id"], "pws_3Qk7xWf2bN0aLpZrT9cD", "body: {body}");
+    assert_eq!(v["idIsString"], true, "User.id must be an opaque string: {body}");
+    assert_eq!(v["isPws"], true, "env.auth.getUser().id must be the pws_: {body}");
+}
+
 /// `env.auth.getUser()` returns `null` when there is no authenticated user
 /// for the request (no `ZeroShip-User` header was forwarded).
 #[test]
