@@ -416,8 +416,23 @@ impl CancelFlag {
 mod tests {
     use super::*;
 
+    // Serializes the measurement windows of every test that reads or
+    // perturbs the process-global `STREAM_GLOBAL_BUFFERED` atomic. Without
+    // it, sibling tests pushing concurrently can inflate the counter inside
+    // another test's before/after window, breaking the `<= before + N`
+    // delta assertions. Poison-tolerant: a panicking test must not wedge
+    // the rest of the module.
+    static GLOBAL_COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_global_counter() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn stream_push_accepts_under_cap() {
+        let _guard = lock_global_counter();
         let (w, r) = stream_buffer_with_cap(100);
         assert_eq!(w.push(vec![0u8; 50]), StreamPushResult::Ok);
         assert_eq!(w.push(vec![0u8; 40]), StreamPushResult::Ok);
@@ -429,6 +444,7 @@ mod tests {
 
     #[test]
     fn stream_push_rejects_over_cap() {
+        let _guard = lock_global_counter();
         let (w, r) = stream_buffer_with_cap(100);
         assert_eq!(w.push(vec![0u8; 60]), StreamPushResult::Ok);
         // 60 + 50 > 100 → overflow
@@ -442,6 +458,7 @@ mod tests {
 
     #[test]
     fn stream_push_stays_rejected_after_overflow() {
+        let _guard = lock_global_counter();
         let (w, _r) = stream_buffer_with_cap(10);
         assert_eq!(w.push(vec![0u8; 20]), StreamPushResult::Full);
         // Every subsequent push must also be rejected
@@ -450,6 +467,7 @@ mod tests {
 
     #[test]
     fn stream_push_after_close_is_rejected() {
+        let _guard = lock_global_counter();
         let (w, _r) = stream_buffer();
         w.close();
         assert_eq!(w.push(vec![0u8; 1]), StreamPushResult::Closed);
@@ -458,7 +476,10 @@ mod tests {
     #[test]
     fn stream_global_counter_tracks_push_and_pop() {
         // Test is delta-based because other tests running in parallel may
-        // also modify the global counter — no exact-value assertions.
+        // also modify the global counter — no exact-value assertions. The
+        // lock serializes this test's measurement window against siblings
+        // that push into the same global counter.
+        let _guard = lock_global_counter();
         let (w, r) = stream_buffer_with_cap(1024);
         let before = stream_global_buffered_bytes();
         assert_eq!(w.push(vec![0u8; 100]), StreamPushResult::Ok);
@@ -473,6 +494,7 @@ mod tests {
 
     #[test]
     fn stream_global_counter_released_on_drop() {
+        let _guard = lock_global_counter();
         let before = stream_global_buffered_bytes();
         {
             let (w, _r) = stream_buffer_with_cap(1024);
@@ -510,6 +532,8 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::task::{Context, Poll, Wake, Waker};
+
+        let _guard = lock_global_counter();
 
         struct TestWake(Arc<AtomicBool>);
         impl Wake for TestWake {

@@ -19,7 +19,6 @@ use crate::state::SharedState;
 static K_STATUS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"status");
 static K_HEADERS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"headers");
 static K_ID: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_id");
-static K_MESSAGE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"message");
 static K_DONE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"done");
 static K_VALUE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"value");
 static K_NEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"next");
@@ -368,6 +367,7 @@ pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) 
 pub fn extract_settled_result(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
+    request_id: u64,
 ) -> SettledResult {
     let local = v8::Local::new(scope, promise);
     match local.state() {
@@ -376,23 +376,39 @@ pub fn extract_settled_result(
             SettledResult::Http(inspect_response(scope, val))
         }
         v8::PromiseState::Rejected => {
-            // Read `.message` if it's an Error object; else stringify.
+            // Mirror `settle_rpc_promise`'s Rejected arm: extract the
+            // structured error, then render a sanitized error body via
+            // `build_error_body`. Reading the raw `.message` into
+            // `SettledResult::Http(Err(..))` would leak the secret message
+            // to the client at a 5xx boundary; `build_error_body` blanks
+            // those (logging the diagnostics with the request id instead).
             let exc = local.result(scope);
-            let msg = if let Some(obj) = exc.to_object(scope) {
-                let msg_key = key(scope, &K_MESSAGE);
-                obj.get(scope, msg_key.into())
-                    .filter(|v| !v.is_undefined() && !v.is_null())
-                    .and_then(|v| v.to_string(scope))
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_else(|| exc.to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_else(|| "Promise rejected".to_string()))
-            } else {
-                exc.to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_else(|| "Promise rejected".to_string())
-            };
-            SettledResult::Http(Err(msg))
+            match crate::dispatch::v8_exception_to_error_value(scope, exc) {
+                crate::state::DispatchResult::ErrorValue {
+                    message,
+                    name,
+                    stack,
+                    status,
+                    code,
+                    details_json,
+                    retryable,
+                } => {
+                    let extras = crate::dispatch::ErrorExtras {
+                        stack: stack.as_deref(),
+                        code: code.as_deref(),
+                        details_json: details_json.as_deref(),
+                        retryable,
+                    };
+                    SettledResult::Http(Ok(ResponseInfo::Complete {
+                        status,
+                        headers: vec![("content-type".into(), "application/json".into())],
+                        body: crate::dispatch::build_error_body(
+                            status, request_id, &message, &name, extras,
+                        ),
+                    }))
+                }
+                _ => SettledResult::Http(Err("Promise rejected".to_string())),
+            }
         }
         v8::PromiseState::Pending => {
             SettledResult::Http(Err("Promise still pending".to_string()))

@@ -2704,7 +2704,7 @@ fn collect_settled_promises(
         .filter_map(|id| {
             let req = pending_requests.remove(&id)?;
             let result = match req.origin {
-                PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise),
+                PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise, id),
                 PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
             };
             Some((id, req, result))

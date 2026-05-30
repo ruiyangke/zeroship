@@ -359,7 +359,11 @@ fn cause_default_undefined() {
                 aHas: "cause" in a,
                 bHas: "cause" in b,
                 cHas: "cause" in c,
-                aVal: a.cause,
+                // The dispatch path is superjson, which encodes a returned
+                // `undefined` *value* as `null` + a meta entry — so asserting
+                // wire-absence of `aVal` is wrong. Assert the read result in
+                // JS instead: a missing prop reads as `undefined`.
+                aReadsUndefined: a.cause === undefined,
             };
         }"#),
         "test",
@@ -369,9 +373,7 @@ fn cause_default_undefined() {
     assert!(r.json.contains("\"aHas\":false"), "got: {}", r.json);
     assert!(r.json.contains("\"bHas\":false"), "got: {}", r.json);
     assert!(r.json.contains("\"cHas\":false"), "got: {}", r.json);
-    // Missing prop reads as undefined, which JSON.stringify omits — verify
-    // by absence rather than by literal.
-    assert!(!r.json.contains("\"aVal\":"), "got: {}", r.json);
+    assert!(r.json.contains("\"aReadsUndefined\":true"), "got: {}", r.json);
 }
 
 #[test]
