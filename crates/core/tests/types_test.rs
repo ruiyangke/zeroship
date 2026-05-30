@@ -73,12 +73,16 @@ fn usage_report_roundtrip() {
 
 #[test]
 fn route_entry_roundtrip() {
+    // A provisioned app: both OAuth identity fields carry `Some`. They
+    // must survive the serialize/deserialize round-trip intact.
     let entry = RouteEntry {
         name: "my-app".to_string(),
         plan_id: "pro".to_string(),
         api_key_hash: "deadbeef".repeat(8),
         deploy_hash: Some("abc123".to_string()),
         manifest: Manifest::passthrough(),
+        oauth_client_id: Some("oac_myapp".to_string()),
+        sector_identifier: Some("https://my-app.zeroship.ai".to_string()),
     };
 
     let json = serde_json::to_string(&entry).unwrap();
@@ -87,12 +91,37 @@ fn route_entry_roundtrip() {
     assert_eq!(decoded.name, "my-app");
     assert_eq!(decoded.plan_id, "pro");
     assert_eq!(decoded.deploy_hash, Some("abc123".to_string()));
+    assert_eq!(decoded.oauth_client_id, Some("oac_myapp".to_string()));
+    assert_eq!(
+        decoded.sector_identifier,
+        Some("https://my-app.zeroship.ai".to_string())
+    );
     // Every route has a manifest after deserialization. The synthesized
     // passthrough has at least one resource entry (`*`).
     assert!(
         !decoded.manifest.resources.is_empty(),
         "passthrough has resources"
     );
+}
+
+#[test]
+fn route_entry_oauth_fields_none_round_trip() {
+    // An un-provisioned app: both OAuth fields are `None`. `None` must
+    // round-trip as `None` (not error, not flip to `Some("")`) so the
+    // gateway can hold the entry and hard-fail closed on the auth path.
+    let entry = RouteEntry {
+        name: "unprovisioned".to_string(),
+        plan_id: "free".to_string(),
+        api_key_hash: "h".to_string(),
+        deploy_hash: None,
+        manifest: Manifest::passthrough(),
+        oauth_client_id: None,
+        sector_identifier: None,
+    };
+    let json = serde_json::to_string(&entry).unwrap();
+    let decoded: RouteEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.oauth_client_id, None);
+    assert_eq!(decoded.sector_identifier, None);
 }
 
 #[test]
@@ -109,6 +138,34 @@ fn route_entry_missing_manifest_field_synthesizes_passthrough() {
     assert!(
         !decoded.manifest.resources.is_empty(),
         "default to passthrough"
+    );
+}
+
+#[test]
+fn route_entry_mixed_default_deserializes() {
+    // The §1.5 "mixed default": a `RouteEntry` produced before the
+    // OAuth-fields join lands (or by a hand-rolled fixture) omits BOTH
+    // the manifest and the OAuth fields. It must deserialize with
+    // `manifest = passthrough` AND `oauth_client_id/sector_identifier =
+    // None` — all three serde defaults firing together.
+    let json = r#"{
+        "name": "mixed-default-app",
+        "plan_id": "free",
+        "api_key_hash": "h",
+        "deploy_hash": null
+    }"#;
+    let decoded: RouteEntry = serde_json::from_str(json).unwrap();
+    assert!(
+        !decoded.manifest.resources.is_empty(),
+        "manifest defaults to passthrough"
+    );
+    assert_eq!(
+        decoded.oauth_client_id, None,
+        "oauth_client_id defaults to None"
+    );
+    assert_eq!(
+        decoded.sector_identifier, None,
+        "sector_identifier defaults to None"
     );
 }
 

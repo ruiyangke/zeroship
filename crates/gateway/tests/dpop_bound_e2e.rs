@@ -359,14 +359,20 @@ async fn dispatch_verify_handler(
         .wrapper_verifier
         .as_ref()
         .expect("wrapper_verifier configured");
-    let claims = match verifier.verify(&access_token, host) {
+    // DPoP fast-path passes `None` for the client_id binding (it
+    // enforces the DPoP key binding via cnf.jkt below) — parity with
+    // the production `resolve_dpop_user_header`.
+    let claims = match verifier.verify(&access_token, host, None) {
         Ok(c) => c,
         Err(e) => {
             return HttpResponse::Unauthorized()
                 .body(format!("wrapper verify failed: {e}"));
         }
     };
-    if claims.cnf.jkt != verified.jkt {
+    let Some(cnf) = claims.cnf.as_ref() else {
+        return HttpResponse::Unauthorized().body("wrapper has no cnf.jkt");
+    };
+    if cnf.jkt != verified.jkt {
         return HttpResponse::Unauthorized().body("cnf.jkt mismatch");
     }
 
@@ -629,14 +635,15 @@ async fn e2e_dpop_bound_happy_path() {
         .as_ref()
         .expect("verifier configured");
     let claims = verifier
-        .verify(&wrapper_token, exchange_host)
+        .verify(&wrapper_token, exchange_host, None)
         .expect("wrapper must verify with the gateway's own verifier");
     assert_eq!(
         claims.iss, GATEWAY_PUBLIC_URL,
         "wrapper iss must equal gateway public URL"
     );
     assert_eq!(
-        claims.cnf.jkt, expected_jkt,
+        claims.cnf.as_ref().expect("DPoP wrapper carries cnf").jkt,
+        expected_jkt,
         "cnf.jkt must equal RFC 7638 thumbprint of client keypair A"
     );
     // For a client_credentials grant hydra emits the client_id as `sub`.

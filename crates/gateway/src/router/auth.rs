@@ -252,7 +252,12 @@ async fn resolve_dpop_user_header(
     //     from the embedded claims — no hydra round-trip required.
     let token_looks_like_wrapper = looks_like_wrapper(access_token);
     if let Some(verifier) = state.wrapper_verifier.as_ref() {
-        match verifier.verify(access_token, host) {
+        // The DPoP fast-path passes `None` for the client_id binding:
+        // it enforces the DPoP key binding (`cnf.jkt == proof.jkt`)
+        // below instead. The per-app `client_id`-claim binding belongs
+        // to the Bearer arm (§1.3, slice 1c), which passes
+        // `Some(route.oauth_client_id)`.
+        match verifier.verify(access_token, host, None) {
             Ok(claims) => {
                 // Strict binding: a wrapper minted for jkt_A cannot be
                 // presented with a proof signed by jkt_B. Mismatch is a
@@ -261,9 +266,19 @@ async fn resolve_dpop_user_header(
                 // an attacker who stole a wrapper bypass its binding
                 // simply by also presenting a different valid DPoP
                 // proof for their own key.
-                if claims.cnf.jkt != verified.jkt {
+                //
+                // A wrapper with no `cnf` (the plain-Bearer browser
+                // mint) cannot satisfy a DPoP proof binding at all, so
+                // it is rejected on this DPoP path.
+                let Some(cnf) = claims.cnf.as_ref() else {
                     tracing::warn!(
-                        expected = %claims.cnf.jkt,
+                        "DPoP wrapper token has no cnf.jkt — rejecting on DPoP path"
+                    );
+                    return None;
+                };
+                if cnf.jkt != verified.jkt {
+                    tracing::warn!(
+                        expected = %cnf.jkt,
                         actual = %verified.jkt,
                         "DPoP proof jkt does not match wrapper cnf.jkt — rejecting"
                     );
@@ -605,13 +620,13 @@ mod tests {
             exp: 0,
             iat: 0,
             jti: "j".into(),
-            cnf: Cnf { jkt: "k".into() },
+            cnf: Some(Cnf { jkt: "k".into() }),
             scope: "openid".into(),
             client_id: "gateway".into(),
             email: Some("a@b.test".into()),
             email_verified: Some(true),
             name: Some("Alice".into()),
-            wraps: "w".into(),
+            wraps: Some("w".into()),
         };
         let owned = build_worker_user_from_wrapper(&claims);
         assert_eq!(owned.id, "usr_abc");
@@ -635,13 +650,13 @@ mod tests {
             exp: 0,
             iat: 0,
             jti: "j".into(),
-            cnf: Cnf { jkt: "k".into() },
+            cnf: Some(Cnf { jkt: "k".into() }),
             scope: String::new(),
             client_id: "gateway".into(),
             email: None,
             email_verified: None,
             name: None,
-            wraps: "w".into(),
+            wraps: Some("w".into()),
         };
         let owned = build_worker_user_from_wrapper(&claims);
         assert_eq!(owned.id, "usr_test");
@@ -915,27 +930,35 @@ mod tests {
         issue_wrapper_for_sub(state, "usr_test", proof_jkt, aud)
     }
 
+    /// Build a DPoP-style [`WrapperMint`] (cnf + wraps present) for the
+    /// dispatch tests. Mirrors what `dpop_exchange.rs` builds from an
+    /// introspection response.
+    fn dpop_test_mint<'a>(sub: &'a str, proof_jkt: &'a str, aud: &'a str) -> crate::wrapper_token::WrapperMint<'a> {
+        crate::wrapper_token::WrapperMint {
+            aud,
+            sub,
+            scope: "openid",
+            client_id: "gateway",
+            exp_secs: 3600,
+            cnf: Some(proof_jkt),
+            wraps: Some("aGVsbG8"),
+            email: Some("test@example.com"),
+            email_verified: Some(true),
+            name: Some("Test"),
+        }
+    }
+
     fn issue_wrapper_for_sub(
         state: &crate::GateState,
         sub: &str,
         proof_jkt: &str,
         aud: &str,
     ) -> String {
-        let intro = crate::oidc_rp::IntrospectionResponse {
-            active: true,
-            sub: Some(sub.into()),
-            client_id: Some("gateway".into()),
-            email: Some("test@example.com".into()),
-            email_verified: Some(true),
-            name: Some("Test".into()),
-            scope: Some("openid".into()),
-            exp: None,
-        };
         state
             .wrapper_issuer
             .as_ref()
             .expect("issuer configured")
-            .issue(aud, &intro, proof_jkt, "hydra-token-shadow")
+            .issue(&dpop_test_mint(sub, proof_jkt, aud))
             .expect("issue wrapper")
     }
 
@@ -947,18 +970,8 @@ mod tests {
         let issuer =
             crate::wrapper_token::Issuer::new(signing, "https://api.zeroship.ai".into())
                 .expect("issuer");
-        let intro = crate::oidc_rp::IntrospectionResponse {
-            active: true,
-            sub: Some("usr_test".into()),
-            client_id: Some("gateway".into()),
-            email: Some("test@example.com".into()),
-            email_verified: Some(true),
-            name: Some("Test".into()),
-            scope: Some("openid".into()),
-            exp: None,
-        };
         issuer
-            .issue(aud, &intro, proof_jkt, "hydra-token-shadow")
+            .issue(&dpop_test_mint("usr_test", proof_jkt, aud))
             .expect("issue wrapper")
     }
 
@@ -997,15 +1010,15 @@ mod tests {
             exp: now + 3600,
             iat: now,
             jti: Uuid::new_v4().to_string(),
-            cnf: crate::wrapper_token::Cnf {
+            cnf: Some(crate::wrapper_token::Cnf {
                 jkt: proof_jkt.into(),
-            },
+            }),
             scope: "openid".into(),
             client_id: "gateway".into(),
             email: Some("test@example.com".into()),
             email_verified: Some(true),
             name: Some("Test".into()),
-            wraps: "hydra-token-shadow".into(),
+            wraps: Some("hydra-token-shadow".into()),
         }
     }
 
@@ -1041,6 +1054,61 @@ mod tests {
         let request_id = Uuid::new_v4();
         let header = resolve_dpop_user_header(&req, &state, &request_id).await;
         assert!(header.is_some(), "wrapper path must accept matched jkt");
+    }
+
+    #[compio::test]
+    async fn resolve_dpop_rejects_plain_bearer_wrapper_without_cnf() {
+        // A plain-Bearer wrapper (cnf: None — the browser mint) has no
+        // DPoP key binding, so it can never satisfy the DPoP path's
+        // `cnf.jkt == proof.jkt` check. The DPoP fast-path must reject
+        // it rather than treat a missing cnf as a wildcard match.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+
+        let aud = "myapp.zeroship.ai";
+        // Mint a cnf-less wrapper directly via the issuer.
+        let wrapper = state
+            .wrapper_issuer
+            .as_ref()
+            .expect("issuer")
+            .issue(&crate::wrapper_token::WrapperMint {
+                aud,
+                sub: "pws_browser",
+                scope: "openid",
+                client_id: "gateway",
+                exp_secs: 600,
+                cnf: None,
+                wraps: None,
+                email: None,
+                email_verified: None,
+                name: None,
+            })
+            .expect("issue plain wrapper");
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", proof)
+            .to_http_request();
+
+        let request_id = Uuid::new_v4();
+        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
+        assert!(
+            header.is_none(),
+            "DPoP path must reject a cnf-less plain-Bearer wrapper"
+        );
     }
 
     #[compio::test]

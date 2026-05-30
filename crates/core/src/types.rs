@@ -67,6 +67,25 @@ pub struct RouteEntry {
     /// SSR" semantics.
     #[serde(default = "Manifest::passthrough")]
     pub manifest: Manifest,
+    /// Per-app OAuth `client_id`, resolved from the request `Host` via
+    /// the route cache. The gateway's browser-auth endpoints and the
+    /// Bearer arm bind on this (`claims.client_id == oauth_client_id`).
+    ///
+    /// `Option`, never a defaulted empty `String`: an empty-string
+    /// `client_id` is a footgun (a malformed token with an empty
+    /// `client_id` claim could match `""`). It is `None` until the
+    /// control plane provisions the app's OAuth client; consumers
+    /// hard-fail (`503`/`401`) rather than bind to a falsy value.
+    /// `#[serde(default)]` ⇒ `None` so an un-provisioned `RouteEntry`
+    /// stays loadable.
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    /// Per-app apex origin used for pairwise/relay subject scoping
+    /// (`derive_pairwise(sub, sector_identifier)`). `Option`: `None`
+    /// until provisioned, in which case the pairwise projection
+    /// hard-fails closed (no `pws_` derivation, no header emitted).
+    #[serde(default)]
+    pub sector_identifier: Option<String>,
 }
 
 /// Map of app id → current deploy/config snapshot.

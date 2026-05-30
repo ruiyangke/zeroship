@@ -374,6 +374,17 @@ impl Registry {
                     api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
                     manifest,
+                    // OAuth identity fields (§1.5). `None` for every app
+                    // today: no app has a provisioned per-app OAuth
+                    // client yet. Slice 1d adds the per-app client
+                    // lifecycle and this query LEFT JOINs
+                    // `control.app_oauth_clients` to populate
+                    // `Some(client_id)`/`Some(sector_identifier)` for a
+                    // provisioned app (un-provisioned rows yield NULL ⇒
+                    // `None`). The wire field ships now so the gateway's
+                    // `CompiledRoute`/Bearer arm can consume it.
+                    oauth_client_id: None,
+                    sector_identifier: None,
                 },
             );
         }

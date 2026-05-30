@@ -347,6 +347,16 @@ fn main() -> std::io::Result<()> {
     // to the P7-U5 introspection path. Cheap to construct (no PKCS#8
     // encoding — `DecodingKey::from_ed_der` accepts the raw 32-byte
     // public key), so we just build it eagerly at boot.
+    //
+    // ROTATION (deferred): this builds a CURRENT-key-only verifier via
+    // `Verifier::new`. The previous-key overlap mechanism
+    // (`Verifier::with_previous`) is implemented and unit-tested, but is
+    // NOT yet wired to a config path — there is no `--prev-signing-key-file`
+    // flag, so wrapper-signing-key rotation is not operable end-to-end and a
+    // key roll would orphan in-flight wrappers at cutover. Wiring previous-key
+    // loading is deferred to the slice that makes the gateway wrapper the
+    // primary browser-held token (1b-endpoints); see the rotation runbook in
+    // docs/superpowers/specs/2026-05-29-auth-sdk-design.md.
     let wrapper_verifier: Option<Arc<wrapper_token::Verifier>> = signing_key.as_ref().map(|sk| {
         let public = sk.verifying_key();
         Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))

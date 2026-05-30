@@ -42,7 +42,7 @@ use ntex::http::header::{AUTHORIZATION, HOST};
 use ntex::web::{types::State, HttpRequest, HttpResponse};
 use serde_json::json;
 
-use crate::{error::GatewayError, GateState};
+use crate::GateState;
 
 /// Cache-Control value applied to every response from this handler.
 const CACHE_NO_STORE: &str = "no-store";
@@ -54,12 +54,13 @@ const CACHE_NO_STORE: &str = "no-store";
 /// has been admitted.
 const JTI_TTL_SECS: i64 = 120;
 
-/// Hard-coded for the wrapper token's `expires_in` claim. Mirrors the
-/// `exp = iat + 3600` in [`crate::wrapper_token::Issuer::issue`] —
-/// changing one without the other yields a token that lies about its
-/// lifetime in the response envelope. Bundled here so callers can
-/// surface the value without re-deriving from the JWT body.
-const WRAPPER_EXPIRES_IN_SECS: u64 = 3600;
+/// Wrapper-token lifetime for the DPoP-exchange path, in seconds. Used
+/// both as the `WrapperMint::exp_secs` the Issuer stamps into `exp` and
+/// as the `expires_in` value echoed in the response envelope — bundling
+/// them here keeps the JWT body and the envelope from disagreeing about
+/// the token's lifetime. (The browser plain-Bearer path mints a shorter
+/// 600 s wrapper; that lives in its own handler.)
+const WRAPPER_EXPIRES_IN_SECS: i64 = 3600;
 
 /// Issue a wrapper token bound to the client's `DPoP` key.
 ///
@@ -205,15 +206,47 @@ pub async fn handle(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRespo
     //    wrapper minted at `myapp.zeroship.ai` can't be replayed
     //    against `other.zeroship.ai`, even if the same DPoP key
     //    accompanies it.
+    //
+    //    Resolve `sub` from the introspection response here (the Issuer
+    //    is now a free-parameter claims-builder that only rejects an
+    //    empty `sub`): an inactive/userless token that introspected
+    //    without a `sub` can't yield a usable wrapper.
     let aud = host.to_string();
-    let wrapper = match issuer.issue(&aud, &intro, &verified.jkt, hydra_token) {
+    let Some(sub) = intro.sub.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!("dpop-exchange: introspection response missing oauth sub");
+        return HttpResponse::Unauthorized()
+            .header("cache-control", CACHE_NO_STORE)
+            .json(&json!({"error": "missing_oauth_sub"}));
+    };
+
+    // `wraps` ties the wrapper to the hydra-issued opaque access token
+    // without leaking it: SHA-256 the (utf-8) bytes, base64url-encode.
+    // The browser plain-Bearer path has no underlying raw token and
+    // omits this; the DPoP path always carries it for revocation-by-
+    // origin-token.
+    let wraps = {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(hydra_token.as_bytes()))
+    };
+
+    let mint = crate::wrapper_token::WrapperMint {
+        aud: &aud,
+        sub,
+        scope: intro.scope.as_deref().unwrap_or_default(),
+        client_id: intro.client_id.as_deref().unwrap_or_default(),
+        // The envelope's `expires_in` and the JWT `exp` read the same
+        // `i64` constant directly, so they cannot disagree (no fallback
+        // that could silently substitute a different lifetime).
+        exp_secs: WRAPPER_EXPIRES_IN_SECS,
+        cnf: Some(verified.jkt.as_str()),
+        wraps: Some(wraps.as_str()),
+        email: intro.email.as_deref(),
+        email_verified: intro.email_verified,
+        name: intro.name.as_deref(),
+    };
+    let wrapper = match issuer.issue(&mint) {
         Ok(t) => t,
-        Err(GatewayError::Internal(message)) if message == "missing oauth sub" => {
-            tracing::warn!("dpop-exchange: introspection response missing oauth sub");
-            return HttpResponse::Unauthorized()
-                .header("cache-control", CACHE_NO_STORE)
-                .json(&json!({"error": "missing_oauth_sub"}));
-        }
         Err(e) => {
             tracing::error!(error = %e, "dpop-exchange: issue failed");
             return HttpResponse::InternalServerError()

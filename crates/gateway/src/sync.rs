@@ -175,4 +175,65 @@ mod tests {
         assert_eq!(CONTROL_REQUEST_TIMEOUT, std::time::Duration::from_secs(5));
         assert_eq!(control_timeout_error(), "control request timed out after 5s");
     }
+
+    fn route_entry(name: &str, oauth_client_id: Option<&str>, sector: Option<&str>) -> RouteEntry {
+        RouteEntry {
+            name: name.to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest: Manifest::passthrough(),
+            oauth_client_id: oauth_client_id.map(str::to_string),
+            sector_identifier: sector.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn route_sync_surfaces_oauth_fields_on_compiled_route() {
+        // The route-sync compile path (`RouteCache::update`) must thread
+        // the §1.5 OAuth identity fields from the source `RouteEntry`
+        // through to the `CompiledRoute` that `lookup_by_name` returns,
+        // so the gateway resolves a per-app `oauth_client_id`/sector
+        // from the request `Host` without a second lookup.
+        let provisioned_id = Uuid::new_v4();
+        let unprovisioned_id = Uuid::new_v4();
+
+        let mut routes: RouteMap = HashMap::new();
+        routes.insert(
+            provisioned_id,
+            route_entry(
+                "provisioned.zeroship.ai",
+                Some("oac_provisioned"),
+                Some("https://provisioned.zeroship.ai"),
+            ),
+        );
+        routes.insert(
+            unprovisioned_id,
+            route_entry("unprovisioned.zeroship.ai", None, None),
+        );
+
+        let cache = RouteCache::new();
+        cache.update(routes);
+
+        // Provisioned host → Some(oauth_client_id) + Some(sector).
+        let (id, compiled) = cache
+            .lookup_by_name("provisioned.zeroship.ai")
+            .expect("provisioned host resolves");
+        assert_eq!(id, provisioned_id);
+        assert_eq!(
+            compiled.entry.oauth_client_id.as_deref(),
+            Some("oac_provisioned")
+        );
+        assert_eq!(
+            compiled.entry.sector_identifier.as_deref(),
+            Some("https://provisioned.zeroship.ai")
+        );
+
+        // Un-provisioned host → None on both (hard-fail-closed source).
+        let (_, compiled) = cache
+            .lookup_by_name("unprovisioned.zeroship.ai")
+            .expect("unprovisioned host resolves");
+        assert_eq!(compiled.entry.oauth_client_id, None);
+        assert_eq!(compiled.entry.sector_identifier, None);
+    }
 }
