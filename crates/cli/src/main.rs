@@ -120,6 +120,14 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
     eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
 
+    // Auth plugin: always on. Stateless — the callbacks read the
+    // per-request user from `RuntimeState` (set from the verified
+    // `ZeroShip-User` header). Pinned here AND in the worker's
+    // `create_plugins()` so `env.auth.getUser()` resolves on both the dev
+    // (`zeroship serve`) and the production worker path.
+    plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
+    eprintln!("[zeroship] auth plugin registered");
+
     // KV plugin backend selection, in priority order:
     //   1. ZEROSHIP_KV_URL set → Redis (distributed-correctness: shared
     //                            across workers/regions).

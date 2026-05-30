@@ -37,12 +37,20 @@ pub fn init_cache(max_size: usize, db_url: Option<String>) {
 }
 
 /// Create plugins for a new Runtime.
+///
+/// `AuthPlugin` is pushed unconditionally — it is stateless (its callbacks
+/// read the per-request user from `RuntimeState`), so every app served
+/// through the worker gets a working `env.auth.getUser()` /
+/// `env.auth.requireUser()`. This is the path every production end-user
+/// app runs on, so it MUST carry the auth namespace; mirror in the CLI
+/// `zeroship serve` plugin vector (`crates/cli/src/main.rs`).
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
+    let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
-        vec![Arc::new(zeroship_plugin_db::DbPlugin::new(url))]
-    } else {
-        vec![]
+        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url)));
     }
+    plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
+    plugins
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
@@ -229,5 +237,27 @@ fn evict_lru(cache: &mut AppCache) {
         // by other threads — DON'T evict it here. The version_poll_loop
         // GCs SharedEnvs against the known-app set every cycle, so an
         // app deleted from control plane gets cleaned up there.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Slice 1a regression guard: every Runtime the worker builds must
+    /// carry the `auth` namespace so `env.auth.getUser()` resolves for
+    /// production end-user apps. The faithful e2e drives `env.auth`
+    /// through this very vector — assert it's present here so a future
+    /// edit that drops `AuthPlugin` from `create_plugins()` fails loudly,
+    /// not just under `zeroship serve` (the CLI vector). `AuthPlugin` is
+    /// stateless, so it is pushed even when no DB URL is configured.
+    #[test]
+    fn create_plugins_registers_auth_namespace() {
+        let plugins = create_plugins();
+        assert!(
+            plugins.iter().any(|p| p.namespace() == "auth"),
+            "worker create_plugins() must include the auth namespace; got: {:?}",
+            plugins.iter().map(|p| p.namespace()).collect::<Vec<_>>()
+        );
     }
 }
