@@ -147,11 +147,15 @@ export const Basic: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
 
-    await userEvent.click(canvas.getByRole("button", { name: /^file$/i }));
+    // Menubar top-level triggers render as a real <button> element, but
+    // Base UI's Menubar overlays `role="menuitem"` on each (the WAI-ARIA
+    // menubar pattern: menuitems inside role="menubar"). Query by the
+    // rendered role — `getByRole("button", …)` does NOT match.
+    await userEvent.click(canvas.getByRole("menuitem", { name: /^file$/i }));
     await expect(
       await body.findByRole("menuitem", { name: /^new$/i }),
     ).toBeVisible();
-    await userEvent.hover(canvas.getByRole("button", { name: /^edit$/i }));
+    await userEvent.hover(canvas.getByRole("menuitem", { name: /^edit$/i }));
     await expect(
       await body.findByRole("menuitem", { name: /^undo$/i }),
     ).toBeVisible();
@@ -198,7 +202,9 @@ export const WithSubmenus: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
 
-    await userEvent.click(canvas.getByRole("button", { name: /^file$/i }));
+    // Top-level triggers carry `role="menuitem"` (Base UI menubar pattern),
+    // even though the rendered element is a <button>.
+    await userEvent.click(canvas.getByRole("menuitem", { name: /^file$/i }));
     const recent = await body.findByRole("menuitem", {
       name: /open recent/i,
     });
@@ -206,7 +212,25 @@ export const WithSubmenus: Story = {
     await expect(
       await body.findByRole("menuitem", { name: /project-alpha/i }),
     ).toBeVisible();
+    // First ESC closes the submenu; the parent File menu stays open
+    // (Base UI's closeParentOnEsc default). A second ESC tears the File
+    // menu down too. We assert the FULLY-closed end-state so the
+    // postVisit a11y audit runs against a clean DOM: while ANY Base UI
+    // menu level is open it parks `tabindex="0"` focus-guard sentinels
+    // (`data-base-ui-focus-guard`, `aria-hidden`) next to the trigger,
+    // which axe's `aria-hidden-focus` rule flags. They vanish once every
+    // level closes — closing fully is the faithful way to keep axe clean
+    // without suppressing a rule (mirror Menu NestedSubmenu).
     await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        body.queryByRole("menuitem", { name: /project-alpha/i }),
+      ).toBeNull(),
+    );
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByRole("menuitem", { name: /^new$/i })).toBeNull(),
+    );
   },
 };
 
@@ -261,7 +285,8 @@ export const WithCheckboxItem: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
 
-    await userEvent.click(canvas.getByRole("button", { name: /view/i }));
+    // Top-level trigger carries `role="menuitem"` (Base UI menubar pattern).
+    await userEvent.click(canvas.getByRole("menuitem", { name: /view/i }));
     const ruler = await body.findByRole("menuitemcheckbox", {
       name: /show ruler/i,
     });
@@ -328,7 +353,8 @@ export const WithRadioGroup: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
 
-    await userEvent.click(canvas.getByRole("button", { name: /theme/i }));
+    // Top-level trigger carries `role="menuitem"` (Base UI menubar pattern).
+    await userEvent.click(canvas.getByRole("menuitem", { name: /theme/i }));
     const system = await body.findByRole("menuitemradio", {
       name: /system/i,
     });
@@ -385,19 +411,33 @@ export const KeyboardNav: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    const file = canvas.getByRole("button", { name: /^file$/i });
-    const edit = canvas.getByRole("button", { name: /^edit$/i });
+    // Top-level triggers carry `role="menuitem"` (Base UI menubar pattern),
+    // even though each renders as a <button> element.
+    const file = canvas.getByRole("menuitem", { name: /^file$/i });
+    const edit = canvas.getByRole("menuitem", { name: /^edit$/i });
 
     await userEvent.tab();
-    await expect(file).toHaveFocus();
+    // Roving focus is async under the reduced-motion harness — wrap.
+    await waitFor(() => expect(file).toHaveFocus());
     await userEvent.keyboard("{ArrowRight}");
-    await expect(edit).toHaveFocus();
+    await waitFor(() => expect(edit).toHaveFocus());
     await userEvent.keyboard("{ArrowDown}");
-    await expect(
-      await body.findByRole("menuitem", { name: /undo/i }),
-    ).toBeVisible();
+    // `findByRole` resolves as soon as the node is in the DOM, but the
+    // popup's visibility can lag a tick behind the mount — wrap the
+    // visibility assertion in `waitFor` so it doesn't race the open.
+    const undo = await body.findByRole("menuitem", { name: /undo/i });
+    await waitFor(() => expect(undo).toBeVisible());
     await userEvent.keyboard("{Escape}");
-    await expect(edit).toHaveFocus();
+    // Escape closes the menu AND restores focus to the trigger, but the
+    // focus restoration is async — under the reduced-motion harness a
+    // synchronous `toHaveFocus()` can race it. Wrap in `waitFor`.
+    await waitFor(() => expect(edit).toHaveFocus());
+    // Assert the menu fully tore down so the postVisit a11y audit runs
+    // against a clean DOM — an open Base UI menu parks focus-guard
+    // sentinels axe's `aria-hidden-focus` rule flags.
+    await waitFor(() =>
+      expect(body.queryByRole("menuitem", { name: /undo/i })).toBeNull(),
+    );
   },
 };
 
@@ -445,7 +485,9 @@ export const Disabled: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    const edit = canvas.getByRole("button", { name: /^edit$/i });
+    // Top-level trigger carries `role="menuitem"` (Base UI menubar pattern),
+    // even though it renders as a <button> element.
+    const edit = canvas.getByRole("menuitem", { name: /^edit$/i });
 
     await expect(edit).toBeDisabled();
     await userEvent.click(edit);
@@ -853,18 +895,30 @@ export const Vertical: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
-    const file = canvas.getByRole("button", { name: /file/i });
-    const tools = canvas.getByRole("button", { name: /tools/i });
+    // Top-level triggers carry `role="menuitem"` (Base UI menubar pattern),
+    // even though each renders as a <button> element.
+    const file = canvas.getByRole("menuitem", { name: /file/i });
+    const tools = canvas.getByRole("menuitem", { name: /tools/i });
 
     await userEvent.tab();
-    await expect(file).toHaveFocus();
+    await waitFor(() => expect(file).toHaveFocus());
     await userEvent.keyboard("{ArrowDown}");
-    await expect(tools).toHaveFocus();
+    // Roving focus is async under the reduced-motion harness — wrap.
+    await waitFor(() => expect(tools).toHaveFocus());
     await userEvent.keyboard("{Enter}");
-    await expect(
-      await body.findByRole("menuitem", { name: /command palette/i }),
-    ).toBeVisible();
+    const palette = await body.findByRole("menuitem", {
+      name: /command palette/i,
+    });
+    await waitFor(() => expect(palette).toBeVisible());
     await userEvent.keyboard("{Escape}");
+    // Tear the menu down fully so the postVisit a11y audit runs against a
+    // clean DOM (an open Base UI menu parks focus-guard sentinels axe's
+    // `aria-hidden-focus` rule flags).
+    await waitFor(() =>
+      expect(
+        body.queryByRole("menuitem", { name: /command palette/i }),
+      ).toBeNull(),
+    );
   },
 };
 

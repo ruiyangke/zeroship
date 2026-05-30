@@ -53,9 +53,14 @@
  *
  * Aria contract:
  *   The native `<input>` Base UI emits via NumberField.Input is the
- *   focusable element. It carries `role="spinbutton"`, `aria-valuemin`,
- *   `aria-valuemax`, `aria-valuenow`, and `aria-valuetext` automatically
- *   (Base UI internals). Field auto-wires `aria-describedby` /
+ *   focusable element. In Base UI 1.5 it is a TEXT input
+ *   (`type="text" inputmode="numeric" aria-roledescription="Number
+ *   field"`) — NOT `role="spinbutton"`, and it does NOT carry
+ *   `aria-valuemin/max/now/text`. Its accessible role is `textbox`; the
+ *   current value lives in the input's `value`. (Base UI deliberately
+ *   uses a text input with `aria-roledescription` rather than a true
+ *   spinbutton — it's more robust for free-form editing while AT still
+ *   announces "Number field".) Field auto-wires `aria-describedby` /
  *   `aria-invalid` / `aria-labelledby`. We forward `data-testid` and
  *   `aria-*` to the input — NOT the Root — so tests that locate by
  *   testid hit the actually-focusable node (Combobox lesson, Slice 6).

@@ -59,6 +59,7 @@ import {
   forwardRef,
   useContext,
   useEffect,
+  useId,
   type ComponentPropsWithRef,
   type ReactNode,
 } from "react";
@@ -258,6 +259,7 @@ function RadioInner<T = string>(
     fieldProps,
     disabled: disabledProp,
     required: requiredProp,
+    "aria-labelledby": ariaLabelledByProp,
     ...rest
   }: RadioProps<T>,
   ref: React.ForwardedRef<HTMLSpanElement>,
@@ -313,6 +315,34 @@ function RadioInner<T = string>(
     className,
   );
 
+  // Per-option accessible name (wave10 🔴 a11y fix).
+  //
+  // Base UI's `useAriaLabelledBy` resolves a Radio's `aria-labelledby`
+  // as `explicitAriaLabelledBy ?? fieldItemLabelId ?? wrappingLabelFallback`.
+  // Inside a `<Field><Field.Label>…</Field.Label>` the Field provides a
+  // single `labelId` (the Field.Label's id) to EVERY contained radio via
+  // `FieldItemContext`, which shadows the per-radio wrapping-`<label>`
+  // fallback. The result was that every radio in a Field-wrapped group
+  // announced the GROUP label ("Plan") instead of its own option text
+  // ("Free" / "Pro" / …) — a real WAI-ARIA radiogroup violation (the
+  // group is named by the Field label; each radio must be named by its
+  // option). Bare groups (no Field) worked because the fallback ran.
+  //
+  // Fix: when this Radio renders its own inline `label`, give the row
+  // text a stable id and pass it as the chip's EXPLICIT `aria-labelledby`,
+  // which is the first (winning) branch in Base UI's resolution — so the
+  // per-option name beats the inherited Field labelId. A caller-supplied
+  // `aria-labelledby` still wins over ours. The radiogroup itself keeps
+  // the Field.Label as its name (unaffected — Field labels the group's
+  // control, the RadioGroup element).
+  const generatedTextId = useId();
+  const hasInlineLabel = label != null;
+  const rowTextId =
+    ariaLabelledByProp == null && hasInlineLabel
+      ? generatedTextId
+      : undefined;
+  const chipAriaLabelledBy = ariaLabelledByProp ?? rowTextId;
+
   const chip = (
     <BaseRadio.Root
       {...rest}
@@ -322,6 +352,7 @@ function RadioInner<T = string>(
       value={value as never}
       disabled={disabled || undefined}
       required={required || undefined}
+      aria-labelledby={chipAriaLabelledBy}
       className={chipClassName}
       data-size={size}
     >
@@ -329,7 +360,7 @@ function RadioInner<T = string>(
     </BaseRadio.Root>
   );
 
-  if (label != null) {
+  if (hasInlineLabel) {
     return (
       <SelectionRow
         base="radio"
@@ -339,7 +370,9 @@ function RadioInner<T = string>(
         fieldProps={fieldProps}
       >
         {chip}
-        <span className="zs-radio-field__text">{label}</span>
+        <span id={rowTextId} className="zs-radio-field__text">
+          {label}
+        </span>
       </SelectionRow>
     );
   }

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { Form } from "@base-ui/react/form";
 import { Field, NumberField } from "../components";
 
 const meta: Meta<typeof NumberField> = {
@@ -41,18 +42,23 @@ export const Basic: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const input = canvas.getByRole("spinbutton", { name: /quantity/i });
+    // Base UI 1.5's NumberField.Input is a text input
+    // (`type="text" inputmode="numeric" aria-roledescription="Number field"`),
+    // NOT `role="spinbutton"`. Its accessible role is `textbox` and the
+    // current value lives in the input's `value` (there is no
+    // `aria-valuenow`). Query + assert the real contract.
+    const input = canvas.getByRole("textbox", { name: /quantity/i });
     const increment = canvas.getByRole("button", { name: /increment/i });
     const decrement = canvas.getByRole("button", { name: /decrement/i });
 
-    await expect(input).toHaveAttribute("aria-valuenow", "42");
+    await expect(input).toHaveValue("42");
     await userEvent.click(increment);
-    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "43"));
+    await waitFor(() => expect(input).toHaveValue("43"));
     await userEvent.click(input);
     await userEvent.keyboard("{ArrowDown}");
-    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "42"));
+    await waitFor(() => expect(input).toHaveValue("42"));
     await userEvent.click(decrement);
-    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "41"));
+    await waitFor(() => expect(input).toHaveValue("41"));
   },
 };
 
@@ -159,17 +165,19 @@ export const MinMaxStep: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const input = canvas.getByRole("spinbutton", { name: /bounded quantity/i });
+    // Base UI 1.5 NumberField.Input is a `textbox`, not a `spinbutton`;
+    // the value lives in the input's `value`, not `aria-valuenow`.
+    const input = canvas.getByRole("textbox", { name: /bounded quantity/i });
     const increment = canvas.getByRole("button", { name: /increment/i });
     const decrement = canvas.getByRole("button", { name: /decrement/i });
 
     await userEvent.click(increment);
     await userEvent.click(increment);
     await userEvent.click(increment);
-    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "65"));
+    await waitFor(() => expect(input).toHaveValue("65"));
 
     await userEvent.click(decrement);
-    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "60"));
+    await waitFor(() => expect(input).toHaveValue("60"));
   },
 };
 
@@ -347,20 +355,42 @@ export const Required: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const input = canvas.getByRole("spinbutton", {
-      name: /required quantity \(empty on submit\)/i,
-    });
-
+    // Base UI 1.5 NumberField.Input is a `textbox`, not a `spinbutton`.
+    //
+    // Both side-by-side fields are wrapped in a `<Field><Field.Label>
+    // Quantity …</Field.Label>`. Per the ARIA accessible-name algorithm,
+    // a Field.Label (wired as `aria-labelledby`) WINS over a caller's
+    // `aria-label`, so the inner input's real accessible name is
+    // "Quantity" for BOTH — the `aria-label` does not surface. We
+    // therefore query the two `Quantity` textboxes and pick the one that
+    // becomes `aria-invalid` after the empty form auto-submits (the
+    // post-submit invalid field). `aria-invalid` is still wired by Base
+    // UI on validation failure.
     await waitFor(() =>
       expect(canvas.getByText(/quantity is required/i)).toBeVisible(),
     );
-    await expect(input).toHaveAttribute("aria-invalid", "true");
+    const quantityFields = canvas.getAllByRole("textbox", {
+      name: /quantity/i,
+    });
+    const invalid = quantityFields.find(
+      (el) => el.getAttribute("aria-invalid") === "true",
+    );
+    await expect(invalid).toBeDefined();
+    await expect(invalid).toHaveAttribute("aria-invalid", "true");
   },
 };
 
 function RequiredInvalidInline() {
+  // Use Base UI's `<Form>` (not a plain `<form>`). `Field.Error` is wired
+  // into Base UI's Form validation pipeline — a Field-level `valueMissing`
+  // error only surfaces when the surrounding form is the Base UI `<Form>`
+  // that orchestrates the field validity state. A plain `<form>` submit
+  // (even via `requestSubmit()`) leaves Base UI's Field unaware of the
+  // native validity failure, so `Field.Error match="valueMissing"` never
+  // renders. The Radio Required story uses the same `<Form>` for the same
+  // reason.
   return (
-    <form
+    <Form
       style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}
       ref={(form) => {
         if (form) {
@@ -390,7 +420,7 @@ function RequiredInvalidInline() {
       <button type="submit" hidden>
         submit
       </button>
-    </form>
+    </Form>
   );
 }
 
@@ -459,7 +489,8 @@ export const BareFocus: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const input = canvas.getByRole("spinbutton", { name: /quantity/i });
+    // Base UI 1.5 NumberField.Input is a `textbox`, not a `spinbutton`.
+    const input = canvas.getByRole("textbox", { name: /quantity/i });
     const root = input.closest(".zs-number-field");
 
     await userEvent.click(input);
