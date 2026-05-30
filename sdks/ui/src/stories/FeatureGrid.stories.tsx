@@ -17,6 +17,16 @@ const meta: Meta<typeof FeatureGrid> = {
   title: "Sections/FeatureGrid",
   component: FeatureGrid,
   parameters: { layout: "fullscreen" },
+  argTypes: {
+    tone: {
+      control: "inline-radio",
+      options: ["default", "muted", "accent"],
+      description:
+        "Full-bleed band tone (the shared page-rhythm system): default " +
+        "(transparent), muted (subtle surface panel), accent (accent fill " +
+        "with ink remapped to accent-ink).",
+    },
+  },
 };
 
 export default meta;

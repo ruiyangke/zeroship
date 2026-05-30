@@ -59,21 +59,17 @@
   text-align: start;
 }
 
-.zs-stats-band__eyebrow {
-  margin-block: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: var(--zs-text-headline-weight);
-  color: var(--zs-accent-active);
-  text-transform: uppercase;
-}
+/* The eyebrow styling is the shared `.zs-section-eyebrow` (defined once in
+   _section-tone.css); this BEM hook remains only as a stable consumer target. */
 
 .zs-stats-band__title {
   margin-block: 0;
-  font-size: var(--zs-text-title-1-size);
-  line-height: var(--zs-text-title-1-line);
-  font-weight: var(--zs-text-title-1-weight);
-  letter-spacing: var(--zs-text-title-1-tracking);
+  /* Marketing display-3 — a confident section <h2>, markedly bigger than the
+     former title-1. */
+  font-size: var(--zs-text-display-3-size);
+  line-height: var(--zs-text-display-3-line);
+  font-weight: var(--zs-text-display-3-weight);
+  letter-spacing: var(--zs-text-display-3-tracking);
   color: var(--zs-label);
   text-wrap: balance;
 }

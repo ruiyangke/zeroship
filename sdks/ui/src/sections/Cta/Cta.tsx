@@ -70,6 +70,7 @@ import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Stack } from "../../layouts/Stack";
 import { Cluster } from "../../layouts/Cluster";
+import type { SectionTone } from "../_tone";
 
 /** Text + actions alignment for the CTA band. */
 export type CtaAlign = "center" | "start";
@@ -129,6 +130,22 @@ export interface CtaProps
   size?: ContainerSize;
 
   /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the band reads as its own
+   *   panel.
+   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
+   *   `--zs-accent-ink` — the bold contrast band, a CTA's loudest close.
+   *
+   * Distinct from `variant`: `variant="tinted"` paints a CONTAINED tint card
+   * on the readable measure, whereas `tone="accent"` paints the WHOLE band.
+   * For a punchy closing CTA prefer `tone="accent"` with the default `plain`
+   * variant.
+   */
+  tone?: SectionTone;
+
+  /**
    * Extra inline content rendered after the actions row inside the same Stack
    * (e.g. a fine-print note). NOT a compound-part channel — Cta is props-only.
    */
@@ -153,6 +170,7 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
     align = "center",
     variant = "plain",
     size = "md",
+    tone = "default",
     className,
     children,
     "data-slot": dataSlot = "cta",
@@ -182,7 +200,10 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
       className="zs-cta__panel"
     >
       {eyebrow != null ? (
-        <p className="zs-cta__eyebrow" data-slot="cta-eyebrow">
+        <p
+          className="zs-section-eyebrow zs-cta__eyebrow"
+          data-slot="cta-eyebrow"
+        >
           {eyebrow}
         </p>
       ) : null}
@@ -217,6 +238,7 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
       data-slot={dataSlot}
       data-align={align}
       data-variant={variant}
+      data-tone={tone}
       aria-labelledby={titleRenders ? titleId : undefined}
       className={composedClassName}
     >

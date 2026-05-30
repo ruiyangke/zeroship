@@ -1,0 +1,249 @@
+/*
+ * _section-tone.css — shared page-section foundations: the tone/surface
+ * system + the cohesive eyebrow treatment.
+ *
+ * ONE source of truth for the full-bleed band treatment that gives a page
+ * its rhythm. Every section root (Hero / PricingTable / FeatureGrid / Cta /
+ * StatsBand / Faq / Footer) stamps `data-tone={tone}` on its root element;
+ * this sheet keys off `[data-tone="…"]` so the three tones are defined ONCE
+ * and every section inherits them — no per-section duplication. The shared
+ * `.zs-section-eyebrow` class (defined at the foot of this sheet) is the
+ * single cohesive eyebrow style applied across every section's lead-in
+ * label, so the eyebrows read as ONE confident family rather than seven
+ * near-duplicate one-offs.
+ *
+ * Sections keep painting their OWN structure (grid, cards, icon badges,
+ * accordion chrome). Tone only sets the band BACKGROUND + an INK REMAP. It
+ * is layered separately from the per-section sheets so the DRY contract is
+ * visible: a section sets `data-tone`, this sheet does the rest.
+ *
+ * Tones:
+ *   default — transparent. The band inherits the page backdrop (the legacy
+ *             behavior; every section defaults to "default" so nothing
+ *             changes unless a tone is opted into).
+ *   muted   — a subtle full-bleed surface fill so the band reads as its own
+ *             panel. Gives light/▢ alternation against default bands.
+ *   accent  — `--zs-accent` fill with ALL inner ink remapped to
+ *             `--zs-accent-ink` (the near-white text-on-accent token, the
+ *             same pairing Button.filled already ships axe-clean). Secondary
+ *             text (descriptions, the FAQ chrome) reads a translucent
+ *             accent-ink so the hierarchy survives the remap. This is the
+ *             bold contrast band — best for the closing CTA.
+ *
+ * The remap targets the section ink hooks via a SHARED selector list so the
+ * accent treatment is keyed off `[data-tone="accent"]` once rather than
+ * re-declared inside each section sheet. The shared eyebrow class
+ * `.zs-section-eyebrow` (see the per-section sheets) is one of those hooks.
+ *
+ * forced-colors: an accent band cannot rely on the painted accent fill (it
+ * drops out under a forced palette). The block re-pins the band to
+ * `Canvas` / `CanvasText` so the high-contrast user still gets a legible,
+ * system-colored band — never invisible white-on-white.
+ *
+ * Motion: none. Tone is a paint-only concern; the reduced-motion gate is a
+ * no-op kept for surface parity.
+ */
+
+/* ─── Full-bleed band background ──────────────────────────────────────────
+ *
+ * The tone background paints the WHOLE section element. Because each section
+ * already owns generous block padding and a composed Container for its inline
+ * measure, the background reads edge-to-edge (full-bleed) while the content
+ * stays on the readable measure — exactly the band-rhythm goal. */
+
+/* muted — a subtle surface fill so the band reads as its own panel. */
+[data-tone="muted"] {
+  background: var(--zs-surface);
+}
+
+/* accent — the bold contrast band. */
+[data-tone="accent"] {
+  background: var(--zs-accent);
+  /* A translucent accent-ink for secondary text inside the band, so the
+     description / muted chrome recede WITHOUT dropping below contrast. The
+     house color-mix idiom keeps it token-pure and theme-tracking. */
+  --zs-section-ink: var(--zs-accent-ink);
+  /* Secondary copy reads a touch recessed but stays clear of AA on the accent
+     fill. Pure accent-ink on this accent measures ~5.26:1; mixing toward the
+     accent (NOT toward transparent, which punched through to the dark fill and
+     slipped under contrast) thins it — 92% accent-ink measures ~4.71:1, still
+     above the 4.5:1 normal-text threshold with margin. */
+  --zs-section-ink-secondary: color-mix(
+    in oklch,
+    var(--zs-accent-ink) 92%,
+    var(--zs-accent)
+  );
+  color: var(--zs-section-ink);
+}
+
+/* ─── accent — ink remap ───────────────────────────────────────────────────
+ *
+ * Every text region inside an accent band resolves to the accent ink. The
+ * primary ink (titles, eyebrows, headings, stat values, footer brand/links)
+ * goes fully opaque `--zs-accent-ink`; secondary copy (descriptions, the FAQ
+ * trigger chrome, stat labels, footer blurb) reads the translucent variant.
+ *
+ * The selectors enumerate every section's documented ink hook ONCE — the
+ * single place the per-section BEM classes are coupled to the tone system. */
+
+/* Primary ink — titles, eyebrows, headings, billboard values. */
+[data-tone="accent"] .zs-section-eyebrow,
+[data-tone="accent"] .zs-hero__title,
+[data-tone="accent"] .zs-pricing__title,
+[data-tone="accent"] .zs-feature-grid__title,
+[data-tone="accent"] .zs-feature-grid__item-title,
+[data-tone="accent"] .zs-cta__title,
+[data-tone="accent"] .zs-stats-band__title,
+[data-tone="accent"] .zs-stats-band__stat-value,
+[data-tone="accent"] .zs-faq__title,
+[data-tone="accent"] .zs-footer__brand,
+[data-tone="accent"] .zs-footer__link,
+[data-tone="accent"] .zs-footer__link:hover,
+[data-tone="accent"] .zs-footer__link:focus-visible {
+  color: var(--zs-section-ink);
+}
+
+/* Secondary ink — descriptions, supporting lines, the muted chrome. */
+[data-tone="accent"] .zs-hero__description,
+[data-tone="accent"] .zs-hero__eyebrow,
+[data-tone="accent"] .zs-pricing__lead-description,
+[data-tone="accent"] .zs-feature-grid__description,
+[data-tone="accent"] .zs-feature-grid__item-description,
+[data-tone="accent"] .zs-cta__description,
+[data-tone="accent"] .zs-stats-band__description,
+[data-tone="accent"] .zs-stats-band__stat-label,
+[data-tone="accent"] .zs-stats-band__stat-description,
+[data-tone="accent"] .zs-faq__description,
+[data-tone="accent"] .zs-footer__description,
+[data-tone="accent"] .zs-footer__column-title,
+[data-tone="accent"] .zs-footer__copyright {
+  color: var(--zs-section-ink-secondary);
+}
+
+/* ─── forced-colors — accent band falls back safely ───────────────────────
+ *
+ * Under a forced palette the painted `--zs-accent` fill and `--zs-accent-ink`
+ * remap both drop out. Re-pin the band to system colors so it stays a real,
+ * legible band (Canvas behind CanvasText) rather than collapsing to an
+ * invisible or low-contrast field. The muted band's surface fill likewise
+ * drops to Canvas. */
+@media (forced-colors: active) {
+  [data-tone="muted"],
+  [data-tone="accent"] {
+    background: Canvas;
+    color: CanvasText;
+  }
+  /* The accent ink remap resolves back to CanvasText so every remapped
+     region stays legible on Canvas. */
+  [data-tone="accent"] {
+    --zs-section-ink: CanvasText;
+    --zs-section-ink-secondary: CanvasText;
+  }
+}
+
+/* ─── accent — adapt the primary CTA button ───────────────────────────────
+ *
+ * On an accent band a `filled` Button paints accent-on-accent and vanishes;
+ * its translucent siblings (`gray` / `tinted`) composite against the accent
+ * fill and slip under AA contrast. So the band INVERTS its primary button: a
+ * `filled` Button becomes a solid accent-INK chip with accent text — a true
+ * high-contrast inverse action (the brief's "buttons adapt"). The label
+ * inherits the button color, so the single `color` swap carries the inversion.
+ * This keeps the contract simple: the consumer drops the default `<Button>`
+ * (filled) into an accent CTA and it reads as the bold inverse button. */
+[data-tone="accent"] .zs-button--filled {
+  background: var(--zs-accent-ink);
+  color: var(--zs-accent);
+}
+@media (hover: hover) {
+  [data-tone="accent"] .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    /* Slightly recede the inverse chip on hover (a touch of accent mixed into
+       the ink) while keeping the accent text well clear of AA. */
+    background: color-mix(in oklch, var(--zs-accent-ink) 88%, var(--zs-accent));
+  }
+}
+[data-tone="accent"] .zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: color-mix(in oklch, var(--zs-accent-ink) 80%, var(--zs-accent));
+}
+
+/* forced-colors: the inverse chip's painted ink/accent both drop out — pin it
+   to a ButtonFace/ButtonText pair so the inverse button stays a real button. */
+@media (forced-colors: active) {
+  [data-tone="accent"] .zs-button--filled {
+    background: ButtonFace;
+    color: ButtonText;
+    border: var(--zs-selection-hairline) solid ButtonText;
+  }
+}
+
+/* ─── Eyebrow — the cohesive section lead-in label ────────────────────────
+ *
+ * ONE confident eyebrow treatment shared across Hero / FeatureGrid / Cta /
+ * StatsBand / Faq (and any future section). The earlier per-section eyebrows
+ * were tiny muted/uppercase filler; this gives them real presence: an
+ * accent-tinted PILL with the accent ink, footnote size, semibold, and a
+ * wider tracking so the uppercase label reads deliberate, not cramped.
+ *
+ * Rendered as an inline-block so the pill hugs its text (it does not stretch
+ * the column); the parent Stack `align` still positions it (centered vs
+ * start) because the pill is the inline child. The accent-tint background is
+ * the house `color-mix` idiom (cf. FeatureGrid's icon badge / Cta's tinted
+ * panel) so it tracks the accent token and stays token-pure. */
+.zs-section-eyebrow {
+  margin-block: 0;
+  /* Hug the text — the pill is sized to content, not the column. */
+  display: inline-block;
+  inline-size: fit-content;
+  max-inline-size: fit-content;
+  padding-block: var(--zs-space-half);
+  padding-inline: var(--zs-space-3);
+  border-radius: var(--zs-radius-full);
+  background: color-mix(
+    in oklch,
+    var(--zs-accent) 12%,
+    transparent
+  );
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  /* The DEEPER accent (`--zs-accent-active`, the same ink the former
+     per-section eyebrows used) — the base `--zs-accent` is tuned for
+     fills/buttons and lands just under AA for small footnote text on the
+     light surface + the accent-tint pill. The deeper step keeps the eyebrow
+     axe-clean while still reading clearly as the accent family. */
+  color: var(--zs-accent-active);
+}
+
+/* On an accent band the accent-tint pill collapses into the accent fill, and a
+   translucent accent-ink chip behind near-white text drops the contrast under
+   AA. Drop the pill entirely: the eyebrow reads as plain opaque accent-ink text
+   on the accent fill (the primary-ink remap above), which is the same
+   accent-ink-on-accent pairing Button.filled ships axe-clean. The padding is
+   removed so the label sits flush as a lead-in rather than an empty chip. */
+[data-tone="accent"] .zs-section-eyebrow {
+  background: transparent;
+  padding-block: 0;
+  padding-inline: 0;
+}
+
+/* forced-colors: the accent-tint pill background + accent ink both drop out.
+   Give the eyebrow a visible system edge so the pill still reads as a chip,
+   with its text on CanvasText. */
+@media (forced-colors: active) {
+  .zs-section-eyebrow {
+    color: CanvasText;
+    border: var(--zs-selection-hairline) solid CanvasText;
+    background: Canvas;
+  }
+}
+
+/* ─── reduced-motion ───────────────────────────────────────────────────────
+ * No-op — tone is paint-only. The gate exists for parity with the rest of
+ * the surface. */
+@media (prefers-reduced-motion: reduce) {
+  [data-tone] {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}

@@ -76,23 +76,19 @@
   );
 }
 
-/* ─── Eyebrow — accent lead-in label above the title ─────────────────────── */
-.zs-cta__eyebrow {
-  margin-block: 0;
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: var(--zs-text-headline-weight);
-  color: var(--zs-accent-active);
-  text-transform: uppercase;
-}
+/* ─── Eyebrow — the shared section eyebrow (accent pill) ──────────────────
+   The styling is `.zs-section-eyebrow` (defined once in _section-tone.css);
+   this BEM hook remains only as a stable consumer target. */
 
 /* ─── Title — the section headline ───────────────────────────────────────── */
 .zs-cta__title {
   margin-block: 0;
-  font-size: var(--zs-text-title-1-size);
-  line-height: var(--zs-text-title-1-line);
-  font-weight: var(--zs-text-title-1-weight);
-  letter-spacing: var(--zs-text-title-1-tracking);
+  /* Marketing display-3 — a confident closing headline, markedly bigger than
+     the former title-1. */
+  font-size: var(--zs-text-display-3-size);
+  line-height: var(--zs-text-display-3-line);
+  font-weight: var(--zs-text-display-3-weight);
+  letter-spacing: var(--zs-text-display-3-tracking);
   color: var(--zs-label);
   text-wrap: balance;
 }

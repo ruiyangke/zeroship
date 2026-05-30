@@ -8,6 +8,10 @@
  * `export *` from the root `index.ts`, so a section reaches the public API
  * just by being exported here.
  */
+
+/* The shared section tone — every section's `tone` prop is this union. */
+export type { SectionTone } from "./_tone";
+
 export {
   Hero,
   type HeroProps,

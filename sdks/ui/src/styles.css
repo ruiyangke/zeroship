@@ -85,7 +85,12 @@
 @import "./blocks/Stepper/Stepper.css";
 
 /* ─── Page sections — full-width marketing/content bands built FROM the
-   primitives + components above. */
+   primitives + components above. The shared tone/surface system
+   (_section-tone.css) is the page-rhythm backbone: every section root
+   stamps `data-tone` and this ONE sheet defines the full-bleed band
+   treatments (default/muted/accent + the accent ink remap). Imported AFTER
+   the per-section sheets so its `[data-tone="…"]` rules win by both
+   specificity and order over the sections' base ink colors. */
 @import "./sections/Hero/Hero.css";
 @import "./sections/PricingTable/PricingTable.css";
 @import "./sections/FeatureGrid/FeatureGrid.css";
@@ -93,6 +98,7 @@
 @import "./sections/StatsBand/StatsBand.css";
 @import "./sections/Faq/Faq.css";
 @import "./sections/Footer/Footer.css";
+@import "./sections/_section-tone.css";
 
 *,
 *::before,
@@ -181,6 +187,29 @@
 
   /* ─── Type scale — sizes in rem so user font-size preference (the
      web equivalent of Dynamic Type) is honored. */
+
+  /* Marketing display scale — sits ABOVE large-title. These are the
+     page-band headline sizes (Hero <h1>, big section <h2>s, billboard
+     stat values) where the standard product type scale (which tops at
+     large-title / 34) reads too timid for a premium marketing surface.
+     Tight line-heights + negative tracking give the confident, dense
+     display feel; sections pair these with `text-wrap: balance`. rem-only,
+     theme-invariant — same values across every theme. */
+  --zs-text-display-1-size: 3.5rem;            /* 56 — hero <h1> */
+  --zs-text-display-1-line: 3.75rem;           /* 60 — tight */
+  --zs-text-display-1-weight: 700;
+  --zs-text-display-1-tracking: -0.03em;
+
+  --zs-text-display-2-size: 2.75rem;           /* 44 — billboard stats / big */
+  --zs-text-display-2-line: 3rem;              /* 48 */
+  --zs-text-display-2-weight: 700;
+  --zs-text-display-2-tracking: -0.026em;
+
+  --zs-text-display-3-size: 2.25rem;           /* 36 — confident section <h2> */
+  --zs-text-display-3-line: 2.5rem;            /* 40 */
+  --zs-text-display-3-weight: 700;
+  --zs-text-display-3-tracking: -0.022em;
+
   --zs-text-large-title-size: 2.125rem;        /* 34 */
   --zs-text-large-title-line: 2.5rem;          /* 40 */
   --zs-text-large-title-weight: 700;

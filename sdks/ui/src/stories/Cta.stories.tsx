@@ -7,6 +7,16 @@ const meta: Meta<typeof Cta> = {
   title: "Sections/Cta",
   component: Cta,
   parameters: { layout: "fullscreen" },
+  argTypes: {
+    tone: {
+      control: "inline-radio",
+      options: ["default", "muted", "accent"],
+      description:
+        "Full-bleed band tone (the shared page-rhythm system): default " +
+        "(transparent), muted (subtle surface panel), accent (accent fill " +
+        "with ink remapped to accent-ink — the bold closing band).",
+    },
+  },
 };
 
 export default meta;
@@ -120,6 +130,50 @@ export const StartAligned: Story = {
     const title = canvas.getByRole("heading", { name: "Start building" });
     await expect(title.tagName).toBe("H2");
     await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
+  },
+};
+
+/* ─── 5. Accent — tone="accent" bold closing band ────────────────────────── */
+export const Accent: Story = {
+  name: "Accent (tone=accent, bold closing band)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The `accent` tone fills the WHOLE band with `--zs-accent` and remaps " +
+          "every inner ink (eyebrow / title / description) to `--zs-accent-ink` " +
+          "for the bold closing statement — the same accent-ink-on-accent " +
+          "pairing Button.filled ships axe-clean. The default (`filled`) CTA " +
+          "Button INVERTS on the accent band — it becomes a solid accent-ink " +
+          "chip with accent text, a true high-contrast inverse action (an " +
+          "un-inverted accent-filled button would vanish into the band). " +
+          "Distinct from `variant=\"tinted\"`, which paints a contained card on " +
+          "the measure rather than the full band.",
+      },
+    },
+  },
+  render: () => (
+    <Cta
+      data-testid="cta-accent"
+      tone="accent"
+      eyebrow="Ready when you are"
+      title="Ship your idea today"
+      description="Describe what you want. AI builds it. We host, scale, and bill for you."
+      actions={<Button>Get started</Button>}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("cta-accent");
+    await expect(root).toHaveAttribute("data-tone", "accent");
+    // Labelled by the real <h2>; the eyebrow carries the shared class.
+    const title = canvas.getByRole("heading", { name: "Ship your idea today" });
+    await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
+    await expect(root.querySelector(".zs-section-eyebrow")).not.toBeNull();
+    // The CTA Button is present + enabled.
+    const cta = canvas.getByRole("button", { name: "Get started" });
+    await userEvent.click(cta);
+    await expect(cta).toBeEnabled();
   },
 };
 

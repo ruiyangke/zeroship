@@ -84,6 +84,7 @@ import { classnames } from "../../components/_classnames";
 import { Separator } from "../../components/Separator";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
+import type { SectionTone } from "../_tone";
 
 /* ─── link + column shapes ────────────────────────────────────────────── */
 
@@ -133,6 +134,17 @@ export interface FooterProps extends ComponentPropsWithoutRef<"footer"> {
    * Default `lg`.
    */
   size?: ContainerSize;
+
+  /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the footer reads as its own
+   *   panel — the common "the footer sits on a tinted slab" treatment.
+   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
+   *   `--zs-accent-ink` — the bold contrast footer.
+   */
+  tone?: SectionTone;
 
   /** Compound `<Footer.Column>` parts (additive after `columns`). */
   children?: ReactNode;
@@ -242,6 +254,7 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
     copyright,
     actions,
     size = "lg",
+    tone = "default",
     className,
     children,
     "data-slot": dataSlot = "footer",
@@ -287,6 +300,7 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
       {...rest}
       ref={ref as Ref<HTMLElement>}
       data-slot={dataSlot}
+      data-tone={tone}
       className={composedClassName}
     >
       <Container size={size} data-slot="footer-container">

@@ -81,6 +81,7 @@ import { classnames } from "../../components/_classnames";
 import { Accordion } from "../../components/Accordion";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Stack } from "../../layouts/Stack";
+import type { SectionTone } from "../_tone";
 
 /* ─── entry ───────────────────────────────────────────────────────────── */
 
@@ -131,6 +132,17 @@ export interface FaqProps
    * Default `md` — a FAQ reads best on a narrow, readable measure.
    */
   size?: ContainerSize;
+
+  /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the band reads as its own
+   *   panel.
+   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
+   *   `--zs-accent-ink` — the bold contrast band.
+   */
+  tone?: SectionTone;
 
   /** Compound `<Faq.Item>` parts (additive after `items`). */
   children?: ReactNode;
@@ -201,6 +213,7 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
     items,
     multiple = false,
     size = "md",
+    tone = "default",
     className,
     children,
     "data-slot": dataSlot = "faq",
@@ -295,6 +308,7 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
       {...rest}
       ref={ref as Ref<HTMLElement>}
       data-slot={dataSlot}
+      data-tone={tone}
       aria-labelledby={titleRenders ? titleId : undefined}
       className={composedClassName}
     >
@@ -307,7 +321,7 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
             className="zs-faq__header"
           >
             {eyebrow != null ? (
-              <p className="zs-faq__eyebrow">{eyebrow}</p>
+              <p className="zs-section-eyebrow zs-faq__eyebrow">{eyebrow}</p>
             ) : null}
             {titleRenders ? (
               <h2

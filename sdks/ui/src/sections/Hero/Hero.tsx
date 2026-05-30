@@ -100,6 +100,7 @@ import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Stack } from "../../layouts/Stack";
 import { Cluster } from "../../layouts/Cluster";
+import type { SectionTone } from "../_tone";
 
 /** Text alignment / column treatment for the hero band. */
 export type HeroAlign = "center" | "start";
@@ -220,6 +221,17 @@ export interface HeroProps
    */
   size?: ContainerSize;
 
+  /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the band reads as its own
+   *   panel.
+   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
+   *   `--zs-accent-ink` — the bold contrast band.
+   */
+  tone?: SectionTone;
+
   /** Band contents — compound parts and/or arbitrary children. */
   children?: ReactNode;
 
@@ -242,6 +254,7 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
     media,
     align = "center",
     size = "lg",
+    tone = "default",
     className,
     children,
     "data-slot": dataSlot = "hero",
@@ -395,6 +408,7 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
         data-slot={dataSlot}
         data-align={align}
         data-layout={dataLayout}
+        data-tone={tone}
         aria-labelledby={hasHeadline ? titleId : undefined}
         className={composedClassName}
       >

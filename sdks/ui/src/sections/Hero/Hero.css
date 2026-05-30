@@ -122,13 +122,14 @@
 /* ─── Title — the page headline ──────────────────────────────────────────── */
 .zs-hero__title {
   margin-block: 0;
-  /* Large-title scale — the hero headline is the page's most prominent
-     type. Reads the foundation large-title tokens so it tracks the type
-     system rather than inventing a one-off size. */
-  font-size: var(--zs-text-large-title-size);
-  line-height: var(--zs-text-large-title-line);
-  font-weight: var(--zs-text-large-title-weight);
-  letter-spacing: var(--zs-text-large-title-tracking);
+  /* Marketing display-1 — the hero headline is the page's loudest type, so it
+     reads the top step of the marketing display scale (above large-title)
+     rather than the product large-title. Confident, dense, with tight
+     line-height + negative tracking. */
+  font-size: var(--zs-text-display-1-size);
+  line-height: var(--zs-text-display-1-line);
+  font-weight: var(--zs-text-display-1-weight);
+  letter-spacing: var(--zs-text-display-1-tracking);
   color: var(--zs-label);
   /* Balance the headline across its lines for a tidy ragged edge on the
      short multi-line headlines heroes typically carry. */

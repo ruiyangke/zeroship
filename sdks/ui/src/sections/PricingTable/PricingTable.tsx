@@ -106,6 +106,7 @@ import { Separator } from "../../components/Separator/Separator";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
 import { Stack } from "../../layouts/Stack";
+import type { SectionTone } from "../_tone";
 import { Check, Minus } from "lucide-react";
 
 /**
@@ -213,6 +214,17 @@ export interface PricingTableProps
    * page `<h1>`/`<h2>`). Relevel here to match the document outline.
    */
   headingLevel?: PricingHeadingLevel;
+
+  /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the band reads as its own
+   *   panel behind the tier cards.
+   * - `accent`: an `--zs-accent` fill with the lead-in ink remapped to
+   *   `--zs-accent-ink` — the bold contrast band.
+   */
+  tone?: SectionTone;
 
   /** Compound `<PricingTable.Tier>` parts (additive after `tiers`). */
   children?: ReactNode;
@@ -451,6 +463,7 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
       description,
       size = "lg",
       headingLevel = "h3",
+      tone = "default",
       className,
       children,
       "data-slot": dataSlot = "pricing-table",
@@ -552,6 +565,7 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
         {...rest}
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
+        data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}
       >

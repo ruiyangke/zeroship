@@ -82,6 +82,7 @@ import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
 import { Stack } from "../../layouts/Stack";
+import type { SectionTone } from "../_tone";
 
 /** Header + item text alignment for the stats band. */
 export type StatsBandAlign = "center" | "start";
@@ -150,6 +151,17 @@ export interface StatsBandProps
    * Default `lg`.
    */
   size?: ContainerSize;
+
+  /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the band reads as its own
+   *   panel — a natural fit for a proof bar set off from the surrounding page.
+   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
+   *   `--zs-accent-ink` — the bold contrast band.
+   */
+  tone?: SectionTone;
 
   /** Compound `<StatsBand.Stat>` parts (additive after `stats`). */
   children?: ReactNode;
@@ -258,6 +270,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
       columns,
       align = "center",
       size = "lg",
+      tone = "default",
       className,
       children,
       "data-slot": dataSlot = "stats-band",
@@ -320,6 +333,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
         data-align={align}
+        data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}
       >
@@ -332,7 +346,9 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
               className="zs-stats-band__header"
             >
               {eyebrow != null ? (
-                <p className="zs-stats-band__eyebrow">{eyebrow}</p>
+                <p className="zs-section-eyebrow zs-stats-band__eyebrow">
+                  {eyebrow}
+                </p>
               ) : null}
               {titleRenders ? (
                 <h2

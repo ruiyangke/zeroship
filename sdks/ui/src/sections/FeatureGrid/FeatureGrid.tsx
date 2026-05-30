@@ -90,6 +90,7 @@ import { classnames } from "../../components/_classnames";
 import { Container, type ContainerSize } from "../../layouts/Container";
 import { Grid } from "../../layouts/Grid";
 import { Stack } from "../../layouts/Stack";
+import type { SectionTone } from "../_tone";
 
 /** Header + item text alignment for the feature band. */
 export type FeatureGridAlign = "center" | "start";
@@ -164,6 +165,17 @@ export interface FeatureGridProps
    * Default `lg`.
    */
   size?: ContainerSize;
+
+  /**
+   * Full-bleed band tone — the shared page-rhythm system. The root stamps
+   * `data-tone`; the band treatment lives in `sections/_section-tone.css`.
+   * - `default` (default): transparent; inherits the page backdrop.
+   * - `muted`: a subtle full-bleed surface fill so the band reads as its own
+   *   panel.
+   * - `accent`: an `--zs-accent` fill with the inner ink remapped to
+   *   `--zs-accent-ink` — the bold contrast band.
+   */
+  tone?: SectionTone;
 
   /** Compound `<FeatureGrid.Item>` parts (additive after `features`). */
   children?: ReactNode;
@@ -276,6 +288,7 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
       columns = 3,
       align = "center",
       size = "lg",
+      tone = "default",
       className,
       children,
       "data-slot": dataSlot = "feature-grid",
@@ -340,6 +353,7 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
         data-align={align}
+        data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}
       >
@@ -352,7 +366,9 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
               className="zs-feature-grid__header"
             >
               {eyebrow != null ? (
-                <p className="zs-feature-grid__eyebrow">{eyebrow}</p>
+                <p className="zs-section-eyebrow zs-feature-grid__eyebrow">
+                  {eyebrow}
+                </p>
               ) : null}
               {titleRenders ? (
                 <h2

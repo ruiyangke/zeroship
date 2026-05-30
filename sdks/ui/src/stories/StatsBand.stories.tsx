@@ -6,6 +6,16 @@ const meta: Meta<typeof StatsBand> = {
   title: "Sections/StatsBand",
   component: StatsBand,
   parameters: { layout: "fullscreen" },
+  argTypes: {
+    tone: {
+      control: "inline-radio",
+      options: ["default", "muted", "accent"],
+      description:
+        "Full-bleed band tone (the shared page-rhythm system): default " +
+        "(transparent), muted (subtle surface panel), accent (accent fill " +
+        "with ink remapped to accent-ink).",
+    },
+  },
 };
 
 export default meta;
@@ -157,6 +167,42 @@ export const Compound: Story = {
     await expect(
       canvas.getByText("Edge-routed worldwide."),
     ).toBeInTheDocument();
+  },
+};
+
+/* ─── 5. Muted — tone="muted" full-bleed surface panel ───────────────────── */
+export const Muted: Story = {
+  name: "Muted (tone=muted, full-bleed surface panel)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The `muted` tone fills the whole band with the subtle `--zs-surface` " +
+          "so the proof bar reads as its own panel — light/▢ rhythm against the " +
+          "default (transparent) bands around it. The shared section tone system " +
+          "stamps `data-tone=\"muted\"` on the root; the band treatment lives in " +
+          "the one shared `_section-tone.css`.",
+      },
+    },
+  },
+  render: () => (
+    <StatsBand
+      data-testid="sb-muted"
+      tone="muted"
+      eyebrow="By the numbers"
+      title="Trusted at scale"
+      stats={threeStats}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("sb-muted");
+    await expect(root).toHaveAttribute("data-tone", "muted");
+    // The eyebrow carries the shared section-eyebrow class.
+    const eyebrow = root.querySelector(".zs-section-eyebrow");
+    await expect(eyebrow).not.toBeNull();
+    const title = canvas.getByRole("heading", { name: "Trusted at scale" });
+    await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
   },
 };
 
