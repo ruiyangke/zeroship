@@ -44,6 +44,15 @@
   /* Band rhythm — generous vertical padding so the band reads distinct.
      No background: composable, the consumer paints the page backdrop. */
   display: block;
+  /* A footer is a full-bleed page band: it fills the inline space of whatever
+     lays it out, then the composed Container governs the inner measure. Claim
+     the full inline size explicitly so the band never shrinks-to-fit when its
+     parent establishes a content-sized context (a centering grid/flex item, a
+     narrow `min-content` track). Without this, a sparse footer (e.g. brand +
+     copyright only) collapsed to its content width — the Separator went stubby
+     and the brand/copyright drifted off the inline-start. The Container's
+     `max-width` + `margin-inline:auto` still own the inner column. */
+  inline-size: 100%;
   padding-block: var(--zs-space-10);
   color: var(--zs-label);
 }
@@ -54,6 +63,13 @@
   flex-wrap: wrap;
   gap: var(--zs-space-9);
   align-items: flex-start;
+  /* Anchor the brand at the inline-start and drive the link columns toward
+     the inline-end so the row reads balanced rather than left-weighted: the
+     brand sits at the start, the columns group spans across the remaining
+     track and finishes at the inline-end edge with no trailing dead space.
+     The columns block (`flex: 2 1`) still absorbs the bulk of the free space;
+     space-between removes any residual slack to the trailing edge. */
+  justify-content: space-between;
   margin-block-end: var(--zs-space-8);
 }
 
@@ -133,8 +149,14 @@
 }
 
 /* House link treatment: muted by default, label ink on hover/focus, with a
-   token-driven focus ring so keyboard users get a visible target. */
-.zs-footer__link {
+   token-driven focus ring so keyboard users get a visible target.
+   Applied via the DESCENDANT selector `.zs-footer__links a` so BOTH authoring
+   modes render identically: the ergonomic `links`-array path (which stamps the
+   `.zs-footer__link` class on each `<a>`) AND the compound `<Footer.Column>`
+   raw-children path (where the consumer supplies bare `<a>` anchors with no
+   house class). Without this, raw children fell back to browser-default blue
+   underlined anchors — inconsistent with the gray array links. */
+.zs-footer__links a {
   color: var(--zs-label-secondary);
   text-decoration: none;
   font-size: var(--zs-text-subheadline-size);
@@ -143,12 +165,12 @@
   transition: color var(--zs-duration-1) var(--zs-ease-out);
 }
 
-.zs-footer__link:hover {
+.zs-footer__links a:hover {
   color: var(--zs-label);
   text-decoration: underline;
 }
 
-.zs-footer__link:focus-visible {
+.zs-footer__links a:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
   outline-offset: var(--zs-focus-ring-offset);
   color: var(--zs-label);
@@ -193,14 +215,14 @@
   .zs-footer__copyright {
     color: CanvasText;
   }
-  .zs-footer__link {
+  .zs-footer__links a {
     color: LinkText;
   }
-  .zs-footer__link:hover,
-  .zs-footer__link:focus-visible {
+  .zs-footer__links a:hover,
+  .zs-footer__links a:focus-visible {
     color: LinkText;
   }
-  .zs-footer__link:focus-visible {
+  .zs-footer__links a:focus-visible {
     outline-color: Highlight;
   }
 }
@@ -209,7 +231,7 @@
  * The only motion is the link color transition; flatten it so the hover/focus
  * ink change arrives instantly. */
 @media (prefers-reduced-motion: reduce) {
-  .zs-footer__link {
+  .zs-footer__links a {
     transition: none;
   }
 }
