@@ -3,6 +3,32 @@
 `feat/auth-sdk-popup` autonomous pilot loop. **Pilot (user offline 2026-05-29): decided forks myself,
 no review gate, commit-only NEVER pushed.** Specs: `2026-05-29-auth-sdk-design.md` + `2026-05-29-relay-email-design.md`.
 
+## STATUS: ✅ FEATURE-COMPLETE + LIVE-E2E-VALIDATED + POLISH + ARCHITECTURAL-REVIEW-HARDENED. NOT pushed.
+
+### Architectural review round (2026-05-30) — DONE, all findings discharged
+A careful 6-lens line-by-line review (21 agents + adversarial verification) scored the build 73
+"fix-these-first" and found a coherent cluster of CONFIRMED COMPOSITIONAL defects the per-slice
+reviews structurally couldn't catch (independently-correct slices that didn't compose):
+- 8a910bb6 (Batch A): BLOCKER /__zs/auth/dpop-exchange leaked the global UUID + real email (Phase-8
+  minter never reconciled with Slice 4/5) → now projects pws_ + relay alias, fails closed; +
+  self-describing subject invariant (both wrapper fast-paths reject UUID-sub wrappers); + revocation
+  unified on (client_id, pws_) across all 3 writers + 4 readers (was a dead check — writer keyed pws_,
+  readers keyed global UUID); + control grant-revoke & per-app BCL now write the marker; + live email
+  re-resolve. M1 (canonicalize UUID in the single derive_pairwise) + M2 (delete dead global denylist).
+- 7bc41f4d (Batch B): BLOCKER relay revoke↔re-consent race (the §6 shared-lock "proof" matched no
+  real primitive) → closed STRUCTURALLY via EXISTS(control.oauth_grants) in resolve_active_alias
+  (grant-absent ⇒ alias inert in both commit orders; §10 race test live); + pairwise_salt its own
+  dedicated secret (was fused to the rotatable stash key); + cookie-name overload split
+  (__Host-zs_app_anchor); + SDK relay state-filter; + provider threaded as idp_hint; + honest relay
+  abuse auto-revoke.
+- 126fa5be: the 2 minor residuals (wrapper email fail-closed in no-DB mode; wrapper_token doc drift).
+RECONFIRM (adversarial, on the fixed code): privacy / revocation-coherence / relay-race ALL CLOSED
+with file:line evidence; final sweep green (build clean; core 170, gateway 306, control 85, auth 158,
+SDK 77, runtime auth_plugin 7, + all PG integration suites; tree clean).
+**Systemic lesson: per-slice critic passes can't catch cross-slice composition defects — a whole-build
+architectural review with adversarial verification was essential and found 2 real privacy/security
+blockers that were unit-test-green.**
+
 ## STATUS: ✅ FEATURE-COMPLETE + LIVE-E2E-VALIDATED + POLISH ROUND COMPLETE. NOT pushed.
 The whole-vision Supabase/Auth0-style in-app-popup auth SDK is built across all 5 subsystems, every
 slice critic-reviewed → fixed → verified, and validated against a real Hydra+Postgres+mailpit stack.
