@@ -193,30 +193,20 @@
   color: var(--zs-label-tertiary);
 }
 
-.zs-data-table__sort-glyph svg {
+/* The governed Icon fills the wrapper (which owns the 0.75em footprint),
+   overriding the Icon's default token size. The lucide svg paints with
+   currentColor, so it inherits the wrapper's color. */
+.zs-data-table__sort-glyph .zs-data-table__sort-glyph-icon {
   inline-size: 100%;
   block-size: 100%;
 }
 
-.zs-data-table__sort-up,
-.zs-data-table__sort-down {
-  fill: currentColor;
-  opacity: 0.4;
-}
-
-/* Active direction: the matching caret is full-strength accent; the
-   inactive caret stays muted so the pair reads as a toggle. */
-.zs-data-table__sort-glyph[data-state="ascending"] {
-  color: var(--zs-accent);
-}
-.zs-data-table__sort-glyph[data-state="ascending"] .zs-data-table__sort-up {
-  opacity: 1;
-}
+/* Active direction: a single accent chevron (ChevronUp / ChevronDown).
+   Unsorted shows the muted up/down chevron pair (ChevronsUpDown). Shape
+   distinguishes the three states; color reinforces active vs. inactive. */
+.zs-data-table__sort-glyph[data-state="ascending"],
 .zs-data-table__sort-glyph[data-state="descending"] {
   color: var(--zs-accent);
-}
-.zs-data-table__sort-glyph[data-state="descending"] .zs-data-table__sort-down {
-  opacity: 1;
 }
 
 /* ─── body cells ──────────────────────────────────────────────────── */
@@ -327,14 +317,13 @@
   .zs-data-table tbody tr[data-selected] > *:first-child {
     box-shadow: inset var(--zs-space-1) 0 0 0 Highlight;
   }
+  /* Active sort falls back to Highlight; the glyph SHAPE (ChevronUp vs
+     ChevronDown, vs the ChevronsUpDown pair when unsorted) keeps the
+     three states distinguishable without relying on color. */
   .zs-data-table__sort-glyph[data-state="ascending"],
   .zs-data-table__sort-glyph[data-state="descending"] {
     color: Highlight;
     forced-color-adjust: none;
-  }
-  .zs-data-table__sort-glyph[data-state="ascending"] .zs-data-table__sort-up,
-  .zs-data-table__sort-glyph[data-state="descending"] .zs-data-table__sort-down {
-    opacity: 1;
   }
 }
 
@@ -379,7 +368,11 @@
   color: var(--zs-label);
 }
 
-.zs-data-table__bool-glyph {
+/* The governed Icon carries this class on its svg. Scope under the bool
+   cell so the 1em footprint wins over the Icon's default token size; the
+   lucide glyph (Check / Minus) paints with currentColor and is tinted by
+   data-value below. */
+.zs-data-table__bool .zs-data-table__bool-glyph {
   inline-size: 1em;
   block-size: 1em;
   flex: none;

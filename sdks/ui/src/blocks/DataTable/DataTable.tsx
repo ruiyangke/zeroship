@@ -141,10 +141,19 @@ import {
   type Row,
   type FilterFn,
 } from "@tanstack/react-table";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
+  Minus,
+  MoreVertical,
+} from "lucide-react";
 import { classnames } from "../../components/_classnames";
 import { Badge, type BadgeIntent } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Checkbox } from "../../components/Checkbox";
+import { Icon } from "../../components/Icon/Icon";
 import { Input } from "../../components/Input";
 import { Menu } from "../../components/Menu";
 import { Skeleton } from "../../components/Skeleton";
@@ -479,20 +488,26 @@ function defaultCompare(a: unknown, b: unknown): number {
 }
 
 /* ─── sort affordance ─────────────────────────────────────────────────
- * Two distinct glyphs (shape ≠ color). The active direction shows a
- * filled caret (▲/▼); an inactive sortable column shows a muted up/down
- * pair. aria-hidden — `aria-sort` on the <th> carries the meaning. */
+ * Distinct glyph per state (shape ≠ color): the active direction is a
+ * single accent chevron (ChevronUp / ChevronDown); an inactive sortable
+ * column shows the muted up/down chevron pair (ChevronsUpDown). The glyph
+ * is decorative — `aria-hidden` on the wrapper and a label-less `Icon`,
+ * `aria-sort` on the <th> carries the meaning. The wrapper owns the size
+ * (tracks the header text) and the color via `data-state`. */
 function SortGlyph({
   state,
 }: {
   state: "ascending" | "descending" | "none";
 }) {
+  const Glyph =
+    state === "ascending"
+      ? ChevronUp
+      : state === "descending"
+        ? ChevronDown
+        : ChevronsUpDown;
   return (
     <span className="zs-data-table__sort-glyph" aria-hidden="true" data-state={state}>
-      <svg viewBox="0 0 12 12" focusable="false" role="presentation">
-        <path className="zs-data-table__sort-up" d="M6 2.5L9 6H3z" />
-        <path className="zs-data-table__sort-down" d="M6 9.5L3 6h6z" />
-      </svg>
+      <Icon as={Glyph} className="zs-data-table__sort-glyph-icon" />
     </span>
   );
 }
@@ -500,43 +515,17 @@ function SortGlyph({
 /* ─── boolean + kebab glyphs ──────────────────────────────────────────── */
 function BoolGlyph({ value }: { value: boolean }) {
   return (
-    <svg
+    <Icon
+      as={value ? Check : Minus}
+      size="sm"
       className="zs-data-table__bool-glyph"
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      focusable="false"
       data-value={value ? "true" : "false"}
-    >
-      {value ? (
-        <path
-          d="M3.5 8.5l3 3 6-6"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.75"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      ) : (
-        <path
-          d="M4 8h8"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.75"
-          strokeLinecap="round"
-        />
-      )}
-    </svg>
+    />
   );
 }
 
 function KebabGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <circle cx="8" cy="3.5" r="1.4" fill="currentColor" />
-      <circle cx="8" cy="8" r="1.4" fill="currentColor" />
-      <circle cx="8" cy="12.5" r="1.4" fill="currentColor" />
-    </svg>
-  );
+  return <Icon as={MoreVertical} size="sm" />;
 }
 
 /* ─── RowActions kebab ─────────────────────────────────────────────────
