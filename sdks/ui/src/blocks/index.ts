@@ -51,3 +51,13 @@ export {
   type DescriptionListTermProps,
   type DescriptionListDetailProps,
 } from "./DescriptionList";
+
+// Data block (Wave 3) — presentational, generic data table.
+export {
+  DataTable,
+  type DataTableProps,
+  type DataTableColumn,
+  type DataTableSort,
+  type DataTableSelectionMode,
+  type DataTableAlign,
+} from "./DataTable";

@@ -78,9 +78,12 @@
 
 .zs-error-state__description {
   margin: 0;
-  /* One step softer + smaller than the title so the heading owns the
-     hierarchy and the description reads as quiet secondary copy. */
-  color: var(--zs-label-tertiary);
+  /* Softer than the title via SIZE (footnote), but kept at
+     --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
+     (below AA 4.5:1) and this copy composites on the opaque DataTable
+     surface, so the smaller size carries the hierarchy while secondary
+     keeps it AA-safe. */
+  color: var(--zs-label-secondary);
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
   margin-block-start: calc(-1 * var(--zs-space-1));

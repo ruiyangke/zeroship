@@ -1,0 +1,284 @@
+/*
+ * DataTable — presentational data table.
+ *
+ * Structure:
+ *   table.zs-data-table
+ *     caption.zs-data-table__caption
+ *     colgroup > col[.zs-data-table__select-col]
+ *     thead > tr > th.zs-data-table__th | .zs-data-table__select-cell
+ *       th .zs-data-table__sort-button > .zs-data-table__header-label
+ *                                       + .zs-data-table__sort-glyph
+ *     tbody > tr[.zs-data-table__row?] > td.zs-data-table__td
+ *                                      | td.zs-data-table__select-cell
+ *                                      | td.zs-data-table__state-cell (full-span)
+ *
+ * Tokens: header bg --zs-fill-secondary over the opaque table surface;
+ * row separators --zs-separator; text --zs-label / header
+ * --zs-label-secondary; selected-row tint an OPAQUE color-mix toward
+ * --zs-surface (glass rule); hover --zs-fill-quaternary. Density changes
+ * cell padding only. No raw hex/px; logical properties throughout.
+ *
+ * Motion: row-hover tint is a color transition only, dropped under
+ * prefers-reduced-motion. forced-colors: separators, the selected-row
+ * marker, and the sort affordance all stay visible via system colors.
+ */
+
+.zs-data-table {
+  /* A data table is a content surface, so it paints an OPAQUE background
+     (the glass-contrast invariant: cell text + the default EmptyState
+     composite on a KNOWN surface, never on the consumer's page mesh).
+     The empty/error description text clears AA against this surface
+     because EmptyState/ErrorState use `--zs-label-secondary` (see their
+     CSS) — the earlier transparent-root workaround that masked a
+     below-floor tertiary description is gone. */
+  background: var(--zs-surface);
+  inline-size: 100%;
+  border-collapse: collapse;
+  color: var(--zs-label);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  text-align: start;
+}
+
+/* ─── caption ─────────────────────────────────────────────────────── */
+.zs-data-table__caption {
+  caption-side: top;
+  text-align: start;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 500;
+}
+
+/* ─── header ──────────────────────────────────────────────────────── */
+.zs-data-table thead th {
+  /* Opaque header band computed as a single `background-color`: mix the
+     translucent --zs-fill-secondary INTO the opaque table surface so the
+     result is a flat opaque color (no gradient/filter behind text). axe's
+     contrast walk only sees an opaque `background-color`; a
+     `background-image` gradient layer would defeat it. The sticky header
+     scrolls rows under it, so it must stay opaque. */
+  background-color: color-mix(
+    in oklab,
+    var(--zs-fill-secondary),
+    var(--zs-surface)
+  );
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: 600;
+  text-align: start;
+  vertical-align: middle;
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+}
+
+.zs-data-table__th[data-align="center"],
+.zs-data-table__td[data-align="center"] {
+  text-align: center;
+}
+.zs-data-table__th[data-align="end"],
+.zs-data-table__td[data-align="end"] {
+  text-align: end;
+}
+
+.zs-data-table__header-label {
+  display: inline-block;
+}
+
+/* Sortable header is a real <button> filling the header cell so the
+   whole label is the activation target. It inherits the header type
+   tokens and stays a quiet affordance until hovered/focused. */
+.zs-data-table__sort-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  border-radius: var(--zs-radius-1);
+}
+
+.zs-data-table__th[data-align="center"] .zs-data-table__sort-button {
+  justify-content: center;
+}
+.zs-data-table__th[data-align="end"] .zs-data-table__sort-button {
+  justify-content: flex-end;
+}
+
+.zs-data-table__sort-button:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+@media (hover: hover) {
+  .zs-data-table__sort-button:hover {
+    color: var(--zs-label);
+  }
+}
+
+/* ─── sort affordance ─────────────────────────────────────────────── */
+.zs-data-table__sort-glyph {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  inline-size: 0.75em;
+  block-size: 0.75em;
+  color: var(--zs-label-tertiary);
+}
+
+.zs-data-table__sort-glyph svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.zs-data-table__sort-up,
+.zs-data-table__sort-down {
+  fill: currentColor;
+  opacity: 0.4;
+}
+
+/* Active direction: the matching caret is full-strength accent; the
+   inactive caret stays muted so the pair reads as a toggle. */
+.zs-data-table__sort-glyph[data-state="ascending"] {
+  color: var(--zs-accent);
+}
+.zs-data-table__sort-glyph[data-state="ascending"] .zs-data-table__sort-up {
+  opacity: 1;
+}
+.zs-data-table__sort-glyph[data-state="descending"] {
+  color: var(--zs-accent);
+}
+.zs-data-table__sort-glyph[data-state="descending"] .zs-data-table__sort-down {
+  opacity: 1;
+}
+
+/* ─── body cells ──────────────────────────────────────────────────── */
+.zs-data-table__td {
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-3);
+  vertical-align: middle;
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+
+.zs-data-table tbody tr:last-child .zs-data-table__td,
+.zs-data-table tbody tr:last-child .zs-data-table__select-cell {
+  border-block-end: 0;
+}
+
+/* Selection column — narrow, centered chip, hairline-separated like the
+   data cells. */
+.zs-data-table__select-cell {
+  /* Just wide enough for the chip + its hit-rect; the colgroup <col>
+     also pins this so the column doesn't stretch with content. */
+  inline-size: 3rem;
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-3);
+  text-align: center;
+  vertical-align: middle;
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+
+.zs-data-table thead .zs-data-table__select-cell {
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+
+/* ─── density ─────────────────────────────────────────────────────── */
+.zs-data-table--compact .zs-data-table__td,
+.zs-data-table--compact .zs-data-table__select-cell,
+.zs-data-table--compact thead th {
+  padding-block: var(--zs-space-2);
+}
+
+/* ─── row hover + selected ────────────────────────────────────────── */
+@media (hover: hover) {
+  .zs-data-table tbody tr[data-slot="data-table-row"]:hover {
+    background-color: var(--zs-fill-quaternary);
+    transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  }
+}
+
+/* Selected-row tint: an OPAQUE mix toward the surface so it never relies
+   on a translucent overlay (glass rule). A leading inline-start marker
+   reinforces selection beyond color alone. */
+.zs-data-table tbody tr[data-selected] {
+  background-color: color-mix(in oklab, var(--zs-accent) 12%, var(--zs-surface));
+}
+
+.zs-data-table tbody tr[data-selected] > *:first-child {
+  box-shadow: inset var(--zs-space-1) 0 0 0 var(--zs-accent);
+}
+
+@media (hover: hover) {
+  .zs-data-table tbody tr[data-selected]:hover {
+    background-color: color-mix(
+      in oklab,
+      var(--zs-accent) 18%,
+      var(--zs-surface)
+    );
+  }
+}
+
+/* ─── state cell (empty / loading / error full-span) ──────────────── */
+.zs-data-table__state-cell {
+  padding-block: var(--zs-space-6);
+  padding-inline: var(--zs-space-3);
+  text-align: center;
+  border-block-end: 0;
+}
+
+/* ─── sticky header ───────────────────────────────────────────────── */
+.zs-data-table--sticky thead th {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 1;
+}
+
+/* ─── reduced motion ──────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-data-table tbody tr[data-slot="data-table-row"]:hover {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * Keep the separators, the selected-row marker, and the sort affordance
+ * visible under HCM. The color-mix tint disappears, so the inline-start
+ * marker and an explicit selected outline carry selection; the active
+ * sort caret falls back to Highlight. */
+@media (forced-colors: active) {
+  .zs-data-table thead th {
+    border-block-end: var(--zs-selection-hairline) solid CanvasText;
+  }
+  .zs-data-table__td,
+  .zs-data-table__select-cell {
+    border-block-end: var(--zs-selection-hairline) solid CanvasText;
+  }
+  .zs-data-table tbody tr[data-selected] {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-data-table tbody tr[data-selected] > *:first-child {
+    box-shadow: inset var(--zs-space-1) 0 0 0 Highlight;
+  }
+  .zs-data-table__sort-glyph[data-state="ascending"],
+  .zs-data-table__sort-glyph[data-state="descending"] {
+    color: Highlight;
+    forced-color-adjust: none;
+  }
+  .zs-data-table__sort-glyph[data-state="ascending"] .zs-data-table__sort-up,
+  .zs-data-table__sort-glyph[data-state="descending"] .zs-data-table__sort-down {
+    opacity: 1;
+  }
+}
