@@ -230,13 +230,34 @@
   [dir="rtl"] .zs-drawer-content[data-side="start"][data-ending-style],
   [dir="rtl"] .zs-drawer-content[data-side="end"][data-starting-style],
   [dir="rtl"] .zs-drawer-content[data-side="end"][data-ending-style] {
+    /* Reduced motion: no slide AND no fade. We zero the transform so the
+     * panel never flies across the viewport, and we DELIBERATELY leave
+     * opacity at its steady-open value (1, inherited from the base
+     * `.zs-drawer-content` rule).
+     *
+     * Why not `opacity: 0` here: with `transition: none` there is no
+     * transitionend event, so Base UI's `data-starting-style` /
+     * `data-ending-style` flags are cleared on the next frame rather than
+     * at the end of a (non-existent) animation. During that frame the
+     * panel is already `data-open` and focus-trapped, but an `opacity: 0`
+     * pin would render it fully INVISIBLE to a reduced-motion user — a
+     * real defect: the drawer opens, traps focus, yet paints nothing.
+     * Instant appearance (opacity 1, transform none) is the correct
+     * reduced-motion semantics — state changes are immediate, not
+     * animated. */
     transform: none;
-    /* Show/hide via opacity only so the panel doesn't jump across the
-     * viewport. */
-    opacity: 0;
   }
   .zs-drawer-backdrop {
     transition: none;
+  }
+  /* Mirror the backdrop: its non-reduced-motion starting/ending rule pins
+   * `opacity: 0` (lines above) to fade the scrim. Under reduced motion the
+   * fade can't complete (no transitionend), so the scrim would stay fully
+   * transparent while the modal is open. Restore it to its steady opacity
+   * so the backdrop paints immediately. */
+  .zs-drawer-backdrop[data-starting-style],
+  .zs-drawer-backdrop[data-ending-style] {
+    opacity: 1;
   }
 }
 

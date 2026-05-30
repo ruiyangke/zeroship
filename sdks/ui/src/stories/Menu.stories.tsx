@@ -414,7 +414,25 @@ export const NestedSubmenu: Story = {
     await expect(
       await body.findByRole("menuitem", { name: /email/i }),
     ).toBeVisible();
+    // ESC closes the submenu; closeParentOnEsc default keeps the PARENT open.
     await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByRole("menuitem", { name: /email/i })).toBeNull(),
+    );
+    await expect(share).toBeVisible();
+    // Second ESC tears the parent down too. We assert the fully-closed
+    // end-state so the a11y audit in postVisit runs against a clean DOM:
+    // while a non-modal Base UI menu is open it leaves `tabindex="0"`
+    // focus-guard sentinels (`data-base-ui-focus-guard`) parked next to
+    // the trigger. axe's `aria-hidden-focus` rule flags those guards
+    // (they're `aria-hidden` yet focusable — Base UI uses them for
+    // focus-wrap detection). They vanish once every menu level closes, so
+    // closing fully is the faithful way to keep axe clean without
+    // suppressing a rule — and it also exercises the full teardown path.
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByRole("menuitem", { name: /share with/i })).toBeNull(),
+    );
   },
 };
 

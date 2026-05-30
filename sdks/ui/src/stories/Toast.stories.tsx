@@ -763,12 +763,22 @@ export const Stacked: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const body = getDocument(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: /show three/i }));
-    await expect(body.getByText("First")).toBeVisible();
-    await expect(body.getByText("Second")).toBeVisible();
-    await expect(body.getByText("Third")).toBeVisible();
+    // Use the shared helper rather than a bare `getByText`. Two reasons,
+    // both faithful to how every other Toast story queries:
+    //   1. Base UI mirrors each toast's title into a visually-hidden
+    //      aria-live announcer, so `getByText("Third")` matches BOTH the
+    //      visible `<h2 class="zs-toast-title">` and the hidden announcer
+    //      node — an ambiguous-match throw. `findToastByTitle` scopes to
+    //      the `[role="status"]` toast surface.
+    //   2. It waits out the enter motion (data-starting-style → resting
+    //      opacity) instead of racing it synchronously.
+    // `expectToastShown` then asserts the headline is on screen (the
+    // Title isn't aria-hidden even when the high-priority root is).
+    expectToastShown(await findToastByTitle(canvasElement, /^first$/i));
+    expectToastShown(await findToastByTitle(canvasElement, /^second$/i));
+    expectToastShown(await findToastByTitle(canvasElement, /^third$/i));
   },
 };
 
