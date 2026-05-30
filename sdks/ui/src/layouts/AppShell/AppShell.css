@@ -42,6 +42,11 @@
 .zs-app-shell {
   display: flex;
   flex-direction: column;
+  /* The shell ALWAYS fills its container's inline-size — its width must
+   * not shrink-to-fit the content (a sparse Main would otherwise collapse
+   * the whole frame to a narrow column). Paired with the dvh min-height so
+   * the frame fills both axes of its container/viewport. */
+  inline-size: 100%;
   /* dvh (dynamic viewport height) tracks the visible viewport as mobile
    * browser chrome shows/hides — not a raw px length. Permitted by the
    * no-raw-px rule (dvh/% are allowed). */
