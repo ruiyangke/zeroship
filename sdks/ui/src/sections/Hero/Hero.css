@@ -1,0 +1,216 @@
+/*
+ * Hero — top-of-page marketing band.
+ *
+ * Anatomy:
+ *   .zs-hero                  — the <section>; generous vertical padding,
+ *                               NO heavy background by default (composable)
+ *   .zs-hero__body            — the band body inside the Container; single
+ *                               column or a two-column split (data-layout)
+ *   .zs-hero__text            — the text column (composed Stack):
+ *                               eyebrow → title → description → actions
+ *   .zs-hero__eyebrow         — small label region above the headline
+ *   .zs-hero__title           — the <h1> headline (relevelable via asChild)
+ *   .zs-hero__description      — muted supporting <p> on a reading measure
+ *   .zs-hero__actions          — CTA Cluster (composed); aligns to the band
+ *   .zs-hero__media            — optional media column (decorative wrapper)
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm (block padding) and lets
+ *     the composed `Container` own the inline width + padding. The body is
+ *     a single column by default; with media it is a CSS grid of two
+ *     columns that collapses to one below the --zs-bp-md breakpoint.
+ *   - `data-align="center"` centers the text column on a readable measure
+ *     (`--zs-hero-measure`); `data-align="start"` start-aligns it. The
+ *     measure keeps headline + description from running edge-to-edge on
+ *     wide viewports (the classic over-long line-length readability trap).
+ *   - The composed Stack / Cluster own the intra-column gaps and the CTA
+ *     wrapping; this stylesheet only adds the band rhythm, the type scale
+ *     for headline / description, the measure, and the split grid.
+ *   - Logical properties throughout for RTL (padding-block, margin-inline,
+ *     inset-inline).
+ *
+ * Motion: none of its own.
+ */
+
+.zs-hero {
+  /* Band rhythm — generous vertical padding from the large space steps so
+     the hero reads as a distinct top-of-page band. No background: the hero
+     is composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  /* Inline padding is owned by the composed Container; the section itself
+     adds none so the Container's measure is the single inline authority. */
+  color: var(--zs-label);
+}
+
+/* ─── Body — single column or two-column split ───────────────────────────── */
+.zs-hero__body {
+  display: grid;
+  /* Single-column default: one track. The split layout overrides below. */
+  grid-template-columns: 1fr;
+  gap: var(--zs-space-9);
+  align-items: center;
+}
+
+/* Centered single column: pin the text column to a readable measure and
+   center it within the Container. `data-align` lives on the section, so we
+   reach the body via the descendant combinator. */
+.zs-hero[data-align="center"] .zs-hero__body[data-layout="single"] {
+  justify-items: center;
+  text-align: center;
+}
+
+/* Start single column: the text column hugs the inline-start edge. */
+.zs-hero[data-align="start"] .zs-hero__body[data-layout="single"] {
+  justify-items: start;
+  text-align: start;
+}
+
+/* ─── Split — text column + media column ─────────────────────────────────── */
+.zs-hero__body[data-layout="split"] {
+  /* Two balanced columns on wide viewports. `minmax(0, …)` lets long
+     headline words wrap instead of forcing the grid wider. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  text-align: start;
+}
+
+/* A split always reads start-aligned in its text column regardless of the
+   requested `align` (the two-column balance is the alignment). */
+.zs-hero__body[data-layout="split"] .zs-hero__text {
+  text-align: start;
+}
+
+/* Collapse the split to a single stacked column below the --zs-bp-md
+   breakpoint (48rem — see --zs-bp-md). The media drops below the text. The
+   literal rem is written here because custom properties cannot appear in
+   an @media condition; the token name is the documented source. */
+@media (max-width: 47.999rem) {
+  .zs-hero__body[data-layout="split"] {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Text column — the readable measure ─────────────────────────────────── */
+.zs-hero__text {
+  /* Reading-measure cap so headline + copy never run edge-to-edge on wide
+     viewports. Only applies to the single-column layouts; in a split each
+     grid track already constrains the column. */
+  --zs-hero-measure: 46rem;
+}
+
+.zs-hero__body[data-layout="single"] .zs-hero__text {
+  max-inline-size: var(--zs-hero-measure);
+  inline-size: 100%;
+}
+
+/* Center the single text column inside the body when the band is centered. */
+.zs-hero[data-align="center"] .zs-hero__body[data-layout="single"] .zs-hero__text {
+  margin-inline: auto;
+}
+
+/* ─── Eyebrow — small label above the headline ───────────────────────────── */
+.zs-hero__eyebrow {
+  display: flex;
+  align-items: center;
+  /* The eyebrow content is the consumer's Badge / Tag / text; this region
+     adds no chrome of its own — just a baseline rhythm hook. */
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Title — the page headline ──────────────────────────────────────────── */
+.zs-hero__title {
+  margin-block: 0;
+  /* Large-title scale — the hero headline is the page's most prominent
+     type. Reads the foundation large-title tokens so it tracks the type
+     system rather than inventing a one-off size. */
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  font-weight: var(--zs-text-large-title-weight);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  color: var(--zs-label);
+  /* Balance the headline across its lines for a tidy ragged edge on the
+     short multi-line headlines heroes typically carry. */
+  text-wrap: balance;
+}
+
+/* ─── Description — muted supporting copy ─────────────────────────────────── */
+.zs-hero__description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  /* Pretty wrapping avoids orphans on the supporting paragraph. */
+  text-wrap: pretty;
+}
+
+/* ─── Actions — the CTA row (composed Cluster) ───────────────────────────── */
+.zs-hero__actions {
+  /* Cluster owns the gap + wrap; the band only adds a touch of top rhythm
+     beyond the Stack gap so the CTAs read as a distinct action band. */
+  margin-block-start: var(--zs-space-1);
+}
+
+/* ─── Media — optional image / illustration column ───────────────────────── */
+/* The media column is the grid track that holds every media source (the
+   `media` prop and each `<Hero.Media>` child). Multiple media stack within
+   it, gap-governed, each filling the column inline. */
+.zs-hero__media-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-5);
+  inline-size: 100%;
+}
+
+.zs-hero__media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  /* The media wrapper rounds + clips its content so consumer images /
+     illustrations adopt the band's corner rhythm without each caller
+     re-specifying it. No background of its own — the content paints. */
+  border-radius: var(--zs-radius-6);
+  overflow: hidden;
+}
+
+/* Media content fills the column responsively without distorting. The
+   wrapper is decorative by default; these rules style whatever element the
+   consumer drops in (img / picture / svg / div). */
+.zs-hero__media > * {
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+.zs-hero__media :is(img, svg, picture, video) {
+  display: block;
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+/* ─── forced-colors — keep every text region legible ──────────────────────
+ *
+ * The authored label tokens drop out in a forced-colors pass; mirror the
+ * painted text so eyebrow / title / description resolve to system colors. */
+@media (forced-colors: active) {
+  .zs-hero,
+  .zs-hero__title,
+  .zs-hero__description,
+  .zs-hero__eyebrow {
+    color: CanvasText;
+  }
+  /* The media wrapper's border-radius/overflow are harmless under
+     forced-colors; no border is forced since the wrapper is decorative. */
+}
+
+/* ─── reduced-motion ─────────────────────────────────────────────────────
+ * No-op — the Hero has no motion of its own (the composed Button / Badge /
+ * Cluster honor reduced-motion in their own CSS). The gate exists for parity
+ * with the rest of the surface. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-hero {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}

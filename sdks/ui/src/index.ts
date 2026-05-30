@@ -376,6 +376,7 @@ export {
   type BreadcrumbsSeparatorProps,
 } from "./components";
 
-// Layout primitives + compositions, and composed blocks.
+// Layout primitives + compositions, composed blocks, and page sections.
 export * from "./layouts";
 export * from "./blocks";
+export * from "./sections";

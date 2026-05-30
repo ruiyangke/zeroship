@@ -84,6 +84,10 @@
 @import "./blocks/AuthForm/AuthForm.css";
 @import "./blocks/Stepper/Stepper.css";
 
+/* ─── Page sections — full-width marketing/content bands built FROM the
+   primitives + components above. */
+@import "./sections/Hero/Hero.css";
+
 *,
 *::before,
 *::after {
