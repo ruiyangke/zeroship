@@ -474,6 +474,13 @@ impl OidcRp {
                 q.append_pair("prompt", prompt);
             }
         }
+        // `idp_hint` is optional — passed through to Hydra so the login UI can
+        // route to / pre-select the named upstream IdP. Omitted ⇒ default picker.
+        if let Some(idp_hint) = p.idp_hint {
+            if !idp_hint.is_empty() {
+                q.append_pair("idp_hint", idp_hint);
+            }
+        }
         let query = q.finish();
         format!(
             "{}/oauth2/auth?{}",
@@ -897,6 +904,11 @@ pub struct BrowserAuthorizeParams<'a> {
     /// Optional `prompt` passthrough (`login`/`consent` for step-up;
     /// omitted in the common interactive case).
     pub prompt: Option<&'a str>,
+    /// Optional provider hint (`google`/`github`/`password`) passed through to
+    /// Hydra as `idp_hint` so the login UI can pre-select / route to the named
+    /// upstream IdP (auth-sdk Slice 1b-browser, Phase-1 `SignInOptions.provider`).
+    /// Omitted ⇒ Hydra/login-UI shows the default provider picker.
+    pub idp_hint: Option<&'a str>,
 }
 
 /// Server-side state stashed in the signed `__Host-zs_oidc_stash` cookie
@@ -1184,6 +1196,7 @@ mod tests {
             scope: "openid profile read:billing",
             redirect_uri: "https://myapp.zeroship.ai/__zs/auth/popup-callback",
             prompt: None,
+            idp_hint: None,
         };
         let url = rp.build_browser_authorize_url("oac_myapp", &params);
         assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"), "{url}");
@@ -1203,6 +1216,8 @@ mod tests {
         );
         // No prompt in the common case (so Hydra's SSO skip fires).
         assert!(!url.contains("prompt="), "default omits prompt: {url}");
+        // No idp_hint unless the SDK supplied a provider.
+        assert!(!url.contains("idp_hint="), "default omits idp_hint: {url}");
     }
 
     #[test]
@@ -1217,6 +1232,7 @@ mod tests {
             scope: "openid",
             redirect_uri: "https://app/cb",
             prompt: Some("consent"),
+            idp_hint: None,
         };
         let url = rp.build_browser_authorize_url("oac_app", &base);
         assert!(url.contains("prompt=consent"), "{url}");
@@ -1226,6 +1242,36 @@ mod tests {
 
         let empty = BrowserAuthorizeParams { prompt: Some(""), ..base };
         assert!(!rp.build_browser_authorize_url("oac_app", &empty).contains("prompt="));
+    }
+
+    /// Fix 5 (MAJOR): `SignInOptions.provider` is threaded through as the
+    /// `idp_hint` authorize-URL param so the login UI can route to the named
+    /// upstream IdP. A present hint lands in the Hydra URL; an empty one is
+    /// dropped (mirrors the `prompt` passthrough discipline).
+    #[test]
+    fn browser_authorize_url_passes_idp_hint_through_when_present() {
+        let rp = OidcRp::new("https://auth.zeroship.ai", "gateway", "s", b"k".repeat(32));
+        let base = BrowserAuthorizeParams {
+            code_challenge: "c",
+            state: "s",
+            nonce: "n",
+            scope: "openid",
+            redirect_uri: "https://app/cb",
+            prompt: None,
+            idp_hint: Some("google"),
+        };
+        let url = rp.build_browser_authorize_url("oac_app", &base);
+        assert!(url.contains("idp_hint=google"), "provider must reach the authorize URL: {url}");
+
+        let github = BrowserAuthorizeParams { idp_hint: Some("github"), ..base.clone() };
+        assert!(rp.build_browser_authorize_url("oac_app", &github).contains("idp_hint=github"));
+
+        let password = BrowserAuthorizeParams { idp_hint: Some("password"), ..base.clone() };
+        assert!(rp.build_browser_authorize_url("oac_app", &password).contains("idp_hint=password"));
+
+        // An empty idp_hint is dropped (no `idp_hint=` in the URL).
+        let empty = BrowserAuthorizeParams { idp_hint: Some(""), ..base };
+        assert!(!rp.build_browser_authorize_url("oac_app", &empty).contains("idp_hint="));
     }
 
     #[test]
@@ -1238,6 +1284,7 @@ mod tests {
             scope: "openid",
             redirect_uri: "https://app/cb",
             prompt: None,
+            idp_hint: None,
         };
         let url = rp.build_browser_authorize_url("oac_app", &params);
         assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"), "no double slash: {url}");

@@ -835,28 +835,45 @@ gateway writes `client_id` into `app_client_id` and that both UPDATEs match it.
 - **Hydra revoke runs *after* commit** (as today) and is best-effort: if it fails the grant + alias
   are already revoked (fail-safe — the privacy-critical state committed first); the handler returns 500
   so the operator retries the Hydra leg, but the alias is **already dead**.
-- **Cross-service concurrency contract for the shared `revoked_at` column (major closed).** Two
-  services write `revoked_at` on the same `(app_id, global_user_id)` row: **control's `revoke_grant`**
-  sets it (above), and **auth's `accept_consent`** clears it on re-grant (§6.1). A naive interleave
-  (revoke commits `revoked_at=now()`, a concurrent re-consent's `COALESCE` re-clears it) could leave a
-  **live alias for a just-revoked grant**. The contract that prevents it:
-  - **The invariant is `grant absent ⇒ alias revoked`.** The `control.oauth_grants` row is the single
-    source of truth for "is this grant live"; the alias's `revoked_at` must agree with it.
-  - **Both writers take the row lock on the *grant* row first.** Control's transaction `DELETE`s the
-    `control.oauth_grants` row (acquiring its row lock) **before** the alias UPDATE, in the same txn.
-    Auth's `accept_consent` `INSERT … ON CONFLICT` on `control.oauth_grants` (the grant write, main
-    spec §5.2) **also** locks that row, in the same txn that clears the alias `revoked_at`. So the two
-    transactions **serialize on the `control.oauth_grants` row** — they cannot interleave the way the
-    critique described. The auth-local consent **advisory** lock (main spec §7.1) still guards
-    concurrent *first-consents*, but the cross-service ordering is enforced by the shared grant-row
-    lock, which both txns must hold.
-  - **Canonical ordering:** whichever transaction commits **last** wins, and because both touch the
-    grant row first, "last to commit on the grant row" is also "last to set the alias state" — they
-    are consistent. If revoke commits last: grant absent + alias revoked (correct). If re-consent
-    commits last: grant present + alias active (correct, the user just re-granted). There is **no**
-    state where grant is absent but alias is active. A §10 concurrency test races a `revoke_grant`
-    against an `accept_consent` re-grant on the same `(app, user)` and asserts the terminal state
-    satisfies the invariant in both commit orders.
+- **Cross-service concurrency contract for the shared `revoked_at` column — STRUCTURAL gate, NOT a
+  shared lock (major closed).** Two services write `revoked_at` on the same `(app_client_id,
+  global_user_id)` row: **control's `revoke_grant`** sets it (above), and **auth's `accept_consent`**
+  clears it on re-grant (§6.1). A naive interleave (revoke commits `revoked_at=now()`, a concurrent
+  re-consent's `COALESCE` re-clears it) could leave a **live alias for a just-revoked grant**. The
+  mechanism that prevents it is a **structural read-side gate**, not a lock the two writers share:
+  - **The two writers do NOT share a held lock — do not assume they serialize.** This was the
+    round-3 proof and it is **false for the shipped code**, recorded here as a superseded claim so no
+    reader trusts it: control's `revoke_grant` (`oauth_grants_handlers.rs`) runs on the dedicated
+    `auth_db_url` client and **never takes the auth-side consent advisory lock**; and auth's
+    `accept_consent` (`ui/consent.rs`) commits the `upsert_oauth_grant` write and then runs
+    `mint_alias_at_consent`'s alias un-revoke as a **separate, already-committed** statement under the
+    auth-local advisory lock — so the `control.oauth_grants` row lock is **released before** the alias
+    `revoked_at` is cleared. The two transactions therefore do **not** queue on the grant row, and the
+    dangerous `(grant absent + alias active)` interleaving **is** reachable on the `revoked_at` column
+    alone.
+  - **The invariant `grant absent ⇒ alias inert` is enforced by the reader, structurally.** The
+    `control.oauth_grants` row is the single source of truth for "is this grant live" (spec §5.2/§5.4).
+    The inbound resolver `resolve_active_alias` (`store/relay.rs`) therefore gates forwarding on **two**
+    ANDed conditions: (1) the alias's own `revoked_at IS NULL`, **AND** (2)
+    `EXISTS (SELECT 1 FROM control.oauth_grants g WHERE g.client_id = i.app_client_id AND g.user_id =
+    i.global_user_id)`. Because `revoke_grant` **DELETEs** the grant row, a revoked grant makes the
+    `EXISTS` subquery fail **regardless of which writer last wrote `revoked_at`** — a deleted grant
+    structurally silences the alias even if a concurrent re-consent's un-revoke won the race on
+    `revoked_at`. No grant ⇒ no forwarding, full stop. This is a single-statement snapshot read of the
+    grant ledger, so there is no read-side interleaving to reason about. (Cross-schema read on one PG
+    instance is sound — one database, separate schemas, AGENTS.md — and `ui/consent.rs` already reads
+    `control.oauth_grants`/`control.app_scope_defs` from auth.)
+  - **The advisory lock guards only concurrent FIRST-consents.** The auth-local consent advisory lock
+    (main spec §7.1) still serializes two concurrent first-consents so exactly one alias is minted; it
+    plays **no role** in the cross-service revoke↔re-consent ordering (it is never held by control).
+  - **Terminal states under the structural gate.** Whichever writer commits last, the reader derives
+    liveness from the grant ledger: grant absent ⇒ alias inert (correct, regardless of `revoked_at`);
+    grant present + `revoked_at IS NULL` ⇒ alias forwards (correct, the user holds a live grant);
+    grant present + `revoked_at` set ⇒ alias inert (correct, locally revoked, e.g. abuse). There is
+    **no** state where forwarding survives a revoked grant. A §10 concurrency test races a
+    `revoke_grant` cascade against the real `mint_alias_at_consent` re-grant writer on the same
+    `(app, user)` and asserts the load-bearing interleaving — `grant absent + revoked_at NULL` ⇒
+    `resolve_active_alias` returns `None` (inert) — in **both** commit orders.
 - **The three revoke paths differ and are each pinned:**
   - **Explicit user revoke** (`DELETE /me/oauth-grants/{client_id}`): the path above; keys on
     `client_id` directly.
@@ -908,12 +925,14 @@ dead-alias bounce stream for the common re-grant case.
 > new one. (The main spec §7.5's "mints a fresh relay alias" on re-grant is **superseded by this
 > decision** — recorded here as the relay sub-spec's authoritative call, to be reconciled into §7.5.)
 >
-> **This upsert is the auth-side writer of `revoked_at` in the §6 cross-service contract.** It runs in
-> `accept_consent`'s grant transaction — the **same** transaction that writes the
-> `control.oauth_grants` row — so it holds that grant row's lock before clearing `revoked_at`,
-> serializing against control's `revoke_grant` (which holds the same row's lock). That is what makes
-> the `COALESCE … revoked_at = NULL` safe against a concurrent revoke: the two never interleave on the
-> alias because they queue on the grant row. See §6's concurrency contract for the invariant proof.
+> **This upsert is the auth-side writer of `revoked_at` in the §6 cross-service contract.** It does
+> **NOT** serialize against control's `revoke_grant` on the grant row — the grant write commits before
+> `mint_alias_at_consent` clears `revoked_at`, so the grant-row lock is released first (the round-3
+> "they queue on the grant row" claim is **superseded**; see §6). What makes `… revoked_at = NULL`
+> safe against a concurrent revoke is **not** ordering on this column but the reader-side **structural
+> gate**: `resolve_active_alias` (§4.5) requires a live `control.oauth_grants` row (`EXISTS`), so a
+> revoke that DELETEs the grant silences the alias even if this un-revoke later wins the race on
+> `revoked_at`. See §6's concurrency contract for the structural invariant.
 
 <!-- Added: minor — re-grant keeps the alias stable (Apple Hide-My-Email model) instead of rotating, avoiding the dead-alias bounce stream; supersedes §7.5's "fresh alias on re-grant" -->
 
@@ -985,14 +1004,26 @@ leg in `crates/gateway/src/identities.rs`, keyed on `(app_client_id, global_user
   only when the per-alias bucket reports `consumed=false`** and **reset on any successful forward**;
   when its running count crosses `ABUSE_STREAK` (default 5 consecutive over-limit windows) the alias
   is auto-revoked. This is a deliberate, observable threshold, not an inference from one boolean.
-- **The auto-revoke crosses services, and the auth-side handler CANNOT do it transactionally (major
-  closed).** Per §6 the revoked_at write that respects the cross-service contract is owned by
-  **control's revoke path** (it must serialize on the `control.oauth_grants` row). The auth-side relay
-  handler therefore does **not** UPDATE `app_user_identities` directly; it calls control's internal
-  revoke endpoint (an admin-authenticated `POST` to control, analogous to the existing control↔auth
-  admin calls) which runs the §6 transactional cascade. If that call fails, the handler still returns
-  200 + drop for *this* message (the rate limiter already blocked the flood); the revoke is retried
-  out-of-band. (Naming who performs the revoke was an explicit ask in the critique.)
+- **The auto-revoke is HONEST about its two halves — local disable now, cross-service grant revoke
+  PENDING (major closed; shipped).** The abuse auto-revoke has two halves and the handler does **only**
+  the half it can do correctly, auditing the gap rather than faking a completed cross-service revoke:
+  1. **Local disable (DONE).** Auth owns `app_user_identities.relay_email`, so `request_alias_auto_revoke`
+     (`ui/webhooks.rs`) calls `relay::revoke_local_alias` to stamp `revoked_at = now()` on its OWN
+     connection — the IMMEDIATE protection that stops THIS service's forwarding right away. This is the
+     auth-side write of `revoked_at` and it is **safe to do unilaterally** because of §6's structural
+     gate, NOT because of any shared lock: even if a concurrent re-consent later clears `revoked_at`,
+     the alias only forwards again while a live `control.oauth_grants` row exists, so an operator's
+     out-of-band grant revoke (the second half) is what makes the silence permanent. (Note: this
+     supersedes round-3's "the auth-side handler does NOT UPDATE `app_user_identities` directly" — the
+     handler DOES, because the structural gate makes a direct local UPDATE sound without serializing on
+     the grant row.)
+  2. **Cross-service grant revoke (NOT done — no endpoint yet).** DELETEing the `control.oauth_grants`
+     row needs an admin-authenticated control endpoint that does not exist. The handler does **not**
+     pretend it ran: it logs the gap at WARN and the audit `outcome` is one of
+     `local_revoked_cross_service_pending` / `already_local_revoked_cross_service_pending` / `failed`
+     (never a bare `success`), with `cross_service_grant_revoke: "not_implemented"` in the detail.
+  If the local disable itself fails (DB error), the audit `outcome` is `failed`; the handler still
+  returns 200 + drop for *this* message (the rate limiter already blocked the flood).
 - **Bounce/complaint of a forward** feeds `auth.email_suppressions` through the **existing delivery
   webhooks** (`/webhooks/postmark`, `/webhooks/ses-sns`) — these are the *delivery-event* webhooks, the
   correct ones for this (unlike the round-1 conflation). A suppressed real inbox then fails the §4.5

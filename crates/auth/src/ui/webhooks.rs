@@ -593,11 +593,25 @@ pub async fn relay_inbound(
         // revoke path + 200 drop. A transient spike ⇒ 503 (Postmark retries).
         let streak = bump_abuse_streak(db.as_ref(), &alias).await;
         if streak >= RELAY_ABUSE_STREAK {
-            request_alias_auto_revoke(&cfg, &target).await;
-            audit_relay(db.as_ref(), "relay_auto_revoke", "success", &target.app_client_id, &req).await;
+            // HONEST auto-revoke (Fix 6): disable our OWN forwarding now, and
+            // audit EXACTLY what happened — the cross-service grant revoke is
+            // PENDING (no admin control endpoint yet), NOT a completed success.
+            let outcome = request_alias_auto_revoke(db.as_ref(), &target).await;
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "relay_auto_revoke",
+                    outcome: outcome.audit_outcome(),
+                    client_id: Some(&target.app_client_id),
+                    auth_method: Some("relay"),
+                    detail: auto_revoke_audit_detail(outcome),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
             // Terminal drop — commit the dedup sentinel.
             commit_seen_logged(db.as_ref(), &msg.message_id).await;
-            tracing::warn!(alias_streak = streak, "relay-inbound: sustained abuse — auto-revoke requested, dropping");
+            tracing::warn!(alias_streak = streak, auto_revoke = %outcome.audit_outcome(), "relay-inbound: sustained abuse — local forwarding disabled, dropping");
             return HttpResponse::Ok().finish();
         }
         // Transient spike ⇒ 503 so Postmark RETRIES the message later (smoothing
@@ -780,37 +794,165 @@ async fn reset_abuse_streak(db: &compio_postgres::Client, alias: &str) {
     }
 }
 
-/// Request the control-side auto-revoke of an abusive alias (§7). The revoke
-/// must run on control's `revoke_grant` path (it serializes on the
-/// `control.oauth_grants` row, §6) — the auth handler does NOT write
-/// `app_user_identities.revoked_at` directly. The control-side endpoint + the
-/// transactional cascade are Slice 5c; this is the auth-side CALL site. v1
-/// records the intent (audit + log) and returns; wiring the HTTP call to
-/// control lands with the 5c revoke endpoint. The rate limiter has already
-/// blocked the flood for THIS message regardless.
-// `async` is retained deliberately: Slice 5c fills this with an
-// admin-authenticated POST to control's internal revoke endpoint (which awaits).
-// Keeping the signature async now means 5c is a body change, not a call-site
-// change at every `request_alias_auto_revoke(...).await` site.
-#[allow(clippy::future_not_send, clippy::unused_async)]
-async fn request_alias_auto_revoke(_cfg: &AuthConfig, target: &relay::AliasTarget) {
-    // Slice 5c lands the admin-authenticated POST to control's internal revoke
-    // endpoint here. Until then, surface the intent so the abuse is observable
-    // and the flood stays blocked by the limiter.
+/// Outcome of an abuse auto-revoke attempt — what ACTUALLY happened, so the
+/// audit trail reflects reality (Fix 6, honest auto-revoke).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoRevokeOutcome {
+    /// Auth disabled its OWN forwarding (`app_user_identities.revoked_at`); the
+    /// cross-service grant revoke is still PENDING (no admin endpoint yet).
+    LocalRevokedCrossServicePending,
+    /// The alias was already locally revoked (idempotent re-trigger); cross-
+    /// service grant revoke still pending.
+    AlreadyLocalRevokedCrossServicePending,
+    /// The local disable itself FAILED (DB error) — nothing was revoked.
+    Failed,
+}
+
+impl AutoRevokeOutcome {
+    /// The audit `outcome` string — TRUTHFUL about the cross-service step never
+    /// having run. Never a bare `"success"` (which would imply a completed
+    /// cross-service revoke that did not happen).
+    fn audit_outcome(self) -> &'static str {
+        match self {
+            Self::LocalRevokedCrossServicePending => "local_revoked_cross_service_pending",
+            Self::AlreadyLocalRevokedCrossServicePending => {
+                "already_local_revoked_cross_service_pending"
+            }
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Build the `relay_auto_revoke` audit `detail` object for an outcome.
+///
+/// The two booleans are DISJOINT and STATE-PRECISE so a downstream consumer that
+/// sums `local_alias_disabled` counts only genuine new revokes:
+/// - `local_alias_disabled` — true ONLY when THIS call newly stamped
+///   `revoked_at` (1 row). It is NOT set for the idempotent re-trigger (which
+///   revoked 0 rows), so it never conflates "this call disabled it" with "the
+///   alias IS disabled".
+/// - `already_disabled` — the separate flag for the idempotent re-trigger (a
+///   prior trigger already disabled the alias; this call was a no-op).
+///
+/// `cross_service_grant_revoke` is always `"not_implemented"` — the grant DELETE
+/// needs an admin control endpoint that does not exist yet.
+fn auto_revoke_audit_detail(outcome: AutoRevokeOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "local_alias_disabled": matches!(
+            outcome,
+            AutoRevokeOutcome::LocalRevokedCrossServicePending
+        ),
+        "already_disabled": matches!(
+            outcome,
+            AutoRevokeOutcome::AlreadyLocalRevokedCrossServicePending
+        ),
+        "cross_service_grant_revoke": "not_implemented",
+    })
+}
+
+/// Auto-revoke an abusive alias (§7), HONESTLY (Fix 6).
+///
+/// The abuse auto-revoke has two halves:
+///   1. **Local disable (DONE here).** Auth owns `app_user_identities.relay_email`,
+///      so it sets `revoked_at = now()` on its OWN connection — the IMMEDIATE
+///      protection that stops THIS service's forwarding right away
+///      (`resolve_active_alias` then returns `None`).
+///   2. **Cross-service grant revoke (NOT done — no endpoint yet).** Deleting
+///      the `control.oauth_grants` row requires an admin-authenticated control
+///      endpoint that does not exist. We do NOT claim it happened; we log it as
+///      PENDING at WARN so the gap is observable and operators can revoke
+///      out-of-band.
+///
+/// Returns the outcome so the caller audits exactly what occurred (never a
+/// fake "revoked" success for the cross-service step).
+#[allow(clippy::future_not_send)]
+async fn request_alias_auto_revoke(
+    db: &compio_postgres::Client,
+    target: &relay::AliasTarget,
+) -> AutoRevokeOutcome {
+    // (1) Disable our OWN forwarding immediately — the protection we can apply.
+    let outcome = match relay::revoke_local_alias(db, &target.app_client_id, target.global_user_id)
+        .await
+    {
+        Ok(n) if n > 0 => AutoRevokeOutcome::LocalRevokedCrossServicePending,
+        Ok(_) => AutoRevokeOutcome::AlreadyLocalRevokedCrossServicePending,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                app_client_id = %target.app_client_id,
+                global_user_id = %target.global_user_id,
+                "relay auto-revoke: LOCAL alias disable failed"
+            );
+            AutoRevokeOutcome::Failed
+        }
+    };
+
+    // (2) The cross-service grant revoke is NOT implemented — do NOT pretend it
+    // ran. Surface the gap at WARN so it is observable.
     tracing::warn!(
         app_client_id = %target.app_client_id,
         global_user_id = %target.global_user_id,
-        "relay auto-revoke requested (control-side cascade is Slice 5c)"
+        local_outcome = %outcome.audit_outcome(),
+        "relay auto-revoke: local forwarding disabled; cross-service grant revoke \
+         is PENDING (admin-authenticated control endpoint not implemented)"
     );
+    outcome
 }
 
 #[cfg(test)]
 mod tests {
-    use super::email_domain;
+    use super::{auto_revoke_audit_detail, email_domain, AutoRevokeOutcome};
 
     #[test]
     fn email_domain_omits_local_part() {
         assert_eq!(email_domain("victim@example.com"), "example.com");
         assert_eq!(email_domain("not-an-email"), "");
+    }
+
+    /// Regression (Batch B fix, minor): the audit-detail booleans must NOT
+    /// conflate "this call disabled the alias" with "the alias IS disabled".
+    /// `local_alias_disabled` is true ONLY for the newly-revoked outcome (1 row
+    /// stamped); the idempotent re-trigger (0 rows) sets the separate
+    /// `already_disabled` flag instead — so summing `local_alias_disabled`
+    /// downstream counts only genuine new revokes, never re-triggers.
+    #[test]
+    fn auto_revoke_audit_detail_disambiguates_newly_vs_already_disabled() {
+        // Newly revoked: local_alias_disabled = true, already_disabled = false.
+        let newly = auto_revoke_audit_detail(AutoRevokeOutcome::LocalRevokedCrossServicePending);
+        assert_eq!(newly["local_alias_disabled"], serde_json::json!(true));
+        assert_eq!(newly["already_disabled"], serde_json::json!(false));
+        assert_eq!(
+            newly["cross_service_grant_revoke"],
+            serde_json::json!("not_implemented")
+        );
+
+        // Idempotent re-trigger: this call revoked 0 rows — must NOT set
+        // local_alias_disabled (the conflation bug), but DOES set already_disabled.
+        let already =
+            auto_revoke_audit_detail(AutoRevokeOutcome::AlreadyLocalRevokedCrossServicePending);
+        assert_eq!(already["local_alias_disabled"], serde_json::json!(false));
+        assert_eq!(already["already_disabled"], serde_json::json!(true));
+
+        // Failed local disable: neither flag is set.
+        let failed = auto_revoke_audit_detail(AutoRevokeOutcome::Failed);
+        assert_eq!(failed["local_alias_disabled"], serde_json::json!(false));
+        assert_eq!(failed["already_disabled"], serde_json::json!(false));
+    }
+
+    /// The audit `outcome` string is never a bare `"success"` — it always names
+    /// the cross-service step as pending/failed so the trail is honest.
+    #[test]
+    fn auto_revoke_outcome_never_bare_success() {
+        for outcome in [
+            AutoRevokeOutcome::LocalRevokedCrossServicePending,
+            AutoRevokeOutcome::AlreadyLocalRevokedCrossServicePending,
+            AutoRevokeOutcome::Failed,
+        ] {
+            assert_ne!(outcome.audit_outcome(), "success");
+        }
+        assert_eq!(
+            AutoRevokeOutcome::LocalRevokedCrossServicePending.audit_outcome(),
+            "local_revoked_cross_service_pending"
+        );
     }
 }

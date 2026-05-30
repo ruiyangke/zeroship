@@ -58,20 +58,28 @@ pub const ANCHOR_MINT_CACHE_TTL_SECS: i64 = 5;
 pub const WRAPPER_TTL_SECS: i64 = 600;
 
 /// Production anchor cookie name (`__Host-` prefix → Secure required).
-pub const ANCHOR_COOKIE_PROD: &str = "__Host-zs_app_session";
+///
+/// DISTINCT from the interactive OIDC `__Host-zs_app_session`
+/// (`oidc_rp::APP_SESSION_COOKIE_PROD`). These are TWO different storage
+/// models on the same origin: the interactive flow's cookie is a
+/// `auth.gateway_sessions.id` (SameSite=Lax, 12h); the SDK reload-recovery
+/// anchor is a `auth.app_session_anchors.id` (SameSite=Strict, 30d). Sharing
+/// one name would let a request carrying one be validated against the WRONG
+/// table (MAJOR fix). One cookie name ⇒ exactly one table.
+pub const ANCHOR_COOKIE_PROD: &str = "__Host-zs_app_anchor";
 /// Dev anchor cookie name (no `__Host-` prefix, no Secure).
-pub const ANCHOR_COOKIE_DEV: &str = "zs_app_session";
+pub const ANCHOR_COOKIE_DEV: &str = "zs_app_anchor";
 
-/// Resolve the anchor cookie name for the current environment. Mirrors
-/// `oidc_rp::app_session_cookie_name` — the anchor reuses the same
-/// `__Host-zs_app_session` name, but with `SameSite=Strict` (vs the
-/// interactive cookie's `Lax`) per §8.3.
+/// Resolve the anchor cookie name for the current environment. The anchor has
+/// its OWN cookie name (`__Host-zs_app_anchor`), separate from the interactive
+/// `oidc_rp::app_session_cookie_name` (`__Host-zs_app_session`), and uses
+/// `SameSite=Strict` (vs the interactive cookie's `Lax`) per §8.3.
 #[must_use]
 pub fn anchor_cookie_name(insecure_dev: bool) -> &'static str {
     if insecure_dev { ANCHOR_COOKIE_DEV } else { ANCHOR_COOKIE_PROD }
 }
 
-/// Build the `Set-Cookie` value for the `__Host-zs_app_session` anchor.
+/// Build the `Set-Cookie` value for the `__Host-zs_app_anchor` anchor.
 ///
 /// `SameSite=Strict` (§8.3 round-2): the anchor is never legitimately
 /// needed on a cross-site request, so a top-level navigation cannot ride
@@ -524,7 +532,7 @@ mod tests {
     fn anchor_cookie_prod_is_host_strict_httponly_secure() {
         let id = Uuid::new_v4();
         let c = set_anchor_cookie(&id, false);
-        assert!(c.starts_with("__Host-zs_app_session="), "{c}");
+        assert!(c.starts_with("__Host-zs_app_anchor="), "{c}");
         assert!(c.contains(&id.to_string()));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
@@ -540,7 +548,7 @@ mod tests {
         let id = Uuid::new_v4();
         let c = set_anchor_cookie(&id, true);
         assert!(!c.starts_with("__Host-"), "dev must drop __Host-: {c}");
-        assert!(c.starts_with("zs_app_session="), "{c}");
+        assert!(c.starts_with("zs_app_anchor="), "{c}");
         assert!(!c.contains("Secure"), "{c}");
         assert!(c.contains("HttpOnly"));
         assert!(c.contains("SameSite=Strict"));
@@ -559,17 +567,25 @@ mod tests {
     #[test]
     fn anchor_cookie_parse_roundtrips() {
         let id = Uuid::new_v4();
-        let header = format!("foo=bar; __Host-zs_app_session={id}; baz=qux");
+        let header = format!("foo=bar; __Host-zs_app_anchor={id}; baz=qux");
         assert_eq!(parse_anchor_cookie(&header, false), Some(id));
         assert_eq!(parse_anchor_cookie("nothing", false), None);
         assert_eq!(
-            parse_anchor_cookie("__Host-zs_app_session=not-a-uuid", false),
+            parse_anchor_cookie("__Host-zs_app_anchor=not-a-uuid", false),
             None
         );
-        let dev = format!("zs_app_session={id}");
+        let dev = format!("zs_app_anchor={id}");
         assert_eq!(parse_anchor_cookie(&dev, true), Some(id));
         // Prod-named cookie does not match in dev mode.
         assert_eq!(parse_anchor_cookie(&header, true), None);
+        // CRITICAL (MAJOR fix): the interactive OIDC cookie name must NOT be
+        // parsed as an anchor — distinct stores, distinct names.
+        let interactive = format!("__Host-zs_app_session={id}");
+        assert_eq!(
+            parse_anchor_cookie(&interactive, false),
+            None,
+            "the interactive __Host-zs_app_session must NOT resolve as an anchor"
+        );
     }
 
     #[test]

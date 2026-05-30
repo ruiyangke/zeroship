@@ -118,6 +118,10 @@ services:
       # The bootstrapped zeroship-builder OAuth client is registered with this
       # redirect URI so the builder's localhost OIDC callback is accepted.
       BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
+      # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
+      # byte-identical on control + gateway — both derive the per-app `pws_`.
+      # Never rotate without a per-app `pws_` migration.
+      PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
     ports:
       - "9090:9090"
     volumes:
@@ -179,6 +183,10 @@ services:
       # Tampering is rejected at decode time; rotating this key
       # invalidates any in-flight OIDC dances.
       STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-key-please-rotate}
+      # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST equal the
+      # control service's PAIRWISE_SALT — both derive the per-app `pws_`. Never
+      # rotate without a per-app `pws_` migration.
+      PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
     ports:
       - "8000:8000"
     security_opt:

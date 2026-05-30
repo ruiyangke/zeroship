@@ -63,6 +63,25 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 | `AUTH_INSECURE_DEV` | unset | dev only | Drops the `Secure` flag on cookies. **Never set in production.** |
 | `AUTH_STASH_SIGNING_KEY` | dev default | **yes in prod** | HMAC key (≥32 bytes) signing the federation stash cookies. The dev default is loud-warned at boot; a weak value lets an attacker forge stash cookies and bypass OAuth state/PKCE checks. |
 
+### crates/gateway + crates/control — pairwise identity salt
+
+This secret is configured on **both** the gateway and the control plane, and it
+**must be byte-identical** on the two services — both derive the per-app
+pairwise subject (`pws_…`) from it.
+
+| Env var | Default | Required? | What it controls |
+|---|---|---|---|
+| `PAIRWISE_SALT` | dev default | **yes in prod** | The dedicated, **permanent** seed for every app's `pws_…` identity anchor (auth-sdk §6.2). ≥32 bytes; the dev default aborts boot outside `--dev-insecure`. **Identical on gateway + control.** |
+| `PAIRWISE_SALT_FILE` | unset | optional | Path to a file holding the salt. Takes precedence over `PAIRWISE_SALT`; prefer it in prod so the value never appears in the process table. |
+
+> **⚠️ NEVER rotate `PAIRWISE_SALT` without a migration.** `pws_…` is the
+> stable per-app foreign key apps store to identify a user. Rotating this secret
+> silently re-keys *every* app's `pws_` for *every* user — breaking every
+> app-stored reference. It is deliberately **separate from**
+> `AUTH_STASH_SIGNING_KEY` (a rotatable, short-lived OIDC-stash HMAC) precisely
+> so that rotating operational keys does not disturb the permanent identity
+> anchor. Treat it like an encryption root key: set once, back it up, leave it.
+
 ### crates/auth — mailer
 
 | Env var | Default | Required? | What it controls |

@@ -68,6 +68,20 @@
 //!   app-delete test catches a dropped companion statement.
 //! - Re-grant keeps the SAME alias (auth's `mint_alias_at_consent` clears
 //!   `revoked_at` on the deterministic row), reusing the same `pws_`.
+//!
+//! ## Cross-service revoke↔re-consent race — closed STRUCTURALLY, not by a lock
+//!
+//! This cascade DELETEs the grant and stamps `revoked_at` in ONE transaction,
+//! but it does NOT serialize against auth's concurrent re-consent un-revoke: it
+//! runs on a dedicated `auth_db_url` client and never takes auth's consent
+//! advisory lock, and auth's `accept_consent` commits its grant upsert BEFORE
+//! `mint_alias_at_consent` clears `revoked_at` (releasing the grant-row lock
+//! first). So `(grant absent + revoked_at re-cleared)` is reachable on the
+//! `revoked_at` column alone. The race is closed on the READ side: auth's
+//! `resolve_active_alias` (`store/relay.rs`) forwards only when a live
+//! `control.oauth_grants` row still `EXISTS`, so DELETEing the grant here makes
+//! the alias inert regardless of which writer last touched `revoked_at`. See the
+//! relay sub-spec §6 "STRUCTURAL gate, NOT a shared lock".
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -118,8 +132,10 @@ async fn dedicated_client(auth_db_url: &str) -> Result<Client, Error> {
 /// statements into this transaction). The RAII [`Client::transaction`] guard
 /// rolls back on drop. The alias UPDATE keys on `app_client_id = client_id`
 /// directly (§6.2) — no cross-schema join. After commit, inbound to that alias
-/// bounces because `resolve_active_alias`'s `revoked_at IS NULL` gate now fails
-/// (5b webhook path).
+/// bounces: the DELETEd grant makes `resolve_active_alias`'s structural
+/// `EXISTS (control.oauth_grants …)` gate fail (the load-bearing guard against a
+/// concurrent re-consent un-revoke), and the `revoked_at = now()` UPDATE is the
+/// immediate local flag on top of it (5b webhook path).
 ///
 /// # Errors
 /// Surfaces connect / transaction / statement errors. On any error the
@@ -135,8 +151,16 @@ pub async fn revoke_grant_cascade(
 ) -> Result<u64, Error> {
     let mut conn = dedicated_client(auth_db_url).await?;
     let tx = conn.transaction().await?;
-    // DELETE the grant row FIRST (acquires its row lock — §6 concurrency
-    // contract: both writers serialize on the control.oauth_grants row).
+    // DELETE the grant row FIRST, in the SAME transaction as the alias UPDATE, so
+    // this path can never commit one without the other. NOTE: this does NOT
+    // serialize against auth's re-consent un-revoke (this runs on a dedicated
+    // auth_db_url client and never takes auth's consent advisory lock; auth
+    // commits its grant upsert before clearing revoked_at, releasing the grant-row
+    // lock first). The cross-service revoke↔re-consent race is closed STRUCTURALLY
+    // on the read side: `resolve_active_alias` (auth `store/relay.rs`) requires a
+    // live `control.oauth_grants` row (EXISTS), so DELETEing the grant here
+    // silences the alias regardless of which writer last wrote `revoked_at`. See
+    // the relay sub-spec §6 "STRUCTURAL gate, NOT a shared lock".
     let deleted = tx
         .execute(
             "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",

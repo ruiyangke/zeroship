@@ -7,8 +7,13 @@
 //!    collision generate-and-retry and re-grant stability (the SAME alias is
 //!    reused on re-grant, never rotated — Apple Hide-My-Email model).
 //! 2. [`resolve_active_alias`] — the inbound handler's alias→real-inbox JOIN
-//!    with the `revoked_at IS NULL` gate (sub-spec §4.5). A revoked/unknown
-//!    alias returns `None`, which the handler turns into an explicit bounce.
+//!    with TWO ANDed liveness gates: the local `revoked_at IS NULL` flag
+//!    (sub-spec §4.5) AND a structural `EXISTS (control.oauth_grants …)` on the
+//!    grant ledger (sub-spec §6, "STRUCTURAL gate, NOT a shared lock" — the
+//!    load-bearing guard that closes the cross-service revoke↔re-consent race
+//!    without the writers sharing a lock). A revoked/unknown alias, or one whose
+//!    grant was DELETEd, returns `None`, which the handler turns into an explicit
+//!    bounce.
 //! 3. [`already_seen`] — a NON-committing read-only probe of the `MessageID`
 //!    dedup sentinel, run early for replay economy (sub-spec §7.1).
 //! 4. [`commit_seen`] — commits the `MessageID` dedup sentinel, run ONLY at a
@@ -158,6 +163,31 @@ fn gen_token() -> String {
 ///
 /// `u.email::text` mirrors `users::find_by_id` — the column is `CITEXT`.
 ///
+/// ## Structural revoke-coherence gate (BLOCKER fix, sub-spec §6)
+///
+/// Forwarding is gated on **TWO** conditions, ANDed:
+///
+/// 1. the alias's own `revoked_at IS NULL` (the auth-side revocation flag), AND
+/// 2. an active grant STILL EXISTS in `control.oauth_grants` for the SAME
+///    `(client_id, user_id)` — `EXISTS (SELECT 1 …)`.
+///
+/// Condition (2) is the load-bearing structural guard. Auth's `accept_consent`
+/// (grant upsert + alias un-revoke) and control's `revoke_grant_cascade`
+/// (grant DELETE + alias UPDATE) write across two schemas with NO shared mutex
+/// — a `pg_advisory_lock` held only by auth does not block control's row
+/// DELETE/UPDATE. So `(grant ABSENT + alias revoked_at NULL)` — live forwarding
+/// to a real inbox after the grant was revoked — is reachable from an
+/// interleaving where control's alias UPDATE loses to a concurrent
+/// re-consent's un-revoke. Because a revoke DELETEs the grant row, the
+/// `EXISTS` subquery makes a deleted grant **structurally** silence the alias
+/// regardless of which writer won the race on `revoked_at`: no grant ⇒ no
+/// forwarding, full stop. The two writers no longer need to share a lock; the
+/// inbound read derives liveness from the grant ledger (the single source of
+/// truth, spec §5.2/§5.4). Cross-schema read on one PG instance is fine
+/// (AGENTS.md: one database, separate schemas) — the existing
+/// `control.oauth_grants`/`control.app_scope_defs` reads in
+/// `ui/consent.rs` already do exactly this from the auth service.
+///
 /// # Errors
 ///
 /// `AuthError::Db` on PG failure.
@@ -168,7 +198,12 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
              FROM auth.app_user_identities i \
              JOIN auth.users u ON u.id = i.global_user_id \
              WHERE i.relay_email = $1 \
-               AND i.revoked_at IS NULL",
+               AND i.revoked_at IS NULL \
+               AND EXISTS ( \
+                 SELECT 1 FROM control.oauth_grants g \
+                 WHERE g.client_id = i.app_client_id \
+                   AND g.user_id = i.global_user_id \
+               )",
             &[&alias],
         )
         .await
@@ -178,6 +213,40 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
         app_client_id: row.get("app_client_id"),
         global_user_id: row.get("global_user_id"),
     }))
+}
+
+/// Locally disable (revoke) the relay alias for `(app_client_id, global_user_id)`
+/// by stamping `revoked_at = now()` on the auth-owned `auth.app_user_identities`
+/// row — the IMMEDIATE protection the auth service can apply on its OWN
+/// connection without a cross-service call (abuse auto-revoke, sub-spec §7).
+///
+/// This is the honest, in-scope half of the abuse auto-revoke: the auth service
+/// owns `app_user_identities.relay_email`, so it can stop its OWN forwarding
+/// right now (`resolve_active_alias`'s `revoked_at IS NULL` gate then fails).
+/// It does NOT touch `control.oauth_grants` (the full cross-service revoke is a
+/// separate, admin-authenticated control endpoint that does not exist yet) — so
+/// it must NEVER be reported as a completed cross-service revoke. Returns the
+/// number of rows newly revoked (0 ⇒ already revoked / row absent), so the
+/// caller can audit reality.
+///
+/// # Errors
+///
+/// `AuthError::Db` on PG failure.
+pub async fn revoke_local_alias(
+    conn: &Client,
+    app_client_id: &str,
+    global_user_id: Uuid,
+) -> Result<u64> {
+    conn.execute(
+        "UPDATE auth.app_user_identities \
+            SET revoked_at = now() \
+          WHERE app_client_id = $1 \
+            AND global_user_id = $2 \
+            AND revoked_at IS NULL",
+        &[&app_client_id, &global_user_id],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("relay local alias revoke: {e}")))
 }
 
 /// The `MessageID` dedup sentinel key in `auth.rate_limits` (used as a generic

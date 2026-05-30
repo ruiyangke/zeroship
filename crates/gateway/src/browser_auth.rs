@@ -23,7 +23,7 @@
 //!   `Referrer-Policy: no-referrer`, `COOP: same-origin`.
 //!
 //! - **`POST /__zs/auth/signout`** — FIXES the live "no handler" bug. Same-
-//!   origin guard (X-ZS-Auth + exact Origin). Reads the `__Host-zs_app_session`
+//!   origin guard (X-ZS-Auth + exact Origin). Reads the `__Host-zs_app_anchor`
 //!   anchor cookie → loads the anchor → (a) sets the per-app family marker
 //!   via `revoke_family(client_id, pws_sub)`, (b) best-effort revokes the
 //!   server-held refresh family at Hydra `/oauth2/revoke`, (c) deletes the
@@ -102,6 +102,12 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
     // forward a non-empty prompt.
     let prompt = q.prompt.as_deref().filter(|s| !s.is_empty());
 
+    // `idp_hint` is the SDK's `SignInOptions.provider` (google/github/password)
+    // threaded through verbatim to Hydra so the login UI can route to / pre-
+    // select the named upstream IdP. PASSTHROUGH only (Hydra/login-UI decides
+    // what a value means); omitted ⇒ default provider picker.
+    let idp_hint = q.idp_hint.as_deref().filter(|s| !s.is_empty());
+
     // redirect_uri defaults to THIS app's own popup-callback (a registered
     // URI from 1d). When the SDK supplies one, it MUST be on this app's
     // origin — a foreign redirect_uri is rejected (open-redirect guard). The
@@ -134,6 +140,7 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
             scope,
             redirect_uri: &redirect_uri,
             prompt,
+            idp_hint,
         },
     );
 
@@ -153,6 +160,7 @@ struct AuthorizeQuery {
     scope: Option<String>,
     prompt: Option<String>,
     redirect_uri: Option<String>,
+    idp_hint: Option<String>,
 }
 
 impl AuthorizeQuery {
@@ -167,6 +175,7 @@ impl AuthorizeQuery {
                 "scope" => out.scope = Some(v.into_owned()),
                 "prompt" => out.prompt = Some(v.into_owned()),
                 "redirect_uri" => out.redirect_uri = Some(v.into_owned()),
+                "idp_hint" => out.idp_hint = Some(v.into_owned()),
                 _ => {}
             }
         }
@@ -418,7 +427,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
     signout_cleared(&route.host, state.config.insecure_dev)
 }
 
-/// Build the 204 signout response: clear the `__Host-zs_app_session` anchor
+/// Build the 204 signout response: clear the `__Host-zs_app_anchor` anchor
 /// cookie + the `is.authenticated` breadcrumb, `Cache-Control: no-store`.
 fn signout_cleared(host: &str, insecure_dev: bool) -> HttpResponse {
     HttpResponse::NoContent()
@@ -612,7 +621,7 @@ mod tests {
     #[test]
     fn authorize_query_parses_all_params() {
         let q = AuthorizeQuery::parse(
-            "code_challenge=CH&code_challenge_method=S256&state=ST&nonce=NO&scope=openid+profile&prompt=consent&redirect_uri=https%3A%2F%2Fapp%2Fcb",
+            "code_challenge=CH&code_challenge_method=S256&state=ST&nonce=NO&scope=openid+profile&prompt=consent&redirect_uri=https%3A%2F%2Fapp%2Fcb&idp_hint=google",
         );
         assert_eq!(q.code_challenge.as_deref(), Some("CH"));
         assert_eq!(q.code_challenge_method.as_deref(), Some("S256"));
@@ -621,5 +630,7 @@ mod tests {
         assert_eq!(q.scope.as_deref(), Some("openid profile"));
         assert_eq!(q.prompt.as_deref(), Some("consent"));
         assert_eq!(q.redirect_uri.as_deref(), Some("https://app/cb"));
+        // Fix 5: the provider hint parses into idp_hint and is forwarded to Hydra.
+        assert_eq!(q.idp_hint.as_deref(), Some("google"));
     }
 }

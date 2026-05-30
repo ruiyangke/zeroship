@@ -9,7 +9,8 @@ use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_overlay_string,
-    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_STASH_SIGNING_KEY,
+    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT,
+    DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
@@ -140,6 +141,25 @@ struct GateCli {
     )]
     stash_signing_key: String,
 
+    /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
+    /// app's `pws_` per-app identity anchor (auth-sdk §6.2) — independent of
+    /// the rotatable stash key. MUST be identical on gateway + control and
+    /// MUST NOT be rotated without a per-app `pws_` migration. Prefer
+    /// `--pairwise-salt-file` in production so the value never appears in a
+    /// process listing.
+    #[arg(
+        long = "pairwise-salt",
+        env = "PAIRWISE_SALT",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pairwise_salt: String,
+
+    /// Path to a file holding the dedicated pairwise-salt secret. Takes
+    /// precedence over `--pairwise-salt` / `PAIRWISE_SALT` when set.
+    #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
+    pairwise_salt_file: String,
+
     /// Allow explicitly insecure local development startup.
     /// CLI presence overrides the env var, so `--dev-insecure=false`
     /// disables a stray `ZEROSHIP_DEV_INSECURE=1`.
@@ -196,6 +216,36 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Resolve the dedicated pairwise-salt secret. Precedence:
+///   1. `--pairwise-salt-file` / `PAIRWISE_SALT_FILE` (read the file verbatim,
+///      trimming a trailing newline) — keeps the value out of the process table,
+///   2. else `obtain_secret` on `--pairwise-salt` / `PAIRWISE_SALT` (+ the
+///      config-overlay reference).
+///
+/// A configured-but-unreadable file is fatal (a misconfigured prod salt must
+/// fail loudly, not silently fall through to the dev default).
+fn resolve_pairwise_salt(
+    salt_file: &str,
+    salt_value: &str,
+    file_ref: Option<&str>,
+    check_config: bool,
+) -> String {
+    if !salt_file.is_empty() {
+        return std::fs::read_to_string(salt_file)
+            .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, path = %salt_file, "gateway: cannot read --pairwise-salt-file");
+                std::process::exit(1);
+            });
+    }
+    zeroship_core::config::obtain_secret(
+        "PAIRWISE_SALT / --pairwise-salt",
+        salt_value,
+        file_ref,
+        check_config,
+    )
 }
 
 fn main() -> std::io::Result<()> {
@@ -274,6 +324,15 @@ fn main() -> std::io::Result<()> {
         file_secrets.stash_signing_key.as_deref(),
         cli.check_config,
     );
+    // Dedicated pairwise-salt secret. A `--pairwise-salt-file` path wins over
+    // the inline `--pairwise-salt`/`PAIRWISE_SALT` value (and over the config
+    // overlay reference), so prod can keep the value out of the process table.
+    let pairwise_salt = resolve_pairwise_salt(
+        &cli.pairwise_salt_file,
+        &cli.pairwise_salt,
+        file_secrets.pairwise_salt.as_deref(),
+        cli.check_config,
+    );
     // File-PATH field (names a file to read), NOT a secret value — left
     // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
@@ -316,6 +375,27 @@ fn main() -> std::io::Result<()> {
         DEV_STASH_SIGNING_KEY.to_string()
     } else {
         stash_signing_key
+    };
+
+    // STRENGTH guard for the dedicated pairwise-salt secret. Same posture as
+    // the stash key: skip the strength check when `--check-config` still holds a
+    // raw secret reference (its text is not the secret). Outside dev a missing /
+    // weak / dev-default salt aborts boot — the per-app `pws_` anchor must be a
+    // strong, stable, operator-set secret.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
+        if let Err(message) =
+            zeroship_core::config::validate_pairwise_salt(&pairwise_salt, insecure_dev)
+        {
+            tracing::error!(error = %message, "gateway: refusing to start with unsafe pairwise salt");
+            std::process::exit(1);
+        }
+    }
+    // Keep the operator-supplied `pairwise_salt` String intact (the check-config
+    // report reads it pre-dev-default); derive the effective secret separately.
+    let pairwise_salt_secret = if pairwise_salt.is_empty() {
+        DEV_PAIRWISE_SALT.to_string()
+    } else {
+        pairwise_salt.clone()
     };
 
     // S3 — symmetric WORKER_KEY enforcement. The worker refuses a
@@ -459,6 +539,13 @@ fn main() -> std::io::Result<()> {
             "signing_key_configured",
             CheckValue::Secret(!signing_key_path.is_empty()),
         );
+        // Report whether the OPERATOR explicitly supplied a salt (pre-dev-
+        // default), matching control — so a dev run with no salt reads "(unset)"
+        // rather than masking the missing config behind the dev default.
+        report.field(
+            "pairwise_salt_configured",
+            CheckValue::Secret(!pairwise_salt.is_empty()),
+        );
         let fmt = if cli.check_config_format == "json" {
             CheckFormat::Json
         } else {
@@ -581,12 +668,12 @@ fn main() -> std::io::Result<()> {
     // subject projection. Derived via the SHARED helper so the gateway and the
     // control plane (which revokes the per-app token family on a dashboard
     // "disconnect app", Batch A fix 4) produce byte-identical `pws_…` subjects.
-    // Domain-separated from `anchor_enc_key` by the helper's distinct derive
-    // prefix. Derived from the same server secret (no new CLI flag pre-launch);
-    // rotating the stash key rotates every app's pairwise subjects, which only
-    // forces a re-derive on the next request (the mapping is deterministic, not
-    // stored as a credential).
-    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(&stash_signing_key_bytes);
+    // Seeded from the DEDICATED `PAIRWISE_SALT` secret (NOT the rotatable stash
+    // key): `pws_` is the PERMANENT per-app identity anchor that apps store as a
+    // user FK, so its seed must be independent of operational-key rotation. The
+    // SAME `PAIRWISE_SALT` value must be configured on gateway + control.
+    // Domain-separated from `anchor_enc_key` by the helper's distinct prefix.
+    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
 
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,

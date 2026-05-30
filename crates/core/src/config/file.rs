@@ -86,6 +86,10 @@ pub struct SecretSection {
     pub worker_key: Option<String>,
     /// Stash signing key reference.
     pub stash_signing_key: Option<String>,
+    /// Dedicated pairwise-salt secret reference (auth-sdk §6.2). The PERMANENT
+    /// per-app `pws_` identity anchor seed — independent of the stash key,
+    /// never rotated without a migration. Must be identical on gateway+control.
+    pub pairwise_salt: Option<String>,
     /// Gateway OIDC relying-party client secret reference.
     pub gateway_oidc_secret: Option<String>,
     /// Console OIDC relying-party client secret reference.

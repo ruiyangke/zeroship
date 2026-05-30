@@ -32,6 +32,24 @@ async function awaitReady(h: {
   return state;
 }
 
+/** All currently-persisted PKCE transaction states. */
+function pendingStates(h: { session: { map: Map<string, string> } }): string[] {
+  const p = "@@zsauth@@::txn::";
+  return [...h.session.map.keys()].filter((k) => k.startsWith(p)).map((k) => k.slice(p.length));
+}
+
+/** Wait until at least `n` distinct PKCE transactions AND `n` relay listeners exist. */
+async function awaitReadyN(
+  h: { session: { map: Map<string, string> }; window: { messageListenerCount: number } },
+  n: number,
+): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    if (pendingStates(h).length >= n && h.window.messageListenerCount >= n) return;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  throw new Error(`fewer than ${n} concurrent flows became ready`);
+}
+
 describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)", () => {
   test("opens the popup SYNCHRONOUSLY before the async URL build", async () => {
     const h = makeHarness();
@@ -176,6 +194,29 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await awaitReady(h);
     const q = new URL(h.window.lastOpened!.location.href).searchParams;
     assert.equal(q.has("prompt"), false, "omitted by default so SSO can skip");
+    assert.equal(q.has("idp_hint"), false, "no provider ⇒ no idp_hint");
+    h.window.lastOpened!.close();
+    await signIn.catch(() => {});
+  });
+
+  test("provider is threaded to the authorize URL as idp_hint (Fix 5)", async () => {
+    const h = makeHarness();
+    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
+    const signIn = client.signInWithOAuth({ provider: "github" });
+    await awaitReady(h);
+    const q = new URL(h.window.lastOpened!.location.href).searchParams;
+    assert.equal(q.get("idp_hint"), "github", "provider must reach GET /authorize as idp_hint");
+    h.window.lastOpened!.close();
+    await signIn.catch(() => {});
+  });
+
+  test("signInWithPassword threads provider=password as idp_hint (Fix 5)", async () => {
+    const h = makeHarness();
+    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
+    const signIn = client.signInWithPassword();
+    await awaitReady(h);
+    const q = new URL(h.window.lastOpened!.location.href).searchParams;
+    assert.equal(q.get("idp_hint"), "password", "signInWithPassword routes to the password IdP");
     h.window.lastOpened!.close();
     await signIn.catch(() => {});
   });
@@ -215,20 +256,68 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     assert.equal(token, "wrap.access.token", "resolves the freshly-minted access token, not a Session");
   });
 
-  test("invalid_state: a relay state that matches no transaction rejects", async () => {
+  test("a relay message for a DIFFERENT flow's state is IGNORED (no cross-flow delivery)", async () => {
+    // MAJOR fix: the relay channels are origin-shared, so a well-formed
+    // response for a CONCURRENT flow (wrong `state`) can arrive. It must be
+    // IGNORED (the flow keeps waiting), NOT delivered to this flow's exchange.
+    // Here the foreign-state message is dropped and the flow then ends via the
+    // popup-close hint (popup_closed) — proving the stray code never reached
+    // /token and never settled this flow with the wrong code.
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    let tokenCalls = 0;
+    h.fetch.on("/__zs/auth/token", () => {
+      tokenCalls++;
+      return jsonResponse(200, tokenSuccessBody());
+    });
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     const signIn = client.signInWithOAuth();
     await awaitReady(h);
+    // A code for SOME OTHER flow (state the SDK never minted) — must be ignored.
     h.window.dispatchMessage({
       origin: APP_ORIGIN,
-      data: { type: "zs:authorization_response", response: { code: "x", state: "WRONG" } },
+      data: { type: "zs:authorization_response", response: { code: "foreign", state: "WRONG" } },
     });
+    // The flow did NOT settle on the foreign message — close the popup so it
+    // terminates via the close hint instead.
+    h.window.lastOpened!.close();
     await assert.rejects(signIn, (e: unknown) => {
-      assert.equal((e as AuthError).code, "invalid_state");
+      assert.equal((e as AuthError).code, "popup_closed");
       return true;
     });
+    assert.equal(tokenCalls, 0, "a foreign-state code must never reach /token");
+  });
+
+  test("concurrent flows: each completes with its OWN code (relay state filtering)", async () => {
+    // Two interleaved sign-ins on the same origin. Each flow's popup relays a
+    // code tagged with ITS state; the SDK must route each code to its own flow.
+    const h = makeHarness();
+    h.fetch.on("/__zs/auth/token", (req) =>
+      jsonResponse(200, tokenSuccessBody({ access_token: `tok-${(req.body as { code: string }).code}` })),
+    );
+    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
+
+    const signInA = client.signInWithOAuth();
+    const stateA = await awaitReady(h);
+    const signInB = client.signInWithOAuth();
+    // Wait until BOTH flows have persisted a txn and installed their relay
+    // listeners, then recover the second flow's distinct state.
+    await awaitReadyN(h, 2);
+    const stateB = pendingStates(h).find((s) => s !== stateA)!;
+    assert.ok(stateB, "two distinct pending PKCE states exist");
+
+    // Relay B's code FIRST (out of order) — flow A must ignore it.
+    h.window.dispatchMessage({
+      origin: APP_ORIGIN,
+      data: { type: "zs:authorization_response", response: { code: "code-B", state: stateB } },
+    });
+    h.window.dispatchMessage({
+      origin: APP_ORIGIN,
+      data: { type: "zs:authorization_response", response: { code: "code-A", state: stateA } },
+    });
+
+    const [a, b] = await Promise.all([signInA, signInB]);
+    assert.equal(a.access_token, "tok-code-A", "flow A resolved with A's code");
+    assert.equal(b.access_token, "tok-code-B", "flow B resolved with B's code");
   });
 
   test("a relay error response maps to a typed AuthError", async () => {

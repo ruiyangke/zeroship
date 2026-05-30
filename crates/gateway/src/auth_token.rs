@@ -6,7 +6,7 @@
 //!   (encrypted) under a NEW `auth.app_session_anchors` row, mints a 10-min
 //!   per-app WRAPPER access token whose `sub` is the per-app pairwise `pws_`
 //!   (§6.2/G4 — the global user UUID never reaches the browser), sets the
-//!   `__Host-zs_app_session` anchor cookie + the `zs.<host>.is.authenticated`
+//!   `__Host-zs_app_anchor` anchor cookie + the `zs.<host>.is.authenticated`
 //!   breadcrumb, and returns `{access_token, token_type, expires_in:600, user}`.
 //! - **`GET /__zs/auth/session?mint=1`** is the SOLE reload-recovery path:
 //!   it reads the anchor cookie, loads the anchor, and mints a fresh

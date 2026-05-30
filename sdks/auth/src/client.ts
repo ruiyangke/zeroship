@@ -165,14 +165,16 @@ class AuthClientImpl implements AuthClient {
     const usePopup = opts.popup !== false;
     const scopes = opts.scopes ?? this.scope;
     // `prompt` is an OIDC passthrough for step-up (login/consent); the gateway
-    // forwards it to Hydra verbatim. `provider` is routed by Hydra separately
-    // and carries no `prompt` semantics.
+    // forwards it to Hydra verbatim. `provider` (google/github/password) is
+    // threaded through as the Hydra `idp_hint` so the login UI can route to /
+    // pre-select the named upstream IdP (Fix 5 — it is no longer dropped).
     const prompt = opts.prompt;
+    const provider = opts.provider;
 
     if (!usePopup) {
       // Full-page redirect: persist the transaction, then navigate the popup-
       // less flow by setting window.location. Out of scope to await here.
-      const { url } = await this.beginFlow(scopes, opts.redirectTo, prompt);
+      const { url } = await this.beginFlow(scopes, opts.redirectTo, prompt, provider);
       // A redirect flow hands control to the browser; resolve is never reached.
       (this.env.window as unknown as { location: { href: string } }).location.href = url;
       return new Promise<Session>(() => {
@@ -189,7 +191,7 @@ class AuthClientImpl implements AuthClient {
     let url: string;
     let txn: Transaction;
     try {
-      const begun = await this.beginFlow(scopes, undefined, prompt);
+      const begun = await this.beginFlow(scopes, undefined, prompt, provider);
       url = begun.url;
       txn = begun.txn;
     } catch (e) {
@@ -201,7 +203,9 @@ class AuthClientImpl implements AuthClient {
       throw e;
     }
 
-    const relay = listenForRelay(this.env, this.appOrigin);
+    // Filter the origin-shared relay by THIS flow's state so a concurrent flow
+    // or a stale message cannot cross-deliver a code to the wrong flow (MAJOR fix).
+    const relay = listenForRelay(this.env, this.appOrigin, txn.state);
     const response = await runPopup(this.env, popup, url, relay);
     return this.completeFlow(response.code, response.state, response.error, response.error_description, txn);
   }
@@ -225,6 +229,7 @@ class AuthClientImpl implements AuthClient {
     scopes: string[],
     _redirectTo: string | undefined,
     prompt: string | undefined,
+    provider: SignInOptions["provider"] | undefined,
   ): Promise<{ url: string; txn: Transaction }> {
     const pkce = await generatePkce(this.env.crypto);
     const redirectUri = this.transport.redirectUri();
@@ -244,6 +249,7 @@ class AuthClientImpl implements AuthClient {
       scope: scopes,
       redirectUri,
       prompt,
+      idpHint: provider,
     });
     return { url, txn };
   }

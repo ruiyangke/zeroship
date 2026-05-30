@@ -949,8 +949,14 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     );
     assert!(!alias_is_active(&fx.state, &relay_email).await);
 
-    // Re-grant: the auth-side writer clears revoked_at on the SAME row (no new
-    // alias). `mint_alias_at_consent` does exactly this COALESCE/un-revoke.
+    // Re-grant, modeled as auth's `accept_consent` does it: re-insert the grant
+    // ledger row AND clear the alias's revoked_at. The structural revoke gate
+    // (BLOCKER fix) requires BOTH — `mint_alias_at_consent` un-revokes the alias
+    // row, and the grant upsert restores the live `control.oauth_grants` row the
+    // alias's `EXISTS` gate consults. (Un-revoking the alias alone, without the
+    // grant, leaves it correctly inert — that is the structural fix's whole
+    // point and is asserted by the §10 race test.)
+    insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
     let reused = zeroship_auth::store::relay::mint_alias_at_consent(
         fx.state.auth_pg.as_ref(),
         &client_id,
@@ -966,11 +972,236 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     );
     assert!(
         alias_is_active(&fx.state, &relay_email).await,
-        "after re-grant the alias forwards again (revoked_at cleared)"
+        "after re-grant (grant restored + revoked_at cleared) the alias forwards again"
     );
 
     cleanup_identities(&fx.state, &client_id).await;
     fx.cleanup_clients(&[client_id]).await;
+    pat.cleanup(&fx.state).await;
+}
+
+/// Raw `(grant_present, revoked_at_is_set)` snapshot of the terminal state, so
+/// the race test can assert the STRUCTURAL invariant directly (grant-absent ⇒
+/// alias-inert) independent of which writer won the `revoked_at` write.
+async fn grant_and_alias_state(
+    state: &AppState,
+    client_id: &str,
+    user_id: Uuid,
+) -> (bool, bool) {
+    let grant_present = count_grant(state, user_id, client_id).await > 0;
+    let revoked_set = identity_revoked_at_is_set(state, client_id, user_id).await;
+    (grant_present, revoked_set)
+}
+
+/// BLOCKER §10 race regression — the relay revoke↔re-consent race.
+///
+/// auth's `accept_consent` (grant upsert + alias un-revoke) and control's
+/// `revoke_grant_cascade` (grant DELETE + alias `revoked_at=now()` UPDATE) write
+/// across two schemas with NO shared mutex (auth holds a `pg_advisory_lock` that
+/// does NOT block control's row DELETE/UPDATE). So an interleaving can reach a
+/// terminal state where the GRANT IS ABSENT but the alias's `revoked_at` is NULL
+/// — which, under the OLD `resolve_active_alias` (alias-flag-only gate), would
+/// keep forwarding third-party mail to the real inbox after the user revoked.
+///
+/// The structural fix makes `resolve_active_alias` ALSO require a live
+/// `control.oauth_grants` row, so a deleted grant silences the alias regardless
+/// of the `revoked_at` write ordering. This test drives BOTH commit orders and
+/// asserts the load-bearing invariant in each: **grant-absent ⇒ alias-inert**
+/// (the alias does NOT resolve), even when `revoked_at` was left NULL by the
+/// losing writer.
+#[compio::test]
+async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "revoke-race").await;
+    let pat = account_pat(&fx.state, "revoke-race").await;
+    let app = init_control!(fx);
+
+    // A re-consent re-grant, modeled exactly as auth's accept_consent does it:
+    // upsert the grant ledger row AND clear the alias's revoked_at (the
+    // mint_alias_at_consent un-revoke). We run the alias un-revoke via the REAL
+    // auth-store writer so this is a faithful cross-service seam, not a stub.
+    async fn reconsent(state: &AppState, client_id: &str, user_id: Uuid, relay_domain: &str) {
+        // grant upsert (the ledger write accept_consent performs under its lock)
+        state
+            .auth_pg
+            .execute(
+                "INSERT INTO control.oauth_grants \
+                    (user_id, client_id, granted_scopes, granted_at, updated_at) \
+                 VALUES ($1, $2, $3, NOW(), NOW()) \
+                 ON CONFLICT (user_id, client_id) DO UPDATE \
+                 SET granted_scopes = EXCLUDED.granted_scopes, updated_at = NOW()",
+                &[&user_id, &client_id, &vec!["email".to_string()]],
+            )
+            .await
+            .expect("reconsent grant upsert");
+        // alias un-revoke (the REAL auth-side writer)
+        zeroship_auth::store::relay::mint_alias_at_consent(
+            state.auth_pg.as_ref(),
+            client_id,
+            user_id,
+            relay_domain,
+        )
+        .await
+        .expect("reconsent alias un-revoke");
+    }
+
+    // ── Commit order A: re-consent commits FULLY, then revoke commits FULLY ──
+    // Terminal: grant absent (revoke DELETEd it last) + revoked_at set. The
+    // alias must be inert by EITHER gate.
+    {
+        let client_id = format!("oac_race_a_{}", Uuid::new_v4().simple());
+        let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());
+        insert_client(&fx.state, &client_id, pat.user_id).await;
+        let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
+        insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
+        let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+        insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+        assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
+
+        // First revoke (sets revoked_at + DELETEs grant), then re-consent fully
+        // re-grants (un-revoke + grant), then revoke AGAIN as the LAST writer.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::delete()
+                .uri(&format!("/me/oauth-grants/{client_id}"))
+                .header("authorization", pat.bearer())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        reconsent(&fx.state, &client_id, pat.user_id, "relay.zeroship.localhost").await;
+        // After re-consent the alias forwards again (grant present, revoked_at cleared).
+        assert!(
+            alias_is_active(&fx.state, &relay_email).await,
+            "order A: re-consent must restore forwarding"
+        );
+        // Revoke is the LAST writer → terminal grant-absent.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::delete()
+                .uri(&format!("/me/oauth-grants/{client_id}"))
+                .header("authorization", pat.bearer())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let (grant_present, _revoked) =
+            grant_and_alias_state(&fx.state, &client_id, pat.user_id).await;
+        assert!(!grant_present, "order A terminal: grant absent");
+        assert!(
+            !alias_is_active(&fx.state, &relay_email).await,
+            "order A: grant-absent ⇒ alias inert"
+        );
+
+        fx.state
+            .auth_pg
+            .execute(
+                "DELETE FROM auth.token_revocations WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await
+            .ok();
+        cleanup_identities(&fx.state, &client_id).await;
+        fx.cleanup_clients(&[client_id.clone()]).await;
+        fx.state
+            .auth_pg
+            .execute(
+                "DELETE FROM control.app_oauth_clients WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await
+            .ok();
+        fx.state
+            .auth_pg
+            .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+            .await
+            .ok();
+    }
+
+    // ── Commit order B (the DANGEROUS interleaving): revoke commits, then a
+    // re-consent's alias UN-REVOKE lands AFTER it but the grant is NOT
+    // re-inserted (the writer raced losing the grant DELETE). Terminal: grant
+    // ABSENT but revoked_at NULL. The OLD alias-flag-only gate would FORWARD
+    // here (the privacy failure); the structural gate keeps it INERT. ──
+    {
+        let client_id = format!("oac_race_b_{}", Uuid::new_v4().simple());
+        let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());
+        insert_client(&fx.state, &client_id, pat.user_id).await;
+        let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
+        insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
+        let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+        insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+        assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
+
+        // Revoke commits: grant DELETEd, revoked_at set.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::delete()
+                .uri(&format!("/me/oauth-grants/{client_id}"))
+                .header("authorization", pat.bearer())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // A concurrent re-consent's ALIAS un-revoke lands AFTER the revoke but
+        // its grant upsert lost the race (never ran / was DELETEd): we replay
+        // ONLY the alias un-revoke (the real writer), leaving the grant absent.
+        // This is precisely the interleaving where revoked_at returns to NULL
+        // with NO live grant — the terminal state the structural gate must
+        // neutralize.
+        zeroship_auth::store::relay::mint_alias_at_consent(
+            fx.state.auth_pg.as_ref(),
+            &client_id,
+            pat.user_id,
+            "relay.zeroship.localhost",
+        )
+        .await
+        .expect("stray alias un-revoke after revoke");
+
+        let (grant_present, revoked_set) =
+            grant_and_alias_state(&fx.state, &client_id, pat.user_id).await;
+        assert!(!grant_present, "order B terminal: grant ABSENT");
+        assert!(
+            !revoked_set,
+            "order B precondition: the stray un-revoke cleared revoked_at (alias-flag says ACTIVE)"
+        );
+        // The whole point: alias-flag says active, but the structural gate sees
+        // no grant ⇒ INERT. Pre-fix this asserted-true (live forwarding leak).
+        assert!(
+            !alias_is_active(&fx.state, &relay_email).await,
+            "order B: grant-absent ⇒ alias inert EVEN WITH revoked_at NULL (structural gate)"
+        );
+
+        fx.state
+            .auth_pg
+            .execute(
+                "DELETE FROM auth.token_revocations WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await
+            .ok();
+        cleanup_identities(&fx.state, &client_id).await;
+        fx.cleanup_clients(&[client_id.clone()]).await;
+        fx.state
+            .auth_pg
+            .execute(
+                "DELETE FROM control.app_oauth_clients WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await
+            .ok();
+        fx.state
+            .auth_pg
+            .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+            .await
+            .ok();
+    }
+
     pat.cleanup(&fx.state).await;
 }
 
@@ -985,11 +1216,18 @@ async fn app_delete_revokes_all_relay_aliases() {
         return;
     };
     let fx = Fixture::new(&db_url, "appdel").await;
-    // Two users with aliases on the SAME app (same client_id).
+    // Two users with aliases on the SAME app (same client_id). Both also hold an
+    // active grant — the structural revoke-coherence gate (BLOCKER fix) requires
+    // a live `control.oauth_grants` row for the alias to forward, so "active
+    // before" only holds with the grant present (this is the realistic state for
+    // a deployed app whose aliases are about to be orphaned by an app delete).
     let user_a = insert_user(&fx.state, "appdel-a").await;
     let user_b = insert_user(&fx.state, "appdel-b").await;
     let app_uuid = Uuid::new_v4();
     let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_uuid);
+    insert_client(&fx.state, &client_id, user_a).await;
+    insert_grant(&fx.state, user_a, &client_id, &["email"]).await;
+    insert_grant(&fx.state, user_b, &client_id, &["email"]).await;
     let alias_a = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     let alias_b = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     insert_identity_with_alias(&fx.state, &client_id, user_a, &alias_a).await;
@@ -1018,6 +1256,9 @@ async fn app_delete_revokes_all_relay_aliases() {
     );
 
     cleanup_identities(&fx.state, &client_id).await;
+    // Drop the oauth_clients row (created_by FKs users.id, no cascade) and the
+    // grants BEFORE the users.
+    fx.cleanup_clients(&[client_id]).await;
     cleanup_user(&fx.state, user_a).await;
     cleanup_user(&fx.state, user_b).await;
 }
@@ -1065,11 +1306,19 @@ async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
     // An independent bystander identity + active alias the bystander write
     // (issued on the SHARED auth_pg) will revoke. Distinct row from the
     // cascade's — so the only way it could be affected is transactional capture.
+    // Seed its grant + client so it is GENUINELY active before the write (the
+    // structural revoke-coherence gate requires a live grant to forward).
     let bystander_user = insert_user(&fx.state, "isolation-bystander").await;
     let bystander_client = zeroship_control::app_oauth_client::client_id_for_app(&Uuid::new_v4());
+    insert_client(&fx.state, &bystander_client, bystander_user).await;
+    insert_grant(&fx.state, bystander_user, &bystander_client, &["email"]).await;
     let bystander_alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     insert_identity_with_alias(&fx.state, &bystander_client, bystander_user, &bystander_alias)
         .await;
+    assert!(
+        alias_is_active(&fx.state, &bystander_alias).await,
+        "bystander alias must be active (grant present) before the bystander revoke"
+    );
 
     // Third connection: hold a lock on the cascade's target grant row so the
     // cascade's DELETE blocks, keeping its transaction OPEN for the window
@@ -1144,7 +1393,10 @@ async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
     drop(locker);
     cleanup_identities(&fx.state, &client_id).await;
     cleanup_identities(&fx.state, &bystander_client).await;
-    fx.cleanup_clients(&[client_id]).await;
+    // Drop the oauth_clients rows BEFORE the users: `oauth_clients.created_by`
+    // is a plain FK to `users.id` (no ON DELETE CASCADE), so a user can only be
+    // deleted after its client. cleanup_clients also clears the grants.
+    fx.cleanup_clients(&[client_id, bystander_client]).await;
     cleanup_user(&fx.state, user).await;
     cleanup_user(&fx.state, bystander_user).await;
 }

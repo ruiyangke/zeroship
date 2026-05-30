@@ -124,23 +124,34 @@ pub fn is_pairwise_subject(sub: &str) -> bool {
     }
 }
 
-/// Derive the platform-wide pairwise salt from the server's shared stash
-/// signing-key bytes (auth-sdk §6.2). BOTH the gateway (which mints wrappers /
-/// builds the `ZeroShip-User` header and so derives `pws_` per request) AND the
-/// control plane (which revokes the per-app token family on a dashboard
-/// "disconnect app" — Batch A fix 4) MUST produce byte-identical `pws_…`
-/// subjects, so the salt derivation lives in ONE place rather than being
-/// re-inlined per crate (a drift in the derive prefix would silently desync the
-/// revocation key from the wrapper subject).
+/// Derive the platform-wide pairwise salt from its OWN dedicated secret
+/// (auth-sdk §6.2). BOTH the gateway (which mints wrappers / builds the
+/// `ZeroShip-User` header and so derives `pws_` per request) AND the control
+/// plane (which revokes the per-app token family on a dashboard "disconnect
+/// app" — Batch A fix 4) MUST produce byte-identical `pws_…` subjects, so the
+/// salt derivation lives in ONE place rather than being re-inlined per crate (a
+/// drift in the derive prefix would silently desync the revocation key from the
+/// wrapper subject).
 ///
-/// Domain-separated from `anchor_enc_key` by the distinct `pairwise-subject:`
-/// prefix so the two derived keys never collide. Pre-launch the seed is the
-/// stash signing key; a later fix moves it to its own secret.
+/// ## Why a DEDICATED secret (MAJOR fix)
+///
+/// `pws_` is the PERMANENT per-app identity anchor: an app stores it as the
+/// foreign key for "who is this user". It MUST NOT change for the life of an
+/// app. Earlier this salt was derived from the gateway `stash_signing_key` — a
+/// *rotatable* "short-lived OIDC stash cookie" HMAC — which meant rotating that
+/// operational key would silently re-key every app's `pws_` for every user and
+/// break their stored FKs. This input is therefore its OWN config secret
+/// (`PAIRWISE_SALT` / `--pairwise-salt[-file]`), documented as a permanent,
+/// never-rotate-without-migration value, independent of the stash/signing key
+/// lifecycle. The SAME value must be configured on gateway AND control.
+///
+/// Domain-separated from `anchor_enc_key` (and the legacy stash usage) by the
+/// distinct `pairwise-subject:` prefix so the two derived keys never collide.
 #[must_use]
-pub fn derive_pairwise_salt(stash_signing_key_bytes: &[u8]) -> [u8; 32] {
+pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
     let seed = format!(
         "pairwise-subject:{}",
-        String::from_utf8_lossy(stash_signing_key_bytes)
+        String::from_utf8_lossy(pairwise_salt_secret_bytes)
     );
     crate::crypto::derive_key(&seed)
 }
@@ -402,6 +413,37 @@ mod tests {
         assert_eq!(a, expected);
         // Different stash ⇒ different salt (rotating the secret rotates subs).
         assert_ne!(derive_pairwise_salt(b"other-stash-key-32-bytes-long----"), a);
+    }
+
+    /// MAJOR fix (pairwise_salt secret lifecycle) — `pws_` derives from its OWN
+    /// dedicated secret, so the per-app identity anchor is a pure function of
+    /// the DEDICATED `PAIRWISE_SALT` value alone. The same dedicated secret
+    /// always yields the same `pws_` for a `(user, sector)` regardless of any
+    /// other operational key, and a DIFFERENT dedicated secret would re-key it.
+    /// This is what makes the salt safe to keep stable while the stash key (a
+    /// distinct, rotatable operational secret) rotates freely.
+    #[test]
+    fn pws_is_a_pure_function_of_the_dedicated_salt_secret() {
+        let dedicated = b"dedicated-pairwise-salt-32+bytes-stable!";
+        let user = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let sector = "https://myapp.zeroship.ai";
+
+        let salt = derive_pairwise_salt(dedicated);
+        let pws_a = derive_pairwise(&salt, user, sector);
+        // Re-deriving from the SAME dedicated secret yields the SAME pws_ — the
+        // app's stored FK is stable as long as PAIRWISE_SALT is unchanged.
+        let pws_b = derive_pairwise(&derive_pairwise_salt(dedicated), user, sector);
+        assert_eq!(pws_a, pws_b, "pws_ must be stable for a fixed dedicated salt");
+
+        // A genuinely DIFFERENT dedicated secret re-keys the anchor — which is
+        // exactly why rotating it requires a migration (and why it is NOT the
+        // rotatable stash key).
+        let pws_rotated =
+            derive_pairwise(&derive_pairwise_salt(b"a-completely-different-32+byte-salt-value"), user, sector);
+        assert_ne!(
+            pws_a, pws_rotated,
+            "a different dedicated salt re-keys pws_ (migration-only rotation)"
+        );
     }
 
     #[test]

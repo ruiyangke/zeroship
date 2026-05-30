@@ -696,7 +696,17 @@ introspect, JWKS fetch) through it. The bounded `/oauth2/token` timeout and the 
 Query params (from the SDK): `code_challenge`, `code_challenge_method=S256`, `state`, `nonce`,
 `scope` (space-delimited), `prompt` (**optional** — omitted in the common case; `login` or
 `consent` only for explicit step-up; **`none` is not supported**, since the silent-iframe path is
-removed), `redirect_uri` (must be one of the app's registered URIs; defaults to `.../popup-callback`).
+removed), `redirect_uri` (must be one of the app's registered URIs; defaults to `.../popup-callback`),
+and `idp_hint` (**optional** — the SDK's `SignInOptions.provider`, e.g. `google`/`github`/`password`).
+
+**`provider` → `idp_hint` passthrough (transport).** `SignInOptions.provider` is forwarded **verbatim**
+to Hydra as the `idp_hint` authorize-URL param — the gateway is a dumb conduit and assigns the value no
+meaning; the **login UI decides** what a hint resolves to (pre-select an upstream IdP, route straight to
+the password page, etc.). The thread is: SDK `provider` → `GET /__zs/auth/authorize?idp_hint=…`
+(`AuthorizeQuery.idp_hint`, `browser_auth.rs`) → `BrowserAuthorizeParams.idp_hint`
+(`oidc_rp.rs`) → Hydra `/oauth2/auth?idp_hint=…`. An empty/absent `provider` drops the param entirely
+(Hydra/login-UI shows the default provider picker). This mirrors the `prompt` passthrough exactly:
+optional, forwarded verbatim, meaning owned downstream.
 
 ⚠️ **Round-2 fix (MINOR) — the popup login does NOT default to `prompt=login`.** Hydra's SSO/skip
 path (`login.rs:90-120`, gated by the `remember` flag) only fires when no `prompt=login` is present;
@@ -1682,6 +1692,9 @@ export interface AuthClientOptions {
 }
 
 export interface SignInOptions {
+  /** Optional IdP hint, forwarded verbatim to Hydra as `idp_hint` (passthrough;
+      the login UI decides what it means). Omitted ⇒ default provider picker.
+      Threaded SDK → `/__zs/auth/authorize?idp_hint` → Hydra `/oauth2/auth?idp_hint`. */
   provider?: "google" | "github" | "password";
   scopes?: string[];
   /** Default true. Popup vs full-page redirect. */
@@ -2697,7 +2710,7 @@ synthesizing the `ZeroShip-User` header; the token itself is never rewritten. <!
 
 | Name | Set by | Attributes | Purpose |
 |---|---|---|---|
-| `__Host-zs_app_session` | gateway `/__zs/auth/token` | `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000` (30d) | First-party anchor; server-held refresh family for reload-recovery. **`SameSite=Strict`** (round-2): never needed cross-site, so a top-level navigation cannot ride it. Name via `app_session_cookie_name(insecure_dev)` → `zs_app_session` (no `__Host-`, no `Secure`) in dev. |
+| `__Host-zs_app_anchor` | gateway `/__zs/auth/token` | `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000` (30d) | First-party anchor; server-held refresh family for reload-recovery. **`SameSite=Strict`** (round-2): never needed cross-site, so a top-level navigation cannot ride it. **DEDICATED cookie name (Batch-B MAJOR fix), DISTINCT from the interactive OIDC `__Host-zs_app_session`** — one cookie name ⇒ exactly one server-side table, so a request carrying one is never validated against the wrong store. Name via `anchors::anchor_cookie_name(insecure_dev)` → `zs_app_anchor` (no `__Host-`, no `Secure`) in dev. |
 
 ⚠️ **Round-5 (MINOR) — `SameSite=Strict` is correct precisely because `/session` is reached by a
 same-origin `fetch`, not a cross-site top-level navigation; do NOT "fix" it to `Lax`.** A user who
@@ -2726,15 +2739,22 @@ clear breadcrumb → interactive login). So the anchor ends at whichever fires f
 absolute expiry, or a Hydra `invalid_grant`. `Max-Age` values are documented, not derived
 per-handler. <!-- Added in round 1: lifetime reconciliation; Round 3: anchor is app_session_anchors (no idle slide); Round 6 (MAJOR): abs_expires_at = created_at+30d set once, NOT min(.,family-ceiling); family ceiling enforced only by Hydra invalid_grant -->
 
-⚠️ The `__Host-zs_app_session` cookie attribute table row (above) is the **anchor cookie pointing at
-an `auth.app_session_anchors` row**, not a `gateway_sessions` row — corrected in round 3 so the
-30-day `Max-Age` points at a store that actually lives 30 days.
+⚠️ The `__Host-zs_app_anchor` cookie attribute table row (above) is the **anchor cookie pointing at
+an `auth.app_session_anchors` row**, not a `gateway_sessions` row. **Batch-B MAJOR fix:** the anchor
+was previously named `__Host-zs_app_session` — the SAME name the interactive OIDC flow uses for a
+`gateway_sessions.id`. On one origin two storage models shared a name, so a request carrying one
+could be validated against the WRONG table. The anchor now has its own dedicated name
+(`__Host-zs_app_anchor` / dev `zs_app_anchor`), keeping the interactive `__Host-zs_app_session` for
+`gateway_sessions`. Name resolved by `anchors::anchor_cookie_name` (NOT `app_session_cookie_name`).
 
-⚠️ **`__Host-`/insecure-dev naming is centralized.** All five new handlers (`/token`, `/session`,
-`/signout`, plus the cookie-clearing on revoke and the anchor validation) use the existing
-`app_session_cookie_name(insecure_dev)` helper (the `APP_SESSION_COOKIE_{PROD,DEV}` constants in
-`oidc_rp.rs`) rather than re-deriving the name; the `__Host-` prefix + `Secure` drop together in
-dev exactly as the existing callback path does. <!-- Added in round 1: addressing MINOR — centralize cookie-name helper across handlers -->
+⚠️ **`__Host-`/insecure-dev naming is centralized — per store.** The anchor handlers (`/token`,
+`/session`, `/signout`, plus the cookie-clearing on revoke and the anchor validation) use the
+DEDICATED `anchors::anchor_cookie_name(insecure_dev)` helper (the `ANCHOR_COOKIE_{PROD,DEV}`
+constants in `anchors.rs` → `__Host-zs_app_anchor` / dev `zs_app_anchor`) rather than re-deriving
+the name. The interactive OIDC redirect flow continues to use the SEPARATE
+`oidc_rp::app_session_cookie_name(insecure_dev)` helper (`APP_SESSION_COOKIE_{PROD,DEV}` →
+`__Host-zs_app_session`) for its `gateway_sessions` cookie. Two stores, two helpers, two names
+(Batch-B MAJOR fix); the `__Host-` prefix + `Secure` drop together in dev for both. <!-- Added in round 1: centralize cookie-name helper; Batch-B: anchor has its OWN name/helper, distinct from the interactive gateway_sessions cookie -->
 
 Headers: `ZeroShip-User` (existing, +scopes); `Authorization: Bearer <jwt>` (new gateway Bearer
 arm, issuer-discriminated, §1.3); `Authorization: DPoP <wrapper>` (existing hardening path). ⚠️

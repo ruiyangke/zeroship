@@ -480,7 +480,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
     assert_eq!(resp.status().as_u16(), 204, "signout must 204");
     // Both cookies cleared (Max-Age=0).
     let anchor_clear =
-        set_cookie_with_prefix(&resp, "__Host-zs_app_session=").expect("anchor clear cookie");
+        set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=").expect("anchor clear cookie");
     assert!(anchor_clear.contains("Max-Age=0"), "{anchor_clear}");
     let crumb_clear = set_cookie_with_prefix(&resp, &format!("zs.{APP_HOST}.is.authenticated="))
         .expect("breadcrumb clear cookie");
@@ -561,7 +561,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(
             http::header::COOKIE,
-            format!("__Host-zs_app_session={anchor_id}"),
+            format!("__Host-zs_app_anchor={anchor_id}"),
         )
         .set_payload(r#"{"scope":"local"}"#)
         .to_request();
@@ -569,7 +569,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     assert_eq!(resp.status().as_u16(), 204, "signout must 204");
 
     // (d) cookies cleared.
-    assert!(set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+    assert!(set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
         .is_some_and(|c| c.contains("Max-Age=0")));
     assert!(
         set_cookie_with_prefix(&resp, &format!("zs.{APP_HOST}.is.authenticated="))

@@ -833,7 +833,7 @@ async fn token_exchange_mints_wrapper_and_sets_anchor() {
     );
 
     // __Host- anchor cookie (Strict, HttpOnly, Secure) + breadcrumb.
-    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
         .expect("anchor cookie set");
     assert!(anchor_cookie.contains("HttpOnly"));
     assert!(anchor_cookie.contains("SameSite=Strict"));
@@ -1066,7 +1066,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
-    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
         .expect("anchor cookie");
     let cookie_pair = anchor_cookie.split(';').next().unwrap().to_string();
     let anchor_id_str = cookie_pair.split('=').nth(1).unwrap().to_string();
@@ -1150,7 +1150,7 @@ async fn cached_wrapper_within_ttl_skips_hydra() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
     let anchor_cookie =
-        set_cookie_with_prefix(&resp, "__Host-zs_app_session=").expect("anchor cookie");
+        set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=").expect("anchor cookie");
     let cookie_pair = anchor_cookie.split(';').next().unwrap().to_string();
 
     let before = hydra.refresh_calls.load(Ordering::SeqCst);

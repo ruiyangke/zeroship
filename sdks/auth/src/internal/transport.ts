@@ -4,7 +4,8 @@
  * exactly (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`).
  *
  *   - `GET  /__zs/auth/authorize`  — query params: code_challenge (S256),
- *     code_challenge_method=S256, state, nonce, scope, redirect_uri, prompt?.
+ *     code_challenge_method=S256, state, nonce, scope, redirect_uri, prompt?,
+ *     idp_hint? (the provider hint from `SignInOptions.provider`).
  *   - `POST /__zs/auth/token`      — `{grant_type:'authorization_code', code,
  *     code_verifier, redirect_uri?}` + `X-ZS-Auth`. → `{access_token,
  *     token_type, expires_in, scope, user}`.
@@ -14,8 +15,11 @@
  *
  * The custom `X-ZS-Auth` header is the primary, browser-version-independent
  * same-origin defense; the gateway also exact-matches `Origin`. Both are
- * `credentials: 'include'` so the `__Host-zs_app_session` anchor + breadcrumb
- * cookies ride along.
+ * `credentials: 'include'` so the `__Host-zs_app_anchor` anchor (HttpOnly;
+ * the SDK never reads its name) + the breadcrumb cookie ride along. The
+ * anchor cookie name is DISTINCT from the interactive OIDC
+ * `__Host-zs_app_session` so a request is never validated against the wrong
+ * server-side session table.
  */
 
 import { AuthError, type AuthErrorCode, type Session, type User } from "../types";
@@ -112,6 +116,8 @@ export class Transport {
     scope: string[];
     redirectUri: string;
     prompt?: string;
+    /** Provider hint (`google`/`github`/`password`) → Hydra `idp_hint`. */
+    idpHint?: string;
   }): string {
     const q = new URLSearchParams({
       code_challenge: params.challenge,
@@ -122,6 +128,9 @@ export class Transport {
       redirect_uri: params.redirectUri,
     });
     if (params.prompt) q.set("prompt", params.prompt);
+    // `SignInOptions.provider` → `idp_hint` (Fix 5). The gateway parses it and
+    // forwards it to Hydra so the login UI routes to the named upstream IdP.
+    if (params.idpHint) q.set("idp_hint", params.idpHint);
     return `${this.appOrigin}/__zs/auth/authorize?${q.toString()}`;
   }
 

@@ -197,6 +197,24 @@ struct ControlCli {
     )]
     stash_signing_key: String,
 
+    /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
+    /// app's `pws_` per-app identity anchor (auth-sdk §6.2) — independent of
+    /// the rotatable stash key. MUST be identical to the gateway's value and
+    /// MUST NOT be rotated without a per-app `pws_` migration. Prefer
+    /// `--pairwise-salt-file` in production.
+    #[arg(
+        long = "pairwise-salt",
+        env = "PAIRWISE_SALT",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pairwise_salt: String,
+
+    /// Path to a file holding the dedicated pairwise-salt secret. Takes
+    /// precedence over `--pairwise-salt` / `PAIRWISE_SALT` when set.
+    #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
+    pairwise_salt_file: String,
+
     /// PostgreSQL DSN for auth/console session tables.
     #[arg(long = "auth-db", env = "AUTH_DB_URL", default_value = "", hide_env_values = true)]
     auth_db_url: String,
@@ -255,11 +273,42 @@ impl std::fmt::Debug for ControlCli {
             .field("hydra_public_url", &self.hydra_public_url)
             .field("console_oidc_secret", &"<redacted>")
             .field("stash_signing_key", &"<redacted>")
+            .field("pairwise_salt", &"<redacted>")
+            .field("pairwise_salt_file", &self.pairwise_salt_file)
             .field("auth_db_url", &"<redacted>")
             .field("oauth_audience", &self.oauth_audience)
             .field("app_base_domain", &self.app_base_domain)
             .finish()
     }
+}
+
+/// Resolve the dedicated pairwise-salt secret (mirrors the gateway). Precedence:
+///   1. `--pairwise-salt-file` / `PAIRWISE_SALT_FILE` (read verbatim, trim a
+///      trailing newline) — keeps the value out of the process table,
+///   2. else `obtain_secret` on `--pairwise-salt` / `PAIRWISE_SALT` (+ overlay).
+///
+/// A configured-but-unreadable file is fatal — a misconfigured prod salt must
+/// fail loudly, not silently fall through to the dev default.
+fn resolve_pairwise_salt(
+    salt_file: &str,
+    salt_value: &str,
+    file_ref: Option<&str>,
+    check_config: bool,
+) -> String {
+    if !salt_file.is_empty() {
+        return std::fs::read_to_string(salt_file)
+            .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, path = %salt_file, "control: cannot read --pairwise-salt-file");
+                std::process::exit(1);
+            });
+    }
+    zeroship_core::config::obtain_secret(
+        "PAIRWISE_SALT / --pairwise-salt",
+        salt_value,
+        file_ref,
+        check_config,
+    )
 }
 
 fn main() -> std::io::Result<()> {
@@ -420,6 +469,15 @@ fn main() -> std::io::Result<()> {
         file_secrets.stash_signing_key.as_deref(),
         cli.check_config,
     );
+    // Dedicated pairwise-salt secret (auth-sdk §6.2). MUST match the gateway's
+    // value — both derive the per-app `pws_`. `--pairwise-salt-file` wins over
+    // the inline value / overlay reference.
+    let pairwise_salt = resolve_pairwise_salt(
+        &cli.pairwise_salt_file,
+        &cli.pairwise_salt,
+        file_secrets.pairwise_salt.as_deref(),
+        cli.check_config,
+    );
     let auth_db_url = zeroship_core::config::obtain_secret(
         "AUTH_DB_URL / --auth-db",
         &cli.auth_db_url,
@@ -505,6 +563,18 @@ fn main() -> std::io::Result<()> {
                 "control: stripe_webhook_secret unset — /internal/webhooks/stripe will reject every request. \
                  Set --stripe-webhook-secret if you need Stripe integration."
             );
+        }
+        // The dedicated pairwise-salt secret MUST be a strong, stable,
+        // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
+        // anchor and MUST equal the gateway's value. Skip the strength check
+        // when `--check-config` still holds a raw reference.
+        if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
+            if let Err(message) =
+                zeroship_core::config::validate_pairwise_salt(&pairwise_salt, insecure_dev)
+            {
+                tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
+                std::process::exit(1);
+            }
         }
     }
     if insecure_dev {
@@ -603,6 +673,10 @@ fn main() -> std::io::Result<()> {
         report.field(
             "auth_db_configured",
             CheckValue::Flag(!auth_db_url.is_empty()),
+        );
+        report.field(
+            "pairwise_salt_configured",
+            CheckValue::Secret(!pairwise_salt.is_empty()),
         );
         report.field("workers_count", CheckValue::Count(workers_count));
 
@@ -707,12 +781,19 @@ fn main() -> std::io::Result<()> {
     } else {
         stash_signing_key.into_bytes()
     };
-    // Platform-wide pairwise salt (auth-sdk §6.2) — derived from the SAME
-    // stash signing key the gateway uses, via the SHARED helper, so control's
-    // disconnect-app revocation writes the family marker on the SAME
-    // `(client_id, pws_)` key the gateway arms read (Batch A fix 4). Derive it
-    // BEFORE `stash_key_bytes` is moved into the console OIDC RP below.
-    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(&stash_key_bytes);
+    // Platform-wide pairwise salt (auth-sdk §6.2) — derived from the DEDICATED
+    // `PAIRWISE_SALT` secret (NOT the stash key), via the SHARED helper, so
+    // control's disconnect-app revocation writes the family marker on the SAME
+    // `(client_id, pws_)` key the gateway arms read (Batch A fix 4). The SAME
+    // `PAIRWISE_SALT` value must be configured on gateway + control, and is the
+    // PERMANENT per-app identity anchor (never rotate without a migration).
+    let pairwise_salt_secret = if pairwise_salt.is_empty() {
+        zeroship_core::config::DEV_PAIRWISE_SALT.to_string()
+    } else {
+        pairwise_salt
+    };
+    let pairwise_salt =
+        zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
     let console_oidc_secret_value = if console_oidc_secret.is_empty() {
         DEV_CONSOLE_OIDC_SECRET.to_string()
     } else {

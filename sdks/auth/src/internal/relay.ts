@@ -12,9 +12,20 @@
  *   3. one-shot `localStorage['@@zsauth@@::relay::<state>'] = JSON(msg)`  (storage event)
  *
  * `waitForResponse` validates origin + envelope type on the postMessage leg,
- * subscribes to all three, and resolves with the FIRST matching response.
+ * subscribes to all three, and resolves with the FIRST matching response whose
+ * `state` equals the flow's expected `state`.
  * A message from the wrong origin surfaces a distinct `config_error` rather
  * than silently waiting for the timeout (gateway §4.4).
+ *
+ * ## State filtering (MAJOR fix)
+ *
+ * All three channels are ORIGIN-shared: a `BroadcastChannel('zs:auth')` and an
+ * origin-wide `storage` event are delivered to EVERY tab/flow on the origin,
+ * and a stale message can linger. Without filtering, two concurrent sign-in
+ * flows (or a stale relay payload from a prior flow) could cross-deliver a code
+ * to the WRONG flow. The fix threads the flow's expected `state` into the
+ * listener and IGNORES (keeps waiting — does NOT reject) any envelope whose
+ * `response.state` does not match. Only the flow's OWN envelope settles it.
  */
 
 import { AuthError } from "../types";
@@ -63,8 +74,18 @@ export interface RelayHandle {
  * `expectedOrigin` MUST equal the app origin — a postMessage from any other
  * origin is rejected with `config_error`. The BroadcastChannel and localStorage
  * legs are inherently same-origin so they carry no cross-origin exposure.
+ *
+ * `expectedState` is the flow's PKCE `state`. Every channel is origin-shared,
+ * so a well-formed `zs:authorization_response` from a CONCURRENT flow (or a
+ * stale prior message) can arrive here; any envelope whose `response.state`
+ * does not equal `expectedState` is IGNORED (the listener keeps waiting — it is
+ * NOT a rejection), so only THIS flow's response settles it (MAJOR fix).
  */
-export function listenForRelay(env: ResolvedEnv, expectedOrigin: string): RelayHandle {
+export function listenForRelay(
+  env: ResolvedEnv,
+  expectedOrigin: string,
+  expectedState: string,
+): RelayHandle {
   let settle!: (r: AuthorizationResponse) => void;
   let fail!: (e: unknown) => void;
   let done = false;
@@ -86,8 +107,12 @@ export function listenForRelay(env: ResolvedEnv, expectedOrigin: string): RelayH
       }
     }
   };
-  const resolveOnce = (r: AuthorizationResponse) => {
+  // Settle ONLY for this flow's own response. A mismatched `state` is from a
+  // concurrent flow (or a stale message) on the origin-shared channels — keep
+  // waiting (return), do NOT reject and do NOT tear down the other flow.
+  const settleIfMine = (r: AuthorizationResponse) => {
     if (done) return;
+    if (r.state !== expectedState) return; // not ours — ignore, keep waiting
     settle(r);
     dispose();
   };
@@ -120,7 +145,7 @@ export function listenForRelay(env: ResolvedEnv, expectedOrigin: string): RelayH
       );
       return;
     }
-    resolveOnce(envl.response!);
+    settleIfMine(envl.response!);
   };
   env.window.addEventListener("message", onMessage);
   cleanups.push(() => env.window.removeEventListener("message", onMessage));
@@ -132,7 +157,7 @@ export function listenForRelay(env: ResolvedEnv, expectedOrigin: string): RelayH
       bc = env.broadcastChannel("zs:auth");
       bc.onmessage = (m) => {
         const envl = asEnvelope(m.data);
-        if (envl) resolveOnce(envl.response!);
+        if (envl) settleIfMine(envl.response!);
       };
       cleanups.push(() => bc?.close());
     } catch {
@@ -146,7 +171,7 @@ export function listenForRelay(env: ResolvedEnv, expectedOrigin: string): RelayH
       if (!ev.key || !ev.key.startsWith(RELAY_STORAGE_PREFIX) || !ev.newValue) return;
       try {
         const envl = asEnvelope(JSON.parse(ev.newValue));
-        if (envl) resolveOnce(envl.response!);
+        if (envl) settleIfMine(envl.response!);
       } catch {
         // corrupt relay payload — ignore
       }
