@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Field, Slider } from "../components";
 
 const meta: Meta<typeof Slider> = {
@@ -524,27 +525,37 @@ export const RTL: Story = {
     },
   },
   render: () => (
-    <div
-      dir="rtl"
-      className="zs-story-row"
-      role="group"
-      aria-label="RTL slider"
-    >
-      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
-        <Field>
-          <Field.Label>עוצמת קול</Field.Label>
-          <Slider
-            defaultValue={60}
-            min={0}
-            max={100}
-            step={1}
-            aria-label="עוצמת קול"
-            data-testid="slider-rtl"
-          />
-          <Field.Description>גררו או השתמשו בחיצים</Field.Description>
-        </Field>
+    // Base UI's Slider reads its writing direction from `DirectionContext`
+    // (seeded by `DirectionProvider`), NOT from the inherited DOM `dir`
+    // attribute — same portal/context boundary the Select + ScrollArea
+    // RTL stories document. Without the provider the thumb's keyboard
+    // handler resolves the inline axis against LTR, so ArrowRight
+    // INCREASES the value (60 → 61) instead of decreasing it. With the
+    // provider the slider sees RTL and ArrowRight maps to direction -1,
+    // so ArrowRight DECREASES the value (60 → 59) as the story claims.
+    <DirectionProvider direction="rtl">
+      <div
+        dir="rtl"
+        className="zs-story-row"
+        role="group"
+        aria-label="RTL slider"
+      >
+        <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+          <Field>
+            <Field.Label>עוצמת קול</Field.Label>
+            <Slider
+              defaultValue={60}
+              min={0}
+              max={100}
+              step={1}
+              aria-label="עוצמת קול"
+              data-testid="slider-rtl"
+            />
+            <Field.Description>גררו או השתמשו בחיצים</Field.Description>
+          </Field>
+        </div>
       </div>
-    </div>
+    </DirectionProvider>
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);

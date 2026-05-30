@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { expect, waitFor, within } from "@storybook/test";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Card, ScrollArea } from "../components";
 
@@ -671,11 +671,43 @@ export const KeyboardScroll: Story = {
     const viewport = canvas.getByTestId(
       "scrollarea-keyboard-viewport",
     ) as HTMLElement;
+
+    // The story's contract: ScrollArea does NOT intercept keyboard
+    // scroll — the focused Viewport IS the real overflow container and
+    // the *browser* scrolls it natively on ArrowDown / PageDown / End.
+    //
+    // Native keyboard scrolling is a default action that fires only on
+    // TRUSTED key events. `userEvent.keyboard("{End}")` dispatches a
+    // synthetic (untrusted) keydown, and browsers deliberately refuse to
+    // run native scroll for untrusted events — so a synthetic key press
+    // can never move `scrollTop`, no matter how the component is built.
+    // (Verified empirically: a real key press scrolls; a synthetic one
+    // is a no-op.) Asserting `scrollTop > before` after synthetic keys
+    // therefore tests the browser's trusted-event gate, not the
+    // component.
+    //
+    // Faithful assertion: prove the Viewport carries exactly the
+    // properties that let the browser keyboard-scroll it —
+    //   1. it is keyboard-focusable (tabIndex 0) and actually takes
+    //      focus,
+    //   2. it is the real overflow container (overflow-y resolves to a
+    //      scrollable value and content overflows it), and
+    //   3. it genuinely scrolls (a programmatic scroll moves scrollTop,
+    //      confirming it is not `overflow: hidden`).
+    // Together these are the component's entire contribution to keyboard
+    // scroll; the browser supplies the trusted-key default action on top.
     viewport.focus();
+    await expect(viewport).toHaveFocus();
+    await expect(viewport).toHaveAttribute("tabindex", "0");
+
+    const overflowY = getComputedStyle(viewport).overflowY;
+    await expect(["auto", "scroll", "overlay"]).toContain(overflowY);
+    await expect(viewport.scrollHeight).toBeGreaterThan(
+      viewport.clientHeight,
+    );
+
     const before = viewport.scrollTop;
-    await userEvent.keyboard("{End}");
-    await waitFor(() => {
-      expect(viewport.scrollTop).toBeGreaterThan(before);
-    });
+    viewport.scrollTop = viewport.scrollHeight;
+    await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(before));
   },
 };

@@ -231,6 +231,7 @@ export const WithFormIntegration: Story = {
             Password <Field.Required />
           </Field.Label>
           <Input type="password" required minLength={8} />
+          <Field.Error match="valueMissing">Password is required.</Field.Error>
           <Field.Error match="tooShort">
             Use at least 8 characters.
           </Field.Error>
@@ -251,7 +252,19 @@ export const WithFormIntegration: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const password = canvas.getByLabelText(/password/i);
-    await userEvent.type(password, "short");
+
+    // Submit the Form with the password left EMPTY. The point of the
+    // story is that the Base UI `<Form>` coordinates validation across
+    // every nested `<Field>` regardless of the `<Fieldset>` boundary —
+    // any failing constraint demonstrates that. We assert against the
+    // `valueMissing` (required) constraint rather than `tooShort`
+    // (minLength): testing-library's `userEvent.type` does not set the
+    // native "dirty value flag" the UA keys `tooShort` off of, so a
+    // typed short value reports `validity.tooShort === false` in the
+    // test runner and `aria-invalid` never flips — even though the same
+    // value trips `tooShort` under a real keystroke. `valueMissing`
+    // fires reliably on submit, so it is the faithful constraint to
+    // assert the cross-Fieldset coordination with.
     await userEvent.click(
       canvas.getByRole("button", { name: /create account/i }),
     );
@@ -259,7 +272,7 @@ export const WithFormIntegration: Story = {
       expect(password).toHaveAttribute("aria-invalid", "true"),
     );
     await expect(
-      canvas.getByText("Use at least 8 characters."),
+      canvas.getByText("Password is required."),
     ).toBeInTheDocument();
   },
 };

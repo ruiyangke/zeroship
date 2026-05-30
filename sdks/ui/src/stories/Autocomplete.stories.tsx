@@ -504,8 +504,20 @@ export const FieldAriaAutowiring: Story = {
     const input = canvas.getByRole("combobox", {
       name: /email \(field-wired\)/i,
     });
-    await expect(input).toHaveAttribute("aria-labelledby", /\S+/);
-    await expect(input).toHaveAttribute("aria-describedby", /\S+/);
+    // jest-dom's `toHaveAttribute(name, value)` compares with strict
+    // equality unless `value` is an asymmetric matcher — a bare RegExp
+    // is not one, so `toHaveAttribute("aria-labelledby", /\S+/)` reduces
+    // to `getAttribute(...) === /\S+/` and always fails even when the id
+    // is correctly wired. `expect.stringMatching` pattern-matches the
+    // value: present AND non-empty.
+    await expect(input).toHaveAttribute(
+      "aria-labelledby",
+      expect.stringMatching(/\S+/),
+    );
+    await expect(input).toHaveAttribute(
+      "aria-describedby",
+      expect.stringMatching(/\S+/),
+    );
   },
 };
 

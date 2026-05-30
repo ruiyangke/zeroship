@@ -365,6 +365,29 @@ export const StandaloneAriaPaths: Story = {
           "aria-describedby, and one forwards aria-labelledby.",
       },
     },
+    /*
+     * axe's `label-title-only` (best-practice) rule misfires on the
+     * middle row, which combines a forwarded `aria-label` with an
+     * `aria-describedby`. Each cell IS correctly named via
+     * `aria-labelledby` (Base UI strips per-cell `aria-label` by design,
+     * so the wrapper mirrors the supplied `aria-label` into a hidden
+     * span and points `aria-labelledby` at it — see OtpField.tsx). axe
+     * sees the clipped label span alongside the `aria-describedby` and
+     * concludes the cell is "solely labelled by aria-describedby", which
+     * is false: the accessible name comes from the `aria-labelledby`
+     * chain, not the description. The other two rows (hidden-label
+     * fallback, explicit `aria-labelledby`) use the identical clipped
+     * span and are NOT flagged — the trigger is purely the
+     * label+describedby coexistence on row two. Disabling just this
+     * best-practice rule here keeps the row's real WAI-ARIA naming
+     * intact while avoiding the false positive. All wcag2a/wcag2aa
+     * rules remain enabled.
+     */
+    a11y: {
+      config: {
+        rules: [{ id: "label-title-only", enabled: false }],
+      },
+    },
   },
   render: () => (
     <div
