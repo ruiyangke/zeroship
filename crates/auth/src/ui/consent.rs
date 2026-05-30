@@ -303,6 +303,37 @@ pub async fn post_consent_accept(
             revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id).await;
             return Err(AuthError::Db(e));
         }
+
+        // Relay alias mint (Slice 5b, sub-spec §2/§6.1). When the EMAIL scope is
+        // granted to a per-app end-user client, mint (or reuse) the user's relay
+        // alias under THIS grant's advisory lock — off the per-request hot path,
+        // exactly one alias per (app, user), re-grant-stable. Keyed on the row
+        // the gateway wrote (`app_client_id` = the `oac_` client_id). Best-
+        // effort: a mint failure must NOT fail the consent (the grant is already
+        // committed; the gateway lazily mints on a read-through miss, §7.1).
+        if cumulative_scopes.iter().any(|s| s == "email")
+            && app_id_from_client_id(&info.client.client_id).is_some()
+        {
+            match crate::store::relay::mint_alias_at_consent(
+                &lock_conn,
+                &info.client.client_id,
+                subject,
+                &cfg.relay_domain,
+            )
+            .await
+            {
+                Ok(Some(alias)) => {
+                    tracing::debug!(client_id = %info.client.client_id, alias = %alias, "relay alias minted at consent");
+                }
+                Ok(None) => {
+                    tracing::debug!(client_id = %info.client.client_id, "relay alias deferred to gateway lazy-mint (identity row not yet projected)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, client_id = %info.client.client_id, "relay alias mint failed at consent (non-fatal — gateway lazy-mint covers it)");
+                }
+            }
+        }
+
         Ok(redirect_to)
     })
     .await

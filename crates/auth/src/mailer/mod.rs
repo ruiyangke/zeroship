@@ -12,12 +12,16 @@
 //! trait demands a connection handle alongside the message.
 
 pub mod bounce;
+pub mod forward;
+pub mod inbound;
 pub mod resend;
 pub mod smtp;
 pub mod sns;
 pub mod stdout;
 pub mod templates;
 pub mod types;
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use compio_postgres::Client;
@@ -27,6 +31,24 @@ pub use resend::{ResendConfig, ResendMailer};
 pub use smtp::{SmtpConfig, SmtpMailer};
 pub use stdout::StdoutMailer;
 pub use types::{Address, Email, MailerError, MessageId};
+
+/// The SECOND, dedicated mailer the relay forward path runs on (sub-spec
+/// §5.2a). A newtype around `Arc<dyn Mailer>` so ntex's type-keyed `State<T>`
+/// can distinguish it from the transactional `State<Arc<dyn Mailer>>` — two
+/// bare `Arc<dyn Mailer>` states would collide on the concrete type.
+///
+/// Built by `build_relay_forward_mailer` (forced to SMTP/stdout — never
+/// Resend, which cannot pin envelope-from) and injected via `server::run`. The
+/// relay handler extracts `State<RelayForwardMailer>`; transactional handlers
+/// keep extracting `State<Arc<dyn Mailer>>`.
+#[derive(Clone)]
+pub struct RelayForwardMailer(pub Arc<dyn Mailer>);
+
+impl std::fmt::Debug for RelayForwardMailer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RelayForwardMailer").field(&self.0).finish()
+    }
+}
 
 /// Outbound email transport. Implementations MUST check
 /// `auth.email_suppressions` before transport (via [`check_suppression`]) and

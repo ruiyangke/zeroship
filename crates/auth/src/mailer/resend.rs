@@ -85,7 +85,11 @@ impl<'a> ResendRequest<'a> {
         };
         Self {
             from: format_address(&msg.from),
-            to: vec![format_address(&msg.to)],
+            // Honour `header_to` so the rendered `To:` never exposes the real
+            // inbox (defense-in-depth — Resend is rejected for relay forwards
+            // because it can't pin envelope-from, but if it ever rendered a
+            // forward the `To:` must still be the alias, sub-spec §5.3).
+            to: vec![format_address(msg.header_to.as_ref().unwrap_or(&msg.to))],
             reply_to: msg.reply_to.as_ref().map(format_address),
             subject: &msg.subject,
             text: &msg.text,
@@ -214,6 +218,7 @@ mod tests {
                 email: "real@inbox.test".into(),
                 name: None,
             },
+            header_to: None,
             from: Address {
                 email: "alias@relay.zeroship.ai".into(),
                 name: Some("App via relay".into()),
@@ -251,6 +256,7 @@ mod tests {
                 email: "u@test".into(),
                 name: None,
             },
+            header_to: None,
             from: Address {
                 email: "auth@zeroship.ai".into(),
                 name: None,

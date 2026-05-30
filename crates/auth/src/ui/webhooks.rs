@@ -40,6 +40,7 @@
 use std::sync::Arc;
 
 use ntex::http::header::AUTHORIZATION;
+use ntex::util::Bytes;
 use ntex::web::{
     types::{Json, State},
     HttpRequest, HttpResponse,
@@ -48,8 +49,29 @@ use ntex::web::{
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::mailer::bounce::{bounce_type_is_permanent, verify_basic_auth, PostmarkEvent};
+use crate::mailer::forward::{build_bounce, build_forward, BounceReason};
+use crate::mailer::inbound::{normalize_alias, InboundMessage, RELAY_MAX_HOPS, SPAM_SCORE_THRESHOLD};
 use crate::mailer::sns::{self, is_valid_sns_cert_url, SesEvent, SnsEnvelope};
-use crate::store::suppressions;
+use crate::mailer::{Email, MailerError, RelayForwardMailer};
+use crate::store::{ratelimit, relay, suppressions};
+
+/// Per-alias leaky-bucket capacity / refill (sub-spec §7): burst 20,
+/// ≈60/hour steady. Sized so a busy receipt/newsletter alias is never
+/// throttled but a flood is.
+const RELAY_ALIAS_CAPACITY: f64 = 20.0;
+const RELAY_ALIAS_REFILL_PER_SEC: f64 = 0.0167;
+/// Per-app leaky-bucket capacity / refill (sub-spec §7): burst 200,
+/// ≈20/min steady. Caps an app's total inbound forward volume.
+const RELAY_APP_CAPACITY: f64 = 200.0;
+const RELAY_APP_REFILL_PER_SEC: f64 = 0.333;
+/// Consecutive over-limit windows on one alias before auto-revoke is requested
+/// (sub-spec §7 — the second-tier signal that distinguishes a transient spike
+/// from sustained abuse). The streak counter rides its own `auth.rate_limits`
+/// bucket and is reset on any successful forward.
+const RELAY_ABUSE_STREAK: f64 = 5.0;
+/// Retry-After (seconds) returned on a transient over-limit 503 so Postmark
+/// re-delivers the spike later (smoothing the burst).
+const RELAY_RETRY_AFTER_SECS: u32 = 60;
 
 /// `POST /webhooks/postmark`. Always registered; rejects 401 when
 /// credentials aren't configured at runtime so misrouted webhook traffic
@@ -352,6 +374,434 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
 
 fn email_domain(email: &str) -> &str {
     email.split_once('@').map(|(_, domain)| domain).unwrap_or("")
+}
+
+// ─── Relay inbound (`POST /webhooks/relay-inbound`) — Slice 5b ──────────────
+//
+// The Postmark Inbound webhook: a third party emailed `{alias}@{relay_domain}`,
+// Postmark parsed the MIME to JSON and POSTs it here. We resolve the alias to
+// the user's real inbox and re-originate the message from the relay identity
+// with the §5.3 privacy surgery. The gates run in the sub-spec §4.3 order;
+// every non-transient outcome returns 200 so Postmark's retry queue stays empty
+// (a non-2xx makes Postmark RETRY then black-hole — §4.3/§8), and the handler
+// itself EMITS a bounce (never silent-drops a known-but-unforwardable message).
+
+/// The relay-forward app display name. v1 has no per-app name lookup wired into
+/// this path, so forwards are branded with a neutral platform label; the
+/// per-app name is a v2 enhancement (it would JOIN control.oauth_clients).
+const RELAY_APP_DISPLAY: &str = "App";
+
+/// `POST /webhooks/relay-inbound`. Extracts the shared `Arc<Client>` (like
+/// `ses_sns`) plus the dedicated `RelayForwardMailer` (§5.2a). Verifies Basic
+/// auth, dedups, runs the loop/lookup/suppression/spam/rate gates, then builds
+/// + sends the forward — or emits an explicit bounce + 200.
+//
+// ntex's per-thread service futures are intentionally `!Send`.
+#[allow(clippy::future_not_send)]
+#[allow(clippy::too_many_lines)]
+pub async fn relay_inbound(
+    req: HttpRequest,
+    // Raw bytes, NOT `Json<…>`: a `Json` extractor would JSON-deserialize the
+    // whole body BEFORE the handler runs (so the auth gate could not precede the
+    // parse). `Bytes` only buffers the raw payload (bounded by ntex's
+    // `PayloadConfig` size limit), and we deserialize it AFTER the auth gate —
+    // so an unauthenticated attacker never forces a JSON parse of arbitrary
+    // attacker-supplied content. (Closes the false "auth before parse" comment.)
+    body: Bytes,
+    cfg: State<Arc<AuthConfig>>,
+    db: State<Arc<compio_postgres::Client>>,
+    relay_mailer: State<RelayForwardMailer>,
+) -> HttpResponse {
+    // 1. Basic-auth gate — runs BEFORE the JSON parse below. The raw `body`
+    //    bytes are buffered by ntex (size-bounded by PayloadConfig), but they
+    //    are NOT deserialized until after this gate, so an unauthenticated POST
+    //    never burns CPU on a JSON parse of attacker-supplied content. An
+    //    unverified POST is a forwarding/suppression spoof oracle, so the
+    //    handler 401s when creds aren't configured (mirrors the postmark hook).
+    let auth_h = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let (Some(expected_user), Some(expected_pass)) = (
+        cfg.relay_inbound_user.as_deref(),
+        cfg.relay_inbound_password.as_deref(),
+    ) else {
+        tracing::warn!("relay-inbound hit but credentials not configured — rejecting");
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !verify_basic_auth(auth_h, expected_user, expected_pass) {
+        return HttpResponse::Unauthorized().finish();
+    }
+
+    // 0. Parse the Postmark Inbound payload (AFTER the auth gate, from the raw
+    //    bytes). A malformed body is NOT retryable (Postmark would re-send it
+    //    identically) — 200 + log, do not bounce.
+    let msg: InboundMessage = match serde_json::from_slice(&body) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "relay-inbound: payload parse failed — dropping");
+            return HttpResponse::Ok().finish();
+        }
+    };
+
+    // 2. Idempotency / replay guard on MessageID (§7.1). Basic auth proves the
+    //    secret, NOT per-message freshness — a captured POST replays N forwards
+    //    without this. This is a NON-committing read-only probe: the sentinel is
+    //    committed only at a TERMINAL outcome (forward / bounce / deliberate
+    //    drop), AFTER every retryable (503) gate. Committing here would dedupe a
+    //    legitimate Postmark retry of a transient-fault (503) message into a
+    //    silent drop — the never-silent-drop bug (§8). Already seen ⇒ 200 +
+    //    drop (the prior sighting already terminally handled it).
+    match relay::already_seen(db.as_ref(), &msg.message_id).await {
+        Ok(false) => {} // fresh — proceed through the gates
+        Ok(true) => {
+            tracing::info!(message_id = %msg.message_id, "relay-inbound: replay — dropping");
+            return HttpResponse::Ok().finish();
+        }
+        Err(e) => {
+            // DB momentarily down — transient; let Postmark retry. No sentinel
+            // was written, so the retry is processed (not silent-dropped).
+            tracing::error!(error = %e, "relay-inbound: dedup probe error");
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    }
+
+    // 3. Loop guard (§7 hop cap) — a forward of our own forward carries
+    //    X-ZS-Relay: <hop>. Drop when the hop count is at/above RELAY_MAX_HOPS
+    //    (bounds a relay↔relay loop even across two aliases). Below-cap inbounds
+    //    are forwarded with hop+1 (§9). Terminal: commit the dedup sentinel so a
+    //    replay is also dropped.
+    if msg.is_relay_loop(RELAY_MAX_HOPS) {
+        tracing::info!(
+            message_id = %msg.message_id,
+            hop = msg.loop_hop().unwrap_or(0),
+            "relay-inbound: loop hop cap reached — dropping"
+        );
+        commit_seen_logged(db.as_ref(), &msg.message_id).await;
+        return HttpResponse::Ok().finish();
+    }
+
+    // 4. Normalize OriginalRecipient → the alias key (§4.4a: lowercase, strip
+    //    +tag/MailboxHash) for the exact-match lookup.
+    let Some(alias) = normalize_alias(&msg.original_recipient) else {
+        tracing::warn!(rcpt = %msg.original_recipient, "relay-inbound: unparseable recipient — dropping");
+        commit_seen_logged(db.as_ref(), &msg.message_id).await;
+        return HttpResponse::Ok().finish();
+    };
+
+    // 5. Resolve alias → real inbox (active map only, §4.5). Unknown/revoked ⇒
+    //    explicit bounce ("address no longer active") + 200 (§8).
+    let target = match relay::resolve_active_alias(db.as_ref(), &alias).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return emit_bounce_then_ok(
+                db.as_ref(),
+                &relay_mailer,
+                &cfg,
+                &msg,
+                BounceReason::AddressInactive,
+                "alias_inactive",
+                &req,
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "relay-inbound: alias resolve error");
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    };
+
+    // O7 — a user REPLY to a relayed message bounces (v1 is app→user one-way).
+    //      Checked after lookup so we only ever bounce to a real third party /
+    //      user, not to a spoofed sender on an unknown alias.
+    if msg.is_reply() {
+        return emit_bounce_then_ok(
+            db.as_ref(),
+            &relay_mailer,
+            &cfg,
+            &msg,
+            BounceReason::RepliesUnsupported,
+            "reply_unsupported",
+            &req,
+        )
+        .await;
+    }
+
+    // 6. Suppression gate on the REAL inbox (§4.3 step 6). Suppressed ⇒ 200 +
+    //    drop, NO bounce (the inbox already bounced/complained; bouncing to the
+    //    original sender leaks nothing useful and risks a loop).
+    match suppressions::is_suppressed(db.as_ref(), &target.real_inbox).await {
+        Ok(true) => {
+            // Terminal drop — commit the dedup sentinel so a replay is dropped.
+            tracing::info!("relay-inbound: real inbox suppressed — dropping (no bounce)");
+            commit_seen_logged(db.as_ref(), &msg.message_id).await;
+            return HttpResponse::Ok().finish();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "relay-inbound: suppression check error");
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    }
+
+    // 7. Spam / sender-auth gate (§5.4). Forwarding spam under the relay's own
+    //    DKIM torches its reputation; bouncing spam to a forged sender is
+    //    backscatter — so drop + 200, NO forward, NO bounce.
+    if msg.is_spam_or_unauthenticated(SPAM_SCORE_THRESHOLD) {
+        // Terminal drop — commit the dedup sentinel so a replay is dropped.
+        tracing::info!("relay-inbound: spam/dmarc-fail — dropping (no forward, no bounce)");
+        commit_seen_logged(db.as_ref(), &msg.message_id).await;
+        return HttpResponse::Ok().finish();
+    }
+
+    // 8. Per-alias + per-app leaky-bucket rate limit (§7). consume() returns a
+    //    BOOL (it does not itself produce a 429); we branch on `consumed`.
+    let alias_key = format!("relay:alias:{alias}");
+    let app_key = format!("relay:app:{}", target.app_client_id);
+    let alias_ok = match ratelimit::consume(
+        db.as_ref(),
+        &alias_key,
+        RELAY_ALIAS_CAPACITY,
+        RELAY_ALIAS_REFILL_PER_SEC,
+    )
+    .await
+    {
+        Ok(r) => r.consumed,
+        Err(e) => {
+            tracing::error!(error = %e, "relay-inbound: alias rate-limit error");
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    };
+    let app_ok = match ratelimit::consume(
+        db.as_ref(),
+        &app_key,
+        RELAY_APP_CAPACITY,
+        RELAY_APP_REFILL_PER_SEC,
+    )
+    .await
+    {
+        Ok(r) => r.consumed,
+        Err(e) => {
+            tracing::error!(error = %e, "relay-inbound: app rate-limit error");
+            return HttpResponse::ServiceUnavailable().finish();
+        }
+    };
+
+    if !(alias_ok && app_ok) {
+        // Second-tier signal: count consecutive over-limit windows. Sustained
+        // abuse (streak ≥ ABUSE_STREAK) ⇒ auto-revoke the alias via control's
+        // revoke path + 200 drop. A transient spike ⇒ 503 (Postmark retries).
+        let streak = bump_abuse_streak(db.as_ref(), &alias).await;
+        if streak >= RELAY_ABUSE_STREAK {
+            request_alias_auto_revoke(&cfg, &target).await;
+            audit_relay(db.as_ref(), "relay_auto_revoke", "success", &target.app_client_id, &req).await;
+            // Terminal drop — commit the dedup sentinel.
+            commit_seen_logged(db.as_ref(), &msg.message_id).await;
+            tracing::warn!(alias_streak = streak, "relay-inbound: sustained abuse — auto-revoke requested, dropping");
+            return HttpResponse::Ok().finish();
+        }
+        // Transient spike ⇒ 503 so Postmark RETRIES the message later (smoothing
+        // the burst). We deliberately do NOT commit the dedup sentinel here — a
+        // committed sentinel would dedupe the retry into a silent drop (§7/§8).
+        tracing::info!("relay-inbound: over rate limit — 503 (Postmark retries)");
+        return HttpResponse::ServiceUnavailable()
+            .header("Retry-After", RELAY_RETRY_AFTER_SECS.to_string())
+            .finish();
+    }
+    // 9. Build + send the forward via the dedicated relay-forward mailer. (The
+    //    abuse streak is reset on a SUCCESSFUL forward — see the Ok arm below —
+    //    matching §7's "reset on any successful forward".)
+    let forward: Email = build_forward(
+        &msg,
+        &alias,
+        &target.real_inbox,
+        RELAY_APP_DISPLAY,
+        &cfg.relay_domain,
+        msg.next_hop(),
+    );
+    match relay_mailer.0.send(db.as_ref(), forward).await {
+        Ok(_) => {
+            // Terminal success — commit the dedup sentinel so a replay (or a
+            // lost-200 Postmark retry of THIS message) does not forward twice.
+            audit_relay(db.as_ref(), "relay_forward", "success", &target.app_client_id, &req).await;
+            commit_seen_logged(db.as_ref(), &msg.message_id).await;
+            // Successful pass through the limiter resets the abuse streak.
+            reset_abuse_streak(db.as_ref(), &alias).await;
+            HttpResponse::Ok().finish()
+        }
+        Err(MailerError::Suppressed(_)) => {
+            // The real inbox got suppressed between the gate and the send — drop
+            // with 200, no bounce (same rationale as the suppression gate).
+            // Terminal — commit the dedup sentinel.
+            tracing::info!("relay-inbound: forward suppressed at send — dropping");
+            commit_seen_logged(db.as_ref(), &msg.message_id).await;
+            HttpResponse::Ok().finish()
+        }
+        Err(MailerError::Transport(e)) => {
+            // Transient transport fault — 503 so Postmark retries. Do NOT commit
+            // the dedup sentinel: the retry must be processed, not deduped away
+            // into a silent drop (§7/§8).
+            tracing::error!(error = %e, "relay-inbound: forward transport error — 503");
+            HttpResponse::ServiceUnavailable().finish()
+        }
+        Err(MailerError::Config(e)) => {
+            // Permanent build/config error — emit a bounce + 200 (no retry).
+            // emit_bounce_then_ok commits the dedup sentinel.
+            tracing::error!(error = %e, "relay-inbound: forward config error — bouncing");
+            emit_bounce_then_ok(
+                db.as_ref(),
+                &relay_mailer,
+                &cfg,
+                &msg,
+                BounceReason::AddressInactive,
+                "forward_config_error",
+                &req,
+            )
+            .await
+        }
+    }
+}
+
+/// Emit an explicit bounce to the original sender via the relay-forward mailer,
+/// then return 200 to Postmark (sub-spec §8). The bounce is itself
+/// suppression-gated by the mailer contract, so we never bounce-loop into a
+/// suppressed sender — a `Suppressed`/transport error on the bounce is logged
+/// and swallowed (we still 200 Postmark; the message is terminally handled).
+///
+/// This is a TERMINAL outcome, so it commits the `MessageID` dedup sentinel
+/// (§7.1) — a replay of the same bounced message is then dropped, while a
+/// genuine transient-fault 503 (which never reaches here) is left un-deduped so
+/// Postmark's retry is honoured (§8 never-silent-drop).
+#[allow(clippy::future_not_send)]
+async fn emit_bounce_then_ok(
+    db: &compio_postgres::Client,
+    relay_mailer: &RelayForwardMailer,
+    cfg: &AuthConfig,
+    // The inbound carries both the bounce recipient (`from_full.email`) and the
+    // dedup key (`message_id`) — passing it whole keeps the helper at ≤7 args.
+    inbound: &InboundMessage,
+    reason: BounceReason,
+    audit_kind: &str,
+    req: &HttpRequest,
+) -> HttpResponse {
+    let original_sender = &inbound.from_full.email;
+    let bounce = build_bounce(original_sender, reason, &cfg.relay_domain);
+    match relay_mailer.0.send(db, bounce).await {
+        Ok(_) => {}
+        Err(MailerError::Suppressed(_)) => {
+            tracing::info!("relay-inbound: bounce target suppressed — not re-bouncing");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "relay-inbound: bounce emit failed (still 200 to Postmark)");
+        }
+    }
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "relay_bounce",
+            outcome: audit_kind,
+            auth_method: Some("relay"),
+            detail: serde_json::json!({ "sender_domain": email_domain(original_sender) }),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
+    commit_seen_logged(db, &inbound.message_id).await;
+    HttpResponse::Ok().finish()
+}
+
+/// Commit the `MessageID` dedup sentinel at a terminal outcome (sub-spec §7.1),
+/// logging (but swallowing) a store error: a commit failure on an
+/// already-handled message is at-least-once (a future replay may re-process),
+/// never the silent-drop direction, so it must not turn a terminal 200 into a
+/// 503. MUST be called ONLY on 200 (terminal) paths — never before a 503 gate.
+#[allow(clippy::future_not_send)]
+async fn commit_seen_logged(db: &compio_postgres::Client, message_id: &str) {
+    if let Err(e) = relay::commit_seen(db, message_id).await {
+        tracing::warn!(error = %e, message_id = %message_id, "relay-inbound: dedup commit failed");
+    }
+}
+
+/// Emit a relay audit event (forward success / auto-revoke). Keyed on the app
+/// client_id only; no PII (matches the bounce/complaint audit convention).
+#[allow(clippy::future_not_send)]
+async fn audit_relay(
+    db: &compio_postgres::Client,
+    event_type: &'static str,
+    outcome: &'static str,
+    app_client_id: &str,
+    req: &HttpRequest,
+) {
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type,
+            outcome,
+            client_id: Some(app_client_id),
+            auth_method: Some("relay"),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
+}
+
+/// Increment the per-alias consecutive-over-limit counter (§7) and return the
+/// new streak. Stored as a counter in `auth.rate_limits` with a huge capacity
+/// (so it never blocks) and zero refill (so it only goes up until reset). The
+/// returned `tokens` is the consumed count ⇒ streak = capacity - tokens.
+#[allow(clippy::future_not_send)]
+async fn bump_abuse_streak(db: &compio_postgres::Client, alias: &str) -> f64 {
+    // capacity huge, refill 0: each consume permanently lowers `tokens` by 1,
+    // so (capacity - tokens) is the count of over-limit windows since reset.
+    const ABUSE_CAP: f64 = 1_000_000.0;
+    let key = format!("relay:abuse:{alias}");
+    match ratelimit::consume(db, &key, ABUSE_CAP, 0.0).await {
+        Ok(r) => ABUSE_CAP - r.state.tokens,
+        Err(e) => {
+            tracing::error!(error = %e, "relay-inbound: abuse-streak bump error");
+            0.0
+        }
+    }
+}
+
+/// Reset the per-alias abuse streak on a successful forward (§7) by deleting its
+/// counter row so the next over-limit window starts from zero.
+#[allow(clippy::future_not_send)]
+async fn reset_abuse_streak(db: &compio_postgres::Client, alias: &str) {
+    let key = format!("relay:abuse:{alias}");
+    if let Err(e) = db
+        .execute(
+            "DELETE FROM auth.rate_limits WHERE bucket_key = $1",
+            &[&key],
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "relay-inbound: abuse-streak reset failed");
+    }
+}
+
+/// Request the control-side auto-revoke of an abusive alias (§7). The revoke
+/// must run on control's `revoke_grant` path (it serializes on the
+/// `control.oauth_grants` row, §6) — the auth handler does NOT write
+/// `app_user_identities.revoked_at` directly. The control-side endpoint + the
+/// transactional cascade are Slice 5c; this is the auth-side CALL site. v1
+/// records the intent (audit + log) and returns; wiring the HTTP call to
+/// control lands with the 5c revoke endpoint. The rate limiter has already
+/// blocked the flood for THIS message regardless.
+// `async` is retained deliberately: Slice 5c fills this with an
+// admin-authenticated POST to control's internal revoke endpoint (which awaits).
+// Keeping the signature async now means 5c is a body change, not a call-site
+// change at every `request_alias_auto_revoke(...).await` site.
+#[allow(clippy::future_not_send, clippy::unused_async)]
+async fn request_alias_auto_revoke(_cfg: &AuthConfig, target: &relay::AliasTarget) {
+    // Slice 5c lands the admin-authenticated POST to control's internal revoke
+    // endpoint here. Until then, surface the intent so the abuse is observable
+    // and the flood stays blocked by the limiter.
+    tracing::warn!(
+        app_client_id = %target.app_client_id,
+        global_user_id = %target.global_user_id,
+        "relay auto-revoke requested (control-side cascade is Slice 5c)"
+    );
 }
 
 #[cfg(test)]

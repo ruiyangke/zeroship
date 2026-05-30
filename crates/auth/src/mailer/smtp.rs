@@ -188,7 +188,12 @@ impl Mailer for SmtpMailer {
 /// Transactional auth mail sets neither and is byte-for-byte unchanged.
 fn build_lettre_message(msg: &Email) -> Result<Message, MailerError> {
     let from_mbox = format_mailbox(&msg.from)?;
-    let to_mbox = format_mailbox(&msg.to)?;
+    // The rendered `To:` header comes from `header_to` when set (relay forwards
+    // set it to the alias so the real inbox is NEVER rendered in a header —
+    // sub-spec §5.3); otherwise it is the envelope recipient (transactional mail
+    // — byte-for-byte unchanged). The envelope `RCPT TO` is always `msg.to`
+    // (built in `build_envelope`), independent of this header.
+    let to_mbox = format_mailbox(msg.header_to.as_ref().unwrap_or(&msg.to))?;
 
     let mut builder = Message::builder()
         .from(from_mbox)
@@ -294,6 +299,7 @@ mod tests {
                 email: "to@zeroship.test".into(),
                 name: Some("To".into()),
             },
+            header_to: None,
             from: Address {
                 email: "from@zeroship.test".into(),
                 name: Some("From".into()),
@@ -321,6 +327,7 @@ mod tests {
                 email: "to@zeroship.test".into(),
                 name: None,
             },
+            header_to: None,
             from: Address {
                 email: "from@zeroship.test".into(),
                 name: None,
@@ -353,6 +360,12 @@ mod tests {
                 email: "real@inbox.test".into(),
                 name: None,
             },
+            // Relay forwards render `To:` from `header_to` (the alias), so the
+            // real inbox lives only in the envelope `RCPT TO`.
+            header_to: Some(Address {
+                email: "alias@relay.zeroship.ai".into(),
+                name: Some("App via relay".into()),
+            }),
             from: Address {
                 email: "alias@relay.zeroship.ai".into(),
                 name: Some("App via relay".into()),
@@ -377,6 +390,76 @@ mod tests {
         assert!(
             raw.contains("X-ZS-Relay:") && raw.contains("X-ZS-Relay: 1"),
             "expected X-ZS-Relay header, raw: {raw}"
+        );
+    }
+
+    /// §5.3 / §10 regression (the privacy invariant the round was missing):
+    /// the rendered SMTP message of a relay forward contains the real inbox in
+    /// **no** header line — it lives only in the envelope `RCPT TO`. Pre-fix,
+    /// `build_lettre_message` rendered `To: real@inbox.test` from `msg.to`, so
+    /// `.formatted()` carried the real inbox in a header line and this assertion
+    /// failed. With `header_to` set to the alias, the rendered `To:` is the
+    /// alias and the real inbox appears nowhere in the headers.
+    #[test]
+    fn relay_forward_real_inbox_absent_from_all_rendered_headers() {
+        let real = "real.user@personal.test";
+        let inbound = crate::mailer::inbound::InboundMessage {
+            from_full: crate::mailer::inbound::Mailbox {
+                email: "newsletter@shop.test".into(),
+                name: Some("Shop".into()),
+            },
+            to_full: vec![],
+            original_recipient: "abc123@relay.zeroship.ai".into(),
+            subject: "Your receipt".into(),
+            text_body: "thanks for your order".into(),
+            html_body: None,
+            stripped_text_reply: None,
+            headers: vec![],
+            message_id: "mid-1".into(),
+        };
+        // Build the forward the REAL way (the path the handler runs), then
+        // render it the REAL way (the path the SMTP driver runs).
+        let fwd = crate::mailer::forward::build_forward(
+            &inbound,
+            "abc123@relay.zeroship.ai",
+            real,
+            "Shop App",
+            "relay.zeroship.ai",
+            1,
+        );
+        let m = build_lettre_message(&fwd).expect("build");
+        let raw = String::from_utf8_lossy(&m.formatted()).to_string();
+
+        // The whole rendered message (headers + body) must not contain the real
+        // inbox. (The body is app content; the real inbox is never in it either.)
+        assert!(
+            !raw.contains(real),
+            "real inbox leaked into rendered forward: {raw}"
+        );
+        // And specifically the `To:` header is the alias, NOT the real inbox —
+        // while the envelope RCPT TO (asserted via build_envelope below) IS the
+        // real inbox.
+        assert!(
+            raw.contains("To:") && raw.contains("abc123@relay.zeroship.ai"),
+            "To: header must render the alias, raw: {raw}"
+        );
+        // The envelope (what send_raw actually uses) keeps the real inbox as the
+        // RCPT TO — the one and only place it is allowed to appear.
+        let env = build_envelope(
+            fwd.envelope_from.as_deref(),
+            &fwd.from.email,
+            &fwd.to.email,
+        )
+        .expect("envelope");
+        assert_eq!(
+            env.to().len(),
+            1,
+            "exactly one RCPT TO"
+        );
+        assert_eq!(
+            env.to()[0].to_string(),
+            real,
+            "the real inbox is the envelope RCPT TO"
         );
     }
 

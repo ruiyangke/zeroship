@@ -31,6 +31,7 @@ async fn stdout_mailer_sends_when_not_suppressed() {
             email: email.clone(),
             name: Some("Test".into()),
         },
+        header_to: None,
         from: Address {
             email: "auth@zeroship.ai".into(),
             name: Some("zeroship".into()),
@@ -81,6 +82,7 @@ async fn stdout_mailer_refuses_suppressed() {
             email: suppressed_email.clone(),
             name: None,
         },
+        header_to: None,
         from: Address {
             email: "auth@zeroship.ai".into(),
             name: None,

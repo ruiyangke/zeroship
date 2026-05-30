@@ -9,7 +9,7 @@ use zeroship_core::oidc_verify::JwksCache;
 use crate::config::AuthConfig;
 use crate::headers::{RequestContextMiddleware, SecurityHeaders};
 use crate::hydra_client::HydraAdmin;
-use crate::mailer::Mailer;
+use crate::mailer::{Mailer, RelayForwardMailer};
 use crate::ui;
 
 /// Bundled stylesheet served at `/static/style.css`. Compiled into the
@@ -147,6 +147,24 @@ pub fn configure(
             .service(
                 web::resource("/webhooks/ses-sns")
                     .route(web::post().to(ui::webhooks::ses_sns)),
+            )
+            // Relay inbound webhook (Slice 5b). The Postmark Inbound server
+            // POSTs parsed-JSON mail sent to `{alias}@{relay_domain}`; the
+            // handler resolves the alias → real inbox and re-originates the
+            // message from the relay identity. Always registered — the handler
+            // 401s when `relay_inbound_user`/`relay_inbound_password` aren't
+            // configured so an unverified POST can't drive a forward/suppression
+            // spoof (sub-spec §4.3 step 1).
+            .service(
+                web::resource("/webhooks/relay-inbound")
+                    // Bound the pre-auth raw-body buffer (the handler reads the
+                    // payload as `Bytes` and parses JSON only AFTER the Basic-auth
+                    // gate — sub-spec §4.3 step 1). 5 MiB is generous for a parsed
+                    // inbound message (headers + text/html bodies) yet caps the
+                    // cost an unauthenticated POST can impose. Scoped to this
+                    // resource so other handlers keep ntex's 256 KiB default.
+                    .state(web::types::PayloadConfig::new(5 * 1024 * 1024))
+                    .route(web::post().to(ui::webhooks::relay_inbound)),
             );
 
         if google_enabled {
@@ -209,6 +227,10 @@ async fn style() -> web::HttpResponse {
 /// - `Arc<dyn Mailer>` — outbound transactional mailer (stdout / SMTP /
 ///   Resend). Selected by `--mailer` in [`crate::main`]; threaded
 ///   uniformly so handlers can always extract `State<Arc<dyn Mailer>>`.
+/// - `RelayForwardMailer` — the SECOND, dedicated relay-forward mailer
+///   (sub-spec §5.2a). Built from `--relay-forward-mailer` (SMTP/stdout,
+///   never Resend) with its own `AUTH_RELAY_SMTP_*` identity. A newtype so
+///   `State<RelayForwardMailer>` is distinct from the transactional state.
 ///
 /// # Errors
 ///
@@ -225,6 +247,7 @@ pub async fn run(
     db: Arc<compio_postgres::Client>,
     google_jwks: Option<Arc<JwksCache>>,
     mailer: Arc<dyn Mailer>,
+    relay_forward_mailer: RelayForwardMailer,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
@@ -236,6 +259,10 @@ pub async fn run(
             .state(cfg.clone())
             .state(db.clone())
             .state(mailer.clone())
+            // The dedicated relay-forward mailer (§5.2a). A distinct newtype
+            // so `State<RelayForwardMailer>` doesn't collide with the
+            // transactional `State<Arc<dyn Mailer>>`.
+            .state(relay_forward_mailer.clone())
             .middleware(RequestContextMiddleware)
             .middleware(SecurityHeaders);
         if let Some(jwks) = google_jwks.clone() {

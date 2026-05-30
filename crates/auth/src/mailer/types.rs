@@ -7,7 +7,17 @@ use thiserror::Error;
 /// own representation (lettre `Message`, Resend JSON, stdout, ...).
 #[derive(Debug, Clone)]
 pub struct Email {
+    /// The envelope recipient (SMTP `RCPT TO`). For relay forwards this is the
+    /// user's REAL inbox — and it appears ONLY here, never in a rendered header
+    /// (the `To:` header is taken from [`Email::header_to`] when set). For
+    /// transactional mail it is also the rendered `To:` (`header_to` is `None`).
     pub to: Address,
+    /// The rendered `To:` header, when it must differ from the envelope
+    /// recipient. `None` ⇒ the driver renders `To:` from [`Email::to`] (the
+    /// transactional case — byte-for-byte unchanged). Relay forwards set this to
+    /// the relay alias so the real inbox (`to.email`) is NEVER emitted in any
+    /// header line (sub-spec §5.3: the real inbox appears only in the `RCPT TO`).
+    pub header_to: Option<Address>,
     pub from: Address,
     /// Reply-To mailbox. `None` ⇒ no `Reply-To` header is emitted. Relay
     /// forwards set this to the relay alias so user replies route back to the
