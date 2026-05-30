@@ -79,6 +79,7 @@
 @import "./blocks/DataTable/DataTable.css";
 @import "./blocks/Pagination/Pagination.css";
 @import "./blocks/FilterBar/FilterBar.css";
+@import "./blocks/ListView/ListView.css";
 
 *,
 *::before,

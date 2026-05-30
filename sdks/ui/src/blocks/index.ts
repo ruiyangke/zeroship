@@ -70,3 +70,18 @@ export {
   type FilterBarProps,
   type FilterBarActiveFilter,
 } from "./FilterBar";
+
+// ListView block — governed stacked list of item rows
+// (leading · content · meta · trailing) with interactive-row a11y.
+export {
+  ListView,
+  type ListViewProps,
+  type ListViewItem,
+  type ListViewDensity,
+  type ListViewLeadingProps,
+  type ListViewContentProps,
+  type ListViewTitleProps,
+  type ListViewDescriptionProps,
+  type ListViewMetaProps,
+  type ListViewTrailingProps,
+} from "./ListView";

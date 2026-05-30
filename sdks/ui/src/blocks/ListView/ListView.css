@@ -1,0 +1,201 @@
+/*
+ * ListView — governed stacked list of item rows.
+ *
+ * Anatomy:
+ *   ul.zs-list-view                     — the list (list semantics)
+ *     └─ li.zs-list-view__item           — one row (flex: main · aside)
+ *         ├─ .zs-list-view__main          — leading + content column
+ *         │   (rendered as <a>/<button>/<div> per interactivity)
+ *         │   ├─ .zs-list-view__leading       — avatar / icon
+ *         │   └─ .zs-list-view__content        — title + description column
+ *         │       ├─ .zs-list-view__title
+ *         │       └─ .zs-list-view__description
+ *         └─ .zs-list-view__aside          — meta + trailing (OUTSIDE main)
+ *             ├─ .zs-list-view__meta
+ *             └─ .zs-list-view__trailing
+ *
+ * The row is a flex row: `main` grows to fill, `aside` hugs the end.
+ * `main` itself is a nested flex row (leading · content). The
+ * interactive affordance (hover tint, focus ring) lives on `main` when
+ * it is the <a>/<button>, NOT on the <li> — so the trailing controls in
+ * `aside` stay independently interactive.
+ *
+ * Density changes block padding only. `divided` adds a logical hairline
+ * between rows.
+ */
+
+.zs-list-view {
+  /* The list paints nothing of its own beyond resetting UA list styling;
+     rows carry the padding and dividers. */
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+.zs-list-view__item {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-3);
+}
+
+/* Divider: a logical hairline between rows. Drawn as a block-start
+   border on every row except the first so the list reads as a grouped
+   set without a leading or trailing rule. */
+.zs-list-view[data-divided] .zs-list-view__item + .zs-list-view__item {
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+/* ─── main area (the row's clickable content) ──────────────────────────── */
+
+.zs-list-view__main {
+  /* Grows to fill the row; lays leading · content out inline. The block
+     padding here is the row's vertical rhythm so the hover/focus
+     affordance fills the row height edge-to-edge on the inline-start
+     side. The aside carries its own block padding to match. */
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-3);
+  flex: 1 1 auto;
+  min-inline-size: 0; /* allow the content column to truncate */
+  padding-block: var(--zs-list-view-padding-block);
+  /* Reset the <a>/<button> UA chrome so the three render-as targets read
+     identically. */
+  margin: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  text-decoration: none;
+}
+
+/* Interactive main (the <a>/<button> path) gets the pointer + hover tint
+   + a focus-visible ring. The non-interactive <div> path carries no
+   data-interactive, so none of this applies. */
+.zs-list-view__main[data-interactive] {
+  cursor: pointer;
+  border-radius: var(--zs-radius-2);
+  /* Pull the rounded hover/focus surface a hair past the text so the
+     tint reads as a row affordance, not a tight text box. */
+  padding-inline: var(--zs-space-2);
+  margin-inline: calc(-1 * var(--zs-space-2));
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+@media (hover: hover) {
+  .zs-list-view__main[data-interactive]:hover {
+    background-color: var(--zs-card-hover-tint);
+  }
+}
+
+.zs-list-view__main[data-interactive]:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── leading ──────────────────────────────────────────────────────────── */
+
+.zs-list-view__leading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--zs-label-secondary);
+}
+
+/* ─── content column ───────────────────────────────────────────────────── */
+
+.zs-list-view__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-1);
+  min-inline-size: 0; /* enable truncation of long titles/descriptions */
+}
+
+.zs-list-view__title {
+  color: var(--zs-label);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: 590;
+  /* Truncate a single overlong line rather than wrapping the row tall. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zs-list-view__description {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── aside (meta + trailing — outside the row link) ───────────────────── */
+
+.zs-list-view__aside {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-3);
+  flex: 0 0 auto;
+  /* Match the main area's block rhythm so meta/trailing align vertically
+     with the content column. */
+  padding-block: var(--zs-list-view-padding-block);
+}
+
+.zs-list-view__meta {
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  white-space: nowrap;
+}
+
+.zs-list-view__trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── density (block padding only) ─────────────────────────────────────── */
+
+.zs-list-view[data-density="comfortable"] {
+  --zs-list-view-padding-block: var(--zs-space-3);
+}
+
+.zs-list-view[data-density="compact"] {
+  --zs-list-view-padding-block: var(--zs-space-2);
+}
+
+/* ─── reduced motion ───────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-list-view__main[data-interactive] {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ──── */
+@media (forced-colors: active) {
+  .zs-list-view[data-divided] .zs-list-view__item + .zs-list-view__item {
+    border-block-start-color: CanvasText;
+  }
+  .zs-list-view__title,
+  .zs-list-view__description,
+  .zs-list-view__meta,
+  .zs-list-view__leading,
+  .zs-list-view__trailing {
+    color: CanvasText;
+  }
+  /* The hover tint is invisible in forced-colors; lean on the native
+     link/button highlight instead, and keep the focus ring visible. */
+  .zs-list-view__main[data-interactive]:hover {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-list-view__main[data-interactive]:focus-visible {
+    outline-color: Highlight;
+  }
+}
