@@ -499,6 +499,27 @@ impl Manifest {
                     ));
                 }
             }
+            // `required_scopes` must be well-formed AND declared. An id that
+            // is malformed, or references neither a `manifest.auth.scopes`
+            // ScopeDef nor a reserved identity scope, can never appear in any
+            // principal's grant — so the route would hard-403 every request
+            // forever and still pass validate(). Catch it at deploy time.
+            // (Declared scopes are format-checked separately above; here we
+            // re-check format so a typo in `required_scopes` is rejected with
+            // a route-scoped message rather than slipping through.)
+            for scope in &entry.required_scopes {
+                ScopeDef::validate_id_format(scope).map_err(|e| {
+                    format!("resource {key:?}: required_scopes id {scope:?} is malformed: {e}")
+                })?;
+                let declared = self.auth.scopes.iter().any(|s| &s.id == scope);
+                if !declared && !is_reserved_identity_scope(scope) {
+                    return Err(format!(
+                        "resource {key:?}: required_scopes id {scope:?} is not declared in \
+                         manifest.auth.scopes and is not a reserved identity scope \
+                         (openid, profile, email, offline_access)"
+                    ));
+                }
+            }
         }
         // 2. Override-marker presence — every shadowed field needs an
         //    explicit `override: [field]` on the child. Walk the
@@ -531,6 +552,14 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+/// The reserved OIDC identity scopes every issuer grants implicitly. A
+/// route may demand these in `required_scopes` without declaring them in
+/// `manifest.auth.scopes` (they are platform-issued, not app-declared).
+/// Mirrors the OIDC core scope set plus `offline_access` (refresh tokens).
+fn is_reserved_identity_scope(s: &str) -> bool {
+    matches!(s, "openid" | "profile" | "email" | "offline_access")
 }
 
 /// Resource-key syntax check. Three legal shapes:

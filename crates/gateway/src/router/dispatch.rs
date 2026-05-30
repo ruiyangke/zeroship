@@ -527,6 +527,9 @@ async fn execute_resource_tree(
             AuthOutcome::ClientNotProvisioned => {
                 return client_not_provisioned_response();
             }
+            AuthOutcome::InsufficientScope { required } => {
+                return insufficient_scope_response(&required);
+            }
         };
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
@@ -1234,6 +1237,36 @@ fn client_not_provisioned_response() -> HttpResponse {
         }))
 }
 
+/// `403 scope_required` — the request authenticated, but the matched
+/// route's `required_scopes` (auth-sdk Slice 3c, §5.3) are not a subset of
+/// the principal's granted scopes.
+///
+/// Two distinct contracts ride this response, and they use DIFFERENT tokens
+/// on purpose:
+///
+/// * **`WWW-Authenticate` header** — RFC 6750 §3.1's challenge. The
+///   error-code token there is the RFC-registered `insufficient_scope`, and
+///   the `scope` parameter lists the required scopes space-delimited. This is
+///   the value HTTP-aware clients / proxies read.
+/// * **JSON body** — the SDK contract. `sdks/auth` `mapError()` reads
+///   `body.error` and maps it onto an `AuthErrorCode`; the registered code is
+///   `scope_required` (spec §5.3 / §error-table), and there is NO
+///   `insufficient_scope` code. We therefore emit `{"error":"scope_required",
+///   "scope":"<space-joined required>"}` so the SDK surfaces the typed error
+///   (and the `scope` string tells the client exactly which scopes to request).
+fn insufficient_scope_response(required: &[String]) -> HttpResponse {
+    let scope_param = required.join(" ");
+    let challenge = format!(
+        "Bearer realm=\"zeroship\", error=\"insufficient_scope\", scope=\"{scope_param}\""
+    );
+    HttpResponse::Forbidden()
+        .header("www-authenticate", challenge.as_str())
+        .json(&serde_json::json!({
+            "error": "scope_required",
+            "scope": scope_param,
+        }))
+}
+
 // ---------------------------------------------------------------------------
 // /__zs/auth/callback — the gateway-owned OIDC callback per hosted app
 // ---------------------------------------------------------------------------
@@ -1841,6 +1874,7 @@ mod tests {
             max_input_bytes: None,
             middleware: vec![],
             publicly_accessible: true,
+            required_scopes: vec![],
             kind: Some(ProcedureKind::Mutation),
             action: crate::compiled::ResolvedAction::WorkerRpc,
             timeout_ms: None,
@@ -2287,6 +2321,7 @@ mod tests {
             max_input_bytes: None,
             middleware: vec![],
             publicly_accessible: true,
+            required_scopes: vec![],
             kind: Some(ProcedureKind::Subscription),
             action: crate::compiled::ResolvedAction::WorkerRpc,
             timeout_ms: None,
@@ -2411,6 +2446,54 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(wa.contains("Bearer"), "got www-authenticate = {wa:?}");
+    }
+
+    /// `insufficient_scope_response` is the dispatch 403 shape (auth-sdk
+    /// Slice 3c, §5.3 / RFC 6750 §3.1). This pins BOTH wire contracts that
+    /// ride it, which use deliberately different error tokens:
+    ///
+    /// * `WWW-Authenticate` header → RFC 6750's registered `insufficient_scope`
+    ///   token plus a space-delimited `scope` param.
+    /// * JSON body → the SDK contract `{"error":"scope_required","scope":"…"}`
+    ///   (the `AuthErrorCode` the SDK `mapError()` recognizes; there is no
+    ///   `insufficient_scope` code SDK-side).
+    ///
+    /// Without this test the body-shape divergence from spec slipped through
+    /// (only transitively covered by the `resolve_auth` enum-level tests).
+    #[compio::test]
+    async fn insufficient_scope_response_403_shape() {
+        let required = vec!["read:billing".to_string(), "write:projects".to_string()];
+        let mut resp = insufficient_scope_response(&required);
+        assert_eq!(resp.status(), ntex::http::StatusCode::FORBIDDEN);
+
+        // RFC 6750 challenge: registered token + space-joined scope param.
+        let wa = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            wa.contains("error=\"insufficient_scope\""),
+            "WWW-Authenticate must use the RFC 6750 token, got {wa:?}"
+        );
+        assert!(
+            wa.contains("scope=\"read:billing write:projects\""),
+            "WWW-Authenticate must list the space-joined required scopes, got {wa:?}"
+        );
+
+        // SDK-contract JSON body: scope_required + space-joined scope string.
+        let body_bytes = collect_body(resp.take_body()).await;
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("403 body is JSON");
+        assert_eq!(
+            body["error"], "scope_required",
+            "JSON error code must be the SDK AuthErrorCode, got {body}"
+        );
+        assert_eq!(
+            body["scope"], "read:billing write:projects",
+            "JSON scope must be the space-joined required scopes, got {body}"
+        );
     }
 
     /// HTML navigations get a 302 → hydra with the stash cookie set.

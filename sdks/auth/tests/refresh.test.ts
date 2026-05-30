@@ -91,6 +91,22 @@ describe("refreshSession / silent renewal (GET /session?mint=1 under navigator.l
     assert.doesNotMatch(h.cookies.get(), /is\.authenticated=true/);
   });
 
+  test("403 scope_required maps to the scope_required AuthErrorCode", async () => {
+    // Gateway scope gate (auth-sdk Slice 3c, §5.3): the 403 JSON body is
+    // `{"error":"scope_required","scope":"…"}`. The SDK mapError() known-map
+    // must surface it as `scope_required` (NOT fall through to server_error),
+    // so callers can prompt for the missing grant.
+    const h = makeHarness();
+    h.fetch.on((u) => u.includes("mint=1"), () =>
+      jsonResponse(403, { error: "scope_required", scope: "read:billing" }),
+    );
+    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
+    await assert.rejects(client.refreshSession(), (e: unknown) => {
+      assert.equal((e as AuthError).code, "scope_required");
+      return true;
+    });
+  });
+
   test("refresh works WITHOUT the Web Locks API (in-process fallback serializes)", async () => {
     const h = makeHarness({ withLocks: false });
     let mintCalls = 0;

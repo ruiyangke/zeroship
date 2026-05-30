@@ -63,6 +63,11 @@ function mapError(status: number, body: WireError | null, fallback: string): Aut
     interaction_required: "interaction_required",
     invalid_grant: "invalid_grant",
     client_not_provisioned: "client_not_provisioned",
+    // 403 from the gateway scope gate (auth-sdk Slice 3c, §5.3 / RFC 6750
+    // §3.1). The body is `{"error":"scope_required","scope":"<space-joined>"}`;
+    // the WWW-Authenticate header uses the RFC token `insufficient_scope`, but
+    // the SDK contract code is `scope_required`.
+    scope_required: "scope_required",
   };
   let code: AuthErrorCode = known[raw] ?? "server_error";
   // 503 maps to the retryable provisioning signal regardless of detail string.

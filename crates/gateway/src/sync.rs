@@ -264,6 +264,84 @@ mod tests {
     }
 
     #[test]
+    fn required_scopes_plumb_from_manifest_json_through_to_compiled_route() {
+        // Faithful end-to-end of the wire path control `get_routes` uses
+        // (auth-sdk Slice 3c, §5.3): the per-route `required_scopes` ride
+        // INSIDE the app manifest (`ResourceEntry.required_scopes`), which
+        // is exactly the `manifest_json` column control serialises and the
+        // gateway parses. We serialise a manifest carrying a scoped resource
+        // to JSON (the column shape), parse it back as `registry::get_routes`
+        // does, hang it on a `RouteEntry`, push it through `RouteCache::update`
+        // (the compile step), and assert the compiled `EffectivePolicy`
+        // carries the scopes the gateway auth gate enforces.
+        use std::collections::HashMap as Map;
+        use zeroship_bundle::{AuthConfig, AuthLevel, ProcedureKind, ResourceEntry, ScopeDef};
+
+        let mut resources: Map<String, ResourceEntry> = Map::new();
+        resources.insert(
+            "rpc:billing.read".to_string(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Query),
+                auth: Some(AuthLevel::User),
+                required_scopes: vec!["read:billing".to_string()],
+                ..Default::default()
+            },
+        );
+        let manifest = Manifest {
+            version: 1,
+            resources,
+            // The route's `required_scopes` must reference a DECLARED scope
+            // (Slice 3c validate-time check) — declare it so the fixture is a
+            // genuinely valid manifest, exactly what control would deploy.
+            auth: AuthConfig {
+                scopes: vec![ScopeDef {
+                    id: "read:billing".to_string(),
+                    label: "Read billing".to_string(),
+                    description: None,
+                }],
+            },
+            ..Manifest::default()
+        };
+
+        // Serialise → parse, exactly as the manifest_json column round-trips
+        // through control `get_routes`.
+        let manifest_json = serde_json::to_string(&manifest).expect("serialise manifest");
+        let parsed: Manifest = serde_json::from_str(&manifest_json).expect("parse manifest_json");
+        parsed.validate().expect("manifest valid");
+
+        let app_id = Uuid::new_v4();
+        let mut routes: RouteMap = HashMap::new();
+        routes.insert(
+            app_id,
+            RouteEntry {
+                name: "billing-app.zeroship.localhost".to_string(),
+                plan_id: "free".to_string(),
+                api_key_hash: "h".to_string(),
+                deploy_hash: None,
+                manifest: parsed,
+                oauth_client_id: Some("oac_billing".to_string()),
+                sector_identifier: Some("https://billing-app.zeroship.localhost".to_string()),
+            },
+        );
+
+        let cache = RouteCache::new();
+        cache.update(routes);
+
+        let (_, compiled) = cache
+            .lookup_by_name("billing-app.zeroship.localhost")
+            .expect("route resolves");
+        let policy = compiled
+            .manifest
+            .lookup_resource("/_zs/v1/billing.read")
+            .expect("scoped resource compiles");
+        assert_eq!(
+            policy.required_scopes,
+            vec!["read:billing".to_string()],
+            "required_scopes must plumb control→CompiledRoute via the manifest"
+        );
+    }
+
+    #[test]
     fn lookup_by_oauth_client_id_resolves_provisioned_app_and_skips_unprovisioned() {
         // Per-app BCL disambiguation (Slice 1d §1.2): the BCL handler resolves
         // the app from the `logout_token.aud` (= per-app client_id). A

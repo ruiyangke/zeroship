@@ -6,7 +6,10 @@
 //! These tests pin both directions.
 
 use serde_json::{Value, json};
-use zeroship_bundle::{AuthConfig, HandlerEntry, Manifest, ManifestExports, ScopeDef};
+use std::collections::HashMap;
+use zeroship_bundle::{
+    AuthConfig, AuthLevel, HandlerEntry, Manifest, ManifestExports, ResourceEntry, ScopeDef,
+};
 
 /// An old manifest produced before `exports` existed must deserialize
 /// unchanged, and round-trip serialize without inventing the field.
@@ -186,4 +189,78 @@ fn validate_accepts_wellformed_scope_id() {
         ],
     };
     m.validate().expect("well-formed scope ids accepted");
+}
+
+/// Build a one-resource manifest with the given `required_scopes` on a
+/// `User` route, and the given set of declared `auth.scopes`.
+fn manifest_requiring(required: &[&str], declared: &[&str]) -> Manifest {
+    let mut m = Manifest::default();
+    m.auth = AuthConfig {
+        scopes: declared
+            .iter()
+            .map(|id| ScopeDef {
+                id: id.to_string(),
+                label: "label".to_string(),
+                description: None,
+            })
+            .collect(),
+    };
+    let mut resources = HashMap::new();
+    resources.insert(
+        "rpc:billing.read".to_string(),
+        ResourceEntry {
+            auth: Some(AuthLevel::User),
+            required_scopes: required.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        },
+    );
+    m.resources = resources;
+    m
+}
+
+/// `validate()` rejects a route whose `required_scopes` references an id that
+/// is neither declared in `manifest.auth.scopes` nor a reserved identity
+/// scope. Such an id can never appear in any principal's grant, so the route
+/// would hard-403 forever — caught at deploy time (auth-sdk Slice 3c, §5.3).
+#[test]
+fn validate_rejects_undeclared_required_scope() {
+    let m = manifest_requiring(&["read:billing"], /* declared */ &[]);
+    let err = m
+        .validate()
+        .expect_err("undeclared required_scopes id must be rejected");
+    assert!(err.contains("read:billing"), "{err}");
+    assert!(err.contains("not declared"), "{err}");
+}
+
+/// `validate()` rejects a malformed `required_scopes` id with a route-scoped
+/// message (distinct from the declared-scope format error path).
+#[test]
+fn validate_rejects_malformed_required_scope() {
+    // Uppercase id is malformed; format-checked before the declared lookup.
+    let m = manifest_requiring(&["Read:Billing"], /* declared */ &["Read:Billing"]);
+    let err = m
+        .validate()
+        .expect_err("malformed required_scopes id must be rejected");
+    assert!(err.contains("Read:Billing"), "{err}");
+}
+
+/// `validate()` accepts `required_scopes` that reference a DECLARED scope.
+#[test]
+fn validate_accepts_declared_required_scope() {
+    let m = manifest_requiring(&["read:billing"], /* declared */ &["read:billing"]);
+    m.validate()
+        .expect("required_scopes referencing a declared scope is accepted");
+}
+
+/// `validate()` accepts the reserved OIDC identity scopes in `required_scopes`
+/// WITHOUT requiring them to be declared in `manifest.auth.scopes` — they are
+/// platform-issued, not app-declared.
+#[test]
+fn validate_accepts_reserved_identity_required_scope() {
+    let m = manifest_requiring(
+        &["openid", "profile", "email", "offline_access"],
+        /* declared */ &[],
+    );
+    m.validate()
+        .expect("reserved identity scopes accepted without declaration");
 }

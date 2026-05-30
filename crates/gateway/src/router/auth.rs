@@ -37,6 +37,17 @@ pub(crate) enum AuthOutcome {
     /// browser-token path uses (`auth_token.rs`). The SDK keeps its
     /// breadcrumb and retries once control finishes provisioning the app.
     ClientNotProvisioned,
+    /// The request authenticated successfully (any arm), but the matched
+    /// route declares `required_scopes` the principal's granted `scopes`
+    /// do NOT cover (auth-sdk Slice 3c, §5.3 / RFC 6750 §3.1). Distinct
+    /// from `Unauthenticated`: identity is fine, the *grant* is too
+    /// narrow. The caller answers `403 scope_required` (JSON body) with a
+    /// `WWW-Authenticate: Bearer error="insufficient_scope"` challenge and
+    /// lists the required scopes. Reached ONLY by an AUTHENTICATED principal
+    /// on a `User`/`Admin` route — an unauthenticated request is gated by the
+    /// `Anon`/`User`/`Admin` policy first (401/redirect), and an `Anon`
+    /// (public) route never scope-gates an authenticated visitor.
+    InsufficientScope { required: Vec<String> },
 }
 
 /// Resolve the per-request auth gate. Returns `Allowed` when the
@@ -60,6 +71,109 @@ pub(crate) enum AuthOutcome {
 /// empty-string fall-open is removed — Phase 3 made the gateway the
 /// authoritative auth checker.)
 pub(crate) async fn resolve_auth(
+    req: &HttpRequest,
+    state: &Arc<GateState>,
+    policy: &crate::compiled::EffectivePolicy,
+    app_id: &Uuid,
+    request_id: &Uuid,
+    oauth_client_id: Option<&str>,
+    sector_identifier: Option<&str>,
+) -> AuthOutcome {
+    // Resolve identity first (DPoP / Bearer / cookie arms, untouched).
+    let outcome = resolve_auth_inner(
+        req,
+        state,
+        policy,
+        app_id,
+        request_id,
+        oauth_client_id,
+        sector_identifier,
+    )
+    .await;
+
+    // Route-level scope enforcement (auth-sdk Slice 3c, §5.3 / RFC 6750
+    // §3.1). The matched route's `required_scopes` (compiled from the
+    // manifest, unioned along the inheritance chain) gate an AUTHENTICATED
+    // principal ONLY: once an arm resolved a `ZeroShip-User` header, the
+    // principal's granted `scopes` (Slice 3a — encoded in that header) MUST
+    // be a superset, else `403 scope_required`. An UNAUTHENTICATED request
+    // never reaches this gate — `Unauthenticated`/`ClientNotProvisioned`
+    // pass through unchanged, gated by the Anon/User/Admin policy first
+    // (401/redirect). Empty `required_scopes` ⇒ no gate (unchanged behavior).
+    // The arms stay scope-agnostic; we read the just-resolved header's scopes
+    // here (the same wire form the worker consumes) so there is ONE
+    // enforcement point regardless of which arm authenticated.
+    //
+    // CRITICAL: the gate fires ONLY on `User`/`Admin` routes. An `Anon` route
+    // is part of the app's PUBLIC surface (HTML/JS/CSS, SSR, public RPCs); it
+    // can still resolve a `ZeroShip-User` when a session is present, but it
+    // must NEVER scope-403 an authenticated visitor — otherwise a logged-in
+    // browser whose 10-min wrapper lacks a scope inherited from a broad `*`
+    // parent would get 403 on public pages a logged-OUT user loads fine. That
+    // is the "logged-in is worse than anonymous on public routes" footgun the
+    // round-3 Invalid-Bearer fix removed; scope gating must not re-introduce
+    // it. Scopes on `*` therefore constrain only the protected (`User`/`Admin`)
+    // descendants, exactly like the auth level itself.
+    if policy.required_scopes.is_empty()
+        || matches!(policy.auth, zeroship_bundle::AuthLevel::Anon)
+    {
+        return outcome;
+    }
+    if let AuthOutcome::Allowed {
+        user_header: Some(header),
+    } = &outcome
+    {
+        let granted = decode_header_scopes(state, header);
+        if !scopes_satisfied(&granted, &policy.required_scopes) {
+            tracing::warn!(
+                required = ?policy.required_scopes,
+                granted = ?granted,
+                "route-level required_scopes not satisfied — 403 scope_required"
+            );
+            return AuthOutcome::InsufficientScope {
+                required: policy.required_scopes.clone(),
+            };
+        }
+    }
+    outcome
+}
+
+/// Whether `granted` is a superset of every scope in `required`. Empty
+/// `required` ⇒ trivially satisfied (no scope gate). Exact string match
+/// per scope (OAuth scopes are opaque tokens; no hierarchy / wildcards).
+fn scopes_satisfied(granted: &[String], required: &[String]) -> bool {
+    required
+        .iter()
+        .all(|need| granted.iter().any(|have| have == need))
+}
+
+/// Recover the `scopes` vector from a freshly-built `ZeroShip-User`
+/// header (the scope source-of-truth set by whichever arm authenticated,
+/// Slice 3a). Verifies the MAC under the worker key and JSON-parses the
+/// `scopes` array — the same path the worker uses. A verify/parse failure
+/// yields `[]`, which fails the scope gate closed (a route demanding a
+/// scope rejects an unreadable principal rather than waving it through).
+fn decode_header_scopes(state: &Arc<GateState>, header: &str) -> Vec<String> {
+    let key = state.config.worker_key.as_bytes();
+    let Some(json) = zeroship_core::auth::verify_zeroship_user_header(key, header) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return Vec::new();
+    };
+    value
+        .get("scopes")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_auth_inner(
     req: &HttpRequest,
     state: &Arc<GateState>,
     policy: &crate::compiled::EffectivePolicy,
@@ -2196,6 +2310,19 @@ mod tests {
         client_id: &str,
         aud: &str,
     ) -> String {
+        issue_plain_wrapper_with_scope(state, sub, client_id, aud, "openid email")
+    }
+
+    /// Same as [`issue_plain_wrapper`] but with a caller-chosen `scope`
+    /// claim, so the route-level scope-enforcement tests (Slice 3c) can
+    /// mint a principal with / without a specific granted scope.
+    fn issue_plain_wrapper_with_scope(
+        state: &crate::GateState,
+        sub: &str,
+        client_id: &str,
+        aud: &str,
+        scope: &str,
+    ) -> String {
         state
             .wrapper_issuer
             .as_ref()
@@ -2203,7 +2330,7 @@ mod tests {
             .issue(&crate::wrapper_token::WrapperMint {
                 aud,
                 sub,
-                scope: "openid email",
+                scope,
                 client_id,
                 exp_secs: 600,
                 cnf: None,
@@ -2347,6 +2474,7 @@ mod tests {
             max_input_bytes: None,
             middleware: vec![],
             publicly_accessible: true,
+            required_scopes: vec![],
             kind: None,
             action: crate::compiled::ResolvedAction::WorkerRpc,
             input_schema: None,
@@ -2360,6 +2488,16 @@ mod tests {
 
     fn user_policy() -> crate::compiled::EffectivePolicy {
         policy_with_auth(zeroship_bundle::AuthLevel::User)
+    }
+
+    /// A `User` policy that additionally demands `required` scopes
+    /// (auth-sdk Slice 3c, §5.3) — the route-level scope gate.
+    fn user_policy_requiring(
+        required: &[&str],
+    ) -> crate::compiled::EffectivePolicy {
+        let mut p = user_policy();
+        p.required_scopes = required.iter().map(|s| s.to_string()).collect();
+        p
     }
 
     #[compio::test]
@@ -2548,6 +2686,257 @@ mod tests {
             matches!(gated, AuthOutcome::Unauthenticated),
             "expired Bearer on User route must be Unauthenticated, got {gated:?}"
         );
+    }
+
+    // ─── Route-level required-scope enforcement (auth-sdk Slice 3c, §5.3) ──
+    //
+    // After a principal authenticates (here via a real plain-Bearer
+    // wrapper), the matched route's `required_scopes` gate the GRANT:
+    // a superset passes, a miss is `403 insufficient_scope` (NOT 401 —
+    // identity is fine), and an empty `required_scopes` is unchanged.
+    // These drive the REAL `resolve_auth` with a REAL minted wrapper +
+    // verifier (no shim), exercising the same path dispatch uses.
+
+    #[compio::test]
+    async fn resolve_auth_authenticated_without_required_scope_403s() {
+        // Authenticated principal whose granted scopes do NOT include the
+        // route's `required_scopes` → InsufficientScope (the dispatch 403),
+        // NOT Allowed and NOT Unauthenticated.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let aud = "myapp.zeroship.ai";
+        // Granted: openid email — does NOT include read:billing.
+        let token =
+            issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid email");
+
+        let req = bearer_req(&token, aud);
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy_requiring(&["read:billing"]),
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        match outcome {
+            AuthOutcome::InsufficientScope { required } => {
+                assert_eq!(required, vec!["read:billing".to_string()]);
+            }
+            other => panic!("expected InsufficientScope, got {other:?}"),
+        }
+    }
+
+    #[compio::test]
+    async fn resolve_auth_authenticated_with_required_scope_allowed() {
+        // Same principal + route, but the wrapper WAS granted read:billing
+        // → Allowed (the scope gate is a superset check). The emitted
+        // ZeroShip-User header carries the granted scopes through.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let aud = "myapp.zeroship.ai";
+        let token = issue_plain_wrapper_with_scope(
+            &state,
+            "pws_alice",
+            "oac_myapp",
+            aud,
+            "openid email read:billing",
+        );
+
+        let req = bearer_req(&token, aud);
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy_requiring(&["read:billing"]),
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        let AuthOutcome::Allowed {
+            user_header: Some(header),
+        } = outcome
+        else {
+            panic!("expected Allowed with a user header, got {outcome:?}");
+        };
+        // Faithful: the granted scope rode through the header the worker reads.
+        let json = zeroship_core::auth::verify_zeroship_user_header(
+            state.config.worker_key.as_bytes(),
+            &header,
+        )
+        .expect("ZeroShip-User MAC verifies");
+        let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
+        assert!(
+            user["scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s == "read:billing"),
+            "granted scope must survive into ZeroShip-User"
+        );
+    }
+
+    #[compio::test]
+    async fn resolve_auth_empty_required_scopes_unchanged() {
+        // A route with NO required_scopes is unchanged: the authenticated
+        // principal is Allowed regardless of which scopes it carries.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let aud = "myapp.zeroship.ai";
+        let token =
+            issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid");
+
+        let req = bearer_req(&token, aud);
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy(), // required_scopes == []
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
+            "empty required_scopes ⇒ no scope gate, got {outcome:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn resolve_auth_required_scope_superset_passes() {
+        // The gate is a SUPERSET check: a principal granted MORE than the
+        // route demands still passes (it has everything required).
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let aud = "myapp.zeroship.ai";
+        let token = issue_plain_wrapper_with_scope(
+            &state,
+            "pws_alice",
+            "oac_myapp",
+            aud,
+            "openid email read:billing write:projects",
+        );
+
+        let req = bearer_req(&token, aud);
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy_requiring(&["read:billing"]),
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
+            "granted superset must pass the scope gate, got {outcome:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn resolve_auth_unauthenticated_scope_route_still_401s_not_403() {
+        // An UNAUTHENTICATED request to a required-scope `User` route is
+        // gated by the User policy FIRST (401), never by the scope gate
+        // (403) — required_scopes only gates an authenticated principal.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        // No Authorization header, no cookie → unauthenticated.
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/billing")
+            .header(http::header::HOST, "myapp.zeroship.ai")
+            .to_http_request();
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy_requiring(&["read:billing"]),
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(outcome, AuthOutcome::Unauthenticated),
+            "unauthenticated request must 401 (policy gate), not 403 (scope gate), got {outcome:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn resolve_auth_underscoped_authenticated_on_anon_route_is_allowed() {
+        // REGRESSION (Slice 3c review finding 2): the scope gate must NOT fire
+        // on an `Anon` (public) route. A logged-in browser whose wrapper lacks
+        // a scope that a broad `*` parent put into `required_scopes` would
+        // otherwise get 403 on the app's own HTML/JS/CSS while a logged-OUT
+        // visitor loads it fine — the "logged-in is worse than anonymous on
+        // public routes" footgun. The authenticated principal must be Allowed
+        // (with its user_header) on the public route regardless of scope.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let aud = "myapp.zeroship.ai";
+        // Granted only `openid` — does NOT include the route's required scope.
+        let token =
+            issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid");
+
+        let req = bearer_req(&token, aud);
+        let app_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+
+        // `Anon` route that nonetheless carries `required_scopes` (e.g.
+        // inherited from a scoped `*`). The Anon policy must win: Allowed.
+        let mut anon_with_scope = anon_policy();
+        anon_with_scope.required_scopes = vec!["read:billing".to_string()];
+
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &anon_with_scope,
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
+            "underscoped authenticated principal on an Anon route must be Allowed, \
+             never scope-403'd, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn scopes_satisfied_superset_semantics() {
+        // Unit-level guard on the gate predicate: every required scope must
+        // be present; empty required is trivially satisfied; a missing one
+        // fails.
+        let granted = vec!["openid".to_string(), "read:billing".to_string()];
+        assert!(scopes_satisfied(&granted, &[]));
+        assert!(scopes_satisfied(&granted, &["read:billing".to_string()]));
+        assert!(scopes_satisfied(
+            &granted,
+            &["openid".to_string(), "read:billing".to_string()]
+        ));
+        assert!(!scopes_satisfied(&granted, &["write:billing".to_string()]));
+        // Fails closed when the principal carries no scopes at all.
+        assert!(!scopes_satisfied(&[], &["read:billing".to_string()]));
     }
 
     #[compio::test]
@@ -3316,6 +3705,154 @@ mod tests {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
             crate::sessions::revoke(&conn, session.id).await.ok();
+        }
+    }
+
+    // ─── Cookie-arm required-scope enforcement (Slice 3c review finding 6) ──
+    //
+    // The single enforcement point in `resolve_auth` is arm-agnostic, but the
+    // plain-Bearer scope tests above only verify ONE arm. This pair drives the
+    // COOKIE arm — whose scopes come from the new Slice-3a
+    // `auth.gateway_sessions.granted_scopes` column — through the REAL
+    // `resolve_auth`, minting a REAL validated session (PG-gated). A cookie
+    // whose granted_scopes cover the route's `required_scopes` is Allowed; one
+    // that does not is InsufficientScope (403), proving the gate is not
+    // Bearer-only.
+
+    #[compio::test]
+    async fn resolve_auth_cookie_arm_with_required_scope_allowed() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        let aud = "myapp.zeroship.ai";
+        let app_id = Uuid::new_v4();
+        let app_id_str = app_id.to_string();
+
+        // Session whose granted_scopes INCLUDE the route's required scope.
+        let session = {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            crate::sessions::create(
+                &conn,
+                &crate::sessions::NewSession {
+                    user_id: &Uuid::new_v4().to_string(),
+                    app_id: &app_id_str,
+                    email: Some("cookie-user@example.com"),
+                    name: Some("Cookie User"),
+                    avatar_url: None,
+                    email_verified: true,
+                    granted_scopes: &["openid".to_string(), "read:billing".to_string()],
+                },
+            )
+            .await
+            .expect("create cookie session")
+        };
+
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/billing")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let request_id = Uuid::new_v4();
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy_requiring(&["read:billing"]),
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            Some("https://myapp.zeroship.ai"),
+        )
+        .await;
+
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            crate::sessions::revoke(&conn, session.id).await.ok();
+        }
+
+        assert!(
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
+            "cookie session granting read:billing must pass the scope gate, got {outcome:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn resolve_auth_cookie_arm_without_required_scope_403s() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        let aud = "myapp.zeroship.ai";
+        let app_id = Uuid::new_v4();
+        let app_id_str = app_id.to_string();
+
+        // Session whose granted_scopes do NOT include the route's required
+        // scope — identity is fine, the grant is too narrow → 403, not 401.
+        let session = {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            crate::sessions::create(
+                &conn,
+                &crate::sessions::NewSession {
+                    user_id: &Uuid::new_v4().to_string(),
+                    app_id: &app_id_str,
+                    email: Some("cookie-user@example.com"),
+                    name: Some("Cookie User"),
+                    avatar_url: None,
+                    email_verified: true,
+                    granted_scopes: &["openid".to_string(), "email".to_string()],
+                },
+            )
+            .await
+            .expect("create cookie session")
+        };
+
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/billing")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let request_id = Uuid::new_v4();
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy_requiring(&["read:billing"]),
+            &app_id,
+            &request_id,
+            Some("oac_myapp"),
+            Some("https://myapp.zeroship.ai"),
+        )
+        .await;
+
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            crate::sessions::revoke(&conn, session.id).await.ok();
+        }
+
+        match outcome {
+            AuthOutcome::InsufficientScope { required } => {
+                assert_eq!(required, vec!["read:billing".to_string()]);
+            }
+            other => panic!(
+                "cookie session lacking read:billing must be InsufficientScope (403), got {other:?}"
+            ),
         }
     }
 

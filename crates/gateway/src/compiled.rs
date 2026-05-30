@@ -77,6 +77,16 @@ pub struct EffectivePolicy {
     pub max_input_bytes: Option<u32>,
     pub middleware: Vec<String>,
     pub publicly_accessible: bool,
+    /// OAuth scopes a request MUST carry to reach this resource (auth-sdk
+    /// Slice 3c, §5.3). Accumulated by union along the inheritance chain
+    /// (root → child): a scoped parent's requirement is inherited and a
+    /// child can only ADD, never weaken it. Empty ⇒ no scope gate. The
+    /// auth gate (`resolve_auth`) checks the authenticated principal's
+    /// granted `scopes` against this set — ONLY on `User`/`Admin` routes
+    /// (an `Anon` public route never scope-gates an authenticated visitor)
+    /// — and answers a `403` (`scope_required` JSON body,
+    /// `insufficient_scope` `WWW-Authenticate` token) on a miss.
+    pub required_scopes: Vec<String>,
     pub kind: Option<ProcedureKind>,
     pub action: ResolvedAction,
     pub input_schema: Option<String>,
@@ -325,6 +335,7 @@ fn resolve_effective_policy(
     let mut max_input_bytes: Option<u32> = None;
     let mut middleware: Vec<String> = Vec::new();
     let mut publicly_accessible: bool = false;
+    let mut required_scopes: Vec<String> = Vec::new();
     let mut kind: Option<ProcedureKind> = None;
     let mut input_schema: Option<String> = None;
     let mut output_schema: Option<String> = None;
@@ -374,6 +385,16 @@ fn resolve_effective_policy(
         for m in &node.middleware {
             middleware.push(m.clone());
         }
+        // required_scopes UNIONS along the chain (root → child): a scoped
+        // parent's requirement is inherited and a child only ADDS. No
+        // `override` weakens it — a stricter scope gate must never be
+        // silently dropped by a more-specific resource. Dedupe to keep the
+        // 403 `required` body and the superset check clean.
+        for s in &node.required_scopes {
+            if !required_scopes.iter().any(|existing| existing == s) {
+                required_scopes.push(s.clone());
+            }
+        }
         if let Some(b) = node.publicly_accessible {
             publicly_accessible = b;
         }
@@ -398,6 +419,7 @@ fn resolve_effective_policy(
         max_input_bytes,
         middleware,
         publicly_accessible,
+        required_scopes,
         kind,
         action,
         input_schema,
@@ -831,6 +853,98 @@ mod tests {
             c.lookup_resource_key("/api/v1/teams").as_deref(),
             Some("/api/v1/*")
         );
+    }
+
+    #[test]
+    fn effective_policy_required_scopes_compiles_from_manifest() {
+        // A route declaring `required_scopes` compiles them onto the
+        // EffectivePolicy verbatim (auth-sdk Slice 3c, §5.3). This is the
+        // value the gateway auth gate checks the principal's scopes against.
+        let mut resources = HashMap::new();
+        resources.insert(
+            "rpc:billing.read".into(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Query),
+                auth: Some(AuthLevel::User),
+                required_scopes: vec!["read:billing".into()],
+                ..Default::default()
+            },
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/_zs/v1/billing.read").expect("matches");
+        assert_eq!(p.required_scopes, vec!["read:billing".to_string()]);
+        assert_eq!(p.auth, AuthLevel::User);
+    }
+
+    #[test]
+    fn effective_policy_required_scopes_union_along_chain() {
+        // required_scopes accumulate by UNION root → child: a scoped parent's
+        // requirement is inherited and the child only ADDS. A child can never
+        // weaken the gate (no `override`), and duplicates are deduped.
+        let mut resources = HashMap::new();
+        resources.insert(
+            "*".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::User),
+                required_scopes: vec!["openid".into()],
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:billing".into(),
+            ResourceEntry {
+                required_scopes: vec!["read:billing".into(), "openid".into()],
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:billing.charge".into(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                required_scopes: vec!["write:billing".into()],
+                ..Default::default()
+            },
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c
+            .lookup_resource("/_zs/v1/billing.charge")
+            .expect("matches");
+        // Root openid + parent read:billing (+ openid deduped) + child write:billing.
+        assert_eq!(
+            p.required_scopes,
+            vec![
+                "openid".to_string(),
+                "read:billing".to_string(),
+                "write:billing".to_string()
+            ],
+            "scopes union along chain, deduped, in root→child order"
+        );
+    }
+
+    #[test]
+    fn effective_policy_required_scopes_default_empty() {
+        // A route with no `required_scopes` compiles to an empty vec — the
+        // gateway treats that as "no scope gate" (unchanged behavior).
+        let mut resources = HashMap::new();
+        resources.insert("rpc:todos.list".into(), rpc_entry(ProcedureKind::Query));
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        assert!(p.required_scopes.is_empty());
     }
 
     #[test]

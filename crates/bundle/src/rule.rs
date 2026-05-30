@@ -96,6 +96,23 @@ pub struct ResourceEntry {
     pub middleware: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publicly_accessible: Option<bool>,
+    /// OAuth scopes a request MUST carry to access this resource
+    /// (auth-sdk Slice 3c, spec §5.3). Independent of `auth: AuthLevel`:
+    /// a route can be `auth: user` AND additionally demand
+    /// `read:billing`. The gateway enforces it AFTER authentication, and
+    /// ONLY on `User`/`Admin` routes — a public (`auth: anon`) route never
+    /// scope-gates an authenticated visitor. An authenticated principal on a
+    /// protected route whose granted `scopes` are not a superset gets a `403`
+    /// (`WWW-Authenticate: …error="insufficient_scope"`, JSON body
+    /// `{"error":"scope_required", …}`). Each id must be DECLARED in
+    /// `manifest.auth.scopes` or be a reserved identity scope (openid /
+    /// profile / email / offline_access) — `validate()` rejects undeclared
+    /// ids so a typo can't hard-403 a route forever. Empty (the default) ⇒ no
+    /// scope gate. Accumulates by union along the inheritance chain (a
+    /// scoped parent's requirement is inherited, never weakened by a
+    /// child — there is no `override` for it), mirroring `middleware`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_scopes: Vec<String>,
 
     // ── Override marker — required when shadowing inherited fields ───────
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -496,5 +513,56 @@ mod procedure_kind_tests {
             let entry: ResourceEntry = serde_json::from_str(&json).expect("must deserialise");
             assert_eq!(entry.kind, Some(k));
         }
+    }
+}
+
+#[cfg(test)]
+mod required_scopes_tests {
+    use super::*;
+
+    /// A `ResourceEntry` with `required_scopes` round-trips through the
+    /// JSON wire verbatim (auth-sdk Slice 3c, §5.3). The field is the
+    /// per-route scope gate the gateway enforces in the Bearer/cookie
+    /// arms; if it didn't survive serialise → deserialise, a deployed
+    /// manifest would silently drop its scope requirement.
+    #[test]
+    fn bundle_required_scopes_round_trips() {
+        let entry = ResourceEntry {
+            auth: Some(AuthLevel::User),
+            required_scopes: vec!["read:billing".to_string(), "write:projects".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&entry).expect("serialise");
+        // The field is present on the wire when non-empty.
+        assert!(
+            json.contains("required_scopes"),
+            "non-empty required_scopes must serialise: {json}"
+        );
+        let back: ResourceEntry = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(
+            back.required_scopes,
+            vec!["read:billing".to_string(), "write:projects".to_string()],
+            "required_scopes must round-trip verbatim"
+        );
+        assert_eq!(back.auth, Some(AuthLevel::User));
+    }
+
+    /// Empty `required_scopes` is the default and is OMITTED from the wire
+    /// (`skip_serializing_if = "Vec::is_empty"`), keeping manifests small
+    /// and old manifests (no field) deserialising as "no scope gate".
+    #[test]
+    fn bundle_required_scopes_empty_omitted_and_defaults() {
+        let entry = ResourceEntry::default();
+        let json = serde_json::to_string(&entry).expect("serialise");
+        assert!(
+            !json.contains("required_scopes"),
+            "empty required_scopes must NOT serialise: {json}"
+        );
+        // A manifest entry with no `required_scopes` field deserialises to [].
+        let parsed: ResourceEntry = serde_json::from_str(r#"{ "auth": "user" }"#).expect("parse");
+        assert!(
+            parsed.required_scopes.is_empty(),
+            "absent required_scopes ⇒ empty vec (no scope gate)"
+        );
     }
 }
