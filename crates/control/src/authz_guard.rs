@@ -220,7 +220,7 @@ async fn oauth_guard_from_bearer(
             web::error::ErrorUnauthorized("oauth introspection failed")
         })?;
     if !result.active {
-        return Err(web::error::ErrorUnauthorized("inactive oauth token").into());
+        return Err(unauthorized_json("inactive_token"));
     }
     if !result.aud.as_ref().is_some_and(|audiences| {
         audiences

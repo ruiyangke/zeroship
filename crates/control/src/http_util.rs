@@ -94,7 +94,7 @@ fn retry_after_header(secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     use ntex::http::StatusCode;
     use ntex::web::test::TestRequest;
@@ -113,9 +113,6 @@ mod tests {
             let _ = conn.run().await;
         })
         .detach();
-        zeroship_auth::store::migrations::migrate(&client)
-            .await
-            .expect("auth migrations");
         Some(client)
     }
 
@@ -132,13 +129,28 @@ mod tests {
             .await
             .expect("cleanup rate-limit bucket");
 
+        // ntex's `TestRequest::peer_addr` does NOT propagate through
+        // `to_http_request()` (see ntex-3.7.2/src/web/test.rs: the builder
+        // stores `peer_addr` but `to_http_request` drops it, and ntex's own
+        // unit test asserts `req.peer_addr() == None`). So `source_ip(req,
+        // trust_proxy=false)` resolves to `None` and `rate_limit` short-circuits
+        // to "allowed" on every call — the original test never exercised
+        // throttling at all. Drive the client identity through the supported
+        // `X-Forwarded-For` + `trust_proxy=true` path instead, which `source_ip`
+        // reads deterministically and which yields the same bucket key.
         let req = TestRequest::default()
-            .peer_addr(SocketAddr::new(ip, 12345))
+            .header("x-forwarded-for", ip.to_string())
             .to_http_request();
         let quota = Quota::per_minute(1, 1);
 
-        assert!(rate_limit(&req, &pg, &namespace, quota, false).await.is_none());
-        let resp = rate_limit(&req, &pg, &namespace, quota, false)
+        // Sanity-check the precondition this test depends on: the identity the
+        // gate will key on must resolve, otherwise `rate_limit` no-ops.
+        assert_eq!(source_ip(&req, true).as_deref(), Some(ip.to_string().as_str()));
+
+        // First call consumes the single token in the bucket → allowed.
+        assert!(rate_limit(&req, &pg, &namespace, quota, true).await.is_none());
+        // Second immediate call finds an empty bucket → throttled (429).
+        let resp = rate_limit(&req, &pg, &namespace, quota, true)
             .await
             .expect("second call throttled");
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);

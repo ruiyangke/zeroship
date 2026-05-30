@@ -11,7 +11,7 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::password;
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 const CHALLENGE: &str = "skip-disabled-challenge";
 const ACCEPT_REDIRECT: &str = "https://client.example/callback?code=accepted";
@@ -99,7 +99,11 @@ async fn mock_reject_login(
     web::HttpResponse::Ok().json(&json!({ "redirect_to": REJECT_REDIRECT }))
 }
 
-#[compio::test]
+// Stands up a mock hydra via `web::test::server`, which needs the ntex
+// runtime/System — so this runs under `#[ntex::test]`, not `#[compio::test]`
+// (which has no System: the server start panics "System is not running").
+// `compio_postgres` still works under the ntex runtime (compio-backed here).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn skip_login_rejects_disabled_user_subject() {
     let db_url = match std::env::var("AUTH_DB_URL") {
@@ -116,7 +120,6 @@ async fn skip_login_rejects_disabled_user_subject() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let email = format!("skip-disabled-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&pg_client, &email, "Skip Disabled", None)
         .await
@@ -193,7 +196,9 @@ async fn skip_login_rejects_disabled_user_subject() {
         .ok();
 }
 
-#[compio::test]
+// See `skip_login_rejects_disabled_user_subject`: needs `#[ntex::test]` for
+// the mock-hydra `web::test::server`.
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn password_login_rejects_locked_user_without_session() {
     let db_url = match std::env::var("AUTH_DB_URL") {
@@ -210,7 +215,6 @@ async fn password_login_rejects_locked_user_without_session() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let email = format!("pwd-locked-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash("correct locked password phrase").expect("hash password");
     let user = users::create(&pg_client, &email, "Password Locked", Some(&phc))

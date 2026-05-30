@@ -2,7 +2,6 @@
 
 use compio_postgres::{connect, NoTls};
 use zeroship_auth::ratelimit::{consume, Bucket, RateLimitDecision};
-use zeroship_auth::store::migrations;
 
 // compio-postgres's `Client` is `!Send` (it owns an io_uring submission
 // handle). All async helpers that touch it inherit that.
@@ -10,7 +9,6 @@ use zeroship_auth::store::migrations;
 async fn pg_or_skip() -> Option<compio_postgres::Client> {
     let dsn = std::env::var("AUTH_DB_URL").ok()?;
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     Some(client)
 }
 

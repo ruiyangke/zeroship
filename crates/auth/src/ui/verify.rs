@@ -77,8 +77,13 @@ pub async fn post_redeem(
         );
     }
 
-    // 1. Redeem atomically.
-    let redeemed = match verification::redeem(db.as_ref(), &form.token).await {
+    // 1. Redeem atomically AND mark the user verified in one statement.
+    //    `redeem` alone only consumes the token; it leaves
+    //    `auth.users.email_verified_at` untouched, so the user would see
+    //    "Email verified" while the row stayed unverified. Use
+    //    `redeem_and_mark_verified` so the consume and the user update are
+    //    the same atomic SQL statement (see verification.rs).
+    let redeemed = match verification::redeem_and_mark_verified(db.as_ref(), &form.token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(

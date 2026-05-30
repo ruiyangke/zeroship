@@ -8,7 +8,7 @@
 use compio_postgres::{connect, NoTls};
 use zeroship_auth::mailer::stdout::StdoutMailer;
 use zeroship_auth::mailer::{Address, Email, Mailer};
-use zeroship_auth::store::{migrations, suppressions};
+use zeroship_auth::store::{suppressions};
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
@@ -23,7 +23,6 @@ async fn stdout_mailer_sends_when_not_suppressed() {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
 
     let mailer = StdoutMailer;
     let email = format!("not-suppressed-{}@test", uuid::Uuid::new_v4().simple());
@@ -62,7 +61,6 @@ async fn stdout_mailer_refuses_suppressed() {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
 
     let suppressed_email = format!("suppressed-{}@test", uuid::Uuid::new_v4().simple());
     suppressions::add(&client, &suppressed_email, "hard_bounce", None)

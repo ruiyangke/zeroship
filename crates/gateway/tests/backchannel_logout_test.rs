@@ -58,11 +58,6 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     })
     .detach();
 
-    // Defensive: ensure the schema is in place. Migrations are
-    // idempotent.
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("migrate");
 
     // Two sessions for the same user at two different apps — the BCL
     // handler revokes ACROSS apps for the same sub.
@@ -399,9 +394,6 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         }
     })
     .detach();
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("migrate");
     let db = Arc::new(client);
 
     let key = make_key();

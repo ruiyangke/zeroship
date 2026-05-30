@@ -28,7 +28,7 @@ use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
-use zeroship_auth::store::{migrations, sessions, users};
+use zeroship_auth::store::{sessions, users};
 
 mod common;
 use common::test_auth_config;
@@ -96,7 +96,6 @@ async fn logout_route_is_registered_returns_not_404() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);
@@ -190,7 +189,6 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);
@@ -241,7 +239,10 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     assert_eq!(status, 400, "expected 400 (CSRF rejection), got {status}");
 }
 
-#[compio::test]
+// Uses a mock-hydra `web::test::server`, which needs the ntex runtime/System
+// — run under `#[ntex::test]` (the sibling logout tests already do), not
+// `#[compio::test]` (no System → "System is not running" panic).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn logout_post_revokes_local_session_cookie() {
     let db_url = match std::env::var("AUTH_DB_URL") {
@@ -261,7 +262,6 @@ async fn logout_post_revokes_local_session_cookie() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let email = format!("logout-local-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&pg_client, &email, "Logout User", None)
         .await
@@ -273,6 +273,7 @@ async fn logout_post_revokes_local_session_cookie() {
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
+            expected_credential_version: Some(user.credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },

@@ -36,7 +36,6 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
 
 mod common;
 use common::{
@@ -76,7 +75,7 @@ async fn e2e_password_flow() {
     let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
-    // 1. Connect PG and run migrations.
+    // 1. Connect PG.
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("connect pg");
@@ -86,7 +85,6 @@ async fn e2e_password_flow() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
 
     let pg_client = Arc::new(pg_client);
     let admin = HydraAdmin::new(&hydra_admin_url);
@@ -150,6 +148,29 @@ async fn e2e_password_flow() {
         .create_client(&client_spec)
         .await
         .expect("create test client");
+
+    // In production the control plane creates an OAuth RP in BOTH hydra and
+    // `control.oauth_clients`; the consent flow records the granted scopes in
+    // `control.oauth_grants`, whose `client_id` FK references
+    // `control.oauth_clients`. This test registers the client only with hydra
+    // (above), so we must mirror the control-plane row here — otherwise the
+    // skip-consent silent-accept upsert fails the FK and the consent handler
+    // renders an error page (200) instead of redirecting (302).
+    pg_client
+        .execute(
+            "INSERT INTO control.oauth_clients \
+                 (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, TRUE, $1) \
+             ON CONFLICT (client_id) DO NOTHING",
+            &[
+                &test_client_id,
+                &"e2e test",
+                &vec![test_redirect.to_string()],
+                &vec!["openid".to_string(), "offline_access".to_string()],
+            ],
+        )
+        .await
+        .expect("seed control.oauth_clients for consent grant FK");
 
     // Cleanup guard via scope-exit: hydra client + user row removal at end.
     // We do this inline (after the assertions) rather than via a Drop guard
@@ -400,10 +421,15 @@ async fn e2e_password_flow() {
     eprintln!("[e2e_password] id_token claims: {claims}");
 
     let iss = claims["iss"].as_str().expect("iss claim");
-    // Either the hydra-configured issuer (https://auth.zeroship.ai/) or the
-    // host-rewritten loopback form — accept whichever hydra issued.
+    // Hydra stamps `iss` from its own configured public URL, which is
+    // environment-dependent: the historical fixture used
+    // `https://auth.zeroship.ai/`, the docker-compose deployment uses
+    // `http://auth.zeroship.localhost`, and a bare loopback hydra uses
+    // `http://127.0.0.1:4444`. Accept whichever this hydra issued.
     assert!(
         iss == "https://auth.zeroship.ai/"
+            || iss.starts_with("http://auth.zeroship.localhost")
+            || iss.starts_with("https://auth.zeroship.localhost")
             || iss.starts_with("http://127.0.0.1:4444"),
         "unexpected iss: {iss}"
     );
@@ -423,11 +449,19 @@ async fn e2e_password_flow() {
     );
 
     // 15. Cleanup — delete client + delete user row + revoke session.
+    //     Deleting the user cascades to control.oauth_grants (user_id FK);
+    //     we then drop the seeded control.oauth_clients row.
     admin
         .delete_client(&test_client_id)
         .await
         .expect("delete test client");
     cleanup_user(&pg_client, &email).await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            &[&test_client_id],
+        )
+        .await;
 
     // Give the server a beat to flush any pending audit writes before
     // we tear down its thread; otherwise the test occasionally races

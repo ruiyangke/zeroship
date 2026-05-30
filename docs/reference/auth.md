@@ -142,7 +142,7 @@ Adding or rotating a client is an edit to the TOML; `crates/auth/src/bootstrap` 
 
 ## Data model
 
-The `auth.*` PostgreSQL schema (managed by `crates/auth/src/store/migrations.rs`):
+The `auth.*` PostgreSQL schema (owned by Liquibase — `db/changelog/`; see [Database migrations](../runbooks/db-migrations.md)):
 
 | Table | Purpose |
 |---|---|

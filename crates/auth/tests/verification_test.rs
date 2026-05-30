@@ -8,7 +8,7 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
 use zeroship_auth::identity::verification;
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 // `compio_postgres::Client` is `!Send` — the futures inherit that
 // structurally. The lint is informational, not actionable here.
@@ -22,7 +22,6 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     Some(client)
 }
 

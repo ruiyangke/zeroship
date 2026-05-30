@@ -23,6 +23,23 @@ use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
+    // The runtime redacts 5xx response bodies to
+    // `{"message":"internal error",…}` unless `AUTH_INSECURE_DEV` is set
+    // (a control/auth security boundary — see
+    // `crates/runtime/src/core/dispatch.rs::build_error_body`). A
+    // `capability_violation` surfaces as a 500, so without this opt-in
+    // the structured `code` / `details` envelope these assertions read
+    // would be stripped. Every test in this binary wants the verbose
+    // body; setting the var to the same value on every call is
+    // idempotent and never removed, so parallel tests don't race on it.
+    //
+    // SAFETY: process-global env mutation. Only ever set (never removed)
+    // to a single constant value, so concurrent test threads observe a
+    // stable value with no torn read.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("AUTH_INSECURE_DEV", "true");
+    }
     init_v8();
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),

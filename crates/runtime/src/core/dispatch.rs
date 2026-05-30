@@ -130,12 +130,26 @@ pub fn build_error_body(
             error.retryable = ?extras.retryable,
             "creator app dispatch error"
         );
-        if !expose_internal_dispatch_errors() {
+        // Public error codes are platform-generated, secret-free,
+        // developer-facing errors (e.g. `capability_violation`). They
+        // are safe to surface verbatim even at a 5xx boundary — the
+        // platform owns the message string and there is no stack or
+        // user-supplied content. Still logged above. Everything else is
+        // blanked unless the dev escape hatch is set.
+        if !extras.code.is_some_and(is_public_error_code) && !expose_internal_dispatch_errors() {
             return build_internal_error_body(request_id);
         }
     }
 
     build_verbose_error_body(message, name, extras)
+}
+
+/// Error codes the platform generates itself that are safe to surface
+/// verbatim to clients even at a 5xx status. These carry no secret
+/// content — the message is a fixed platform string with no stack and no
+/// user-supplied data — so the 5xx body-sanitization rail exempts them.
+fn is_public_error_code(code: &str) -> bool {
+    matches!(code, "capability_violation")
 }
 
 fn expose_internal_dispatch_errors() -> bool {

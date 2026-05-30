@@ -17,9 +17,9 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use std::sync::Mutex;
+use zeroship_auth::bootstrap::keys::ensure_signing_keys;
 use zeroship_auth::cron::jwk_rotation;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::store::migrations;
 
 // The hydra-backed tests in this file mutate the same `auth.cron_state` rows
 // (`hydra.openid.id-token`, `hydra.jwt.access-token`) and the same
@@ -45,6 +45,20 @@ async fn pg_connect(dsn: &str) -> Client {
     })
     .detach();
     client
+}
+
+/// Guarantee the signing-key sets hydra's bootstrap normally creates are
+/// present before a rotation test asserts on them. The tests below assume
+/// the integration hydra is already bootstrapped; when this suite runs
+/// against a bare hydra (compose / CI) that bootstrap never ran, so the
+/// `hydra.openid.id-token` set is absent and `get_jwks` returns `None`.
+/// `ensure_signing_keys` is the real bootstrap path and is idempotent
+/// (per-algorithm presence check), so calling it here only fills gaps and
+/// never disturbs an already-populated set.
+async fn ensure_bootstrap_keys(admin: &HydraAdmin, client: &Client) {
+    ensure_signing_keys(admin, client)
+        .await
+        .expect("ensure signing keys (bootstrap precondition)");
 }
 
 async fn clear_jwk_state(client: &Client) {
@@ -78,17 +92,17 @@ async fn rotation_first_tick_records_baseline_no_action() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
 
     // Ensure no prior cron_state for these sets so we exercise the
     // first-observation branch.
     clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);
+    ensure_bootstrap_keys(&admin, &client).await;
 
     // Capture current JWKS count for the ID-token set. Bootstrap must
-    // already have populated it (the integration hydra is bootstrapped
-    // by the broader test fixture, not by us here).
+    // already have populated it (ensured just above via the real
+    // bootstrap path, since a bare integration hydra has no keys).
     let before = admin
         .get_jwks("hydra.openid.id-token")
         .await
@@ -142,10 +156,10 @@ async fn rotation_due_prepends_new_keys() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);
+    ensure_bootstrap_keys(&admin, &client).await;
 
     // Seed `last_rotated_at` 100 days in the past for the id-token set
     // so this tick treats it as overdue.
@@ -216,7 +230,6 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     clear_jwk_state(&client).await;
 
     let id_token_set = "hydra.openid.id-token";
@@ -224,6 +237,7 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
     let rotation_days = 90;
     let retain_days = 31;
     let admin = HydraAdmin::new(&admin_url);
+    ensure_bootstrap_keys(&admin, &client).await;
 
     client
         .execute(
@@ -291,7 +305,6 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
     clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);

@@ -83,10 +83,8 @@ pub async fn post(
         );
     }
     let email_hash = hex::encode(Sha256::digest(email_norm.as_bytes()));
-    let ip = req
-        .peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "0.0.0.0".to_string());
+    // Forwarded client IP (auth is behind the gateway); see signup.rs.
+    let ip = crate::headers::client_ip(&req);
     let buckets = [
         (
             format!("forgot_email:{email_hash}"),

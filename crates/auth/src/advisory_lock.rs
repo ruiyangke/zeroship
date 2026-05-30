@@ -69,6 +69,21 @@ pub fn oauth_grant_lock_key(user_id: &uuid::Uuid, client_id: &str) -> i64 {
     )
 }
 
+/// Stable i64 advisory-lock key serializing guarded identity-unlinks for one
+/// user. The orphan guard in `store::identities::unlink_preserving_credential`
+/// must see *committed* state of the other identities, but a single
+/// auto-commit statement under READ COMMITTED takes its snapshot before it
+/// blocks on `auth.users FOR UPDATE` — so two concurrent unlinks each see the
+/// other identity still present and both delete, orphaning the account.
+/// Holding a session advisory lock on the user across the unlink statement
+/// fully serializes the two callers: the loser's unlink statement runs as a
+/// fresh implicit transaction *after* the winner commits and releases the
+/// lock, so its orphan check reads the winner's committed delete.
+#[must_use]
+pub fn identity_unlink_lock_key(user_id: &uuid::Uuid) -> i64 {
+    stable_lock_key(b"zeroship-auth:identity-unlink:", &[user_id.as_bytes()])
+}
+
 fn stable_lock_key(prefix: &[u8], parts: &[&[u8]]) -> i64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

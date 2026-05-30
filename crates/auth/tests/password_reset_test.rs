@@ -17,7 +17,7 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::{magic_link, password, password_reset};
-use zeroship_auth::store::{migrations, sessions, users};
+use zeroship_auth::store::{sessions, users};
 
 fn test_cfg(db_url: &str) -> AuthConfig {
     let mut cfg = AuthConfig::parse_from([
@@ -80,7 +80,6 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     Some(client)
 }
 
@@ -137,7 +136,9 @@ async fn drop_magic_links_insert_delay(client: &Client) {
         .ok();
 }
 
-#[compio::test]
+// Mock-hydra `web::test::server` needs the ntex runtime/System; run under
+// `#[ntex::test]` not `#[compio::test]` ("System is not running" otherwise).
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let dsn = match std::env::var("AUTH_DB_URL") {
@@ -327,7 +328,8 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .ok();
 }
 
-#[compio::test]
+// Mock-hydra `web::test::server` needs the ntex runtime/System; see above.
+#[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_consumes_magic_login_state_for_same_email() {
     let dsn = match std::env::var("AUTH_DB_URL") {

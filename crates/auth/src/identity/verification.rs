@@ -20,7 +20,7 @@
 //!
 //! Distinct from [`crate::identity::magic_link`] (different TTL, different
 //! purpose, distinct `auth.email_verifications` table). The schema for the
-//! table is created in `store::migrations` (item 5.5).
+//! table is owned by Liquibase (`db/changelog/`).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::Client;

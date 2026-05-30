@@ -23,7 +23,9 @@
 
 use serde_json::Value;
 
-use crate::backend::{AuditWriter, LockGuard, LockScope, NamespaceManager, RegisterBackend};
+use crate::backend::{
+    AuditWriter, LockGuard, LockScope, NamespaceManager, PgSqlExecutor, RegisterBackend,
+};
 use crate::error::DbError;
 use crate::query;
 
@@ -191,6 +193,25 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
             return Err(e);
         }
     };
+
+    // §17.5 per-app PG role hardening. Provision the constrained per-app
+    // role (`app_<id>_role`, NOLOGIN/NOREPLICATION) + scope its grants to
+    // THIS schema immediately after the schema + audit table exist. The
+    // native `db.transaction(fn)` orchestrator issues `SET LOCAL ROLE
+    // "app_<id>_role"` on its dedicated client (see
+    // `crate::transaction::apply_per_app_role`); without this call the
+    // role does not exist and every transaction's BEGIN fails with
+    // `role "app_<id>_role" does not exist`. Idempotent — `CREATE ROLE`
+    // is existence-probed and the GRANTs are re-runnable, so re-deploying
+    // a hot app is a no-op. Runs through the pool (like `ensure_app_schema`
+    // / `ensure_audit_table` above), not the locked client, so it inherits
+    // the same release-on-err discipline.
+    if let Err(e) =
+        crate::auth::bootstrap::ensure_per_app_role(backend.pool_handle().as_ref(), app_id).await
+    {
+        let _ = guard.release().await;
+        return Err(e);
+    }
 
     Ok((ctx, guard))
 }

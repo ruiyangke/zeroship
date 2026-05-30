@@ -52,9 +52,6 @@ impl Fixture {
             let _ = auth_pg_conn.run().await;
         })
         .detach();
-        zeroship_auth::store::migrations::migrate(&auth_pg_client)
-            .await
-            .expect("auth migrations");
 
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));

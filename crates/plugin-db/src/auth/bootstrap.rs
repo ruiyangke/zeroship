@@ -1475,6 +1475,22 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     let schema = crate::query::quote_ident(app_id);
     let qrole = format!("\"{role}\"");
 
+    // 0. Ensure the app-role template anchor exists. The per-app role's
+    //    `IN ROLE "<template>"` membership (step 1) requires it. In a
+    //    fully-provisioned cluster the platform `bootstrap` already
+    //    created it, but `register_model` provisions the per-app role
+    //    defensively (it runs before any explicit platform-bootstrap on
+    //    a fresh DB), so we guarantee the precondition here. The template
+    //    is a NOLOGIN/NOREPLICATION permission anchor — creating it is
+    //    idempotent and carries no login surface; the same attributes the
+    //    platform `bootstrap` uses (see `APP_ROLE_TEMPLATE` above).
+    create_role_if_missing(
+        pool,
+        APP_ROLE_TEMPLATE,
+        "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT",
+    )
+    .await?;
+
     // 1. CREATE ROLE — NOREPLICATION is the §17.5 invariant, asserted
     //    explicitly (not relying on the server default). `IN ROLE`
     //    grants membership in the template so admin-wrapper EXECUTE +

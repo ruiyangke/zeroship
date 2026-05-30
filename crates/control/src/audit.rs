@@ -82,8 +82,8 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
     };
     let result = conn
         .execute(
-            "INSERT INTO control.app_audit(app_id, creator_id, actor, action, resource, source_ip)
-             VALUES($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO control.app_audit(app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
                 &entry.app_id,
                 &entry.creator_id,

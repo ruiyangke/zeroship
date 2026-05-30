@@ -122,14 +122,36 @@ pub async fn unlink(conn: &Client, user_id: Uuid, provider: &str) -> Result<bool
 
 /// Unlink an identity only if the user keeps at least one sign-in method.
 ///
-/// This locks the user's row inside one statement so concurrent unlinks against
-/// different providers cannot both observe the same "other" identity and
-/// delete the last credentials.
+/// Concurrent unlinks against *different* providers on a no-password,
+/// two-identity user must not both succeed (that would orphan the account).
+/// A single auto-commit statement can't guarantee this under READ COMMITTED:
+/// the orphan-check read of `auth.identities` uses the statement's snapshot,
+/// which is taken *before* it blocks on `auth.users FOR UPDATE`, so the loser
+/// still sees the winner's not-yet-deleted identity and deletes its own too.
+///
+/// We therefore serialize the two callers with a per-user *session* advisory
+/// lock (`with_advisory_lock`): the loser's unlink statement runs as a fresh
+/// implicit transaction only after the winner has committed and released the
+/// lock, so its orphan check observes the committed delete and correctly
+/// refuses (`WouldOrphan`). The in-statement `FOR UPDATE` + orphan guard stay
+/// as belt-and-braces.
 ///
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
 pub async fn unlink_preserving_credential(
+    conn: &Client,
+    user_id: Uuid,
+    provider: &str,
+) -> Result<GuardedUnlink> {
+    let lock_key = crate::advisory_lock::identity_unlink_lock_key(&user_id);
+    crate::advisory_lock::with_advisory_lock(conn, lock_key, || async {
+        unlink_preserving_credential_locked(conn, user_id, provider).await
+    })
+    .await
+}
+
+async fn unlink_preserving_credential_locked(
     conn: &Client,
     user_id: Uuid,
     provider: &str,

@@ -25,7 +25,6 @@ use zeroship_auth::mailer::{
 };
 use zeroship_auth::server;
 use zeroship_auth::startup_validation::validate_hydra_admin_url;
-use zeroship_auth::store;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
@@ -162,16 +161,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .detach();
 
-    // 2. Run migrations.
-    store::migrations::migrate(&client).await?;
-    tracing::info!("auth.* migrations applied");
+    // Schema is owned by Liquibase (db/changelog), applied out of band by the
+    // `migrate` step before this service boots — not here.
 
-    // 3. Bootstrap: keys + client reconciliation.
+    // 2. Bootstrap: keys + client reconciliation.
     let admin = HydraAdmin::new(cfg.hydra_admin_url());
     bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
     tracing::info!("bootstrap complete");
 
-    // 4. Build the Google JWKS cache. Only constructed when Google OAuth
+    // 3. Build the Google JWKS cache. Only constructed when Google OAuth
     //    is wired up — the cache eagerly does nothing (lazy refresh on
     //    first verify), so we don't burn a startup roundtrip on Google.
     let google_jwks = if cfg.google_client_id.is_some() {
@@ -180,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // 5. Spawn in-process cron tasks. Detached on
+    // 4. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared with the server
@@ -190,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
     tracing::info!("cron tasks spawned");
 
-    // 6. Serve. `Arc`s keep the PG client + config alive across the
+    // 5. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
     server::run(cfg, admin, db, google_jwks, mailer).await?;

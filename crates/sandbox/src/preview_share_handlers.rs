@@ -8,7 +8,7 @@
 //! - `DELETE` — rotate the secret + clear `previous` (zero-grace);
 //!   wipes the audit table.
 //! - `DELETE /{token_id}` — per-token revoke. Returns
-//!   `501 Not Implemented` with `code: "deferred-to-phase-5"` so the
+//!   `501 Not Implemented` with `error: "deferred_to_phase_5"` so the
 //!   API surface is reserved until per-token revoke is implemented.
 //!
 //! ## Auth
@@ -463,7 +463,7 @@ async fn persist_preview_state(state: &Arc<AppState>, sandbox_id: Uuid) {
 
 /// `DELETE /sandboxes/{id}/preview/{port}/share/{token_id}` — per-token
 /// revoke stub (`preview-URL` § II.4 "Per-token revocation").
-/// Returns 501 with `code: "deferred-to-phase-5"` so the API surface
+/// Returns 501 with `error: "deferred_to_phase_5"` so the API surface
 /// is reserved without claiming functionality v1 doesn't have.
 pub async fn revoke_one_share(
     req: HttpRequest,

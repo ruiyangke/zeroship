@@ -132,6 +132,29 @@ pub trait SqlExecutor: 'static {
     #[allow(async_fn_in_trait)]
     async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError>;
 
+    /// Execute a parameterless, possibly multi-statement DDL script
+    /// against the pool.
+    ///
+    /// CREATE TABLE emission bundles the table definition with its
+    /// implicit system-field indexes (and, on PG, `COMMENT ON COLUMN`
+    /// mask sentinels) into one `;`-separated script — see
+    /// [`crate::query::build_create_table_with_fks_for_dialect`]. The
+    /// Postgres extended/prepared protocol used by [`Self::pool_exec`]
+    /// (`query_text_params` issues `Parse`/`Bind`/`Execute`) rejects
+    /// multi-statement strings with `cannot insert multiple commands
+    /// into a prepared statement`, so DDL must ride the **simple query
+    /// protocol** (`batch_execute`) instead, which executes a sequence
+    /// of `;`-separated statements in one implicit transaction.
+    ///
+    /// The default impl forwards to [`Self::pool_exec`] — correct for
+    /// the SQLite arm (whose `pool_exec` routes through `sqlite3_exec`,
+    /// natively multi-statement) and for mocks. The Postgres backend
+    /// overrides it to use `batch_execute`.
+    #[allow(async_fn_in_trait)]
+    async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
+        self.pool_exec(sql, &[]).await.map(|_| ())
+    }
+
     /// Execute a SQL statement against a specific client.
     ///
     /// Used by the migration lock + apply-pass paths that need every

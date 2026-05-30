@@ -944,7 +944,11 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
                 code: 42,                        // not a string → drop
                 retryable: "yes",                // not a boolean → drop
                 details: ["array", "is", "ok"],  // any JSON → keep
-                status: 500,
+                // 422: a non-boundary 4xx where the verbose envelope
+                // survives. (5xx bodies are blanked by the dispatch
+                // error-sanitization rail, which would defeat the
+                // type-filtering this test exercises.)
+                status: 422,
             });
         }
         function _makeProcedures() { return { fail }; }
@@ -964,7 +968,7 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
-    assert_eq!(status, 500, "body: {}", body);
+    assert_eq!(status, 422, "body: {}", body);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let obj = v.as_object().unwrap();
     assert!(!obj.contains_key("code"), "non-string code dropped: {}", body);

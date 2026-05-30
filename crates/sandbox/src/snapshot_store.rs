@@ -28,11 +28,13 @@
 //!
 //! Single SHA-256 over the canonical concatenation:
 //!
-//!     H = sha256(
-//!           "config.json"  || len_be(N1) || file_bytes_1 ||
-//!           "memory-ranges"|| len_be(N2) || file_bytes_2 ||
-//!           "state.json"   || len_be(N3) || file_bytes_3
-//!         )
+//! ```text
+//! H = sha256(
+//!       "config.json"  || len_be(N1) || file_bytes_1 ||
+//!       "memory-ranges"|| len_be(N2) || file_bytes_2 ||
+//!       "state.json"   || len_be(N3) || file_bytes_3
+//!     )
+//! ```
 //!
 //! Names are alphabetical to give a deterministic order regardless
 //! of FS traversal. Length prefixes prevent ambiguity at file

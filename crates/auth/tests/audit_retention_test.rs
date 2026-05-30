@@ -8,7 +8,6 @@
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_auth::cron::audit_retention;
-use zeroship_auth::store::migrations;
 
 #[compio::test]
 async fn retention_deletes_old_security_events() {
@@ -21,7 +20,6 @@ async fn retention_deletes_old_security_events() {
         let _ = conn.run().await;
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
 
     // Use a tag in the detail json to uniquely identify our test rows.
     let test_tag = format!("retention-test-{}", Uuid::new_v4().simple());
@@ -79,7 +77,6 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
         let _ = conn.run().await;
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
 
     let test_tag = format!("retention-reuse-{}", Uuid::new_v4().simple());
 

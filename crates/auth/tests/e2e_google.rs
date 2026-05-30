@@ -31,7 +31,6 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
 use zeroship_core::oidc_verify::JwksCache;
 
 mod common;
@@ -69,7 +68,7 @@ async fn google_federation_creates_new_user() {
     let mock = MockProvider::start(ProviderMode::Google, mock_user.clone()).await;
     eprintln!("[e2e_google] mock provider at {}", mock.base);
 
-    // 2. Connect PG and run migrations.
+    // 2. Connect PG.
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
         .expect("connect pg");
@@ -79,7 +78,6 @@ async fn google_federation_creates_new_user() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     // 3. Register a hydra OIDC client. `skip_consent` so the
@@ -372,7 +370,6 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);

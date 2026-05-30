@@ -209,9 +209,6 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         let _ = auth_pg_conn.run().await;
     })
     .detach();
-    zeroship_auth::store::migrations::migrate(&auth_pg_client)
-        .await
-        .expect("auth migrations");
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
@@ -446,8 +443,8 @@ async fn inactive_oauth_token_returns_401() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let body: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("wrong audience json");
-    assert_eq!(body["error"], "wrong_audience");
+        serde_json::from_slice(&test::read_body(resp).await).expect("inactive token json");
+    assert_eq!(body["error"], "inactive_token");
 
     fx.cleanup().await;
 }

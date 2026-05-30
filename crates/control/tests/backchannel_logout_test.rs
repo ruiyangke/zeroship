@@ -60,12 +60,6 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     })
     .detach();
 
-    // Defensive: ensure the schema is in place. Migrations are
-    // idempotent.
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("migrate");
-
     // Two sessions for the same user — the BCL handler revokes every
     // console session for the same sub. There's only one console
     // origin so unlike gateway_sessions there's no per-app dimension;

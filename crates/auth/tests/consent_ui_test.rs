@@ -12,7 +12,6 @@ use common::{read_set_cookie, test_auth_config};
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
 
 const CHALLENGE: &str = "consent-challenge-test";
 const ACCEPT_REDIRECT: &str = "https://client.example/callback?code=accept";
@@ -69,7 +68,6 @@ impl ConsentTestApp {
             }
         })
         .detach();
-        migrations::migrate(&pg_client).await.expect("migrate");
         let pg = Arc::new(pg_client);
 
         let user_id = Uuid::new_v4();
@@ -327,6 +325,20 @@ impl ConsentTestApp {
             )
             .await
             .expect("count oauth grant")
+            .get("n")
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn audit_event_count(&self, event_type: &str) -> i64 {
+        self.pg
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS n \
+                 FROM auth.audit_events \
+                 WHERE user_id = $1 AND event_type = $2",
+                &[&self.user_id, &event_type],
+            )
+            .await
+            .expect("count audit event")
             .get("n")
     }
 }

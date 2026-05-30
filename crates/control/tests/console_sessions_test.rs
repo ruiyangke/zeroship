@@ -49,13 +49,6 @@ async fn create_validate_revoke_roundtrip() {
     })
     .detach();
 
-    // Defensive: U7.1 will have created the table earlier in any sane
-    // boot sequence, but running this test standalone on a fresh DB
-    // should still work.
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("migrate");
-
     let user_id = insert_user(&client, "console-session").await;
     let user_id_text = user_id.to_string();
     let email = format!("u-{}@zeroship.test", Uuid::new_v4().simple());

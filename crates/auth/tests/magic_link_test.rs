@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_auth::identity::{magic_link, password_reset};
-use zeroship_auth::store::migrations;
 use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 
 // `compio_postgres::Client` is `!Send` — the futures inherit that
@@ -20,18 +19,6 @@ use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 async fn pg() -> Option<compio_postgres::Client> {
     let dsn = std::env::var("AUTH_DB_URL").ok()?;
     Some(pg_connect(&dsn).await)
-}
-
-async fn pg_connect(dsn: &str) -> compio_postgres::Client {
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            eprintln!("magic_link test pg connection error: {e}");
-        }
-    })
-    .detach();
-    migrations::migrate(&client).await.expect("migrate");
-    client
 }
 
 async fn pg_connect(dsn: &str) -> Client {
@@ -212,9 +199,17 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
     let attempts: i16 = row.get("attempts");
     let pending: bool = row.get("pending");
     let consumed: bool = row.get("consumed");
+    // The winning CORRECT consume increments `attempts` to 1 as part of its
+    // reservation (consistent with
+    // `concurrent_correct_magic_completions_do_not_count_as_wrong_attempts`,
+    // which asserts the same). The point of THIS test is that the concurrent
+    // WRONG code must NOT increment it further — its wrong-code UPDATE is
+    // gated on `consumed_pending_at IS NULL`, so once the correct code has
+    // reserved the row the wrong code matches nothing. So attempts must be
+    // exactly 1 (the correct reservation), never 2.
     assert_eq!(
-        attempts, 0,
-        "wrong-code update must not increment attempts on a reserved row"
+        attempts, 1,
+        "wrong-code update must not increment attempts beyond the correct reservation's"
     );
     assert!(pending, "correct code should reserve the completion");
     assert!(!consumed, "completion should not be finalized by consume_pending");
@@ -398,7 +393,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
     assert!(!consumed, "redeem_pending must not finalize consumed_at");
 
     assert!(
-        magic_link::clear_consume_pending(&client, &first.token_hash, &first.reserved_at)
+        magic_link::clear_consume_pending(&client, &first.token_hash, Some(&first.reserved_at))
             .await
             .expect("clear consume pending"),
         "clear should update the pending row"
@@ -447,6 +442,11 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
         .await
         .expect("redeem pending 1")
         .expect("first redeem should reserve token");
+    // Age the reservation past PENDING_STALE_SECONDS (5s for magic_links —
+    // unlike magic_completions' 60s retry window). magic_links BURN stale
+    // reservations rather than letting them be retried (the secure default,
+    // documented on `redeem_pending` and covered by
+    // `stale_pending_redeem_burns_link_as_consumed`).
     client
         .execute(
             "UPDATE auth.magic_links \
@@ -457,29 +457,42 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
         .await
         .expect("age first reservation");
 
-    let second = magic_link::redeem_pending(&client, &issued.raw)
+    // The second redeem observes the stale reservation and BURNS the link
+    // (marks consumed_at). It does NOT hand back a fresh reservation.
+    let burned = magic_link::redeem_pending(&client, &issued.raw)
         .await
-        .expect("redeem pending 2")
-        .expect("stale reservation should be retriable");
+        .expect_err("redeem pending 2 should burn the stale reservation");
+    assert!(
+        matches!(burned, magic_link::RedeemError::AlreadyConsumed),
+        "stale magic_link reservation must be burned (AlreadyConsumed), got {burned:?}"
+    );
 
+    // Now the original (stale) owner cannot finalize or clear the row: it has
+    // been consumed by the burn, so its `consumed_at IS NULL` guard fails.
     assert!(
         !magic_link::finalize_consume(&client, &first.token_hash, &first.reserved_at)
             .await
             .expect("stale finalize"),
-        "stale owner must not finalize the newer reservation"
+        "stale owner must not finalize a burned reservation"
     );
     assert!(
-        !magic_link::clear_consume_pending(&client, &first.token_hash, &first.reserved_at)
+        !magic_link::clear_consume_pending(&client, &first.token_hash, Some(&first.reserved_at))
             .await
             .expect("stale clear"),
-        "stale owner must not clear the newer reservation"
+        "stale owner must not clear a burned reservation"
     );
-    assert!(
-        magic_link::finalize_consume(&client, &second.token_hash, &second.reserved_at)
-            .await
-            .expect("current finalize"),
-        "current owner should finalize"
-    );
+
+    // And the row is indeed consumed (the burn stuck).
+    let row = client
+        .query_one(
+            "SELECT consumed_at IS NOT NULL AS consumed FROM auth.magic_links \
+             WHERE token_hash = $1",
+            &[&first.token_hash.as_slice()],
+        )
+        .await
+        .expect("load burned row");
+    let consumed: bool = row.get("consumed");
+    assert!(consumed, "burned stale reservation must be marked consumed_at");
 
     client
         .execute(
@@ -515,7 +528,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
         "second pending redeem should return InFlight, got {err:?}"
     );
 
-    magic_link::clear_consume_pending(&client, &first.token_hash, &first.reserved_at)
+    magic_link::clear_consume_pending(&client, &first.token_hash, Some(&first.reserved_at))
         .await
         .expect("clear consume pending");
 
@@ -938,7 +951,7 @@ async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() 
         "stale owner must not finalize the newer completion reservation"
     );
     assert!(
-        !completions_store::clear_consume_pending(&client, &csrf_nonce, &first.reserved_at)
+        !completions_store::clear_consume_pending(&client, &csrf_nonce, Some(&first.reserved_at))
             .await
             .expect("stale completion clear"),
         "stale owner must not clear the newer completion reservation"

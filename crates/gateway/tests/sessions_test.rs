@@ -29,9 +29,6 @@ async fn create_validate_revoke_roundtrip() {
     // Defensive: U4.1 will have created the table earlier in any sane
     // boot sequence, but running this test on a fresh DB should still
     // work standalone.
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("migrate");
 
     // Random ids — keeps the test repeatable on a shared DB.
     let app_id = format!("app-{}", Uuid::new_v4().simple());

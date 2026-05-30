@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::mailer::{Email, Mailer, MailerError, MessageId};
-use zeroship_auth::store::{migrations, users};
+use zeroship_auth::store::{users};
 
 #[derive(Debug, Default)]
 struct CountingMailer {
@@ -84,7 +84,6 @@ async fn pg() -> Option<(String, compio_postgres::Client)> {
         }
     })
     .detach();
-    migrations::migrate(&client).await.expect("migrate");
     Some((dsn, client))
 }
 
@@ -137,6 +136,14 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
             test::TestRequest::post()
                 .uri("/signup")
                 .peer_addr(peer)
+                // ntex's `TestRequest::peer_addr` does not propagate to
+                // `req.peer_addr()` (its own test asserts it stays None),
+                // so the handler can't see a per-test socket peer. The
+                // handler keys its rate-limit on the *forwarded* client IP
+                // (auth runs behind the gateway), so we inject uniqueness
+                // via X-Forwarded-For — otherwise every test would share
+                // the single `signup_ip:0.0.0.0` bucket and drain it.
+                .header("x-forwarded-for", peer.ip().to_string())
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header("cookie", format!("zsidp_csrf={csrf}"))
                 .set_payload(body)
@@ -333,6 +340,8 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
             test::TestRequest::post()
                 .uri("/forgot")
                 .peer_addr(peer)
+                // See signup test: forwarded IP, not socket peer.
+                .header("x-forwarded-for", peer.ip().to_string())
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header("cookie", format!("zsidp_csrf={csrf}"))
                 .set_payload(body)

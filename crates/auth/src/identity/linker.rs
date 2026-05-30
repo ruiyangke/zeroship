@@ -393,7 +393,6 @@ mod tests {
             }
         })
         .detach();
-        crate::store::migrations::migrate(&client).await.expect("migrate");
         Some(client)
     }
 

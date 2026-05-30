@@ -54,7 +54,6 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
 
 use zeroship_gateway::oidc_rp::OidcRp;
 use zeroship_gateway::sessions::{create, revoke, validate, NewSession};
@@ -171,7 +170,6 @@ async fn gateway_oidc_rp_full_dance() {
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg_client = Arc::new(pg_client);
 
     // 2. Boot crates/auth in-process on a random port.

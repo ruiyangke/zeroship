@@ -15,7 +15,7 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
-use zeroship_auth::store::{migrations, sessions as session_store, users};
+use zeroship_auth::store::{sessions as session_store, users};
 
 #[derive(Debug, serde::Deserialize)]
 struct DeviceAuthorizationResponse {
@@ -56,7 +56,6 @@ async fn boot() -> Option<(
         }
     })
     .detach();
-    migrations::migrate(&pg_client).await.expect("migrate");
     let pg = Arc::new(pg_client);
 
     let admin = HydraAdmin::new(&hydra_admin_url);
@@ -115,16 +114,30 @@ async fn device_route_renders_and_rejects_bad_input() {
         .expect("send POST /device empty");
     assert_eq!(resp.status().as_u16(), 400);
 
+    // An over-length code is rejected by the handler's format check
+    // (`valid_user_code`, MAX_USER_CODE_BYTES) with 400 BEFORE any Hydra
+    // round-trip. Note: a *well-formed* but unknown code (e.g. "BOGUS-CODE")
+    // can NOT be rejected here — Hydra's `/oauth2/device/verify` issues a
+    // device_challenge for any syntactically-acceptable code and only
+    // validates it at `accept_device_user_code` (which requires a signed-in
+    // session). So an anonymous browser submitting a well-formed unknown code
+    // is correctly sent to /login (302), exercised by the next test. Here we
+    // assert the format-level 400 rejection.
+    let overlong = "A".repeat(64);
     let resp = http
         .request(http::Method::POST, format!("{auth_base}/device"))
-        .expect("build POST /device bogus")
+        .expect("build POST /device overlong")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .body("user_code=BOGUS-CODE")
+        .body(format!("user_code={overlong}"))
         .send()
         .await
-        .expect("send POST /device bogus");
-    assert_eq!(resp.status().as_u16(), 400);
+        .expect("send POST /device overlong");
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "an over-length user_code must be rejected at the format check"
+    );
 
     drop(srv);
 }
@@ -226,6 +239,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
+            expected_credential_version: Some(user.credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },
@@ -240,7 +254,13 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         .expect("build signed-in POST /device")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .header("cookie", session_cookie::set_cookie(&session.id, false))
+        // The boot() config runs with `--dev-insecure`, so the handler's
+        // `parse_cookie` looks for the dev cookie name (`zsidp_session`).
+        // The cookie we present must use the SAME mode (insecure_dev=true),
+        // otherwise it is named `__Host-zsidp_session` and the handler can't
+        // find it — `current_session` returns None and we (wrongly) redirect
+        // to /login. Pass `true` to match the dev config.
+        .header("cookie", session_cookie::set_cookie(&session.id, true))
         .expect("cookie")
         .body(post_body)
         .send()

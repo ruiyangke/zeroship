@@ -1,0 +1,51 @@
+# ops/Caddyfile — dev reverse proxy for the zeroship stack on the
+# *.zeroship.localhost domain. Browsers resolve any *.localhost name to
+# 127.0.0.1 automatically, so no /etc/hosts entries are needed.
+#
+# All site addresses use the explicit http:// scheme so Caddy serves plain
+# HTTP on :80 and never tries to provision TLS for .localhost names.
+#
+# Caddy routes to the MOST SPECIFIC matching site block, so the explicit
+# hosts below always win over the *.zeroship.localhost catch-all.
+{
+	# Dev: plain HTTP only, no automatic HTTPS / cert provisioning.
+	auto_https off
+	admin off
+}
+
+# auth.zeroship.localhost — split between the Hydra OIDC kernel (protocol
+# endpoints) and the zeroship-auth UI/RP (login, consent, logout, etc.).
+http://auth.zeroship.localhost {
+	# OAuth2 protocol + discovery/JWKS endpoints → Hydra public listener.
+	handle /oauth2/* {
+		reverse_proxy hydra:4444
+	}
+	handle /.well-known/* {
+		reverse_proxy hydra:4444
+	}
+	# Everything else (login / consent / logout UI + RP routes) → auth service.
+	handle {
+		reverse_proxy auth:9092
+	}
+}
+
+# console.zeroship.localhost — creator dashboard / control plane.
+http://console.zeroship.localhost {
+	reverse_proxy control:9090
+}
+
+# builder.zeroship.localhost — AI builder Vite dev server.
+http://builder.zeroship.localhost {
+	reverse_proxy builder:3001
+}
+
+# api.zeroship.localhost — gateway (explicit API host).
+http://api.zeroship.localhost {
+	reverse_proxy gateway:8000
+}
+
+# Catch-all for hosted creator-app subdomains ({app}.zeroship.localhost).
+# Least specific — only matches hosts not claimed by a block above.
+http://*.zeroship.localhost {
+	reverse_proxy gateway:8000
+}

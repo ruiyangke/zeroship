@@ -286,10 +286,18 @@ fn npm_deserialize_accepts_our_bytes() {
         return;
     }
     // Use a tmpdir that already has superjson installed (created in the
-    // setup phase). If not, skip.
+    // setup phase). If the package is missing OR incompletely installed
+    // (e.g. an empty `dist/` with no `package.json`, which Node cannot
+    // resolve), skip rather than hard-fail — the fixture is an untracked
+    // tmpdir and may be partially populated.
     let tmp = "/tmp/sj-fixture";
-    if !std::path::Path::new(&format!("{tmp}/node_modules/superjson")).exists() {
-        eprintln!("skipping: /tmp/sj-fixture/node_modules/superjson missing");
+    if !std::path::Path::new(&format!("{tmp}/node_modules/superjson/package.json"))
+        .exists()
+    {
+        eprintln!(
+            "skipping: /tmp/sj-fixture/node_modules/superjson/package.json missing \
+             (fixture absent or incomplete)"
+        );
         return;
     }
 

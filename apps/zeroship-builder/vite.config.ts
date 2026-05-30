@@ -19,6 +19,11 @@ const controlUrl = process.env.CONTROL_URL ?? "http://localhost:9090";
 export default defineConfig({
   plugins: [react(), tailwindcss(), zeroship({ devServerPort })],
   server: {
+    // The docker-compose stack serves the builder behind Caddy at
+    // builder.zeroship.localhost. Vite's dev server rejects requests whose
+    // Host header isn't allowlisted (DNS-rebinding protection), so permit the
+    // dev domain (leading "." matches the host and any subdomain).
+    allowedHosts: [".zeroship.localhost"],
     proxy: {
       "/auth": {
         target: controlUrl,

@@ -1,0 +1,68 @@
+# ops/hydra-dev.yaml — Hydra config for the LOCAL docker-compose stack.
+#
+# Differs from ops/hydra.yaml (the prod template) only in the public-facing
+# URLs and cookie scope: the issuer/public base is the Caddy-fronted dev host
+# http://auth.zeroship.localhost (NOT https://auth.zeroship.ai). Hydra still
+# listens on :4444 (public) / :4445 (admin) inside the compose network; Caddy
+# reverse-proxies /oauth2/* and /.well-known/* on auth.zeroship.localhost to
+# hydra:4444, so the issuer the browser (and container-side RPs) see matches
+# the address tokens are minted under.
+#
+# dsn + secrets still come from env (set in docker-compose.yml).
+
+dsn: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+
+serve:
+  public:
+    port: 4444
+    host: 0.0.0.0
+  admin:
+    port: 4445
+    host: 0.0.0.0           # in production: 127.0.0.1; in compose we share network
+  cookies:
+    same_site_mode: Lax
+    # No explicit cookie domain in dev: hydra scopes its session cookies to
+    # auth.zeroship.localhost (the issuer host) by default. Pinning a parent
+    # domain like ".zeroship.localhost" is unnecessary here and browsers
+    # refuse cookie domains on the bare ".localhost" suffix.
+
+urls:
+  self:
+    issuer: http://auth.zeroship.localhost
+    public: http://auth.zeroship.localhost
+  login:   http://auth.zeroship.localhost/login
+  consent: http://auth.zeroship.localhost/consent
+  logout:  http://auth.zeroship.localhost/logout
+  error:   http://auth.zeroship.localhost/error
+
+# JWT access tokens so RPs (gateway, control, builder) can verify locally
+# against the JWKS exposed at /.well-known/jwks.json without an introspection
+# round-trip.
+strategies:
+  access_token: jwt
+
+oauth2:
+  pkce:
+    enforced_for_public_clients: true
+    enforced: true
+  grant:
+    refresh_token:
+      rotation_grace_period: 30s
+      rotation_grace_reuse_count: 3
+
+ttl:
+  access_token: 1h
+  refresh_token: 720h
+  id_token: 1h
+  auth_code: 60s
+  login_consent_request: 1h
+
+oidc:
+  subject_identifiers:
+    supported_types: [public]
+  dynamic_client_registration:
+    enabled: false
+
+log:
+  level: info
+  format: json

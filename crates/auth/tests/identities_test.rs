@@ -7,7 +7,7 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
 use zeroship_auth::store::identities::GuardedUnlink;
-use zeroship_auth::store::{identities, migrations};
+use zeroship_auth::store::{identities};
 
 #[compio::test]
 async fn identities_link_find_list_unlink_roundtrip() {
@@ -18,7 +18,6 @@ async fn identities_link_find_list_unlink_roundtrip() {
 
     let client = pg_connect(&dsn).await;
 
-    migrations::migrate(&client).await.expect("migrate");
 
     // Seed: an OAuth-only user (password_hash NULL). Email is CITEXT so the
     // bind must be cast — compio-postgres binds &str as TEXT.
@@ -112,7 +111,6 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
     };
 
     let client = pg_connect(&dsn).await;
-    migrations::migrate(&client).await.expect("migrate");
 
     let email = format!("identities-{}@example.test", Uuid::new_v4().simple());
     let row = client

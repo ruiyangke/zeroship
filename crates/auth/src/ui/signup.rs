@@ -126,10 +126,10 @@ pub async fn post(
     let name = name.to_string();
 
     // 5. Rate-limit per IP before entering the CPU-bound password hash.
-    let ip = req
-        .peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "0.0.0.0".to_string());
+    //    Use the forwarded client IP (auth runs behind the gateway, so the
+    //    socket peer is the gateway — keying on it would make this a single
+    //    global bucket). Matches link.rs and the audit RequestContext.
+    let ip = crate::headers::client_ip(&req);
     let signup_ip_key = format!("signup_ip:{ip}");
     match ratelimit::consume_or_throttle(db.as_ref(), &signup_ip_key, Bucket::SIGNUP_IP).await {
         Ok(RateLimitDecision::Allowed) => {}
