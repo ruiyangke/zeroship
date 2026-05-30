@@ -51,6 +51,21 @@
  * measure, the background reads edge-to-edge (full-bleed) while the content
  * stays on the readable measure — exactly the band-rhythm goal. */
 
+/* Full-bleed width — the single most important band rule, shared by every
+ * section (all seven stamp `data-tone`). A section root is `display:block`, so
+ * in normal flow it already fills its container; but when a section is laid out
+ * by a CENTERING parent (a grid/flex column with place-items/justify-items:
+ * center — the Storybook canvas does exactly this, and real page shells often
+ * do too) a block child is content-SIZED and centered. That silently collapsed
+ * every band to its content width: align="start" never reached the page edge,
+ * two-tier / minimal layouts floated mid-canvas, and even the tone fills above
+ * were centered blocks rather than true full-bleed bands. Claiming the full
+ * inline size makes the band span its container; the composed Container's
+ * max-width + margin-inline:auto still own the inner readable measure. */
+[data-tone] {
+  inline-size: 100%;
+}
+
 /* muted — a subtle surface fill so the band reads as its own panel. */
 [data-tone="muted"] {
   background: var(--zs-surface);

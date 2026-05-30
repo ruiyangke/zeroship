@@ -42,17 +42,11 @@
   --zs-footer-brand-size: 18rem;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
-     No background: composable, the consumer paints the page backdrop. */
+     No background: composable, the consumer paints the page backdrop.
+     Full-bleed inline-size is owned by the shared `[data-tone]` rule in
+     _section-tone.css (every section band claims 100% so it never
+     shrinks-to-fit under a centering parent). */
   display: block;
-  /* A footer is a full-bleed page band: it fills the inline space of whatever
-     lays it out, then the composed Container governs the inner measure. Claim
-     the full inline size explicitly so the band never shrinks-to-fit when its
-     parent establishes a content-sized context (a centering grid/flex item, a
-     narrow `min-content` track). Without this, a sparse footer (e.g. brand +
-     copyright only) collapsed to its content width — the Separator went stubby
-     and the brand/copyright drifted off the inline-start. The Container's
-     `max-width` + `margin-inline:auto` still own the inner column. */
-  inline-size: 100%;
   padding-block: var(--zs-space-10);
   color: var(--zs-label);
 }
