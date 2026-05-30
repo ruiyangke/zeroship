@@ -28,3 +28,12 @@ export {
   type PricingFeature,
   type PricingHeadingLevel,
 } from "./PricingTable";
+
+export {
+  FeatureGrid,
+  type FeatureGridProps,
+  type FeatureGridItemProps,
+  type FeatureItem,
+  type FeatureGridAlign,
+  type FeatureGridColumns,
+} from "./FeatureGrid";
