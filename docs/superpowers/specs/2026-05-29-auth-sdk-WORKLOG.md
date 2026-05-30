@@ -1,53 +1,64 @@
-# @zeroship/auth build — loop WORKLOG
+# @zeroship/auth build — loop WORKLOG (FINAL)
 
-`feat/auth-sdk-popup` autonomous pilot loop. **Pilot (user offline 2026-05-29): decide forks myself,
-no review gate, commit-only NEVER push.** Specs: `2026-05-29-auth-sdk-design.md` + `2026-05-29-relay-email-design.md`.
+`feat/auth-sdk-popup` autonomous pilot loop. **Pilot (user offline 2026-05-29): decided forks myself,
+no review gate, commit-only NEVER pushed.** Specs: `2026-05-29-auth-sdk-design.md` + `2026-05-29-relay-email-design.md`.
 
-## STATUS: feature build COMPLETE (5/5 subsystems). Remaining: live e2e + backlog.
+## STATUS: ✅ FEATURE-COMPLETE + LIVE-E2E-VALIDATED + meaningful backlog cleared. NOT pushed.
+The whole-vision Supabase/Auth0-style in-app-popup auth SDK is built across all 5 subsystems, every
+slice critic-reviewed → fixed → verified, and validated against a real Hydra+Postgres+mailpit stack.
 
-## Commit log (feat/auth-sdk-popup, commit-only)
+## Commit log (feat/auth-sdk-popup, commit-only — 20 feat/fix commits + docs)
 1a 5ee245d7 · 1b-mech 83936a83 · 1c 3d96f7ea · 1d d46ac990 · 1b-pool 740f009f · 1b-anchors 4ea94e3b ·
 1b-browser aaebed3d · 2a 77e2d18c · 2b c5afa5ae · oidc_rp-breaker c7f905d7 · 3a b2e087cc · 3b 441c0a01 ·
-4 b5af568f · 5a 2cec959d · 5b 344f0108 · 5c 09f46d83. (+ doc commits; relay sub-spec GO f95c7638.)
+4 b5af568f · 5a 2cec959d · 5b 344f0108 · 5c 09f46d83 · live-e2e-fixes b1d1a28d · 3c 86cd6496 ·
+dpop-introspect-bind cc5a48e8. (+ doc commits; relay sub-spec GO f95c7638.)
 
-Delivered: gateway /__zs/auth/{authorize,popup-callback,token,session?mint=1,signout,jwks} + Bearer arm
-+ per-app public PKCE clients + anchors + mint single-flight + wrapper key rotation + per-thread Hydra
-client + circuit breaker. env.auth. Declared scopes (manifest→registry→consent two-namespace→token→
-env.auth). Pairwise pws_ on ALL arms (global UUID never reaches apps). Relay: alias mint + inbound
-webhook + forwarding (real inbox only in RCPT TO) + reply-bounce + revocation cascade + email-claim swap
-(apps see pws_ id + relay alias only). SDK @zeroship/auth . /client /react /types.
+## What shipped
+- **Per-app OAuth foundation:** gateway `/__zs/auth/{authorize, popup-callback, token, session?mint=1,
+  signout, jwks}` (same-origin so no ITP), Bearer arm (wrapper + raw-Hydra, client_id-bound), per-app
+  public PKCE clients (control lifecycle on deploy), app_session_anchors + per-node mint single-flight,
+  wrapper ed25519 key rotation, per-worker compio-postgres pool, per-thread Hydra client + circuit
+  breaker, env.auth.{getUser,requireUser}.
+- **`@zeroship/auth` SDK:** ESM `.`/`./client`/`./react`/`./types`; createAuthClient (signInWithOAuth
+  popup, exchangeCodeForSession, getSession/getUser/refreshSession/onAuthStateChange/signOut,
+  getAccessToken[WithPopup], hasScope/requestScopes), cacheLocation memory(default)|localstorage,
+  navigator.locks, breadcrumb-gated checkSession, AuthProvider/useAuth/SignInButton. 71 tests.
+- **Declared scopes:** manifest auth.scopes → control registry + per-app Hydra allowlist → consent
+  two-namespace classifier (self-grant fix) → token scope claim → WorkerUser.scopes → env.auth; route
+  required_scopes → 403 (Anon-short-circuited). SDK hasScope/requestScopes + scope_required mapError.
+- **Pairwise:** derive_pairwise; every arm projects pws_ (global UUID never reaches apps);
+  app_user_identities mapping.
+- **Relay email:** alias mint at consent, inbound webhook (provider-sig gate), forwarding (real inbox
+  only in RCPT TO — proven via .formatted()), reply→bounce, loop/rate/suppression guards, revocation
+  cascade, email-claim swap (apps see pws_ id + relay alias only).
 
-DB changesets added: 0006 app_session_anchors, 0007 app_scope_defs, 0008 gateway_sessions.granted_scopes,
-0009 app_user_identities (+ token_revocations into 0002). includeAll auto-applies.
+## Live e2e (b1d1a28d): 43/43 Liquibase changesets apply to a fresh DB; 12/13 DB-gated suites RUN+PASS
+live vs real Hydra+Postgres(+mailpit) — auth_token_anchors proves pws_≠UUID / email→alias / single-flight
+/ reload LIVE; consent 21, control oauth_grants 13 (revoke→alias cascade), DPoP 3, headless
+authorization_code+PKCE dance, relay inbound spoof-gate+revoke→bounce. Found+fixed 3 bugs (plaintext SMTP
+transport [major], clap bool flags, oidc_rp_e2e fixture). (oidc_rp_e2e's 1 fail was a fixture coupling, fixed.)
 
-## REMAINING WORK
-### A. Live compose-stack e2e (HIGH — the faithful-e2e validation gate)
-Bring up the stack (Hydra + migrated Postgres + an MX sink), run ALL the DB-gated tests live
-(auth_token_anchors, app_oauth_client, consent_ui, identities_relay, relay_dedup, sessions, dpop), and a
-cross-component headless OAuth flow: provision per-app client → /authorize → Hydra → /token (wrapper) →
-app request with Bearer → env.auth sees pws_ + alias email → consent declared scope → /session?mint=1
-reload → /signout revokes. Relay: inbound to alias → forward to real inbox (MX sink), reply→bounce,
-revoke→stops forwarding. (Browser popup e2e via Playwright is the heavier gold-standard, separate.)
-Compose setup is on the merged full-stack-compose work (Caddy + *.zeroship.localhost, Liquibase migrate
-service). EXPECT to find never-exercised integration bugs (as the compose work did) and fix them.
+## OPTIONAL backlog (NONE block; for the user to greenlight — all well-specified):
+1. JWKS-refresh breaker: core::oidc_verify::JwksCache::refresh still does cyper::Client::new() per fetch,
+   no breaker. LOW value — 5-min cached, NOT the brownout hot path (the oidc_rp breaker c7f905d7 already
+   covers the token/introspect mint path). In core (shared by gateway+control), so a self-contained
+   breaker/timeout there.
+2. DPoP-introspection per-app revocation: the DPoP introspection-fallback arm trusts Hydra `active`
+   (global revocation) and does not do the per-app family-marker check the Bearer arm does. Rare path
+   (opaque DPoP tokens).
+3. control auth_pg Arc<Client> → Pool: relay_revoke + the cross-schema cascade open per-call dedicated
+   conns. Cleaner with a pool (the gateway already migrated in 1b-pool). Moderate refactor.
+4. Wire-level gateway-HTTP e2e: drive /__zs/auth/* over the wire behind a deployed app (needs the slow
+   Rust service image build). Handler logic is already covered by the live DB-gated tests.
+5. Trivia: BroadcastChannel name 'zs:auth' vs the spec's app-ref-scoped; gateway clippy doc-lints +
+   resolve_dpop_user_header too_many_lines (-W warnings, pre-existing-class).
 
-### B. Backlog polish (MED)
-- 3c: gateway route-level required_scopes → 403 (apps self-enforce via env.auth.scopes meanwhile;
-  needs a Manifest rule field + RouteEntry + the gateway check).
-- DPoP-introspection per-app client_id binding (token-confusion between apps for opaque DPoP tokens;
-  pre-existing, not a UUID leak).
-- JWKS fetch in core::oidc_verify still per-call cyper::Client (5-min cached, not the brownout surface).
-- control auth_pg Arc<Client> → Pool (relay_revoke opens a per-call dedicated conn; deferred).
-- BroadcastChannel name 'zs:auth' vs spec app-ref-scoped; gateway clippy doc-lints.
+## WHEN THE USER RETURNS: give the full summary; THEY decide push / open a PR / do any optional backlog.
+Still commit-only, nothing pushed. (Loop kept alive at a long idle heartbeat; no more heavy work spawned
+autonomously — the meaningful build is done.)
 
 ## Decisions (in specs): O8 manifest auth.scopes · O7 relay-reply-bounce · S1 client_id binding · S2 F4-B
 gateway HMAC pairwise · mint single-flight+Pool · wrapper key rotation · anchor abs=created_at+30d ·
 scope:global signout=this-app-all-devices · app_user_identities(app_client_id=oac_, pairwise_sub) ·
-email_verified describes the real inbox the alias forwards to.
-
-## Process notes
-- Per-slice: implement(TDD faithful) → code-critic(security) → code-fixer → I build the FULL affected
-  crate set + run all suites + commit. Two workflows hit a StructuredOutput hiccup (5b critic) → recovered
-  by re-running review on the on-disk output.
-- LESSON: integration-heavy slices SOLO; parallelize only provably-disjoint (sdks vs gateway, doc vs code).
-- NOT pushed (pilot directive). When the user returns: summarize, then they decide push/PR.
+email_verified describes the real inbox · 403=scope_required(SDK)/insufficient_scope(WWW-Authenticate).
+## LESSON: integration-heavy slices SOLO; parallelize only provably-disjoint (sdks vs gateway, doc vs code).
