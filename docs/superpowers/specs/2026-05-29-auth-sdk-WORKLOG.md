@@ -3,9 +3,21 @@
 `feat/auth-sdk-popup` autonomous pilot loop. **Pilot (user offline 2026-05-29): decided forks myself,
 no review gate, commit-only NEVER pushed.** Specs: `2026-05-29-auth-sdk-design.md` + `2026-05-29-relay-email-design.md`.
 
-## STATUS: ✅ FEATURE-COMPLETE + LIVE-E2E-VALIDATED + meaningful backlog cleared. NOT pushed.
+## STATUS: ✅ FEATURE-COMPLETE + LIVE-E2E-VALIDATED + POLISH ROUND COMPLETE. NOT pushed.
 The whole-vision Supabase/Auth0-style in-app-popup auth SDK is built across all 5 subsystems, every
 slice critic-reviewed → fixed → verified, and validated against a real Hydra+Postgres+mailpit stack.
+
+### Polish round (2026-05-30) — DONE
+- d196adff: DPoP introspection arm now does per-app family-marker revocation (Bearer parity).
+- f014d7be: investigated relay revoke-cascade pooling → KEPT the dedicated connection (a shared-conn
+  BEGIN/COMMIT would break txn isolation); added a regression test that locks that in.
+- 2808f4e8: aligned the spec BroadcastChannel name to the code ('zs:auth').
+- bedf4e39: bounded JWKS-refresh fetch timeout + reused client (last §8.7 resilience gap).
+- FINAL SWEEP green: build all 8 auth crates clean; core 165, bundle 10, gateway 302, control 85,
+  auth 156, runtime auth_plugin 7, @zeroship/auth SDK 71 — 0 failed; working tree clean.
+- REMAINING (genuinely optional, NOT done): a wire-level browser/popup e2e (needs the slow Rust
+  service image build) + cosmetic clippy doc-lints / too_many_lines (-W warnings, pre-existing-class).
+  Nothing functional left. **Awaiting the user: push / PR decision.**
 
 ## Commit log (feat/auth-sdk-popup, commit-only — 20 feat/fix commits + docs)
 1a 5ee245d7 · 1b-mech 83936a83 · 1c 3d96f7ea · 1d d46ac990 · 1b-pool 740f009f · 1b-anchors 4ea94e3b ·
