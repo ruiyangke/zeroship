@@ -27,11 +27,15 @@
 //!    by introspecting the original. The browser plain-Bearer path has
 //!    no underlying raw token and omits `wraps`.
 //!
-//! The `sub` claim is an **opaque string**: the DPoP path stamps
-//! whatever subject the introspection response carried (a global UUID
-//! today); a future browser path stamps a per-app pairwise `pws_…`
-//! projection. The wrapper machinery makes no UUID assumption — the
-//! caller supplies the `sub` it wants.
+//! The `sub` claim is an **opaque string**, but every gateway minter
+//! ALWAYS stamps a per-app pairwise `pws_…` subject (and a relay-alias
+//! email) — on BOTH the DPoP-exchange path and the browser plain-Bearer
+//! path — so the JS-readable wrapper never carries the global Hydra UUID
+//! or the real address. The wrapper *machinery* itself makes no shape
+//! assumption (the caller supplies `sub`), but the inbound fast-paths
+//! enforce the self-describing-subject invariant: a wrapper whose `sub`
+//! is not `pws_…`-shaped is hard-rejected (`is_pairwise_subject`), so a
+//! non-projected wrapper can never reach a worker.
 //!
 //! Tokens carry the RFC 9068 `typ: at+jwt` header so they cannot be
 //! confused with hydra ID tokens (`typ: JWT`) on the verify side, and
@@ -124,8 +128,9 @@ pub struct Cnf {
 pub struct WrapperMint<'a> {
     /// Request `Host` the wrapper is destined for (`{app}.zeroship.ai`).
     pub aud: &'a str,
-    /// Opaque subject. A global UUID on the DPoP path; a per-app
-    /// `pws_…` projection on the browser path. Stamped verbatim.
+    /// Opaque subject, stamped verbatim. Every gateway minter supplies a
+    /// per-app pairwise `pws_…` projection here (DPoP-exchange and browser
+    /// paths alike); the inbound fast-paths reject any non-`pws_` subject.
     pub sub: &'a str,
     /// Granted scope string.
     pub scope: &'a str,

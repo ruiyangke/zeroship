@@ -446,13 +446,15 @@ async fn live_relay_email_for_wrapper(
     state: &Arc<GateState>,
     client_id: &str,
     pws_sub: &str,
-    wrapper_email: &str,
 ) -> String {
     let Some(db_cfg) = state.db.as_ref() else {
-        // Smoke mode (no DB): nothing to re-resolve against. The wrapper's
-        // claim is already alias-only (minted via the §7 swap), so pass it
-        // through rather than blank a still-valid alias.
-        return wrapper_email.to_string();
+        // Smoke mode (no DB): nothing to re-resolve against. Fail CLOSED to an
+        // empty email rather than trust the wrapper's embedded claim — this
+        // matches the raw-Hydra/introspection/cookie arms (which already emit
+        // empty when no alias is resolvable) and means the no-DB path can never
+        // surface an embedded email regardless of how the wrapper was minted
+        // (defense-in-depth: not an implicit dependency on the minter invariant).
+        return String::new();
     };
     match crate::db::checkout(db_cfg).await {
         Ok(pool) => match pool.get().await {
@@ -822,7 +824,6 @@ async fn resolve_dpop_user_header(
                     state,
                     &claims.client_id,
                     &claims.sub,
-                    &owned.email,
                 )
                 .await;
                 let user: oidc_rp::WorkerUser<'_> = (&owned).into();
@@ -1243,7 +1244,6 @@ async fn resolve_bearer_user_header(
             state,
             &claims.client_id,
             &claims.sub,
-            &owned.email,
         )
         .await;
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
@@ -2812,7 +2812,12 @@ mod tests {
     async fn bearer_valid_wrapper_emits_zeroship_user() {
         // Happy path (wrapper): a plain-Bearer wrapper for the route's
         // client_id verifies and the ZeroShip-User header carries the
-        // wrapper's sub/email straight through (no pairwise re-derivation).
+        // wrapper's pws_ sub. The email is re-resolved LIVE (Batch A fix 5):
+        // this state has no DB (smoke), so the live re-resolve fails CLOSED to
+        // an empty email rather than trusting the wrapper's embedded claim —
+        // a real gateway always has a DB and re-reads the alias by (client_id,
+        // pws_). (See bearer_wrapper_reresolves_relay_email_live_and_blanks_on_revoke
+        // for the with-DB live re-resolve + blank-on-revoke path.)
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_wrapper(gateway_signing);
         let aud = "myapp.zeroship.ai";
@@ -2833,7 +2838,8 @@ mod tests {
         .expect("ZeroShip-User MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(user["id"], "pws_alice");
-        assert_eq!(user["email"], "relay-alias@zeroship.ai");
+        // Smoke mode (no DB) ⇒ live email re-resolve fails closed to empty.
+        assert_eq!(user["email"], "", "no-DB wrapper arm fails closed to empty email");
         assert_eq!(user["email_verified"], true);
     }
 
