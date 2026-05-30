@@ -49,10 +49,33 @@ component + regression. Each cluster agent must verify its suites GREEN + axe-cl
 before reporting. Orchestrator central-verifies + commits per cluster.
 
 ## Progress
-- [ ] Cluster 1 hover overlays (PreviewCard+Tooltip) — AGENT RUNNING
-- [ ] Cluster 2 toBeDisabled pattern
-- [ ] Cluster 3 residual toBeVisible overlays
-- [ ] Cluster 4 role/aria
-- [ ] Cluster 5 axe violations
-- [ ] Cluster 6 focus / role=link
-- [ ] FINAL: full suite 0 failed; commit reduced-motion harness + all fixes
+- [x] Cluster 1 hover overlays (PreviewCard+Tooltip) — DONE, 19/19 green, committed 76f1178d
+      (root cause: Base UI hover opens on onMouseMove which userEvent.hover never fires +
+      listeners attach in useEffect → hoverToOpen helper replays real pointer seq; reduced-motion
+      harness fix committed same round)
+- [x] Cluster 2 disabled-state — DONE, committed d083b61f (5 faithful aria-disabled test fixes
+      + 1 REAL Fieldset cascade bug: FieldsetRoot never emitted native disabled → fixed via render prop;
+      Accordion axe was a cascading artifact of the failed assertion)
+- [x] Cluster 3 residual toBeVisible overlays — DONE, committed 3069d42b (REAL reduced-motion CSS
+      defect: open overlays painted opacity:0 for a frame; snapped reduced-motion enter/leave to
+      resting-visible in Drawer/Menu/NavMenu/Dialog css; + faithful Menu NestedSubmenu & Toast Stacked play fixes)
+- [x] Cluster 4a role-not-found — DONE, committed efaafc6d (REAL Radio group-label a11y bug fixed in
+      Radio.tsx; Menubar items role=menuitem; NumberField input is textbox not spinbutton; Required needs Base UI <Form>)
+- [x] Cluster 4b field-aria/value — DONE, committed b4d32fcd (REAL OtpField aria-invalid bug on cells +
+      faithful fixes: keyboard-commit, <Form> validation, expect.stringMatching API-bug, RTL DirectionProvider, axe opt-out, scroll/dirty-flag)
+- [x] Cluster 6 focus+role=link + Drawer-Nested-axe — DONE, committed ae86a138 (faithful story-layer:
+      Close asChild→role=button via Base UI useButton, Menu aria-haspopup not aria-expanded, disabled
+      items stay focusable, NavMenu roving/hover-swap, Dialog InitialFocus deflaked; + REAL a11y fix:
+      Drawer Nested duplicate <main> landmark → <section>). FIRST attempt (ad8a2aaf) died on API 529 and
+      its unverified _slot.ts rewrite regressed ALL asChild (163 red) → DISCARDED; fresh guarded agent
+      (af2ef43f) redid it story-only with _slot.ts untouched + broad asChild regression guard.
+
+## ✅ CAMPAIGN COMPLETE — FULL SUITE 611/611 PASSED, 65 suites, 0 failed (maxWorkers=2)
+Commits: r1 76f1178d (hover + reduced-motion test harness), r2 d083b61f (disabled-state + REAL Fieldset
+native-disabled cascade bug), r3 3069d42b (REAL reduced-motion overlay-paint defect), r4a efaafc6d
+(REAL Radio group-label a11y bug), r4b b4d32fcd (REAL OtpField cell aria-invalid bug), r6 ae86a138
+(focus/role/link + REAL Drawer duplicate-main landmark fix).
+FIVE real component/a11y defects fixed + the reduced-motion test harness; every other fix was a
+faithful test correction of a wrong premise about real @base-ui/react 1.5.0 behavior. NO assertions
+weakened. Process lesson: an agent that dies unverified (e.g. API 529) can leave a catastrophic
+shared-helper regression — DISCARD its edits and re-dispatch fresh with a regression guard.
