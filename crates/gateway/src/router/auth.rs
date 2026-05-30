@@ -494,7 +494,10 @@ enum DpopOutcome {
 ///      (Phase 8 U4 fast path — self-contained, no introspection),
 ///      OR the token does not look like a wrapper / no verifier is
 ///      configured AND hydra's `/oauth2/introspect` returns
-///      `active: true` (P7-U5 fallback, no `cnf.jkt` enforcement).
+///      `active: true` AND the introspected `client_id` equals the route's
+///      expected `oauth_client_id` (P7-U5 fallback; no `cnf.jkt` enforcement,
+///      but the per-app `client_id` binding closes the cross-app
+///      token-confusion gap the wrapper fast-path covers via `aud`/`cnf`).
 ///
 /// Returns [`DpopOutcome::None`] for "no `DPoP` token in this request"
 /// AND for every failure mode above. The caller distinguishes the two
@@ -740,12 +743,45 @@ async fn resolve_dpop_user_header(
         return DpopOutcome::None;
     }
 
+    // 6c. Per-app binding (Slice 4 token-confusion fix). The DPoP wrapper
+    //     fast-path (6a) binds via `aud == Host` + `cnf.jkt`; this raw-opaque
+    //     fallback has neither, so an opaque DPoP-bound token active for app A,
+    //     replayed at app B's host with a valid proof, would otherwise be
+    //     accepted as B (and projected to B's sector). We close that gap by
+    //     binding the introspected token to the route's expected client, the
+    //     SAME `client_id`-claim binding the raw-Hydra Bearer arm enforces
+    //     (RFC 9068 §3 / RFC 7662 `client_id`).
+    //
+    //     When the route has no `oauth_client_id` (un-provisioned app, 1d
+    //     fills it) we cannot bind to a missing client — exactly the Bearer
+    //     arm's posture (it returns `Invalid` rather than accept an unbound
+    //     token). Here we reject the DPoP credential (`None`); the caller then
+    //     401s (a request that asserted DPoP cannot re-assert via cookie). The
+    //     ClientNotProvisioned 503 is reserved for the DOWNSTREAM no-sector
+    //     case (6.2), reached only once the token is already bound.
+    let Some(expected_client_id) = oauth_client_id else {
+        tracing::warn!(
+            "DPoP introspection succeeded but route has no oauth_client_id — \
+             cannot bind token to a client; rejecting"
+        );
+        return DpopOutcome::None;
+    };
+    if info.client_id.as_deref() != Some(expected_client_id) {
+        tracing::warn!(
+            token_client_id = ?info.client_id,
+            expected = %expected_client_id,
+            "DPoP introspected token client_id does not match route client — \
+             rejecting (cross-app token confusion)"
+        );
+        return DpopOutcome::None;
+    }
+
     // 7. Build the `ZeroShip-User` header from the introspection result.
     //    The introspected `sub` is the GLOBAL Hydra UUID — project it to
     //    the per-app `pws_` (§6.2) so the worker header never carries the
     //    global id. Fail closed (503) when the route has no sector yet.
     let mut owned = build_worker_user_from_introspection(&info);
-    match project_pairwise(state, oauth_client_id, sector_identifier, &owned.id).await {
+    match project_pairwise(state, Some(expected_client_id), sector_identifier, &owned.id).await {
         PairwiseProjection::Projected { pws, relay_email } => {
             owned.id = pws;
             // Email-claim swap (§7): project the relay alias, never the real
@@ -3111,6 +3147,305 @@ mod tests {
         );
 
         drop(srv);
+    }
+
+    // ─── DPoP introspection-fallback per-app binding (Slice 4 token-confusion
+    //     fix) ──────────────────────────────────────────────────────────────
+    //
+    // The DPoP wrapper fast-path binds via `aud == Host` + `cnf.jkt`. The
+    // raw-opaque introspection fallback (6b) has neither, so it now binds the
+    // introspected `client_id` to the route's expected `oauth_client_id` —
+    // mirroring the raw-Hydra Bearer arm. These tests drive the REAL
+    // `resolve_dpop_user_header` against a loopback `/oauth2/introspect` mock
+    // (same harness shape as `start_jwks_server` / the dpop_exchange tests):
+    //
+    //   - client_id mismatch (token issued to app A, presented at app B) →
+    //     rejected (`DpopOutcome::None`), no global UUID projected.
+    //   - client_id match → `Allowed`, sub projected to the per-app `pws_`.
+    //   - route un-provisioned (`oauth_client_id == None`) → rejected,
+    //     consistent with the Bearer arm refusing to bind an unbound token.
+    //
+    // An opaque (non-JWT) access token + `wrapper_verifier: None` guarantees
+    // the wrapper fast-path is skipped and the introspection arm runs.
+
+    /// Spin up a loopback Hydra `/oauth2/introspect` mock returning `body`
+    /// verbatim. `OidcRp::introspect_token` POSTs to `{auth_ui_url}/oauth2/
+    /// introspect`, so the gateway must be built with `auth_ui_url` = this
+    /// server's base URL.
+    async fn start_introspect_server(
+        body: serde_json::Value,
+    ) -> ntex::web::test::TestServer {
+        let body = std::sync::Arc::new(body);
+        let body_for_server = body.clone();
+        ntex::web::test::server(move || {
+            let body = body_for_server.clone();
+            async move {
+                ntex::web::App::new().state(body).service(
+                    ntex::web::resource("/oauth2/introspect").route(
+                        ntex::web::post().to(
+                            |body: ntex::web::types::State<
+                                std::sync::Arc<serde_json::Value>,
+                            >| async move {
+                                ntex::web::HttpResponse::Ok().json(body.get_ref().as_ref())
+                            },
+                        ),
+                    ),
+                )
+            }
+        })
+        .await
+    }
+
+    /// Build a state whose `OidcRp` introspection endpoint dials
+    /// `introspect_base` and whose `wrapper_verifier` is `None` — so a DPoP
+    /// access token that is NOT a wrapper falls straight through to the
+    /// introspection fallback (6b). `db: None` keeps the pairwise projection
+    /// a pure HMAC (no PG round-trip) while still exercising the real
+    /// `project_pairwise`.
+    fn build_state_for_introspection(
+        gateway_signing: ed25519_dalek::SigningKey,
+        introspect_base: &str,
+    ) -> std::sync::Arc<crate::GateState> {
+        use std::sync::Arc as StdArc;
+
+        let oidc_rp = crate::oidc_rp::OidcRp::new(
+            introspect_base,
+            "gateway",
+            "test-secret",
+            b"test-stash-key-32-bytes-long----".to_vec(),
+        );
+
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("zsgate-dpop-introspect-{}", uuid::Uuid::new_v4().simple()));
+        let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
+
+        StdArc::new(crate::GateState {
+            config: crate::GateConfig {
+                control_url: String::new(),
+                control_key: String::new(),
+                worker_urls: vec![],
+                poll_interval_secs: 5,
+                worker_key: "wk".into(),
+                hydra_public_url: String::new(),
+                auth_ui_url: oidc_rp.auth_ui_url.clone(),
+                insecure_dev: true,
+                trust_proxy: false,
+                public_url: "https://api.zeroship.ai".into(),
+            },
+            routes: crate::sync::RouteCache::new(),
+            hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
+            rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
+            per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
+            concurrency: crate::enforce::ConcurrencyRegistry::new(1),
+            blob_store: StdArc::new(StubBlobStore),
+            blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
+            disk_cache: disk,
+            idempotency_store: StdArc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
+            oidc_rp: StdArc::new(oidc_rp),
+            db: None,
+            dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
+            logout_jti_cache: StdArc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            signing_key: Some(StdArc::new(gateway_signing)),
+            prev_signing_key: None,
+            // No wrapper verifier ⇒ the wrapper fast-path is skipped and an
+            // opaque DPoP token routes to the introspection fallback.
+            wrapper_issuer: None,
+            wrapper_verifier: None,
+            anchor_enc_key: [0u8; 32],
+            pairwise_salt: [0u8; 32],
+        })
+    }
+
+    /// Build a DPoP request carrying an OPAQUE (non-JWT) access token + a real
+    /// RFC 9449 proof signed by `client_key`, bound to `http://{host}{path}`.
+    fn opaque_dpop_req(
+        client_key: &ed25519_dalek::SigningKey,
+        access_token: &str,
+        host: &str,
+        path: &str,
+    ) -> ntex::web::HttpRequest {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{host}{path}");
+        let proof = sign_dpop_proof(client_key, "GET", &htu, access_token, now);
+        ntex::web::test::TestRequest::default()
+            .uri(path)
+            .header(http::header::HOST, host)
+            .header(http::header::AUTHORIZATION, format!("DPoP {access_token}"))
+            .header("dpop", proof)
+            .to_http_request()
+    }
+
+    #[ntex::test]
+    async fn resolve_dpop_introspection_rejects_client_id_mismatch() {
+        // A DPoP-bound opaque token active for app A ("oac_app_a"), replayed at
+        // app B's host with a VALID proof, must be rejected — the introspected
+        // client_id does not match the route's expected client. Pre-fix this
+        // was accepted and projected to B's sector (cross-app token confusion).
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let srv = start_introspect_server(serde_json::json!({
+            "active": true,
+            "sub": "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001",
+            "client_id": "oac_app_a",
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": "Hydra User",
+            "scope": "openid email",
+        }))
+        .await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_introspection(gateway_signing, &base);
+
+        let host = "appb.zeroship.ai";
+        let req = opaque_dpop_req(&client_key, "ht_opaque_app_a", host, "/api/me");
+        let request_id = Uuid::new_v4();
+        // Route bound to app B; token says app A.
+        let outcome = resolve_dpop_user_header(
+            &req,
+            &state,
+            &request_id,
+            Some("oac_app_b"),
+            Some("https://appb.zeroship.ai"),
+        )
+        .await;
+        assert!(
+            matches!(outcome, DpopOutcome::None),
+            "DPoP introspection client_id mismatch must reject (None), got {outcome:?}"
+        );
+
+        drop(srv);
+    }
+
+    #[ntex::test]
+    async fn resolve_dpop_introspection_accepts_matching_client_id() {
+        // Matching client_id → Allowed, and the GLOBAL Hydra UUID sub is
+        // projected to the per-app pws_ for THIS route's client/sector (never
+        // emitted on the worker header).
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002";
+        let srv = start_introspect_server(serde_json::json!({
+            "active": true,
+            "sub": global_sub,
+            "client_id": "oac_myapp",
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": "Hydra User",
+            "scope": "openid email",
+        }))
+        .await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_introspection(gateway_signing, &base);
+
+        let host = "myapp.zeroship.ai";
+        let sector = "https://myapp.zeroship.ai";
+        let req = opaque_dpop_req(&client_key, "ht_opaque_myapp", host, "/api/me");
+        let request_id = Uuid::new_v4();
+        let outcome = resolve_dpop_user_header(
+            &req,
+            &state,
+            &request_id,
+            Some("oac_myapp"),
+            Some(sector),
+        )
+        .await;
+        let DpopOutcome::Allowed(header) = outcome else {
+            panic!("expected Allowed on matching client_id, got {outcome:?}");
+        };
+        let json = zeroship_core::auth::verify_zeroship_user_header(
+            state.config.worker_key.as_bytes(),
+            &header,
+        )
+        .expect("MAC verifies");
+        let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
+        let expected_pws =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+        assert_eq!(user["id"], expected_pws, "sub must project to the per-app pws_");
+        assert!(expected_pws.starts_with("pws_"), "id must be a pws_, got {expected_pws}");
+        assert!(
+            !json.contains(global_sub),
+            "global UUID leaked into ZeroShip-User: {json}"
+        );
+
+        drop(srv);
+    }
+
+    #[ntex::test]
+    async fn resolve_dpop_introspection_rejects_when_route_unprovisioned() {
+        // No route client (oauth_client_id == None): we cannot bind the
+        // introspected token to a client. Consistent with the Bearer arm
+        // (which refuses an unbound token rather than accept it), the DPoP
+        // introspection fallback rejects — it does NOT fall through to the
+        // no-sector ClientNotProvisioned 503 (that is the downstream §6.2
+        // case, reached only once a token is already bound).
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let srv = start_introspect_server(serde_json::json!({
+            "active": true,
+            "sub": "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0003",
+            "client_id": "oac_app_a",
+            "scope": "openid",
+        }))
+        .await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_introspection(gateway_signing, &base);
+
+        let req = opaque_dpop_req(&client_key, "ht_opaque", "appx.zeroship.ai", "/api/me");
+        let request_id = Uuid::new_v4();
+        let outcome =
+            resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(
+            matches!(outcome, DpopOutcome::None),
+            "un-provisioned route must reject the introspection fallback (None), got {outcome:?}"
+        );
+
+        drop(srv);
+    }
+
+    #[compio::test]
+    async fn resolve_dpop_wrapper_fast_path_unaffected_by_introspection_binding() {
+        // Guard: the new introspection-arm binding must NOT touch the wrapper
+        // fast-path, which binds via aud + cnf.jkt and is reached even when the
+        // route has no oauth_client_id (it passes None to the wrapper verifier).
+        // A matching-jkt wrapper with oauth_client_id == None still Allows.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+
+        let jkt = client_jkt(&client_key);
+        let aud = "myapp.zeroship.ai";
+        let wrapper = issue_wrapper(&state, &jkt, aud);
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", proof)
+            .to_http_request();
+
+        let request_id = Uuid::new_v4();
+        // oauth_client_id == None — the wrapper fast-path must still accept
+        // (binding is via cnf.jkt, not the route client).
+        let outcome = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
+        assert!(
+            matches!(outcome, DpopOutcome::Allowed(_)),
+            "wrapper fast-path must remain unaffected by the introspection binding, got {outcome:?}"
+        );
     }
 
     #[ntex::test]
