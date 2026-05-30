@@ -133,8 +133,12 @@ fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Op
 /// (`revoked_at IS NULL` gate) — the caller then projects an EMPTY email (fail
 /// closed), NEVER the real one. A DB checkout/read failure also yields `None`
 /// (fail closed): a browser token must never leak the real email on a blip.
+///
+/// `pub(crate)` so the DPoP-exchange handler reuses the SAME fail-closed
+/// email-swap source (Batch A fix 1) rather than duplicate the pooled-read
+/// logic — keeping every mint path's email projection byte-for-byte identical.
 #[allow(clippy::future_not_send)]
-async fn relay_alias_for(
+pub(crate) async fn relay_alias_for(
     db_cfg: &crate::db::DbConfig,
     client_id: &str,
     global_user_id: Uuid,
@@ -408,7 +412,12 @@ pub async fn token(
     //    access_token cannot read the global user id or correlate across
     //    apps. cnf=None, wraps=None; 600 s. This is the access_token the
     //    browser holds.
-    let Some(pws_sub) = pairwise_sub(&state, &route, &claims.sub) else {
+    // Derive on the CANONICAL UUID string (Batch A M1) — `derive_pairwise`
+    // canonicalizes internally, but feeding it the already-parsed
+    // `global_user_id` here keeps the mint convention identical to the
+    // `/signout` / control-cascade writers (which derive on
+    // `Uuid::to_string()`) at the call site too, not just in the helper.
+    let Some(pws_sub) = pairwise_sub(&state, &route, &global_user_id.to_string()) else {
         // No sector_identifier yet ⇒ we cannot derive the pairwise sub.
         // Fail closed rather than ship a wrapper with the global UUID. The
         // SDK treats 503 as retryable and keeps the breadcrumb.
@@ -791,8 +800,12 @@ async fn do_refresh(
         }
     }
     // Per-app pairwise `pws_` subject (§6.2/G4) — the global UUID never
-    // reaches the browser, on the refresh path just as on /token.
-    let pws_sub = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &raw.sub, sector);
+    // reaches the browser, on the refresh path just as on /token. Derive on
+    // the CANONICAL UUID (`sub` = `anchor.global_user_id.to_string()`), NOT the
+    // rotated `raw.sub` (Batch A M1): the anchor's UUID is the stable identity
+    // and matches the `/signout` / control-cascade writers' convention, so a
+    // refreshed wrapper's `pws_` is byte-identical to the revocation marker's.
+    let pws_sub = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector);
     // Email-claim swap (§7): the rotated wrapper carries the relay ALIAS, never
     // the real `raw.email`. None ⇒ empty (fail closed) — the real address never
     // reaches the browser on the refresh path either.

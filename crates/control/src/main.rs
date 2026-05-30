@@ -707,6 +707,12 @@ fn main() -> std::io::Result<()> {
     } else {
         stash_signing_key.into_bytes()
     };
+    // Platform-wide pairwise salt (auth-sdk §6.2) — derived from the SAME
+    // stash signing key the gateway uses, via the SHARED helper, so control's
+    // disconnect-app revocation writes the family marker on the SAME
+    // `(client_id, pws_)` key the gateway arms read (Batch A fix 4). Derive it
+    // BEFORE `stash_key_bytes` is moved into the console OIDC RP below.
+    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(&stash_key_bytes);
     let console_oidc_secret_value = if console_oidc_secret.is_empty() {
         DEV_CONSOLE_OIDC_SECRET.to_string()
     } else {
@@ -800,6 +806,7 @@ fn main() -> std::io::Result<()> {
         pat_issuer,
         hydra_introspector,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        pairwise_salt,
     });
 
     let bind_addr = format!("{bind_host}:{port}");

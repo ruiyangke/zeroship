@@ -21,7 +21,6 @@ pub struct TokenSweepReport {
     pub password_resets_deleted: u64,
     pub magic_completions_deleted: u64,
     pub email_verifications_deleted: u64,
-    pub wrapper_revoked_subjects_deleted: u64,
     pub token_revocations_deleted: u64,
 }
 
@@ -31,7 +30,6 @@ impl TokenSweepReport {
             + self.password_resets_deleted
             + self.magic_completions_deleted
             + self.email_verifications_deleted
-            + self.wrapper_revoked_subjects_deleted
             + self.token_revocations_deleted
     }
 }
@@ -55,8 +53,6 @@ pub async fn run(db: Arc<Client>) {
                     password_resets_deleted = report.password_resets_deleted,
                     magic_completions_deleted = report.magic_completions_deleted,
                     email_verifications_deleted = report.email_verifications_deleted,
-                    wrapper_revoked_subjects_deleted =
-                        report.wrapper_revoked_subjects_deleted,
                     token_revocations_deleted = report.token_revocations_deleted,
                     total_deleted = report.total(),
                     "token_sweep completed"
@@ -72,11 +68,11 @@ pub async fn run(db: Arc<Client>) {
 /// consumption timestamp is older than the 7-day grace window.
 #[doc(hidden)]
 pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
-    let mut report = TokenSweepReport::default();
-
-    report.password_resets_deleted = delete_magic_links(db, Some("reset")).await?;
-    report.magic_links_deleted = delete_magic_links(db, None).await?;
-    report.magic_completions_deleted = delete_table(
+    // Build the report in the initializer (every field is computed once here),
+    // so there is no redundant `Default::default()` to reassign over.
+    let password_resets_deleted = delete_magic_links(db, Some("reset")).await?;
+    let magic_links_deleted = delete_magic_links(db, None).await?;
+    let magic_completions_deleted = delete_table(
         db,
         "auth.magic_completions",
         "DELETE FROM auth.magic_completions \
@@ -84,7 +80,7 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
             OR consumed_at < NOW() - INTERVAL '7 days'",
     )
     .await?;
-    report.email_verifications_deleted = delete_table(
+    let email_verifications_deleted = delete_table(
         db,
         "auth.email_verifications",
         "DELETE FROM auth.email_verifications \
@@ -92,22 +88,18 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
             OR consumed_at < NOW() - INTERVAL '7 days'",
     )
     .await?;
-    report.wrapper_revoked_subjects_deleted =
-        zeroship_core::wrapper_revocation::sweep_expired_subjects(db)
-            .await
-            .map_err(|e| {
-                AuthError::Db(format!(
-                    "token_sweep auth.wrapper_revoked_subjects: {e}"
-                ))
-            })?;
-    report.token_revocations_deleted =
+    let token_revocations_deleted =
         zeroship_core::wrapper_revocation::sweep_expired_families(db)
             .await
-            .map_err(|e| {
-                AuthError::Db(format!("token_sweep auth.token_revocations: {e}"))
-            })?;
+            .map_err(|e| AuthError::Db(format!("token_sweep auth.token_revocations: {e}")))?;
 
-    Ok(report)
+    Ok(TokenSweepReport {
+        magic_links_deleted,
+        password_resets_deleted,
+        magic_completions_deleted,
+        email_verifications_deleted,
+        token_revocations_deleted,
+    })
 }
 
 async fn delete_magic_links(db: &Client, purpose: Option<&str>) -> Result<u64> {

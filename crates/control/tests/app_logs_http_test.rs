@@ -112,6 +112,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             logout_jti_cache: Arc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),
             ),
+            pairwise_salt: [0u8; 32],
         }),
         blob_root,
         deploy_tmp_dir,

@@ -105,6 +105,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
             "http://127.0.0.1:9",
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        pairwise_salt: [0u8; 32],
     });
 
     Fixture {

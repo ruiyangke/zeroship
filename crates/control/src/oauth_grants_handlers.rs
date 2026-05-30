@@ -113,6 +113,7 @@ pub async fn revoke_grant(
         &state.auth_db_url,
         &authz.principal_id,
         &client_id,
+        &state.pairwise_salt,
     )
     .await
     {

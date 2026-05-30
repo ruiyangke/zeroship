@@ -66,17 +66,27 @@ pub async fn handle(
     //
     // `revoke_scope` carries the app subdomain when a per-app client matched
     // (revoke only that app), or `None` for the shared-client all-apps path.
+    // `revoke_sector` carries that app's `sector_identifier` so the per-app
+    // branch can derive the same `pws_…` the gateway projects, to write the
+    // PER-APP token-family marker (Batch A fix 4) — a per-app BCL must kill the
+    // user's live wrapper / raw-Hydra access token for THAT app, not just its
+    // gateway sessions. `None` sector ⇒ the marker write is skipped (no live
+    // wrapper to revoke without a sector).
     let aud_candidates =
         zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
-    let (aud, revoke_scope): (String, Option<String>) = aud_candidates
-        .iter()
-        .find_map(|cand| {
-            state
-                .routes
-                .lookup_by_oauth_client_id(cand)
-                .map(|(_id, route)| (cand.clone(), Some(route.entry.name.clone())))
-        })
-        .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None));
+    let (aud, revoke_scope, revoke_sector): (String, Option<String>, Option<String>) =
+        aud_candidates
+            .iter()
+            .find_map(|cand| {
+                state.routes.lookup_by_oauth_client_id(cand).map(|(_id, route)| {
+                    (
+                        cand.clone(),
+                        Some(route.entry.name.clone()),
+                        route.entry.sector_identifier.clone(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None, None));
 
     let token = match zeroship_core::logout_token::verify(
         &state.oidc_rp.jwks,
@@ -152,47 +162,68 @@ pub async fn handle(
                     // into the global wrapper denylist — that is a cross-app
                     // nuke; a per-app BCL must not log the user out of other
                     // apps.
-                    Some(app_name) => sessions::revoke_app_sessions_for_user(conn, app_name, sub)
-                        .await
-                        .unwrap_or_else(|e| {
-                            tracing::error!(
-                                error = %e,
-                                app_id = %app_name,
-                                "backchannel_logout: revoke_app_sessions_for_user failed"
+                    Some(app_name) => {
+                        // PER-APP token-family marker (Batch A fix 4): write
+                        // `auth.token_revocations` on the SAME `(client_id,
+                        // pws_)` key the gateway arms read, so the user's live
+                        // wrapper / raw-Hydra access token for THIS app dies on
+                        // the next request — not just their gateway sessions.
+                        // `aud` is the per-app `oac_…` client; `pws_` is
+                        // `derive_pairwise(sub, sector)` under the app's apex
+                        // sector. Best-effort: a marker write failure must not
+                        // block the session revoke. Skipped (with a warn) when
+                        // the route carries no sector yet.
+                        if let Some(sector) = revoke_sector.as_deref() {
+                            let pws = zeroship_core::auth::derive_pairwise(
+                                &state.pairwise_salt,
+                                sub,
+                                sector,
                             );
-                            0
-                        }),
-                    // Shared `gateway` client (legacy path): revoke across the
-                    // subject's gateway sessions and push the subject into the
-                    // wrapper denylist (the original all-apps semantics).
-                    None => {
-                        if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub)
-                        {
-                            if let Err(e) = zeroship_core::wrapper_revocation::revoke_subject(
-                                conn, subject,
+                            if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(
+                                conn, &aud, &pws,
                             )
                             .await
                             {
                                 tracing::error!(
                                     error = %e,
-                                    sub = %sub,
-                                    "backchannel_logout: wrapper subject revoke failed"
+                                    client_id = %aud,
+                                    "backchannel_logout: per-app token-family marker write failed"
                                 );
                             }
                         } else {
                             tracing::warn!(
-                                sub = %sub,
-                                "backchannel_logout: non-UUID sub cannot enter wrapper denylist"
+                                app_id = %app_name,
+                                "backchannel_logout: per-app BCL has no sector_identifier; \
+                                 skipping token-family marker (sessions still revoked)"
                             );
                         }
-                        sessions::revoke_all_for_user(conn, sub).await.unwrap_or_else(|e| {
-                            tracing::error!(
-                                error = %e,
-                                "backchannel_logout: revoke_all_for_user failed"
-                            );
-                            0
-                        })
+                        sessions::revoke_app_sessions_for_user(conn, app_name, sub)
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::error!(
+                                    error = %e,
+                                    app_id = %app_name,
+                                    "backchannel_logout: revoke_app_sessions_for_user failed"
+                                );
+                                0
+                            })
                     }
+                    // Shared `gateway` client (legacy all-apps path): revoke
+                    // across the subject's gateway sessions. There is NO
+                    // wrapper-token revocation to write here: every wrapper /
+                    // raw-Hydra access token is minted under a per-app `oac_…`
+                    // client and keyed on a per-app `pws_` (Batch A) — the
+                    // shared `gateway` client never owns a live wrapper family,
+                    // so the previous global subject-denylist write was a no-op
+                    // (zero readers) and has been removed (Batch A M2). Session
+                    // revocation IS the real effect of the legacy path.
+                    None => sessions::revoke_all_for_user(conn, sub).await.unwrap_or_else(|e| {
+                        tracing::error!(
+                            error = %e,
+                            "backchannel_logout: revoke_all_for_user failed"
+                        );
+                        0
+                    }),
                 };
                 tracing::info!(
                     sub = %sub,

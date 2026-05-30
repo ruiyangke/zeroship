@@ -578,19 +578,15 @@ fn main() -> std::io::Result<()> {
     };
 
     // auth-sdk §6.2 — platform-wide pairwise salt for the per-app `pws_…`
-    // subject projection. Domain-separated from `anchor_enc_key` by a
-    // distinct derive prefix so the two never collide. Derived from the same
-    // server secret (no new CLI flag pre-launch); rotating the stash key
-    // rotates every app's pairwise subjects, which only forces a re-derive
-    // on the next request (the mapping is deterministic, not stored as a
-    // credential).
-    let pairwise_salt = {
-        let seed = format!(
-            "pairwise-subject:{}",
-            String::from_utf8_lossy(&stash_signing_key_bytes)
-        );
-        zeroship_core::crypto::derive_key(&seed)
-    };
+    // subject projection. Derived via the SHARED helper so the gateway and the
+    // control plane (which revokes the per-app token family on a dashboard
+    // "disconnect app", Batch A fix 4) produce byte-identical `pws_…` subjects.
+    // Domain-separated from `anchor_enc_key` by the helper's distinct derive
+    // prefix. Derived from the same server secret (no new CLI flag pre-launch);
+    // rotating the stash key rotates every app's pairwise subjects, which only
+    // forces a re-derive on the next request (the mapping is deterministic, not
+    // stored as a credential).
+    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(&stash_signing_key_bytes);
 
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,

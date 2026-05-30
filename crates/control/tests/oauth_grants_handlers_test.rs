@@ -113,6 +113,10 @@ impl Fixture {
                 "http://127.0.0.1:9",
             )),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            // A real, non-zero pairwise salt so the disconnect-app cascade
+            // writes a `token_revocations` marker under a `pws_` the test can
+            // re-derive with the SAME salt + sector (Batch A fix 4).
+            pairwise_salt: zeroship_core::auth::derive_pairwise_salt(b"control-test-stash"),
         });
 
         Self {
@@ -760,6 +764,160 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     pat.cleanup(&fx.state).await;
 }
 
+/// Seed the `control.app_oauth_clients` extension row carrying the app's apex
+/// `sector_identifier` — what the disconnect-app cascade reads (Batch A fix 4)
+/// to derive the per-app `pws_` before writing the token-family marker.
+/// `app_oauth_clients.app_id` FKs `control.apps`, so we seed a minimal app row
+/// first. Returns the seeded `app_id` so the caller can clean it up.
+async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> Uuid {
+    let app_id = Uuid::new_v4();
+    state
+        .auth_pg
+        .execute(
+            "INSERT INTO control.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            &[
+                &app_id,
+                &format!("app-{}", app_id.simple()),
+                &format!("ak_{}", Uuid::new_v4().simple()),
+            ],
+        )
+        .await
+        .expect("insert apps row");
+    state
+        .auth_pg
+        .execute(
+            "INSERT INTO control.app_oauth_clients (app_id, client_id, sector_identifier) \
+             VALUES ($1, $2, $3)",
+            &[&app_id, &client_id, &sector],
+        )
+        .await
+        .expect("insert app_oauth_clients row");
+    app_id
+}
+
+/// Batch A fix 4: a dashboard "disconnect app" (DELETE /me/oauth-grants/{id})
+/// must write the per-app token-family marker so the user's LIVE access token
+/// dies — not just the relay alias. After revoke we assert a
+/// `auth.token_revocations` row exists for `(client_id, pws_)` AND that the
+/// REAL gateway reader (`is_family_revoked_since`) — keyed exactly as the
+/// wrapper / Bearer / DPoP arms key it — now reports a still-live token (one
+/// whose `iat` predates the marker) as revoked. PG-gated.
+#[compio::test]
+async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "tokmarker").await;
+    let pat = account_pat(&fx.state, "tokmarker").await;
+    let app = init_control!(fx);
+    let client_id = format!("oac_tokmarker_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());
+    insert_client(&fx.state, &client_id, pat.user_id).await;
+    let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
+    insert_grant(&fx.state, pat.user_id, &client_id, &["apps:read", "email"]).await;
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+
+    // The per-app pws_ the gateway projects for this (app, user) — derived with
+    // the SAME salt the AppState carries + the app's sector. A live token for
+    // this user carries this sub.
+    let pws = zeroship_core::auth::derive_pairwise(
+        &fx.state.pairwise_salt,
+        &pat.user_id.to_string(),
+        &sector,
+    );
+    // A token issued BEFORE the disconnect (iat in the past) — what "live"
+    // means: still cryptographically valid, must be rejected after revoke.
+    let live_token_iat = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+        - 60;
+
+    // Pre-condition: no marker yet ⇒ the live token is NOT revoked.
+    assert!(
+        !zeroship_core::wrapper_revocation::is_family_revoked_since(
+            fx.state.auth_pg.as_ref(),
+            &client_id,
+            &pws,
+            live_token_iat,
+        )
+        .await
+        .expect("pre-revoke family check"),
+        "before disconnect, the live token must NOT be family-revoked"
+    );
+
+    // Disconnect the app via the REAL control HTTP handler.
+    let req = test::TestRequest::delete()
+        .uri(&format!("/me/oauth-grants/{client_id}"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The marker row exists for (client_id, pws_).
+    let marker_rows = fx
+        .state
+        .auth_pg
+        .query(
+            "SELECT 1 FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&client_id, &pws],
+        )
+        .await
+        .expect("query token_revocations");
+    assert_eq!(
+        marker_rows.len(),
+        1,
+        "disconnect-app must write a token_revocations row keyed on (client_id, pws_)"
+    );
+
+    // The faithful seam: the EXACT reader the gateway arms run now reports the
+    // still-live token as revoked. A regression that dropped this write (or
+    // keyed it on the global UUID) would leave the live token accepted here.
+    assert!(
+        zeroship_core::wrapper_revocation::is_family_revoked_since(
+            fx.state.auth_pg.as_ref(),
+            &client_id,
+            &pws,
+            live_token_iat,
+        )
+        .await
+        .expect("post-revoke family check"),
+        "after disconnect, the live token (iat before the marker) must be family-revoked"
+    );
+
+    // Cleanup.
+    fx.state
+        .auth_pg
+        .execute(
+            "DELETE FROM auth.token_revocations WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .ok();
+    fx.state
+        .auth_pg
+        .execute(
+            "DELETE FROM control.app_oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .ok();
+    cleanup_identities(&fx.state, &client_id).await;
+    fx.cleanup_clients(&[client_id]).await;
+    // The apps row FKs app_oauth_clients (deleted above) — drop it last.
+    fx.state
+        .auth_pg
+        .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+    pat.cleanup(&fx.state).await;
+}
+
 /// 5c §6.1 — re-grant stability: revoke then re-grant reuses the SAME alias
 /// (Apple Hide-My-Email model). After re-grant `revoked_at` is cleared and the
 /// alias forwards again — no new alias, no dead-alias bounce. The auth-side
@@ -935,11 +1093,13 @@ async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
     // on DELETE (the row is locked). We do NOT await it yet.
     let auth_db_url = fx.state.auth_db_url.clone();
     let cascade_client_id = client_id.clone();
+    let cascade_salt = fx.state.pairwise_salt;
     let cascade = compio::runtime::spawn(async move {
         zeroship_control::relay_revoke::revoke_grant_cascade(
             &auth_db_url,
             &user,
             &cascade_client_id,
+            &cascade_salt,
         )
         .await
     });

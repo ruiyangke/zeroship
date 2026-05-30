@@ -247,17 +247,14 @@ CREATE TABLE auth.cron_state (
 );
 --rollback DROP TABLE auth.cron_state;
 
--- Missing tables (cron bug fix). The token-sweep and jwk-rotation cron tasks
--- reference these but no migration ever created them. Inferred from
--- crates/core/src/wrapper_revocation.rs and
--- crates/auth/src/cron/{token_sweep,jwk_rotation}.rs.
---changeset zeroship:auth-wrapper-revoked-subjects splitStatements:true
-CREATE TABLE auth.wrapper_revoked_subjects (
-    subject    UUID PRIMARY KEY,
-    revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
---rollback DROP TABLE auth.wrapper_revoked_subjects;
-
+-- Missing tables (cron bug fix). The jwk-rotation cron task references this
+-- but no migration ever created it. Inferred from
+-- crates/auth/src/cron/jwk_rotation.rs.
+--
+-- (The former auth.wrapper_revoked_subjects global subject denylist was
+-- removed in Batch A M2 — it was write-only dead code after the per-app
+-- pws_ revocation cutover; the per-app auth.token_revocations family marker
+-- below is the sole wrapper-token revocation primitive.)
 --changeset zeroship:auth-jwk-key-state splitStatements:true
 CREATE TABLE auth.jwk_key_state (
     set_name   TEXT NOT NULL,

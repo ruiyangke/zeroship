@@ -41,7 +41,9 @@ use std::sync::Arc;
 use ntex::http::header::{AUTHORIZATION, HOST};
 use ntex::web::{types::State, HttpRequest, HttpResponse};
 use serde_json::json;
+use uuid::Uuid;
 
+use crate::auth_token::{relay_alias_for, resolve_route};
 use crate::GateState;
 
 /// Cache-Control value applied to every response from this handler.
@@ -219,6 +221,69 @@ pub async fn handle(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRespo
             .json(&json!({"error": "missing_oauth_sub"}));
     };
 
+    // Resolve the per-app route (Host → app + oauth_client_id +
+    // sector_identifier), mirroring `/token` (Batch A fix 1). The wrapper this
+    // handler mints is JS-readable by app code, so its `sub` MUST be the
+    // per-app pairwise `pws_…` (§6.2/G4) and its `email` the relay alias (§7) —
+    // NEVER the global Hydra UUID / real email. Deriving the `pws_` needs the
+    // route's `sector_identifier`, and the relay-alias + wrapper `client_id`
+    // claim need the route's `oauth_client_id`; `resolve_route` answers
+    // `503 client_not_provisioned` (kept retryable by the SDK) when the host is
+    // not a provisioned app or has no OAuth client yet. We re-emit its error
+    // body with this handler's `Cache-Control: no-store`.
+    let route = match resolve_route(&req, &state) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // The introspected `sub` is the GLOBAL Hydra user UUID. It is stored /
+    // checked server-side but NEVER projected into the JS-readable wrapper:
+    // parse it as a UUID and project it to the per-app pairwise `pws_…` under
+    // the route's `sector_identifier` (§6.2/G4), EXACTLY as `/token` does. An
+    // end-user authorization_code token carries a UUID `sub`; a non-UUID `sub`
+    // (e.g. a `client_credentials` token with a client-id subject) cannot
+    // become a per-app user pseudonym, so reject it rather than ship a wrapper
+    // whose `sub` is not a `pws_`.
+    let Ok(global_user_id) = Uuid::parse_str(sub) else {
+        tracing::warn!(sub = %sub, "dpop-exchange: oauth sub is not a global user UUID");
+        return HttpResponse::Unauthorized()
+            .header("cache-control", CACHE_NO_STORE)
+            .json(&json!({"error": "sub_not_global_user"}));
+    };
+    let Some(sector) = route.sector_identifier.as_deref() else {
+        // No sector_identifier yet ⇒ we cannot derive the pairwise sub. Fail
+        // closed rather than ship a wrapper with the global UUID, matching
+        // `/token`'s posture (the SDK treats 503 as retryable).
+        tracing::warn!(app = %route.app_name, "dpop-exchange: route has no sector_identifier yet");
+        return HttpResponse::ServiceUnavailable()
+            .header("cache-control", CACHE_NO_STORE)
+            .json(&json!({"error": "client_not_provisioned"}));
+    };
+    // Derive on the CANONICAL UUID string (Batch A M1) so this mint's `pws_`
+    // is byte-identical to the `/signout` / control-cascade writers' marker
+    // regardless of the inbound `sub` spelling. `derive_pairwise` canonicalizes
+    // internally; passing `global_user_id.to_string()` makes the convention
+    // explicit at the call site too.
+    let pws_sub = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &global_user_id.to_string(),
+        sector,
+    );
+
+    // Email-claim swap (§7): the wrapper carries the per-app relay ALIAS, never
+    // the real `intro.email`. Resolved live for `(route.client_id, user)`; no
+    // active alias (not yet minted at consent, or revoked) ⇒ empty email (fail
+    // closed) — the real address NEVER reaches the DPoP client.
+    let Some(db_cfg) = state.db.as_ref() else {
+        // No DB ⇒ no alias source. The real `intro.email` must never leak, so
+        // fail closed: 503 (the gateway is mis-provisioned for this surface).
+        tracing::warn!("dpop-exchange: no database configured for relay-alias swap");
+        return HttpResponse::ServiceUnavailable()
+            .header("cache-control", CACHE_NO_STORE)
+            .json(&json!({"error": "db_unavailable"}));
+    };
+    let relay_email = relay_alias_for(db_cfg, &route.client_id, global_user_id).await;
+
     // `wraps` ties the wrapper to the hydra-issued opaque access token
     // without leaking it: SHA-256 the (utf-8) bytes, base64url-encode.
     // The browser plain-Bearer path has no underlying raw token and
@@ -232,16 +297,23 @@ pub async fn handle(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRespo
 
     let mint = crate::wrapper_token::WrapperMint {
         aud: &aud,
-        sub,
+        // Per-app pairwise `pws_…` (§6.2/G4) — NOT the global Hydra UUID, so
+        // app JS decoding this wrapper cannot read the global user id or
+        // correlate the user across apps. The Bearer/DPoP fast-paths enforce
+        // this as the self-describing-subject invariant (fix 2).
+        sub: &pws_sub,
         scope: intro.scope.as_deref().unwrap_or_default(),
-        client_id: intro.client_id.as_deref().unwrap_or_default(),
+        // Bind the wrapper to the route's per-app `oac_` client (the relay +
+        // family-marker key the gateway arms read against), mirroring `/token`.
+        client_id: &route.client_id,
         // The envelope's `expires_in` and the JWT `exp` read the same
         // `i64` constant directly, so they cannot disagree (no fallback
         // that could silently substitute a different lifetime).
         exp_secs: WRAPPER_EXPIRES_IN_SECS,
         cnf: Some(verified.jkt.as_str()),
         wraps: Some(wraps.as_str()),
-        email: intro.email.as_deref(),
+        // The relay alias (or None ⇒ empty), NEVER `intro.email`.
+        email: relay_email.as_deref(),
         email_verified: intro.email_verified,
         name: intro.name.as_deref(),
     };
@@ -255,8 +327,11 @@ pub async fn handle(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRespo
         }
     };
 
+    // Log the per-app `pws_` (NOT the global UUID — it must not appear in logs
+    // any more than in the wrapper) + the route's client.
     tracing::info!(
-        sub = %intro.sub.as_deref().unwrap_or(""),
+        pws = %pws_sub,
+        client_id = %route.client_id,
         aud = %aud,
         jkt = %verified.jkt,
         "dpop-exchange: wrapper token issued"

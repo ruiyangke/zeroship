@@ -423,6 +423,74 @@ async fn project_pairwise(
     PairwiseProjection::Projected { pws, relay_email }
 }
 
+/// Re-resolve the LIVE relay alias for a wrapper's `(client_id, pws_sub)` on
+/// the wrapper fast-paths (Batch A fix 5), returning the `email` claim the
+/// worker header should carry — NEVER the (TTL-stale) email the wrapper itself
+/// embeds.
+///
+/// A wrapper is JS-readable and lives for its full TTL (10 min browser / 1 h
+/// DPoP), so the alias it was minted with can be revoked WHILE the wrapper is
+/// still cryptographically valid. The cookie / introspection / raw-Hydra arms
+/// already re-read the alias live via [`project_pairwise`]; this gives the two
+/// wrapper fast-paths the SAME posture: a single pooled read keyed on the
+/// per-app `pws_…` subject, with the same `revoked_at IS NULL` gate.
+///
+/// Fail-closed contract: returns an EMPTY string when the alias is revoked OR
+/// no live alias exists OR the DB read fails — the worker then sees no email
+/// rather than a dead/stale alias. It NEVER returns the wrapper's embedded
+/// claim and NEVER the real address. When the gateway has no DB at all
+/// (smoke mode) there is nothing to re-resolve, so the wrapper's own (already
+/// alias-only, never-real-email) `email` claim is passed through unchanged.
+#[allow(clippy::future_not_send)]
+async fn live_relay_email_for_wrapper(
+    state: &Arc<GateState>,
+    client_id: &str,
+    pws_sub: &str,
+    wrapper_email: &str,
+) -> String {
+    let Some(db_cfg) = state.db.as_ref() else {
+        // Smoke mode (no DB): nothing to re-resolve against. The wrapper's
+        // claim is already alias-only (minted via the §7 swap), so pass it
+        // through rather than blank a still-valid alias.
+        return wrapper_email.to_string();
+    };
+    match crate::db::checkout(db_cfg).await {
+        Ok(pool) => match pool.get().await {
+            Ok(conn) => {
+                match crate::identities::lookup_relay_email_by_pairwise(
+                    &conn, client_id, pws_sub,
+                )
+                .await
+                {
+                    Ok(alias) => alias.unwrap_or_default(),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            client_id = %client_id,
+                            "wrapper live relay_email re-resolve failed (failing closed on email)"
+                        );
+                        String::new()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "wrapper live relay_email re-resolve: pg pool get failed (failing closed)"
+                );
+                String::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "wrapper live relay_email re-resolve: pg pool checkout failed (failing closed)"
+            );
+            String::new()
+        }
+    }
+}
+
 /// Whether the request carries an `Authorization: DPoP <token>` header.
 /// We branch on this so a failed `DPoP` verification doesn't silently
 /// fall back to the cookie path.
@@ -642,12 +710,56 @@ async fn resolve_dpop_user_header(
                     tracing::warn!("DPoP wrapper token missing sub — rejecting");
                     return DpopOutcome::None;
                 }
-                if let (Some(db_cfg), Some(subject)) = (
-                    state.db.as_ref(),
-                    zeroship_core::wrapper_revocation::subject_uuid(&claims.sub),
-                ) {
-                    // Check out a pooled connection for just this
-                    // revocation lookup and release it on drop.
+                // Self-describing-subject invariant (Batch A fix 2). A
+                // gateway-issued wrapper's `sub` is ALWAYS the per-app `pws_…`
+                // (the gateway minted it that way at /token / ?mint=1 /
+                // dpop-exchange, §6.2). A wrapper whose `sub` is the global
+                // Hydra UUID (or otherwise not `pws_`-shaped) means a mint path
+                // failed to project — defense-in-depth, hard-reject it so a
+                // non-projected wrapper can NEVER reach a worker (it would leak
+                // the global identity into the JS-readable token).
+                //
+                // The `debug_assert!` is a developer tripwire for a GATEWAY
+                // bug (a mint path that forgot to project). It is gated off
+                // under `cfg(test)` so the adversarial subject-invariant test
+                // can feed a hand-crafted UUID-sub wrapper and exercise the
+                // RUNTIME reject below (an attacker's forged-but-rejected token
+                // must surface as a clean reject, not a panic).
+                #[cfg(not(test))]
+                debug_assert!(
+                    zeroship_core::auth::is_pairwise_subject(&claims.sub),
+                    "wrapper sub must be a pws_ pairwise subject, got {}",
+                    claims.sub
+                );
+                if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
+                    tracing::warn!(
+                        sub = %claims.sub,
+                        "DPoP wrapper sub is not a pws_ pairwise subject — rejecting (self-describing-subject invariant)"
+                    );
+                    return DpopOutcome::None;
+                }
+                // Cross-node PER-APP family-marker revocation (spec §8.5), the
+                // SAME `(client_id, sub)` shape and writer the other arms use.
+                // The wrapper's `sub` IS the `pws_` (fix 1/2 above), so this
+                // keys on `(claims.client_id, claims.sub=pws_)` — exactly what
+                // /signout + control's disconnect-app cascade write. (Batch A
+                // fix 3: the old code keyed `is_subject_revoked_since` on a
+                // UUID parse of `sub`, which a `pws_` can never satisfy, so the
+                // check silently no-op'd for every wrapper.)
+                //
+                // KEY TRUST (Batch A minor): this fast-path called
+                // `verifier.verify(.., None)` above, so `claims.client_id` is
+                // NOT checked against the resolved route's client here — we key
+                // the marker on the gateway-SIGNED `claims.client_id`. That is
+                // safe because (a) the wrapper is gateway-signed, so
+                // `claims.client_id` is the value the gateway itself stamped at
+                // mint (= `route.client_id`), not attacker-controlled, and
+                // (b) `aud == host` was enforced by the verify above, pinning
+                // the wrapper to THIS app's host. The marker writers key on the
+                // same per-app client, so the key matches. The Bearer-wrapper
+                // arm passes the route client to verify explicitly; this arm
+                // relies on the signed claim + aud binding instead.
+                if let Some(db_cfg) = state.db.as_ref() {
                     let pool = match crate::db::checkout(db_cfg).await {
                         Ok(p) => p,
                         Err(e) => {
@@ -668,17 +780,19 @@ async fn resolve_dpop_user_header(
                             return DpopOutcome::None;
                         }
                     };
-                    match zeroship_core::wrapper_revocation::is_subject_revoked_since(
+                    match zeroship_core::wrapper_revocation::is_family_revoked_since(
                         &conn,
-                        subject,
+                        &claims.client_id,
+                        &claims.sub,
                         claims.iat,
                     )
                     .await
                     {
                         Ok(true) => {
                             tracing::warn!(
+                                client_id = %claims.client_id,
                                 sub = %claims.sub,
-                                "DPoP wrapper subject was revoked after wrapper issue"
+                                "DPoP wrapper family was revoked after wrapper issue"
                             );
                             return DpopOutcome::None;
                         }
@@ -697,7 +811,20 @@ async fn resolve_dpop_user_header(
                 // the per-app `pws_` (the gateway minted it that way at
                 // /token / ?mint=1, §6.2) — no pairwise re-derivation, the
                 // same consistent `pws_` the Bearer-wrapper arm reads.
-                let owned = build_worker_user_from_wrapper(&claims);
+                let mut owned = build_worker_user_from_wrapper(&claims);
+                // Email-claim swap re-resolved LIVE (Batch A fix 5): the
+                // wrapper's embedded `email` is alias-only but TTL-stale, so a
+                // revoked alias would still forward for the wrapper's lifetime.
+                // Re-read the alias keyed on `(client_id, pws_)` and fail
+                // closed (empty) on revoke/miss — matching the cookie /
+                // introspection / raw-Hydra arms.
+                owned.email = live_relay_email_for_wrapper(
+                    state,
+                    &claims.client_id,
+                    &claims.sub,
+                    &owned.email,
+                )
+                .await;
                 let user: oidc_rp::WorkerUser<'_> = (&owned).into();
                 return DpopOutcome::Allowed(oidc_rp::encode_user_header(
                     &user,
@@ -779,19 +906,33 @@ async fn resolve_dpop_user_header(
     // 6d. Cross-node PER-APP family-marker revocation (spec §8.5), the SAME
     //     check the raw-Hydra Bearer arm runs. Hydra `active: true` (step 6b)
     //     only reflects GLOBAL revocation; the per-app `auth.token_revocations`
-    //     marker is keyed on `(client_id, sub)`, so revoking a user on app A
-    //     must also reject their DPoP-bound opaque token on app A's path here.
-    //     Keyed on `expected_client_id` (the route's bound client; 6c proved
-    //     the token agrees) and the introspected GLOBAL Hydra `sub` — the SAME
-    //     sub the Bearer arm uses, checked BEFORE the pairwise projection so
-    //     the marker and the check agree on the key. `iat` comes from the
+    //     marker is keyed on `(client_id, pws_)` — the SAME key the WRITERS
+    //     (/signout + control's disconnect-app cascade) use — so revoking a
+    //     user on app A must also reject their DPoP-bound opaque token on app
+    //     A's path here. We project the per-app `pws_` FIRST and key the marker
+    //     check on it (Batch A fix 3): pre-fix this keyed on the GLOBAL Hydra
+    //     `sub` while the writer keyed on `pws_`, so a real revocation never
+    //     matched the live token.
+    //
+    //     The pairwise derivation needs the route's `sector_identifier`; with
+    //     no sector we cannot derive the `pws_` (and the downstream projection
+    //     would fail closed anyway), so fail closed (503) BEFORE the marker
+    //     check rather than key on the global UUID. `iat` comes from the
     //     introspection response (RFC 7662 §2.2); when Hydra omits it we fail
     //     CLOSED (epoch `0`), so any live family marker rejects rather than
     //     silently skipping the check. We hold the pooled connection only
     //     across this lookup — never across the introspection HTTP call above.
+    let Some(sector) = sector_identifier else {
+        return DpopOutcome::ClientNotProvisioned;
+    };
+    // `info.sub` is already confirmed `Some(non-empty)` above.
+    // `derive_pairwise` canonicalizes a UUID `sub` (Batch A M1), so the `pws_`
+    // derived from the RAW introspection `info.sub` is byte-identical to the
+    // canonical-form writers' marker regardless of Hydra's sub spelling.
+    let global_sub = info.sub.as_deref().unwrap_or_default();
+    let pws_sub =
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
     if let Some(db_cfg) = state.db.as_ref() {
-        // `info.sub` is already confirmed `Some(non-empty)` above.
-        let sub = info.sub.as_deref().unwrap_or_default();
         let iat = info.iat.unwrap_or(0);
         let pool = match crate::db::checkout(db_cfg).await {
             Ok(p) => p,
@@ -810,7 +951,7 @@ async fn resolve_dpop_user_header(
         match zeroship_core::wrapper_revocation::is_family_revoked_since(
             &conn,
             expected_client_id,
-            sub,
+            &pws_sub,
             iat,
         )
         .await
@@ -818,14 +959,14 @@ async fn resolve_dpop_user_header(
             Ok(true) => {
                 tracing::warn!(
                     client_id = %expected_client_id,
-                    sub = %sub,
+                    sub = %pws_sub,
                     "DPoP introspection family revoked after iat — rejecting"
                 );
                 return DpopOutcome::None;
             }
             Ok(false) => {}
             Err(e) => {
-                tracing::warn!(error = %e, sub = %sub, "DPoP introspection revocation check failed");
+                tracing::warn!(error = %e, sub = %pws_sub, "DPoP introspection revocation check failed");
                 return DpopOutcome::None;
             }
         }
@@ -834,9 +975,11 @@ async fn resolve_dpop_user_header(
     // 7. Build the `ZeroShip-User` header from the introspection result.
     //    The introspected `sub` is the GLOBAL Hydra UUID — project it to
     //    the per-app `pws_` (§6.2) so the worker header never carries the
-    //    global id. Fail closed (503) when the route has no sector yet.
+    //    global id. `project_pairwise` re-derives the SAME `pws_sub` (pure
+    //    deterministic HMAC) and additionally upserts the reverse-lookup row +
+    //    reads the email-swap alias.
     let mut owned = build_worker_user_from_introspection(&info);
-    match project_pairwise(state, Some(expected_client_id), sector_identifier, &owned.id).await {
+    match project_pairwise(state, Some(expected_client_id), Some(sector), &owned.id).await {
         PairwiseProjection::Projected { pws, relay_email } => {
             owned.id = pws;
             // Email-claim swap (§7): project the relay alias, never the real
@@ -1019,6 +1162,31 @@ async fn resolve_bearer_user_header(
             tracing::warn!("Bearer wrapper token missing sub — rejecting");
             return BearerOutcome::Invalid;
         }
+        // Self-describing-subject invariant (Batch A fix 2). A gateway-issued
+        // wrapper's `sub` is ALWAYS the per-app `pws_…` (minted that way at
+        // /token / ?mint=1 / dpop-exchange, §6.2). A wrapper carrying the
+        // global Hydra UUID (or any non-`pws_` sub) means a mint path failed
+        // to project — defense-in-depth, hard-reject so a non-projected
+        // wrapper can never reach a worker and leak the global identity into
+        // the JS-readable token.
+        //
+        // `debug_assert!` is a developer tripwire for a GATEWAY mint bug; gated
+        // off under `cfg(test)` so the adversarial subject-invariant test can
+        // exercise the RUNTIME reject below (a forged-but-rejected token must
+        // surface as a clean reject, not a panic).
+        #[cfg(not(test))]
+        debug_assert!(
+            zeroship_core::auth::is_pairwise_subject(&claims.sub),
+            "wrapper sub must be a pws_ pairwise subject, got {}",
+            claims.sub
+        );
+        if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
+            tracing::warn!(
+                sub = %claims.sub,
+                "Bearer wrapper sub is not a pws_ pairwise subject — rejecting (self-describing-subject invariant)"
+            );
+            return BearerOutcome::Invalid;
+        }
         // Cross-node PER-APP family-marker revocation (spec §8.5). Keyed on
         // `(client_id, sub)` with `sub` as TEXT, so it covers the wrapper's
         // `pws_…` pairwise subject — which the UUID-only subject denylist
@@ -1064,7 +1232,20 @@ async fn resolve_bearer_user_header(
                 }
             }
         }
-        let owned = build_worker_user_from_wrapper(&claims);
+        let mut owned = build_worker_user_from_wrapper(&claims);
+        // Email-claim swap re-resolved LIVE (Batch A fix 5): the wrapper's
+        // embedded `email` is alias-only but TTL-stale (10-min browser
+        // wrapper), so a revoked alias would still surface for the wrapper's
+        // lifetime. Re-read the alias keyed on `(client_id, pws_)` and fail
+        // closed (empty) on revoke/miss — the same posture as the cookie /
+        // introspection / raw-Hydra arms.
+        owned.email = live_relay_email_for_wrapper(
+            state,
+            &claims.client_id,
+            &claims.sub,
+            &owned.email,
+        )
+        .await;
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
         return BearerOutcome::Allowed(oidc_rp::encode_user_header(
             &user,
@@ -1109,15 +1290,35 @@ async fn resolve_bearer_user_header(
             tracing::warn!("raw-Hydra Bearer token missing sub — rejecting");
             return BearerOutcome::Invalid;
         }
+        // Project the per-app pairwise `pws_` FIRST (§6.2), then key the
+        // revocation check on it — the marker WRITERS (/signout + control's
+        // disconnect-app cascade) key `auth.token_revocations` on
+        // `(client_id, pws_)`, NOT the global Hydra UUID, so the reader MUST
+        // agree (Batch A fix 3). Pre-fix this arm keyed the lookup on the
+        // global `claims.sub` while the writer keyed on `pws_`, so a real
+        // revocation never matched a still-live raw-Hydra token.
+        //
+        // The pairwise derivation needs the route's `sector_identifier`; with
+        // no sector we cannot derive the `pws_` (and would never reach the
+        // worker without one anyway), so fail closed (503) BEFORE the marker
+        // check rather than fall back to keying on the global UUID.
+        let Some(sector) = sector_identifier else {
+            return BearerOutcome::ClientNotProvisioned;
+        };
+        // `derive_pairwise` canonicalizes a UUID `sub` to its hyphenated-
+        // lowercase form before hashing (Batch A M1), so the `pws_` this reader
+        // computes from the RAW Hydra `claims.sub` is byte-identical to the
+        // marker the canonical-form writers (`/signout`, control cascade) wrote
+        // — even if Hydra emitted a non-canonical sub spelling.
+        let pws_sub =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &claims.sub, sector);
         // Cross-node PER-APP family-marker revocation (spec §8.5). Keyed on
-        // `(expected_client_id, sub)` — the SAME `(client_id, sub)` shape
-        // the wrapper path uses — so revocation is per-app, not global:
-        // revoking this user on app A leaves their raw-Hydra access on app
-        // B valid. We key on `expected_client_id` (the route's bound
-        // client) rather than the token's `client_id` claim because the
-        // binding above already proved they agree (or the aud fallback did),
-        // and the marker is written against the route's client. The sub is
-        // the global Hydra UUID today; Slice 4 will project it to a pws_.
+        // `(expected_client_id, pws_sub)` — the SAME `(client_id, pws_)` shape
+        // the writers use. Per-app: revoking this user on app A leaves their
+        // raw-Hydra access on app B valid (app B's `pws_` differs). We key on
+        // `expected_client_id` (the route's bound client) because the binding
+        // above proved the token agrees and the marker is written against the
+        // route's client.
         if let Some(db_cfg) = state.db.as_ref() {
             // Check out a pooled connection for just this family-marker
             // lookup and release it on drop.
@@ -1138,7 +1339,7 @@ async fn resolve_bearer_user_header(
             match zeroship_core::wrapper_revocation::is_family_revoked_since(
                 &conn,
                 expected_client_id,
-                &claims.sub,
+                &pws_sub,
                 claims.iat,
             )
             .await
@@ -1146,29 +1347,31 @@ async fn resolve_bearer_user_header(
                 Ok(true) => {
                     tracing::warn!(
                         client_id = %expected_client_id,
-                        sub = %claims.sub,
+                        sub = %pws_sub,
                         "raw-Hydra Bearer family revoked after iat"
                     );
                     return BearerOutcome::Invalid;
                 }
                 Ok(false) => {}
                 Err(e) => {
-                    tracing::warn!(error = %e, sub = %claims.sub, "raw-Hydra Bearer revocation check failed");
+                    tracing::warn!(error = %e, sub = %pws_sub, "raw-Hydra Bearer revocation check failed");
                     return BearerOutcome::Invalid;
                 }
             }
         }
         // Slice 4 (§6.2): the raw-Hydra `sub` is the GLOBAL Hydra UUID —
-        // project it to the per-app `pws_` (and upsert the mapping) before
-        // the header is built, so the worker never sees the global id. Fail
-        // closed (503) when the route has no sector yet. `expected_client_id`
-        // is the route's bound oac_ client (the binding above proved the
-        // token agrees), so the mapping is keyed on it.
+        // project it to the per-app `pws_` (and upsert the mapping + read the
+        // live relay alias) before the header is built, so the worker never
+        // sees the global id. `expected_client_id` is the route's bound oac_
+        // client (the binding above proved the token agrees), so the mapping
+        // is keyed on it. `project_pairwise` re-derives the SAME `pws_sub` (a
+        // pure deterministic HMAC) and additionally persists the reverse-lookup
+        // row + reads the email-swap alias.
         let mut owned = build_worker_user_from_access_claims(&claims);
         match project_pairwise(
             state,
             Some(expected_client_id),
-            sector_identifier,
+            Some(sector),
             &owned.id,
         )
         .await
@@ -1963,7 +2166,10 @@ mod tests {
         proof_jkt: &str,
         aud: &str,
     ) -> String {
-        issue_wrapper_for_sub(state, "usr_test", proof_jkt, aud)
+        // A `pws_…`-shaped default sub: a gateway-issued wrapper's `sub` is
+        // ALWAYS a per-app pairwise pseudonym (the self-describing-subject
+        // invariant, Batch A fix 2), so the test fixtures mint one too.
+        issue_wrapper_for_sub(state, "pws_testsubject0000000", proof_jkt, aud)
     }
 
     /// Build a DPoP-style [`WrapperMint`] (cnf + wraps present) for the
@@ -2144,15 +2350,21 @@ mod tests {
         assert!(matches!(header, DpopOutcome::None), "DPoP path must reject a cnf-less plain-Bearer wrapper");
     }
 
+    /// Batch A fix 3: the DPoP wrapper fast-path keys revocation on the per-app
+    /// FAMILY marker `(client_id, pws_)` — the SAME mechanism (and the SAME
+    /// writer) the Bearer-wrapper / raw-Hydra / introspection arms use. (This
+    /// replaced a legacy UUID-only subject denylist that a `pws_` sub could
+    /// never match — now deleted, Batch A M2.) Mint a `pws_`-sub DPoP wrapper,
+    /// prove it resolves, `revoke_family(client_id, pws_)` the way /signout
+    /// does, and prove the SAME wrapper is then rejected. PG-gated.
     #[compio::test]
-    async fn resolve_dpop_rejects_wrapper_revoked_by_subject() {
+    async fn resolve_dpop_rejects_wrapper_revoked_by_family_marker() {
         let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
             eprintln!("skipping (no AUTH_DB_URL)");
             return;
         };
         let db_cfg = crate::db::DbConfig::new(dsn.clone(), 4);
 
-        let subject = Uuid::new_v4();
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let state = build_state_with_wrapper_and_auth_ui_url_and_db(
@@ -2163,7 +2375,11 @@ mod tests {
 
         let jkt = client_jkt(&client_key);
         let aud = "myapp.zeroship.ai";
-        let wrapper = issue_wrapper_for_sub(&state, &subject.to_string(), &jkt, aud);
+        // The wrapper's client_id is the `dpop_test_mint` default ("gateway");
+        // the family marker keys on that + the wrapper's pws_ sub.
+        let marker_client_id = "gateway";
+        let pws_sub = format!("pws_{}", Uuid::new_v4().simple());
+        let wrapper = issue_wrapper_for_sub(&state, &pws_sub, &jkt, aud);
         let htu = format!("http://{aud}/api/me");
         let now = i64::try_from(
             std::time::SystemTime::now()
@@ -2186,15 +2402,15 @@ mod tests {
                 resolve_dpop_user_header(&first_req, &state, &request_id, None, None).await,
                 DpopOutcome::Allowed(_)
             ),
-            "wrapper should resolve before subject revocation"
+            "wrapper should resolve before family revocation"
         );
 
         {
             let pool = crate::db::checkout(&db_cfg).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_subject(&conn, subject)
+            zeroship_core::wrapper_revocation::revoke_family(&conn, marker_client_id, &pws_sub)
                 .await
-                .expect("revoke subject");
+                .expect("revoke family (client_id, pws_)");
         }
 
         let second_proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
@@ -2209,14 +2425,14 @@ mod tests {
                 resolve_dpop_user_header(&second_req, &state, &request_id, None, None).await,
                 DpopOutcome::None
             ),
-            "revoked wrapper subject must be rejected"
+            "revoked (client_id, pws_) family must reject the DPoP wrapper"
         );
 
         let pool = crate::db::checkout(&db_cfg).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool checkout");
         conn.execute(
-            "DELETE FROM auth.wrapper_revoked_subjects WHERE subject = $1",
-            &[&subject],
+            "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&marker_client_id, &pws_sub],
         )
         .await
         .ok();
@@ -3610,15 +3826,17 @@ mod tests {
             "pre-revocation DPoP introspection token must be Allowed, got {pre:?}"
         );
 
-        // Revoke ONLY the (client_a, global_sub) family AFTER the token's iat.
-        // The introspection arm keys on the GLOBAL Hydra sub (the pairwise
-        // projection happens AFTER this check), the same sub the marker is
-        // written against here — exactly as the Bearer arm keys before its
-        // own projection.
+        // Batch A fix 3: the introspection arm now projects the per-app pws_
+        // BEFORE the marker check and keys on `(client_id, pws_)` — the SAME
+        // key the WRITERS use. Derive each app's pws_ under ITS sector (the
+        // states' salt is all-zero, the same salt the arm uses) and revoke ONLY
+        // app A's family.
+        let pws_a = zeroship_core::auth::derive_pairwise(&state_a.pairwise_salt, &global_sub, sector_a);
+        let pws_b = zeroship_core::auth::derive_pairwise(&state_b.pairwise_salt, &global_sub, sector_b);
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_a, &global_sub)
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_a, &pws_a)
                 .await
                 .expect("revoke_family app A");
         }
@@ -3658,8 +3876,8 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool checkout");
         conn.execute(
-            "DELETE FROM auth.token_revocations WHERE sub = $1",
-            &[&global_sub],
+            "DELETE FROM auth.token_revocations WHERE sub = ANY($1)",
+            &[&vec![pws_a, pws_b]],
         )
         .await
         .ok();
@@ -3992,17 +4210,24 @@ mod tests {
         let req_b = bearer_req(&token_b, aud);
         let request_id = Uuid::new_v4();
 
-        // Revoke ONLY app A's family for this sub.
+        // Batch A fix 3: the marker is keyed on `(client_id, pws_)` — the SAME
+        // key the arm now reads (it projects pws_ BEFORE the lookup). Derive
+        // each app's pws_ under ITS sector (the state's salt is all-zero, the
+        // same salt the arm uses), and revoke ONLY app A's family.
+        let sector_a = "https://app-a.zeroship.ai";
+        let sector_b = "https://app-b.zeroship.ai";
+        let pws_a = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector_a);
+        let pws_b = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector_b);
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, "oac_app_a", &sub)
+            zeroship_core::wrapper_revocation::revoke_family(&conn, "oac_app_a", &pws_a)
                 .await
                 .expect("revoke_family app A");
         }
 
-        // App A token: revoked → Invalid. (Sector present so the projection
-        // would succeed; revocation rejects BEFORE the pairwise projection.)
+        // App A token: revoked → Invalid. (Sector present so the arm derives
+        // the SAME pws_a the marker was written under.)
         assert!(
             matches!(
                 resolve_bearer_user_header(
@@ -4010,14 +4235,15 @@ mod tests {
                     &state,
                     &request_id,
                     Some("oac_app_a"),
-                    Some("https://app-a.zeroship.ai")
+                    Some(sector_a)
                 )
                 .await,
                 BearerOutcome::Invalid
             ),
-            "revoked (oac_app_a, sub) family must reject app A's token"
+            "revoked (oac_app_a, pws_a) family must reject app A's token"
         );
-        // App B token, SAME sub: NOT revoked → Allowed (per-app scoping).
+        // App B token, SAME global sub but DIFFERENT pws_ (different sector) and
+        // client: NOT revoked → Allowed (per-app scoping).
         assert!(
             matches!(
                 resolve_bearer_user_header(
@@ -4025,7 +4251,7 @@ mod tests {
                     &state,
                     &request_id,
                     Some("oac_app_b"),
-                    Some("https://app-b.zeroship.ai")
+                    Some(sector_b)
                 )
                 .await,
                 BearerOutcome::Allowed(_)
@@ -4036,8 +4262,8 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool checkout");
         conn.execute(
-            "DELETE FROM auth.token_revocations WHERE sub = $1",
-            &[&sub],
+            "DELETE FROM auth.token_revocations WHERE sub = ANY($1)",
+            &[&vec![pws_a, pws_b]],
         )
         .await
         .ok();
@@ -4887,5 +5113,330 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool");
         let conn = pool.get().await.expect("pool");
         crate::sessions::revoke(&conn, session.id).await.ok();
+    }
+
+    // ─── Batch A fix 2: self-describing-subject invariant ─────────────────
+
+    /// Decode the signed `ZeroShip-User` header and pull `.email` out.
+    fn decode_header_email(state: &crate::GateState, header: &str) -> String {
+        let json = zeroship_core::auth::verify_zeroship_user_header(
+            state.config.worker_key.as_bytes(),
+            header,
+        )
+        .expect("ZeroShip-User MAC verifies");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("user json");
+        v["email"].as_str().unwrap_or("").to_string()
+    }
+
+    /// A hand-crafted wrapper whose `sub` is a GLOBAL UUID (not a `pws_`) must
+    /// be HARD-REJECTED by BOTH wrapper fast-paths — defense in depth: even if
+    /// some future mint path forgot to project, a non-projected wrapper can
+    /// never reach a worker and leak the global identity into the JS-readable
+    /// token. No PG needed (the invariant check precedes any DB touch). The
+    /// `debug_assert!` is `cfg(not(test))`-gated so this exercises the runtime
+    /// reject, the production defense against a forged token.
+    #[ntex::test]
+    async fn wrapper_with_uuid_sub_is_rejected_by_both_fast_paths() {
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+        let request_id = Uuid::new_v4();
+
+        let aud = "myapp.zeroship.ai";
+        let client_id = "oac_myapp";
+        // A global UUID sub — exactly what an un-projected wrapper would carry.
+        let uuid_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+
+        // (a) Bearer wrapper path (cnf = None).
+        let plain = issue_plain_wrapper(&state, uuid_sub, client_id, aud);
+        let bearer = bearer_req(&plain, aud);
+        let outcome =
+            resolve_bearer_user_header(&bearer, &state, &request_id, Some(client_id), None).await;
+        assert!(
+            matches!(outcome, BearerOutcome::Invalid),
+            "Bearer wrapper with a UUID sub must be Invalid (subject invariant), got {outcome:?}"
+        );
+
+        // (b) DPoP wrapper fast-path (cnf = Some(jkt)).
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let jkt = client_jkt(&client_key);
+        let dpop_wrapper = issue_wrapper_for_sub(&state, uuid_sub, &jkt, aud);
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        let proof = sign_dpop_proof(&client_key, "GET", &htu, &dpop_wrapper, now);
+        let dpop_req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {dpop_wrapper}"))
+            .header("dpop", proof)
+            .to_http_request();
+        let outcome =
+            resolve_dpop_user_header(&dpop_req, &state, &request_id, None, None).await;
+        assert!(
+            matches!(outcome, DpopOutcome::None),
+            "DPoP wrapper with a UUID sub must be rejected (subject invariant), got {outcome:?}"
+        );
+
+        // Sanity: the SAME wrappers with a real pws_ sub ARE accepted, so the
+        // reject above is the invariant firing — not a broken fixture.
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let plain_ok = issue_plain_wrapper(&state, &pws, client_id, aud);
+        assert!(
+            matches!(
+                resolve_bearer_user_header(&bearer_req(&plain_ok, aud), &state, &request_id, Some(client_id), None).await,
+                BearerOutcome::Allowed(_)
+            ),
+            "a pws_-sub Bearer wrapper must still Allow"
+        );
+    }
+
+    // ─── Batch A fix 3: revocation cross-arm parity ───────────────────────
+
+    /// Write the family marker the EXACT way `/signout` does — keyed on
+    /// `(client_id, pws_)` where `pws_ = derive_pairwise(salt, global_uuid,
+    /// sector)` — then assert that BOTH a still-live raw-Hydra Bearer token AND
+    /// a DPoP-introspected token for the SAME `(client_id, user)` are now
+    /// rejected. Pre-fix these arms keyed the lookup on the GLOBAL UUID while
+    /// the writer keyed on `pws_`, so a real signout never matched a live token
+    /// (the MAJOR cross-arm namespace mismatch). PG-gated.
+    ///
+    /// `#[ntex::test]` (not `#[compio::test]`) because it stands up
+    /// `ntex::web::test::server` JWKS + introspection mocks — the same harness
+    /// the sibling raw-Hydra / introspection revocation tests use — and that
+    /// requires the ntex runtime (a `compio::test` would nest runtimes).
+    #[ntex::test]
+    async fn revocation_keyed_on_pws_rejects_raw_hydra_and_dpop_introspection() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+
+        let client_id = "oac_revparity";
+        let host = "myapp.zeroship.ai";
+        let sector = "https://myapp.zeroship.ai";
+        let global_sub = format!("0192f1aa-bbbb-7ccc-8ddd-{:012x}", rand_suffix());
+
+        // (a) RAW-HYDRA BEARER arm. Build a state whose oidc_rp JWKS serves the
+        // Hydra key. Both test builders default to an all-zero `pairwise_salt`,
+        // so we read the SAME salt the arms will use off the built state and
+        // derive the WRITER's pws_ from it — no fragile Arc mutation.
+        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let oidc_rp = crate::oidc_rp::OidcRp::new(
+            &base,
+            "gateway",
+            "test-secret",
+            b"test-stash-key-32-bytes-long----".to_vec(),
+        )
+        .with_issuer(HYDRA_ISS);
+        let bearer_state =
+            build_state_with_wrapper_and_oidc_and_db(gateway_signing.clone(), oidc_rp, Some(db.clone()));
+
+        // The pws_ the WRITER (/signout) keys on — derive_pairwise under the
+        // route's sector with the SAME salt the arm uses (read off the state).
+        let pws_sub =
+            zeroship_core::auth::derive_pairwise(&bearer_state.pairwise_salt, &global_sub, sector);
+
+        // Write the family marker EXACTLY as browser_auth::signout does:
+        // revoke_family(client_id, pws_sub).
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool get");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws_sub)
+                .await
+                .expect("signout-style revoke_family on (client_id, pws_)");
+        }
+
+        let token = sign_hydra_access_jwt(
+            &jwks_signing,
+            &global_sub,
+            Some(client_id),
+            serde_json::json!(["http://api.zeroship.localhost"]),
+            "user@example.com",
+            "Hydra User",
+            3600,
+        );
+        let req = bearer_req(&token, host);
+        let request_id = Uuid::new_v4();
+        let outcome = resolve_bearer_user_header(
+            &req,
+            &bearer_state,
+            &request_id,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        assert!(
+            matches!(outcome, BearerOutcome::Invalid),
+            "a still-live raw-Hydra Bearer must be rejected by the pws_-keyed marker, got {outcome:?}"
+        );
+
+        // (b) DPoP-INTROSPECTION arm. Introspection mock returns the SAME
+        // global sub + the route client_id; the arm projects pws_ and keys the
+        // marker check on it.
+        let srv_i = start_introspect_server(serde_json::json!({
+            "active": true,
+            "sub": global_sub,
+            "client_id": client_id,
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": "Hydra User",
+            "scope": "openid email",
+            "iat": i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            )
+            .unwrap()
+                - 60,
+        }))
+        .await;
+        let base_i = srv_i.url("").trim_end_matches('/').to_string();
+        // Same all-zero default salt as `bearer_state`, so the introspection
+        // arm derives the SAME pws_ the marker was written under.
+        let intro_state =
+            build_state_for_introspection_with_db(gateway_signing, &base_i, Some(db.clone()));
+        debug_assert_eq!(intro_state.pairwise_salt, bearer_state.pairwise_salt);
+
+        let dpop_req = opaque_dpop_req(&client_key, "ht_opaque_revparity", host, "/api/me");
+        let outcome = resolve_dpop_user_header(
+            &dpop_req,
+            &intro_state,
+            &request_id,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        assert!(
+            matches!(outcome, DpopOutcome::None),
+            "a DPoP-introspected token must be rejected by the pws_-keyed marker, got {outcome:?}"
+        );
+
+        // Cleanup.
+        let pool = crate::db::checkout(&db).await.expect("pool checkout");
+        let conn = pool.get().await.expect("pool get");
+        conn.execute(
+            "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&client_id, &pws_sub],
+        )
+        .await
+        .ok();
+        drop(srv);
+        drop(srv_i);
+    }
+
+    // ─── Batch A fix 5: live relay_email re-resolve on wrapper fast-path ──
+
+    /// A wrapper carries an alias-only email at mint, but the alias can be
+    /// revoked WHILE the wrapper is still valid. The Bearer wrapper fast-path
+    /// must re-resolve the alias LIVE keyed on `(client_id, pws_)` and emit an
+    /// EMPTY email once it is revoked — never the stale alias the wrapper still
+    /// embeds. PG-gated.
+    #[compio::test]
+    async fn bearer_wrapper_reresolves_relay_email_live_and_blanks_on_revoke() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+
+        let aud = "myapp.zeroship.ai";
+        let client_id = format!("oac_livemail_{}", Uuid::new_v4().simple());
+        let global_user_id = Uuid::new_v4();
+        let pws_sub = format!("pws_live_{}", Uuid::new_v4().simple());
+        let active_alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+
+        // Seed the user + an ACTIVE alias row keyed on (client_id, pws_).
+        let dsn = std::env::var("AUTH_DB_URL").unwrap();
+        let (seed, conn) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
+            .await
+            .expect("seed connect");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        seed.execute(
+            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+             VALUES ($1, $2::citext, $3, NOW())",
+            &[&global_user_id, &format!("real-{}@example.com", global_user_id.simple()), &"Live User"],
+        )
+        .await
+        .expect("seed user");
+        seed.execute(
+            "INSERT INTO auth.app_user_identities \
+                (app_client_id, global_user_id, pairwise_sub, relay_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[&client_id, &global_user_id, &pws_sub, &active_alias],
+        )
+        .await
+        .expect("seed alias");
+
+        // The wrapper is minted carrying the helper's default alias claim
+        // (`relay-alias@zeroship.ai`). The LIVE re-resolve must OVERRIDE that
+        // with the DB value: pre-revoke the header email must be the seeded
+        // ACTIVE alias (not the mint-time claim), proving the arm reads live.
+        let token = issue_plain_wrapper_with_scope(&state, &pws_sub, &client_id, aud, "openid email");
+        let req = bearer_req(&token, aud);
+        let request_id = Uuid::new_v4();
+
+        // Pre-revoke: the live alias is projected.
+        let BearerOutcome::Allowed(header) =
+            resolve_bearer_user_header(&req, &state, &request_id, Some(&client_id), None).await
+        else {
+            panic!("pre-revoke wrapper must Allow");
+        };
+        assert_eq!(
+            decode_header_email(&state, &header),
+            active_alias,
+            "wrapper fast-path must project the LIVE active alias"
+        );
+
+        // Revoke the alias (the 5c cascade write).
+        seed.execute(
+            "UPDATE auth.app_user_identities SET revoked_at = now() \
+             WHERE app_client_id = $1 AND global_user_id = $2",
+            &[&client_id, &global_user_id],
+        )
+        .await
+        .expect("revoke alias");
+
+        // Post-revoke: the SAME still-valid wrapper now projects an EMPTY email
+        // (fail closed) — the stale alias must NOT survive.
+        let BearerOutcome::Allowed(header2) =
+            resolve_bearer_user_header(&req, &state, &request_id, Some(&client_id), None).await
+        else {
+            panic!("wrapper still cryptographically valid post alias-revoke");
+        };
+        assert_eq!(
+            decode_header_email(&state, &header2),
+            "",
+            "a revoked alias must blank the wrapper fast-path email (fail closed)"
+        );
+
+        // Cleanup.
+        seed.execute(
+            "DELETE FROM auth.app_user_identities WHERE app_client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .ok();
+        seed.execute("DELETE FROM auth.users WHERE id = $1", &[&global_user_id])
+            .await
+            .ok();
     }
 }

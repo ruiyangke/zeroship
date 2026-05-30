@@ -131,6 +131,7 @@ pub async fn revoke_grant_cascade(
     auth_db_url: &str,
     user_id: &uuid::Uuid,
     client_id: &str,
+    pairwise_salt: &[u8; 32],
 ) -> Result<u64, Error> {
     let mut conn = dedicated_client(auth_db_url).await?;
     let tx = conn.transaction().await?;
@@ -155,6 +156,43 @@ pub async fn revoke_grant_cascade(
         &[user_id, &client_id],
     )
     .await?;
+
+    // SAME transaction — write the per-app token-family marker so the live
+    // ACCESS token dies too (Batch A fix 4), not just the relay alias. The
+    // gateway's wrapper / Bearer / DPoP arms reject a token when a row exists
+    // in `auth.token_revocations` for its `(client_id, pws_)` with
+    // `revoked_after > token.iat`; without this write a "disconnect app" left
+    // the user's current 10-min wrapper / 1 h raw-Hydra token fully live until
+    // it expired. We derive the SAME `pws_` the gateway projects:
+    // `derive_pairwise(salt, global_user_id, sector)` under the route's apex
+    // `sector_identifier` (read from `control.app_oauth_clients` by client_id,
+    // the same value the gateway uses). When the sector row is missing (an app
+    // whose client was never provisioned) there is no live wrapper to revoke,
+    // so the marker write is skipped — the alias revoke above still applies.
+    let sector: Option<String> = tx
+        .query_opt(
+            "SELECT sector_identifier FROM control.app_oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await?
+        .map(|row| row.get("sector_identifier"));
+    if let Some(sector) = sector {
+        let pws = zeroship_core::auth::derive_pairwise(
+            pairwise_salt,
+            &user_id.to_string(),
+            &sector,
+        );
+        // Mirror `wrapper_revocation::revoke_family` (NOW()-stamped upsert),
+        // inline here so it runs inside this cascade's transaction on the
+        // dedicated client rather than on the shared `auth_pg`.
+        tx.execute(
+            "INSERT INTO auth.token_revocations (client_id, sub, revoked_after) \
+             VALUES ($1, $2, NOW()) \
+             ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+            &[&client_id, &pws],
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(deleted)
 }

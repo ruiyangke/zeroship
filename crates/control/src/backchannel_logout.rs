@@ -106,26 +106,13 @@ pub async fn handle(
     // `console_sessions.user_id` column).
     match token.sub.as_deref() {
         Some(sub) => {
+            // Drop the introspection cache so the console stops accepting the
+            // user's live access tokens, then revoke their console sessions.
+            // There is NO wrapper-token denylist write here: the console has no
+            // browser-wrapper / per-app `pws_` token family of its own, and the
+            // global subject denylist was write-only dead code with zero
+            // readers — removed in Batch A M2 (pre-launch, no back-compat).
             state.hydra_introspector.invalidate_by_sub(sub);
-            if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub) {
-                if let Err(e) = zeroship_core::wrapper_revocation::revoke_subject(
-                    state.auth_pg.as_ref(),
-                    subject,
-                )
-                .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        sub = %sub,
-                        "console backchannel_logout: wrapper subject revoke failed"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    sub = %sub,
-                    "console backchannel_logout: non-UUID sub cannot enter wrapper denylist"
-                );
-            }
             let revoked = console_sessions::revoke_all_for_user(&state.auth_pg, sub)
                 .await
                 .unwrap_or_else(|e| {

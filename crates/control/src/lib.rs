@@ -202,6 +202,15 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
+    /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
+    /// stash signing key the gateway uses via
+    /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a
+    /// dashboard "disconnect app" (grant revoke) can derive the per-app
+    /// `pws_…` subject and write the `auth.token_revocations` family marker on
+    /// the SAME `(client_id, pws_)` key the gateway's wrapper / Bearer / DPoP
+    /// arms read — killing the live access token, not just the relay alias
+    /// (Batch A fix 4). MUST stay byte-identical to the gateway's salt.
+    pub pairwise_salt: [u8; 32],
 }
 
 impl AppState {
