@@ -108,3 +108,14 @@ export {
   type AuthFormMode,
   type AuthFormValues,
 } from "./AuthForm";
+
+// Stepper block — multi-step progress indicator / wizard nav composing
+// Icon (Lucide Check) with complete/current/upcoming status, connectors,
+// horizontal|vertical orientation, and opt-in clickable steps.
+export {
+  Stepper,
+  type StepperProps,
+  type StepperStep,
+  type StepperOrientation,
+  type StepStatus,
+} from "./Stepper";
