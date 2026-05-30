@@ -87,6 +87,7 @@
 /* ─── Page sections — full-width marketing/content bands built FROM the
    primitives + components above. */
 @import "./sections/Hero/Hero.css";
+@import "./sections/PricingTable/PricingTable.css";
 
 *,
 *::before,

@@ -1,0 +1,310 @@
+/*
+ * PricingTable — the monetization band.
+ *
+ * Anatomy:
+ *   .zs-pricing                — the <section>; generous vertical padding,
+ *                                NO heavy background (composable — the
+ *                                consumer paints the page backdrop)
+ *   .zs-pricing__lead          — optional centered title + description band
+ *   .zs-pricing__title         — the optional section lead-in <h2>
+ *   .zs-pricing__lead-description — muted lead-in <p>
+ *   .zs-pricing__grid          — the responsive Grid of tier cards
+ *   .zs-pricing__tier          — each tier Card (relabels Card's "card");
+ *                                a column flexbox so the CTA pins to bottom
+ *   .zs-pricing__header        — badge + name + price + description region
+ *   .zs-pricing__badge         — the featured "Most popular" badge row
+ *   .zs-pricing__name          — the tier name heading
+ *   .zs-pricing__price         — the price line (amount + muted period)
+ *   .zs-pricing__amount        — the price amount (prominent type)
+ *   .zs-pricing__period        — the period suffix (muted)
+ *   .zs-pricing__description    — one-line positioning copy
+ *   .zs-pricing__divider        — the Separator between header + features
+ *   .zs-pricing__features       — the feature <ul>; GROWS so the CTA pins
+ *   .zs-pricing__feature        — each feature <li> (icon + label + note)
+ *   .zs-pricing__feature-icon   — the Check / Minus inclusion icon
+ *   .zs-pricing__feature-label  — the feature text
+ *   .zs-pricing__feature-note   — optional muted trailing note
+ *   .zs-pricing__cta            — the trailing CTA row (pinned to bottom)
+ *   .zs-pricing__cta-button     — the default CTA Button (full-width)
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm; the composed Container
+ *     owns the inline width + padding. The composed Grid owns the column
+ *     tracks + gap. The Card owns its own padding / radius / surface.
+ *   - EQUAL-HEIGHT cards: the Grid track is `align-items: stretch` (set
+ *     via the Grid `align="stretch"` prop) so every Card fills the row
+ *     height. Each Card is itself a column flexbox; the feature list
+ *     (`flex: 1`) grows to absorb the slack and the CTA row sits at the
+ *     block-end — so CTAs align across tiers of differing feature counts.
+ *   - Responsive: N columns at the --zs-bp-md breakpoint and up (the Grid
+ *     `columns={{ md: N }}` prop); below it the Grid primitive ITSELF
+ *     collapses to a single stacked column (its responsive base count is 1).
+ *     The collapse is owned by the Grid — this band carries no local
+ *     @media override.
+ *   - Logical properties throughout (padding-block, margin-inline,
+ *     inset, gap) for RTL.
+ *
+ * Motion: none of its own (the composed Card / Button honor reduced-motion
+ * in their own CSS); the gate below exists for surface parity.
+ */
+
+.zs-pricing {
+  /* Local single-knob custom properties (the house idiom, cf.
+     --zs-auth-form-width / --zs-hero-measure): named, tunable handles for
+     the band's calibrated literals so the intent is legible and a consumer
+     can retune in one place. Values are the calibrated defaults — changing
+     them here is the only place that moves the band.
+       --zs-pricing-ring-width   — the featured tier's accent ring thickness
+       --zs-pricing-lead-measure — the centered lead-in's max readable measure
+       --zs-pricing-icon-nudge   — the feature icon's first-line baseline nudge
+  */
+  --zs-pricing-ring-width: 0.125rem;
+  --zs-pricing-lead-measure: 40rem;
+  --zs-pricing-icon-nudge: 0.125rem;
+
+  /* Band rhythm — generous vertical padding so the band reads distinct.
+     No background: composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  color: var(--zs-label);
+}
+
+/* ─── Lead-in — optional centered title + description ─────────────────────── */
+.zs-pricing__lead {
+  /* Cap the lead-in to a readable measure and center it above the grid. */
+  max-inline-size: var(--zs-pricing-lead-measure);
+  margin-inline: auto;
+  margin-block-end: var(--zs-space-9);
+  text-align: center;
+}
+
+.zs-pricing__title {
+  margin-block: 0;
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  color: var(--zs-label);
+  text-wrap: balance;
+}
+
+.zs-pricing__lead-description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── Grid — the responsive tier row ─────────────────────────────────────── */
+/* The composed Grid owns the column tracks, gap, stretch alignment AND the
+   single-column collapse: its responsive base column count is 1, and the
+   `columns={{ md }}` prop only PROMOTES to the multi-column row at ≥ --zs-bp-md.
+   Below the breakpoint the Grid is already a single stacked column, so this
+   band adds no local collapse override. */
+
+/* ─── Tier card — a column flexbox so the CTA pins to the bottom ─────────── */
+.zs-pricing__tier {
+  /* The Card root is overridden to a column flexbox so the feature list can
+     grow and the CTA sits at the block-end. `block-size: 100%` makes the
+     card fill its stretched grid track (equal-height row). */
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  /* The intra-card vertical rhythm. The Card owns its outer padding; this
+     gap governs the space between header / divider / features / CTA. */
+  gap: var(--zs-space-4);
+}
+
+/* Featured tier — a token accent ring layered as an inset box-shadow on top
+   of the elevated Card's --zs-shadow-2, plus a touch more lift. The ring is
+   a --zs-pricing-ring-width ring in the accent color so the recommended tier
+   reads distinct WITHOUT relying on color alone (the visible "Most popular"
+   badge carries the meaning for AT + color-blind users). */
+.zs-pricing__tier[data-featured] {
+  box-shadow:
+    inset 0 0 0 var(--zs-pricing-ring-width) var(--zs-accent),
+    var(--zs-shadow-3);
+}
+
+/* ─── Header — badge + name + price + description ─────────────────────────── */
+.zs-pricing__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+}
+
+.zs-pricing__badge {
+  /* The badge sits above the name; start-aligned so it reads as a flag on
+     the tier rather than a centered ornament. */
+  display: flex;
+  margin-block-end: var(--zs-space-1);
+}
+
+.zs-pricing__name {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+
+.zs-pricing__price {
+  /* The price line: a prominent amount with a muted period suffix on the
+     same baseline. */
+  margin-block: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--zs-space-1);
+  flex-wrap: wrap;
+}
+
+.zs-pricing__amount {
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  font-weight: var(--zs-text-large-title-weight);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  color: var(--zs-label);
+}
+
+.zs-pricing__period {
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+}
+
+.zs-pricing__description {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── Divider ─────────────────────────────────────────────────────────────
+   The composed Separator paints the hairline; no extra rule needed — the
+   tier's own `gap` provides the rhythm above/below it. */
+
+/* ─── Features — the GROW region so the CTA pins to the bottom ───────────── */
+.zs-pricing__features {
+  /* Reset the list chrome — the rows are styled rows, not bulleted. */
+  margin-block: 0;
+  padding-inline-start: 0;
+  list-style: none;
+  /* GROW: absorb the vertical slack so the trailing CTA sits at the card
+     block-end regardless of feature count (equal-height CTA alignment). */
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+}
+
+.zs-pricing__feature {
+  display: flex;
+  /* Top-align the icon to the first line of a multi-line label. */
+  align-items: flex-start;
+  gap: var(--zs-space-2);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label);
+}
+
+/* An excluded feature reads muted — but inclusion is conveyed by the icon +
+   the visually-hidden word ("Included" / "Not included"), so the muting is a
+   reinforcing cue, NEVER the sole signal (color-blind + SR users).
+   `--zs-label-secondary` (not tertiary) keeps the row body-text AA-clean
+   against the Card surface while still reading visibly quieter than the
+   full-weight included rows. */
+.zs-pricing__feature:not([data-included]) {
+  color: var(--zs-label-secondary);
+}
+
+.zs-pricing__feature-icon {
+  /* Nudge the icon down to sit on the label's first-line baseline. The icon
+     inherits the row color via currentColor; the included rows tint the
+     check accent, the excluded rows stay muted with the row. */
+  margin-block-start: var(--zs-pricing-icon-nudge);
+  flex: 0 0 auto;
+}
+
+.zs-pricing__feature[data-included] .zs-pricing__feature-icon {
+  color: var(--zs-accent);
+}
+
+.zs-pricing__feature-label {
+  /* The label takes the remaining inline space; the optional note follows. */
+  flex: 1 1 auto;
+}
+
+.zs-pricing__feature-note {
+  flex: 0 0 auto;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  /* Secondary (not tertiary) keeps the small footnote-size note AA-clean. */
+  color: var(--zs-label-secondary);
+}
+
+/* ─── CTA — pinned to the card block-end ─────────────────────────────────── */
+.zs-pricing__cta {
+  /* The trailing row. `margin-block-start: auto` is the belt to the feature
+     list's `flex: 1` braces — together they pin the CTA to the block-end so
+     CTAs align across tiers of differing feature counts. */
+  display: flex;
+  margin-block-start: auto;
+}
+
+/* The default (ctaLabel) Button stretches full-width so the CTA reads as a
+   tier-level action band. A consumer-supplied `cta` node is laid out as-is. */
+.zs-pricing__cta-button {
+  inline-size: 100%;
+}
+
+/* ─── forced-colors — keep tier borders / featured ring / text legible ─────
+ *
+ * The authored surface / accent / label tokens drop out in a forced-colors
+ * pass. Reassert system colors so the tier cards stay outlined, the featured
+ * ring stays distinguishable (Highlight), and every text region resolves to
+ * CanvasText. The composed Icon paints with currentColor, so it follows the
+ * row color automatically — no extra rule needed. */
+@media (forced-colors: active) {
+  .zs-pricing,
+  .zs-pricing__title,
+  .zs-pricing__name,
+  .zs-pricing__amount {
+    color: CanvasText;
+  }
+  .zs-pricing__lead-description,
+  .zs-pricing__period,
+  .zs-pricing__description,
+  .zs-pricing__feature,
+  .zs-pricing__feature:not([data-included]),
+  .zs-pricing__feature-note {
+    color: CanvasText;
+  }
+  /* Every tier card keeps a system border so the cards stay separable when
+     the authored box-shadow hairline drops out. Uses the house hairline
+     token (the same edge Radio / Toolbar / DataTable use). */
+  .zs-pricing__tier {
+    border: var(--zs-selection-hairline) solid CanvasText;
+  }
+  /* The featured ring becomes a thicker Highlight border so "recommended"
+     stays visually distinct (the visible badge already carries it for AT).
+     1.5× the accent ring width keeps it tied to the single ring knob. */
+  .zs-pricing__tier[data-featured] {
+    border-color: Highlight;
+    border-width: calc(var(--zs-pricing-ring-width) * 1.5);
+  }
+}
+
+/* ─── reduced-motion ─────────────────────────────────────────────────────
+ * No-op — PricingTable has no motion of its own (the composed Card / Button
+ * honor reduced-motion in their own CSS). The gate exists for parity with the
+ * rest of the surface. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-pricing {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}

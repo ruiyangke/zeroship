@@ -18,3 +18,13 @@ export {
   type HeroActionsProps,
   type HeroMediaProps,
 } from "./Hero";
+
+export {
+  PricingTable,
+  type PricingTableProps,
+  type PricingTableTierProps,
+  type PricingTableFeatureProps,
+  type PricingTier,
+  type PricingFeature,
+  type PricingHeadingLevel,
+} from "./PricingTable";
