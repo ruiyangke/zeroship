@@ -326,7 +326,7 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
                 port: cfg.smtp_port,
                 username: cfg.smtp_username.clone(),
                 password: cfg.smtp_password.clone(),
-                use_starttls: cfg.smtp_starttls,
+                tls: cfg.smtp_tls,
             })
             .map_err(|e| AuthError::Config(format!("smtp mailer: {e}")))?;
             Ok(Arc::new(driver))
@@ -364,7 +364,7 @@ fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, Au
                 port: cfg.relay_smtp_port,
                 username: cfg.relay_smtp_username.clone(),
                 password: cfg.relay_smtp_password.clone(),
-                use_starttls: cfg.relay_smtp_starttls,
+                tls: cfg.relay_smtp_tls,
             })
             .map_err(|e| AuthError::Config(format!("relay smtp mailer: {e}")))?;
             Ok(RelayForwardMailer(Arc::new(driver)))

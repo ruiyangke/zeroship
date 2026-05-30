@@ -68,13 +68,21 @@ fn extract_query_param(raw_url: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-/// Rewrite any `https?://auth.zeroship.ai/...` URL to the loopback hydra
-/// the test container exposes on 127.0.0.1:4444.
-fn rewrite_to_hydra_loopback(raw_url: &str) -> String {
-    for prefix in ["https://auth.zeroship.ai", "http://auth.zeroship.ai"] {
-        if let Some(rest) = raw_url.strip_prefix(prefix) {
-            return format!("http://127.0.0.1:4444{rest}");
-        }
+/// Rewrite any URL whose origin is the configured Hydra `issuer_base` to the
+/// loopback `dial_base` the test can actually reach.
+///
+/// Hydra mints `redirect_to` URLs under its configured issuer host
+/// (`urls.self.issuer`), which differs by deployment: the prod template uses
+/// `https://auth.zeroship.ai`, the compose stack (`ops/hydra-dev.yaml`) uses
+/// `http://auth.zeroship.localhost`. The test, however, dials Hydra on a
+/// loopback port. Parameterising both ends lets the same test run against
+/// either issuer; hard-coding `auth.zeroship.ai → 127.0.0.1:4444` left the
+/// compose `redirect_to` unrewritten and the request hung.
+fn rewrite_to_hydra_loopback(raw_url: &str, issuer_base: &str, dial_base: &str) -> String {
+    let issuer_base = issuer_base.trim_end_matches('/');
+    let dial_base = dial_base.trim_end_matches('/');
+    if let Some(rest) = raw_url.strip_prefix(issuer_base) {
+        return format!("{dial_base}{rest}");
     }
     raw_url.to_string()
 }
@@ -157,8 +165,22 @@ async fn gateway_oidc_rp_full_dance() {
         eprintln!("[oidc_rp_e2e] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
+    // The loopback base the test can actually dial Hydra on.
     let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
+    // The issuer Hydra mints into `redirect_to`/`iss` (`urls.self.issuer`).
+    // Defaults to the prod template's value (with its trailing slash); the
+    // compose stack overrides it to `http://auth.zeroship.localhost` (no
+    // trailing slash) via AUTH_HYDRA_ISSUER. We use this string *verbatim* as
+    // the expected `iss` — the trailing slash is deployment-specific (Hydra
+    // echoes `urls.self.issuer` byte-for-byte), so munging it here would break
+    // one deployment or the other. The host origin (scheme + host, no path)
+    // drives the loopback rewrite below; both differ from `hydra_public` (a
+    // loopback dial URL).
+    let expected_iss = std::env::var("AUTH_HYDRA_ISSUER")
+        .unwrap_or_else(|_| "https://auth.zeroship.ai/".to_string());
+    // Origin used for the redirect_to → loopback rewrite (drop any path/slash).
+    let issuer_base = expected_iss.trim_end_matches('/').to_string();
 
     // 1. Boot PG client + run auth migrations.
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
@@ -207,7 +229,7 @@ async fn gateway_oidc_rp_full_dance() {
         smtp_port: 587,
         smtp_username: None,
         smtp_password: None,
-        smtp_starttls: true,
+        smtp_tls: zeroship_auth::mailer::SmtpTls::Starttls,
         resend_api_key: None,
         mail_from_email: "auth@zeroship.ai".to_string(),
         mail_from_name: "zeroship".to_string(),
@@ -223,7 +245,7 @@ async fn gateway_oidc_rp_full_dance() {
         relay_smtp_port: 587,
         relay_smtp_username: None,
         relay_smtp_password: None,
-        relay_smtp_starttls: false,
+        relay_smtp_tls: zeroship_auth::mailer::SmtpTls::Plaintext,
         jwk_rotation_days: 90,
         jwk_retain_days: 31,
         cron_tick_secs: 86400,
@@ -287,6 +309,36 @@ async fn gateway_oidc_rp_full_dance() {
         .await
         .expect("create test client");
 
+    // 3b. Seed the matching `control.oauth_clients` row. The Slice-3
+    //     skip-consent fast path upserts `control.oauth_grants`, whose
+    //     `client_id` FK targets `control.oauth_clients(client_id)`. Without
+    //     this row the upsert fails its FK and `/consent` renders a
+    //     ContactSupport 200 instead of the skip 302 — so the test only ever
+    //     passed against a DB where some other run had seeded the client.
+    //     (Real per-app clients always exist here via `ensure_app_client`.)
+    let redirect_uris: Vec<String> = vec![test_redirect.to_string()];
+    let scopes: Vec<String> = vec![
+        "openid".into(),
+        "offline_access".into(),
+        "email".into(),
+        "profile".into(),
+    ];
+    pg_client
+        .execute(
+            "INSERT INTO control.oauth_clients \
+                 (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, TRUE, $1) \
+             ON CONFLICT (client_id) DO NOTHING",
+            &[
+                &test_client_id,
+                &"gateway oidc_rp e2e",
+                &redirect_uris,
+                &scopes,
+            ],
+        )
+        .await
+        .expect("seed control.oauth_clients");
+
     // 4. Seed a user directly into auth.users (avoids the signup HTTP
     //    flow — the e2e_password test already covers that, and we want
     //    a deterministic `sub` to assert against).
@@ -314,7 +366,7 @@ async fn gateway_oidc_rp_full_dance() {
         test_client_secret.clone(),
         b"gateway-e2e-stash-signing-key-32-bytes!".to_vec(),
     )
-    .with_issuer("https://auth.zeroship.ai/");
+    .with_issuer(expected_iss.clone());
 
     // 6. Build the authorize redirect — sanity-check the URL shape, then
     //    follow it.
@@ -400,7 +452,7 @@ async fn gateway_oidc_rp_full_dance() {
     );
 
     // 10. Follow back to hydra → 302 to /consent?consent_challenge=...
-    let to_hydra_local = rewrite_to_hydra_loopback(&to_hydra);
+    let to_hydra_local = rewrite_to_hydra_loopback(&to_hydra, &issuer_base, &hydra_public);
     let resp = http
         .request(http::Method::GET, &to_hydra_local)
         .expect("build GET hydra-from-login")
@@ -435,7 +487,7 @@ async fn gateway_oidc_rp_full_dance() {
     let to_hydra = location(&resp);
 
     // 12. Follow that redirect → final 302 to test_redirect with ?code=...&state=...
-    let to_hydra_local = rewrite_to_hydra_loopback(&to_hydra);
+    let to_hydra_local = rewrite_to_hydra_loopback(&to_hydra, &issuer_base, &hydra_public);
     let resp = http
         .request(http::Method::GET, &to_hydra_local)
         .expect("build GET hydra-from-consent")
@@ -537,6 +589,14 @@ async fn gateway_oidc_rp_full_dance() {
         .execute(
             "DELETE FROM auth.users WHERE id = $1",
             &[&user_id],
+        )
+        .await;
+    // Remove the seeded client (cascades any control.oauth_grants rows minted
+    // by the skip-consent path), keeping the test re-runnable.
+    let _ = pg_client
+        .execute(
+            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            &[&test_client_id],
         )
         .await;
 

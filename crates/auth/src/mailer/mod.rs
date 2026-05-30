@@ -28,7 +28,7 @@ use compio_postgres::Client;
 
 use crate::store::suppressions;
 pub use resend::{ResendConfig, ResendMailer};
-pub use smtp::{SmtpConfig, SmtpMailer};
+pub use smtp::{SmtpConfig, SmtpMailer, SmtpTls};
 pub use stdout::StdoutMailer;
 pub use types::{Address, Email, MailerError, MessageId};
 

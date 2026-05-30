@@ -6,6 +6,8 @@ use clap::Parser;
 use zeroship_core::config::{
     parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY,
 };
+
+use crate::mailer::SmtpTls;
 use zeroship_core::observability::ObservabilityFlags;
 
 const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
@@ -235,10 +237,16 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_SMTP_PASSWORD", hide_env_values = true)]
     pub smtp_password: Option<String>,
 
-    /// `true` ⇒ open plaintext then upgrade with STARTTLS (port 587).
-    /// `false` ⇒ open implicit TLS / SMTPS (port 465).
-    #[arg(long, env = "AUTH_SMTP_STARTTLS", default_value = "true")]
-    pub smtp_starttls: bool,
+    /// Transport encryption for the transactional SMTP leg:
+    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
+    /// `plaintext` (no TLS — dev/test sinks like mailpit on :1025 ONLY).
+    #[arg(
+        long = "smtp-tls",
+        env = "AUTH_SMTP_TLS",
+        value_enum,
+        default_value_t = SmtpTls::Starttls
+    )]
+    pub smtp_tls: SmtpTls,
 
     /// Resend API key (required when `--mailer=resend`).
     #[arg(long, env = "AUTH_RESEND_API_KEY", hide_env_values = true)]
@@ -331,10 +339,17 @@ pub struct AuthConfig {
     )]
     pub relay_smtp_password: Option<String>,
 
-    /// `true` ⇒ STARTTLS on the relay-forward SMTP connection. Dev sinks
-    /// (mailpit) are plaintext (`false`); prod is `true`.
-    #[arg(long = "relay-smtp-starttls", env = "AUTH_RELAY_SMTP_STARTTLS", default_value = "true")]
-    pub relay_smtp_starttls: bool,
+    /// Transport encryption for the relay-forward SMTP leg:
+    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
+    /// `plaintext` (no TLS). Dev sinks (mailpit on :1025) use `plaintext`;
+    /// prod uses `starttls`.
+    #[arg(
+        long = "relay-smtp-tls",
+        env = "AUTH_RELAY_SMTP_TLS",
+        value_enum,
+        default_value_t = SmtpTls::Starttls
+    )]
+    pub relay_smtp_tls: SmtpTls,
 
     // ─── Postmark webhook (bounce/complaint receiver, P5-U7) ─────────────
     /// HTTP Basic-auth username Postmark must present on every
@@ -670,6 +685,76 @@ mod tests {
             "--insecure-dev",
         ])
         .expect_err("--insecure-dev no longer accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    // ─── SMTP TLS mode (Bug 2 regression) ────────────────────────────────
+    // The old `--smtp-starttls`/`--relay-smtp-starttls` were bare `bool` flags
+    // with `default_value = "true"`: passing a value (`=false`) errored and the
+    // bare flag could only ever set `true`, so there was NO way to disable TLS
+    // on the command line (only via env). These value-enum flags fix that AND
+    // add the previously-missing `plaintext` arm for dev/test sinks.
+
+    #[test]
+    fn smtp_tls_defaults_to_starttls() {
+        let cfg = test_config();
+        assert_eq!(cfg.smtp_tls, SmtpTls::Starttls);
+        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Starttls);
+    }
+
+    #[test]
+    fn smtp_tls_accepts_plaintext_value_on_cli() {
+        // Pre-fix `--smtp-starttls=false` errored ("unexpected value"); the
+        // valued enum parses an explicit mode, including the new plaintext arm.
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-tls",
+            "plaintext",
+            "--relay-smtp-tls",
+            "plaintext",
+        ]);
+        assert_eq!(cfg.smtp_tls, SmtpTls::Plaintext);
+        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Plaintext);
+    }
+
+    #[test]
+    fn smtp_tls_accepts_implicit_and_starttls_values() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-tls=implicit",
+            "--relay-smtp-tls=starttls",
+        ]);
+        assert_eq!(cfg.smtp_tls, SmtpTls::Implicit);
+        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Starttls);
+    }
+
+    #[test]
+    fn smtp_tls_rejects_unknown_mode() {
+        let err = AuthConfig::try_parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-tls",
+            "nope",
+        ])
+        .expect_err("unknown smtp-tls mode must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn old_smtp_starttls_flag_is_rejected() {
+        // No back-compat: the bare bool flag is gone, replaced by `--smtp-tls`.
+        let err = AuthConfig::try_parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-starttls",
+        ])
+        .expect_err("--smtp-starttls no longer accepted");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 

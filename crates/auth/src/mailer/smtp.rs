@@ -83,6 +83,26 @@ impl Header for RawHeader {
     }
 }
 
+/// Transport encryption mode for an [`SmtpConfig`].
+///
+/// Three-way so the relay/transactional SMTP legs can target a real MTA
+/// (TLS) **or** a plaintext dev/test sink (mailpit) — the two-way
+/// `use_starttls: bool` had no plaintext arm, so a plaintext sink was
+/// undeliverable (STARTTLS → "STARTTLS is not supported"; implicit-TLS →
+/// "corrupt message of type InvalidContentType").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum SmtpTls {
+    /// Open plaintext then upgrade with STARTTLS (typical port 587). The
+    /// default — real submission MTAs require it.
+    #[default]
+    Starttls,
+    /// Open implicit TLS / SMTPS from the first byte (typical port 465).
+    Implicit,
+    /// No TLS at all — plaintext SMTP. ONLY for dev/test sinks (mailpit on
+    /// `:1025`); never a real MTA. Maps to lettre's `builder_dangerous`.
+    Plaintext,
+}
+
 /// Driver-specific config; parsed from `AUTH_SMTP_*` env vars in [`crate::config`].
 #[derive(Debug, Clone)]
 pub struct SmtpConfig {
@@ -90,9 +110,8 @@ pub struct SmtpConfig {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
-    /// `true` ⇒ open plaintext then upgrade via STARTTLS (typical port 587).
-    /// `false` ⇒ open implicit-TLS / SMTPS (typical port 465).
-    pub use_starttls: bool,
+    /// Transport encryption mode (STARTTLS / implicit-TLS / plaintext).
+    pub tls: SmtpTls,
 }
 
 /// SMTP-backed `Mailer`. The wrapped `SmtpTransport` is internally
@@ -116,12 +135,17 @@ impl SmtpMailer {
     /// [`MailerError::Config`] if lettre rejects the relay host (e.g.
     /// the rustls connector can't construct a server-name from `host`).
     pub fn new(cfg: &SmtpConfig) -> Result<Self, MailerError> {
-        let builder = if cfg.use_starttls {
-            SmtpTransport::starttls_relay(&cfg.host)
-        } else {
-            SmtpTransport::relay(&cfg.host)
+        // `starttls_relay`/`relay` build a rustls connector (can fail on a bad
+        // server-name); `builder_dangerous` is infallible — it opens a
+        // plaintext socket with no TLS, the only path that can reach a
+        // plaintext dev/test sink (mailpit).
+        let builder = match cfg.tls {
+            SmtpTls::Starttls => SmtpTransport::starttls_relay(&cfg.host)
+                .map_err(|e| MailerError::Config(format!("smtp build({}): {e}", cfg.host)))?,
+            SmtpTls::Implicit => SmtpTransport::relay(&cfg.host)
+                .map_err(|e| MailerError::Config(format!("smtp build({}): {e}", cfg.host)))?,
+            SmtpTls::Plaintext => SmtpTransport::builder_dangerous(&cfg.host),
         }
-        .map_err(|e| MailerError::Config(format!("smtp build({}): {e}", cfg.host)))?
         .port(cfg.port);
 
         let builder = match (&cfg.username, &cfg.password) {
@@ -273,7 +297,7 @@ mod tests {
             port: 587,
             username: Some("u".into()),
             password: Some("p".into()),
-            use_starttls: true,
+            tls: SmtpTls::Starttls,
         });
         assert!(m.is_ok(), "starttls relay build: {:?}", m.err());
     }
@@ -285,9 +309,27 @@ mod tests {
             port: 465,
             username: None,
             password: None,
-            use_starttls: false,
+            tls: SmtpTls::Implicit,
         });
         assert!(m.is_ok(), "implicit tls relay build: {:?}", m.err());
+    }
+
+    /// Regression for the missing plaintext transport arm (major bug): a
+    /// plaintext dev/test sink (mailpit on `:1025`) MUST build a no-TLS
+    /// transport. Pre-fix there was no `SmtpTls::Plaintext` and both arms
+    /// forced TLS, so a plaintext sink was undeliverable. `builder_dangerous`
+    /// is infallible, so the only thing under test here is that the plaintext
+    /// arm exists and constructs a mailer.
+    #[test]
+    fn smtp_mailer_builds_for_plaintext_sink() {
+        let m = SmtpMailer::new(&SmtpConfig {
+            host: "127.0.0.1".into(),
+            port: 1025,
+            username: None,
+            password: None,
+            tls: SmtpTls::Plaintext,
+        });
+        assert!(m.is_ok(), "plaintext sink build: {:?}", m.err());
     }
 
     /// `build_lettre_message` translates text-only `Email` cleanly

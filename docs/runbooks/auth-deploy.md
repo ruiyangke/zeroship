@@ -74,7 +74,7 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 | `AUTH_SMTP_PORT` | `587` | no | 587 (STARTTLS) or 465 (implicit TLS). |
 | `AUTH_SMTP_USERNAME` | — | optional | SMTP username (if relay requires auth). |
 | `AUTH_SMTP_PASSWORD` | — | optional | Paired with `AUTH_SMTP_USERNAME`. |
-| `AUTH_SMTP_STARTTLS` | `true` | no | `true` = STARTTLS on 587, `false` = implicit SMTPS on 465. |
+| `AUTH_SMTP_TLS` | `starttls` | no | Transport encryption: `starttls` (587) \| `implicit` (SMTPS, 465) \| `plaintext` (no TLS — dev/test sinks like mailpit on :1025 ONLY). |
 | `AUTH_RESEND_API_KEY` | — | when `AUTH_MAILER=resend` | Resend HTTP API key. |
 | `AUTH_POSTMARK_WEBHOOK_USER` | unset | when using Postmark | HTTP Basic-auth user Postmark presents on `/webhooks/postmark`. Unset = handler returns 401. |
 | `AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Paired with the above. |
