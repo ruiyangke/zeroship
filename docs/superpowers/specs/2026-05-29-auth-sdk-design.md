@@ -1,49 +1,46 @@
 # @zeroship/auth — in-app popup login SDK (whole-vision design)
 
-> Status: **DRAFT / round-3 revision applied — pending human review gate.** This file is the durable
-> source of truth for the `feat/auth-sdk-popup` loop. Locked decisions + grounded facts are
-> preserved verbatim below the fold; the full per-subsystem design follows. Round 1 resolved the
-> consent authorization-inversion, the silent-iframe third-party-cookie blocker, the
-> client_id-resolution wire-format gap, the dual-rotation refresh race, the Bearer/API-key
-> collision + `aud`-vs-`client_id` binding, the F4 pairwise lean, the relay feasibility/topology
-> gaps, and the schema type mismatches. **Round 2** relocated the pairwise subject to a deterministic
-> gateway header projection, applied the consent self-grant bypass on both the GET and POST paths,
-> added gateway id_token validation, the custom-header CSRF posture, the non-authoritative
-> breadcrumb, the 10-min browser access TTL + jti denylist, `oauth_client_id: Option`, and the
-> pinned relay-email substitution points.
+> Status: **DRAFT / round-5 (code-grounded feasibility fixes) — pending human review gate.** Durable
+> source of truth for the `feat/auth-sdk-popup` loop. The full **decision ledger** (every O*/S* item,
+> with the grounded-fact anchors) lives in §10; the per-subsystem design follows. Round-by-round
+> detail is captured by the inline `Added in round N` markers — this banner only records the current
+> state.
 >
-> **Round 3** closes three blocker-class soundness gaps round 2 still shipped, plus two real majors:
-> (1) the **reload-recovery anchor is now a SEPARATE durable credential** (`auth.app_session_anchors`)
-> with its own no-idle-slide, 30-day-capped-at-720h lifetime — the old plan reused
-> `auth.gateway_sessions`, whose live `ABSOLUTE_HOURS=12` / `IDLE_MINUTES=30` (`sessions.rs:46-50`,
-> `validate()` at :103) would kill the anchor after the first 30-min idle gap, making "return
-> tomorrow" recovery impossible (§2/§8.1/§8.3); (2) the **`env.auth` plugin is pinned to BOTH
-> registration sites** — the multi-tenant **worker** registers ONLY `DbPlugin` via
-> `create_plugins()` (`crates/worker/src/cache.rs:40-46`), so the round-2 "same path as Kv/Storage"
-> instruction would have made `env.auth.getUser()` resolve under `zeroship serve` but stay
-> `undefined` for every real end-user app; AuthPlugin is stateless (reads `RuntimeState`) so it is
-> unconditionally pushed at both sites and the e2e item 5 runs against the **worker** path (§1.4);
-> (3) the **`/session?mint=1` rotation is made atomic and idempotent under concurrency** — round 2's
-> per-tab/per-reload `?mint=1` was a second concurrent rotator of the single server family, racing
-> Hydra reuse-detection; round 3 holds the anchor row lock ACROSS the Hydra refresh round-trip and
-> caches the minted access token under the anchor with its own short TTL, so N concurrent minters
-> yield exactly one Hydra refresh call (§1.2/§2/O3). Round 3 also: **persists the PKCE transaction in
-> `sessionStorage`** (verifier/state/nonce/redirect_uri) so an opener reload mid-popup does not strand
-> the flow (Auth0 `TransactionManager` parity, §4.3/§4.4); **demotes the over-built CORS apparatus**
-> on the same-origin `/token`+`/session` to an exact-origin reject (no credentialed origin
-> reflection, §1.2/§8.3/§8.5); makes the **jti denylist cross-node** by backing it with the
-> PG-tiered `auth.token_revocations` table and making the **`(client_id, sub, revoked-after)`
-> family marker the PRIMARY mechanism** (signout cannot enumerate live jtis, §8.5); makes the
-> **access-token `sub` privacy-safe** by minting a per-app wrapper access token whose `sub` is the
-> `pws_` so app JS cannot recover the global UUID (§1.2/§1.3/§6.2/G4); **downgrades the nonce claim**
-> to honest signature+client_id binding (a client-echoed nonce is no guarantee against an XSS client,
-> §1.2); **unifies the consent grant ledger** so `control.oauth_grants` and the delta-detection read
-> the same store, with per-app clients NOT setting `skip_consent` (§5.2); reconciles the
-> **Unknown-scope reject with the live `scope_views` render + deploy-ordering** (§5.1/§5.2); fixes the
-> **expired-Bearer-on-Anon-route** regression so public pages still serve (§1.3); analyzes **COOP
-> across all three popup navigation legs** with a BroadcastChannel fallback (§4.4); and gives the
-> **email-alias projection a read-through cache + consent-time creation** off the hot path (§7.1).
-> (See the `Added in round 3` markers.)
+> **Round 5** closed the feasibility gaps the round-4 review found against the live tree, without
+> relitigating any decision: (1) the **`wrapper_token::Issuer::issue`/`Verifier::verify` refactor**
+> the entire G4/Bearer wrapper path depends on is now spelled out as an in-patch contract change
+> (claims-builder with free `sub`/`email`/`exp`/`cnf`, optional `client_id` check) — it was never the
+> "pure reuse" round 3 implied (§1.2); (2) **`auth.gateway_sessions` gains a `granted_scopes` column**
+> (it had none) via a Liquibase changeset + a `sessions::create` write (§1.4/§5.3/§8.1); (3) per-app
+> clients now register in the **existing `control.oauth_clients`** so the `oauth_grants` FK +
+> `skip_consent` are satisfied, with `app_oauth_clients` demoted to a per-app extension (§1.1/§5.2/§8.1);
+> (4) **`?mint=1` produces the `pws_` wrapper via local JWKS verify of the rotated raw JWT — no
+> introspection** — and caches the wrapper, not the raw token (§1.2); (5) the **consent→`/token`
+> commit ordering** + a defensive lazy-alias-mint on a read-through miss are pinned (§7.1); plus
+> minors: OAuth `client_id` gets an **`oac_` prefix** (not `app_`) distinct from `app_ref` (§1.1/§4.3),
+> the **nonce echo to the gateway is dropped** (no-op under the trust model; `expected_nonce=None`)
+> (§1.2/§4.3), the bogus **`client_id_implicit`** authorize param is removed (§2), the
+> **advisory-lock-held-across-Hydra** connection-pin is bounded + breaker-tied (§8.7), the exact
+> **`RouteEntry` producer (`registry.rs::get_routes`)** + mixed-default fixture is named (§1.5), and
+> **`SameSite=Strict` on the anchor is confirmed correct** for the same-origin `/session` fetch (§8.3).
+>
+> **Round 4** locked four pilot rulings into the body (§10): **O8** — app scopes are declared in the
+> app **manifest** (`auth.scopes`), mirrored to `control.app_scope_defs` + the per-app Hydra client
+> allowlist **atomically on deploy** (§5.1/§5.2/§1.1); **O7** — relay reply routing v1 **BOUNCES**
+> ("replies not yet supported"), never silently drops; two-way is v2 (§7.2); **S1** — the gateway
+> Bearer arm binds on the **`client_id` claim** (RFC 9068), the Slice-1c spike confirms, fallback =
+> `audience=[client_id]` + bind on `aud` (§1.3); **S2** — ship **F4-B** (gateway HMAC pairwise
+> projection), Hydra stays `subject_type: public`, **F4-A deferred** behind an optional spike (§6.2).
+>
+> Rounds 1–3 resolved the consent authorization-inversion, the silent-iframe 3p-cookie blocker, the
+> client_id-resolution wire-format gap, the dual-rotation refresh race, the Bearer/API-key collision,
+> the separate `auth.app_session_anchors` anchor store, the `AuthPlugin`-on-both-sites wiring, the
+> atomic anchor-lock `?mint=1`, the browser-held `pws_` wrapper (no global UUID in app JS), the
+> cross-node `auth.token_revocations` family marker, the single `control.oauth_grants` ledger,
+> same-origin-only CORS, the expired-Bearer-on-Anon fall-through, the sessionStorage PKCE
+> transaction, the COOP/BroadcastChannel relay fallback, and the consent-time alias + read-through
+> cache. See §10 for the full list and the `Added in round N` markers for the rationale at each site.
+>
 > Date: 2026-05-29. Branch: `feat/auth-sdk-popup` (worktree `.worktrees/auth-sdk-popup`).
 > Discipline: **commit-only, never push**; orchestrate via subagents (pilot mode); every
 > fix carries a regression test; tests run the real path (no shims).
@@ -390,8 +387,9 @@ User clicks "Sign in"
   ├─ SDK: window.open('', 'zs:auth', '400x600 centered')   [SYNC — before any await]
   ├─ SDK: generate verifier+challenge(S256), state, nonce; PERSIST {verifier,state,nonce,redirect_uri}
   │        in sessionStorage (keyed by state) + in-memory flow map (survives an opener reload, §4.3)
-  ├─ SDK: authorizeUrl = `${appOrigin}/__zs/auth/authorize?` + {client_id_implicit, challenge,
-  │        state, nonce, scope}     (NO prompt — let Hydra's SSO skip fire; client_id gateway-side)
+  ├─ SDK: authorizeUrl = `${appOrigin}/__zs/auth/authorize?` + {code_challenge,
+  │        code_challenge_method=S256, state, nonce, scope}
+  │        (NO client_id — the gateway injects it from Host; NO prompt — let Hydra's SSO skip fire)
   ├─ SDK: popup.location.href = authorizeUrl
   │
   ▼ popup
@@ -534,8 +532,18 @@ the gateway under its own DB row lock, never by the browser, so the two families
 
 Each app gets its own Hydra client, created/reconciled by the **control plane**.
 
-- **client_id**: `app_<base62-app-id>` (deterministic from `app_id`; one client per app, stable
-  across deploys). Derivation lives next to `registry.rs`/`api.rs`.
+- **client_id**: `oac_<base62-app-id>` (deterministic from `app_id`; one client per app, stable
+  across deploys). Derivation lives next to `registry.rs`/`api.rs`. ⚠️ **Round-5 (MINOR) — the OAuth
+  client_id uses an `oac_` prefix, NOT `app_`, to avoid colliding with the `app_` *entity* typed_id
+  namespace** (`usr_`/`app_`/`ses_` are UUIDv7+base62 typed_ids per the invariant; the OAuth
+  `client_id` is a *derived* identifier, not a typed_id, so it must not reuse the `app_` prefix). It
+  is the value written to `control.oauth_clients.client_id` and bound by the Bearer arm
+  (`claims.client_id == route.oauth_client_id`). It is **distinct from `app_ref`** (the SDK cache key,
+  §4.3): `app_ref` is a *separate* short opaque per-app id the gateway returns to the browser for
+  cache/breadcrumb/lock keying and is **never** the OAuth `client_id`, so the SDK still does not learn
+  the `client_id` (the gateway injects it). See §4.3 for `app_ref`'s derivation. (Throughout this doc,
+  illustrative `app_7Fk…`/`app_<base62>` tokens in OAuth-claim examples denote this `oac_<base62>`
+  `client_id`; they are written `oac_…` where the distinction matters.) <!-- Added in round 5: addressing MINOR — give the OAuth client_id an oac_ prefix so it doesn't collide with the app_ typed_id namespace; pin app_ref ≠ client_id -->
 - **token_endpoint_auth_method**: `none` (public).
 - **grant_types**: `["authorization_code", "refresh_token"]`.
 - **response_types**: `["code"]`.
@@ -543,20 +551,16 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
   (Subsystem 3 mirrors them into this allowlist).
 - **redirect_uris**: `[{scheme}://{host}/__zs/auth/popup-callback, {scheme}://{host}/__zs/auth/callback]`
   for every host the app serves (apex + custom domains). Exact-match (RFC 9700) — registered per
-  host, no wildcards. ⚠️ **Round-3 fix (MINOR) — bound the array and address Hydra re-validation /
-  per-deploy PUT cost.** Two-per-host growth (2×N) is bounded by a **per-app custom-domain cap
-  (default 50 domains ⇒ ≤102 redirect_uris)**, well within Hydra's per-client `redirect_uris`
-  tolerance (Hydra stores them as a JSON array and validates by exact-match lookup; ~100 entries is
-  not a performance concern). The control plane recomputes the **full set idempotently** on each
-  domain change and `PUT`s it only when it differs (diff-then-PUT, so a no-op deploy is a no-op PUT);
-  concurrent domain attaches are serialized by the same `control.app_oauth_clients` row update. We do
-  **not** register a wildcard. The same `sector_identifier_uri` churn concern that pushed us away from
-  Hydra-native pairwise (below) does **not** apply to `redirect_uris` because the baseline client is
-  `subject_type: public` — Hydra does **not** fetch/re-validate a sector document for a public client,
-  so a `redirect_uris` PUT is a cheap local validation, not an outbound JSON fetch. (If F4-A
-  Hydra-native pairwise is ever adopted, a **single stable platform-controlled callback origin with a
-  signed return-target** — one redirect_uri, sector-stable — is the documented escape from both the
-  2×N growth and the sector re-validation; that is the S2 spike's design, not the baseline.) <!-- Added in round 3: addressing MINOR — bound redirect_uris growth, idempotent diff-then-PUT, note public-client has no sector re-validation, signed-return-target escape hatch -->
+  host, no wildcards. ⚠️ **Round-3 (MINOR) — bound the array and the per-deploy PUT cost.** Two-per-host
+  growth (2×N) is bounded by a **per-app custom-domain cap (default 50 ⇒ ≤102 redirect_uris)**, well
+  within Hydra's tolerance (it stores them as a JSON array, validates by exact-match lookup). The
+  control plane recomputes the **full set idempotently** on each domain change and `PUT`s only on a
+  diff (no-op deploy ⇒ no-op PUT); concurrent attaches are serialized by the same
+  `control.app_oauth_clients` row update. Because the baseline is `subject_type: public` there is **no**
+  sector document, so a `redirect_uris` PUT is a cheap local validation, not the outbound JSON
+  fetch/re-validation that pushed us away from F4-A (below). (If F4-A is ever adopted, the documented
+  escape from both the 2×N growth and the sector re-validation is a single platform-controlled callback
+  origin with a signed return-target — the S2 spike's design, not the baseline.) <!-- Added in round 3: bound redirect_uris growth, idempotent diff-then-PUT, public-client has no sector re-validation -->
 - **subject_type**: `public` (the **locked default**). The per-app pairwise `pws_…` sub is a
   **gateway header projection** (§6.2, F4-B), **not** computed by Hydra and **not** set at
   `accept_consent` (round 2 relocated it — the subject is bound to the global UUID at `accept_login`).
@@ -583,8 +587,28 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
   `sync_app_redirect_uris(app, hosts)`, `delete_app_client(app_id)`; called from the app/deploy
   handlers. Idempotent (upsert), mirroring `bootstrap_builder.rs`.
 
-The control plane stores client bookkeeping in `control.app_oauth_clients` (DDL in §8) so it can
-reconcile without re-deriving from Hydra.
+⚠️ **Round-5 (MAJOR) — per-app clients register in the EXISTING `control.oauth_clients`, with
+`skip_consent = false`; `control.app_oauth_clients` is a thin per-app *extension*, not a parallel
+client table.** The single-ledger argument (§5.2) leans on `control.oauth_grants` keyed by
+`(user_id, client_id)`, and **`control.oauth_grants.client_id` has a FK
+`REFERENCES control.oauth_clients(client_id) ON DELETE CASCADE`** (0004_control.sql:262). The
+`skip_consent` flag the §5.2 fast path reads also lives on `control.oauth_clients`
+(`consent.rs:69 info.client.skip_consent`). So an `oauth_grants` upsert for a per-app `client_id`
+**violates the FK** unless that `client_id` also has a `control.oauth_clients` row. Therefore
+`ensure_app_client` writes the per-app client to **`control.oauth_clients`** — exactly as
+`bootstrap_builder.rs::insert_oauth_client` does for the builder client (`client_id == hydra_client_id
+== oac_<base62>`, `skip_consent = FALSE`, `redirect_uris`/`scopes` mirrored) — and **NOT** to the
+trusted-clients allowlist (so per-app clients never get `skip_consent = true`; §5.2 round-3). This
+makes the FK satisfiable and the `skip_consent` read correct. `control.app_oauth_clients` (§8.1) is
+kept only for the **per-app-specific** bookkeeping `oauth_clients` does not carry — the
+`sector_identifier` (for pairwise/relay scoping) and the `app_id → client_id` link — and is `1:1` with
+the `oauth_clients` row via `hydra_client_id`. The redirect_uris/scope allowlist live on the
+`oauth_clients` row (the FK target), and `app_oauth_clients` does not duplicate them. <!-- Added in round 5: addressing MAJOR — register per-app clients in control.oauth_clients (FK + skip_consent target); app_oauth_clients holds only sector_identifier/app link -->
+
+The control plane stores per-app-specific bookkeeping in `control.app_oauth_clients` (DDL in §8.1) —
+the `sector_identifier` and `app_id ↔ client_id` mapping — so it can reconcile without re-deriving
+from Hydra; the OAuth client identity itself (the FK target, `skip_consent`) lives in
+`control.oauth_clients`.
 
 ### 1.2 Gateway same-origin endpoints
 
@@ -623,7 +647,7 @@ Add `OidcRp::build_browser_authorize_url(client_id, params) -> String` in `oidc_
 ```
 GET /__zs/auth/authorize?code_challenge=…&code_challenge_method=S256&state=…&nonce=…
                          &scope=openid%20profile%20read:billing     (no prompt — SSO skip fires)
-→ 302 Location: https://auth.zeroship.ai/oauth2/auth?client_id=app_7Fk…&response_type=code&…
+→ 302 Location: https://auth.zeroship.ai/oauth2/auth?client_id=oac_7Fk…&response_type=code&…
 ```
 
 #### `GET /__zs/auth/popup-callback`
@@ -681,14 +705,12 @@ timing out at 60s. <!-- Added in round 1: addressing MINOR — cross-origin ifra
 
 #### `POST /__zs/auth/token`
 
-⚠️ **Round-3 fix (MAJOR) — `/__zs/auth/token` is SAME-ORIGIN-ONLY; CORS is NOT the security
-boundary and credentialed origin-reflection is removed.** The SDK calls `${appOrigin}/__zs/auth/token`
-from the app page, i.e. **same-origin** — so the browser never consults CORS on the happy path, and
-cross-origin SDK use is explicitly unsupported (§1.2). Round 2's "CORS-enabled, allow-origin =
-reflected app origin, `allow-credentials: true`" was both dead weight on the happy path **and** the
-classic dangerous pattern: origin-reflection + `allow-credentials` turns any reflection bug (a
-subdomain match, an `Origin: null`, a Host-spoofed value) into a credentialed cross-origin
-token-mint oracle. Round 3 therefore: <!-- Added in round 3: addressing MAJOR — drop credentialed origin reflection; same-origin-only; reject foreign/null/missing Origin; CORS is not the boundary -->
+⚠️ **`/__zs/auth/token` is SAME-ORIGIN-ONLY; CORS is NOT the security boundary** (round-3 MAJOR). The
+SDK calls `${appOrigin}/__zs/auth/token` from the app page (same-origin), so the browser never
+consults CORS on the happy path; cross-origin SDK use is unsupported. We deliberately do **not** use
+credentialed origin-reflection (`allow-origin = reflected origin` + `allow-credentials: true`): that
+pattern turns any reflection bug (subdomain match, `Origin: null`, Host-spoof) into a credentialed
+cross-origin token-mint oracle. Instead: <!-- Added in round 3: drop credentialed origin reflection; same-origin-only; reject foreign/null/missing Origin; CORS is not the boundary -->
 
 - **Emits NO CORS allow-origin / allow-credentials headers** on `/token` and `/session`. A
   cross-origin request gets no `Access-Control-Allow-Origin`, so the browser blocks the response —
@@ -741,51 +763,65 @@ or `mode=browser_refresh` (`useRefreshTokens` — browser keeps its own family).
   established by the first exchange, holds a **different** family from a **different** code. Two
   codes ⇒ two non-overlapping families ⇒ no shared rotation, no reuse-detection race.
 
-**Server-side id_token validation (the SDK does NOT trust a raw id_token).** ⚠️ **Round-2 fix
-(MAJOR).** The browser cannot reach Hydra's JWKS (no CORS), so it cannot verify the id_token's
-signature itself. Round 1 had the SDK *decode* the id_token to populate the user profile — trusting
-an unverified JWT, which an XSS or a compromised intermediary that influences the same-origin token
-response could forge. Auth0-spa-js avoids this by validating the id_token (nonce, iss, aud, exp,
-signature) against the OIDC client's JWKS. **We do the equivalent on the gateway, which already
-holds Hydra JWKS** (`state.oidc_rp.jwks`): <!-- Added in round 2: addressing MAJOR — gateway validates id_token (sig/nonce/iss/aud/exp) and returns a trusted user projection; SDK never decodes a raw id_token -->
+**Server-side id_token validation (the SDK does NOT trust a raw id_token)** ⚠️ (round-2 MAJOR). The
+browser cannot reach Hydra's JWKS (no CORS), so it cannot verify the id_token itself; decoding it
+client-side would trust an unverified JWT an XSS or compromised intermediary could forge. Auth0-spa-js
+validates the id_token (nonce/iss/aud/exp/signature) against the client's JWKS; **we do the
+equivalent on the gateway, which already holds Hydra JWKS** (`state.oidc_rp.jwks`): <!-- Added in round 2: gateway validates id_token (sig/nonce/iss/aud/exp) and returns a trusted user projection; SDK never decodes a raw id_token -->
 
 - On every `/__zs/auth/token` code exchange the gateway, after receiving Hydra's response,
-  **fully validates the id_token**: EdDSA/RS256 signature via `state.oidc_rp.jwks`, `iss ==
-  state.oidc_rp.issuer`, `aud == route.oauth_client_id`, `exp`/`iat` within skew (these four are the
-  **load-bearing** binding), and a defense-in-depth `nonce` echo check (round-3: *not* a guarantee
-  against an untrusted client — see "Nonce round-trip" below). A signature/iss/aud/exp failure
-  returns `400 invalid_token` and no cookie is set.
+  **fully validates the id_token** via `zeroship_core::oidc_verify::verify_id_token(cache=state.oidc_rp.jwks,
+  token, expected_iss=state.oidc_rp.issuer, expected_aud=route.oauth_client_id, expected_nonce=None, …)`:
+  EdDSA/RS256 signature, `iss`, `aud == route.oauth_client_id` (for an id_token `aud` IS the client_id —
+  correct, `oidc_verify.rs:342` `set_audience(&[expected_aud])`), `exp`/`iat` within skew. These four
+  are the **load-bearing** binding. A signature/iss/aud/exp failure returns `400 invalid_token` and no
+  cookie is set. ⚠️ **Round-5 (MINOR) — `expected_nonce` is passed as `None`, and the nonce is NOT
+  echoed to the gateway at all.** Feeding the client-echoed nonce into `verify_id_token`'s
+  `expected_nonce` would make `oidc_verify.rs`'s `NonceMismatch` check (line ~387) compare two
+  client-supplied values — trivially satisfiable by the same untrusted client, so it is dead weight,
+  not even defense-in-depth, under the §8.5 trust model. The nonce's only real job is a **cross-flow
+  mixup guard inside the SDK**: the SDK matches the id_token's `nonce` claim (when it inspects it for
+  diagnostics) against its **own `sessionStorage` transaction nonce** (§4.3) and **never sends the
+  nonce to the gateway**. Dropping the gateway-side nonce echo removes a no-op masquerading as
+  defense-in-depth; the load-bearing binding stays signature + `iss` + `aud`(=client_id) + `exp`. <!-- Added in round 5: addressing MINOR — pass expected_nonce=None to verify_id_token; keep nonce as the SDK's own sessionStorage cross-flow guard, never echoed to the gateway -->
 - The gateway returns a **server-validated `user` projection** in the token response (the same
   shape as `/session`), built from the *verified* id_token claims. **The SDK consumes `user` from
   the response body and never decodes the id_token itself.** The id_token is still returned (for
   parity / opaque pass-through) but is not trusted client-side.
 
-**⚠️ Round-3 fix (MAJOR) — the browser receives a per-app WRAPPER access token whose `sub` is the
-`pws_`, NOT the raw Hydra access JWT (which carries the GLOBAL UUID in `sub`).** Round 2 kept Hydra's
-`sub` = the global `usr_` UUID end-to-end and only projected `pws_` at the `ZeroShip-User` header.
-But in Bearer mode the **browser holds the access token** (`Session.access_token`) and the trust
-model (§8.5) puts arbitrary creator JS *inside* the token boundary — so any app's JS could
-`base64`-decode its own access token's payload and read the global `usr_` UUID `sub`, correlating the
-user across apps. That makes G4 ("each app sees a per-app pairwise sub, never the global user id")
-**false on the Bearer path** and undermines mitigation #1 ("a token stolen from app A reveals only
-app A's `pws_…`"). The fix reuses the **wrapper-token machinery that already exists** for the DPoP
-path (`crates/gateway/src/wrapper_token.rs` `Issuer::issue` → `WrapperClaims{ sub, scope, client_id,
-email, … }`, signed by the gateway's own ed25519 key and verified by `state.wrapper_verifier`): <!-- Added in round 3: addressing MAJOR — browser gets a wrapper access token whose sub is pws_ and email is the alias; raw Hydra access JWT (global UUID) never leaves the gateway -->
+**⚠️ The browser receives a per-app WRAPPER access token whose `sub` is the `pws_`, NOT the raw Hydra
+access JWT** (round-3 MAJOR). In Bearer mode the browser holds the access token
+(`Session.access_token`) and the trust model (§8.5) puts arbitrary creator JS *inside* the token
+boundary — so a raw Hydra token (global UUID in `sub`) could be `base64`-decoded by app JS to
+correlate the user across apps, breaking G4 and mitigation #1. The fix **extends** the wrapper-token
+machinery that the DPoP path already ships (`crates/gateway/src/wrapper_token.rs`: `Issuer`,
+`WrapperClaims{ sub, scope, client_id, email, … }`, the gateway ed25519 key, `Verifier`) to mint a
+browser-path wrapper. ⚠️ **Round-5 (BLOCKER) — this is NOT pure reuse; `Issuer::issue` and
+`Verifier::verify` are refactored in this patch.** The shipped `issue()` signature is
+`issue(aud, introspection: &IntrospectionResponse, proof_jkt: &str, hydra_token: &str)` — it derives
+`sub`/`email`/`scope`/`client_id` **from the introspection response**, hard-codes `exp = now + 3600`
+(1 h), **requires** a `proof_jkt` (lands in `cnf.jkt`), and derives `wraps = SHA256(hydra_token)`.
+None of that can mint a `pws_`/alias/10-min/cnf-optional wrapper as-is. The required in-patch
+`wrapper_token` contract changes are enumerated below (§"wrapper_token changes required"); the
+mechanism then reads: <!-- Added in round 3: browser gets a wrapper access token whose sub is pws_ and email is the alias; raw Hydra access JWT (global UUID) never leaves the gateway. Round 5: refactor Issuer::issue to a claims-builder (free sub/email/exp/cnf), add Verifier client_id check — not pure reuse -->
 
 - On the `/token` code exchange, after validating Hydra's response, the gateway **mints a per-app
   wrapper access token** with `sub = derive_pairwise(hydra.sub, route.sector_identifier)` (the
-  `pws_`), `email = relay_alias`, `client_id = route.oauth_client_id`, `scope`, and a 10-min `exp`.
-  **This wrapper is the `access_token` returned to the browser.** The raw Hydra access JWT (global
-  UUID) is kept server-side under the anchor (for `?mint=1` re-mint) and **never leaves the gateway**.
-- The Bearer arm (§1.3) **already** verifies wrapper tokens via `state.wrapper_verifier` (the DPoP
-  precedent), so it accepts this wrapper and reads `pws_` straight from its `sub` — no pairwise
-  re-derivation needed on the wrapper path. (A wrapper minted **without** a DPoP key simply omits
-  `cnf.jkt`; `useDpop` adds the `cnf.jkt` binding exactly as the DPoP exchange does today.) This
-  reuses `state.wrapper_issuer` / `state.wrapper_verifier` (`crates/gateway/src/lib.rs:136/147`),
-  which the gateway already constructs from its ed25519 signing key — the **same** key requirement
-  the shipped `/__zs/auth/dpop-exchange` path has, so no new key material. If the signing key is
-  absent (a misconfiguration), `/token` returns `503` exactly as `dpop-exchange` does today, rather
-  than silently handing back the raw Hydra token.
+  `pws_`), `email = relay_alias`, `client_id = route.oauth_client_id`, `scope`, a 10-min `exp`, and
+  `cnf = None` (plain Bearer) or `cnf = Some(jkt)` (`useDpop`). **This wrapper is the `access_token`
+  returned to the browser.** The raw Hydra access JWT (global UUID) is kept server-side under the
+  anchor (for `?mint=1` re-mint) and **never leaves the gateway**. Because the wrapper's claims are
+  **not** read from an introspection response, the gateway builds them explicitly from the
+  locally-validated id_token + the route's sector/alias (no Hydra introspection round-trip — §8.5 O2).
+- The Bearer arm (§1.3) verifies wrapper tokens via `state.wrapper_verifier` (the DPoP precedent),
+  reading `pws_` straight from the wrapper `sub` — no pairwise re-derivation on the wrapper path. The
+  verifier gains an optional `client_id`-match (below). A wrapper minted **without** a DPoP key has
+  `cnf = None`; `useDpop` sets `cnf = Some(jkt)` exactly as the DPoP exchange binds today. This reuses
+  the existing `state.wrapper_issuer` / `state.wrapper_verifier` instances
+  (`crates/gateway/src/lib.rs:136/147`), built from the gateway's ed25519 signing key — the **same**
+  key the shipped `/__zs/auth/dpop-exchange` path uses, so **no new key material**. If the signing key
+  is absent (a misconfiguration), `/token` returns `503` exactly as `dpop-exchange` does today
+  (`dpop_exchange.rs:78`), rather than silently handing back the raw Hydra token.
 - ⇒ **The token the browser holds contains the `pws_`, never the global UUID.** App JS decoding its
   own access token sees only its per-app pairwise sub and relay alias — cross-app correlation is
   impossible, and G4 holds on the Bearer path. The `/session?mint=1` response likewise returns a
@@ -794,21 +830,74 @@ email, … }`, signed by the gateway's own ed25519 key and verified by `state.wr
   `/session?mint=1` does **not** contain the global `usr_` UUID anywhere in its payload, and that its
   `sub` equals the app's `pws_`.
 
-**Nonce round-trip — honest scope (round-3, MAJOR).** The SDK echoes `nonce` in the `/token` body
-and the gateway asserts the id_token's `nonce` claim equals it. ⚠️ **This is NOT the OIDC nonce
-guarantee in this trust model, and the spec no longer claims it is.** The gateway is **stateless**
-across `/authorize`→`/token` (no server-side record of the expected nonce — the Supabase-style
-statelessness this design deliberately chose), so the value it checks against is supplied by the
-client. Since the trust model (§8.5) is that arbitrary/XSS creator JS is *in* the boundary and
-controls the `/token` request body, that JS could echo any nonce that matches a forged id_token —
-the "stored" side of the OIDC nonce contract is the very client we distrust. **The real binding is
-signature + `iss` + `client_id`(`aud` for the per-app client) + `exp`** — i.e. "this is a
-validly-signed Hydra id_token for this app's client." The nonce check is kept as **defense-in-depth
-against accidental cross-flow id_token mixups**, not as a defense against an XSS-controlled client.
-We do **not** add a server-side per-flow nonce stash, because that would reintroduce the stateful
-`/authorize`→`/token` flow record this design removed to stay stateless; the signature+client_id
+**⚠️ wrapper_token changes required (round-5 BLOCKER — in-patch wire/contract changes, not reuse).**
+The browser/G4 design above depends on `Issuer::issue` minting a `pws_`/alias/10-min/cnf-optional
+wrapper, which the shipped signature cannot do. This patch refactors `crates/gateway/src/wrapper_token.rs`:
+<!-- Added in round 5: addressing BLOCKER — the wrapper path is a substantive Issuer::issue/Verifier::verify rewrite, listed as an in-patch contract change with its sole caller -->
+
+1. **`Issuer::issue` becomes a claims-builder.** Replace the introspection-derived signature with an
+   explicit claims struct so `sub`/`email`/`name`/`email_verified`/`scope`/`client_id` are **free
+   parameters** (not read from `IntrospectionResponse`):
+   ```rust
+   pub struct WrapperMint<'a> {
+       pub aud: &'a str,            // request Host
+       pub sub: &'a str,            // pws_ (browser path) OR global UUID (callers that want it)
+       pub email: Option<&'a str>,  // relay alias on the browser path
+       pub email_verified: Option<bool>,
+       pub name: Option<&'a str>,
+       pub scope: &'a str,
+       pub client_id: &'a str,      // the per-app client_id (Bearer arm binds on this)
+       pub exp_secs: i64,           // 600 for the browser path; 3600 for the DPoP path
+       pub cnf: Option<&'a str>,    // Some(jkt) for DPoP-bound; None for plain Bearer
+       pub wraps: Option<&'a str>,  // base64url(SHA256(hydra_token)) when a raw token underlies it; else None
+   }
+   impl Issuer { pub fn issue(&self, m: &WrapperMint<'_>) -> Result<String> { … } }
+   ```
+   - `exp` is now `now + m.exp_secs` (browser path passes **600**; the DPoP path passes 3600 — its
+     `WRAPPER_EXPIRES_IN_SECS` constant in `dpop_exchange.rs:62` is updated to read the same value so
+     the envelope cannot lie about the lifetime).
+   - `cnf: Cnf` becomes `cnf: Option<Cnf>` on `WrapperClaims` (serde `skip_serializing_if =
+     "Option::is_none"`), so a plain-Bearer wrapper carries no `cnf.jkt`. The DPoP path passes
+     `Some(jkt)`; the browser plain path passes `None`.
+   - `wraps` becomes `Option<String>` on `WrapperClaims`: the browser wrapper has **no** underlying
+     raw Hydra token to hash (its claims come from the validated id_token + route), so `wraps = None`;
+     the DPoP path still sets `Some(SHA256(hydra_token))` so its revocation-by-origin-token mapping is
+     unchanged.
+2. **`Verifier::verify` gains an optional `client_id` match.** Today `verify(token, expected_aud)`
+   checks sig + iss + aud + exp + kid + typ but **not** `client_id`. Add
+   `verify(token, expected_aud, expected_client_id: Option<&str>)`; when `Some`, reject unless
+   `claims.client_id == expected_client_id`. The Bearer arm's step c-wrap (§1.3) passes
+   `Some(route.oauth_client_id)`; the existing dispatcher call site (which already enforces `aud ==
+   Host`) passes `None` to preserve its behavior.
+3. **The sole current caller is updated in the same patch.** `Issuer::issue` is called only at
+   `dpop_exchange.rs:209`; it is rewritten to build a `WrapperMint{ sub: intro.sub, email: intro.email,
+   …, exp_secs: 3600, cnf: Some(verified.jkt), wraps: Some(sha256(hydra_token)) }`. The
+   `wrapper_token.rs` lib tests (`issue_then_verify_roundtrip`, `cnf_jkt_round_trips_*`,
+   `verify_rejects_*`) and the `WRAPPER_EXPIRES_IN_SECS` constant are updated in the same patch
+   (pre-launch, no back-compat). New tests: a 600 s plain-Bearer wrapper (`cnf == None`, `wraps ==
+   None`, `sub == pws_`) round-trips; `verify` with `Some(wrong_client_id)` rejects; `verify` with
+   `None` accepts (dispatcher parity).
+
+This is a **deliberate wire/contract change to a stable gateway primitive**, landed in one patch with
+its only consumer — not the "pure reuse" round-3 implied. The G4/Bearer design is sound **given this
+refactor**; it would be unbuildable against the shipped `issue()`.
+
+**Nonce round-trip — honest scope (round-3, refined round-5).** ⚠️ **The nonce is NOT sent to the
+gateway and is NOT an OIDC guarantee in this trust model.** The gateway is **stateless** across
+`/authorize`→`/token` (no server-side record of the expected nonce — the Supabase-style statelessness
+this design deliberately chose). Round 3 had the SDK *echo* the nonce to `/token` for the gateway to
+re-check, but under the §8.5 trust model that compares two client-supplied values, so it was a no-op
+masquerading as defense-in-depth (round-5 MINOR). **Round 5 removes the echo entirely:** the gateway
+passes `expected_nonce=None` to `verify_id_token` (above) and the SDK does **not** put a nonce in the
+`/token` body. **The real binding is signature + `iss` + `aud`(=`client_id` for an id_token) +
+`exp`** — i.e. "this is a validly-signed Hydra id_token for this app's client." The nonce survives
+**only** as the SDK's own cross-flow-mixup guard: the SDK matches the id_token's `nonce` claim against
+its own `sessionStorage` transaction nonce (§4.3), purely to catch an accidental flow mixup in the
+browser — never as a defense against an XSS-controlled client, and never on the gateway. We do **not**
+add a server-side per-flow nonce stash, because that would reintroduce the stateful
+`/authorize`→`/token` flow record this design removed to stay stateless; the signature+aud(client_id)
 binding is the load-bearing guarantee and is sufficient given Hydra is the only id_token signer.
-<!-- Added in round 3: addressing MAJOR — stop presenting a client-echoed nonce as an OIDC guarantee under an untrusted-client model; bind on signature+client_id+iss+exp; nonce is defense-in-depth only -->
+<!-- Added in round 3: stop presenting a client-echoed nonce as an OIDC guarantee. Round 5: remove the gateway nonce echo (no-op); nonce is the SDK's own sessionStorage cross-flow guard only -->
 
 ```
 200 OK  (mode=server_anchor)
@@ -816,7 +905,7 @@ Cache-Control: no-store
 Content-Type: application/json
 Set-Cookie: __Host-zs_app_session=<anchor>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000
 
-{ "access_token":"<gateway WRAPPER jwt — sub=pws_, email=alias, client_id=app_…, 10-min exp>",
+{ "access_token":"<gateway WRAPPER jwt — sub=pws_, email=alias, client_id=oac_…, 10-min exp>",
   "id_token":"<jwt — opaque pass-through, NOT trusted by the SDK>", "token_type":"Bearer",
   "expires_in":600, "scope":"openid profile read:billing",
   "user": { "id":"pws_…", "email":"…@{relay_domain}", "name":"…", "avatar":null,
@@ -872,30 +961,53 @@ The fix makes the rotation **server-serialized and result-shared**, with an expl
 boundary:
 
 ```
-mint(anchor):
+mint(anchor):                                              // route → oauth_client_id, sector_identifier
   lock = pg_advisory_xact_lock( hash(anchor.id) )         // serializes ALL minters for this anchor
   begin:
     a := read anchor row (cached_access_token, cached_access_exp, refresh_token_enc)
     if a.cached_access_token is present AND a.cached_access_exp > now()+skew:
-        return a.cached_access_token                       // share the in-window token, NO Hydra call
+        return a.cached_access_token                       // share the in-window WRAPPER, NO Hydra call
     R := decrypt(a.refresh_token_enc)
     resp := POST Hydra /oauth2/token { grant_type=refresh_token, refresh_token=R, client_id }
     if resp == invalid_grant:                              // family revoked/expired upstream
         delete anchor row; return 401 login_required
+    // resp.access_token is a RAW Hydra access JWT (global UUID sub). Turn it into the per-app WRAPPER
+    // WITHOUT a per-mint introspection (O2): verify it LOCALLY via the cached Hydra JWKS, then rebuild.
+    raw := verify_access_token(resp.access_token, route.oauth_client_id)  // state.oidc_rp.jwks, local
+    pws := derive_pairwise(raw.sub, route.sector_identifier)              // global UUID → pws_, no DB
+    alias := app_user_identities.relay_email(app_id, raw.sub)            // read-through cache (§7.1)
+    wrapper := wrapper_issuer.issue(WrapperMint{
+        aud=host, sub=pws, email=alias, scope=raw.scope, client_id=route.oauth_client_id,
+        exp_secs=600, cnf=None /* or Some(jkt) under useDpop */, wraps=None })
     store anchor row { refresh_token_enc = encrypt(resp.refresh_token),
-                       cached_access_token = resp.access_token,
-                       cached_access_exp = now()+resp.expires_in,
+                       cached_access_token = wrapper,        // ← the WRAPPER, NOT the raw Hydra token
+                       cached_access_exp = now()+600,        // 10-min wrapper TTL, not Hydra's 1h
                        refresh_family_id = resp.family_lineage }
   commit (releases the xact lock)
-  return resp.access_token
+  return wrapper                                            // browser receives the pws_ wrapper
 ```
 
+- ⚠️ **Round-5 (MAJOR) — `cached_access_token` stores the WRAPPER, and the raw→wrapper transform uses
+  NO per-mint introspection.** On `?mint=1` the gateway holds a freshly-rotated **raw** Hydra access
+  JWT. It does **not** introspect it (that would be a per-mint Hydra round-trip, contradicting O2/§8.5)
+  and does **not** synthesize an `IntrospectionResponse`. Instead it **verifies the rotated raw JWT
+  locally** via `state.oidc_rp.jwks` (`verify_access_token`, the same JWKS-only helper the raw-Hydra
+  Bearer arm uses, §1.3), derives `pws_ = derive_pairwise(raw.sub, route.sector_identifier)` (no DB),
+  looks up the alias via the read-through cache (§7.1), and calls the **refactored** `wrapper_issuer`
+  (§1.2 "wrapper_token changes required") to build the `pws_`/alias/600 s wrapper. The stored
+  `cached_access_token` is **the wrapper**, so concurrent minters that take the cache branch share the
+  **wrapper** (sub=`pws_`), never the raw Hydra token — and the browser never receives the raw token
+  from `?mint=1`. `cached_access_exp` is the 10-min wrapper TTL, not Hydra's 1 h. This is consistent
+  with §1.2's `/token` mint, which builds the wrapper from the locally-validated id_token + route;
+  `?mint=1` builds it from the locally-validated **rotated access JWT** + route. No introspection on
+  either path. <!-- Added in round 5: addressing MAJOR — specify ?mint=1's raw-Hydra→pws_-wrapper transform via local JWKS verify (no introspection); cached_access_token is the wrapper -->
 - The lock is a **PostgreSQL transaction-scoped advisory lock keyed on the anchor id**
   (`pg_advisory_xact_lock`), held **across** the Hydra refresh round-trip and the row write — not
   just the write. A second concurrent `?mint=1` blocks on the lock; by the time it acquires, the
-  first has already stored a fresh `cached_access_token`, so the second takes the cache branch and
-  returns that token **without a second Hydra call**. This is cross-node correct because the advisory
-  lock and the anchor row both live in shared Postgres (the same store backing `dpop_jti`, §8.5).
+  first has already stored a fresh `cached_access_token` (the wrapper), so the second takes the cache
+  branch and returns that **wrapper without a second Hydra call**. This is cross-node correct because
+  the advisory lock and the anchor row both live in shared Postgres (the same store backing
+  `dpop_jti`, §8.5).
 - **Idempotent under N-way concurrency:** the first minter to acquire the lock does the single Hydra
   rotation; everyone else serves the cached in-window token. The `cached_access_exp` short TTL (=
   the 10-min browser access TTL, §8.5) bounds how long the cache is served before the next rotation.
@@ -997,9 +1109,11 @@ A Bearer token is therefore never ambiguously routed.
             iss == gateway issuer        → WRAPPER path (step c-wrap)
             iss == state.oidc_rp.issuer  → raw-Hydra path (step c-hydra)
             else                         → BearerOutcome::NotUserSession (reserved API-key → 401)
-       c-wrap. verify wrapper via state.wrapper_verifier (ed25519, exp, aud==host) and
-            `claims.client_id == route.oauth_client_id`. sub is ALREADY pws_, email IS the alias.
-            (DPoP-bound if cnf.jkt present — verified like the DPoP arm.) No pairwise derivation.
+       c-wrap. verify wrapper via state.wrapper_verifier.verify(token, host, Some(route.oauth_client_id))
+            (ed25519, exp, aud==host, AND the new optional client_id match — see the round-5
+            Verifier::verify refactor in §1.2). sub is ALREADY pws_, email IS the alias.
+            (DPoP-bound iff cnf is Some(jkt) — verified like the DPoP arm; plain Bearer has cnf=None.)
+            No pairwise derivation.
        c-hydra. verify as Hydra access JWT via state.oidc_rp.jwks (JwksCache):
             signature (EdDSA/RS256), iss == issuer, exp, nbf/iat,
             and `Some(client_id CLAIM) == route.oauth_client_id`        ← per-app binding
@@ -1046,15 +1160,17 @@ scheme; the auto-attached Bearer is different. So the round-3 rule, by route pol
 The `expired-Bearer-on-Anon-route serves the public page`, `invalid-Bearer-on-User-route 401`, and
 `oauth_client_id == None` cases are added to the regression matrix (§8.6).
 
-**Per-app binding is the critical safety property.** An access token minted for `app_A` must be
-rejected at `app_B`'s host. The Bearer arm resolves the expected `oauth_client_id` from the request
-`Host` (via the route cache, §1.5) and rejects tokens whose **`client_id` claim** doesn't match.
-⚠️ **We bind to `client_id`, not `aud`** — the shared `gateway` client today sets `aud =
-["http://api.zeroship.localhost"]` (the resource server), so binding to `aud` would be wrong. The
-exact claim Hydra emits for a per-app *public* client is **confirmed against live Hydra in Slice
-1c** before the binding is finalized; if Hydra unexpectedly omits `client_id`, the fallback is to
-set each per-app client's `audience` to its own `client_id` and bind to `aud` — decided by the
-spike, not assumed. <!-- Added in round 1: addressing MAJOR — bind to client_id claim not aud, verify against live Hydra -->
+**Per-app binding is the critical safety property — DECIDED (S1, round-4 pilot): bind on the
+`client_id` claim.** An access token minted for `app_A` must be rejected at `app_B`'s host. The
+Bearer arm resolves the expected `oauth_client_id` from the request `Host` (via the route cache,
+§1.5) and rejects tokens whose **`client_id` claim** doesn't match. We bind to **`client_id`, not
+`aud`**: RFC 9068 §3 mandates `client_id` on access tokens and Hydra emits it, whereas `aud` is the
+resource-server audience (the shared `gateway` client today sets `aud =
+["http://api.zeroship.localhost"]`, so binding to `aud` would be wrong). The Slice-1c live-Hydra
+spike **confirms** this against a real per-app *public* client (a confirmation pass, not a decision
+gate). **Pre-decided fallback:** if Hydra unexpectedly omits `client_id`, set each per-app client's
+`audience = [its own client_id]` and bind on `aud` instead — same safety property, selected by the
+spike. <!-- Added in round 1: bind to client_id claim not aud; round 4: lock S1 — client_id is the primary binding, spike is confirmation-only, aud fallback pre-decided -->
 
 **Replay window + revocation (round-2 hardening, MAJOR).** Plain Bearer is not sender-constrained,
 and because the gateway verifies access JWTs **locally** via JWKS (`strategies.access_token=jwt`),
@@ -1109,11 +1225,12 @@ Round 2 changes three things: <!-- Added in round 2: addressing MAJOR — shorte
    with DPoP) is stated in §8.5.
 
 New code: `resolve_bearer_user_header` + `build_worker_user_from_wrapper_claims` /
-`build_worker_user_from_jwt_claims` in `router/auth.rs`; the wrapper path reuses
-`state.wrapper_verifier.verify(token, host)` (the existing DPoP-exchange verifier); the raw-Hydra
-path uses a `verify_access_token(token, expected_client_id) -> Result<AccessClaims>` helper on
-`OidcRp` (reuses `self.jwks`, checks the `client_id` claim); both consult the cross-node
-`token_revocations` family marker. Regression tests: accept a valid **wrapper** (sub=`pws_`) and a
+`build_worker_user_from_jwt_claims` in `router/auth.rs`; the wrapper path calls the **refactored**
+`state.wrapper_verifier.verify(token, host, Some(route.oauth_client_id))` (the round-5 signature with
+the optional `client_id` match — §1.2); the raw-Hydra path uses a
+`verify_access_token(token, expected_client_id) -> Result<AccessClaims>` helper on `OidcRp` (reuses
+`self.jwks`, checks the `client_id` claim); both consult the cross-node `token_revocations` family
+marker. Regression tests: accept a valid **wrapper** (sub=`pws_`) and a
 valid raw-Hydra token for matching `client_id`; reject wrong `client_id`; reject expired; reject bad
 signature; **reject a non-recognized-`iss` token as `NotUserSession` (reserved API-key path)**;
 **reject a token whose `(client_id, sub)` family was revoked after its `iat`** (cross-node); 403 on
@@ -1161,15 +1278,36 @@ primitives are forever" invariant. Because it is a wire-format change, **every**
 consumer changes in the **same patch**, with no shim: <!-- Added in round 1: addressing MINOR — WorkerUser scopes is a permanent kernel contract; enumerate consumers -->
 1. `oidc_rp::WorkerUser<'a>` (+ `scopes: Vec<&str>` / owned variant) and `encode_user_header`,
 2. gateway `build_worker_user_from_{jwt_claims,wrapper,introspection}` (populate `scopes`),
-3. gateway cookie-session path (read granted scopes from `auth.gateway_sessions.granted_scopes`),
+3. gateway cookie-session path (read granted scopes from the **new**
+   `auth.gateway_sessions.granted_scopes TEXT[]` column — see the round-5 schema note below + §8.1),
 4. worker `User` deserialization (`crates/worker/`),
 5. runtime `auth.rs` `get_user_callback`/`require_user_callback` (expose `.scopes`),
 6. RPC `ctx.user` (`rpc/ctx_holder.rs`) — `ctx.user.scopes` now present,
 7. SDK `User` type (`sdks/auth/src/types.ts`).
 
+⚠️ **Round-5 (MAJOR) — `auth.gateway_sessions.granted_scopes` does not exist today and is added in
+this patch.** The live `auth.gateway_sessions` (`db/changelog/changesets/0002_auth.sql`, the
+`zeroship:auth-gateway-sessions` changeset) has columns `id, user_id, app_id, email, name,
+avatar_url, email_verified, issued_at, idle_expires_at, abs_expires_at, revoked_at` — **no
+`granted_scopes`**. `granted_scopes` lives only on `control.oauth_grants` (a *control*-schema table).
+So the cookie path cannot read scopes from `gateway_sessions` as written. The fix (option (a),
+chosen over a cross-schema read for hot-path locality): <!-- Added in round 5: addressing MAJOR — auth.gateway_sessions has no granted_scopes column; add it via Liquibase + populate at session-create from the consent grant -->
+
+- **New Liquibase changeset** `zeroship:auth-gateway-sessions-granted-scopes` adds
+  `granted_scopes TEXT[] NOT NULL DEFAULT '{}'` to `auth.gateway_sessions` (DDL §8.1). Listed as a
+  schema change there.
+- **`gateway::sessions::create`** (`crates/gateway/src/sessions.rs:58-90`) is extended: `NewSession`
+  gains `granted_scopes: &[String]` and the `INSERT … (user_id, app_id, …, granted_scopes)` writes it.
+  The value is the scopes from the consent grant resolved at session-create (the gateway already
+  knows the granted scope set when it mints the cookie session after the redirect callback). The
+  `validate()` `SELECT`/slide is extended to return `granted_scopes` so the per-request cookie path
+  reads it without a second query.
+- This keeps the read on the **same row** the cookie path already loads each request (no cross-schema
+  `control.oauth_grants` join on the hot path), so adding `scopes` costs nothing extra at request time.
+
 > **Why `scopes` belongs in the kernel, not derived in JS.** The cookie-session path has **no**
-> access token in the browser to decode — only the server knows the granted scopes
-> (`auth.gateway_sessions.granted_scopes`). So `scopes` cannot be uniformly derived in JS from a
+> access token in the browser to decode — only the server knows the granted scopes (now in the new
+> `auth.gateway_sessions.granted_scopes` column). So `scopes` cannot be uniformly derived in JS from a
 > token the SDK holds (the Bearer path has one; the cookie path does not). Putting `scopes` on
 > `WorkerUser` is the only place both paths converge, which is why it is a kernel field and the
 > worker-side `env.auth.getUser().scopes` is authoritative.
@@ -1196,8 +1334,22 @@ across every producer/consumer/fixture: <!-- Added in round 1: addressing BLOCKE
   every token (valid signature or not) when `oauth_client_id` is `None`. <!-- Added in round 2: addressing MAJOR — oauth_client_id is Option<String>, hard-fail on None, never bind to empty -->
   `sector_identifier` is likewise `Option`; the pairwise projection (§6.2) hard-fails closed (no
   `pws_` derivation) when it is `None`, so an un-provisioned app never emits a header.
-- **Control populates them** from `control.app_oauth_clients` (§8) on the route-sync push (the
-  existing control→gateway 5s HTTP pull) — the same path that already ships `RouteEntry`.
+- **Control populates them** from `control.app_oauth_clients` (§8.1) on the route-sync push. ⚠️
+  **Round-5 (MINOR) — name the exact producer: `Registry::get_routes` in
+  `crates/control/src/registry.rs:340-381`**, which `SELECT`s from `control.apps` and constructs each
+  `RouteEntry { name, plan_id, api_key_hash, deploy_hash, manifest }` for the gateway's `RouteMap`
+  pull. That query joins `control.app_oauth_clients` (LEFT JOIN — un-provisioned apps yield `NULL`)
+  to populate the two new fields. The serialized `RouteEntry` is what the gateway pulls every ~5s.
+  ⚠️ **Both new fields use `#[serde(default)]` (⇒ `None`)**, exactly as the existing
+  `manifest: Manifest` uses `#[serde(default = "Manifest::passthrough")]` — so a `RouteEntry` produced
+  before the join lands (or by a hand-rolled fixture) deserializes with `oauth_client_id: None` +
+  `manifest: passthrough`. The round-trip fixture must cover this **mixed default**: a `RouteEntry`
+  with a passthrough manifest **and** `None` OAuth fields serializes/deserializes intact. **No
+  `AppVersionInfo`-level carrier is needed** — the gateway resolves the per-app `client_id` from
+  `RouteEntry` (the routing-time struct it holds via `CompiledRoute`/`lookup_by_name`), not from the
+  `AppVersionInfo` version-poll struct; `oauth_client_id` does not need to survive the version poll.
+  <!-- Added in round 5: addressing MINOR — name registry.rs::get_routes as the producer; #[serde(default)]⇒None like manifest; mixed-default round-trip fixture; AppVersionInfo not involved -->
+  The control→gateway 5 s HTTP pull is the same path that already ships `RouteEntry`.
 - **`CompiledRoute` surfaces them** so `lookup_by_name(host) -> (Uuid, Arc<CompiledRoute>)` yields
   the `oauth_client_id` without a second lookup.
 - **Threaded through**: `build_browser_authorize_url(client_id, …)` (the `/authorize` 302), the
@@ -1214,20 +1366,17 @@ same `app_id` → same `oauth_client_id`.
 ⚠️ **Round-3 — gateway-complexity acknowledgement against the "dumb gateway" invariant, and the
 provisioning→route-sync ordering guarantee.** Two things the round-2 §1.5 left implicit: <!-- Added in round 3: addressing MAJOR — acknowledge gateway identity-logic growth; pin the provision→route-sync ordering so there is no cold-start 503; state oauth_client_id staleness/reassignment behavior -->
 
-1. **The gateway grows real identity logic, and that is a deliberate, bounded exception to "the
-   gateway is dumb."** The browser-auth endpoints make the gateway build authorize URLs, proxy/validate
-   token exchanges, **fully validate id_tokens** (sig/iss/aud/exp), rotate the server refresh family
-   under a lock, derive pairwise `pws_` via HMAC, look up relay aliases, and run a jti denylist. We
-   justify keeping this in the gateway rather than a sidecar because: (a) every piece reuses
-   primitives the gateway **already** owns for the shipped DPoP/BCL paths — JWKS verification
-   (`state.oidc_rp.jwks`), `encode_user_header`, the `dpop_jti` PG cache, the cookie-session store —
-   so it is the *same class* of work, not a new competence; (b) it is all **stateless OAuth plumbing
-   + a header projection**, no app/business logic (the invariant's actual line); and (c) a separate
-   auth-sidecar would add a network hop on the hot per-request Bearer path and a second JWKS cache to
-   keep coherent. If this surface grows further (e.g. token introspection policies, multi-IdP), the
-   documented escalation is to extract a thin **auth-sidecar** that owns id_token validation +
-   pairwise derivation; until then it stays in the gateway, explicitly noted as the one place the
-   "dumb" invariant is stretched.
+1. **The gateway grows real identity logic — a deliberate, bounded exception to "the gateway is
+   dumb."** The browser-auth endpoints make the gateway build authorize URLs, proxy/validate token
+   exchanges, fully validate id_tokens (sig/iss/aud/exp), rotate the server refresh family under a
+   lock, derive pairwise `pws_` via HMAC, look up relay aliases, and run a jti denylist. We keep this
+   in the gateway because every piece reuses primitives it **already** owns for the shipped DPoP/BCL
+   paths (`state.oidc_rp.jwks`, `encode_user_header`, the `dpop_jti` PG cache, the cookie-session
+   store) — the *same class* of work, all **stateless OAuth plumbing + a header projection** with no
+   app/business logic (the invariant's actual line) — and a sidecar would add a hot-path hop plus a
+   second JWKS cache to keep coherent. Documented escalation if the surface grows further (token
+   introspection policies, multi-IdP): extract a thin **auth-sidecar** owning id_token validation +
+   pairwise derivation. Until then this is the one place the "dumb" invariant is stretched.
 2. **Provisioning ordering — control creates the Hydra client AND ships the populated `RouteEntry`
    before the app is routable, so there is NO cold-start 503 window.** The app/deploy handler runs
    `ensure_app_client(app)` (Hydra `POST /admin/clients` + write `control.app_oauth_clients`)
@@ -1239,7 +1388,7 @@ provisioning→route-sync ordering guarantee.** Two things the round-2 §1.5 lef
    client_not_provisioned` as retryable with backoff. A control-plane invariant test asserts
    "RouteEntry for a deployed app always carries `Some(oauth_client_id)`."
 3. **`oauth_client_id` staleness / reassignment.** The per-app `client_id` is **stable for the life
-   of the app** (`app_<base62-app-id>`, derived from `app_id`); it is never rekeyed or reassigned
+   of the app** (`oac_<base62-app-id>`, derived from `app_id`); it is never rekeyed or reassigned
    while the app exists, so the Bearer arm's `client_id`-claim binding cannot validate against a
    stale value. The only mutation is redirect-URI/scope edits (a `PUT`, not a new `client_id`), which
    do not affect the binding. The staleness bound on the cached `oauth_client_id` is therefore the
@@ -1476,12 +1625,16 @@ the click handler.
 
 ### 4.3 Cache, worker, locks, breadcrumb (Auth0 internals)
 
-- **The browser keys on a stable per-app `app_ref`, NOT the host.** The SDK doesn't know the Hydra
-  `client_id` (the gateway injects it). Auth0 keys on `client_id`; we replace it with a stable
-  **`app_ref`** the **gateway returns** on the first `/__zs/auth/token` and `/__zs/auth/session`
-  response (a short opaque per-app id derived from `app_id`, e.g. `app_7Fk…` — the same value for
-  every host the app serves). The SDK caches `app_ref` in `sessionStorage` and uses it for all
-  keying. This makes apex + custom domains share **one** cache namespace, **one** breadcrumb, and
+- **The browser keys on a stable per-app `app_ref`, NOT the host, and `app_ref` is NOT the OAuth
+  `client_id`.** The SDK doesn't know the Hydra `client_id` (`oac_<base62>`, §1.1; the gateway
+  injects it). Auth0 keys on `client_id`; we replace it with a stable **`app_ref`** the **gateway
+  returns** on the first `/__zs/auth/token` and `/__zs/auth/session` response. ⚠️ **Round-5 (MINOR) —
+  `app_ref` is a distinct, deliberately non-OAuth value**: a short opaque per-app id derived from
+  `app_id` (e.g. `apr_7Fk…`), the same for every host the app serves, used **only** for browser-side
+  cache/breadcrumb/lock keying. It is **not** `oac_<base62>` (the `client_id`) — keeping them distinct
+  means returning `app_ref` to browser JS never reveals the OAuth `client_id`, preserving "the SDK
+  doesn't know the client_id; the gateway injects it." The SDK caches `app_ref` in `sessionStorage`
+  and uses it for all keying. This makes apex + custom domains share **one** cache namespace, **one** breadcrumb, and
   **one** refresh lock — fixing the split-session bug where moving between `myapp.zeroship.ai` and a
   custom domain looked logged-out on one even though the IdP/anchor session was live. <!-- Added in round 1: addressing MINOR — apex+custom-domain shared keying via gateway-returned app_ref -->
 - **CacheManager keying**: `@@zsauth@@::<app_ref>::<scope-sorted>` for token entries;
@@ -1506,14 +1659,15 @@ the click handler.
   `checkSession`) detect a pending `@@zsauth@@::txn::*` entry whose popup may already have delivered
   a `code` via a `localStorage`/`BroadcastChannel` relay (§4.4) and resume the exchange; if no code
   arrived, the next relay `postMessage` matches the persisted `state` and the exchange proceeds. <!-- Added in round 3: addressing MAJOR — persist verifier/state/nonce/redirect_uri in sessionStorage; specify reload-recovery and clearing -->
-- **Nonce binding (browser side).** The persisted transaction holds `nonce` (with `state`+`verifier`).
-  `relay.ts` matches the relay message's `state`, recovers `verifier`+`nonce` from the in-memory map
-  or `sessionStorage`, and `transport.ts` echoes `nonce` in the `/token` body. ⚠️ **Round-3 honesty
-  (MAJOR) — this nonce echo is defense-in-depth against accidental cross-flow id_token mixups, NOT a
-  security guarantee against an XSS-controlled client** (see §1.2): the gateway is stateless across
-  `/authorize`→`/token`, so the value it checks against is supplied by the same client the trust
-  model distrusts. A relay message whose `state` matches no persisted transaction → `invalid_state`
-  (CSRF/replay guard on the `code`). <!-- Added in round 3: addressing MAJOR — nonce echo is defense-in-depth, not an OIDC nonce guarantee against an untrusted client -->
+- **Nonce binding (browser side only).** The persisted transaction holds `nonce` (with
+  `state`+`verifier`). `relay.ts` matches the relay message's `state` and recovers `verifier`+`nonce`
+  from the in-memory map or `sessionStorage`. ⚠️ **Round-5 (MINOR) — `transport.ts` does NOT send the
+  nonce to `/token`.** The nonce is used **only** locally: if the SDK inspects the (untrusted, opaque)
+  id_token for diagnostics, it checks the `nonce` claim against its own `sessionStorage` nonce to
+  catch an accidental cross-flow mixup in the browser. It is **not** echoed to the gateway (which
+  passes `expected_nonce=None` to `verify_id_token`, §1.2), because comparing two client-supplied
+  values is a no-op under the §8.5 trust model. The real `code`-CSRF/replay guard is `state`: a relay
+  message whose `state` matches no persisted transaction → `invalid_state`. <!-- Added in round 3: nonce is browser-side only. Round 5: stop echoing nonce to the gateway — it's a no-op there; keep it as the SDK's own cross-flow guard -->
 - **InMemoryCache**: closure over a plain object (default). **LocalStorageCache**: opt-in,
   documented XSS tradeoff. **Custom `ICache`** honored when supplied.
 - **Web Worker** (`internal/worker.ts`): only when `window.Worker && useRefreshTokens &&
@@ -1643,7 +1797,9 @@ share their own name/email with an app.)
   control plane stores them in `control.app_scope_defs` and mirrors the allowlist into the app's
   Hydra client `scope`. These are self-grantable end-user scopes — never platform-delegated.
 
-**Where declared** — manifest field (`crates/bundle/src/manifest.rs`):
+**Where declared — DECIDED (round-4 pilot, O8): the app MANIFEST**, `auth.scopes`
+(`crates/bundle/src/manifest.rs`). Creators declare scopes alongside their routes; the control plane
+mirrors them on deploy. (We do **not** use a deploy-time control-plane-only field.) <!-- Added in round 4: lock O8 — scopes declared in the manifest auth.scopes, mirrored to control + Hydra allowlist atomically on deploy -->
 
 ```jsonc
 // manifest.json (excerpt)
@@ -1671,9 +1827,14 @@ This closes the round-1 hole where `billing:read`/`team:read`/`account:read`/`en
 `secrets:read`/`deployments:read` (all in the closed `Scope` vocabulary, `scope.rs:118-136`) were
 **not** rejected — an app could declare one and have it classified self-grantable while it *also*
 parsed as a real platform scope. Binding the manifest guard to `Scope::parse` means the app-scope
-namespace and the platform-scope vocabulary are provably disjoint. Definitions are stored in
-`control.app_scope_defs` (§8). On deploy, `sync_app_client` updates the Hydra client `scope` to
-`"openid offline_access profile email " + declared ids`.
+namespace and the platform-scope vocabulary are provably disjoint.
+
+**On deploy (O8 mirror — atomic):** `sync_app_client` writes the validated manifest `auth.scopes`
+to **`control.app_scope_defs`** **and** updates the per-app Hydra client `scope` allowlist to
+`"openid offline_access profile email " + declared ids` — **both in the same control-plane
+transaction**, derived from the same manifest. This single atomicity invariant is what makes the
+consent classifier sound (§5.2): Hydra's allowlist can never accept a scope at `/authorize` that
+`app_scope_defs` hasn't yet learned (or vice versa), so no deploy-race can brick login.
 
 > A regression test must declare a manifest with `billing:read` and assert the control-plane
 > validator **rejects** it (pre-fix it was accepted), and assert a non-colliding `read:billing` is
@@ -1717,33 +1878,24 @@ If only the GET render is patched, an end user still cannot complete consent for
    subset* is a hard error, not a drop. The `Unknown` bucket is handled by the classifier above
    (→ `invalid_scope` reject), not by silent discard. This implements the doc's "reject invalid
    scope" branch instead of assuming it.
-3. ⚠️ **Round-3 fix (MINOR) — reconcile the Unknown→`invalid_scope` policy with the live
-   `scope_views` renderer AND guarantee a deploy-race cannot brick login.** The existing
-   `scope_views` (`consent.rs:600-622`) renders any scope that fails `Scope::parse` /
-   `standard_scope_label` as `unrecognized: true` rather than rejecting, and the test
-   `renders_scope_labels` (`consent.rs:730-744`) asserts `custom-scope` renders `unrecognized`.
-   Hard-rejecting *every* unrecognized scope would break app-declared scopes (which `scope_views`
-   doesn't know about) and that test. Round 3 resolves it: <!-- Added in round 3: addressing MINOR — reconcile Unknown-reject with scope_views/renders_scope_labels and define the deploy-ordering that prevents an app_scope_defs/Hydra-allowlist race from bricking login -->
-   - **`scope_views` is extended to consult `app_scope_defs`** for the consent's `app_id`, so an
-     app-declared `read:billing` renders with its declared label and is **recognized** (not
-     `unrecognized`). After this, the *only* `unrecognized`/`Unknown` scopes are ones that are
-     neither platform-vocab, nor reserved-identity, nor app-declared — genuinely undefined. The
-     `renders_scope_labels` test is **updated in the same patch** (per the no-back-compat rule): a
-     scope present in `app_scope_defs` renders recognized; a scope present nowhere renders
-     `unrecognized` AND causes the gate to reject `invalid_scope`. (We do not keep a "render
-     unrecognized but proceed" path — the classifier is the single authority.)
-   - **Deploy-race guard (the brick-login risk).** A single not-yet-known platform/app scope (e.g.
-     during a deploy where the Hydra client `scope` allowlist updated before `app_scope_defs`, or vice
-     versa) must NOT `invalid_scope`-brick *all* logins for the app. The control plane updates
-     **`app_scope_defs` and the Hydra client `scope` allowlist atomically** in the same deploy
-     transaction (both derive from the same manifest `auth.scopes`), so an authorize request can never
-     carry a scope that Hydra's allowlist accepts but `app_scope_defs` hasn't yet learned (Hydra
-     rejects a non-allowlisted scope at `/authorize` before consent is ever reached, so the inputs to
-     the classifier are always a subset of the allowlist, which equals `app_scope_defs ∪ identity ∪
-     declared-platform`). The atomic update is the invariant that makes "Unknown at consent time"
-     unreachable for a correctly-deployed app — leaving `invalid_scope` only for a genuinely bogus
-     authorize request. A deploy-ordering test asserts the two updates land in one transaction and
-     that an authorize with a just-declared scope is never rejected.
+3. **Reconcile the Unknown→`invalid_scope` policy with the live `scope_views` renderer.** The
+   existing `scope_views` (`consent.rs:600-622`) renders any scope failing `Scope::parse` /
+   `standard_scope_label` as `unrecognized: true`, and the test `renders_scope_labels`
+   (`consent.rs:730-744`) asserts `custom-scope` renders `unrecognized`. Hard-rejecting *every*
+   unrecognized scope would break app-declared scopes. Fix: **`scope_views` is extended to consult
+   `app_scope_defs`** for the consent's `app_id`, so an app-declared `read:billing` renders with its
+   declared label and is **recognized**. After this the only `Unknown` scopes are ones that are
+   neither platform-vocab, nor reserved-identity, nor app-declared — genuinely undefined: they render
+   `unrecognized` AND the gate rejects `invalid_scope`. `renders_scope_labels` is updated in the same
+   patch (no-back-compat); the classifier is the single authority, with no "render unrecognized but
+   proceed" path. <!-- Added in round 3: reconcile Unknown-reject with scope_views; round 4: deploy-race guard now references the O8 atomic mirror in §5.1 -->
+   - **Deploy-race guard — `Unknown`-at-consent is unreachable for a correctly-deployed app.** The
+     control plane writes `app_scope_defs` and the Hydra client `scope` allowlist **atomically in one
+     transaction** (the O8 mirror, §5.1), so Hydra never accepts a scope at `/authorize` that
+     `app_scope_defs` hasn't learned. The inputs to the classifier are therefore always a subset of
+     the allowlist (= `app_scope_defs ∪ identity ∪ declared-platform`), leaving `invalid_scope` only
+     for a genuinely bogus authorize request. A deploy-ordering test asserts the two updates land in
+     one transaction and that an authorize with a just-declared scope is never rejected.
 
 Only the namespace-(a) `Delegated` subset is fed to `is_authorized_anywhere`. The namespace-(b)
 `SelfGrant` subset (app-declared + identity) is **always** self-grantable by the authenticated
@@ -1757,27 +1909,31 @@ The consent screen renders per-scope line items:
 - **App-defined group**: one row per requested custom scope, `label` + `description` from
   `control.app_scope_defs` (self-grantable).
 
-⚠️ **Round-3 fix (MAJOR) — ONE grant ledger, and per-app end-user clients do NOT set `skip_consent`.**
-Round 2 introduced a **parallel** `auth.app_grants` ledger keyed by `(app_id, global_user_id)` for
-delta detection, while the live consent handler already has a remembered-grant fast path reading
-`control.oauth_grants` keyed by `(subject, client_id)` (`get_consent`, `consent.rs:69-125`:
-`load_oauth_grant`/`upsert_oauth_grant`/`scopes_are_subset` under `skip_consent`). Two ledgers,
-written/read by two different actors (the auth consent handler vs the gateway), with no consistency
-mechanism, can disagree — causing either an un-prompted scope escalation or an **infinite
-`prompt=consent` loop** (consent is granted but one ledger still detects a delta). Round 3 collapses
-this to a single source of truth: <!-- Added in round 3: addressing MAJOR — drop auth.app_grants; use control.oauth_grants as the single ledger; per-app clients do NOT set skip_consent; reconcile with the live get_consent subset fast path -->
+⚠️ **ONE grant ledger; per-app end-user clients do NOT set `skip_consent`** (round-3 MAJOR). The live
+consent handler already has a remembered-grant fast path over `control.oauth_grants` keyed by
+`(subject, client_id)` (`get_consent`, `consent.rs:69-125`:
+`load_oauth_grant`/`upsert_oauth_grant`/`scopes_are_subset` under `skip_consent`). A *parallel* ledger
+(written/read by a second actor with no consistency mechanism) can disagree — causing an un-prompted
+escalation or an infinite `prompt=consent` loop (consent granted, the other ledger still detects a
+delta). So there is a single source of truth: <!-- Added in round 3: drop auth.app_grants; control.oauth_grants is the single ledger; per-app clients do NOT set skip_consent -->
 
 - **`auth.app_grants` is DROPPED.** The remembered-grant ledger is the **existing
-  `control.oauth_grants`** keyed by `(subject, client_id)`. Because the per-app `client_id` is
-  `app_<base62-app-id>` (deterministic from `app_id`, §1.1), `(subject, client_id)` is 1:1 with
-  `(global_user, app)` — no second table needed. (The `auth.app_user_identities` row, §6.3, remains
-  the **pairwise/relay** mapping; it is not a grant ledger.)
-- **Per-app end-user clients do NOT set `skip_consent`.** The `get_consent` silent-accept fast path
-  (`consent.rs:69-125`) only fires for `client.skip_consent`; per-app clients leave it **false**, so
-  every consent challenge runs the round-3 classifier (§5.2) — including the `Delegated`/`SelfGrant`
-  partition and the delta detection — rather than the legacy subset auto-accept. This removes the
-  two-actor disagreement entirely: the **auth consent handler** is the sole writer of
-  `control.oauth_grants` (on `accept_consent`) and the sole reader for delta detection.
+  `control.oauth_grants`** keyed by `(user_id, client_id)` (its real PK — `user_id` is the **global**
+  `auth.users(id)` UUID, `client_id` is the per-app client TEXT, 0004_control.sql:255-264). Because
+  the per-app `client_id` is `oac_<base62-app-id>` (deterministic from `app_id`, §1.1),
+  `(user_id, client_id)` is 1:1 with `(global_user, app)` — no second table needed. (The
+  `auth.app_user_identities` row, §6.3, remains the **pairwise/relay** mapping; it is not a grant
+  ledger.) ⚠️ **Round-5 — the `oauth_grants.client_id` FK requires the per-app client to exist in
+  `control.oauth_clients`** (which `ensure_app_client` writes, §1.1); an upsert against a per-app
+  `client_id` with no `oauth_clients` row would violate `REFERENCES control.oauth_clients(client_id)`.
+- **Per-app end-user clients do NOT set `skip_consent`.** `skip_consent` is a column on
+  `control.oauth_clients` (where the per-app client now lives, §1.1). The `get_consent` silent-accept
+  fast path (`consent.rs:69-125`) only fires for `client.skip_consent`; per-app clients are written
+  with `skip_consent = FALSE` (they are **not** added to `trusted_oauth_clients`), so every consent
+  challenge runs the round-3 classifier (§5.2) — including the `Delegated`/`SelfGrant` partition and
+  the delta detection — rather than the legacy subset auto-accept. This removes the two-actor
+  disagreement entirely: the **auth consent handler** is the sole writer of `control.oauth_grants` (on
+  `accept_consent`) and the sole reader for delta detection.
 - **Delta detection runs in the auth consent handler, not the gateway.** When the SDK opens the
   popup for a new scope, the consent handler loads `control.oauth_grants` for `(subject, client_id)`,
   computes the **delta** vs the request, renders only the delta rows, and on accept upserts the union
@@ -1809,7 +1965,9 @@ this to a single source of truth: <!-- Added in round 3: addressing MAJOR — dr
 - **Manifest rule-level scopes**: `Rule` gains an optional `required_scopes: Vec<String>`
   (`crates/bundle/src/rule.rs`), compiled into `EffectivePolicy`. A route can demand
   `read:billing` independent of the app-wide `AuthLevel`. The gateway enforces it in the Bearer
-  arm and (for cookie sessions) against the session's granted scopes.
+  arm and (for cookie sessions) against the session's granted scopes — read from the **new**
+  `auth.gateway_sessions.granted_scopes` column (added in this patch; populated at session-create from
+  the consent grant — §1.4 round-5 note, §8.1), **not** from a per-request `control.oauth_grants` join.
 - **Worker visibility**: the granted scopes ride in `ZeroShip-User` (extend `WorkerUser` with
   `scopes: Vec<String>`), so `env.auth.getUser().scopes` and RPC `ctx.user.scopes` are available
   for app-level checks.
@@ -1853,10 +2011,13 @@ per-app sector is **not known at login time** for an SSO'd session shared across
 challenge that Hydra skips via the `remember` flag is not per-app). Forcing a fresh login challenge
 per app to learn the sector would defeat SSO and the `remember` flag.
 
-**F4-B (locked default) — keep Hydra's subject = the global `usr_` UUID end-to-end, and translate
-to the per-app `pws_…` exactly once, at the gateway's `ZeroShip-User` header boundary.** Hydra,
-login, consent, id_token, BCL, `gateway_sessions`, and wrapper-revocation all keep operating on the
-UUID and nothing in those pipelines changes type. The pairwise derivation is:
+**F4-B (DECIDED — S2, round-4 pilot: this is the shipped pairwise mechanism) — keep Hydra's subject
+= the global `usr_` UUID end-to-end, and translate to the per-app `pws_…` exactly once, at the
+gateway's `ZeroShip-User` header boundary.** Hydra stays `subject_type: public`. Login, consent,
+id_token, BCL, `gateway_sessions`, and wrapper-revocation all keep operating on the UUID and nothing
+in those pipelines changes type. **F4-A (Hydra-native pairwise) is deferred behind an optional
+spike** (§1.1; the "Why NOT" note below), built only if a concrete need arises. The pairwise
+derivation is: <!-- Added in round 4: lock S2 — F4-B (gateway HMAC projection) is the shipped mechanism; F4-A deferred behind an optional spike -->
 
 ```
 pws = "pws_" + base62( HMAC-SHA256(pairwise_salt, global_user_id || ":" || app_sector) )[:20]
@@ -1970,15 +2131,14 @@ projection; see the round-3 fix below), generate a relay alias `{token}@{relay_d
 `email` claim and `ZeroShip-User.email` are the **alias** — never the real address. (Apps that
 weren't granted `email` scope get `null`.)
 
-⚠️ **Round-2 fix (MAJOR) — the substitution point is pinned at every place the email is emitted,
-consistent with the pairwise gateway-projection model (§6.2).** Round 1 asserted "the email claim is
-the alias" without identifying where the real email is swapped, even though
-`build_id_token_claims(db, &info.subject, …)` (`consent.rs:191/419/657`) inserts the **real**
-`u.email` from `users::find_by_id`. The three emit sites and their substitution: <!-- Added in round 2: addressing MAJOR — identify the exact email-claim substitution points (id_token, userinfo, ZeroShip-User.email) and pin them to the gateway projection -->
+⚠️ **The substitution point is pinned at every place the email is emitted** (round-2 MAJOR),
+consistent with the §6.2 gateway-projection model. `build_id_token_claims(db, &info.subject, …)`
+(`consent.rs:191/419/657`) inserts the **real** `u.email` from `users::find_by_id` today, so the swap
+must be explicit at all three emit sites: <!-- Added in round 2: identify the exact email-claim substitution points (id_token, userinfo, ZeroShip-User.email) and pin them to the gateway projection -->
 
 | Emit site | Today | Round-2 substitution |
 |---|---|---|
-| **`ZeroShip-User.email`** (worker header — the value apps actually read) | gateway puts the real email | gateway looks up `app_user_identities.relay_email` for `(app, global_user)` via a **read-through cache** (round-3: created at consent time, never lazily on the hot path) and writes the **alias** — same projection boundary as the `pws_` sub (§6.2). Hit ⇒ no DB round-trip; miss ⇒ one cached `SELECT`, never a write. This is the authoritative app-facing email. |
+| **`ZeroShip-User.email`** (worker header — the value apps actually read) | gateway puts the real email | gateway looks up `app_user_identities.relay_email` for `(app, global_user)` via a **read-through cache** (created at consent time; §1.2 `/token` mints the alias into the **wrapper** the same way). Hit ⇒ no DB round-trip; miss ⇒ one cached `SELECT`. On the rare miss-with-email-scope (replication lag / partial sync) the gateway **lazily mints the alias** via the §7.1 idempotent `ON CONFLICT` upsert rather than emitting `null` (round-5 §7.1) — so the app-facing email is never spuriously null. This is the authoritative app-facing email. |
 | **id_token `email` claim** (`build_id_token_claims`, `consent.rs:657`) | inserts real `u.email` | the consent handler, when the requesting client is a **per-app end-user client** (not the console/admin client), substitutes the alias: it resolves `app_user_identities.relay_email` for `(client→app_id, subject)` (minting it if absent) and inserts **that** into the `ConsentSession.id_token` claims (`ConsentSession.id_token` IS settable, `consent.rs:200/426`). The SDK never trusts the id_token anyway (§1.2), but the claim is kept correct so any introspection/userinfo derived from it is also the alias. |
 | **`/userinfo`** (Hydra-served, derived from the id_token session claims set above) | derives from id_token claims | because the `email` claim written into `ConsentSession.id_token` is already the alias, `/userinfo` returns the alias with no extra hook. |
 
@@ -1995,12 +2155,10 @@ occupies the slot and a recycled token can re-issue. On the (low-probability) co
 (bounded retries, then surface `server_error`), rather than failing the consent. This closes the
 "recycled token hard-fails re-grant" hole. <!-- Added in round 1: addressing MAJOR — partial-unique + generate-and-retry for relay_email -->
 
-⚠️ **Round-3 fix (MINOR) — alias creation happens at CONSENT time (off the hot path), and the
-gateway projection uses a READ-THROUGH cache, so the per-request `ZeroShip-User.email` projection is
-not a write on the hot path.** Round 2 said the alias could be created "lazily on first gateway
-projection," which would make every first request that projects `ZeroShip-User.email` a **DB write**
-(generate-and-retry-on-conflict) on the per-request path — contradicting §6.2's "no DB round-trip"
-pairwise claim for the email half, with no caching and an unspecified race. Round 3 pins it: <!-- Added in round 3: addressing MINOR — create alias at consent time off the hot path; read-through cache on the gateway; define the upsert concurrency contract; state per-request cost -->
+⚠️ **Alias creation happens at CONSENT time (off the hot path); the gateway projection is
+READ-THROUGH cached** (round-3 MINOR). Lazy creation "on first gateway projection" would make every
+first request that projects `ZeroShip-User.email` a per-request DB write (generate-and-retry),
+contradicting §6.2's no-round-trip property for the email half. So: <!-- Added in round 3: create alias at consent time off the hot path; read-through cache on the gateway; define the upsert concurrency contract; state per-request cost -->
 
 - **Alias is created when the `email` scope is granted, in the consent handler's `accept_consent`
   path** (off the per-request hot path), upserting the `relay_email` into the
@@ -2020,6 +2178,32 @@ pairwise claim for the email half, with no caching and an unspecified race. Roun
 - **Per-request DB cost when email is granted:** zero writes; zero reads on a cache hit; one read on
   the first miss per `(app, user)` per gateway process. Stated as the perf budget.
 
+⚠️ **Round-5 (MAJOR) — consent→token commit ordering for the FIRST login, and the gateway miss
+behavior.** The wrapper minted at `/token` (and `?mint=1`) carries `email = relay_alias` and
+`sub = pws_`, but the alias and the `app_user_identities` row are written by the **auth** service in
+`accept_consent`, while `/token` runs in the **gateway** right after the code exchange. The first-login
+order is: `accept_consent` (writes the `pws_`/`relay_email` row) → Hydra issues the code → popup-callback
+→ gateway `/token` (reads alias to mint the wrapper). The ordering guarantee and miss handling: <!-- Added in round 5: addressing MAJOR — pin the accept_consent→/token commit ordering for first login; define gateway behavior on a read-through miss (derive pws_ deterministically; lazily mint alias) -->
+
+- **`accept_consent` commits the `auth.app_user_identities` row (the `pws_` `id` + `relay_email`)
+  BEFORE Hydra issues the authorization code.** The consent handler's grant write and the alias
+  upsert (§7.1 concurrency contract) are in the **same transaction** as the grant, which **commits
+  before** `AcceptConsentRequest` returns the redirect that carries the code. Hydra cannot mint a code
+  until `accept_consent` succeeds, so by the time the gateway's `/token` handler runs (one browser
+  round-trip later) the row is committed and the gateway read-through **always hits** for a normal
+  first login. A regression test asserts the **very first** wrapper for a `(user, app)` carries the
+  alias, not `null`.
+- **Behavior on a should-not-happen miss (defensive).** The `pws_` half **never** needs the row:
+  `derive_pairwise(global_uuid, route.sector_identifier)` is a pure HMAC, so the gateway always has a
+  correct `sub` even on a miss. For the **email** half, on a read-through miss when the `email` scope
+  *was* granted (e.g. a partial-sync or replication lag), the gateway **lazily mints the alias** under
+  the §7.1 upsert (`INSERT … ON CONFLICT … RETURNING`, the same generate-and-retry), then uses the
+  returned alias — so the wrapper still carries a real alias, never `null`, and the lazy mint is
+  idempotent against the consent-time write (whichever lands first wins via `ON CONFLICT`). If the
+  `email` scope was **not** granted, the alias is legitimately `null` (apps without `email` scope get
+  `email: null`, §7.1) — that is the correct value, not a miss. This makes the email half **robust to
+  ordering** while keeping the common path a pure cache read.
+
 ### 7.2 Inbound forwarding — managed provider, thin compio handler (default)
 
 ⚠️ **Default: do NOT build a from-scratch receiving MX in Rust.** Deliverability of forwarded mail
@@ -2035,10 +2219,13 @@ handler** (`crates/control` or a small `crates/relay` handler — no SMTP server
 - The handler looks up `alias → real inbox` via `auth.app_user_identities` (active only).
 - If active, it forwards via the **existing outbound path** (`crates/auth/src/mailer` /
   the managed provider's send API), rewriting `From:` to `{app-name} via relay <alias>` and
-  `Reply-To:` to the alias (replies re-enter the relay — two-way routing is v2). The provider
-  handles DKIM/SPF/DMARC alignment and ARC for the `{relay_domain}` sending identity.
-- **v1 scope = app → user forwarding only.** Inbound user replies are bounced with a "replies not
-  yet supported" message (or silently dropped behind a flag) until v2.
+  `Reply-To:` to the alias. The provider handles DKIM/SPF/DMARC alignment and ARC for the
+  `{relay_domain}` sending identity.
+- **v1 scope = app → user forwarding only (O7, DECIDED — round-4 pilot).** Inbound user replies to a
+  relay alias are **BOUNCED** with a clear "replies not yet supported" message — **never silently
+  dropped**. A bounce gives the sender a delivery failure they can act on, instead of a black hole.
+  Two-way reply re-injection (the alias → real address direction back to the app) is **v2**, designed
+  in the relay sub-spec. <!-- Added in round 4: lock O7 — v1 relay reply routing BOUNCES (not silent drop); two-way is v2 -->
 
 > **Decision (managed inbound vs bespoke MX — O5, resolved).** A managed inbound provider + thin
 > compio webhook handler is the **default**; a from-scratch zero-tokio receiving MX
@@ -2089,18 +2276,29 @@ that `client_id`. <!-- Added in round 2: addressing MINOR — fresh ALIAS on re-
 
 ### 8.1 Data model (SQL DDL sketches)
 
-`control.app_oauth_clients` (control plane bookkeeping):
+`control.app_oauth_clients` (per-app **extension** of `control.oauth_clients`, round-5). ⚠️ The OAuth
+client identity itself — `client_id` (the `oauth_grants` FK target), `redirect_uris`, `scopes`,
+`skip_consent`, `hydra_client_id` — lives in the **existing `control.oauth_clients`** (§1.1:
+`ensure_app_client` writes it there exactly like `bootstrap_builder.rs` does for the builder client).
+This table holds only the **per-app-specific** bits `oauth_clients` lacks: the `app_id ↔ client_id`
+link and the `sector_identifier` for pairwise/relay scoping. It does **not** duplicate
+`redirect_uris`/`scope` (those are on the `oauth_clients` row, the FK target — single source of
+truth). <!-- Added in round 5: addressing MAJOR — reconcile app_oauth_clients with control.oauth_clients; client identity + skip_consent + redirect_uris live on oauth_clients (FK target), this table holds only app link + sector -->
 
 ```sql
 CREATE TABLE control.app_oauth_clients (
   app_id              uuid PRIMARY KEY REFERENCES control.apps(id) ON DELETE CASCADE,
-  hydra_client_id     text NOT NULL UNIQUE,          -- app_<base62>
-  sector_identifier   text NOT NULL,                 -- apex origin or sector_identifier_uri
-  redirect_uris       text[] NOT NULL DEFAULT '{}',
-  scope               text NOT NULL,                 -- mirrored allowlist
+  client_id           text NOT NULL UNIQUE                         -- oac_<base62>; the per-app
+                        REFERENCES control.oauth_clients(client_id) -- oauth_clients row ensure_app_client wrote
+                        ON DELETE CASCADE,
+  sector_identifier   text NOT NULL,                 -- apex origin (pairwise/relay scoping); NOT on oauth_clients
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now()
 );
+-- redirect_uris, scopes, skip_consent, hydra_client_id are NOT here — they live on
+-- control.oauth_clients (the control.oauth_grants FK target + the skip_consent the consent fast path
+-- reads). ensure_app_client (§1.1) writes BOTH the oauth_clients row (skip_consent=FALSE) and this
+-- extension row, in one transaction.
 ```
 
 `control.app_scope_defs` (declared scope registry):
@@ -2146,7 +2344,7 @@ CREATE UNIQUE INDEX app_user_identities_relay_active
 
 ⚠️ **Round-3: there is NO `auth.app_grants` table.** The per-app remembered-grant ledger is the
 **existing `control.oauth_grants`** keyed by `(subject, client_id)` (the live consent fast path's
-store, §5.2); `client_id = app_<app_id>` is 1:1 with `(global_user, app)`, so no second grant table
+store, §5.2); `client_id = oac_<app_id>` is 1:1 with `(global_user, app)`, so no second grant table
 is created. This removes the two-ledger consistency hazard round 2 introduced. <!-- Added in round 3: addressing MAJOR — drop the parallel auth.app_grants table; control.oauth_grants is the single grant ledger -->
 
 `auth.app_session_anchors` (the **dedicated** SDK reload-recovery anchor — round-3 BLOCKER fix; a
@@ -2179,7 +2377,7 @@ CREATE INDEX app_session_anchors_user ON auth.app_session_anchors (app_id, globa
 
 ```sql
 CREATE TABLE auth.token_revocations (
-  client_id      text        NOT NULL,                 -- app_<base62>
+  client_id      text        NOT NULL,                 -- oac_<base62>
   sub            text        NOT NULL,                 -- pws_ (wrapper) or global UUID (raw-Hydra) — whichever the token carries
   revoked_after  timestamptz NOT NULL,                 -- reject any token with iat < revoked_after for this (client_id, sub)
   PRIMARY KEY (client_id, sub)
@@ -2189,10 +2387,23 @@ CREATE TABLE auth.token_revocations (
 -- Per-jti admin revokes use a PG-backed TieredJtiCache (NOT the in-memory logout_jti_cache).
 ```
 
-⚠️ **`auth.gateway_sessions` is UNCHANGED.** The interactive cookie redirect flow keeps it with its
-`ABSOLUTE_HOURS=12` / `IDLE_MINUTES=30` semantics (`sessions.rs:46-50`) and its UUID `user_id`; the
-SDK anchor lives in the separate `app_session_anchors` table above, so no `sessions.rs` constant or
-`validate()`-slide test changes. The `pws_…` is **never stored** in either table — it is the
+`auth.gateway_sessions.granted_scopes` (the **one** column added to the existing table — round-5 MAJOR,
+§1.4/§5.3; lets the cookie path emit `WorkerUser.scopes` without a cross-schema `oauth_grants` join):
+
+```sql
+-- changeset zeroship:auth-gateway-sessions-granted-scopes
+ALTER TABLE auth.gateway_sessions ADD COLUMN granted_scopes TEXT[] NOT NULL DEFAULT '{}';
+-- rollback ALTER TABLE auth.gateway_sessions DROP COLUMN granted_scopes;
+-- gateway::sessions::create writes it from the consent grant at session-create; validate() returns it
+-- so the per-request cookie path reads scopes off the same row (no control.oauth_grants hot-path join).
+```
+
+⚠️ **`auth.gateway_sessions` keeps its lifetime semantics; only this column is added.** The
+interactive cookie redirect flow keeps `ABSOLUTE_HOURS=12` / `IDLE_MINUTES=30` (`sessions.rs:46-50`)
+and its UUID `user_id`; the SDK anchor lives in the separate `app_session_anchors` table above, so no
+`sessions.rs` constant or `validate()`-slide test changes. The **only** schema change to
+`gateway_sessions` is the new `granted_scopes TEXT[]` column (above) — `NOT NULL DEFAULT '{}'`, so
+existing-shape inserts and the `validate()` slide are unaffected beyond reading/writing the new column. The `pws_…` is **never stored** in either table — it is the
 deterministic projection derived on the way out into `ZeroShip-User.id` (§6.2). All DDL authored as
 Liquibase changesets under `db/changelog/` (per the auth.md data-model note — migrations are
 Liquibase, no inline SQL). <!-- Added in round 3: addressing BLOCKER — anchor is a dedicated table with no idle slide; gateway_sessions untouched; +token_revocations cross-node table -->
@@ -2212,11 +2423,12 @@ access JWT** kept server-side (and used directly only by non-browser OAuth clien
 ```json
 { "iss":"<gateway issuer>", "sub":"pws_…",            // ← per-app pairwise sub; NO global UUID in the browser-held token
   "aud":"myapp.zeroship.ai",                 // the app host (wrapper aud)
-  "client_id":"app_<base62>",                // ← the Bearer arm binds on THIS
+  "client_id":"oac_<base62>",                // ← the Bearer arm binds on THIS (the per-app OAuth client_id, §1.1)
   "email":"{token}@{relay_domain}",          // relay alias, not the real inbox
-  "cnf":{ "jkt":"…" }?,                      // present only with useDpop (sender-constraint)
+  "cnf":{ "jkt":"…" },                       // OPTIONAL (round-5): present ONLY with useDpop; OMITTED for plain Bearer (cnf=None)
   "exp":…, "iat":…, "jti":"…",               // exp = iat + 10min; revocation via the (client_id,sub) family marker (§8.5)
-  "scope":"openid profile email read:billing" }
+  "scope":"openid profile email read:billing",
+  "wraps": null }                            // round-5: None for the browser wrapper (no underlying raw token); Some(sha256) only on the DPoP path
 ```
 
 **Raw Hydra access JWT** (RFC 9068, EdDSA, kept server-side under the anchor; used directly only by
@@ -2226,7 +2438,7 @@ non-browser clients like the CLI). ⚠️ The Bearer arm binds on the **`client_
 ```json
 { "iss":"https://auth.zeroship.ai/", "sub":"<global usr_ UUID>",   // ← Hydra issues the GLOBAL UUID (bound at accept_login)
   "aud":"http://api.zeroship.ai",            // resource-server audience (NOT the per-app client)
-  "client_id":"app_<base62>",                // ← the Bearer arm binds on THIS
+  "client_id":"oac_<base62>",                // ← the Bearer arm binds on THIS (the per-app OAuth client_id, §1.1)
   "exp":…, "iat":…, "jti":"…",
   "scope":"openid profile email read:billing" }
 ```
@@ -2251,6 +2463,17 @@ synthesizing the `ZeroShip-User` header; the token itself is never rewritten. <!
 | Name | Set by | Attributes | Purpose |
 |---|---|---|---|
 | `__Host-zs_app_session` | gateway `/__zs/auth/token` | `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000` (30d) | First-party anchor; server-held refresh family for reload-recovery. **`SameSite=Strict`** (round-2): never needed cross-site, so a top-level navigation cannot ride it. Name via `app_session_cookie_name(insecure_dev)` → `zs_app_session` (no `__Host-`, no `Secure`) in dev. |
+
+⚠️ **Round-5 (MINOR) — `SameSite=Strict` is correct precisely because `/session` is reached by a
+same-origin `fetch`, not a cross-site top-level navigation; do NOT "fix" it to `Lax`.** A user who
+arrives at `https://myapp.zeroship.ai` via a **cross-site top-level navigation** (clicking a link in
+an email) will **not** send the Strict anchor on that initial navigation — but `checkSession()` issues
+a **same-origin** `fetch` to `/__zs/auth/session?mint=1` *from* the loaded app page, and a Strict
+cookie **is** sent on a same-origin request regardless of how the user first arrived. So the
+cross-site-entry → same-origin-fetch case still carries the anchor and reload-recovery works. (This
+is also why `?mint=1` requires the `X-ZS-Auth` custom header, §1.2: it cannot be reached by a
+top-level navigation at all.) Relaxing to `Lax` would only widen the CSRF surface for no functional
+gain. <!-- Added in round 5: addressing MINOR — confirm SameSite=Strict is correct for the same-origin /session fetch even after a cross-site top-level entry; pre-empt a Lax "fix" -->
 | `zs.<app_ref>.is.authenticated` | SDK (browser) | non-HttpOnly; `Secure; SameSite=Lax; Path=/; Max-Age=2592000` (30d, matches anchor) | Session-presence breadcrumb; gates `checkSession`. Keyed on the gateway-returned `app_ref` (§4.3), not the raw host. |
 | `__Host-zs_oidc_stash` | gateway (legacy redirect only) | unchanged | Not used by the popup/PKCE-in-browser flow. |
 
@@ -2440,6 +2663,30 @@ first-party server code, and we say so plainly — it is the accepted cost of tr
     (cross-node family marker) (round-3, §1.3/§1.5/§8.5).
   - gateway: the **access token returned to the browser contains NO global `usr_` UUID** (it is the
     wrapper, `sub` = `pws_`) on both `/token` and `/session?mint=1` (round-3 §1.2/G4).
+  - gateway (**round-5 wrapper_token refactor**): a 600 s plain-Bearer wrapper minted via the
+    refactored `Issuer::issue(WrapperMint{…})` round-trips with `cnf == None`, `wraps == None`,
+    `sub == pws_`, `email == alias`; `Verifier::verify(token, host, Some(wrong_client_id))` **rejects**
+    and `Some(matching)` / `None` accept; the DPoP-exchange caller still mints a 3600 s `cnf=Some(jkt)`
+    wrapper (its lib tests + `WRAPPER_EXPIRES_IN_SECS` updated in the same patch).
+  - gateway (**round-5 `?mint=1` no-introspection**): a `?mint=1` that rotates the server family makes
+    **zero** Hydra `/oauth2/introspect` calls — it verifies the rotated raw access JWT locally via
+    JWKS, derives `pws_`, and returns the **wrapper** (assert the stored `cached_access_token` and the
+    response `access_token` are the wrapper, not the raw Hydra token).
+  - gateway (**round-5 first-login alias ordering**): the **very first** `/token` wrapper for a
+    `(user, app)` carries the relay alias (not `null`) when `email` scope is granted — proving the
+    `accept_consent` row committed before the code was issued; and a forced read-through **miss** with
+    `email` scope lazily mints the alias rather than emitting `null` (§7.1).
+  - cookie path (**round-5 `granted_scopes`**): a cookie session created after consent has
+    `auth.gateway_sessions.granted_scopes` populated, and `ZeroShip-User.scopes` reflects it on the
+    per-request path with **no** `control.oauth_grants` join (§1.4/§5.3).
+  - control (**round-5 client reconciliation**): `ensure_app_client` writes the per-app client to
+    `control.oauth_clients` with `skip_consent = FALSE` **and** an `app_oauth_clients` extension row in
+    one transaction; an `oauth_grants` upsert for that `client_id` succeeds (FK satisfied); the
+    `client_id` uses the `oac_` prefix (not `app_`) and is **distinct** from the SDK `app_ref`.
+  - core/control (**round-5 RouteEntry producer/fixture**): `registry.rs::get_routes` LEFT-JOINs
+    `app_oauth_clients` and emits `Some(oauth_client_id)` for a provisioned app, `None` for an
+    un-provisioned one; the **mixed-default** round-trip (passthrough manifest + `None` OAuth fields)
+    serializes/deserializes intact.
   - gateway: `/__zs/auth/token` **validates the id_token** (sig/iss/aud/exp — the load-bearing
     binding; nonce is defense-in-depth) and returns a server-validated `user`; a forged/altered
     id_token in the Hydra response ⇒ `400 invalid_token` (round-2/3 §1.2). `?mint=1` **without
@@ -2515,6 +2762,30 @@ need production observability and abuse limits — absent from round 1. They reu
 - **Hydra back-pressure**: when `/oauth2/token` is slow or 5xx-ing, the proxy applies a bounded
   timeout + circuit-breaker and returns `503 upstream_unavailable` (not a hang), so a Hydra brownout
   cannot exhaust gateway connections.
+- ⚠️ **Anchor advisory-lock held across the Hydra refresh — connection-pin cost, bounded (round-5
+  MINOR).** `?mint=1` holds `pg_advisory_xact_lock(hash(anchor.id))` **across** the outbound Hydra
+  refresh (§1.2). Even on compio/io_uring (no thread blocks), the open transaction **pins one
+  compio-postgres connection** for the full Hydra RTT, and N minters serialized on one anchor have
+  tail latency ≈ N × Hydra-RTT with a connection held the whole time — a pool-exhaustion vector under
+  a Hydra brownout. We keep the lock-across-call (the alternative — release before the Hydra call,
+  re-acquire to write — reopens the tab-vs-tab double-rotation the round-3 design closed) but **bound
+  it on three axes**: <!-- Added in round 5: addressing MINOR — bound the advisory-lock-held-across-Hydra connection pin; tie the lock-wait + per-mint Hydra timeout to the circuit breaker so a brownout can't hold DB connections for the breaker timeout -->
+  1. **Per-mint Hydra timeout** = the same bounded `/oauth2/token` timeout above (a few seconds), so a
+     single held connection is bounded by that timeout, **not** the circuit-breaker's open duration.
+     When the breaker is **open**, `?mint=1` short-circuits to `503 upstream_unavailable` **before**
+     acquiring the lock or a connection — so a Hydra brownout holds **zero** DB connections for the
+     breaker timeout (it fails fast, lock-free).
+  2. **Bounded lock-wait**: a minter that cannot acquire the anchor lock within a short cap (e.g. the
+     per-mint timeout) returns `503` with `Retry-After` rather than queueing behind N minters — the
+     SDK retries with backoff. The common case (the first minter populates `cached_access_token`)
+     means later minters acquire the lock fast and take the cache branch with no Hydra call at all.
+  3. **Connection-budget isolation**: the mint path uses the gateway's bounded compio-postgres pool;
+     because (1) caps hold time and (2) caps queueing, the worst-case held-connection count is bounded
+     by the per-anchor concurrency the rate limiter already caps (per-IP + per-app, above). The
+     `auth_session_mint_total{result=upstream_error}` and a new `auth_mint_lock_wait_timeout_total`
+     metric surface saturation.
+  This stays zero-tokio (all on compio/ntex); the point is the *transaction-held-across-HTTP* cost is
+  acknowledged and explicitly bounded, not that a thread blocks.
 - **Metrics** (emit on the existing gateway metrics path):
   - `auth_token_mint_total{result=success|invalid_grant|upstream_error}`,
   - `auth_session_mint_total{result}`,
@@ -2537,26 +2808,38 @@ reshaping the SDK.
 - 1a. `env.auth` `AuthPlugin` registration **in BOTH `crates/worker/src/cache.rs` `create_plugins()`
   (the production path) AND the CLI `zeroship serve` vector** (round-3 §1.4) + a runtime regression
   test driven through the **worker** path (smallest, unblocks server SDK).
-- 1b. **Wire-format first (§1.5):** extend `RouteEntry` with `oauth_client_id`+`sector_identifier`,
-  populate from control's route-sync, surface on `CompiledRoute`; update every producer/consumer/
-  fixture in the same patch (a deliberate wire-format break). Then gateway `browser_auth.rs`:
+- 1b. **Wire-format first (§1.5):** extend `RouteEntry` with `oauth_client_id`+`sector_identifier`
+  (both `#[serde(default)]`⇒`None`), populate from `registry.rs::get_routes` (LEFT JOIN
+  `app_oauth_clients`), surface on `CompiledRoute`; update every producer/consumer/fixture (incl. the
+  mixed-default round-trip) in the same patch (a deliberate wire-format break). **Then refactor
+  `wrapper_token.rs` (§1.2 round-5):** `Issuer::issue` → claims-builder (free
+  `sub`/`email`/`exp`/`cnf`/`wraps`), `Verifier::verify` → optional `client_id` match, update the sole
+  caller `dpop_exchange.rs:209` + lib tests + `WRAPPER_EXPIRES_IN_SECS`. Then gateway `browser_auth.rs`:
   `/authorize`, `/popup-callback` (with BroadcastChannel/localStorage relay fallback), `/token`
-  (mint per-app **wrapper** access token sub=`pws_`; server-held refresh family in
+  (validate id_token via `verify_id_token(expected_aud=client_id, expected_nonce=None)`; mint per-app
+  **wrapper** access token sub=`pws_` via the refactored issuer; server-held refresh family in
   `auth.app_session_anchors`; **same-origin-only, no credentialed CORS**), `/session` (`?mint=1`
-  under an **anchor-id advisory lock across the Hydra refresh**, cached access token), `/signout`
-  (fixes the live bug; per-app `global`; writes `auth.token_revocations` marker) + anchor cookie via
-  `app_session_cookie_name`. **New Liquibase changesets: `auth.app_session_anchors`,
-  `auth.token_revocations`** (§8.1). Handler-level tests (incl. N-parallel-mint, foreign-Origin
-  reject, >30-min-idle recovery) + a loopback-Hydra integration test.
+  under an **anchor-id advisory lock across the Hydra refresh** with a **bounded lock-wait +
+  breaker-gated fail-fast**, §8.7; rotates the raw family, **locally JWKS-verifies** the rotated JWT,
+  re-mints + **caches the wrapper**), `/signout` (fixes the live bug; per-app `global`; writes
+  `auth.token_revocations` marker) + anchor cookie via `app_session_cookie_name`. **New Liquibase
+  changesets: `auth.app_session_anchors`, `auth.token_revocations`, and
+  `auth.gateway_sessions.granted_scopes` (ALTER ADD COLUMN)** (§8.1); extend `sessions::create` to
+  write `granted_scopes`. Handler-level tests (incl. N-parallel-mint, **zero-introspection on mint**,
+  foreign-Origin reject, >30-min-idle recovery, first-login alias) + a loopback-Hydra integration test.
 - 1c. Gateway Bearer arm in `router/auth.rs` (**wrapper path via `state.wrapper_verifier` + raw-Hydra
   path via JWKS**, issuer discriminator, **per-app `client_id`-claim binding**, cross-node
   `token_revocations` family-marker check, expired-Bearer-falls-through-on-Anon, `encode_user_header`)
-  + regression tests. **Live-Hydra spike**: confirm a per-app public client's raw access JWT carries
-  `client_id` (and what `aud` holds) before finalizing the binding claim (§1.3).
-- 1d. Control plane per-app client lifecycle (`app_oauth_client.rs`: create on app-create with
-  `backchannel_logout_uri`, sync redirect URIs on deploy, delete on app-delete) +
-  `control.app_oauth_clients` Liquibase changeset + idempotency tests. Update
-  `backchannel_logout.rs` to disambiguate per-app `aud` and revoke per-app sessions.
+  + regression tests. **Live-Hydra spike (S1, confirmation-only)**: confirm a per-app public client's
+  raw access JWT carries `client_id` (the locked binding claim, §1.3); if absent, switch to the
+  pre-decided `audience=[client_id]` + `aud` fallback. Either way the binding ships.
+- 1d. Control plane per-app client lifecycle (`app_oauth_client.rs`: `ensure_app_client` writes the
+  per-app client to **`control.oauth_clients`** (`oac_<base62>`, `skip_consent=FALSE`,
+  `backchannel_logout_uri`) **and** the `control.app_oauth_clients` extension row (sector + app link)
+  in one transaction, satisfying the `oauth_grants` FK; sync redirect URIs/scope on the `oauth_clients`
+  row on deploy (diff-then-PUT); delete on app-delete) + `control.app_oauth_clients` Liquibase
+  changeset + idempotency/FK tests. Update `backchannel_logout.rs` to disambiguate per-app `aud` and
+  revoke per-app sessions.
 
 **Slice 2 — SDK (Subsystem 2).** Restructure `sdks/auth` to subpath exports; implement
 `types.ts`, repaired `server.ts`, `client.ts` (cache/worker/locks/popup/relay/**transaction
@@ -2595,89 +2878,107 @@ the local mailpit/inbucket sink.
 A `writing-plans` doc converts each slice into ordered tasks before implementation; each slice is
 implemented by a background subagent (opus), reviewed (diff + tests + decisions) before the next.
 
-## 10. Open questions for the review gate
+## 10. Decision ledger (all blockers/majors closed; spikes are confirmation-only)
 
-> Round-1 update: the round-0 blockers/majors that masqueraded as "open questions" are now
-> **resolved decisions** in the body. Only the genuinely-open items and the two live-Hydra spikes
-> remain. <!-- Added in round 1: resolve O1/O3/O4/O5/O6, keep only genuine unknowns + spikes -->
->
-> Round-3 closed three blockers (separate `auth.app_session_anchors` store; `AuthPlugin` on the
-> worker path; atomic anchor-lock `?mint=1`) and five majors (browser holds a `pws_` wrapper not the
-> global-UUID Hydra token; honest nonce scope; cross-node `token_revocations` family marker; single
-> `control.oauth_grants` ledger; same-origin-only no-credentialed-CORS; expired-Bearer-on-Anon
-> fall-through) plus minors (sessionStorage PKCE transaction; COOP relay fallback; redirect_uri
-> bound; consent-time alias creation + read-through cache; `scope_views`/deploy-race reconciliation).
-> None of these reopened a decision; they are body fixes. <!-- Added in round 3: index the round-3 closures -->
+Every item that earlier rounds tracked as "open" is now a **decided** body change. O7, O8, and the
+F4-A/F4-B + Bearer-binding choices were locked by pilot ruling (round 4) and folded into the body;
+the two live-Hydra spikes that remain are **confirmation passes for already-shipped decisions**, with
+documented fallbacks — not gates that could reopen a decision. **Round 5** changed no decision; it
+aligned five load-bearing feasibility claims with the live tree (the `wrapper_token` refactor, the
+missing `gateway_sessions.granted_scopes` column, the `oauth_clients` FK/`skip_consent` reconciliation,
+the `?mint=1` raw→wrapper transform, the consent→`/token` ordering) and resolved six minors
+(`oac_`-prefixed client_id, dropped gateway nonce echo, removed `client_id_implicit`, bounded
+lock-held-across-Hydra, named `RouteEntry` producer, confirmed anchor `SameSite=Strict`). <!-- Updated in round 4: pilot ruling locked O7/O8/S1/S2. Round 5: code-grounded feasibility alignment, no decision changed -->
 
-**Round-3 grounded-fact corrections (verified against the live tree):**
-- `crates/gateway/src/sessions.rs:46/50` — `IDLE_MINUTES=30`, `ABSOLUTE_HOURS=12`; `validate()`
-  (`:103`) rejects on either expiry. ⇒ the anchor needs its own store (`auth.app_session_anchors`).
-- `crates/worker/src/cache.rs:40-46` — `create_plugins()` registers **only `DbPlugin`**; Kv/Storage
-  live only in the CLI path (`crates/cli/src/main.rs:108-165`). ⇒ pin `AuthPlugin` to BOTH.
-- `crates/auth/src/ui/consent.rs:69-125` — `skip_consent` fast path reads/writes
-  `control.oauth_grants` via `load_oauth_grant`/`upsert_oauth_grant`/`scopes_are_subset`. ⇒ single
-  ledger; per-app clients `skip_consent=false`.
-- `crates/core/src/dpop.rs:980` `TieredJtiCache::with_pg` is PG-tiered (cross-node);
-  `crates/core/src/logout_token.rs:99` `LogoutJtiCache` is in-memory. ⇒ back the denylist with PG.
-- `crates/gateway/src/wrapper_token.rs` `Issuer::issue`/`WrapperClaims{sub,email,client_id,…}` +
-  `state.wrapper_issuer`/`wrapper_verifier` (`lib.rs:136/147`). ⇒ mint the `pws_` wrapper for the browser.
-- `ops/hydra-dev.yaml:49-51` — `rotation_grace_period: 30s`, `rotation_grace_reuse_count: 3`,
-  refresh `720h`. ⇒ grace softens but ≥3 concurrent minters trip revocation ⇒ anchor-lock mint.
+**Round-4 pilot rulings (DECIDED — folded into the body):**
+- **O8 — app scopes declared in the manifest.** App permission scopes live in the **app manifest**
+  (`auth.scopes`, §5.1). On deploy the control plane mirrors them to `control.app_scope_defs` **and**
+  the per-app Hydra client `scope` allowlist **atomically, in one transaction** (§5.2 deploy-race
+  guard, §1.1). Not a deploy-time control-plane-only field — creators declare scopes alongside routes.
+- **O7 — relay reply routing v1 = BOUNCE.** Inbound user replies to a relay alias are **bounced**
+  with a "replies not yet supported" message (§7.2) — **never silently dropped**. Two-way reply
+  re-injection is **v2**. Relay is a **separate sub-spec** (`2026-05-29-relay-email-design.md`).
+- **S1 — Bearer arm binds on `client_id` (RFC 9068).** The Bearer arm binds the per-app access JWT on
+  the **`client_id` claim** (§1.3; RFC 9068 §3 mandates it on access tokens, Hydra emits it). The
+  Slice-1c live-Hydra spike **confirms** this against a real per-app public client. **Documented
+  fallback** (if Hydra omits `client_id`): give each per-app client `audience = [its own client_id]`
+  and bind on `aud`. The spike is a confirmation + fallback-selection pass; it cannot change the
+  *primary* design.
+- **S2 — ship F4-B (gateway HMAC pairwise) as the pairwise mechanism.** The default and shipped
+  pairwise mechanism is the **gateway HMAC header projection** (§6.2, F4-B); Hydra stays
+  `subject_type: public`. **F4-A (Hydra-native pairwise) is deferred** behind an *optional* spike,
+  built only if a concrete need arises.
 
-**Resolved (now decided in the body, not open):**
-- **O1 — client_id resolution → RESOLVED (§1.5).** A designed wire-format extension to `RouteEntry`
-  (`oauth_client_id`+`sector_identifier`), populated by control's route-sync. Not "inject from Host
-  magically" — a deliberate, in-patch wire-format change. All app hosts (apex + custom) map 1:1 to
-  one per-app client via the existing `name_index`.
-- **O3 — server-held refresh → RESOLVED (§1.2/§2, round-3 hardened).** Single-holder: the rotating
-  refresh family lives server-side in the **dedicated `auth.app_session_anchors`** store; the browser
-  holds none by default (`server_anchor`), or its own *separate* family from a *separate* code
-  (`browser_refresh`). Round 3 additionally serializes the **same-family** tab-vs-tab `?mint=1` race
-  with an **anchor-id advisory lock across the Hydra refresh** + a cached minted access token. No
-  copies, no parallel-grant, no dual-rotation. The silent-iframe alternative is **deleted** (3p
-  cookie).
-- **O4 — pairwise mechanism → RESOLVED (§6.2; RELOCATED round 2; round-3 wrapper).** Hydra keeps
-  `subject_type: public` and emits the **global UUID** (bound at `accept_login`); the gateway projects
-  the `pws_…` at the `ZeroShip-User` header boundary on the cookie + raw-Hydra Bearer arms, **and
-  mints a per-app wrapper access token (sub=`pws_`) for the browser** so the global UUID never reaches
-  app JS (round-3 §1.2/G4). Round 1's "set `pws_` at `accept_consent`" was impossible (subject bound
-  at login; `pws_` text breaks four UUID-parsing consumers) — corrected. F4-A (Hydra-native) remains a
-  future optimization gated on a spike (sector_identifier_uri vs redirect_uri churn).
-- **O5 — relay → RESOLVED (§7): managed inbound provider + thin compio webhook**, split into its
-  own spec. A from-scratch zero-tokio MX is deferred unless the managed route is rejected.
-- **O6 — signout `global` → RESOLVED (§1.2): "this app, every device."** Revoke all
-  `(app_id, user)` anchors; do NOT trigger Hydra RP-logout (which the existing BCL fans out across
-  all apps). Per-app BCL disambiguates by `logout_token` `aud` = per-app `client_id`. Platform-wide
-  logout is a separate explicit action.
+**Earlier-round closures (decided in the body, not open):**
+- **O1 — client_id resolution (§1.5).** `RouteEntry` gains `oauth_client_id` + `sector_identifier`,
+  populated by control's route-sync — a deliberate in-patch wire-format break. All app hosts (apex +
+  custom) map 1:1 to one per-app client via `name_index`.
+- **O2 — Bearer-arm verification (§1.3/§8.5).** Local verify (wrapper via the **refactored**
+  `state.wrapper_verifier.verify(token, host, Some(client_id))`, raw-Hydra via JWKS —
+  `strategies.access_token=jwt`) **+** a **cross-node `auth.token_revocations` `(client_id, sub)`
+  family marker** (shared PG, like `dpop_jti`; NOT the in-memory `logout_jti_cache`) **+** a 10-min
+  wrapper-access TTL. **No per-request Hydra introspection — and (round-5) no per-mint introspection
+  either**: `/token` builds the wrapper from the locally-validated id_token, and `?mint=1` builds it
+  from the locally-JWKS-verified rotated access JWT (§1.2). The family marker is the primary
+  revocation mechanism (signout cannot enumerate per-node jtis).
+- **O3 — server-held refresh (§1.2/§2).** The rotating refresh family lives server-side in the
+  dedicated `auth.app_session_anchors` store (single-holder); the browser holds none by default, or
+  its *own separate* family from a *separate* code. Same-family tab-vs-tab `?mint=1` is serialized by
+  an anchor-id advisory lock held **across** the Hydra refresh + a cached minted access token. The
+  silent-iframe alternative is deleted (3p-cookie blocked).
+- **O4 — pairwise mechanism (§6.2; = S2 above).** Hydra keeps `subject_type: public` and emits the
+  global UUID (bound at `accept_login`); the gateway projects `pws_…` at the `ZeroShip-User` boundary
+  (cookie + raw-Hydra Bearer arms) and mints a per-app wrapper access token (`sub = pws_`) for the
+  browser, so the global UUID never reaches app JS.
+- **O5 — relay transport (§7).** Managed inbound provider + thin compio webhook; bespoke zero-tokio
+  MX deferred unless the managed route is rejected. Split into the relay sub-spec.
+- **O6 — signout `global` (§1.2): "this app, every device."** Revoke all `(app_id, user)` anchors; do
+  not trigger Hydra RP-logout. Per-app BCL disambiguates by `logout_token` `aud` = per-app
+  `client_id`. Platform-wide logout is a separate explicit action.
+- **O9 — re-grant rotation (§6.4): deterministic sub reused, alias fresh.** The `pws_` is
+  deterministic and reused (the `app_user_identities` row is upserted, `revoked_at` cleared); only the
+  relay alias rotates on re-grant (Apple Hide-My-Email applies to the alias, not the sub).
 
-**Two live-Hydra spikes (must run before the dependent slice finalizes):**
-- **S1 (Slice 1c) — Bearer binding claim.** Confirm a per-app *public* client's Hydra access JWT
-  carries the per-app `client_id` in the `client_id` claim (and what `aud` holds). The Bearer arm
-  binds on `client_id`; if Hydra omits it, set each client's `audience = [its own client_id]` and
-  bind on `aud`. Decided by the spike, not assumed.
-- **S2 (Slice 4) — F4-A viability (optional).** Only if we ever want Hydra-native pairwise: verify
-  `pairwise.salt` + `sector_identifier_uri` fetch/validation under redirect_uri churn. Until then,
-  F4-B ships.
+**Two live-Hydra spikes (confirmation passes — fallbacks pre-decided):**
+- **S1 (Slice 1c) — confirm the Bearer binding claim.** Verify a per-app public client's access JWT
+  carries `client_id` (and inspect `aud`). If present (expected, per RFC 9068), the binding is
+  `client_id`; if absent, switch to the pre-decided `audience = [client_id]` + `aud` fallback. Either
+  way the design ships.
+- **S2 (Slice 4, OPTIONAL) — F4-A viability.** Only if Hydra-native pairwise is ever wanted: verify
+  `pairwise.salt` + `sector_identifier_uri` fetch/validation under redirect_uri churn. **Not on the
+  ship path** — F4-B is the mechanism.
 
-**Still genuinely open (cosmetic / product decisions):**
-- **O2 — Local verify vs introspection on the Bearer arm → RESOLVED (round-3 cross-node).** Local
-  verification (wrapper via `state.wrapper_verifier`, raw-Hydra via JWKS — `strategies.access_token=jwt`)
-  for speed, **plus** a **cross-node `auth.token_revocations` `(client_id, sub)` family marker**
-  (§8.5, backed by shared PG like `dpop_jti`, NOT the in-memory `logout_jti_cache`) for revocation
-  that actually works under `--scale`/multi-gate, and a **10-min** wrapper-access TTL bounding the
-  residual window. Round 2's "reuse the (in-memory) jti denylist" was unsound multi-node; round 3
-  makes the family marker the primary mechanism (signout cannot enumerate per-node jtis). No
-  per-request Hydra introspection. *Decided: local verify + cross-node family marker + short TTL.*
-- **O7 — Relay reply routing.** v1 = app→user forwarding only; two-way reply re-injection is v2.
-  Confirm v1 bounces vs silently drops user replies. (Belongs to the relay sub-spec.)
-- **O8 — Manifest `auth.scopes` location.** Top-level manifest `auth.scopes` vs a deploy-time
-  control-plane field. *Lean: manifest (creators declare scopes alongside routes), mirrored to
-  control on deploy.*
-- **O9 — re-grant rotation → RESOLVED (§6.4): deterministic sub reused, alias fresh.** The `pws_`
-  is deterministic and reused (the `app_user_identities` row is upserted, `revoked_at` cleared) so
-  it never collides with its own PK; only the **relay alias** rotates on re-grant (Apple
-  Hide-My-Email applies to the alias, not the sub). Round 1's "fresh sub on re-grant" contradicted
-  the deterministic derivation and the `id`-as-PK DDL — corrected.
+**Grounded-fact anchors (verified against the live tree; the body cites these inline):**
+`sessions.rs:46/50` (`IDLE_MINUTES=30`/`ABSOLUTE_HOURS=12`, reject in `validate()` :103 ⇒ anchor
+needs its own store) · `worker/src/cache.rs:40-46` (`create_plugins()` registers only `DbPlugin` ⇒
+pin `AuthPlugin` to BOTH sites) · `consent.rs:69-125` (`skip_consent` fast path over
+`control.oauth_grants` ⇒ single ledger, per-app `skip_consent=false`) · `core/dpop.rs:980`
+(`TieredJtiCache::with_pg` is cross-node) vs `core/logout_token.rs:99` (in-memory ⇒ back the denylist
+with PG) · `gateway/wrapper_token.rs` + `lib.rs:136/147` (`Issuer`/`WrapperClaims` +
+`wrapper_issuer`/`wrapper_verifier` ⇒ mint the `pws_` wrapper) · `ops/hydra-dev.yaml:49-51`
+(`rotation_grace_period 30s`, `reuse_count 3`, refresh `720h` ⇒ ≥3 concurrent minters trip revocation
+⇒ anchor-lock mint).
+
+**Round-5 grounded-fact anchors (the feasibility-fix evidence):**
+`gateway/wrapper_token.rs:167-230` (`issue(aud, &IntrospectionResponse, proof_jkt, hydra_token)` —
+derives `sub`/`email`/`scope`/`client_id` from intro, hard-codes `exp = now+3600`, requires
+`proof_jkt`, `wraps = SHA256(hydra_token)`; `Verifier::verify` :309 does **not** check `client_id`) ⇒
+the §1.2 `Issuer::issue`/`Verifier::verify` refactor is a real in-patch contract change, not reuse ·
+`gateway/dpop_exchange.rs:209` (the **only** `issue()` caller; `WRAPPER_EXPIRES_IN_SECS=3600` :62) ⇒
+updated in the same patch · `db/changelog/changesets/0002_auth.sql` `auth-gateway-sessions` (columns:
+`id,user_id,app_id,email,name,avatar_url,email_verified,issued_at,idle_expires_at,abs_expires_at,revoked_at`
+— **no `granted_scopes`**) ⇒ add the column (§1.4/§8.1) · `gateway/sessions.rs:58-90` (`create`
+INSERT does not populate scopes) ⇒ extend `NewSession` + INSERT · `0004_control.sql:255-264`
+(`control.oauth_grants(user_id UUID FK auth.users, client_id TEXT FK control.oauth_clients ON DELETE
+CASCADE, granted_scopes …, PK (user_id, client_id))`) + `oauth_clients(client_id PK, skip_consent,
+hydra_client_id …)` + `bootstrap_builder.rs:130-168` (builder client written to `control.oauth_clients`
+with `client_id == hydra_client_id`) ⇒ register per-app clients in `control.oauth_clients` (§1.1/§5.2/§8.1)
+· `control/registry.rs:340-381` (`get_routes` constructs `RouteEntry` for the gateway pull) ⇒ named
+producer for the §1.5 OAuth fields · `core/types.rs:59-78` (`RouteEntry { name, plan_id, api_key_hash,
+deploy_hash, manifest }`, `manifest` uses `#[serde(default = "Manifest::passthrough")]`) ⇒ new fields
+use `#[serde(default)]` + mixed-default fixture · `core/oidc_verify.rs:342` (`verify_id_token(cache,
+token, expected_iss, expected_aud, expected_nonce: Option<&str>, …)`, `set_audience(&[expected_aud])`,
+`NonceMismatch` :~387) ⇒ pass `expected_aud = client_id`, `expected_nonce = None` (§1.2).
 
 ---
 

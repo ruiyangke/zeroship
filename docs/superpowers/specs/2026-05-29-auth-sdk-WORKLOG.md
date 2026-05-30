@@ -1,45 +1,64 @@
 # @zeroship/auth build — loop WORKLOG
 
-Running log for the `feat/auth-sdk-popup` autonomous pilot loop. The spec workflow rewrites
-`2026-05-29-auth-sdk-design.md`; THIS file is loop state. Append newest at the bottom.
-**Pilot mode (user offline 2026-05-29): decide forks myself, don't wait for review gate,
-commit-only NEVER push.**
+Running log for the `feat/auth-sdk-popup` autonomous pilot loop. **Pilot mode (user offline
+2026-05-29): decide forks myself, don't wait for review gate, commit-only NEVER push.** The spec
+is `2026-05-29-auth-sdk-design.md` (~2992 lines, code-grounded). For implementation, feed each
+subagent ONLY its slice's section (grep the spec), never the whole doc.
 
 ## State machine
 `seed ✔` → `spec author+harden ✔ (61→62→72)` → `lock forks ✔` →
-`convergence harden (running)` → `writing-plans` → impl slice 1 (foundation) → review → …
-→ slice 5 (relay) → review → e2e → done.
+`convergence harden ✔ (→82, conditional GO)` → `apply blocker+3 majors+slice-split (running)` +
+`Slice 1a impl (running)` → 1b-mech → 1c → 1d → 1b-endpoints → 2 → 3 → 4 → 5 → e2e.
 
-## Decisions log (forks resolved as pilot — best-architecture rulings)
-- **O8 — where app scopes are declared → MANIFEST.** Creators declare `auth.scopes` in the app
-  manifest (alongside routes), mirrored to control-plane `app_scope_defs` + the per-app Hydra
-  client allowlist atomically on deploy. Rationale: scopes are an app-shape concern, belong with
-  the code that defines them; single source of truth; matches how routes are declared.
-- **O7 — relay reply routing (v1) → BOUNCE with "replies not yet supported".** Clearer failure
-  than silently dropping; two-way re-injection is v2. (Relay = separate sub-spec.)
-- **S1 — Bearer binding → bind on the `client_id` claim (RFC 9068).** Confirmed by a live-Hydra
-  spike in Slice 1c; if Hydra omits `client_id`, fall back to per-client `audience=[client_id]` +
-  `aud` binding. Decided-by-spike, not assumed.
-- **S2 — pairwise mechanism → ship F4-B (gateway HMAC projection).** Hydra stays
-  `subject_type: public`; gateway derives `pws_=base62(HMAC(salt, global_user||sector))` at the
-  ZeroShip-User boundary + mints the browser wrapper token with `sub=pws_`. F4-A (Hydra-native
-  pairwise + sector_identifier_uri) deferred behind an optional spike. Rationale: zero change to
-  accept_login/accept_consent + no UUID-parsing consumer touched; reversible later.
-- **Relay (subsystem 5)** is split to its own spec `2026-05-29-relay-email-design.md`; in pilot
-  mode I author that sub-spec + build it after slices 1-4 (no user gate).
+## Design score history
+61 → 62 → 72 (author+harden) → 81/82 final (convergence, GO). Reviewer verified grounded facts
+against the live tree (wrapper_token.rs, router/auth.rs:561, consent.rs, 0002_auth.sql,
+oidc_verify.rs, worker/cache.rs:40, sync.rs, lib.rs:116/136). Prior blockers closed.
+
+## Decisions log (pilot rulings)
+Fork rulings (from convergence): O8=manifest auth.scopes, O7=relay-reply-bounce,
+S1=client_id-claim-binding (spike), S2=F4-B gateway HMAC pairwise. (Locked into the spec body.)
+
+**Round-5 blocker + 3 majors — my rulings (being applied to the spec now):**
+- **BLOCKER (mint substrate).** Redesign `/session?mint=1` so NO db connection/lock is held
+  across the outbound Hydra refresh. Mechanism: (a) per-node in-process async single-flight
+  coalescing concurrent mints for the same `anchor_id` into one Hydra refresh; (b) a short
+  per-anchor cached minted token (TTL ≪ wrapper TTL) so rapid repeat mints skip Hydra; (c) rely
+  on Hydra's already-configured refresh rotation grace (30s / reuse 3) to tolerate the rare
+  cross-node concurrent mint (≤reuse_count valid rotations, no family revoke). ALSO migrate
+  gateway `AppState.db` Arc<Client> → compio-postgres **Pool** for normal per-request DB work
+  (update sessions::create/validate/revoke call sites). NO `pg_advisory_xact_lock` across HTTP.
+- **MAJOR-1 (wrapper key rotation).** Gateway keeps current+previous ed25519 keys; Verifier
+  accepts a wrapper signed by EITHER during an overlap ≥ wrapper TTL (10m)+skew; sign with
+  current. Rotation = promote current→previous, gen new current. Document procedure; optional
+  gateway JWKS exposing both pubkeys.
+- **MAJOR-2 (shared breaker'd HTTP client).** oidc_rp holds ONE reused `cyper::Client` built at
+  construction; circuit-breaker + bounded-timeout state attaches to it. No `Client::new()`/call.
+- **MAJOR-3 (anchor abs cap).** `app_session_anchors.abs_expires_at = created_at + 30d` (anchor's
+  own lifetime, set once, not slid). The 720h Hydra family ceiling is enforced solely by Hydra
+  `invalid_grant` (gateway treats as anchor-dead → clear anchor+breadcrumb → SDK interactive
+  login). Decouples the two; removes stale-cap.
+- **Slice 1b SPLIT.** 1b-mech = wrapper_token refactor (pws_ sub, client_id binding, key list) +
+  RouteEntry/CompiledRoute wire fields (oauth_client_id, sector_identifier) + route-sync
+  population (mechanical, low-risk). 1b-endpoints = the 5 `/__zs/auth/*` endpoints + Liquibase
+  changesets (app_session_anchors, token_revocations) + redesigned mint single-flight + Pool.
+- **New slice order:** 1a → 1b-mech → 1c → 1d → 1b-endpoints → 2 → 3 → 4 → 5. (1c Bearer arm
+  needs 1b-mech wrapper refactor; 1d per-app client must precede 1b-endpoints e2e.)
+- **Residual notes to fold in:** confirm wrapper-revocation read-through cache TTL is seconds-scale
+  (NOT the dpop_jti default); trace breadcrumb-cleared + 503 client_not_provisioned interaction (§4.3).
+
+## Residual risks to watch during impl
+mint-path connection pinning under Hydra brownout (breaker-before-anything fail-fast); gateway
+"dumb" invariant deliberately stretched (watch surface growth, auth-sidecar escape hatch);
+cross-node revocation latency bounded by cache TTL; faithful e2e needs 1d (per-app client) before
+1b-endpoints; breadcrumb/anchor desync + provisioning race edge.
 
 ## Timeline
-- 2026-05-29: worktree created off `f051cc87`; seed committed `bdf04426`.
-- 2026-05-29: research complete (discovery + 3 grounded facts + Supabase + Auth0 internals).
-  Architecture spine = client-held tokens via SAME-ORIGIN gateway endpoints (not cross-site
-  iframe). User went offline → FULL PILOT authority; review gate skipped.
-- 2026-05-29: spec author+harden workflow `w9eoznlnh` done — 3 critic→reviser rounds, 61→62→72,
-  detailed 5-subsystem design (~180KB). Open forks O7/O8/S1/S2 resolved above.
-- 2026-05-29: launching convergence-harden (lock forks + 2 critic→reviser + final critic) to
-  drive blockers→0 before implementing.
+- 2026-05-29: seed `bdf04426`; research done; pilot authority; spec author+harden `w9eoznlnh`
+  (61→62→72) committed `8c8ee374`; convergence `wohq6gm3g` → 82 conditional GO.
+- 2026-05-29: applying blocker+majors+slice-split to spec; starting Slice 1a (env.auth dual-site).
 
 ## Next actions when woken
-1. Read convergence result + final score; commit the converged spec.
-2. Invoke writing-plans (or author the impl plan) from section-6 slice order (1a/1b/1c/1d → 2 → 3 → 4 → 5).
-3. Implement slice-by-slice via background opus subagents; review each (diff+tests+decisions)
-   before next; commit per slice. Faithful e2e; regression test per behavior. NEVER push.
+1. Review + commit the spec fixes (blocker+majors). Review + verify + commit Slice 1a.
+2. Proceed down the slice order; each slice: implement (TDD, faithful test) → review (diff+tests)
+   → commit. Bigger slices (1b/1c) get a code-reviewer subagent pass too. NEVER push.
