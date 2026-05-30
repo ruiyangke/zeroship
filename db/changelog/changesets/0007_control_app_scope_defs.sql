@@ -16,7 +16,7 @@
 -- label + description from this table.
 --
 -- FK order: control.apps already exists (0004_control.sql), so this 0007
--- changeset runs cleanly after it.
+-- runs cleanly after it.
 
 --changeset zeroship:control-app-scope-defs splitStatements:true
 CREATE TABLE control.app_scope_defs (

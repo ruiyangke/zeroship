@@ -17,6 +17,9 @@
       {% if s.unrecognized %}
         <small class="scope-tag">(unrecognized)</small>
       {% endif %}
+      {% if let Some(desc) = s.description %}
+        <small class="scope-desc">{{ desc }}</small>
+      {% endif %}
     </li>
   {% endfor %}
 </ul>

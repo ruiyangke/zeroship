@@ -197,6 +197,34 @@ pub const SESSION_PREFIX: &str = "ses";
 /// stores the full typed-id string (`wak_<base62>`).
 pub const WAKE_PREFIX: &str = "wak";
 
+/// Per-app OAuth `client_id` prefix (auth-sdk Slice 1d, spec §1.1): the
+/// deterministic, stable-for-app-life OAuth client id is `oac_<base62-app-id>`.
+/// Distinct from [`APP_PREFIX`] (the app *entity* typed_id) on purpose — the
+/// OAuth `client_id` is a derived identifier, not a typed_id.
+///
+/// This is the SINGLE source of truth for the prefix string. The control plane
+/// mints the id ([`app_oauth_client_id`]) and the auth consent classifier
+/// decodes it back to the app UUID ([`app_id_from_oauth_client_id`]); both go
+/// through this constant so they can never drift.
+pub const APP_OAUTH_CLIENT_PREFIX: &str = "oac";
+
+/// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
+/// Deterministic and stable for the life of the app (spec §1.1).
+#[must_use]
+pub fn app_oauth_client_id(app_id: &uuid::Uuid) -> String {
+    format!("{APP_OAUTH_CLIENT_PREFIX}_{}", uuid_to_base62(app_id))
+}
+
+/// Decode a per-app OAuth `client_id` (`oac_<base62-app-id>`) back to its app
+/// UUID. Returns `None` for any client id that is not a per-app end-user client
+/// (a missing `oac_` prefix or a non-base62 tail), e.g. the builder/console
+/// clients. The exact inverse of [`app_oauth_client_id`].
+#[must_use]
+pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<uuid::Uuid> {
+    let encoded = client_id.strip_prefix(APP_OAUTH_CLIENT_PREFIX)?.strip_prefix('_')?;
+    base62_to_uuid(encoded).ok()
+}
+
 /// Generate a new user ID: `usr_{base62(uuidv7)}`
 pub fn new_user_id() -> String {
     generate(USER_PREFIX)
@@ -257,6 +285,25 @@ mod tests {
         assert_eq!(prefix, "usr");
         let back = from_uuid_string("usr", &uuid.to_string()).unwrap();
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn app_oauth_client_id_round_trips() {
+        let app = uuid::Uuid::now_v7();
+        let client_id = app_oauth_client_id(&app);
+        assert!(client_id.starts_with("oac_"), "got {client_id}");
+        // oac_ + 22 base62 chars.
+        assert_eq!(client_id.len(), 26, "got {client_id}");
+        // Distinct from the app_ entity typed_id namespace.
+        assert!(!client_id.starts_with("app_"));
+        // The decode is the exact inverse of the mint — the single-source-of-
+        // truth that keeps control (minter) and auth (decoder) from drifting.
+        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(app));
+        // Non-per-app clients (builder/console) and malformed tails → None.
+        assert_eq!(app_id_from_oauth_client_id("zeroship-builder-abc"), None);
+        assert_eq!(app_id_from_oauth_client_id("oac_not-base62"), None);
+        // The bare prefix with no underscore must not decode.
+        assert_eq!(app_id_from_oauth_client_id("oacsomething"), None);
     }
 
     #[test]

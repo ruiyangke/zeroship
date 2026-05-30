@@ -64,7 +64,7 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_authz::Scope;
 use zeroship_bundle::ScopeDef;
-use zeroship_core::typed_id::uuid_to_base62;
+use zeroship_core::typed_id::{app_oauth_client_id, APP_OAUTH_CLIENT_PREFIX};
 
 /// Per-app custom-domain cap (default 50). With 2 redirect_uris per host
 /// (popup-callback + callback) the redirect_uri array is bounded at
@@ -80,10 +80,12 @@ pub const MAX_REDIRECT_URIS: usize = MAX_HOSTS * 2;
 /// `openid` + `offline_access` (refresh tokens) + `profile` + `email`.
 pub const BASE_SCOPE: &str = "openid offline_access profile email";
 
-/// The OAuth `client_id` prefix for per-app clients. Distinct from the `app_`
-/// *entity* typed_id namespace on purpose (spec §1.1 round-5): the OAuth
+/// The OAuth `client_id` prefix for per-app clients. Re-exported from
+/// `zeroship_core::typed_id` — the SINGLE source of truth shared with the auth
+/// consent classifier's decoder, so the two can never drift (spec §1.1 round-5).
+/// Distinct from the `app_` *entity* typed_id namespace on purpose: the OAuth
 /// `client_id` is a derived identifier, not a typed_id.
-pub const APP_CLIENT_PREFIX: &str = "oac";
+pub const APP_CLIENT_PREFIX: &str = APP_OAUTH_CLIENT_PREFIX;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -129,9 +131,11 @@ type Result<T> = std::result::Result<T, AppOauthClientError>;
 // ---------------------------------------------------------------------------
 
 /// Deterministic, stable-for-app-life OAuth `client_id`: `oac_<base62-app-id>`.
+/// Delegates to the shared `zeroship_core::typed_id` minter so the auth-side
+/// decoder (`app_id_from_oauth_client_id`) is the exact inverse.
 #[must_use]
 pub fn client_id_for_app(app_id: &Uuid) -> String {
-    format!("{APP_CLIENT_PREFIX}_{}", uuid_to_base62(app_id))
+    app_oauth_client_id(app_id)
 }
 
 /// The app's apex origin, used as the `sector_identifier` (pairwise/relay
