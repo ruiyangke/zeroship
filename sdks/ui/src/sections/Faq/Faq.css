@@ -1,0 +1,103 @@
+/*
+ * Faq — a frequently-asked-questions band.
+ *
+ * Anatomy:
+ *   .zs-faq             — the <section>; generous vertical padding, NO heavy
+ *                         background (composable)
+ *   .zs-faq__header     — optional eyebrow + title + desc band
+ *   .zs-faq__eyebrow    — small label above the title (accent)
+ *   .zs-faq__title      — the optional section lead-in <h2>
+ *   .zs-faq__description — muted lead-in <p>
+ *   .zs-faq__list       — the composed Accordion wrapper (constrained measure)
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm; the composed Container owns
+ *     the inline width + padding. The composed Accordion owns ALL disclosure
+ *     chrome (trigger rows, chevron, panel animation, dividers) — this band
+ *     only constrains it to a readable measure and adds the band header.
+ *   - The Q/A list reads start-aligned on a readable measure so the questions
+ *     never run edge-to-edge; the header matches.
+ *   - Logical properties throughout for RTL.
+ *
+ * Motion: none of its own — the disclosure motion (panel open/close, chevron
+ * rotation) lives in the composed Accordion, which already honors
+ * reduced-motion. The gate below exists for surface parity.
+ */
+
+.zs-faq {
+  /* Local single-knob custom property (the house idiom): the readable measure
+     the header + Q/A list are capped to. */
+  --zs-faq-measure: 44rem;
+
+  /* Band rhythm — generous vertical padding so the band reads distinct.
+     No background: composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  color: var(--zs-label);
+}
+
+/* ─── Header — optional eyebrow + title + description ─────────────────────── */
+.zs-faq__header {
+  max-inline-size: var(--zs-faq-measure);
+  margin-block-end: var(--zs-space-8);
+  text-align: start;
+}
+
+.zs-faq__eyebrow {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-accent-active);
+  text-transform: uppercase;
+}
+
+.zs-faq__title {
+  margin-block: 0;
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  color: var(--zs-label);
+  text-wrap: balance;
+}
+
+.zs-faq__description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── List — the composed Accordion, capped to the readable measure ──────── */
+.zs-faq__list {
+  max-inline-size: var(--zs-faq-measure);
+  /* The Accordion owns its own internal chrome (rows, dividers, chevron,
+     panel animation). This band only constrains its inline measure. */
+}
+
+/* ─── forced-colors — keep header text legible ────────────────────────────
+ *
+ * The authored label / accent tokens drop out in a forced-colors pass; mirror
+ * the painted header text to system colors. The composed Accordion handles its
+ * own forced-colors treatment for the trigger/panel/dividers. */
+@media (forced-colors: active) {
+  .zs-faq,
+  .zs-faq__eyebrow,
+  .zs-faq__title,
+  .zs-faq__description {
+    color: CanvasText;
+  }
+}
+
+/* ─── reduced-motion ─────────────────────────────────────────────────────
+ * No-op — Faq has no motion of its own; the disclosure motion lives in the
+ * composed Accordion, which honors reduced-motion in its own CSS. The gate
+ * exists for parity with the rest of the surface. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-faq {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}

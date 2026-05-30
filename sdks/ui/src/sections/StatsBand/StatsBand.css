@@ -1,0 +1,160 @@
+/*
+ * StatsBand — a horizontal band of headline metrics.
+ *
+ * Anatomy:
+ *   .zs-stats-band                  — the <section>; generous vertical
+ *                                     padding, NO heavy background (composable)
+ *   .zs-stats-band__header          — optional eyebrow + title + desc band
+ *   .zs-stats-band__eyebrow         — small label above the title (accent)
+ *   .zs-stats-band__title           — the optional section lead-in <h2>
+ *   .zs-stats-band__description      — muted lead-in <p>
+ *   .zs-stats-band__items            — the responsive Grid of stats
+ *   .zs-stats-band__stat             — each stat cell (a group)
+ *   .zs-stats-band__stat-value       — the large metric value (plain text)
+ *   .zs-stats-band__stat-label       — the muted label (plain text)
+ *   .zs-stats-band__stat-description — the optional small supporting line
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm; the composed Container owns
+ *     the inline width + padding. The composed Grid owns the column tracks,
+ *     gap AND the single-column collapse (its responsive base count is 1; the
+ *     `columns={{ md }}` prop only PROMOTES at ≥ --zs-bp-md), so this band
+ *     carries no local @media collapse override.
+ *   - `data-align="center"` (default) centers the header + each stat;
+ *     `data-align="start"` start-aligns them. `align` lives on the section, so
+ *     we reach the stats via the descendant combinator.
+ *   - Logical properties throughout for RTL.
+ *
+ * Type: the stat VALUE reads at the title-1 display scale (the metric is the
+ * loudest element); the label + description read muted/small. These are plain
+ * `<p>` text, NOT headings — a stats row is not part of the heading outline.
+ *
+ * Motion: none of its own; the gate below exists for surface parity.
+ */
+
+.zs-stats-band {
+  /* Local single-knob custom property (the house idiom, cf.
+     --zs-feature-grid-header-measure): the centered header's readable measure. */
+  --zs-stats-band-header-measure: 40rem;
+
+  /* Band rhythm — generous vertical padding so the band reads distinct.
+     No background: composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  color: var(--zs-label);
+}
+
+/* ─── Header — optional eyebrow + title + description ─────────────────────── */
+.zs-stats-band__header {
+  max-inline-size: var(--zs-stats-band-header-measure);
+  margin-block-end: var(--zs-space-9);
+}
+
+.zs-stats-band[data-align="center"] .zs-stats-band__header {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.zs-stats-band[data-align="start"] .zs-stats-band__header {
+  text-align: start;
+}
+
+.zs-stats-band__eyebrow {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-accent-active);
+  text-transform: uppercase;
+}
+
+.zs-stats-band__title {
+  margin-block: 0;
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  color: var(--zs-label);
+  text-wrap: balance;
+}
+
+.zs-stats-band__description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── Stat — value → label → description ──────────────────────────────────── */
+.zs-stats-band__stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-1);
+}
+
+/* Centered band: center each stat's text. */
+.zs-stats-band[data-align="center"] .zs-stats-band__stat {
+  align-items: center;
+  text-align: center;
+}
+
+/* Start band: hug the inline-start edge. */
+.zs-stats-band[data-align="start"] .zs-stats-band__stat {
+  align-items: flex-start;
+  text-align: start;
+}
+
+/* The headline metric — the loudest element, at the large-title display
+   scale, in the accent ink so the number reads as the figure of merit. */
+.zs-stats-band__stat-value {
+  margin-block: 0;
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  font-weight: var(--zs-text-large-title-weight);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  color: var(--zs-accent-active);
+}
+
+.zs-stats-band__stat-label {
+  margin-block: 0;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+}
+
+.zs-stats-band__stat-description {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── forced-colors — keep every text region legible ──────────────────────
+ *
+ * The authored label / accent tokens drop out in a forced-colors pass; mirror
+ * the painted text so the value (accent) resolves to CanvasText along with the
+ * rest of the text. */
+@media (forced-colors: active) {
+  .zs-stats-band,
+  .zs-stats-band__eyebrow,
+  .zs-stats-band__title,
+  .zs-stats-band__description,
+  .zs-stats-band__stat-value,
+  .zs-stats-band__stat-label,
+  .zs-stats-band__stat-description {
+    color: CanvasText;
+  }
+}
+
+/* ─── reduced-motion ─────────────────────────────────────────────────────
+ * No-op — StatsBand has no motion of its own (the composed Stack / Grid carry
+ * none). The gate exists for parity with the rest of the surface. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-stats-band {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}

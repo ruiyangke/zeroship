@@ -89,6 +89,10 @@
 @import "./sections/Hero/Hero.css";
 @import "./sections/PricingTable/PricingTable.css";
 @import "./sections/FeatureGrid/FeatureGrid.css";
+@import "./sections/Cta/Cta.css";
+@import "./sections/StatsBand/StatsBand.css";
+@import "./sections/Faq/Faq.css";
+@import "./sections/Footer/Footer.css";
 
 *,
 *::before,

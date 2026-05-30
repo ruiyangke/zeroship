@@ -1,0 +1,211 @@
+/*
+ * Footer — the site footer band (contentinfo landmark).
+ *
+ * Anatomy:
+ *   .zs-footer              — the <footer> landmark; generous vertical
+ *                             padding, NO heavy background (composable)
+ *   .zs-footer__top         — the top row: brand block beside link columns
+ *   .zs-footer__brand-block — the brand + description stack
+ *   .zs-footer__brand       — the brand / wordmark slot
+ *   .zs-footer__description  — short blurb under the brand (muted)
+ *   .zs-footer__columns      — the link-group Grid
+ *   .zs-footer__column       — each link group
+ *   .zs-footer__column-title — the column <h3>
+ *   .zs-footer__links        — the column's <ul> of links
+ *   .zs-footer__link         — a single <a> (house link treatment)
+ *   .zs-footer__separator    — the composed Separator above the bottom bar
+ *   .zs-footer__bottom       — the bottom bar (copyright + actions)
+ *   .zs-footer__copyright    — bottom-bar inline-start
+ *   .zs-footer__actions      — bottom-bar inline-end (social / secondary slot)
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm; the composed Container owns
+ *     the inline width + padding. The composed Grid owns the link-column
+ *     tracks + gap + the single-column collapse below --zs-bp-md (its
+ *     responsive base count is 1; columns={{ md }} only PROMOTES at ≥ the bp).
+ *   - The top row is a flex row: the brand block beside the columns block.
+ *     Below --zs-bp-md it stacks (brand over columns). The literal rem is
+ *     written here because custom properties cannot appear in an @media
+ *     condition; the token name is the documented source.
+ *   - The bottom bar is a wrapping flex row: copyright at the inline-start,
+ *     actions at the inline-end; it wraps on narrow widths.
+ *   - Logical properties throughout for RTL.
+ *
+ * Motion: none of its own (the composed Separator carries none; consumer
+ * links / icon buttons in the actions slot bring their own). The gate below
+ * exists for surface parity.
+ */
+
+.zs-footer {
+  /* Local single-knob custom property (the house idiom): the inline size the
+     brand block holds before the link columns take the remaining space. */
+  --zs-footer-brand-size: 18rem;
+
+  /* Band rhythm — generous vertical padding so the band reads distinct.
+     No background: composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  color: var(--zs-label);
+}
+
+/* ─── Top row — brand block beside the link columns ──────────────────────── */
+.zs-footer__top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--zs-space-9);
+  align-items: flex-start;
+  margin-block-end: var(--zs-space-8);
+}
+
+/* The brand block holds a comfortable inline size; the columns block takes the
+   remaining space. Both wrap to a full row below the breakpoint. */
+.zs-footer__brand-block {
+  flex: 1 1 var(--zs-footer-brand-size);
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+}
+
+.zs-footer__columns {
+  /* The link-group Grid takes the remaining inline space beside the brand. */
+  flex: 2 1 var(--zs-footer-brand-size);
+  min-inline-size: 0;
+}
+
+/* Below --zs-bp-md the top row stacks the brand over the columns (each takes
+   the full row). The Grid already collapses to one column on its own. */
+@media (max-width: 47.999rem) {
+  .zs-footer__brand-block,
+  .zs-footer__columns {
+    flex-basis: 100%;
+  }
+}
+
+.zs-footer__brand {
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+}
+
+.zs-footer__description {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── Column — <h3> title + <ul> of links ────────────────────────────────── */
+.zs-footer__column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+}
+
+.zs-footer__column-title {
+  margin-block: 0;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--zs-text-footnote-tracking);
+}
+
+.zs-footer__links {
+  /* Reset the list chrome — the rows are styled, not bulleted. */
+  list-style: none;
+  margin-block: 0;
+  padding-inline-start: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+}
+
+.zs-footer__link-item {
+  margin: 0;
+}
+
+/* House link treatment: muted by default, label ink on hover/focus, with a
+   token-driven focus ring so keyboard users get a visible target. */
+.zs-footer__link {
+  color: var(--zs-label-secondary);
+  text-decoration: none;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  border-radius: var(--zs-radius-2);
+  transition: color var(--zs-duration-1) var(--zs-ease-out);
+}
+
+.zs-footer__link:hover {
+  color: var(--zs-label);
+  text-decoration: underline;
+}
+
+.zs-footer__link:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline-offset: var(--zs-focus-ring-offset);
+  color: var(--zs-label);
+}
+
+/* ─── Separator + bottom bar ─────────────────────────────────────────────── */
+.zs-footer__separator {
+  margin-block: var(--zs-space-7);
+}
+
+.zs-footer__bottom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--zs-space-4);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.zs-footer__copyright {
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-secondary);
+}
+
+.zs-footer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-4);
+}
+
+/* ─── forced-colors — keep text, links + separator legible ────────────────
+ *
+ * The authored label tokens drop out in a forced-colors pass. Reassert system
+ * colors so every text region + link resolves to CanvasText, and links keep a
+ * visible link affordance. The composed Separator handles its own hairline. */
+@media (forced-colors: active) {
+  .zs-footer,
+  .zs-footer__brand,
+  .zs-footer__description,
+  .zs-footer__column-title,
+  .zs-footer__copyright {
+    color: CanvasText;
+  }
+  .zs-footer__link {
+    color: LinkText;
+  }
+  .zs-footer__link:hover,
+  .zs-footer__link:focus-visible {
+    color: LinkText;
+  }
+  .zs-footer__link:focus-visible {
+    outline-color: Highlight;
+  }
+}
+
+/* ─── reduced-motion ─────────────────────────────────────────────────────
+ * The only motion is the link color transition; flatten it so the hover/focus
+ * ink change arrives instantly. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-footer__link {
+    transition: none;
+  }
+}

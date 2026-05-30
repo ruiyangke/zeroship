@@ -37,3 +37,34 @@ export {
   type FeatureGridAlign,
   type FeatureGridColumns,
 } from "./FeatureGrid";
+
+export {
+  Cta,
+  type CtaProps,
+  type CtaAlign,
+  type CtaVariant,
+} from "./Cta";
+
+export {
+  StatsBand,
+  type StatsBandProps,
+  type StatsBandStatProps,
+  type StatItem,
+  type StatsBandAlign,
+  type StatsBandColumns,
+} from "./StatsBand";
+
+export {
+  Faq,
+  type FaqProps,
+  type FaqItemProps,
+  type FaqEntry,
+} from "./Faq";
+
+export {
+  Footer,
+  type FooterProps,
+  type FooterColumnProps,
+  type FooterColumnData,
+  type FooterLink,
+} from "./Footer";
