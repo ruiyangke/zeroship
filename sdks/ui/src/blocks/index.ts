@@ -50,3 +50,12 @@ export {
   type DataTableAlign,
   type DataTableDensity,
 } from "./DataTable";
+
+// Pagination block — controlled page navigation (standalone + the footer
+// control DataTable v2 composes).
+export {
+  Pagination,
+  buildPageItems,
+  type PaginationProps,
+  type PaginationSize,
+} from "./Pagination";

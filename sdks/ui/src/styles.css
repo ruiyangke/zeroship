@@ -76,6 +76,7 @@
 @import "./blocks/Banner/Banner.css";
 @import "./blocks/DescriptionList/DescriptionList.css";
 @import "./blocks/DataTable/DataTable.css";
+@import "./blocks/Pagination/Pagination.css";
 
 *,
 *::before,

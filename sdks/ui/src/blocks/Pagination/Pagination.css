@@ -1,0 +1,141 @@
+/*
+ * Pagination — controlled page navigation control.
+ *
+ * Pagination paints almost NO chrome of its own: the prev / next / page
+ * buttons are `<Button>`s (they own their fill, hover, focus-ring, and
+ * forced-colors treatment) and the page-size control is a `<Select>`.
+ * These rules only govern the row layout, the summary / page-size label
+ * type, the decorative ellipsis, and the few button overrides that make a
+ * dense numeric row read evenly.
+ *
+ *   .zs-pagination               <nav> — flex row, wraps on narrow widths
+ *     ├─ .zs-pagination__summary       "Showing 1–10 of 57" — footnote
+ *     ├─ .zs-pagination__page-size     "Rows per page" + <Select>
+ *     │    └─ .zs-pagination__page-size-label
+ *     └─ .zs-pagination__pages         the button row
+ *          ├─ .zs-pagination__button   Prev / Next / page (extends .zs-button)
+ *          └─ .zs-pagination__ellipsis decorative gap, aria-hidden
+ *
+ * Motion: none of our own; Button owns its hover transition (and its
+ * reduced-motion handling).
+ */
+
+.zs-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--zs-space-3);
+  /* Summary anchors the start; the page row drifts to the end so the
+     control reads "context … actions" on a wide footer. */
+  justify-content: space-between;
+  inline-size: 100%;
+}
+
+/* ─── summary ──────────────────────────────────────────────────────────── */
+
+.zs-pagination__summary {
+  margin: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  /* The summary should not be squeezed to multi-line before the page row
+     wraps; let it hold its natural width. */
+  white-space: nowrap;
+}
+
+/* ─── page-size selector ─────────────────────────────────────────────────
+ * Inline label + <Select>. The label rides the footnote rhythm so it
+ * reads as a quiet companion to the control, not a form field title. */
+
+.zs-pagination__page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  /* Sits between summary and pages on wide layouts; push toward the page
+     row so the two "controls" cluster. */
+  margin-inline-start: auto;
+}
+
+.zs-pagination__page-size-label {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  white-space: nowrap;
+}
+
+/* ─── page row ───────────────────────────────────────────────────────────
+ * When a page-size control is present it already claimed the auto margin,
+ * so the page row just trails it. When it is absent the page row takes the
+ * end via the parent's space-between. */
+
+.zs-pagination__pages {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+}
+
+/* ─── buttons ────────────────────────────────────────────────────────────
+ * Page buttons are square-ish so a run of single digits reads as an even
+ * track; min-inline-size matches the control height so "1" and "10" keep
+ * the same footprint. The edge (Prev/Next) buttons keep their label and
+ * so size to content. */
+
+.zs-pagination__button.zs-pagination__button--page {
+  /* Match the small/medium control heights for a square numeric chip. */
+  min-inline-size: var(--zs-control-h-md);
+  padding-inline: var(--zs-space-2);
+  /* Tabular figures keep "11" and "88" the same width so the track does
+     not jitter as the current page moves. */
+  font-variant-numeric: tabular-nums;
+}
+
+.zs-pagination[data-size="sm"] .zs-pagination__button--page {
+  min-inline-size: var(--zs-control-h-sm);
+}
+
+.zs-pagination__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The chevron rides slightly larger than the label so the directional
+     cue reads at a glance. */
+  font-size: 1.15em;
+  line-height: 1;
+}
+
+/* ─── ellipsis ───────────────────────────────────────────────────────────
+ * A non-actionable elided range. Sized to the page-button track so it sits
+ * on the same baseline, centered, with no interactive affordance. */
+
+.zs-pagination__ellipsis {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-inline-size: var(--zs-space-6);
+  block-size: var(--zs-control-h-md);
+  padding-block-end: var(--zs-space-1);
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  user-select: none;
+}
+
+.zs-pagination[data-size="sm"] .zs-pagination__ellipsis {
+  block-size: var(--zs-control-h-sm);
+  font-size: var(--zs-text-subheadline-size);
+}
+
+/* ─── forced-colors ──────────────────────────────────────────────────────
+ * Buttons + Select carry their own HCM treatment. We only need to keep the
+ * decorative text legible under a forced palette. */
+
+@media (forced-colors: active) {
+  .zs-pagination__summary,
+  .zs-pagination__page-size-label {
+    color: CanvasText;
+  }
+  .zs-pagination__ellipsis {
+    color: GrayText;
+    forced-color-adjust: none;
+  }
+}
