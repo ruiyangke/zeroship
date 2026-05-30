@@ -98,20 +98,26 @@ pub async fn revoke_grant(
         return web::HttpResponse::BadRequest().json(&json!({"error": "invalid_client_id"}));
     }
 
-    let deleted = match state
-        .auth_pg
-        .execute(
-            "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
-            &[&authz.principal_id, &client_id],
-        )
-        .await
+    // Atomic revocation cascade (relay sub-spec §6, B4): DELETE the grant AND
+    // revoke the relay alias for THIS (app, user) in ONE transaction on a
+    // dedicated owned client. `auth_pg` is an `Arc<Client>` which cannot open a
+    // transaction (`transaction()` needs `&mut self`), so we open a fresh owned
+    // `Client` on `auth_db_url` — the field that exists for exactly this. After
+    // commit, inbound to that alias bounces (5b `revoked_at IS NULL` gate). No
+    // window exists where the grant is gone but the alias still forwards.
+    let deleted = match crate::relay_revoke::revoke_grant_cascade(
+        &state.auth_db_url,
+        &authz.principal_id,
+        &client_id,
+    )
+    .await
     {
         Ok(deleted) => deleted,
         Err(err) => {
             tracing::error!(
                 error = %err,
                 client_id = %client_id,
-                "control: oauth grant delete failed"
+                "control: oauth grant revoke cascade failed"
             );
             return web::HttpResponse::InternalServerError()
                 .json(&json!({"error": "oauth_grant_delete_failed"}));

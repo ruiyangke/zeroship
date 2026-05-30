@@ -106,7 +106,28 @@ The relay alias is the value the gateway projects into `ZeroShip-User.email` and
 claim, so **no real address ever reaches an app** (main spec §7.1 substitution table). This spec covers
 what happens to mail *sent to* that alias.
 
-<!-- Added: B1 — the file now exists; §2 anchors to the already-sound §7.1 alias machinery rather than re-deriving it -->
+### 2.1 `email_verified` semantics under the alias swap (pinned)
+
+When the gateway swaps the `email` claim to the relay alias, it **passes the upstream `email_verified`
+through unchanged** (`claims.email_verified` / `raw.email_verified` / `session.email_verified` across
+the `/token`, `/session`, and `do_refresh` arms in `crates/gateway/src/auth_token.rs`, mirrored in
+`router/auth.rs`). The flag therefore describes the **underlying real address the alias forwards to**,
+not the alias string itself.
+
+This is the intended contract, pinned here so an app does not misread it:
+
+> **`email_verified` describes the real inbox the relay alias forwards to. The alias itself is a
+> platform-owned, always-deliverable address (we mint it and we route it), so `email_verified=true`
+> next to a relay alias means "the platform has verified the real address behind this alias", not
+> "this alias literal was challenge-verified."**
+
+We deliberately do **not** force `email_verified=true` for every minted alias: the alias is only
+deliverable insofar as the real inbox behind it is, and an unverified real inbox should not be laundered
+into a verified-looking alias. So the flag is a faithful projection of the upstream verification state,
+applied to the alias the app sees. Apps that gate on `email_verified` get the same trust signal they
+would for a direct login; they simply never see the underlying address.
+
+<!-- Added: B1 — the file now exists; §2 anchors to the already-sound §7.1 alias machinery rather than re-deriving it. §2.1 (review minor) pins the email_verified pass-through semantics under the alias swap. -->
 
 ---
 

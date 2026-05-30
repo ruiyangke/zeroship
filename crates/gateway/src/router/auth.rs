@@ -205,9 +205,19 @@ pub(crate) async fn resolve_auth(
 /// not — in which case the caller MUST fail closed (`503
 /// client_not_provisioned`) rather than ever leak the global UUID.
 enum PairwiseProjection {
-    /// The derived per-app `pws_…` subject. The global UUID never appears
-    /// in this value (HMAC of the UUID under the platform salt).
-    Pws(String),
+    /// The derived per-app `pws_…` subject + the per-app relay alias (the
+    /// email-claim swap, §7). The global UUID never appears in `pws` (HMAC of
+    /// the UUID under the platform salt); `relay_email` is the app-facing
+    /// `email` claim — `None` when no ACTIVE alias exists, in which case the
+    /// caller FAILS CLOSED on the email (emits empty), NEVER the real address.
+    Projected {
+        pws: String,
+        /// The active relay alias for this `(app, user)`, or `None` when no
+        /// alias is minted / it is revoked. The caller substitutes this for
+        /// the real email and emits empty when it is `None` — the real email
+        /// must NEVER reach an app (§7).
+        relay_email: Option<String>,
+    },
     /// No `sector_identifier` on the route yet ⇒ no `pws_` derivation
     /// possible. Fail closed.
     Unprovisioned,
@@ -226,8 +236,19 @@ enum PairwiseProjection {
 /// returned, because the persisted row is a reverse-lookup cache, not
 /// part of the per-request trust decision.
 ///
-/// The UPSERT checks out a pooled connection for JUST the write and
-/// releases it on drop — never held across an outbound HTTP call.
+/// The UPSERT + relay-alias read check out a pooled connection for JUST those
+/// two writes/reads and release it on drop — never held across an outbound
+/// HTTP call.
+///
+/// ## Email-claim swap (§7)
+///
+/// In the SAME checkout that upserts the pairwise mapping, this reads the
+/// ACTIVE relay alias (`relay_email`, `revoked_at IS NULL`) for
+/// `(app_client_id, global_user_id)` and returns it as
+/// [`PairwiseProjection::Projected::relay_email`]. The caller substitutes that
+/// alias for the user's REAL email so apps NEVER see the real address.
+/// `None` (no minted alias yet, or the grant was revoked) makes the caller
+/// FAIL CLOSED — emit an empty email — never the real one.
 async fn project_pairwise(
     state: &Arc<GateState>,
     app_client_id: Option<&str>,
@@ -239,9 +260,13 @@ async fn project_pairwise(
     };
     let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
 
-    // Persist the (app_client_id, global_user_id) → pws_ mapping, keyed on
-    // the per-app oac_ client_id (§6.2). Best-effort: log-and-continue on
-    // any failure so a transient mapping-write error never breaks auth.
+    // Persist the (app_client_id, global_user_id) → pws_ mapping AND read the
+    // active relay alias, both keyed on the per-app oac_ client_id (§6.2), in
+    // ONE pooled checkout. The UPSERT is best-effort (log-and-continue: the
+    // pws_ is already projected). The relay-alias read is the email-swap
+    // source (§7): a read failure leaves `relay_email = None`, so the caller
+    // fails closed (empty email) — it NEVER falls back to the real address.
+    let mut relay_email = None;
     if let (Some(app_client_id), Some(db_cfg)) = (app_client_id, state.db.as_ref()) {
         if let Ok(uuid) = Uuid::parse_str(global_user_id) {
             match crate::db::checkout(db_cfg).await {
@@ -255,6 +280,17 @@ async fn project_pairwise(
                                 app_client_id = %app_client_id,
                                 "app_user_identities upsert failed (non-fatal; pws_ already projected)"
                             );
+                        }
+                        // Email-claim swap: read the active alias for this
+                        // (app, user). None ⇒ caller emits empty email (§7).
+                        match crate::identities::lookup_relay_email(&conn, app_client_id, uuid).await
+                        {
+                            Ok(alias) => relay_email = alias,
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                app_client_id = %app_client_id,
+                                "relay_email lookup failed (non-fatal; failing closed on email)"
+                            ),
                         }
                     }
                     Err(e) => tracing::warn!(
@@ -270,7 +306,7 @@ async fn project_pairwise(
         }
     }
 
-    PairwiseProjection::Pws(pws)
+    PairwiseProjection::Projected { pws, relay_email }
 }
 
 /// Whether the request carries an `Authorization: DPoP <token>` header.
@@ -596,7 +632,12 @@ async fn resolve_dpop_user_header(
     //    global id. Fail closed (503) when the route has no sector yet.
     let mut owned = build_worker_user_from_introspection(&info);
     match project_pairwise(state, oauth_client_id, sector_identifier, &owned.id).await {
-        PairwiseProjection::Pws(pws) => owned.id = pws,
+        PairwiseProjection::Projected { pws, relay_email } => {
+            owned.id = pws;
+            // Email-claim swap (§7): project the relay alias, never the real
+            // email. No active alias ⇒ empty (fail closed).
+            owned.email = relay_email.unwrap_or_default();
+        }
         PairwiseProjection::Unprovisioned => return DpopOutcome::ClientNotProvisioned,
     }
     let user: oidc_rp::WorkerUser<'_> = (&owned).into();
@@ -927,7 +968,12 @@ async fn resolve_bearer_user_header(
         )
         .await
         {
-            PairwiseProjection::Pws(pws) => owned.id = pws,
+            PairwiseProjection::Projected { pws, relay_email } => {
+                owned.id = pws;
+                // Email-claim swap (§7): project the relay alias, never the
+                // real email. No active alias ⇒ empty (fail closed).
+                owned.email = relay_email.unwrap_or_default();
+            }
             PairwiseProjection::Unprovisioned => {
                 return BearerOutcome::ClientNotProvisioned;
             }
@@ -1114,8 +1160,9 @@ async fn resolve_app_session_user_header_inner(
     drop(conn);
 
     // Project the GLOBAL session user_id to the per-app `pws_` (§6.2) and
-    // upsert the mapping. Fail closed when the route has no sector yet.
-    let pws = match project_pairwise(
+    // upsert the mapping. Fail closed when the route has no sector yet. The
+    // SAME call reads the active relay alias (§7) — the app-facing email.
+    let (pws, relay_email) = match project_pairwise(
         state,
         oauth_client_id,
         sector_identifier,
@@ -1123,13 +1170,16 @@ async fn resolve_app_session_user_header_inner(
     )
     .await
     {
-        PairwiseProjection::Pws(pws) => pws,
+        PairwiseProjection::Projected { pws, relay_email } => (pws, relay_email),
         PairwiseProjection::Unprovisioned => return CookieOutcome::ClientNotProvisioned,
     };
 
+    // Email-claim swap (§7): the app sees the relay alias, NEVER the real
+    // `session.email`. No active alias ⇒ empty email (fail closed).
+    let email = relay_email.as_deref().unwrap_or("");
     let user = oidc_rp::WorkerUser {
         id: &pws,
-        email: session.email.as_deref().unwrap_or(""),
+        email,
         name: session.name.as_deref().unwrap_or(""),
         avatar: session.avatar_url.as_deref(),
         email_verified: session.email_verified,
@@ -2584,7 +2634,15 @@ mod tests {
             !json.contains(global_sub),
             "global UUID leaked into ZeroShip-User: {json}"
         );
-        assert_eq!(user["email"], "user@example.com");
+        // Slice 5c §7 — email-claim swap: the app NEVER sees the real email.
+        // With no DB/alias source here (`build_state_for_hydra` db=None) the
+        // swap fails closed → empty email. The real `user@example.com` (what
+        // Hydra stamped) must be ABSENT from the projected header.
+        assert_eq!(user["email"], "", "no alias ⇒ empty email (fail closed)");
+        assert!(
+            !json.contains("user@example.com"),
+            "real email leaked into ZeroShip-User: {json}"
+        );
 
         drop(srv);
     }
@@ -3517,8 +3575,23 @@ mod tests {
         let client_id = "oac_myapp";
         let sector = "https://myapp.zeroship.ai";
 
-        // Mint a REAL cookie session for a global user.
+        // Mint a REAL cookie session for a global user. The user row must
+        // exist first: `app_user_identities.global_user_id` FK-references
+        // `auth.users(id)`, so the gateway's mapping upsert silently no-ops
+        // (best-effort) without it — which the persistence assertion below
+        // would then fail. Seed it so the upsert actually lands.
         let user_id = Uuid::new_v4();
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "INSERT INTO auth.users (id, email, name, email_verified_at) \
+                 VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
+                &[&user_id, &"cookie-user@example.com", &"Cookie User"],
+            )
+            .await
+            .expect("seed user");
+        }
         let session = {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
@@ -3569,6 +3642,22 @@ mod tests {
             !header.contains(&user_id.to_string()),
             "global UUID must not appear in the cookie-arm header"
         );
+        // Slice 5c §7 — email-claim swap: no relay alias minted for this
+        // (app, user), so the cookie arm fails closed → empty email. The
+        // session's real `cookie-user@example.com` must NEVER reach the worker.
+        {
+            let json = zeroship_core::auth::verify_zeroship_user_header(
+                state.config.worker_key.as_bytes(),
+                &header,
+            )
+            .expect("MAC verifies");
+            let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
+            assert_eq!(user["email"], "", "no alias ⇒ empty email (fail closed)");
+            assert!(
+                !json.contains("cookie-user@example.com"),
+                "real email leaked into cookie-arm ZeroShip-User: {json}"
+            );
+        }
 
         // The mapping row exists with the right (app_client_id, global, pws_).
         let stored = {
@@ -3622,6 +3711,10 @@ mod tests {
             .await
             .ok();
             crate::sessions::revoke(&conn, session.id).await.ok();
+            // Drop the seeded user row last (FK from app_user_identities cleared above).
+            conn.execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+                .await
+                .ok();
         }
     }
 

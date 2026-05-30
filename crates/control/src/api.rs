@@ -212,7 +212,64 @@ pub async fn delete_app(
                     "control: per-app OAuth client delete failed on app delete (Hydra client leaked — GC later)"
                 );
             }
-            web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true}))
+            // Relay revocation companion (relay sub-spec §6, B4): there is NO
+            // cross-schema FK from auth.app_user_identities to control, so the
+            // control-DB cascade does NOT revoke this app's relay aliases. This
+            // companion UPDATE is the ONLY guard against orphaned LIVE aliases
+            // forwarding third-party mail to real inboxes after the app is gone.
+            // Keyed on the SAME deterministic `client_id_for_app(uuid)` the
+            // gateway wrote and the explicit-revoke path uses (§6.2). Runs on a
+            // dedicated owned client (auth_db_url), not the registry txn.
+            //
+            // Privacy is load-bearing here, so a failure is NOT swallowed. The
+            // app row is already gone (a retry of delete_app is a 404 no-op),
+            // and there is no background reconciler that re-runs this UPDATE —
+            // so a silent failure would permanently strand live aliases. We
+            // therefore surface the failure as a 500 carrying the precise state
+            // (`deleted: true, aliases_revoked: false`) plus the deterministic
+            // `client_id`, so the caller knows aliases may still forward and can
+            // retry the revoke out-of-band. The companion is idempotent and
+            // keyed only on the uuid-derived `client_id` (no app row needed), so
+            // an out-of-band retry against that same `client_id` is safe and
+            // converges.
+            let client_id = app_oauth_client::client_id_for_app(&uid);
+            match crate::relay_revoke::revoke_all_aliases_for_client(
+                &state.auth_db_url,
+                &client_id,
+            )
+            .await
+            {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::info!(
+                            app_id = %uid,
+                            client_id = %client_id,
+                            revoked = n,
+                            "control: revoked relay aliases on app delete"
+                        );
+                    }
+                    web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true}))
+                }
+                Err(e) => {
+                    // The app is deleted but its aliases may still be LIVE and
+                    // forwarding real mail. Surface it loudly AND to the caller.
+                    let request_id = Uuid::new_v4();
+                    tracing::error!(
+                        request_id = %request_id,
+                        app_id = %uid,
+                        client_id = %client_id,
+                        error = %e,
+                        "control: relay alias revoke FAILED on app delete — live aliases may still forward; retry revoke out-of-band by client_id"
+                    );
+                    web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                        "error": "alias revoke pending",
+                        "deleted": true,
+                        "aliases_revoked": false,
+                        "client_id": client_id,
+                        "request_id": request_id,
+                    }))
+                }
+            }
         }
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))

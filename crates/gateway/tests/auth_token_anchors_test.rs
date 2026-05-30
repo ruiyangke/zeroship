@@ -735,6 +735,52 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         .expect("seed user");
 }
 
+/// The real email the mock Hydra stamps into the id_token + access JWT (see
+/// `MockHydra::id_token`/`access_token`). The email-claim swap (§7) must ensure
+/// THIS never reaches the browser wrapper or the user projection.
+const REAL_EMAIL: &str = "user@example.com";
+
+/// Seed an active relay alias for `(CLIENT_ID, user_id)` — the row the gateway
+/// (Slice 4) + consent (5b) write. The email-claim swap (§7) reads THIS and
+/// projects it instead of the real email.
+async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
+    let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    let pairwise_sub = format!("pws_seed_{}", user_id.simple());
+    client
+        .execute(
+            "INSERT INTO auth.app_user_identities \
+                (app_client_id, global_user_id, pairwise_sub, relay_email) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (app_client_id, global_user_id) \
+             DO UPDATE SET relay_email = EXCLUDED.relay_email, revoked_at = NULL",
+            &[&CLIENT_ID, &user_id, &pairwise_sub, &relay_email],
+        )
+        .await
+        .expect("seed relay alias");
+}
+
+async fn cleanup_identities(dsn: &str, user_id: Uuid) {
+    let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    let _ = client
+        .execute(
+            "DELETE FROM auth.app_user_identities WHERE global_user_id = $1",
+            &[&user_id],
+        )
+        .await;
+}
+
 async fn cleanup(dsn: &str, user_id: Uuid) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
@@ -826,6 +872,123 @@ async fn token_exchange_mints_wrapper_and_sets_anchor() {
     assert_eq!(body["user"]["id"], expected_pws);
     assert_ne!(body["user"]["id"], user_id.to_string());
 
+    cleanup(&dsn, user_id).await;
+}
+
+/// 5c §7 — the email-claim swap on the browser wrapper (`/token` mint). With an
+/// active relay alias for `(CLIENT_ID, user)`, the wrapper's `email` claim AND
+/// the `user` projection carry the ALIAS, and the REAL email
+/// (`user@example.com`, what Hydra stamps) is ABSENT from both. The browser
+/// holds this wrapper and the SDK decodes it — so the real email must never be
+/// in it.
+#[ntex::test]
+async fn token_exchange_swaps_email_for_relay_alias() {
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip token_email_swap (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    seed_user(&dsn, hydra.user_id).await;
+    let user_id = hydra.user_id;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    let req = test::TestRequest::post()
+        .uri("/__zs/auth/token")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=thecode&code_verifier=theverifier")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "code exchange must succeed");
+
+    let body: serde_json::Value = read_json(resp).await;
+    let access = body["access_token"].as_str().expect("access_token");
+
+    // The wrapper's `email` claim is the ALIAS, never the real email.
+    let verifier = state.wrapper_verifier.as_ref().unwrap();
+    let claims = verifier
+        .verify(access, APP_HOST, Some(CLIENT_ID))
+        .expect("wrapper verifies");
+    assert_eq!(
+        claims.email.as_deref(),
+        Some(relay_email.as_str()),
+        "wrapper email claim must be the relay alias"
+    );
+    // The REAL email must not appear anywhere in the browser token.
+    assert!(
+        !access.contains(REAL_EMAIL),
+        "real email must be ABSENT from the wrapper token"
+    );
+    // The user projection in the body carries the alias too.
+    assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
+    assert_ne!(body["user"]["email"], serde_json::json!(REAL_EMAIL));
+
+    cleanup_identities(&dsn, user_id).await;
+    cleanup(&dsn, user_id).await;
+}
+
+/// 5c §7 — fail-closed when NO alias is present (e.g. consent minted none yet).
+/// The swap NEVER falls back to the real email: the wrapper carries an EMPTY
+/// email (and certainly not `user@example.com`), and the user projection is
+/// null/empty. This is the "alias absent ⇒ fail closed, never leak real email"
+/// policy.
+#[ntex::test]
+async fn token_exchange_fails_closed_when_no_alias() {
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip token_email_failclosed (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    seed_user(&dsn, hydra.user_id).await;
+    let user_id = hydra.user_id;
+    // Deliberately seed NO app_user_identities row → no alias.
+    cleanup_identities(&dsn, user_id).await;
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    let req = test::TestRequest::post()
+        .uri("/__zs/auth/token")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=thecode&code_verifier=theverifier")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "exchange still succeeds");
+
+    let body: serde_json::Value = read_json(resp).await;
+    let access = body["access_token"].as_str().expect("access_token");
+
+    // No alias ⇒ fail closed: the real email is NEVER emitted.
+    assert!(
+        !access.contains(REAL_EMAIL),
+        "real email must be ABSENT even when no alias exists (fail closed)"
+    );
+    let verifier = state.wrapper_verifier.as_ref().unwrap();
+    let claims = verifier
+        .verify(access, APP_HOST, Some(CLIENT_ID))
+        .expect("wrapper verifies");
+    assert_ne!(
+        claims.email.as_deref(),
+        Some(REAL_EMAIL),
+        "wrapper must not carry the real email when no alias is minted"
+    );
+    // The user projection must not leak the real email either.
+    assert_ne!(body["user"]["email"], serde_json::json!(REAL_EMAIL));
+
+    cleanup_identities(&dsn, user_id).await;
     cleanup(&dsn, user_id).await;
 }
 

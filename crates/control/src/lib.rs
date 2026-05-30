@@ -24,6 +24,7 @@ pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod rate_limit;
 pub mod registry;
+pub mod relay_revoke;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod token_handlers;

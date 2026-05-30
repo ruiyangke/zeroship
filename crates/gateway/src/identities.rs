@@ -89,3 +89,37 @@ pub async fn lookup_pairwise_sub(
         .map_err(|e| GatewayError::Db(format!("app_user_identities lookup: {e}")))?;
     Ok(rows.first().map(|row| row.get("pairwise_sub")))
 }
+
+/// Read the ACTIVE relay alias (`relay_email`) for `(app_client_id,
+/// global_user_id)`, or `None` when no live alias exists.
+///
+/// This is the email-claim swap source (relay sub-spec §7): the gateway
+/// projects this alias as the `email` claim on EVERY auth arm so the app
+/// NEVER sees the user's real address. The `revoked_at IS NULL` gate means a
+/// revoked grant's alias is treated as absent — the caller then fails closed
+/// (no real-email leak) rather than emit a dead alias or the real email.
+///
+/// Returns `None` for: no identity row, no minted alias yet (`relay_email`
+/// NULL — e.g. consent ran before the gateway's first projection), or a
+/// revoked row. The caller distinguishes "no alias" from "real email" — it
+/// must NEVER fall back to the real email.
+///
+/// # Errors
+/// [`GatewayError::Db`] on PG failure.
+pub async fn lookup_relay_email(
+    conn: &Client,
+    app_client_id: &str,
+    global_user_id: Uuid,
+) -> Result<Option<String>> {
+    let rows = conn
+        .query(
+            "SELECT relay_email FROM auth.app_user_identities \
+             WHERE app_client_id = $1 AND global_user_id = $2 \
+               AND relay_email IS NOT NULL \
+               AND revoked_at IS NULL",
+            &[&app_client_id, &global_user_id],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup: {e}")))?;
+    Ok(rows.first().and_then(|row| row.get("relay_email")))
+}

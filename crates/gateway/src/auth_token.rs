@@ -123,6 +123,45 @@ fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Op
     ))
 }
 
+/// Resolve the ACTIVE relay alias for `(route.client_id, global_user_id)` —
+/// the email-claim swap source for the browser wrapper + `/token`/`/session`
+/// responses (relay sub-spec §7). The browser holds this wrapper and the SDK
+/// decodes it, so the `email` it carries MUST be the alias, never the user's
+/// real address.
+///
+/// Returns `None` when no alias is minted yet OR the grant was revoked
+/// (`revoked_at IS NULL` gate) — the caller then projects an EMPTY email (fail
+/// closed), NEVER the real one. A DB checkout/read failure also yields `None`
+/// (fail closed): a browser token must never leak the real email on a blip.
+#[allow(clippy::future_not_send)]
+async fn relay_alias_for(
+    db_cfg: &crate::db::DbConfig,
+    client_id: &str,
+    global_user_id: Uuid,
+) -> Option<String> {
+    let pool = match crate::db::checkout(db_cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "relay alias lookup: pool checkout failed (failing closed on email)");
+            return None;
+        }
+    };
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "relay alias lookup: pool get failed (failing closed on email)");
+            return None;
+        }
+    };
+    match crate::identities::lookup_relay_email(&conn, client_id, global_user_id).await {
+        Ok(alias) => alias,
+        Err(e) => {
+            tracing::warn!(error = %e, "relay alias lookup failed (failing closed on email)");
+            None
+        }
+    }
+}
+
 /// Same-origin guard for state-changing POST `/token` (§1.2). Rejects a
 /// present-but-foreign `Origin`, `Origin: null`, and (for POST) a missing
 /// `Origin` on browsers that send it. `Sec-Fetch-Site` is enforced WHEN
@@ -379,6 +418,11 @@ pub async fn token(
             "app has no sector_identifier yet",
         );
     };
+    // Email-claim swap (§7): the browser-held wrapper + the user projection
+    // carry the relay ALIAS, never the real `claims.email`. No active alias
+    // (not yet minted at consent, or revoked) ⇒ empty email (fail closed) —
+    // the real address NEVER reaches the browser.
+    let relay_email = relay_alias_for(db_cfg, &route.client_id, global_user_id).await;
     let scope = tokens.scope.clone().unwrap_or_default();
     let wrapper = match issuer.issue(&crate::wrapper_token::WrapperMint {
         aud: &route.host,
@@ -388,7 +432,7 @@ pub async fn token(
         exp_secs: anchors::WRAPPER_TTL_SECS,
         cnf: None,
         wraps: None,
-        email: claims.email.as_deref(),
+        email: relay_email.as_deref(),
         email_verified: claims.email_verified,
         name: claims.name.as_deref(),
     }) {
@@ -448,8 +492,9 @@ pub async fn token(
     };
 
     // User.id is the per-app `pws_` (§6.3), matching the wrapper `sub` — the
-    // global UUID never reaches the browser.
-    let user = user_projection(&pws_sub, claims.email.as_deref(), claims.name.as_deref(), claims.email_verified, &scopes);
+    // global UUID never reaches the browser. `email` is the relay alias (§7),
+    // never the real `claims.email`.
+    let user = user_projection(&pws_sub, relay_email.as_deref(), claims.name.as_deref(), claims.email_verified, &scopes);
 
     HttpResponse::Ok()
         .header("cache-control", CACHE_NO_STORE)
@@ -559,7 +604,10 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             "app has no sector_identifier yet",
         );
     };
-    let user = user_projection(&pws_sub, None, None, None, &scopes);
+    // Email-claim swap (§7): the /session user projection carries the relay
+    // ALIAS, never the real email. None ⇒ empty (fail closed).
+    let relay_email = relay_alias_for(db_cfg, &route.client_id, anchor.global_user_id).await;
+    let user = user_projection(&pws_sub, relay_email.as_deref(), None, None, &scopes);
 
     if !want_mint {
         // No fresh token — just the user. Refresh the breadcrumb so it
@@ -745,6 +793,10 @@ async fn do_refresh(
     // Per-app pairwise `pws_` subject (§6.2/G4) — the global UUID never
     // reaches the browser, on the refresh path just as on /token.
     let pws_sub = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &raw.sub, sector);
+    // Email-claim swap (§7): the rotated wrapper carries the relay ALIAS, never
+    // the real `raw.email`. None ⇒ empty (fail closed) — the real address never
+    // reaches the browser on the refresh path either.
+    let relay_email = relay_alias_for(db_cfg, client_id, anchor.global_user_id).await;
     let scope = tokens
         .scope
         .clone()
@@ -758,7 +810,7 @@ async fn do_refresh(
         exp_secs: anchors::WRAPPER_TTL_SECS,
         cnf: None,
         wraps: None,
-        email: raw.email.as_deref(),
+        email: relay_email.as_deref(),
         email_verified: raw.email_verified,
         name: raw.name.as_deref(),
     }) {

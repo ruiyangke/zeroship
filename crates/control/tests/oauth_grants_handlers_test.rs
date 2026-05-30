@@ -16,9 +16,11 @@ use uuid::Uuid;
 use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    oauth_grants_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter,
+    api, oauth_grants_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter,
     Registry, SecretString, StripeStore,
 };
+
+mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -46,6 +48,15 @@ struct Fixture {
 
 impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
+        Self::new_with_auth_db_url(db_url, db_url, label).await
+    }
+
+    /// Build a fixture whose `registry` + `auth_pg` use the real `db_url` but
+    /// whose `auth_db_url` (the URL the relay companion opens a dedicated client
+    /// on) is `auth_db_url`. Pointing `auth_db_url` at an unreachable address
+    /// lets a test exercise the app-delete companion's FAILURE arm without
+    /// breaking the rest of the delete (the registry cascade still succeeds).
+    async fn new_with_auth_db_url(db_url: &str, auth_db_url: &str, label: &str) -> Self {
         let hydra = MockHydra::start();
         let (auth_pg_client, auth_pg_conn) = connect(db_url, NoTls).await.expect("auth-pg connect");
         compio::runtime::spawn(async move {
@@ -88,7 +99,7 @@ impl Fixture {
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             oidc_rp,
             auth_pg: Arc::new(auth_pg_client),
-            auth_db_url: db_url.to_string(),
+            auth_db_url: auth_db_url.to_string(),
             hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
@@ -376,6 +387,64 @@ async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: 
         .expect("insert oauth grant");
 }
 
+/// Seed an `auth.app_user_identities` row with a minted relay alias keyed on
+/// `(client_id, user_id)` — the row the gateway writes (Slice 4) + the alias
+/// consent mints (5b). The relay revocation cascade (5c §6) revokes THIS row.
+async fn insert_identity_with_alias(
+    state: &AppState,
+    client_id: &str,
+    user_id: Uuid,
+    relay_email: &str,
+) {
+    let pairwise_sub = format!("pws_test_{}", Uuid::new_v4().simple());
+    state
+        .auth_pg
+        .execute(
+            "INSERT INTO auth.app_user_identities \
+                (app_client_id, global_user_id, pairwise_sub, relay_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[&client_id, &user_id, &pairwise_sub, &relay_email],
+        )
+        .await
+        .expect("insert app_user_identities row");
+}
+
+/// The active-alias resolution the 5b relay webhook runs on EVERY inbound
+/// (`relay::resolve_active_alias`, sub-spec §4.5). `None` ⇒ the webhook emits a
+/// bounce + 200 (the revoked/unknown-alias branch). We assert against the REAL
+/// auth-store gate, not a stub, so this is the faithful cross-service seam.
+async fn alias_is_active(state: &AppState, relay_email: &str) -> bool {
+    zeroship_auth::store::relay::resolve_active_alias(state.auth_pg.as_ref(), relay_email)
+        .await
+        .expect("resolve_active_alias")
+        .is_some()
+}
+
+async fn identity_revoked_at_is_set(state: &AppState, client_id: &str, user_id: Uuid) -> bool {
+    let rows = state
+        .auth_pg
+        .query(
+            "SELECT revoked_at FROM auth.app_user_identities \
+             WHERE app_client_id = $1 AND global_user_id = $2",
+            &[&client_id, &user_id],
+        )
+        .await
+        .expect("query identity revoked_at");
+    rows.first()
+        .and_then(|r| r.get::<_, Option<chrono::DateTime<Utc>>>("revoked_at"))
+        .is_some()
+}
+
+async fn cleanup_identities(state: &AppState, client_id: &str) {
+    let _ = state
+        .auth_pg
+        .execute(
+            "DELETE FROM auth.app_user_identities WHERE app_client_id = $1",
+            &[&client_id],
+        )
+        .await;
+}
+
 async fn count_grant(state: &AppState, user_id: Uuid, client_id: &str) -> i64 {
     let rows = state
         .auth_pg
@@ -634,6 +703,287 @@ async fn revoke_does_not_affect_other_users() {
     fx.cleanup_clients(&[client_id]).await;
     revoker.cleanup(&fx.state).await;
     owner.cleanup(&fx.state).await;
+}
+
+/// 5c §6 — the B4 revocation cascade: revoking a grant sets
+/// `app_user_identities.revoked_at` AND a subsequent inbound to that alias
+/// bounces (the real 5b `resolve_active_alias` gate now returns `None`). The
+/// DELETE + UPDATE commit atomically on a dedicated `auth_db_url` client (NOT
+/// the `Arc<Client>` `auth_pg`). This is the full faithful loop: the relay
+/// alias was forwarding (active) → revoke → it bounces (inactive).
+#[compio::test]
+async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "cascade").await;
+    let pat = account_pat(&fx.state, "cascade").await;
+    let app = init_control!(fx);
+    let client_id = format!("oauth-grant-cascade-{}", Uuid::new_v4().simple());
+    insert_client(&fx.state, &client_id, pat.user_id).await;
+    insert_grant(&fx.state, pat.user_id, &client_id, &["apps:read", "email"]).await;
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+
+    // Pre-condition: the alias forwards (active map present — what 5b resolves).
+    assert!(
+        alias_is_active(&fx.state, &relay_email).await,
+        "alias must be active (forwarding) BEFORE revoke"
+    );
+
+    // Revoke via the REAL control HTTP handler (runs the §6 cascade).
+    let req = test::TestRequest::delete()
+        .uri(&format!("/me/oauth-grants/{client_id}"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The grant is gone AND the alias is revoked — committed atomically.
+    assert_eq!(count_grant(&fx.state, pat.user_id, &client_id).await, 0);
+    assert!(
+        identity_revoked_at_is_set(&fx.state, &client_id, pat.user_id).await,
+        "revoke must set app_user_identities.revoked_at (the cascade UPDATE)"
+    );
+    // The faithful seam: the 5b webhook's active-map resolution now returns
+    // None ⇒ inbound to this alias BOUNCES (revoked/unknown-alias branch, §8).
+    assert!(
+        !alias_is_active(&fx.state, &relay_email).await,
+        "after revoke, inbound to the alias must bounce (resolve_active_alias → None)"
+    );
+
+    cleanup_identities(&fx.state, &client_id).await;
+    fx.cleanup_clients(&[client_id]).await;
+    pat.cleanup(&fx.state).await;
+}
+
+/// 5c §6.1 — re-grant stability: revoke then re-grant reuses the SAME alias
+/// (Apple Hide-My-Email model). After re-grant `revoked_at` is cleared and the
+/// alias forwards again — no new alias, no dead-alias bounce. The auth-side
+/// writer (`mint_alias_at_consent`) clears `revoked_at` on the deterministic
+/// row; here we exercise that clear directly to prove the row is reusable.
+#[compio::test]
+async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "regrant").await;
+    let pat = account_pat(&fx.state, "regrant").await;
+    let app = init_control!(fx);
+    let client_id = format!("oauth-grant-regrant-{}", Uuid::new_v4().simple());
+    insert_client(&fx.state, &client_id, pat.user_id).await;
+    insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+
+    // Revoke → alias goes inactive.
+    let req = test::TestRequest::delete()
+        .uri(&format!("/me/oauth-grants/{client_id}"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(!alias_is_active(&fx.state, &relay_email).await);
+
+    // Re-grant: the auth-side writer clears revoked_at on the SAME row (no new
+    // alias). `mint_alias_at_consent` does exactly this COALESCE/un-revoke.
+    let reused = zeroship_auth::store::relay::mint_alias_at_consent(
+        fx.state.auth_pg.as_ref(),
+        &client_id,
+        pat.user_id,
+        "relay.zeroship.localhost",
+    )
+    .await
+    .expect("re-grant mint");
+    assert_eq!(
+        reused.as_deref(),
+        Some(relay_email.as_str()),
+        "re-grant must reuse the SAME alias (Apple Hide-My-Email), not mint a new one"
+    );
+    assert!(
+        alias_is_active(&fx.state, &relay_email).await,
+        "after re-grant the alias forwards again (revoked_at cleared)"
+    );
+
+    cleanup_identities(&fx.state, &client_id).await;
+    fx.cleanup_clients(&[client_id]).await;
+    pat.cleanup(&fx.state).await;
+}
+
+/// 5c §6 — the app-delete companion revokes ALL of an app's aliases. There is
+/// NO cross-schema FK from `auth.app_user_identities` to control, so this
+/// companion UPDATE (keyed on `client_id_for_app(uuid)`) is the SOLE guard
+/// against orphaned live aliases. A dropped companion statement fails this test.
+#[compio::test]
+async fn app_delete_revokes_all_relay_aliases() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "appdel").await;
+    // Two users with aliases on the SAME app (same client_id).
+    let user_a = insert_user(&fx.state, "appdel-a").await;
+    let user_b = insert_user(&fx.state, "appdel-b").await;
+    let app_uuid = Uuid::new_v4();
+    let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_uuid);
+    let alias_a = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    let alias_b = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    insert_identity_with_alias(&fx.state, &client_id, user_a, &alias_a).await;
+    insert_identity_with_alias(&fx.state, &client_id, user_b, &alias_b).await;
+
+    assert!(alias_is_active(&fx.state, &alias_a).await);
+    assert!(alias_is_active(&fx.state, &alias_b).await);
+
+    // Drive the companion directly (the same call delete_app makes after the
+    // control-schema cascade — keyed on the deterministic oac_ client_id).
+    let revoked = zeroship_control::relay_revoke::revoke_all_aliases_for_client(
+        &fx.state.auth_db_url,
+        &client_id,
+    )
+    .await
+    .expect("app-delete companion");
+    assert_eq!(revoked, 2, "must revoke BOTH users' aliases for the app");
+
+    assert!(
+        !alias_is_active(&fx.state, &alias_a).await,
+        "user A's alias must bounce after app delete"
+    );
+    assert!(
+        !alias_is_active(&fx.state, &alias_b).await,
+        "user B's alias must bounce after app delete"
+    );
+
+    cleanup_identities(&fx.state, &client_id).await;
+    cleanup_user(&fx.state, user_a).await;
+    cleanup_user(&fx.state, user_b).await;
+}
+
+/// 5c §6 (review MAJOR) — when the app-delete relay companion FAILS, `delete_app`
+/// must NOT silently return 200: the app row is already gone (a retry is a 404
+/// no-op) and there is no background sweep, so a swallowed failure permanently
+/// strands LIVE aliases forwarding real mail. The handler surfaces the failure
+/// as a 500 carrying `{deleted: true, aliases_revoked: false, client_id}` so the
+/// operator can retry the revoke out-of-band. Pre-fix this returned 200.
+///
+/// We force the companion to fail by pointing the fixture's `auth_db_url` (the
+/// URL the dedicated relay client connects on) at an unreachable address, while
+/// the registry + auth_pg keep using the real DB so the control-schema delete
+/// still succeeds.
+#[compio::test]
+async fn app_delete_surfaces_companion_failure_as_500() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    // Registry/auth_pg = real DB; auth_db_url = unreachable ⇒ companion connect fails.
+    let fx = Fixture::new_with_auth_db_url(
+        &db_url,
+        "postgres://nobody@127.0.0.1:1/nodb",
+        "companion-fail",
+    )
+    .await;
+
+    // A real app row so the registry cascade succeeds (delete returns Ok(true)).
+    let app_name = format!("companionfail{}", Uuid::new_v4().simple());
+    let record = fx
+        .state
+        .registry
+        .create_app(&app_name, "free")
+        .await
+        .expect("create app");
+    let app_id = record.id;
+    let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_id);
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .service(web::resource("/api/apps/{id}").route(web::delete().to(api::delete_app))),
+    )
+    .await;
+
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/apps/{app_id}"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    // The privacy-critical assertion: a failed companion is NOT a 200.
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a failed relay-alias companion must surface as 500, not a silent 200"
+    );
+    let body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("delete body json");
+    assert_eq!(
+        body.get("deleted").and_then(Value::as_bool),
+        Some(true),
+        "the app IS deleted (registry cascade succeeded)"
+    );
+    assert_eq!(
+        body.get("aliases_revoked").and_then(Value::as_bool),
+        Some(false),
+        "aliases were NOT revoked — caller must know they may still forward"
+    );
+    assert_eq!(
+        body.get("client_id").and_then(Value::as_str),
+        Some(client_id.as_str()),
+        "the deterministic client_id is returned so the operator can retry out-of-band"
+    );
+
+    pat.cleanup(&fx.state).await;
+}
+
+/// 5c §6 (review MAJOR, success arm) — the happy path still returns 200
+/// `{deleted: true}` when the companion succeeds (no aliases to revoke is also
+/// success). This pins the 500 above to the FAILURE arm only.
+#[compio::test]
+async fn app_delete_returns_200_when_companion_succeeds() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    // auth_db_url == real DB ⇒ companion connects + runs (revokes 0 rows = ok).
+    let fx = Fixture::new(&db_url, "companion-ok").await;
+
+    let app_name = format!("companionok{}", Uuid::new_v4().simple());
+    let record = fx
+        .state
+        .registry
+        .create_app(&app_name, "free")
+        .await
+        .expect("create app");
+    let app_id = record.id;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .service(web::resource("/api/apps/{id}").route(web::delete().to(api::delete_app))),
+    )
+    .await;
+
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/apps/{app_id}"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "companion success ⇒ 200 (the 500 is the failure arm only)"
+    );
+    let body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("delete body json");
+    assert_eq!(body.get("deleted").and_then(Value::as_bool), Some(true));
+
+    pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
