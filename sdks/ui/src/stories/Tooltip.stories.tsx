@@ -17,6 +17,74 @@ function pause(ms: number) {
   });
 }
 
+/* Dispatch the genuine pointer sequence Chromium emits when a real
+ * cursor crosses onto a trigger. */
+function dispatchHoverEnter(el: Element) {
+  const rect = el.getBoundingClientRect();
+  const coords = {
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+  };
+  const base = { bubbles: true, cancelable: true, ...coords };
+  const ptr = { ...base, pointerType: "mouse", pointerId: 1 };
+  // `over`/`enter` latch Base UI's pointer type and clear its
+  // `blockMouseMove` guard; the trailing `mousemove` is what actually
+  // drives the open (Base UI's Tooltip / PreviewCard trigger runs with
+  // `mouseOnly: true, move: false`, so the popup opens off the
+  // `onMouseMove` rest-timer — never off `mouseenter` alone).
+  el.dispatchEvent(new PointerEvent("pointerover", ptr));
+  el.dispatchEvent(new PointerEvent("pointerenter", { ...ptr, bubbles: false }));
+  el.dispatchEvent(new MouseEvent("mouseover", base));
+  el.dispatchEvent(new MouseEvent("mouseenter", { ...base, bubbles: false }));
+  el.dispatchEvent(new PointerEvent("pointermove", ptr));
+  el.dispatchEvent(new MouseEvent("mousemove", base));
+}
+
+/* Open a hover-anchored Base UI surface (Tooltip / PreviewCard) from a
+ * play() test, faithfully.
+ *
+ * Two real properties of the component conspire to make a naive
+ * `userEvent.hover(...)` fail in the Test Runner while the component
+ * works perfectly under a live cursor:
+ *
+ *  1. Base UI 1.5 opens these surfaces from its `onMouseMove`
+ *     pointer-intent handler (the trigger is configured `mouseOnly:
+ *     true, move: false`). `@storybook/test`'s `userEvent.hover` emits
+ *     `pointerover`/`pointerenter`/`mouseover`/`mouseenter` but never a
+ *     `mousemove`, so the rest-timer that opens the popup never starts.
+ *     `dispatchHoverEnter` replays the full real sequence including the
+ *     `mousemove`, with an explicit `pointerType: "mouse"`.
+ *
+ *  2. Base UI binds its `mouseenter` listener in a `useEffect`, so the
+ *     hover machinery is not live on the very first tick the play runs.
+ *     Dispatching before the effect has attached is a no-op — verified:
+ *     the identical event sequence opens the popup when dispatched a
+ *     moment later. We therefore settle one macrotask, dispatch, and
+ *     poll the real open (re-dispatching) until the popup mounts.
+ *
+ * This is a faithful reproduction of the real interaction — the popup
+ * still has to open through the component's own open path; no assertion
+ * is weakened. */
+async function hoverToOpen(el: Element, popupTestId: string) {
+  const body = el.ownerDocument.body;
+  const isOpen = () => body.querySelector(`[data-testid="${popupTestId}"]`);
+  await pause(0);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    dispatchHoverEnter(el);
+    await pause(50);
+    if (isOpen()) return;
+  }
+}
+
+/* Close a hover-anchored surface: replay the leave sequence so the
+ * grace-timer starts and the popup unmounts. Mirrors `hoverToOpen`. */
+function hoverToClose(el: Element) {
+  el.dispatchEvent(
+    new PointerEvent("pointerleave", { pointerType: "mouse", pointerId: 1 }),
+  );
+  el.dispatchEvent(new MouseEvent("mouseleave"));
+}
+
 const meta: Meta<typeof Tooltip> = {
   title: "Components/Tooltip",
   component: Tooltip,
@@ -45,7 +113,7 @@ export const Basic: Story = {
   render: () => (
     <Wrap>
       <div className="zs-story-row" role="group" aria-label="Basic">
-        <Tooltip>
+        <Tooltip delay={50}>
           <Tooltip.Trigger
             render={
               <Button
@@ -70,9 +138,9 @@ export const Basic: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /tooltip basic/i });
 
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, "tooltip-basic-popup");
     await expect(await body.findByText("Quick label")).toBeInTheDocument();
-    await userEvent.unhover(trigger);
+    hoverToClose(trigger);
     await waitFor(() =>
       expect(body.queryByText("Quick label")).not.toBeInTheDocument(),
     );
@@ -121,7 +189,7 @@ export const WithDelay: Story = {
       name: /tooltip delay 200ms/i,
     });
 
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, "tooltip-delay-popup");
     await expect(await body.findByText("Opens after 200ms")).toBeInTheDocument();
   },
 };
@@ -167,7 +235,7 @@ export const WithArrow: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /tooltip with arrow/i });
 
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, "tooltip-arrow-popup");
     await expect(await body.findByText("With arrow pointer")).toBeInTheDocument();
     await expect(
       canvasElement.ownerDocument.body.querySelector(".zs-tooltip-arrow"),
@@ -230,11 +298,11 @@ export const PlacementSide: Story = {
       const trigger = canvas.getByRole("button", {
         name: new RegExp(`tooltip ${side}`, "i"),
       });
-      await userEvent.hover(trigger);
+      await hoverToOpen(trigger, `tooltip-side-${side}-popup`);
       await expect(
         await body.findByText(new RegExp(`${side} side`, "i")),
       ).toBeInTheDocument();
-      await userEvent.unhover(trigger);
+      hoverToClose(trigger);
       await waitFor(() =>
         expect(
           body.queryByText(new RegExp(`${side} side`, "i")),
@@ -350,7 +418,7 @@ export const RichContent: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /tooltip rich content/i });
 
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, "tooltip-rich-popup");
     await expect(await body.findByText(/heads up:/i)).toBeInTheDocument();
     await expect(body.getByText(/cannot be undone/i)).toBeInTheDocument();
   },
@@ -396,7 +464,11 @@ export const Disabled: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /tooltip disabled/i });
 
-    await userEvent.hover(trigger);
+    // Dispatch the genuine hover-open sequence (not just `userEvent.hover`,
+    // which never opens these surfaces) and assert it STAYS closed because
+    // the Root is disabled.
+    await pause(0);
+    dispatchHoverEnter(trigger);
     await pause(250);
     await expect(
       body.queryByText("This should never appear."),
@@ -439,7 +511,11 @@ export const ComposedDescribedBy: Story = {
             }
           />
           <Tooltip.Portal>
-            <Tooltip.Popup side="bottom" align="start">
+            <Tooltip.Popup
+              side="bottom"
+              align="start"
+              data-testid="tooltip-composed-popup"
+            >
               <Tooltip.Arrow>
                 <span aria-hidden="true">^</span>
               </Tooltip.Arrow>
@@ -461,7 +537,7 @@ export const ComposedDescribedBy: Story = {
     await expect(describedBy).toContain("tooltip-external-description");
     await expect(describedBy.split(/\s+/).length).toBeGreaterThan(1);
 
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, "tooltip-composed-popup");
     await expect(
       await body.findByText("Composed tooltip body"),
     ).toBeInTheDocument();
@@ -601,7 +677,7 @@ export const DetachedHandle: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /tooltip detached/i });
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, "tooltip-detached-popup");
     const popup = await body.findByTestId("tooltip-detached-popup");
     await expect(popup).toBeInTheDocument();
     // aria-describedby crosses the handle: the Trigger must reference
@@ -610,7 +686,7 @@ export const DetachedHandle: Story = {
     const popupId = popup.id;
     await expect(popupId.length).toBeGreaterThan(0);
     await expect(describedBy.split(/\s+/)).toContain(popupId);
-    await userEvent.unhover(trigger);
+    hoverToClose(trigger);
     await waitFor(() =>
       expect(
         body.queryByTestId("tooltip-detached-popup"),

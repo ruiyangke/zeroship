@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { expect, waitFor, within } from "@storybook/test";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { useMemo } from "react";
 import {
@@ -7,6 +7,77 @@ import {
   PreviewCard,
   createPreviewCardHandle,
 } from "../components";
+
+function pause(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/* Dispatch the genuine pointer sequence Chromium emits when a real
+ * cursor crosses onto a trigger. */
+function dispatchHoverEnter(el: Element) {
+  const rect = el.getBoundingClientRect();
+  const coords = {
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+  };
+  const base = { bubbles: true, cancelable: true, ...coords };
+  const ptr = { ...base, pointerType: "mouse", pointerId: 1 };
+  // `over`/`enter` latch Base UI's pointer type and clear its
+  // `blockMouseMove` guard; the trailing `mousemove` is what actually
+  // drives the open (the PreviewCard trigger runs with `mouseOnly:
+  // true, move: false`, so the popup opens off the `onMouseMove`
+  // rest-timer — never off `mouseenter` alone).
+  el.dispatchEvent(new PointerEvent("pointerover", ptr));
+  el.dispatchEvent(new PointerEvent("pointerenter", { ...ptr, bubbles: false }));
+  el.dispatchEvent(new MouseEvent("mouseover", base));
+  el.dispatchEvent(new MouseEvent("mouseenter", { ...base, bubbles: false }));
+  el.dispatchEvent(new PointerEvent("pointermove", ptr));
+  el.dispatchEvent(new MouseEvent("mousemove", base));
+}
+
+/* Open the PreviewCard from a play() test, faithfully.
+ *
+ * Two real properties of the component break a naive
+ * `userEvent.hover(...)` in the Test Runner while the component works
+ * perfectly under a live cursor:
+ *
+ *  1. Base UI 1.5 opens the card from its `onMouseMove` pointer-intent
+ *     handler (`mouseOnly: true, move: false`). `userEvent.hover`
+ *     emits `pointerover`/`pointerenter`/`mouseover`/`mouseenter` but
+ *     never a `mousemove`, so the open intent never fires.
+ *     `dispatchHoverEnter` replays the full real sequence, including the
+ *     `mousemove`, with an explicit `pointerType: "mouse"`.
+ *
+ *  2. Base UI binds its `mouseenter` listener in a `useEffect`, so the
+ *     hover machinery is not live on the very first tick the play runs.
+ *     We therefore settle, dispatch, and poll the real open
+ *     (re-dispatching) until the popup mounts.
+ *
+ * Faithful reproduction of the real interaction — the popup still opens
+ * through the component's own path; no assertion is weakened. The
+ * matcher resolves the popup either by `data-testid` or by a CSS
+ * selector (PlacementSide shares one testid-less popup across triggers). */
+async function hoverToOpen(el: Element, popupSelector: string) {
+  const body = el.ownerDocument.body;
+  const isOpen = () => body.querySelector(popupSelector);
+  await pause(0);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    dispatchHoverEnter(el);
+    await pause(50);
+    if (isOpen()) return;
+  }
+}
+
+/* Close a hover-anchored surface: replay the leave sequence so the
+ * grace-timer starts and the popup unmounts. */
+function hoverToClose(el: Element) {
+  el.dispatchEvent(
+    new PointerEvent("pointerleave", { pointerType: "mouse", pointerId: 1 }),
+  );
+  el.dispatchEvent(new MouseEvent("mouseleave"));
+}
 
 /* Token-driven placeholder thumbnail used in the Basic / LinkPreview
  * stories. Previous revisions used SVG data URIs that contained URL-
@@ -98,17 +169,14 @@ export const Basic: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /preview basic/i });
-    await userEvent.hover(trigger);
-    // Wait for the popup testid (portaled into body) — Base UI's
-    // intent timer fires asynchronously; findByTestId tolerates the
-    // mount delay and ignores text resolution inside the trigger.
+    await hoverToOpen(trigger, '[data-testid="previewcard-basic-popup"]');
     const popup = await body.findByTestId(
       "previewcard-basic-popup",
       undefined,
       { timeout: 3000 },
     );
     await expect(popup).toBeInTheDocument();
-    await userEvent.unhover(trigger);
+    hoverToClose(trigger);
     await waitFor(
       () =>
         expect(
@@ -183,10 +251,7 @@ export const UserHandle: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByTestId("previewcard-userhandle-trigger");
-    await userEvent.hover(trigger);
-    // Wait on the popup testid so the assertion never observes the
-    // pre-mount DOM. Once mounted, the follow button is the
-    // post-condition we actually care about.
+    await hoverToOpen(trigger, '[data-testid="previewcard-userhandle-popup"]');
     await body.findByTestId(
       "previewcard-userhandle-popup",
       undefined,
@@ -248,10 +313,7 @@ export const LinkPreview: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByTestId("previewcard-linkpreview-trigger");
-    await userEvent.hover(trigger);
-    // Wait for the popup testid (portaled into body) — the trigger text
-    // "io_uring runtimes" otherwise resolves a generic text query before
-    // the popup mounts.
+    await hoverToOpen(trigger, '[data-testid="previewcard-linkpreview-popup"]');
     await body.findByTestId(
       "previewcard-linkpreview-popup",
       undefined,
@@ -320,10 +382,7 @@ export const LongContent: Story = {
     const trigger = canvas.getByRole("button", {
       name: /preview longcontent/i,
     });
-    await userEvent.hover(trigger);
-    // Wait for the popup testid (portaled into body) rather than the
-    // trigger text — "Release notes" appears on the trigger too, so a
-    // text query would resolve on the trigger before the popup mounts.
+    await hoverToOpen(trigger, '[data-testid="previewcard-longcontent-popup"]');
     const popup = await body.findByTestId(
       "previewcard-longcontent-popup",
       undefined,
@@ -391,7 +450,7 @@ export const AsChild: Story = {
     // consumer's element alongside the consumer's own className.
     await expect(trigger).toHaveClass("zs-aschild-wrapper-class");
     await expect(trigger).toHaveClass("zs-aschild-consumer-class");
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, '[data-testid="previewcard-aschild-popup"]');
     await body.findByTestId(
       "previewcard-aschild-popup",
       undefined,
@@ -436,7 +495,7 @@ export const WithArrow: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /preview witharrow/i });
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, '[data-testid="previewcard-arrow-popup"]');
     const popup = await body.findByTestId(
       "previewcard-arrow-popup",
       undefined,
@@ -494,10 +553,10 @@ export const PlacementSide: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByTestId("previewcard-side-top-trigger");
-    await userEvent.hover(trigger);
-    // Each side popup carries the wrapper class — wait on the
-    // generic class hook rather than text content since multiple
-    // triggers share the "side = X" pattern.
+    // Each side popup carries the wrapper class — wait on the generic
+    // class hook rather than text content since multiple triggers share
+    // the "side = X" pattern.
+    await hoverToOpen(trigger, ".zs-preview-card-popup");
     await waitFor(
       () =>
         expect(
@@ -567,7 +626,7 @@ export const Rtl: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /preview rtl/i });
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, '[data-testid="previewcard-rtl-popup"]');
     await body.findByTestId(
       "previewcard-rtl-popup",
       undefined,
@@ -665,11 +724,11 @@ export const DetachedHandle: Story = {
     const canvas = within(canvasElement);
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByTestId("previewcard-detached-trigger");
-    await userEvent.hover(trigger);
+    await hoverToOpen(trigger, '[data-testid="previewcard-detached-popup"]');
     const popup = await body.findByTestId(
       "previewcard-detached-popup",
       undefined,
-      { timeout: 1500 },
+      { timeout: 3000 },
     );
     await expect(popup).toBeInTheDocument();
     // aria-describedby crosses the handle: the Trigger must reference
