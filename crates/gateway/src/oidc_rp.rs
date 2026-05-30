@@ -18,6 +18,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use zeroship_core::auth::hmac_sha256;
 use zeroship_core::oidc_verify::{verify_id_token, JwksCache, OidcError, TokenClaims};
+// `CachedKey` is referenced in `verify_access_jwt`'s closure type below.
 use zeroship_core::pkce::{generate_verifier, s256_challenge};
 
 /// A configured OIDC relying party for the gateway, parameterised by the
@@ -300,6 +301,173 @@ impl OidcRp {
             OidcRpError::TokenExchange(format!("introspect parse: {e}\nbody: {resp_body}"))
         })
     }
+
+    /// Verify a **raw Hydra access JWT** (RFC 9068) locally against the
+    /// gateway's JWKS cache — no introspection round-trip. Used by the
+    /// Bearer arm's raw-Hydra path (§1.3, slice 1c) for non-browser
+    /// clients that hold a Hydra access token directly (CLI,
+    /// server-to-server). The browser never takes this path — it holds a
+    /// gateway *wrapper*, verified by `wrapper_token::Verifier` instead.
+    ///
+    /// Validation covers: signature (against any cached JWK matching the
+    /// token's `kid`/`alg`), `iss == self.issuer`, and `exp` (with the
+    /// jsonwebtoken default 60 s leeway). **`aud` is deliberately NOT
+    /// validated here** — an access token's `aud` is the resource-server
+    /// audience, not the OAuth client, so per-app binding is done by the
+    /// caller on the `client_id` claim (RFC 9068 §3), with an `aud`
+    /// fallback. We therefore disable jsonwebtoken's audience check and
+    /// surface `aud` in the returned claims for the caller's fallback.
+    ///
+    /// **This function does NOT bind the token to any client.** It verifies
+    /// only signature + `iss` + `exp` and returns the decoded claims. Per-app
+    /// binding (`client_id` claim == route client, with an `aud`-contains
+    /// fallback) is the CALLER's responsibility — it lives in the Bearer arm
+    /// because it needs the `aud` fallback, which depends on the normalized
+    /// `aud` list this function surfaces. A caller that skips the
+    /// caller-side binding check silently opens cross-app replay; that is
+    /// why no `expected_client_id` parameter is accepted here (it would
+    /// falsely imply this function enforces binding).
+    ///
+    /// # Errors
+    ///
+    /// [`OidcRpError::VerifyIdToken`] wrapping an [`OidcError`] for any
+    /// JWKS/signature/iss/exp failure. Callers translate this into a
+    /// `401` (User/Admin route) or fall-through to anonymous (Anon
+    /// route), per the Bearer-arm policy gate.
+    pub async fn verify_access_token(&self, token: &str) -> Result<AccessClaims, OidcRpError> {
+        let claims = verify_access_jwt(&self.jwks, token, &self.issuer).await?;
+        Ok(claims)
+    }
+}
+
+/// Decoded claims of a raw Hydra access JWT (RFC 9068). The Bearer arm
+/// reads `client_id`/`aud` for per-app binding, `sub` for identity, and
+/// the profile fields for the `ZeroShip-User` header.
+///
+/// `aud` per RFC 7519 may be a string OR an array of strings; the helper
+/// normalizes both into a `Vec<String>` so the caller's `aud`-fallback
+/// binding (`aud` contains the expected `client_id`) is uniform.
+#[derive(Debug, Clone)]
+pub struct AccessClaims {
+    /// Subject — the **global** Hydra UUID (`usr_…`). On the raw-Hydra
+    /// Bearer path Slice 4 projects this to a per-app `pws_`; Slice 1c
+    /// uses it directly (no pairwise derivation yet).
+    pub sub: String,
+    /// The OAuth `client_id` claim, when present (RFC 9068 §3 mandates
+    /// it; Hydra emits it). The Bearer arm's primary per-app binding.
+    pub client_id: Option<String>,
+    /// The token audience(s), normalized to a list. The Bearer arm's
+    /// fallback binding (when `client_id` is absent) checks whether this
+    /// list contains the expected `client_id`.
+    pub aud: Vec<String>,
+    /// Issued-at (UNIX seconds) — used by the revocation family marker.
+    pub iat: i64,
+    pub email: Option<String>,
+    pub email_verified: Option<bool>,
+    pub name: Option<String>,
+    pub scope: Option<String>,
+}
+
+/// Wire shape of a Hydra access JWT we deserialize. `aud` is a raw
+/// `serde_json::Value` so we accept both the string and array forms.
+#[derive(Deserialize)]
+struct RawAccessClaims {
+    sub: String,
+    iss: String,
+    #[serde(default)]
+    aud: serde_json::Value,
+    #[serde(default)]
+    exp: Option<i64>,
+    #[serde(default)]
+    iat: i64,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    email_verified: Option<bool>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// Verify a raw Hydra access JWT against `cache`, pinning `iss` and
+/// `exp` but NOT `aud` (see [`OidcRp::verify_access_token`] rationale).
+/// On a first verify failure (likely a rotated JWKS) the cache is
+/// force-refreshed and verification retried once — mirroring
+/// [`zeroship_core::oidc_verify::verify_id_token`].
+async fn verify_access_jwt(
+    cache: &JwksCache,
+    token: &str,
+    expected_iss: &str,
+) -> Result<AccessClaims, OidcRpError> {
+    use jsonwebtoken::{decode, decode_header, Validation};
+
+    let header = decode_header(token).map_err(|e| {
+        OidcRpError::VerifyIdToken(OidcError::DecodeHeader(e.to_string()))
+    })?;
+    let kid = header
+        .kid
+        .clone()
+        .ok_or_else(|| OidcRpError::VerifyIdToken(OidcError::DecodeHeader("no kid".into())))?;
+    let alg = header.alg;
+
+    let try_verify = |keys: Vec<zeroship_core::oidc_verify::CachedKey>| -> Result<RawAccessClaims, OidcError> {
+        let key = keys
+            .iter()
+            .find(|k| k.kid == kid && k.alg == alg)
+            .ok_or_else(|| OidcError::NoMatchingKey(kid.clone()))?;
+        let mut validation = Validation::new(alg);
+        validation.set_issuer(&[expected_iss]);
+        // Access-token `aud` is the resource-server audience, NOT the
+        // OAuth client — so we do NOT pin it here. Per-app binding is on
+        // `client_id` (with an `aud` fallback) in the Bearer arm.
+        validation.validate_aud = false;
+        // `validate_exp` is on by default (60 s leeway).
+        let data: jsonwebtoken::TokenData<RawAccessClaims> =
+            decode(token, &key.decoding, &validation)
+                .map_err(|e| OidcError::Verify(e.to_string()))?;
+        Ok(data.claims)
+    };
+
+    let raw = if let Ok(c) = try_verify(cache.keys().await.map_err(OidcRpError::VerifyIdToken)?) {
+        c
+    } else {
+        // Likely cause: JWKS rotated. Force-refresh once and retry.
+        cache.refresh().await.map_err(OidcRpError::VerifyIdToken)?;
+        try_verify(cache.keys().await.map_err(OidcRpError::VerifyIdToken)?)
+            .map_err(OidcRpError::VerifyIdToken)?
+    };
+
+    // Defense-in-depth iss re-check (jsonwebtoken checked it above).
+    if raw.iss != expected_iss {
+        return Err(OidcRpError::VerifyIdToken(OidcError::IssuerMismatch {
+            expected: expected_iss.into(),
+            got: raw.iss,
+        }));
+    }
+    let _ = raw.exp; // exp enforced by jsonwebtoken; surfaced for clarity only.
+
+    let aud = match raw.aud {
+        serde_json::Value::String(s) => vec![s],
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    Ok(AccessClaims {
+        sub: raw.sub,
+        client_id: raw.client_id,
+        aud,
+        iat: raw.iat,
+        email: raw.email,
+        email_verified: raw.email_verified,
+        name: raw.name,
+        scope: raw.scope,
+    })
 }
 
 /// Subset of an RFC 7662 introspection response (hydra's

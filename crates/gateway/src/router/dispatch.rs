@@ -509,7 +509,16 @@ async fn execute_resource_tree(
     //    challenge so they can prompt the user out-of-band.
     let request_id = Uuid::new_v4();
     let user_header_from_gate =
-        match resolve_auth(&req, &state, policy, app_id, &request_id).await {
+        match resolve_auth(
+            &req,
+            &state,
+            policy,
+            app_id,
+            &request_id,
+            compiled_route.entry.oauth_client_id.as_deref(),
+        )
+        .await
+        {
             AuthOutcome::Allowed { user_header } => user_header,
             AuthOutcome::Unauthenticated => {
                 return unauthenticated_response(&req, &state);

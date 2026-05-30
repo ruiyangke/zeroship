@@ -22,6 +22,7 @@ pub struct TokenSweepReport {
     pub magic_completions_deleted: u64,
     pub email_verifications_deleted: u64,
     pub wrapper_revoked_subjects_deleted: u64,
+    pub token_revocations_deleted: u64,
 }
 
 impl TokenSweepReport {
@@ -31,6 +32,7 @@ impl TokenSweepReport {
             + self.magic_completions_deleted
             + self.email_verifications_deleted
             + self.wrapper_revoked_subjects_deleted
+            + self.token_revocations_deleted
     }
 }
 
@@ -55,6 +57,7 @@ pub async fn run(db: Arc<Client>) {
                     email_verifications_deleted = report.email_verifications_deleted,
                     wrapper_revoked_subjects_deleted =
                         report.wrapper_revoked_subjects_deleted,
+                    token_revocations_deleted = report.token_revocations_deleted,
                     total_deleted = report.total(),
                     "token_sweep completed"
                 );
@@ -96,6 +99,12 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
                 AuthError::Db(format!(
                     "token_sweep auth.wrapper_revoked_subjects: {e}"
                 ))
+            })?;
+    report.token_revocations_deleted =
+        zeroship_core::wrapper_revocation::sweep_expired_families(db)
+            .await
+            .map_err(|e| {
+                AuthError::Db(format!("token_sweep auth.token_revocations: {e}"))
             })?;
 
     Ok(report)

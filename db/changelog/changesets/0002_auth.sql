@@ -266,3 +266,19 @@ CREATE TABLE auth.jwk_key_state (
     PRIMARY KEY (set_name, kid)
 );
 --rollback DROP TABLE auth.jwk_key_state;
+
+-- Cross-node access-token revocation family marker (spec §8.5). The
+-- PRIMARY revocation mechanism for the Bearer arm: keyed PER-APP on
+-- (client_id, sub) so revoking a user on app A leaves app B untouched.
+-- `sub` is TEXT to hold BOTH the wrapper's pws_ pairwise subject and the
+-- raw-Hydra global UUID. The Bearer arm rejects a token when a row exists
+-- with revoked_after > token.iat. See crates/core/src/wrapper_revocation.rs
+-- (revoke_family / is_family_revoked_since / sweep_expired_families).
+--changeset zeroship:auth-token-revocations splitStatements:true
+CREATE TABLE auth.token_revocations (
+    client_id     TEXT        NOT NULL,
+    sub           TEXT        NOT NULL,
+    revoked_after TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (client_id, sub)
+);
+--rollback DROP TABLE auth.token_revocations;
