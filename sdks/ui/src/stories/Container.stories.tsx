@@ -58,18 +58,52 @@ export const Sizes: Story = {
     docs: {
       description: {
         story:
-          "Each size maps to a `--zs-container-*` token. `full` opts out " +
-          "of any max-width (`none`).",
+          "Each size maps to a `--zs-container-*` token (`full` opts out of " +
+          "any max-width). `max-width` only CONSTRAINS, so the sizes only " +
+          "diverge once the available width exceeds them — this demo lays " +
+          "them out start-aligned inside a fixed-wide (88rem) frame so the " +
+          "stepped caps read as a clear staircase regardless of the canvas " +
+          "width (the panel scrolls on a narrow viewport rather than " +
+          "clamping every size to the same width). Each row's fill carries " +
+          "a start-edge accent rule so the column extent is unmistakable.",
       },
     },
   },
   render: () => (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--zs-space-3)" }}>
-      <Container size="sm" data-testid="container-sm">{fill("sm — 30rem")}</Container>
-      <Container size="md" data-testid="container-md">{fill("md — 48rem")}</Container>
-      <Container size="lg" data-testid="container-lg">{fill("lg — 64rem")}</Container>
-      <Container size="xl" data-testid="container-xl">{fill("xl — 80rem")}</Container>
-      <Container size="full" data-testid="container-full">{fill("full — no max-width")}</Container>
+    // Fixed-wide frame: guarantees room for every cap (full ≈ 88rem here) so
+    // the sizes visibly differ even when the Storybook canvas is narrow.
+    <div style={{ minInlineSize: "88rem", paddingBlock: "var(--zs-space-4)" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "var(--zs-space-3)" }}>
+        {(
+          [
+            ["sm", "sm — 30rem"],
+            ["md", "md — 48rem"],
+            ["lg", "lg — 64rem"],
+            ["xl", "xl — 80rem"],
+            ["full", "full — no max-width"],
+          ] as const
+        ).map(([size, label]) => (
+          <Container
+            key={size}
+            size={size}
+            center={false}
+            padX={0}
+            data-testid={`container-${size}`}
+          >
+            <div
+              style={{
+                background: "var(--zs-fill-secondary)",
+                borderInlineStart:
+                  "var(--zs-space-half) solid var(--zs-accent)",
+                padding: "var(--zs-space-3) var(--zs-space-4)",
+                borderRadius: "var(--zs-radius-3)",
+              }}
+            >
+              {label}
+            </div>
+          </Container>
+        ))}
+      </div>
     </div>
   ),
   play: async ({ canvasElement }) => {
