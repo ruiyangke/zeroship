@@ -37,6 +37,45 @@ pub fn uuid_to_base62(uuid: &uuid::Uuid) -> String {
     String::from_utf8(buf.to_vec()).expect("base62 chars are valid UTF-8")
 }
 
+/// Encode an arbitrary byte slice as a base62 string by treating it as a
+/// big-endian integer and repeatedly dividing by 62.
+///
+/// Unlike [`uuid_to_base62`] (fixed 22-char width for a 128-bit UUID), this
+/// handles inputs of any length, so it can encode an HMAC tag. The output
+/// length is not fixed; callers that want a bounded id should truncate the
+/// returned string (e.g. the pairwise-subject derivation takes the first 20
+/// chars). Empty input yields an empty string.
+#[must_use]
+pub fn base62_encode_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    // Big-endian byte-array long division by 62, collecting remainders.
+    let mut digits = bytes.to_vec();
+    let mut out = Vec::new();
+    // Strip leading zero bytes only after the loop preserves value; we loop
+    // until the running number is zero.
+    loop {
+        let mut rem: u16 = 0;
+        let mut all_zero = true;
+        for d in &mut digits {
+            let cur = (rem << 8) | u16::from(*d);
+            let q = cur / 62;
+            rem = cur % 62;
+            *d = u8::try_from(q).unwrap_or(0);
+            if *d != 0 {
+                all_zero = false;
+            }
+        }
+        out.push(BASE62[rem as usize]);
+        if all_zero {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base62 chars are valid UTF-8")
+}
+
 /// Decode 22-char base62 string to UUID bytes.
 pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
     if s.len() != 22 {
@@ -191,6 +230,22 @@ mod tests {
         assert_eq!(encoded.len(), 22);
         let decoded = base62_to_uuid(&encoded).unwrap();
         assert_eq!(uuid, decoded);
+    }
+
+    #[test]
+    fn base62_encode_bytes_only_base62_chars() {
+        // The HMAC-tag encoder must emit only base62 alphabet chars and be
+        // deterministic + injective enough that distinct tags differ.
+        let a = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
+        let b = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x03]);
+        assert_ne!(a, b);
+        assert_eq!(a, base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]));
+        assert!(a.bytes().all(|c| BASE62.contains(&c)), "{a}");
+        assert!(base62_encode_bytes(&[]).is_empty());
+        // A full 32-byte HMAC tag yields >= 20 chars (enough to truncate to
+        // the pairwise body length).
+        let tag = [0xffu8; 32];
+        assert!(base62_encode_bytes(&tag).len() >= 20);
     }
 
     #[test]

@@ -13,8 +13,8 @@ use zeroship_core::config::{
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
-    backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
-    signing, sync, wrapper_token, GateConfig, GateState,
+    auth_token, backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp,
+    proxy, router, signing, sync, wrapper_token, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -514,11 +514,44 @@ fn main() -> std::io::Result<()> {
     // `client_id` matches the entry registered in
     // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
     // built at the dispatch site.
+    let stash_signing_key_bytes = stash_signing_key.into_bytes();
+
+    // auth-sdk Slice 1b-anchors — AES-256-GCM key for the server-held refresh
+    // family at rest in `auth.app_session_anchors.refresh_token_enc` (§8.1).
+    // Derived from the (server-only) stash signing key via
+    // `core::crypto::derive_key` so no new CLI flag is needed and the
+    // refresh family never sits in PG in plaintext. Domain-separated by the
+    // derive prefix; rotating the stash key rotates this key too (acceptable
+    // pre-launch — a roll just forces re-login, which the anchor design
+    // already tolerates via Hydra invalid_grant → login_required).
+    let anchor_enc_key = {
+        let seed = format!(
+            "anchor-refresh-enc:{}",
+            String::from_utf8_lossy(&stash_signing_key_bytes)
+        );
+        zeroship_core::crypto::derive_key(&seed)
+    };
+
+    // auth-sdk §6.2 — platform-wide pairwise salt for the per-app `pws_…`
+    // subject projection. Domain-separated from `anchor_enc_key` by a
+    // distinct derive prefix so the two never collide. Derived from the same
+    // server secret (no new CLI flag pre-launch); rotating the stash key
+    // rotates every app's pairwise subjects, which only forces a re-derive
+    // on the next request (the mapping is deterministic, not stored as a
+    // credential).
+    let pairwise_salt = {
+        let seed = format!(
+            "pairwise-subject:{}",
+            String::from_utf8_lossy(&stash_signing_key_bytes)
+        );
+        zeroship_core::crypto::derive_key(&seed)
+    };
+
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,
         "gateway",
         oidc_client_secret,
-        stash_signing_key.into_bytes(),
+        stash_signing_key_bytes,
     ));
 
     let state = Arc::new(GateState {
@@ -550,6 +583,8 @@ fn main() -> std::io::Result<()> {
         signing_key,
         wrapper_issuer,
         wrapper_verifier,
+        anchor_enc_key,
+        pairwise_salt,
     });
 
     sync::start_sync(state.clone());
@@ -586,6 +621,20 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/__zs/auth/dpop-exchange")
                     .route(web::post().to(dpop_exchange::handle)),
+            )
+            // auth-sdk Slice 1b-anchors — the browser-token CORE. Same
+            // mounting discipline as dpop-exchange: registered BEFORE the
+            // subdomain catch-all so the path lands on the dedicated
+            // handler. `/token` runs the PKCE code→token exchange + sets the
+            // anchor; `/session?mint=1` is reload-recovery (mint via the
+            // per-node single-flight). Both same-origin-only (no CORS).
+            .service(
+                web::resource("/__zs/auth/token")
+                    .route(web::post().to(auth_token::token)),
+            )
+            .service(
+                web::resource("/__zs/auth/session")
+                    .route(web::get().to(auth_token::session)),
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the

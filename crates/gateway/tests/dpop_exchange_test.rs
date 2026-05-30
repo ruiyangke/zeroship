@@ -144,6 +144,8 @@ fn build_state_with_auth_ui_url(with_issuer: bool, auth_ui_url: &str) -> Arc<Gat
         signing_key: signing_key_arc,
         wrapper_issuer,
         wrapper_verifier,
+        anchor_enc_key: [0u8; 32],
+        pairwise_salt: [0u8; 32],
     })
 }
 

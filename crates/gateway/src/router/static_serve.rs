@@ -908,6 +908,8 @@ mod tests {
             signing_key: None,
             wrapper_issuer: None,
             wrapper_verifier: None,
+            anchor_enc_key: [0u8; 32],
+            pairwise_salt: [0u8; 32],
         }
     }
 

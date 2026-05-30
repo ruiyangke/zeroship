@@ -90,6 +90,41 @@ pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) ->
     validate_control_key(&computed, expected_hex)
 }
 
+/// Length of the base62 body of a `pws_…` pairwise subject (after the
+/// `pws_` prefix). 20 base62 chars ≈ 119 bits of the HMAC tag — ample to
+/// avoid collisions while keeping the id compact (auth-sdk §6.2).
+pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
+
+/// Derive the per-app pairwise subject (`pws_…`) for a global user under an
+/// app's sector identifier (auth-sdk §6.2, the shipped F4-B gateway
+/// projection):
+///
+/// ```text
+/// pws = "pws_" + base62( HMAC-SHA256(salt, global_user_id || ":" || sector) )[:20]
+/// ```
+///
+/// Deterministic: the same `(global_user_id, sector)` always yields the same
+/// `pws_…`, so the gateway can derive it without a DB round-trip and a
+/// re-login yields a stable sub. Two apps (distinct sectors) get different
+/// subs for the same human, so app JS decoding its own token cannot correlate
+/// the user across apps. Rotating `salt` rotates every sub (a deliberate
+/// break-glass).
+///
+/// `salt` is the platform-wide pairwise secret (config); `global_user_id` is
+/// the global Hydra subject (the `usr_…` UUID string); `sector` is the app's
+/// stable apex origin (`RouteEntry.sector_identifier`).
+#[must_use]
+pub fn derive_pairwise(salt: &[u8], global_user_id: &str, sector: &str) -> String {
+    let mut payload = Vec::with_capacity(global_user_id.len() + 1 + sector.len());
+    payload.extend_from_slice(global_user_id.as_bytes());
+    payload.push(b':');
+    payload.extend_from_slice(sector.as_bytes());
+    let tag = hmac_sha256(salt, &payload);
+    let mut body = crate::typed_id::base62_encode_bytes(&tag);
+    body.truncate(PAIRWISE_SUB_BODY_LEN);
+    format!("pws_{body}")
+}
+
 /// Sign a `ZeroShip-User` JSON payload as:
 /// `<base64(json)>.<request_id>.<issued_at_unix_secs>.<hex-hmac>`.
 ///
@@ -226,6 +261,42 @@ mod tests {
     #[test]
     fn control_key_equal() {
         assert!(validate_control_key("secret", "secret"));
+    }
+
+    #[test]
+    fn pairwise_is_deterministic_per_app_and_prefixed() {
+        let salt = b"platform-pairwise-salt";
+        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let a = derive_pairwise(salt, uid, "https://app-a.zeroship.ai");
+        let a2 = derive_pairwise(salt, uid, "https://app-a.zeroship.ai");
+        let b = derive_pairwise(salt, uid, "https://app-b.zeroship.ai");
+
+        // Deterministic for the same (user, sector).
+        assert_eq!(a, a2);
+        // Prefixed + bounded body length.
+        assert!(a.starts_with("pws_"), "{a}");
+        assert_eq!(a.len(), 4 + PAIRWISE_SUB_BODY_LEN, "{a}");
+        // Different sector ⇒ different sub (no cross-app correlation).
+        assert_ne!(a, b);
+        // The global UUID never appears in the derived sub.
+        assert!(!a.contains(uid), "global UUID must not leak into pws_: {a}");
+    }
+
+    #[test]
+    fn pairwise_changes_with_salt_and_user() {
+        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let other = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002";
+        let sector = "https://app.zeroship.ai";
+        assert_ne!(
+            derive_pairwise(b"salt-1", uid, sector),
+            derive_pairwise(b"salt-2", uid, sector),
+            "rotating the salt must rotate the sub"
+        );
+        assert_ne!(
+            derive_pairwise(b"salt", uid, sector),
+            derive_pairwise(b"salt", other, sector),
+            "different users get different subs"
+        );
     }
 
     #[test]

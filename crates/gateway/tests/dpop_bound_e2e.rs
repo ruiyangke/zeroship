@@ -271,6 +271,8 @@ fn build_state(
         signing_key: Some(Arc::new(signing.clone())),
         wrapper_issuer: Some(Arc::new(issuer)),
         wrapper_verifier: Some(Arc::new(verifier)),
+        anchor_enc_key: [0u8; 32],
+            pairwise_salt: [0u8; 32],
     });
     (state, signing)
 }

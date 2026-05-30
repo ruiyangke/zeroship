@@ -216,7 +216,11 @@ impl OidcRp {
         }
 
         let tr: TokenResponse = serde_json::from_str(&resp_body).map_err(|e| {
-            OidcRpError::TokenExchange(format!("parse: {e}\nbody: {resp_body}"))
+            // SECURITY: a 2xx body from `/oauth2/token` contains the
+            // access_token AND refresh_token in plaintext. NEVER embed it in
+            // an error that surfaces at `tracing::warn!` — the refresh family
+            // must never be logged (§8.1/§8.5). Redact to the parse error only.
+            OidcRpError::TokenExchange(format!("parse: {e} (success body redacted)"))
         })?;
 
         // 4. Verify ID token. Hydra's issuer is whatever
@@ -299,6 +303,94 @@ impl OidcRp {
         }
         serde_json::from_str(&resp_body).map_err(|e| {
             OidcRpError::TokenExchange(format!("introspect parse: {e}\nbody: {resp_body}"))
+        })
+    }
+
+    /// Exchange an authorization code for tokens as a PUBLIC PKCE client
+    /// (auth-sdk Slice 1b, `POST /__zs/auth/token`). Unlike
+    /// [`OidcRp::finish_callback`] (the interactive cookie flow, which uses
+    /// the gateway's confidential `client_secret`), the browser SDK is a
+    /// public client: it sends `code` + `code_verifier`, and the gateway
+    /// injects the per-app `client_id` (the browser never sends it). No
+    /// `client_secret` — public clients authenticate by PKCE alone.
+    ///
+    /// Returns the full token set INCLUDING the `refresh_token` (the
+    /// gateway keeps it server-side under the anchor in `server_anchor`
+    /// mode; it is never returned to the browser).
+    ///
+    /// # Errors
+    /// [`OidcRpError::TokenExchange`] on transport error, non-2xx status,
+    /// or a JSON parse failure.
+    pub async fn exchange_code_public(
+        &self,
+        client_id: &str,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<TokenSet, OidcRpError> {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "authorization_code")
+            .append_pair("code", code)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("client_id", client_id)
+            .append_pair("code_verifier", code_verifier)
+            .finish();
+        self.post_token(body).await
+    }
+
+    /// Rotate a refresh family as a PUBLIC PKCE client (the server-held
+    /// `?mint=1` refresh, auth-sdk Slice 1b-anchors). Posts
+    /// `grant_type=refresh_token` with the per-app `client_id` injected.
+    /// Returns the rotated token set (new `access_token` + new
+    /// `refresh_token`).
+    ///
+    /// # Errors
+    /// [`OidcRpError::TokenExchange`] — its message contains the upstream
+    /// status + body, so callers can detect Hydra `invalid_grant` (family
+    /// revoked / expired / 720h ceiling) by substring and treat the anchor
+    /// as dead.
+    pub async fn refresh_token_public(
+        &self,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> Result<TokenSet, OidcRpError> {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "refresh_token")
+            .append_pair("refresh_token", refresh_token)
+            .append_pair("client_id", client_id)
+            .finish();
+        self.post_token(body).await
+    }
+
+    /// Shared `POST /oauth2/token` for the public-client grants above.
+    async fn post_token(&self, body: String) -> Result<TokenSet, OidcRpError> {
+        let client = cyper::Client::new();
+        let token_url = format!("{}/oauth2/token", self.auth_ui_url.trim_end_matches('/'));
+        let resp = client
+            .request(http::Method::POST, &token_url)
+            .map_err(|e| OidcRpError::TokenExchange(format!("build: {e}")))?
+            .header("content-type", "application/x-www-form-urlencoded")
+            .map_err(|e| OidcRpError::TokenExchange(format!("header: {e}")))?
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| OidcRpError::TokenExchange(format!("send: {e}")))?;
+        let status = resp.status().as_u16();
+        let resp_body = resp
+            .text()
+            .await
+            .map_err(|e| OidcRpError::TokenExchange(format!("read: {e}")))?;
+        if !(200..300).contains(&status) {
+            return Err(OidcRpError::TokenExchange(format!(
+                "HTTP {status}: {resp_body}"
+            )));
+        }
+        serde_json::from_str(&resp_body).map_err(|e| {
+            // SECURITY: redact — a 2xx `/oauth2/token` body carries the
+            // access_token + refresh_token in plaintext and this error is
+            // logged on the refresh path (§8.1/§8.5). Non-2xx bodies (Hydra
+            // error JSON, no tokens) are surfaced above this branch.
+            OidcRpError::TokenExchange(format!("parse: {e} (success body redacted)"))
         })
     }
 
@@ -527,6 +619,22 @@ struct TokenResponse {
     token_type: String,
     #[serde(default)]
     scope: Option<String>,
+}
+
+/// Public token set returned by [`OidcRp::exchange_code_public`] /
+/// [`OidcRp::refresh_token_public`] (auth-sdk Slice 1b). `id_token` is
+/// `Option` because a `refresh_token` grant does not always re-issue one.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenSet {
+    pub access_token: String,
+    #[serde(default)]
+    pub id_token: Option<String>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<i64>,
 }
 
 /// Server-side state stashed in the signed `__Host-zs_oidc_stash` cookie

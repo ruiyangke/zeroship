@@ -10,7 +10,9 @@
 //! [`GateConfig`] and [`GateState`] live here (not in `main.rs`) for
 //! the same reason: tests construct fixtures directly.
 
+pub mod anchors;
 pub mod auth;
+pub mod auth_token;
 pub mod backchannel_logout;
 pub mod blob_cache;
 pub mod compiled;
@@ -162,4 +164,21 @@ pub struct GateState {
     /// verification is disabled" — every DPoP request falls through
     /// to introspection.
     pub wrapper_verifier: Option<Arc<wrapper_token::Verifier>>,
+    /// AES-256-GCM key encrypting the server-held refresh family at rest in
+    /// `auth.app_session_anchors.refresh_token_enc` (auth-sdk Slice
+    /// 1b-anchors, §8.1/§8.5). A `[u8; 32]` (so `Send + Sync`, unlike the
+    /// `!Send` pool / single-flight), derived once at boot from a stable
+    /// server secret via `zeroship_core::crypto::derive_key`. The refresh
+    /// family never leaves the gateway in plaintext — neither to the
+    /// browser nor at rest in PG.
+    pub anchor_enc_key: [u8; 32],
+    /// Platform-wide pairwise salt for the per-app `pws_…` subject
+    /// projection (auth-sdk §6.2, F4-B). The browser-held wrapper's `sub`
+    /// is `derive_pairwise(global_user_id, route.sector_identifier)` keyed
+    /// on THIS salt, so app JS decoding its own access token reads a
+    /// per-app pseudonym, never the global user UUID (G4). A `[u8; 32]`
+    /// (Send + Sync), derived once at boot from a stable server secret via
+    /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
+    /// subjects (a deliberate break-glass).
+    pub pairwise_salt: [u8; 32],
 }

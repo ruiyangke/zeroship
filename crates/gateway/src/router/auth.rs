@@ -1294,6 +1294,8 @@ mod tests {
             signing_key: Some(StdArc::new(signing)),
             wrapper_issuer: Some(StdArc::new(issuer)),
             wrapper_verifier: Some(StdArc::new(verifier)),
+            anchor_enc_key: [0u8; 32],
+            pairwise_salt: [0u8; 32],
         })
     }
 

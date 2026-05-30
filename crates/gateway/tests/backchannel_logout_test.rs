@@ -352,6 +352,8 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         signing_key: None,
         wrapper_issuer: None::<Arc<wrapper_token::Issuer>>,
         wrapper_verifier: None::<Arc<wrapper_token::Verifier>>,
+        anchor_enc_key: [0u8; 32],
+            pairwise_salt: [0u8; 32],
     })
 }
 
