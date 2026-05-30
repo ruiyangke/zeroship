@@ -776,6 +776,61 @@ async fn resolve_dpop_user_header(
         return DpopOutcome::None;
     }
 
+    // 6d. Cross-node PER-APP family-marker revocation (spec §8.5), the SAME
+    //     check the raw-Hydra Bearer arm runs. Hydra `active: true` (step 6b)
+    //     only reflects GLOBAL revocation; the per-app `auth.token_revocations`
+    //     marker is keyed on `(client_id, sub)`, so revoking a user on app A
+    //     must also reject their DPoP-bound opaque token on app A's path here.
+    //     Keyed on `expected_client_id` (the route's bound client; 6c proved
+    //     the token agrees) and the introspected GLOBAL Hydra `sub` — the SAME
+    //     sub the Bearer arm uses, checked BEFORE the pairwise projection so
+    //     the marker and the check agree on the key. `iat` comes from the
+    //     introspection response (RFC 7662 §2.2); when Hydra omits it we fail
+    //     CLOSED (epoch `0`), so any live family marker rejects rather than
+    //     silently skipping the check. We hold the pooled connection only
+    //     across this lookup — never across the introspection HTTP call above.
+    if let Some(db_cfg) = state.db.as_ref() {
+        // `info.sub` is already confirmed `Some(non-empty)` above.
+        let sub = info.sub.as_deref().unwrap_or_default();
+        let iat = info.iat.unwrap_or(0);
+        let pool = match crate::db::checkout(db_cfg).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "DPoP introspection revocation: pg pool checkout failed");
+                return DpopOutcome::None;
+            }
+        };
+        let conn = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "DPoP introspection revocation: pg pool get failed");
+                return DpopOutcome::None;
+            }
+        };
+        match zeroship_core::wrapper_revocation::is_family_revoked_since(
+            &conn,
+            expected_client_id,
+            sub,
+            iat,
+        )
+        .await
+        {
+            Ok(true) => {
+                tracing::warn!(
+                    client_id = %expected_client_id,
+                    sub = %sub,
+                    "DPoP introspection family revoked after iat — rejecting"
+                );
+                return DpopOutcome::None;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, sub = %sub, "DPoP introspection revocation check failed");
+                return DpopOutcome::None;
+            }
+        }
+    }
+
     // 7. Build the `ZeroShip-User` header from the introspection result.
     //    The introspected `sub` is the GLOBAL Hydra UUID — project it to
     //    the per-app `pws_` (§6.2) so the worker header never carries the
@@ -1621,6 +1676,7 @@ mod tests {
             name: Some("Bob".into()),
             scope: Some("openid email".into()),
             exp: Some(0),
+            iat: Some(0),
         };
         let owned = build_worker_user_from_introspection(&info);
         assert_eq!(owned.id, "usr_xyz");
@@ -3206,6 +3262,19 @@ mod tests {
         gateway_signing: ed25519_dalek::SigningKey,
         introspect_base: &str,
     ) -> std::sync::Arc<crate::GateState> {
+        build_state_for_introspection_with_db(gateway_signing, introspect_base, None)
+    }
+
+    /// Same as [`build_state_for_introspection`] but with a `db` so the
+    /// introspection arm's per-app family-marker revocation check runs
+    /// against a live `auth.token_revocations` (mirrors the Bearer arm's
+    /// `build_state_with_wrapper_and_oidc_and_db`). PG-gated tests pass
+    /// `Some(db)`; the others keep `None` (pairwise stays a pure HMAC).
+    fn build_state_for_introspection_with_db(
+        gateway_signing: ed25519_dalek::SigningKey,
+        introspect_base: &str,
+        db: Option<crate::db::DbConfig>,
+    ) -> std::sync::Arc<crate::GateState> {
         use std::sync::Arc as StdArc;
 
         let oidc_rp = crate::oidc_rp::OidcRp::new(
@@ -3242,7 +3311,7 @@ mod tests {
             disk_cache: disk,
             idempotency_store: StdArc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
             oidc_rp: StdArc::new(oidc_rp),
-            db: None,
+            db,
             dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: StdArc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             signing_key: Some(StdArc::new(gateway_signing)),
@@ -3446,6 +3515,171 @@ mod tests {
             matches!(outcome, DpopOutcome::Allowed(_)),
             "wrapper fast-path must remain unaffected by the introspection binding, got {outcome:?}"
         );
+    }
+
+    #[ntex::test]
+    async fn resolve_dpop_introspection_rejects_revoked_family() {
+        // PARITY with the raw-Hydra Bearer arm's family-marker revocation
+        // (`bearer_raw_hydra_revocation_is_per_app_not_global`): a DPoP-bound
+        // OPAQUE token whose `(client_id, sub)` family was revoked-since-before
+        // the token's `iat` must be rejected on the introspection fallback —
+        // Hydra `active: true` only covers GLOBAL revocation, not the per-app
+        // family marker. Pre-fix this path trusted `active` alone and let a
+        // per-app-revoked DPoP token through.
+        //
+        // This test proves BOTH halves of the Bearer parity claim:
+        //   1. REJECT: revoking (oac_app_a, sub) rejects app A's DPoP token.
+        //   2. PER-APP SCOPING: the SAME global sub on app B (oac_app_b) stays
+        //      Allowed — the 6d key is `(client_id, sub)`, not just `sub`, so a
+        //      regression that dropped the client_id (made 6d global) would
+        //      let arm 2 fail (app B wrongly rejected).
+        //
+        // PG-gated: needs a live `auth.token_revocations` (skip when
+        // AUTH_DB_URL is unset), exactly like the Bearer revocation tests.
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+
+        let client_a = "oac_app_a";
+        let client_b = "oac_app_b";
+        let host_a = "app-a.zeroship.ai";
+        let host_b = "app-b.zeroship.ai";
+        let sector_a = "https://app-a.zeroship.ai";
+        let sector_b = "https://app-b.zeroship.ai";
+        // ONE global Hydra sub presented to both apps — exactly the Bearer
+        // test's shape (same `sub`, two `client_id`s).
+        let global_sub = format!("0192f1aa-bbbb-7ccc-8ddd-{:012x}", rand_suffix());
+        // `iat` strictly in the past so a `revoke_family` stamped NOW() is
+        // `revoked_after > to_timestamp(iat)` → the token is rejected.
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let iat = now - 60;
+
+        // Two introspection servers / states, one per client_id, each
+        // returning the SAME global sub but its own client_id claim.
+        let srv_a = start_introspect_server(serde_json::json!({
+            "active": true,
+            "sub": global_sub,
+            "client_id": client_a,
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": "Hydra User",
+            "scope": "openid email",
+            "iat": iat,
+        }))
+        .await;
+        let srv_b = start_introspect_server(serde_json::json!({
+            "active": true,
+            "sub": global_sub,
+            "client_id": client_b,
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": "Hydra User",
+            "scope": "openid email",
+            "iat": iat,
+        }))
+        .await;
+        let base_a = srv_a.url("").trim_end_matches('/').to_string();
+        let base_b = srv_b.url("").trim_end_matches('/').to_string();
+        let state_a =
+            build_state_for_introspection_with_db(gateway_signing.clone(), &base_a, Some(db.clone()));
+        let state_b =
+            build_state_for_introspection_with_db(gateway_signing, &base_b, Some(db.clone()));
+
+        let request_id = Uuid::new_v4();
+
+        // Before revocation: app A Allowed (matching client_id, no marker).
+        let pre = resolve_dpop_user_header(
+            &opaque_dpop_req(&client_key, "ht_opaque_revoke", host_a, "/api/me"),
+            &state_a,
+            &request_id,
+            Some(client_a),
+            Some(sector_a),
+        )
+        .await;
+        assert!(
+            matches!(pre, DpopOutcome::Allowed(_)),
+            "pre-revocation DPoP introspection token must be Allowed, got {pre:?}"
+        );
+
+        // Revoke ONLY the (client_a, global_sub) family AFTER the token's iat.
+        // The introspection arm keys on the GLOBAL Hydra sub (the pairwise
+        // projection happens AFTER this check), the same sub the marker is
+        // written against here — exactly as the Bearer arm keys before its
+        // own projection.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool checkout");
+            let conn = pool.get().await.expect("pool checkout");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_a, &global_sub)
+                .await
+                .expect("revoke_family app A");
+        }
+
+        // Arm 1 — REJECT: app A token now rejected (None). The new family
+        // check fires before the pairwise projection / Allowed.
+        let post_a = resolve_dpop_user_header(
+            &opaque_dpop_req(&client_key, "ht_opaque_revoke2", host_a, "/api/me"),
+            &state_a,
+            &request_id,
+            Some(client_a),
+            Some(sector_a),
+        )
+        .await;
+        assert!(
+            matches!(post_a, DpopOutcome::None),
+            "revoked (oac_app_a, sub) family must reject app A's DPoP introspection token, got {post_a:?}"
+        );
+
+        // Arm 2 — PER-APP SCOPING: the SAME global sub on app B is NOT in the
+        // revoked family `(oac_app_b, sub)` → still Allowed. Proves the 6d key
+        // is per-app, not global; a regression dropping client_id would reject
+        // here.
+        let post_b = resolve_dpop_user_header(
+            &opaque_dpop_req(&client_key, "ht_opaque_revoke3", host_b, "/api/me"),
+            &state_b,
+            &request_id,
+            Some(client_b),
+            Some(sector_b),
+        )
+        .await;
+        assert!(
+            matches!(post_b, DpopOutcome::Allowed(_)),
+            "app A revocation must NOT revoke the same sub on app B (per-app, not global), got {post_b:?}"
+        );
+
+        let pool = crate::db::checkout(&db).await.expect("pool checkout");
+        let conn = pool.get().await.expect("pool checkout");
+        conn.execute(
+            "DELETE FROM auth.token_revocations WHERE sub = $1",
+            &[&global_sub],
+        )
+        .await
+        .ok();
+        drop(conn);
+        drop(srv_a);
+        drop(srv_b);
+    }
+
+    /// 48-bit pseudo-random suffix for a unique-per-run global sub: the
+    /// unique sub avoids cross-run assertion taint (a stale row from an
+    /// earlier run keys on a different sub). Stale rows are not cleaned up on
+    /// an unwound assert! panic — they accumulate until the 24h
+    /// `sweep_expired_families` reaps them. No `rand` dep needed — the nanos
+    /// clock is plenty.
+    fn rand_suffix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+            & 0xffff_ffff_ffff
     }
 
     #[ntex::test]

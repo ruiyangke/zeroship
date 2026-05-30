@@ -789,6 +789,14 @@ pub struct IntrospectionResponse {
     /// Absolute expiry (UNIX seconds).
     #[serde(default)]
     pub exp: Option<i64>,
+    /// Token issued-at (UNIX seconds). RFC 7662 §2.2 optional field; Hydra
+    /// emits it. The DPoP introspection-fallback arm needs it for the
+    /// per-app family-marker revocation check (`is_family_revoked_since`):
+    /// a token whose `iat` predates the marker is rejected. When Hydra omits
+    /// it, the arm fails CLOSED (treats it as epoch `0`), so any live family
+    /// marker rejects the token rather than silently skipping the check.
+    #[serde(default)]
+    pub iat: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]
