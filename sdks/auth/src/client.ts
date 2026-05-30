@@ -75,6 +75,8 @@ export interface AuthClient {
   requestScopes(scopes: string[]): Promise<Session>;
   /** Returns a valid access token, refreshing if needed (lock-serialized). */
   getAccessToken(): Promise<string>;
+  /** Step-up via popup specifically (Auth0 `getAccessTokenWithPopup` parity). */
+  getAccessTokenWithPopup(opts?: { scopes?: string[] }): Promise<string>;
 
   onAuthStateChange(cb: Listener): { unsubscribe(): void };
 
@@ -374,6 +376,14 @@ class AuthClientImpl implements AuthClient {
       return this.current.access_token;
     }
     const session = await this.mintUnderLock();
+    return session.access_token;
+  }
+
+  async getAccessTokenWithPopup(opts: { scopes?: string[] } = {}): Promise<string> {
+    // Auth0 parity: always an INTERACTIVE step-up. Run the popup consent flow
+    // for the requested (or current) scopes and return the freshly-minted token.
+    // The caller MUST invoke this inside a user gesture so the popup is not blocked.
+    const session = await this.requestScopes(opts.scopes ?? this.scope);
     return session.access_token;
   }
 

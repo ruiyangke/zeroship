@@ -192,6 +192,29 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await signIn.catch(() => {});
   });
 
+  test("getAccessTokenWithPopup runs an interactive consent step-up and returns the minted token", async () => {
+    const h = makeHarness();
+    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody({ scope: "openid profile email payments:write" })));
+    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
+
+    const tokenP = client.getAccessTokenWithPopup({ scopes: ["payments:write"] });
+    const state = await awaitReady(h);
+
+    // It is the INTERACTIVE variant: a popup must have opened with prompt=consent
+    // and the requested scope unioned in (no silent mint).
+    const q = new URL(h.window.lastOpened!.location.href).searchParams;
+    assert.equal(q.get("prompt"), "consent", "getAccessTokenWithPopup must drive an interactive consent step-up");
+    assert.match(q.get("scope") ?? "", /payments:write/, "the requested scope is unioned in");
+
+    h.window.dispatchMessage({
+      origin: APP_ORIGIN,
+      data: { type: "zs:authorization_response", response: { code: "stepup-code", state } },
+    });
+
+    const token = await tokenP;
+    assert.equal(token, "wrap.access.token", "resolves the freshly-minted access token, not a Session");
+  });
+
   test("invalid_state: a relay state that matches no transaction rejects", async () => {
     const h = makeHarness();
     h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
