@@ -90,6 +90,8 @@ import {
   type ReactNode,
 } from "react";
 import { Collapsible as BaseCollapsible } from "@base-ui/react/collapsible";
+import { ChevronDown } from "lucide-react";
+import { Icon } from "../Icon/Icon";
 import { Slot } from "../_slot";
 import { classnames } from "../_classnames";
 
@@ -297,32 +299,12 @@ const CollapsibleTrigger = forwardRef<
       className={classnames("zs-collapsible-trigger", className)}
     >
       <span className="zs-collapsible-trigger-label">{children}</span>
-      <CollapsibleChevron />
+      <Icon as={ChevronDown} className="zs-collapsible-trigger-chevron" />
     </BaseCollapsible.Trigger>
   );
 });
 (CollapsibleTrigger as { displayName?: string }).displayName =
   "Collapsible.Trigger";
-
-function CollapsibleChevron() {
-  return (
-    <svg
-      className="zs-collapsible-trigger-chevron"
-      viewBox="0 0 12 12"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M3 4.5l3 3 3-3"
-      />
-    </svg>
-  );
-}
 
 /* ─── Collapsible.Panel ─────────────────────────────────────────────── */
 

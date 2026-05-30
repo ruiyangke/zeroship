@@ -59,6 +59,8 @@ import {
   type Ref,
 } from "react";
 import { Select as BaseSelect } from "@base-ui/react/select";
+import { Check, ChevronDown } from "lucide-react";
+import { Icon } from "../Icon";
 import { useFieldContext, type FieldSize } from "../Field";
 import { classnames, composeBaseClass } from "../_classnames";
 
@@ -341,7 +343,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
             className="zs-select-trigger__icon"
             aria-hidden="true"
           >
-            <ChevronDownGlyph />
+            <Icon as={ChevronDown} size="sm" />
           </BaseSelect.Icon>
         </BaseSelect.Trigger>
         <BaseSelect.Portal>
@@ -383,21 +385,6 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
 }
 SelectRoot.displayName = "Select";
 
-function ChevronDownGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M4 6l4 4 4-4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 /* ─── Item ─────────────────────────────────────────────────────────── */
 
 type BaseItemProps = ComponentPropsWithoutRef<typeof BaseSelect.Item>;
@@ -425,7 +412,7 @@ const SelectItem = forwardRef<HTMLElement, SelectItemProps>(function SelectItem(
         className="zs-select-item__indicator"
         keepMounted
       >
-        <CheckGlyph />
+        <Icon as={Check} size="sm" />
       </BaseSelect.ItemIndicator>
       <BaseSelect.ItemText className="zs-select-item__text">
         {children}
@@ -434,21 +421,6 @@ const SelectItem = forwardRef<HTMLElement, SelectItemProps>(function SelectItem(
   );
 });
 SelectItem.displayName = "Select.Item";
-
-function CheckGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M3.5 8.5l3 3 6-6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── Group + GroupLabel ─────────────────────────────────────────── *
  *

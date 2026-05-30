@@ -74,7 +74,9 @@ import {
   type ToastRootToastObject,
 } from "@base-ui/react/toast";
 import { useDirection } from "@base-ui/react/direction-provider";
+import { X } from "lucide-react";
 import { composeBaseClass, classnames } from "../_classnames";
+import { Icon } from "../Icon";
 
 /** Base UI's per-toast payload. The manager publishes this for each
  * live toast; the Viewport's default render loop walks the list and
@@ -581,31 +583,12 @@ const ToastClose = forwardRef<HTMLButtonElement, ToastCloseProps>(
         aria-label={ariaLabel ?? "Dismiss notification"}
         aria-hidden={undefined}
       >
-        {children ?? <CloseGlyph />}
+        {children ?? <Icon as={X} size="sm" />}
       </BaseToast.Close>
     );
   },
 );
 ToastClose.displayName = "Toast.Close";
-
-function CloseGlyph() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 12 12"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M 2,2 L 10,10 M 10,2 L 2,10"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── Public manager hook ───────────────────────────────────────────── *
  *

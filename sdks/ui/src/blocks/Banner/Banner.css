@@ -85,6 +85,12 @@
   margin-block-start: var(--zs-space-half);
 }
 
+/* The glyph is a Lucide icon (rendered as an <svg> by the Icon primitive);
+   this descendant rule still matches and keeps the prior 1em footprint
+   (the .zs-icon--md size class loses on specificity to this class+element
+   selector). Lucide glyphs are fully stroked in currentColor — both the
+   circled check (success) and the circled alert (info/warning/danger) carry
+   their full mark as strokes, so no per-shape fill override is needed. */
 .zs-banner__icon svg {
   inline-size: 1em;
   block-size: 1em;
@@ -93,18 +99,6 @@
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-/* The success check is a stroked path; the alert exclamation dot is a
-   filled mark. Mirror ErrorState's treatment of the dot. */
-.zs-banner__icon svg circle:last-of-type {
-  fill: currentColor;
-  stroke: none;
-}
-.zs-banner--success .zs-banner__icon svg circle:last-of-type {
-  /* The success glyph's only circle is the outer ring — keep it stroked. */
-  fill: none;
-  stroke: currentColor;
 }
 
 .zs-banner__title {

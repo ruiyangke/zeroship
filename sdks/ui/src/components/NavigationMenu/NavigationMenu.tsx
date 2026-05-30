@@ -77,6 +77,8 @@ import {
   type Ref,
 } from "react";
 import { NavigationMenu as BaseNavMenu } from "@base-ui/react/navigation-menu";
+import { ChevronDown } from "lucide-react";
+import { Icon } from "../Icon/Icon";
 import { classnames, composeBaseClass } from "../_classnames";
 import { Slot, composeRefs } from "../_slot";
 
@@ -593,33 +595,17 @@ const NavMenuIcon = forwardRef<HTMLSpanElement, NavMenuIconProps>(
         ref={ref}
         className={composeBaseClass("zs-navmenu-icon", className)}
       >
-        {children ?? <ChevronGlyph />}
+        {/* The chevron is the governed `Icon` (Lucide chevron-down). It
+            renders directly inside the `.zs-navmenu-icon` span, so the
+            parent's `[data-popup-open]` rotation and the
+            `.zs-navmenu-icon > svg { inline-size:100%; block-size:100% }`
+            sizing rule keep matching it. */}
+        {children ?? <Icon as={ChevronDown} />}
       </BaseNavMenu.Icon>
     );
   },
 );
 NavMenuIcon.displayName = "NavigationMenu.Icon";
-
-function ChevronGlyph() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 12 12"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M 3,4.5 L 6,7.5 L 9,4.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── public namespace ──────────────────────────────────────────────── */
 

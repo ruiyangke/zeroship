@@ -173,10 +173,17 @@
  * `data-panel-open` on the trigger when its Item is expanded; we read
  * that and flip the rotation. `prefers-reduced-motion` drops the
  * transition (the flip still happens, just instantly). */
-.zs-accordion-trigger-chevron {
-  flex: 0 0 auto;
+/* The chevron is the governed `Icon` (a Lucide chevron-down svg) carrying
+   `zs-icon` + `zs-icon--md` alongside this class. We scope the sizing
+   under the trigger so this rule (0,2,0) outranks `.zs-icon--md` (0,1,0)
+   regardless of stylesheet concat order — the chevron stays at the
+   accordion token size, not the default Icon md box. */
+.zs-accordion-trigger .zs-accordion-trigger-chevron {
   inline-size: var(--zs-accordion-chevron-size);
   block-size: var(--zs-accordion-chevron-size);
+}
+.zs-accordion-trigger-chevron {
+  flex: 0 0 auto;
   color: var(--zs-label-secondary);
   transform-origin: 50% 50%;
   transition: transform var(--zs-motion-fast) var(--zs-motion-ease);

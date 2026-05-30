@@ -75,8 +75,10 @@ import {
   type MouseEvent as ReactMouseEvent,
   type Ref,
 } from "react";
+import { X } from "lucide-react";
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Button, type ButtonProps } from "../Button";
+import { Icon } from "../Icon";
 import { Slot, composeRefs } from "../_slot";
 import { classnames, composeBaseClass } from "../_classnames";
 
@@ -406,7 +408,7 @@ const DialogHeader = forwardRef<HTMLDivElement, DialogHeaderProps>(
             className="zs-dialog__header-close"
             aria-label={closeLabel}
           >
-            <CloseGlyph />
+            <Icon as={X} size="sm" />
           </BaseDialog.Close>
         ) : null}
       </div>
@@ -414,27 +416,6 @@ const DialogHeader = forwardRef<HTMLDivElement, DialogHeaderProps>(
   },
 );
 DialogHeader.displayName = "Dialog.Header";
-
-function CloseGlyph() {
-  // SVG viewBox units are unitless; not subject to the no-raw-px rule.
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M4 4l8 8M12 4l-8 8"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── Title / Description ───────────────────────────────────────────── */
 

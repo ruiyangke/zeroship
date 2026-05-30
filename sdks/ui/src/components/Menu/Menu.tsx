@@ -80,6 +80,8 @@ import {
   type Ref,
 } from "react";
 import { Menu as BaseMenu } from "@base-ui/react/menu";
+import { Check, ChevronRight } from "lucide-react";
+import { Icon } from "../Icon";
 import { Slot, composeRefs } from "../_slot";
 import { composeBaseClass } from "../_classnames";
 
@@ -430,7 +432,7 @@ const MenuCheckboxItem = forwardRef<HTMLElement, MenuCheckboxItemProps>(
             className="zs-menu-item__indicator-glyph"
             keepMounted
           >
-            <CheckGlyph />
+            <Icon as={Check} size="sm" />
           </BaseMenu.CheckboxItemIndicator>
         </span>
         <span className="zs-menu-item__text">{children}</span>
@@ -444,25 +446,6 @@ const MenuCheckboxItem = forwardRef<HTMLElement, MenuCheckboxItemProps>(
   },
 );
 MenuCheckboxItem.displayName = "Menu.CheckboxItem";
-
-function CheckGlyph() {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M3.5 8.5l3 3 6-6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── RadioGroup + RadioItem + Indicator ───────────────────────────── *
  *
@@ -714,7 +697,7 @@ function MenuSubmenu({
         <span className="zs-menu-item__indicator" aria-hidden="true" />
         <span className="zs-menu-item__text">{trigger}</span>
         <span className="zs-menu-submenu-trigger__chevron" aria-hidden="true">
-          <ChevronRightGlyph />
+          <Icon as={ChevronRight} size="sm" />
         </span>
       </BaseMenu.SubmenuTrigger>
       <BaseMenu.Portal>
@@ -733,21 +716,6 @@ function MenuSubmenu({
   );
 }
 MenuSubmenu.displayName = "Menu.Submenu";
-
-function ChevronRightGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M6 4l4 4-4 4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── public namespace ─────────────────────────────────────────────── */
 

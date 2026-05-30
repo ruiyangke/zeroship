@@ -71,7 +71,9 @@ import {
   type Ref,
 } from "react";
 import { NumberField as BaseNumberField } from "@base-ui/react/number-field";
+import { Minus, Plus } from "lucide-react";
 import { useFieldContext } from "../Field";
+import { Icon } from "../Icon/Icon";
 import { classnames } from "../_classnames";
 
 export type NumberFieldSize = "sm" | "md" | "lg";
@@ -301,19 +303,10 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
             className="zs-number-field__step zs-number-field__step--dec"
             aria-label="Decrement"
           >
-            {/* Minus glyph. SVG so currentColor flows from CSS state. */}
-            <svg
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-              focusable="false"
-              width="16"
-              height="16"
-            >
-              <path
-                fill="currentColor"
-                d="M3 7.25h10v1.5H3z"
-              />
-            </svg>
+            {/* Minus glyph — decorative; the button carries aria-label.
+                Sized to 1em by `.zs-number-field__step > svg` (matches the
+                prior 16×16); currentColor flows from the step's CSS state. */}
+            <Icon as={Minus} size="sm" />
           </BaseNumberField.Decrement>
           <BaseNumberField.Input
             className="zs-number-field__input"
@@ -369,19 +362,8 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
             className="zs-number-field__step zs-number-field__step--inc"
             aria-label="Increment"
           >
-            {/* Plus glyph. */}
-            <svg
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-              focusable="false"
-              width="16"
-              height="16"
-            >
-              <path
-                fill="currentColor"
-                d="M7.25 3h1.5v4.25H13v1.5H8.75V13h-1.5V8.75H3v-1.5h4.25z"
-              />
-            </svg>
+            {/* Plus glyph — decorative; the button carries aria-label. */}
+            <Icon as={Plus} size="sm" />
           </BaseNumberField.Increment>
         </BaseNumberField.Group>
       </BaseNumberField.Root>

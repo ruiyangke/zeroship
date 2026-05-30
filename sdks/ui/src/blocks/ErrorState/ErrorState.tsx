@@ -51,8 +51,10 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
+import { CircleAlert } from "lucide-react";
 import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
+import { Icon } from "../../components/Icon/Icon";
 import { Center } from "../../layouts/Center";
 import { Stack } from "../../layouts/Stack";
 import { Button } from "../../components/Button";
@@ -192,13 +194,11 @@ function ErrorStateIcon({ intent }: { intent: ErrorStateIntent }) {
       data-slot="error-state-icon"
       className="zs-error-state__icon"
     >
-      <svg viewBox="0 0 24 24" focusable="false">
-        {/* A circle + exclamation: the universal alert glyph. SVG
-            attribute units (viewBox space), not CSS px. */}
-        <circle cx="12" cy="12" r="10" />
-        <line x1="12" y1="7" x2="12" y2="13" />
-        <circle cx="12" cy="17" r="1" />
-      </svg>
+      {/* The universal alert glyph (Lucide CircleAlert). Decorative — the
+          wrapper is aria-hidden and the heading carries the meaning. Sized
+          to 1em by `.zs-error-state__icon svg` (wins on specificity over the
+          .zs-icon--md size class), preserving the prior footprint. */}
+      <Icon as={CircleAlert} />
     </div>
   );
 }

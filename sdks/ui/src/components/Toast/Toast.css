@@ -288,6 +288,13 @@
     color var(--zs-motion-fast) var(--zs-motion-ease),
     background-color var(--zs-motion-fast) var(--zs-motion-ease);
 }
+/* The dismiss glyph is an Icon (`size="sm"` = 1rem); the original
+ * hand-rolled X was 0.75rem. Hold that quieter footprint here rather
+ * than enlarging the glyph, so the trailing close column is unchanged. */
+.zs-toast-close > svg {
+  inline-size: var(--zs-space-3);
+  block-size: var(--zs-space-3);
+}
 .zs-toast-close:hover {
   color: var(--zs-label);
   background-color: var(--zs-fill-quaternary);

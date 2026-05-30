@@ -49,7 +49,9 @@ import {
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
+import { CircleAlert, CircleCheck } from "lucide-react";
 import { classnames } from "../../components/_classnames";
+import { Icon } from "../../components/Icon/Icon";
 import { Stack } from "../../layouts/Stack";
 import type { Intent } from "../../components/_intent";
 
@@ -219,29 +221,20 @@ export type BannerActionsProps = DivProps;
  * meaning is fixed per intent, so there's no consumer slot for it. The
  * wrapper is aria-hidden; the title/description carry the meaning. */
 function BannerIcon({ intent }: { intent: BannerIntent }) {
+  // Cohesive intent→glyph mapping: success reads as a circled check, every
+  // other severity (info / warning / danger) shares the circled-alert mark.
+  // The tint + the copy carry the severity distinction, same as before; the
+  // shape difference (check vs alert) reinforces success-vs-attention. Both
+  // are Lucide stroked glyphs painting in `currentColor`, so the wrapper's
+  // intent color flows through unchanged.
+  const glyph = intent === "success" ? CircleCheck : CircleAlert;
   return (
     <div
       aria-hidden="true"
       data-slot="banner-icon"
       className="zs-banner__icon"
     >
-      <svg viewBox="0 0 24 24" focusable="false">
-        {intent === "success" ? (
-          // A circle + check — the universal success glyph.
-          <>
-            <circle cx="12" cy="12" r="10" />
-            <path d="M8 12.5l2.5 2.5L16 9" />
-          </>
-        ) : (
-          // info / warning / danger share the circle + exclamation alert
-          // glyph; the tint + the copy carry the severity distinction.
-          <>
-            <circle cx="12" cy="12" r="10" />
-            <line x1="12" y1="7" x2="12" y2="13" />
-            <circle cx="12" cy="17" r="1" />
-          </>
-        )}
-      </svg>
+      <Icon as={glyph} />
     </div>
   );
 }
