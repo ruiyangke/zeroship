@@ -1,16 +1,22 @@
 /*
- * DataTable — presentational data table.
+ * DataTable v2 — presentational data grid (managed engine + toolbar +
+ * filter row + pagination footer).
  *
  * Structure:
- *   table.zs-data-table
- *     caption.zs-data-table__caption
- *     colgroup > col[.zs-data-table__select-col]
- *     thead > tr > th.zs-data-table__th | .zs-data-table__select-cell
- *       th .zs-data-table__sort-button > .zs-data-table__header-label
- *                                       + .zs-data-table__sort-glyph
- *     tbody > tr[.zs-data-table__row?] > td.zs-data-table__td
- *                                      | td.zs-data-table__select-cell
- *                                      | td.zs-data-table__state-cell (full-span)
+ *   div.zs-data-table-shell
+ *     div.zs-data-table__toolbar  (Cluster — title + search + actions)
+ *     div.zs-data-table__scroll   (overflow container; sticky-header scope)
+ *       table.zs-data-table
+ *         caption.zs-data-table__caption
+ *         colgroup > col[.zs-data-table__select-col]
+ *         thead > tr > th.zs-data-table__th | .zs-data-table__select-cell
+ *           th .zs-data-table__sort-button > .zs-data-table__header-label
+ *                                           + .zs-data-table__sort-glyph
+ *         thead > tr.zs-data-table__filter-row > th.zs-data-table__filter-cell
+ *         tbody > tr[data-slot=data-table-row] > td.zs-data-table__td
+ *                                              | td.zs-data-table__select-cell
+ *                                              | td.zs-data-table__state-cell
+ *     div.zs-data-table__footer   (composes the Pagination block)
  *
  * Tokens: header bg --zs-fill-secondary over the opaque table surface;
  * row separators --zs-separator; text --zs-label / header
@@ -22,6 +28,55 @@
  * prefers-reduced-motion. forced-colors: separators, the selected-row
  * marker, and the sort affordance all stay visible via system colors.
  */
+
+/* ─── shell: stacks toolbar / scroll / footer ─────────────────────────── */
+.zs-data-table-shell {
+  display: flex;
+  flex-direction: column;
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+/* The scroll region owns overflow so the sticky header pins relative to
+   it (not the page). When the consumer bounds the shell's block-size, the
+   scroll region flexes to fill it (min-block-size:0 lets it actually
+   shrink inside the flex column) and scrolls its overflow. */
+.zs-data-table__scroll {
+  inline-size: 100%;
+  min-inline-size: 0;
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow: auto;
+}
+
+/* ─── toolbar ─────────────────────────────────────────────────────────── */
+.zs-data-table__toolbar {
+  inline-size: 100%;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-1);
+}
+
+.zs-data-table__toolbar-start {
+  min-inline-size: 0;
+}
+
+.zs-data-table__title {
+  color: var(--zs-label);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: 600;
+}
+
+.zs-data-table__search {
+  inline-size: 16rem;
+  max-inline-size: 100%;
+}
+
+/* ─── footer ──────────────────────────────────────────────────────────── */
+.zs-data-table__footer {
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-1);
+}
 
 .zs-data-table {
   /* A data table is a content surface, so it paints an OPAQUE background
@@ -280,5 +335,134 @@
   .zs-data-table__sort-glyph[data-state="ascending"] .zs-data-table__sort-up,
   .zs-data-table__sort-glyph[data-state="descending"] .zs-data-table__sort-down {
     opacity: 1;
+  }
+}
+
+/* ─── per-column filter row ───────────────────────────────────────────── */
+.zs-data-table__filter-row th {
+  background-color: color-mix(
+    in oklab,
+    var(--zs-fill-secondary),
+    var(--zs-surface)
+  );
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+  vertical-align: middle;
+}
+
+.zs-data-table--sticky .zs-data-table__filter-row th {
+  /* The filter row pins directly under the header band. Two sticky rows
+     stack; the header sits at 0, the filter row offsets by the header's
+     intrinsic block-size (it stays glued beneath it as content scrolls). */
+  position: sticky;
+  inset-block-start: var(--zs-data-table-header-offset, 2.5rem);
+  z-index: 1;
+}
+
+.zs-data-table__filter-input {
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+/* ─── rich cells ──────────────────────────────────────────────────────── */
+
+/* boolean: glyph + text label so meaning never rides on color alone. */
+.zs-data-table__bool {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  color: var(--zs-label-secondary);
+}
+
+.zs-data-table__bool[data-value="true"] {
+  color: var(--zs-label);
+}
+
+.zs-data-table__bool-glyph {
+  inline-size: 1em;
+  block-size: 1em;
+  flex: none;
+}
+
+.zs-data-table__bool-glyph[data-value="true"] {
+  color: var(--zs-success);
+}
+
+.zs-data-table__bool-glyph[data-value="false"] {
+  color: var(--zs-label-tertiary);
+}
+
+.zs-data-table__bool-label {
+  font-size: inherit;
+}
+
+/* link cell: accent text, underline on hover/focus; ring from focus-visible. */
+.zs-data-table__link {
+  color: var(--zs-accent);
+  text-decoration: none;
+  border-radius: var(--zs-radius-1);
+}
+
+@media (hover: hover) {
+  .zs-data-table__link:hover {
+    text-decoration: underline;
+  }
+}
+
+.zs-data-table__link:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+  text-decoration: underline;
+}
+
+/* actions column: pin to the inline-end, quiet kebab trigger. */
+.zs-data-table__th--actions,
+.zs-data-table__td--actions {
+  inline-size: 3rem;
+  text-align: end;
+  white-space: nowrap;
+}
+
+.zs-data-table__row-actions-trigger {
+  color: var(--zs-label-secondary);
+}
+
+.zs-data-table__row-actions-trigger svg {
+  inline-size: 1rem;
+  block-size: 1rem;
+}
+
+/* danger row-action: destructive ink on the menu item. */
+.zs-data-table__row-action--danger {
+  color: var(--zs-danger);
+}
+
+/* ─── cell truncation ─────────────────────────────────────────────────── */
+.zs-data-table__truncate {
+  display: block;
+  min-inline-size: var(--zs-data-table-cell-min, 0);
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── clickable rows (onRowClick) ─────────────────────────────────────── */
+.zs-data-table tbody tr[data-clickable] {
+  cursor: pointer;
+}
+
+/* ─── forced-colors: rich-cell affordances ────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-data-table__filter-row th {
+    border-block-end: var(--zs-selection-hairline) solid CanvasText;
+  }
+  .zs-data-table__bool-glyph,
+  .zs-data-table__bool {
+    color: CanvasText;
+  }
+  .zs-data-table__link {
+    color: LinkText;
   }
 }

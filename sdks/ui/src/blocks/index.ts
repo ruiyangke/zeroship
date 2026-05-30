@@ -40,12 +40,16 @@ export {
   type DescriptionListDetailProps,
 } from "./DescriptionList";
 
-// Data block (Wave 3) — presentational, generic data table.
+// Data block (Wave 3) — presentational, generic data grid with an opt-in
+// managed (client-side) sort/filter/paginate engine (v2).
 export {
   DataTable,
   type DataTableProps,
   type DataTableColumn,
+  type DataTableColumnType,
+  type DataTableRowAction,
   type DataTableSort,
+  type DataTableColumnFilters,
   type DataTableSelectionMode,
   type DataTableAlign,
   type DataTableDensity,
