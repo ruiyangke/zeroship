@@ -85,3 +85,17 @@ export {
   type ListViewMetaProps,
   type ListViewTrailingProps,
 } from "./ListView";
+
+// FormSection block — governed settings/form section (header · body ·
+// optional footer actions) in stacked|aside layout.
+export {
+  FormSection,
+  type FormSectionProps,
+  type FormSectionOrientation,
+  type FormSectionHeaderProps,
+  type FormSectionTitleProps,
+  type FormSectionDescriptionProps,
+  type FormSectionBodyProps,
+  type FormSectionFooterProps,
+  type FormSectionFooterAlign,
+} from "./FormSection";

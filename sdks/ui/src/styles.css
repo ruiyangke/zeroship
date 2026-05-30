@@ -80,6 +80,7 @@
 @import "./blocks/Pagination/Pagination.css";
 @import "./blocks/FilterBar/FilterBar.css";
 @import "./blocks/ListView/ListView.css";
+@import "./blocks/FormSection/FormSection.css";
 
 *,
 *::before,

@@ -1,0 +1,186 @@
+/*
+ * FormSection — governed settings/form section.
+ *
+ * Anatomy:
+ *   .zs-form-section                     <section> root (aria-labelledby title)
+ *     ├─ .zs-form-section__header        <div> — title + description region
+ *     │   ├─ .zs-form-section__title       <h3> — relevelable heading
+ *     │   └─ .zs-form-section__description <p>  — muted supporting copy
+ *     ├─ .zs-form-section__body          <div> — vertical stack of fields
+ *     └─ .zs-form-section__footer        <div> — separator + action row
+ *         ├─ .zs-form-section__footer-divider  the hairline Separator
+ *         └─ .zs-form-section__actions   <div> — right-aligned Cluster of Buttons
+ *
+ * The section paints NO surface of its own — it sits inside whatever
+ * panel/Card/page region the consumer provides. It only arranges the
+ * header / body / footer regions and governs their rhythm. Logical
+ * properties throughout so it flips correctly under RTL.
+ *
+ * ── Layout ────────────────────────────────────────────────────────────
+ * stacked (default): a single grid column — header, then body, then
+ *   footer, separated by --zs-space tokens.
+ *
+ * aside: a two-column grid (settings-page style). The header sits in the
+ *   start column, the body in the end column, and the footer SPANS both
+ *   columns under the body. Below --zs-bp-md (48rem) the grid collapses
+ *   back to a single column (stacked) — a fixed two-column split is
+ *   unreadable on narrow viewports. The collapse @media uses the literal
+ *   rem value of --zs-bp-md (custom properties cannot appear in a media
+ *   query condition).
+ *
+ * ── Motion ──────────────────────────────────────────────────────────── *
+ *   None. The reduced-motion gate exists for parity with the surface.
+ */
+
+.zs-form-section {
+  /* Token knobs a consumer can retune per-section via inline custom
+     properties without forking the CSS. */
+  --zs-form-section-gap: var(--zs-space-6);
+  --zs-form-section-header-gap: var(--zs-space-1);
+  --zs-form-section-body-gap: var(--zs-space-5);
+  --zs-form-section-aside-col: 16rem;
+  --zs-form-section-aside-gap: var(--zs-space-8);
+
+  display: grid;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+/* ─── header ──────────────────────────────────────────────────────────
+ * Title + description stacked with a tight gap. */
+.zs-form-section__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-form-section-header-gap);
+}
+
+.zs-form-section__title {
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: 600;
+}
+
+.zs-form-section__description {
+  margin: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 400;
+}
+
+/* ─── body ────────────────────────────────────────────────────────────
+ * A vertical stack of the consumer's fields. Layout-only (no role). The
+ * rhythm between fields comes from the body gap token. */
+.zs-form-section__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-form-section-body-gap);
+  /* Logical min-size so an overflowing field (e.g. a wide Input) shrinks
+     instead of blowing out the aside end column. */
+  min-inline-size: 0;
+}
+
+/* ─── footer ──────────────────────────────────────────────────────────
+ * The action band: a hairline Separator (when enabled) above a row of
+ * Buttons. The Separator owns no outer margin (house rule); the band gap
+ * comes from the footer's own flex gap. */
+.zs-form-section__footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-4);
+}
+
+.zs-form-section__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-3);
+  /* Default alignment is `end` — actions on the trailing inline edge.
+     justify-content is writing-direction-aware via flex-end. */
+  justify-content: flex-end;
+}
+
+.zs-form-section__footer[data-align="start"] .zs-form-section__actions {
+  justify-content: flex-start;
+}
+
+.zs-form-section__footer[data-align="between"] .zs-form-section__actions {
+  justify-content: space-between;
+}
+
+.zs-form-section__footer[data-align="end"] .zs-form-section__actions {
+  justify-content: flex-end;
+}
+
+/* ─── stacked (default) ───────────────────────────────────────────────
+ * Single column: header / body / footer, separated by the section gap. */
+.zs-form-section--stacked {
+  grid-template-columns: 1fr;
+  row-gap: var(--zs-form-section-gap);
+}
+
+/* ─── aside ───────────────────────────────────────────────────────────
+ * Two-column settings layout: header in the start column, body in the
+ * end column, footer spanning both under the body.
+ *
+ * Named grid areas keep the placement readable regardless of source
+ * order: the root emits header → body → footer, and the areas re-place
+ * them into the two-column arrangement. */
+.zs-form-section--aside {
+  grid-template-columns: var(--zs-form-section-aside-col) 1fr;
+  grid-template-areas:
+    "header body"
+    ".      footer";
+  column-gap: var(--zs-form-section-aside-gap);
+  row-gap: var(--zs-form-section-gap);
+}
+
+.zs-form-section--aside > .zs-form-section__header {
+  grid-area: header;
+}
+
+.zs-form-section--aside > .zs-form-section__body {
+  grid-area: body;
+}
+
+.zs-form-section--aside > .zs-form-section__footer {
+  grid-area: footer;
+}
+
+/* Below --zs-bp-md (48rem): collapse the two-column aside back to a
+ * single stacked column. A fixed two-column split is unreadable narrow.
+ * Custom properties can't appear in the @media condition, so the literal
+ * 47.999rem mirrors --zs-bp-md (48rem). */
+@media (max-width: 47.999rem) {
+  .zs-form-section--aside {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "body"
+      "footer";
+    column-gap: 0;
+  }
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * The header text and footer Separator must stay legible under HCM. The
+ * Separator component already maps its hairline to CanvasText; assert the
+ * header/description text resolve to the system text color so the section
+ * reads coherently in forced-colors mode. */
+@media (forced-colors: active) {
+  .zs-form-section__title,
+  .zs-form-section__description {
+    color: CanvasText;
+  }
+}
+
+/* ─── reduced-motion ──────────────────────────────────────────────────
+ * No-op — FormSection has no transitions. The gate exists for parity
+ * with the rest of the surface. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-form-section {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}
