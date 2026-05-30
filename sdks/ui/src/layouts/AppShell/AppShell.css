@@ -20,9 +20,14 @@
  *     height (dvh, not px — tracks mobile browser-chrome show/hide; the
  *     no-raw-px rule explicitly permits dvh/%). The body Split gets
  *     `flex: 1` so it absorbs the remaining height between Header/Footer.
- *   - The Header paints `--zs-surface-raised` with a bottom hairline
- *     (`--zs-separator`); the Footer paints a top hairline. These are the
- *     only painted bands — the Split body and Main stay arrange-only.
+ *   - Surface hierarchy: the Header paints `--zs-surface-raised` (a step
+ *     ABOVE the canvas) with a bottom hairline; the Sidebar rail paints
+ *     `--zs-surface-sunken` (a step BELOW the canvas) with a hairline on
+ *     the edge facing Main; Main stays the bare canvas (`--zs-surface`),
+ *     arrange-only with NO forced padding (consumers may want full-bleed
+ *     content — wrap Main content in a `Container` or your own padded
+ *     region). The Footer paints a top hairline. Raised header > canvas
+ *     main > sunken rail is the deliberate layering.
  *   - The sidebar collapse is a width/visibility toggle keyed off
  *     `[data-sidebar-open]`: open → the rail keeps its
  *     `--app-shell-sidebar-width`; closed → it collapses to zero and is
@@ -48,9 +53,17 @@
 /* ─── Header — raised band + bottom hairline ──────────────────────────── */
 .zs-app-shell__header {
   flex: 0 0 auto;
+  /* A real bar: a comfortable minimum height + vertically-centered content
+   * so a brand lockup and actions sit on a baseline rather than collapsing
+   * to the height of whatever text is dropped in. `min-block-size` keeps
+   * the bar from shrinking below a touch-comfortable height; flex centers
+   * the row. */
+  display: flex;
+  align-items: center;
+  min-block-size: var(--zs-space-9);
   background: var(--zs-surface-raised);
   border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
-  padding-block: var(--zs-space-3);
+  padding-block: var(--zs-space-2);
   padding-inline: var(--zs-space-4);
 }
 
@@ -60,16 +73,38 @@
   min-block-size: 0;
 }
 
-/* ─── Sidebar rail ────────────────────────────────────────────────────── */
+/* ─── Sidebar rail — sunken material, hairline on the edge facing Main ───
+ *
+ * The rail reads as a distinct SUNKEN surface (`--zs-surface-sunken`),
+ * one step below the canvas Main, so the navigation column is visually
+ * differentiated from the page content instead of sharing Main's plane.
+ * A single hairline divides the rail from Main; it sits on the rail's
+ * inline edge that FACES Main, which depends on which side the rail is on
+ * (keyed off the shell root's `[data-sidebar-side]`):
+ *   - rail on the start edge → hairline on `border-inline-end`,
+ *   - rail on the end edge   → hairline on `border-inline-start`.
+ * Open width comes from the Split.Side `flex-basis` (sideWidth wires
+ * `--app-shell-sidebar-width`), so this rule owns only the surface,
+ * the divider, padding, overflow, and the collapse transition. */
 .zs-app-shell__sidebar {
-  /* Open width comes from the rail var the root sets; the Split.Side
-   * `flex-basis` already uses --app-shell-sidebar-width via sideWidth, so
-   * this only needs the collapse transition + padding. */
   overflow: auto;
+  background: var(--zs-surface-sunken);
   padding-block: var(--zs-space-4);
-  padding-inline: var(--zs-space-4);
+  padding-inline: var(--zs-space-3);
   transition: flex-basis var(--zs-motion-base) var(--zs-motion-ease),
     inline-size var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* Divider hairline on the rail edge facing Main. Default (start side, the
+ * common case) puts it on the inline-end edge; `sidebarSide="end"` flips
+ * it to inline-start. We key off the shell root's `[data-sidebar-side]`
+ * (the side attr the root always carries) rather than the rail element,
+ * which does not. */
+.zs-app-shell[data-sidebar-side="start"] .zs-app-shell__sidebar {
+  border-inline-end: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+.zs-app-shell[data-sidebar-side="end"] .zs-app-shell__sidebar {
+  border-inline-start: var(--zs-selection-hairline) solid var(--zs-separator);
 }
 
 /* Closed — the rail collapses out of the layout. The collapse is keyed
@@ -87,12 +122,23 @@
   overflow: auto;
 }
 
-/* ─── Footer — top hairline ───────────────────────────────────────────── */
+/* ─── Footer — muted footnote band, top hairline ──────────────────────── */
 .zs-app-shell__footer {
   flex: 0 0 auto;
+  /* A quiet footnote band: vertically centered, muted secondary label
+   * colour, footnote type scale, with the page content centered on the
+   * bar so a copyright + a couple of links read as fine print rather than
+   * body copy. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-4);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: var(--zs-text-footnote-weight);
 }
 
 /* ─── prefers-reduced-motion — drop the rail collapse transition ──────── */
@@ -115,6 +161,18 @@
   .zs-app-shell__header {
     background: Canvas;
     border-block-end-color: CanvasText;
+  }
+  /* The sunken rail surface is dropped in a forced-colors pass; mirror the
+   * dividing hairline so the rail keeps a visible system-color edge against
+   * Main on whichever side it sits. */
+  .zs-app-shell__sidebar {
+    background: Canvas;
+  }
+  .zs-app-shell[data-sidebar-side="start"] .zs-app-shell__sidebar {
+    border-inline-end-color: CanvasText;
+  }
+  .zs-app-shell[data-sidebar-side="end"] .zs-app-shell__sidebar {
+    border-inline-start-color: CanvasText;
   }
   .zs-app-shell__footer {
     border-block-start-color: CanvasText;

@@ -341,6 +341,17 @@ AppShellSidebar.displayName = "AppShell.Sidebar";
 
 /* ─── Main ────────────────────────────────────────────────────────────── */
 
+/**
+ * `AppShell.Main` is the fluid `<main>` region. It is ARRANGE-ONLY: it
+ * sets no padding of its own and paints nothing, so a consumer can render
+ * full-bleed content (a map, a hero) flush to the rail/header. For the
+ * common padded-page case, wrap the Main content in a `Container` (or your
+ * own padded region) rather than expecting the shell to inset it:
+ *
+ *   <AppShell.Main>
+ *     <Container size="lg">…page…</Container>
+ *   </AppShell.Main>
+ */
 const AppShellMain = forwardRef<HTMLElement, AppShellMainProps>(
   function AppShellMain({ className, id: idProp, children, ...rest }, ref) {
     const ctx = useContext(AppShellContext);
