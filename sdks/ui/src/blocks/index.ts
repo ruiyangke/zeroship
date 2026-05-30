@@ -63,3 +63,10 @@ export {
   type PaginationProps,
   type PaginationSize,
 } from "./Pagination";
+
+// FilterBar block — governed search/filter toolbar for collections.
+export {
+  FilterBar,
+  type FilterBarProps,
+  type FilterBarActiveFilter,
+} from "./FilterBar";

@@ -1,0 +1,45 @@
+/*
+ * FilterBar — search/filter toolbar.
+ *
+ * FilterBar paints NOTHING of its own — no background, no border, no
+ * padding. The layout is the wrapping `Cluster` (the root + the chips /
+ * actions sub-clusters); the surface belongs to the composed Input /
+ * Tag / Button primitives. These rules only:
+ *
+ *   .zs-filter-bar             root Cluster — full inline size so the
+ *                              spacer has room to push actions to the end
+ *   .zs-filter-bar__search     give the search Input a sensible grow +
+ *                              floor so it owns the leading space and
+ *                              shrinks (not disappears) as the row narrows
+ *   .zs-filter-bar__spacer     the flex spacer that pushes `actions` to
+ *                              the inline-end edge on a single line
+ *
+ * Logical properties throughout (inline-size, margin-inline) so RTL is
+ * automatic. Motion: none — there is nothing here that animates, so
+ * reduced-motion needs no override. forced-colors needs no override
+ * either: every painted pixel comes from the composed primitives, which
+ * carry their own high-contrast handling.
+ */
+
+.zs-filter-bar {
+  /* Span the container so the spacer can do its job; the row still wraps
+     (Cluster owns flex-wrap) when content overflows one line. */
+  inline-size: 100%;
+}
+
+.zs-filter-bar__search {
+  /* Grow to fill leading space, but keep a usable floor so the field
+     stays legible as the bar narrows and eventually wraps. */
+  flex: 1 1 auto;
+  min-inline-size: 12rem;
+  max-inline-size: 24rem;
+}
+
+.zs-filter-bar__spacer {
+  /* The only flex-grow item: consumes the slack between the leading
+     group and the trailing actions on a single line. Zero-size once the
+     row wraps, so it never adds phantom space on narrow viewports. */
+  flex: 1 1 0;
+  /* Belt-and-braces against any inherited inline-size from a reset. */
+  min-inline-size: 0;
+}
