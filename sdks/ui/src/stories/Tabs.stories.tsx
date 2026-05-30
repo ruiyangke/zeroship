@@ -481,7 +481,17 @@ export const DisabledTab: Story = {
     const disabled = canvas.getByRole("tab", { name: /disabled/i });
 
     await expect(active).toHaveAttribute("aria-selected", "true");
-    await expect(disabled).toBeDisabled();
+    // Base UI's Tabs.Tab is a composite `role="tab"` button, not a
+    // native form control. Per the WAI-ARIA Tabs pattern a disabled
+    // tab stays a focus stop in the roving order (see this story's
+    // doc note), so Base UI marks it `aria-disabled="true"` +
+    // `data-disabled` rather than the native `disabled` attribute that
+    // would yank it from the tab sequence. jest-dom's `toBeDisabled()`
+    // only sees native `disabled`; the faithful assertion is the
+    // aria/data contract plus the behavioral guarantee (clicking does
+    // not flip selection).
+    await expect(disabled).toHaveAttribute("aria-disabled", "true");
+    await expect(disabled).toHaveAttribute("data-disabled");
     await userEvent.click(disabled);
     await expect(active).toHaveAttribute("aria-selected", "true");
     await expect(disabled).toHaveAttribute("aria-selected", "false");

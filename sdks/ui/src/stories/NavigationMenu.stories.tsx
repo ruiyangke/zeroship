@@ -604,7 +604,17 @@ export const Disabled: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const resources = canvas.getByRole("button", { name: /resources/i });
 
-    await expect(resources).toBeDisabled();
+    // Base UI's NavigationMenu.Trigger is a composite menu trigger
+    // button, not a native form control. It marks the disabled state
+    // with `aria-disabled="true"` (NOT the native `disabled`
+    // attribute) so the trigger stays in the AT tree and roving
+    // navigation can expose it as disabled. jest-dom's
+    // `toBeDisabled()` only recognizes native `disabled`; the faithful
+    // assertion is the aria contract plus the behavioral guarantee
+    // (clicking does not open the Content panel). Note: unlike the
+    // Tabs/Toolbar/Collapsible triggers, this trigger does NOT carry a
+    // `data-disabled` attribute, so we assert only the aria contract.
+    await expect(resources).toHaveAttribute("aria-disabled", "true");
     await userEvent.click(resources);
     await expect(
       body.queryByRole("link", { name: /^c$/i }),

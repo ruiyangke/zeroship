@@ -325,7 +325,16 @@ export const Disabled: Story = {
       name: /shipping & delivery/i,
     });
 
-    await expect(shipping).toBeDisabled();
+    // Base UI's Accordion.Trigger is a heading-button (a `<button>`
+    // inside an `<h3>`), not a native form control. It marks the
+    // disabled state with `aria-disabled="true"` + `data-disabled`
+    // (NOT the native `disabled` attribute) so the trigger stays in
+    // the AT tree as a disabled heading-button. jest-dom's
+    // `toBeDisabled()` only recognizes native `disabled`; the faithful
+    // assertion is the aria/data contract plus the behavioral
+    // guarantee (clicking does not expand, no focus is taken).
+    await expect(shipping).toHaveAttribute("aria-disabled", "true");
+    await expect(shipping).toHaveAttribute("data-disabled");
     await expect(shipping).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(shipping);
     await expect(shipping).toHaveAttribute("aria-expanded", "false");
