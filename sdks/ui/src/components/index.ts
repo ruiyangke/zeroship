@@ -431,3 +431,7 @@ export type {
   SeparatorOrientation,
   SeparatorVariant,
 } from "./Separator";
+
+// Governed Lucide wrapper — token sizing, currentColor, a11y.
+export { Icon } from "./Icon";
+export type { IconProps, IconSize } from "./Icon";

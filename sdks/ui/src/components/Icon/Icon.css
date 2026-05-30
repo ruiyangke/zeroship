@@ -1,0 +1,31 @@
+/*
+ * Icon — token-driven sizing for the governed SVG wrapper.
+ *
+ * Size lives in CSS (not a px prop on the svg) so the surface stays
+ * token-pure: each modifier maps to a `--zs-icon-*` foundation token.
+ * Logical properties (`inline-size`/`block-size`) keep RTL a no-op.
+ *
+ * Color is intentionally absent here — Lucide paints with
+ * `currentColor`, so the icon follows the surrounding text color and
+ * maps correctly under `forced-colors: active` with no extra rule.
+ */
+.zs-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
+
+.zs-icon--sm {
+  inline-size: var(--zs-icon-sm);
+  block-size: var(--zs-icon-sm);
+}
+
+.zs-icon--md {
+  inline-size: var(--zs-icon-md);
+  block-size: var(--zs-icon-md);
+}
+
+.zs-icon--lg {
+  inline-size: var(--zs-icon-lg);
+  block-size: var(--zs-icon-lg);
+}

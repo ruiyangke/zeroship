@@ -1089,6 +1089,9 @@ importers:
       clsx:
         specifier: 'catalog:'
         version: 2.1.1
+      lucide-react:
+        specifier: ^1.8.0
+        version: 1.14.0(react@19.2.5)
     devDependencies:
       '@axe-core/playwright':
         specifier: ^4.11.0
@@ -12751,6 +12754,10 @@ snapshots:
   lucide-react@1.14.0(react@18.3.1):
     dependencies:
       react: 18.3.1
+
+  lucide-react@1.14.0(react@19.2.5):
+    dependencies:
+      react: 19.2.5
 
   lz-string@1.5.0: {}
 

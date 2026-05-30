@@ -56,6 +56,7 @@
 @import "./components/Badge/Badge.css";
 @import "./components/Tag/Tag.css";
 @import "./components/Breadcrumbs/Breadcrumbs.css";
+@import "./components/Icon/Icon.css";
 
 /* ─── Layout primitives — arrange-only, paint nothing. */
 @import "./layouts/Stack/Stack.css";
@@ -228,6 +229,12 @@
   --zs-space-8: 2.5rem;                        /* 40 */
   --zs-space-9: 3rem;                          /* 48 */
   --zs-space-10: 4rem;                         /* 64 */
+
+  /* ─── Icon sizes — theme-invariant, aligned to the type/space scale.
+     Consumed by the Icon primitive's zs-icon--{size} classes. */
+  --zs-icon-sm: 1rem;                          /* 16 */
+  --zs-icon-md: 1.25rem;                       /* 20 */
+  --zs-icon-lg: 1.5rem;                        /* 24 */
 
   /* ─── Radii — circular border-radius approximating continuous corners.
      (True continuous-corner squircles aren't natively expressible on web;
