@@ -1,10 +1,28 @@
 # @zeroship/auth — in-app popup login SDK (whole-vision design)
 
-> Status: **DRAFT / round-5 (code-grounded feasibility fixes) — pending human review gate.** Durable
+> Status: **DRAFT / round-6 (round-5-review corrections) — pending human review gate.** Durable
 > source of truth for the `feat/auth-sdk-popup` loop. The full **decision ledger** (every O*/S* item,
 > with the grounded-fact anchors) lives in §10; the per-subsystem design follows. Round-by-round
 > detail is captured by the inline `Added in round N` markers — this banner only records the current
 > state.
+>
+> **Round 6** applied the round-5-review pilot rulings (corrections, no new decisions): (1) BLOCKER —
+> the `?mint=1` "`pg_advisory_xact_lock` held across the Hydra refresh" was **unbuildable** against the
+> live gateway (`AppState.db` is a single `Arc<compio_postgres::Client>`, not a pool, and a transaction
+> needs `&mut self`); it is replaced by a **per-node in-process single-flight keyed on `anchor_id` + a
+> short cached wrapper (seconds-scale TTL) + Hydra's rotation grace** for the rare cross-node case, and
+> the gateway `AppState.db` separately **migrates to a compio-postgres `Pool`** (§1.2/§2/§8.7); (2)
+> MAJOR — a **wrapper signing-key (ed25519) rotation/overlap** story: current+previous key, the
+> `Verifier` accepts either by `kid` for an overlap ≥ wrapper TTL + skew, signing uses current, optional
+> gateway JWKS endpoint (§1.2); (3) MAJOR — `oidc_rp` holds **ONE reused `cyper::Client`** with the
+> breaker/timeout attached to it (no per-call `cyper::Client::new()`) (§1.2/§8.7); (4) MAJOR —
+> `app_session_anchors.abs_expires_at = created_at + 30d`, **set once, never slid**; the 720h family
+> ceiling is enforced **solely** by Hydra `invalid_grant` → anchor cleared (§2/§8.1/§8.3); (5) slice
+> plan — **Slice 1b split into `1b-mech` + `1b-endpoints`**, reordered 1a → 1b-mech → 1c → 1d →
+> 1b-endpoints → 2 → 3 → 4 → 5 (§9); (6) residual — the wrapper-revocation read-through cache TTL is
+> **seconds-scale, NOT the `dpop_jti` default** (§1.3/§8.5), and the cleared-breadcrumb × `503
+> client_not_provisioned` interaction is traced (503 is `recovering`/retryable with backoff, keeps the
+> breadcrumb; only `401` clears it) (§4.3/§1.5).
 >
 > **Round 5** closed the feasibility gaps the round-4 review found against the live tree, without
 > relitigating any decision: (1) the **`wrapper_token::Issuer::issue`/`Verifier::verify` refactor**
@@ -19,8 +37,9 @@
 > commit ordering** + a defensive lazy-alias-mint on a read-through miss are pinned (§7.1); plus
 > minors: OAuth `client_id` gets an **`oac_` prefix** (not `app_`) distinct from `app_ref` (§1.1/§4.3),
 > the **nonce echo to the gateway is dropped** (no-op under the trust model; `expected_nonce=None`)
-> (§1.2/§4.3), the bogus **`client_id_implicit`** authorize param is removed (§2), the
-> **advisory-lock-held-across-Hydra** connection-pin is bounded + breaker-tied (§8.7), the exact
+> (§1.2/§4.3), the bogus **`client_id_implicit`** authorize param is removed (§2), the mint-path
+> connection-pin cost was first bounded + breaker-tied (§8.7; **superseded in round 6** — the lock is
+> gone, replaced by single-flight, see above), the exact
 > **`RouteEntry` producer (`registry.rs::get_routes`)** + mixed-default fixture is named (§1.5), and
 > **`SameSite=Strict` on the anchor is confirmed correct** for the same-origin `/session` fetch (§8.3).
 >
@@ -35,7 +54,8 @@
 > Rounds 1–3 resolved the consent authorization-inversion, the silent-iframe 3p-cookie blocker, the
 > client_id-resolution wire-format gap, the dual-rotation refresh race, the Bearer/API-key collision,
 > the separate `auth.app_session_anchors` anchor store, the `AuthPlugin`-on-both-sites wiring, the
-> atomic anchor-lock `?mint=1`, the browser-held `pws_` wrapper (no global UUID in app JS), the
+> serialized `?mint=1` (round-3 anchor-lock, **superseded by round-6 per-node single-flight**), the
+> browser-held `pws_` wrapper (no global UUID in app JS), the
 > cross-node `auth.token_revocations` family marker, the single `control.oauth_grants` ledger,
 > same-origin-only CORS, the expired-Bearer-on-Anon fall-through, the sessionStorage PKCE
 > transaction, the COOP/BroadcastChannel relay fallback, and the consent-time alias + read-through
@@ -429,11 +449,12 @@ Page reload → memory cache is empty
   │        gateway: parse __Host-zs_app_session → validate auth.app_session_anchors row
   │          (the DEDICATED anchor store — NOT auth.gateway_sessions; see below + §8.1)
   │          if valid && not expired:
-  │            LOCK the anchor row, then:
   │              if a cached unexpired access token is stored under the anchor → return it (no Hydra call)
-  │              else: mint a fresh access token from the SERVER-HELD refresh token under the anchor
-  │                    (Hydra /oauth2/token grant_type=refresh_token; rotation stays server-side),
-  │                    store {new refresh, new access, access_exp} under the anchor, then unlock
+  │              else: per-node SINGLE-FLIGHT keyed on anchor_id (concurrent minters coalesce):
+  │                    mint a fresh access token from the SERVER-HELD refresh token under the anchor
+  │                    (Hydra /oauth2/token grant_type=refresh_token; rotation stays server-side; NO db
+  │                     connection or lock held across the Hydra call — §1.2 round-6),
+  │                    store {new refresh, new wrapper, short cached_access_exp} under the anchor
   │            → 200 { user, access_token, expires_at, scopes }
   │          else (anchor missing/expired):
   │            → 401 { error: "login_required" }
@@ -454,14 +475,19 @@ store, `auth.app_session_anchors` (DDL §8.1), with **anchor-specific lifetime s
 
 - **No 30-min idle expiry.** A reload-recovery anchor exists precisely to survive long idle gaps; it
   has **no idle window** — only an absolute lifetime.
-- **Absolute lifetime = 30 days, capped at the Hydra refresh-family ceiling (720h ≈ 30d).** The
-  anchor's absolute expiry is `min(created_at + 30d, refresh_family_expiry)`. Because Hydra's
-  refresh family is `720h` (`ops/hydra-dev.yaml:55`) and its rotation **slides** the family on each
-  successful refresh (each `/session?mint=1` rotates and re-anchors the 720h window), an actively-used
-  anchor renews its underlying family on every mint, so the practical ceiling is "30 days of total
-  inactivity OR the refresh family being revoked," whichever first. At the 720h family ceiling with
-  no intervening mint, the next `?mint=1` gets `invalid_grant` from Hydra → the gateway deletes the
-  anchor → `401 login_required` → interactive login. This is stated, not left implicit.
+- **Absolute lifetime = `created_at + 30d`, set ONCE at create, never slid (round-6 MAJOR fix).** The
+  anchor owns its **own** 30-day absolute lifetime: `abs_expires_at = created_at + 30d`, written once
+  and never recomputed. ⚠️ **Round 6 removes the round-3 `min(created_at + 30d, family-ceiling)`
+  formula** — it conflated two independent clocks (the anchor's own lifetime vs. the Hydra
+  refresh-family ceiling) and asserted the family "slides on every mint" *and* was a cap *computed at
+  create*, which is inconsistent. The **720h Hydra refresh-family ceiling is enforced solely by Hydra**:
+  if the underlying family has expired or been revoked, the next `/session?mint=1`'s
+  `grant_type=refresh_token` returns `invalid_grant` from Hydra, and the gateway treats that as
+  anchor-dead → **deletes the anchor row + clears the breadcrumb** → the SDK falls to interactive
+  login. The gateway does **not** try to mirror or track the family ceiling in `abs_expires_at`. So
+  there are two clean, independent terminations: (a) the anchor reaches its own `created_at + 30d`
+  (the gateway rejects it on read), or (b) Hydra rejects a refresh as `invalid_grant` (the gateway
+  clears the anchor). Whichever fires first ends the anchor; neither is a function of the other.
 - **The 12h/30-min `auth.gateway_sessions` constants and every consumer/test that asserts them are
   UNTOUCHED.** The interactive cookie redirect flow (`/__zs/auth/callback`) keeps using
   `gateway_sessions` with its 12h/30-min semantics; only the new SDK anchor uses
@@ -482,13 +508,30 @@ out elsewhere) the only recovery is an **interactive** popup login. <!-- Added i
 exchange to obtain its *own* independent family (see §1.2) — two **separate** families from two
 **separate** codes, each rotated by exactly one holder, so Hydra's reuse detection never fires on a
 browser-vs-server race. When `useRefreshTokens` is off (the default), only the server family exists
-and every fresh access token comes from `/__zs/auth/session?mint=1`. ⚠️ **Round 3 closes the
-remaining same-family race:** multiple tabs/reloads all call `/session?mint=1` against the *same*
-server family, so the server family itself needs a single rotator. The mint path therefore holds a
-**PostgreSQL advisory lock keyed on the anchor id across the Hydra refresh round-trip** and caches
-the minted access token under the anchor, so N concurrent minters produce exactly one Hydra rotation
-and share the result — no dual-rotation, no reuse-detection trip (see `GET /__zs/auth/session`
-below). <!-- Added in round 3: addressing BLOCKER — same-server-family concurrent mint is serialized by an anchor-id advisory lock -->
+and every fresh access token comes from `/__zs/auth/session?mint=1`. ⚠️ **Round 3 closed the
+remaining same-family race; round 5 rebuilds the mechanism feasibly:** multiple tabs/reloads all call
+`/session?mint=1` against the *same* server family, so the server family needs a single rotator. The
+mint path uses a **per-node in-process single-flight keyed on the anchor id** (concurrent minters on
+one gateway node coalesce into ONE Hydra refresh) plus a **short cached minted wrapper under the
+anchor** (seconds-scale TTL ≪ the 10-min wrapper TTL, so a reload-storm skips Hydra entirely), and
+relies on **Hydra's already-configured rotation grace** (`rotation_grace_period: 30s` /
+`rotation_grace_reuse_count: 3`) to absorb the rare cross-node concurrent mint without a family
+revoke. **No db connection or advisory lock is held across the Hydra HTTP call** — see the round-5
+BLOCKER note under `GET /__zs/auth/session` for why the round-3 "advisory lock across the Hydra
+refresh" was unbuildable against the live gateway (`AppState.db` is a single `Arc<Client>`, not a
+pool, and a transaction needs `&mut self`). <!-- Added in round 3: same-server-family concurrent mint serialized. Round 6 (BLOCKER): replace the unbuildable cross-node advisory lock with per-node single-flight + short cached wrapper + Hydra rotation grace -->
+
+⚠️ **Round-6 — the gateway `AppState.db` migrates from `Arc<Client>` to a compio-postgres `Pool`.**
+This is a SEPARATE change from the mint redesign (the mint path no longer needs a transaction at
+all), motivated by it: today `AppState.db: Option<Arc<compio_postgres::Client>>` (`gateway/src/lib.rs:116`,
+`main.rs:450-456`) is a **single shared connection**, so any handler that wanted a transaction (or
+that stalls on an upstream call mid-query) would serialize all gateway DB work. We migrate to
+`Option<Arc<compio_postgres::Pool>>` (`compio-postgres/src/pool.rs:224` `PooledClient`), and the
+existing session call sites — `sessions::create` / `validate` / `revoke*` and the new anchor
+read/write — take a checked-out `PooledClient` for the duration of one operation and release it. The
+`/token`, `/session`, and `/signout` handlers each check out a pooled connection for their short DB
+touches and never hold one across a Hydra call. This is in-patch (pre-launch, no back-compat): every
+`state.db`/`sessions::*` call site updates in the same change. <!-- Added in round 6: addressing BLOCKER — migrate gateway AppState.db from Arc<Client> to a compio-postgres Pool; per-request handlers use a pooled conn; mint never holds a conn across Hydra -->
 
 > **Why not share one refresh token?** If the browser and server both held the same rotating token,
 > whichever refreshed first would rotate it and the other's copy would trip Automatic Reuse
@@ -616,6 +659,16 @@ New module `crates/gateway/src/browser_auth.rs` (sibling to `dpop_exchange.rs`),
 handler per endpoint, registered in `crates/gateway/src/main.rs` alongside the existing
 `/__zs/auth/dpop-exchange` resource. All reuse `state.oidc_rp` (Hydra dial URL, JWKS, introspect),
 `state.config` (insecure_dev, public_url, worker_key), and `oidc_rp::encode_user_header`.
+
+⚠️ **Round-6 (MAJOR #3) — `OidcRp` holds ONE reused `cyper::Client`; the breaker + timeout attach to
+it.** Today `oidc_rp` constructs `cyper::Client::new()` **per call** (`oidc_rp.rs:191,276`), so each
+outbound Hydra request gets a fresh connection pool and no shared breaker/timeout state — which would
+make the bounded-timeout/circuit-breaker/connection-budget claims of §8.7 hollow (a brownout would
+just spin up more clients). This patch builds **one** `cyper::Client` at `OidcRp` construction,
+stores it on the struct, and routes **every** Hydra call (`/oauth2/token`, `/oauth2/auth` dial,
+introspect, JWKS fetch) through it. The bounded `/oauth2/token` timeout and the circuit breaker
+(§8.7) are state **on that shared client**, so they actually govern Hydra load. No per-call
+`cyper::Client::new()` remains on the browser-auth or DPoP paths. <!-- Added in round 6: addressing MAJOR #3 — oidc_rp reuses one cyper::Client; breaker/timeout attach to it; no per-call client construction -->
 
 #### `GET /__zs/auth/authorize`
 
@@ -882,6 +935,38 @@ This is a **deliberate wire/contract change to a stable gateway primitive**, lan
 its only consumer — not the "pure reuse" round-3 implied. The G4/Bearer design is sound **given this
 refactor**; it would be unbuildable against the shipped `issue()`.
 
+**⚠️ Wrapper signing-key (ed25519) rotation + overlap (round-6 MAJOR).** The wrapper is now the
+**primary browser-held access token** (every `/token` and `/session?mint=1` mint, and the Bearer arm
+verifies it on every request), so the gateway's ed25519 wrapper signing key needs an explicit
+rotation/overlap story — distinct from the pairwise-salt break-glass rotation (§8.5, which is a
+global identity break, not a key roll). Without overlap, rolling the key would instantly invalidate
+every wrapper minted under the old key, signing out every browser session at once. The design: <!-- Added in round 6: addressing MAJOR — wrapper signing-key rotation/overlap; current+previous key, Verifier accepts EITHER within an overlap window ≥ wrapper TTL + skew, sign with current; optional gateway JWKS endpoint -->
+
+- **The gateway holds a current + previous wrapper key.** `Issuer` signs **only** with the current
+  ed25519 key (its kid stamped in the JWT header, as today). `Verifier` holds an ordered key list
+  `[current, previous]` and accepts a wrapper signed by **either** — matched by the JWT header `kid`
+  (it already reads `kid`; the change is a one-to-many lookup keyed on `kid`). A wrapper with an
+  unknown/absent `kid` is rejected.
+- **Overlap window ≥ wrapper TTL (10 min) + clock skew.** The previous key must remain accepted for
+  at least the maximum lifetime of any wrapper it could have signed — `WRAPPER_EXPIRES_IN_SECS`
+  (600 s) plus the verifier's clock-skew leeway — so no live wrapper is orphaned mid-flight. In
+  practice the previous key is retained for a comfortably longer window (e.g. ≥ 1 h) to also cover the
+  cached-wrapper-under-anchor case and any in-flight `?mint=1`.
+- **Rotation procedure.** (1) Generate a fresh ed25519 keypair → it becomes the new **current**.
+  (2) Promote the old current → **previous** (it stays in the `Verifier` accept-list). (3) From this
+  point `Issuer` signs new wrappers with the new current; the `Verifier` accepts both. (4) After the
+  overlap window elapses (≥ TTL + skew), drop the old previous from the accept-list. Steps (1)–(3) are
+  atomic from the request path's view (swap the `Arc<Issuer>`/`Arc<Verifier>` state); no in-flight
+  request sees a single-key gap.
+- **Optional gateway JWKS endpoint.** The gateway MAY expose **both** wrapper public keys at a
+  read-only `GET /__zs/auth/jwks` (or reuse an existing well-known path) so the wrapper becomes
+  independently verifiable by tooling/tests and so a future auth-sidecar (§1.5 escalation) can verify
+  wrappers without sharing private key material. This is optional in Phase 1 (the Bearer arm verifies
+  in-process against the live key list); the endpoint is purely additive.
+- **Test:** mint a wrapper under key A; rotate (A→previous, B→current); assert a request bearing the
+  A-signed wrapper still verifies during the overlap and a freshly minted wrapper is B-signed; after
+  the overlap window, assert the A-signed wrapper is rejected (bad-`kid`) while B-signed still passes.
+
 **Nonce round-trip — honest scope (round-3, refined round-5).** ⚠️ **The nonce is NOT sent to the
 gateway and is NOT an OIDC guarantee in this trust model.** The gateway is **stateless** across
 `/authorize`→`/token` (no server-side record of the expected nonce — the Supabase-style statelessness
@@ -921,20 +1006,27 @@ without any browser-held refresh token. **The anchor is bound to the access-toke
 the family's Hydra session id / `jti` lineage), so a stolen browser refresh token alone (in
 `browser_refresh` mode) cannot resurrect or impersonate the anchor.
 
-> **Decision (server-held refresh under the anchor — O3, resolved + round-3 hardened).** Exactly
-> **one holder rotates each refresh family**, AND the single server family is rotated under an
-> **anchor-id advisory lock held across the Hydra refresh**, so concurrent `?mint=1` calls from
-> multiple tabs/reloads collapse to one rotation. In the default `server_anchor` mode the *only*
-> refresh family is server-side and the browser never holds a refresh token at all — eliminating
-> *browser-vs-server* dual-rotation by construction; the round-3 lock + cached-access-token
-> eliminates the *server-vs-server* (tab-vs-tab) rotation race that round 2 still had. The discarded
-> alternatives were (a) keeping a *copy* of one rotating token in both the browser and the server
-> (guaranteed reuse-detection race on the first reload-then-refresh — rejected), (b) "a second
+> **Decision (server-held refresh under the anchor — O3, resolved + round-3 hardened + round-5
+> rebuilt).** Exactly **one holder rotates each refresh family**, AND concurrent `?mint=1` calls
+> from multiple tabs/reloads on a node collapse to one rotation via a **per-node in-process
+> single-flight keyed on the anchor id** plus a **short cached minted wrapper** under the anchor. In
+> the default `server_anchor` mode the *only* refresh family is server-side and the browser never
+> holds a refresh token at all — eliminating *browser-vs-server* dual-rotation by construction; the
+> single-flight + cached wrapper eliminate the *server-vs-server* (tab-vs-tab) rotation race that
+> round 2 still had, **without** holding any db connection or lock across the Hydra call. The
+> discarded alternatives were (a) keeping a *copy* of one rotating token in both the browser and the
+> server (guaranteed reuse-detection race on the first reload-then-refresh — rejected), (b) "a second
 > refresh token from a parallel grant" (impossible: a code is single-use — rejected as
-> ill-specified), and (c) letting each `?mint=1` rotate freely and relying on Hydra's 30s/3× grace to
-> absorb concurrency (round-2 posture — rejected in round 3 because ≥3 concurrent minters exhaust the
-> grace and trip family revocation). `browser_refresh` mode opts into Supabase-style browser-held
-> refresh by spending a **separate** code for a **separate** family, never a copy. <!-- Added in round 1: addressing MAJOR — single-holder, no copy, no parallel-grant hand-waving; addressing token endpoint XSS — same-origin check + family-bound anchor; Updated in round 3: anchor-id advisory lock + cached access token kills the tab-vs-tab same-family rotation race -->
+> ill-specified), (c) letting each `?mint=1` rotate freely and relying solely on Hydra's 30s/3× grace
+> (round-2 posture — rejected because a sustained reload-storm could exhaust the grace), and (d) a
+> **cross-node PostgreSQL advisory lock held across the Hydra refresh** (round-3 posture — rejected
+> in round 6 as unbuildable: the gateway has no pool, `AppState.db` is a single `Arc<Client>`, and a
+> transaction needs `&mut self`; holding a session-lock across the HTTP call would pin the one shared
+> connection behind a Hydra brownout). The round-5 design coalesces **per node** in process and
+> leans on Hydra's rotation grace only for the rare **cross-node** simultaneous mint — within the
+> `reuse_count: 3` budget because the cached-wrapper window is seconds-scale. `browser_refresh` mode
+> opts into Supabase-style browser-held refresh by spending a **separate** code for a **separate**
+> family, never a copy. <!-- Added in round 1: single-holder, no copy, no parallel-grant. Round 3: anchor lock. Round 6 (BLOCKER): replace the unbuildable advisory-lock-across-Hydra with per-node single-flight + cached wrapper + Hydra rotation grace -->
 
 #### `GET /__zs/auth/session`
 
@@ -943,48 +1035,68 @@ store, §8.1 — **not** `auth.gateway_sessions`), returns the server-validated 
 (with `?mint=1`) a fresh access token minted from the server-held refresh token. Gated by the
 breadcrumb on the client side (the SDK skips this call when the breadcrumb is absent).
 
-⚠️ **Round-3 fix (BLOCKER) — `?mint=1` is atomic and idempotent under concurrency: N concurrent
-minters ⇒ exactly ONE Hydra refresh call.** Round 2 had every tab and every reload drive
-`/session?mint=1`, and each mint did `grant_type=refresh_token` against Hydra — which **rotates** the
-single server-held refresh family. Two tabs (or a tab + a background reload) minting concurrently
-were two concurrent rotators of the **same** family: request A reads refresh `R`, request B reads
-`R` before A's rotation commits, both POST `R` to Hydra, and Hydra's Automatic Reuse Detection
-revokes the whole family on the second use of `R`. The dev config's `rotation_grace_period: 30s` /
+⚠️ **Round-3 fix, REDESIGNED round-6 (BLOCKER) — `?mint=1` is idempotent under concurrency: N
+concurrent minters on a node ⇒ exactly ONE Hydra refresh call, and NO db connection or lock is held
+across the Hydra HTTP round-trip.** Round 2 had every tab and every reload drive `/session?mint=1`,
+and each mint did `grant_type=refresh_token` against Hydra — which **rotates** the single
+server-held refresh family. Two tabs (or a tab + a background reload) minting concurrently were two
+concurrent rotators of the **same** family: request A reads refresh `R`, request B reads `R` before
+A's rotation commits, both POST `R` to Hydra, and Hydra's Automatic Reuse Detection revokes the
+whole family on the second use of `R`. The dev config's `rotation_grace_period: 30s` /
 `rotation_grace_reuse_count: 3` (`ops/hydra-dev.yaml:49-51`) *softens* this (a rotated token can be
-reused up to 3× within 30s and all tokens stay in one chain — per Ory's graceful-rotation design)
-but does **not** eliminate it: three concurrent reloads/tabs exhaust the reuse count and the family
-is revoked. `navigator.locks` cannot help — it does not serialize across the browser/server boundary,
-and the lock key is per-origin-per-profile while the rotation happens **server-side** across
-independent browser contexts. <!-- Added in round 3: addressing BLOCKER — hold the anchor row lock ACROSS the Hydra refresh; cache the minted access token so concurrent minters share one rotation -->
+reused up to 3× within 30s and all tokens stay in one chain — per Ory's graceful-rotation design).
 
-The fix makes the rotation **server-serialized and result-shared**, with an explicit locking
-boundary:
+⚠️ **Round-6 (BLOCKER) — the round-3 "PostgreSQL advisory lock held across the Hydra refresh inside
+a transaction" is UNBUILDABLE against the live gateway and is removed.** The gateway has **no
+connection pool today** and **no transaction handle reachable from `AppState`**:
+`AppState.db` is a single `Option<Arc<compio_postgres::Client>>` (`gateway/src/lib.rs:116`,
+`main.rs:450-456`), and `compio_postgres::Transaction<'a>` borrows `&'a mut self` — **unobtainable
+from an `Arc<Client>`** (an `Arc` yields only `&Client`, never `&mut`). A `pg_advisory_xact_lock`
+needs a transaction; a session-scoped `pg_advisory_lock` would still pin one shared connection
+across the outbound Hydra HTTP call on a single non-cloneable `Arc<Client>`, serializing **all**
+gateway DB work behind one Hydra brownout. So the cross-node "one rotator via a DB lock" design is
+replaced with a **per-node in-process single-flight + a short cached wrapper + Hydra's own rotation
+grace**, and the gateway's `AppState.db` is separately migrated to a real **`compio-postgres` Pool**
+for normal per-request work. This is the same pattern reqwest/`moka`-style single-flight and Auth0's
+in-flight-request dedupe use (one outbound call shared by N concurrent callers); the cross-node tail
+is covered by Hydra's already-configured rotation grace, not a distributed lock. <!-- Added in round 3: serialize concurrent mint. Round 6 (BLOCKER): redesign — no db lock/connection held across the Hydra call; per-node single-flight + cached wrapper + Hydra rotation grace; migrate AppState.db to a Pool separately -->
+
+The fix makes the rotation **per-node single-flight and result-shared**, with **no db connection or
+lock held across the Hydra HTTP call**:
 
 ```
 mint(anchor):                                              // route → oauth_client_id, sector_identifier
-  lock = pg_advisory_xact_lock( hash(anchor.id) )         // serializes ALL minters for this anchor
-  begin:
-    a := read anchor row (cached_access_token, cached_access_exp, refresh_token_enc)
-    if a.cached_access_token is present AND a.cached_access_exp > now()+skew:
-        return a.cached_access_token                       // share the in-window WRAPPER, NO Hydra call
-    R := decrypt(a.refresh_token_enc)
-    resp := POST Hydra /oauth2/token { grant_type=refresh_token, refresh_token=R, client_id }
-    if resp == invalid_grant:                              // family revoked/expired upstream
-        delete anchor row; return 401 login_required
-    // resp.access_token is a RAW Hydra access JWT (global UUID sub). Turn it into the per-app WRAPPER
-    // WITHOUT a per-mint introspection (O2): verify it LOCALLY via the cached Hydra JWKS, then rebuild.
-    raw := verify_access_token(resp.access_token, route.oauth_client_id)  // state.oidc_rp.jwks, local
-    pws := derive_pairwise(raw.sub, route.sector_identifier)              // global UUID → pws_, no DB
-    alias := app_user_identities.relay_email(app_id, raw.sub)            // read-through cache (§7.1)
-    wrapper := wrapper_issuer.issue(WrapperMint{
-        aud=host, sub=pws, email=alias, scope=raw.scope, client_id=route.oauth_client_id,
-        exp_secs=600, cnf=None /* or Some(jkt) under useDpop */, wraps=None })
-    store anchor row { refresh_token_enc = encrypt(resp.refresh_token),
-                       cached_access_token = wrapper,        // ← the WRAPPER, NOT the raw Hydra token
-                       cached_access_exp = now()+600,        // 10-min wrapper TTL, not Hydra's 1h
-                       refresh_family_id = resp.family_lineage }
-  commit (releases the xact lock)
-  return wrapper                                            // browser receives the pws_ wrapper
+  // (1) SHORT-CIRCUIT on the per-anchor cached wrapper (read-only DB, no lock):
+  a := read anchor row (cached_access_token, cached_access_exp, refresh_token_enc)  // pooled conn, released immediately
+  if a.cached_access_token is present AND a.cached_access_exp > now()+skew:
+      return a.cached_access_token                         // serve the in-window WRAPPER, NO Hydra call, NO single-flight
+
+  // (2) PER-NODE SINGLE-FLIGHT keyed on anchor_id: concurrent minters for the same anchor on THIS
+  //     gateway node coalesce into ONE Hydra refresh. No DB connection is held while we await Hydra.
+  fut := single_flight.entry(anchor.id).or_insert_with(|| Shared(async {
+      R := decrypt(a.refresh_token_enc)                    // value already read above
+      resp := POST Hydra /oauth2/token { grant_type=refresh_token, refresh_token=R, client_id }
+             // bounded timeout + circuit breaker on the SHARED cyper::Client (§8.7); NO db conn held here
+      if resp == invalid_grant:                            // family revoked/expired upstream (incl. 720h ceiling)
+          checkout pooled conn → delete anchor row; return LoginRequired
+      // resp.access_token is a RAW Hydra access JWT (global UUID sub). Turn it into the per-app WRAPPER
+      // WITHOUT a per-mint introspection (O2): verify it LOCALLY via the cached Hydra JWKS, then rebuild.
+      raw := verify_access_token(resp.access_token, route.oauth_client_id)  // state.oidc_rp.jwks, local
+      pws := derive_pairwise(raw.sub, route.sector_identifier)              // global UUID → pws_, no DB
+      alias := app_user_identities.relay_email(app_id, raw.sub)            // read-through cache (§7.1)
+      wrapper := wrapper_issuer.issue(WrapperMint{
+          aud=host, sub=pws, email=alias, scope=raw.scope, client_id=route.oauth_client_id,
+          exp_secs=600, cnf=None /* or Some(jkt) under useDpop */, wraps=None })
+      // (3) PERSIST the rotated family + cached wrapper (checkout a pooled conn, write, release — no lock):
+      checkout pooled conn → UPDATE anchor row SET
+          refresh_token_enc = encrypt(resp.refresh_token),
+          cached_access_token = wrapper,                   // ← the WRAPPER, NOT the raw Hydra token
+          cached_access_exp = now() + min(600, ANCHOR_MINT_CACHE_TTL),  // ≪ the 10-min wrapper TTL
+          refresh_family_id = resp.family_lineage
+      return wrapper
+  }))
+  remove single_flight.entry(anchor.id) once fut resolves   // keyed map is Mutex<HashMap<AnchorId, Shared<…>>>
+  return fut.await                                          // all N concurrent minters share this one result
 ```
 
 - ⚠️ **Round-5 (MAJOR) — `cached_access_token` stores the WRAPPER, and the raw→wrapper transform uses
@@ -997,27 +1109,47 @@ mint(anchor):                                              // route → oauth_cl
   (§1.2 "wrapper_token changes required") to build the `pws_`/alias/600 s wrapper. The stored
   `cached_access_token` is **the wrapper**, so concurrent minters that take the cache branch share the
   **wrapper** (sub=`pws_`), never the raw Hydra token — and the browser never receives the raw token
-  from `?mint=1`. `cached_access_exp` is the 10-min wrapper TTL, not Hydra's 1 h. This is consistent
-  with §1.2's `/token` mint, which builds the wrapper from the locally-validated id_token + route;
-  `?mint=1` builds it from the locally-validated **rotated access JWT** + route. No introspection on
-  either path. <!-- Added in round 5: addressing MAJOR — specify ?mint=1's raw-Hydra→pws_-wrapper transform via local JWKS verify (no introspection); cached_access_token is the wrapper -->
-- The lock is a **PostgreSQL transaction-scoped advisory lock keyed on the anchor id**
-  (`pg_advisory_xact_lock`), held **across** the Hydra refresh round-trip and the row write — not
-  just the write. A second concurrent `?mint=1` blocks on the lock; by the time it acquires, the
-  first has already stored a fresh `cached_access_token` (the wrapper), so the second takes the cache
-  branch and returns that **wrapper without a second Hydra call**. This is cross-node correct because
-  the advisory lock and the anchor row both live in shared Postgres (the same store backing
-  `dpop_jti`, §8.5).
-- **Idempotent under N-way concurrency:** the first minter to acquire the lock does the single Hydra
-  rotation; everyone else serves the cached in-window token. The `cached_access_exp` short TTL (=
-  the 10-min browser access TTL, §8.5) bounds how long the cache is served before the next rotation.
+  from `?mint=1`. The **wrapper's own `exp` is the 10-min TTL** the browser holds; but `cached_access_exp`
+  (how long the *server* serves the cached wrapper before re-rotating) is the **seconds-scale**
+  `min(600, ANCHOR_MINT_CACHE_TTL)`, not the full 10 min — see the cross-node bullet below. This is
+  consistent with §1.2's `/token` mint, which builds the wrapper from the locally-validated id_token +
+  route; `?mint=1` builds it from the locally-validated **rotated access JWT** + route. No
+  introspection on either path. <!-- Added in round 5: specify ?mint=1's raw-Hydra→pws_-wrapper transform via local JWKS verify (no introspection); cached_access_token is the wrapper. Round 6: cached_access_exp is the seconds-scale single-flight window, not the full 10-min wrapper exp -->
+- **Per-node single-flight (no db lock across HTTP).** The coalescing key is `anchor.id`; the map is
+  an in-process `Mutex<HashMap<AnchorId, Shared<impl Future>>>` on `AppState`. Concurrent `?mint=1`
+  calls for the same anchor on **one** gateway node `await` the **same** `Shared` future, so exactly
+  one Hydra refresh is issued and all N callers receive its result. **No db connection and no DB lock
+  is held while awaiting Hydra** — the only DB touches are the short read (step 1) and the short
+  post-refresh write (step 3), each on a pooled connection checked out and released around the call.
+  The `cyper::Client` doing the Hydra POST is the **shared, breaker-guarded** client (§8.7, MAJOR
+  #3), not a per-call client.
+- **Cross-node concurrency is tolerated by Hydra's rotation grace, not a distributed lock.** Two
+  gateway nodes can in the rare case mint for the same anchor at once (each node's single-flight only
+  coalesces its own callers). The cap on parallel rotations is then bounded by the **per-node**
+  request rate × the short cached-wrapper window: once the first node persists a fresh
+  `cached_access_token`, every other node's next `?mint=1` reads the cache (step 1) and skips Hydra.
+  Hydra's configured `rotation_grace_period: 30s` / `rotation_grace_reuse_count: 3`
+  (`ops/hydra-dev.yaml:49-51`) absorbs the residual ≤`reuse_count` concurrent rotations of one family
+  **without** a family-revoke (Ory's graceful-rotation chain keeps all tokens in one family). Because
+  the cached-wrapper TTL is **seconds-scale** (`ANCHOR_MINT_CACHE_TTL` ≪ the 10-min wrapper TTL), the
+  window in which two nodes can both miss the cache and both rotate is small and self-limiting, so the
+  reuse-count budget is not exhausted in normal operation.
+- **`cached_access_exp` is seconds-scale, not the full wrapper TTL.** It is
+  `min(600, ANCHOR_MINT_CACHE_TTL)` where `ANCHOR_MINT_CACHE_TTL` is on the order of **a few seconds**
+  — long enough to collapse a reload-storm and the cross-node window, short enough that an actively
+  used anchor still rotates its family well within the 720h ceiling. (This is intentionally **shorter**
+  than the 10-min wrapper `exp` the browser holds: the cache exists to coalesce bursts, not to extend
+  token lifetime.)
 - **`browser_refresh` mode is unaffected** — that family is browser-held and rotated by the SDK under
   `navigator.locks` (§2/§3); the server anchor family is a *different* family from a *different*
   code, so the two never collide (the single-holder invariant, O3).
-- **Regression test (round 3):** fire **N parallel `?mint=1`** against one anchor; assert exactly
-  **one** Hydra `/oauth2/token` call is made, all N responses carry a valid access token, and the
-  refresh family is **not** revoked (no reuse-detection trip). A second test asserts a mint after the
-  cached token expires triggers exactly one new rotation.
+- **Regression test (round 3, updated round 6):** fire **N parallel `?mint=1`** against one anchor on
+  one node; assert exactly **one** Hydra `/oauth2/token` call is made (single-flight coalesces), all
+  N responses carry a valid access token, and the refresh family is **not** revoked (no
+  reuse-detection trip). A second test asserts a mint after the cached wrapper expires triggers
+  exactly one new rotation. A third asserts **no DB connection is held across the Hydra call** (the
+  single mutable `Client`/pool is reusable by an unrelated query that runs concurrently with a stalled
+  Hydra refresh).
 
 ⚠️ **Round-2 hardening (MAJOR) — `?mint=1` is a credential-minting surface and must not be
 triggerable by a top-level navigation.** A `SameSite=Lax` anchor cookie **is** sent on a top-level
@@ -1035,7 +1167,7 @@ only the cached user projection (no fresh token) and is harmless. <!-- Added in 
 GET /__zs/auth/session?mint=1
 Headers (required): X-ZS-Auth: 1        (custom header — absent ⇒ 400 invalid_request, no mint)
 → 200 { "user": {…}, "scopes":[…], "access_token":"<gateway WRAPPER jwt — sub=pws_, 10-min exp>",
-        "expires_at":1717000000 }     (wrapper, NOT the raw Hydra JWT; minted under the anchor lock, §1.2)
+        "expires_at":1717000000 }     (wrapper, NOT the raw Hydra JWT; minted via per-node single-flight, §1.2)
 → 401 { "error":"login_required" }   (anchor missing/expired, or Hydra invalid_grant on the family)
 → 400 { "error":"invalid_request" }  (mint requested without X-ZS-Auth)
 ```
@@ -1206,8 +1338,14 @@ Round 2 changes three things: <!-- Added in round 2: addressing MAJOR — shorte
    - The Bearer arm, after verifying the token (wrapper or raw-Hydra), checks: **is there a
      `token_revocations` row for `(token.client_id, token.sub)` with `revoked_after > token.iat`?**
      If so → `Unauthenticated`. Any token issued *before* the revocation is rejected on **every** node
-     (the table is shared PG, read-through-cached locally with a short TTL exactly like the
-     `dpop_jti` tier). New tokens minted *after* re-login carry a later `iat` and pass.
+     (the table is shared PG, read-through-cached locally). ⚠️ **The read-through cache TTL for this
+     family-marker lookup must be seconds-scale (round-6) — NOT the `dpop_jti` cache's default TTL.**
+     The `dpop_jti` cache is sized to the DPoP-proof replay window (minutes); the
+     wrapper-revocation read-through is a *freshness* cache whose TTL **directly bounds how stale a
+     revocation can be on a sibling node**, so it is set explicitly to a few seconds (a dedicated
+     `TieredJtiCache`/read-through with its **own** seconds-scale TTL), independent of the
+     `dpop_jti` default. A longer TTL would widen the cross-node revocation window for no benefit.
+     New tokens minted *after* re-login carry a later `iat` and pass.
    - **Per-jti denial is the special case** (a single stolen token revoked without signing out the
      family): the same `auth.token_revocations`-style PG-backed set holds individual `jti`s when the
      caller *does* know one (e.g. an admin revoke of a specific token). It is a `TieredJtiCache`
@@ -1369,7 +1507,8 @@ provisioning→route-sync ordering guarantee.** Two things the round-2 §1.5 lef
 1. **The gateway grows real identity logic — a deliberate, bounded exception to "the gateway is
    dumb."** The browser-auth endpoints make the gateway build authorize URLs, proxy/validate token
    exchanges, fully validate id_tokens (sig/iss/aud/exp), rotate the server refresh family under a
-   lock, derive pairwise `pws_` via HMAC, look up relay aliases, and run a jti denylist. We keep this
+   per-node single-flight (§1.2), derive pairwise `pws_` via HMAC, look up relay aliases, and run a
+   jti denylist. We keep this
    in the gateway because every piece reuses primitives it **already** owns for the shipped DPoP/BCL
    paths (`state.oidc_rp.jwks`, `encode_user_header`, the `dpop_jti` PG cache, the cookie-session
    store) — the *same class* of work, all **stateless OAuth plumbing + a header projection** with no
@@ -1385,8 +1524,11 @@ provisioning→route-sync ordering guarantee.** Two things the round-2 §1.5 lef
    host is never live with `oauth_client_id == None`. The `None` arm and its `503
    client_not_provisioned` remain as a **defensive** state (e.g. a hand-rolled route, a partial sync,
    or a reconcile error) — not a routine first-deploy window — and the SDK treats `503
-   client_not_provisioned` as retryable with backoff. A control-plane invariant test asserts
-   "RouteEntry for a deployed app always carries `Some(oauth_client_id)`."
+   client_not_provisioned` as a **retryable `recovering` state with bounded backoff** that does **not**
+   clear the breadcrumb or emit `SIGNED_OUT` (only a `401 login_required` does), so a transient
+   provisioning 503 on the unconditional first-load probe does not strand the user in a confusing
+   anonymous-but-recoverable state — see the §4.3 breadcrumb × 503 interaction. A control-plane
+   invariant test asserts "RouteEntry for a deployed app always carries `Some(oauth_client_id)`."
 3. **`oauth_client_id` staleness / reassignment.** The per-app `client_id` is **stable for the life
    of the app** (`oac_<base62-app-id>`, derived from `app_id`); it is never rekeyed or reassigned
    while the app exists, so the Bearer arm's `client_id`-claim binding cannot validate against a
@@ -1474,14 +1616,18 @@ export interface Session {
 }
 
 export type AuthChangeEvent =
-  | "SIGNED_IN" | "SIGNED_OUT" | "TOKEN_REFRESHED" | "USER_UPDATED";
+  | "SIGNED_IN" | "SIGNED_OUT" | "TOKEN_REFRESHED" | "USER_UPDATED"
+  | "RECOVERING";  // round-6: emitted while a 503 client_not_provisioned probe retries with backoff
+                   // (NOT SIGNED_OUT; breadcrumb is kept) — §4.3. Resolves to SIGNED_IN or a final AuthError.
 
 export type AuthErrorCode =
   | "login_required" | "consent_required" | "interaction_required"
   | "invalid_grant"  | "missing_refresh_token"
   | "popup_closed"   | "popup_blocked"   | "timeout"
   | "scope_required" | "invalid_state"   | "network_error"
-  | "server_error"   | "config_error";
+  | "server_error"   | "config_error"
+  | "client_not_provisioned";  // round-6: 503 from /session|/token when the per-app client is not yet
+                               // routable; retryable/recovering with backoff, does NOT clear the breadcrumb (§4.3/§1.5)
 
 export class AuthError extends Error {
   readonly code: AuthErrorCode;
@@ -1701,6 +1847,26 @@ the click handler.
     only suppresses the *repeat* background probes within a load, never the first one — so a forged
     or cleared breadcrumb can at most add/remove one cheap network call, never grant or deny a
     session. The breadcrumb is cleared on `signOut`.
+  - ⚠️ **Cleared-breadcrumb × `503 client_not_provisioned` interaction (round-6).** Because the first
+    `checkSession()` per load probes `/__zs/auth/session` **unconditionally** (regardless of the
+    breadcrumb, consequence (b) above), that probe can race a still-provisioning app and get
+    `503 client_not_provisioned` (the defensive `oauth_client_id == None` state, §1.5 — not a routine
+    first-deploy window, but possible on a partial sync). The SDK must **not** collapse this into a
+    durable anonymous state. Concretely: a `503 client_not_provisioned` from `/session` (or `/token`)
+    is treated as a **retryable** signal distinct from `401 login_required` — the SDK keeps the
+    session in a `recovering` (not `anonymous`) substate, schedules a **bounded exponential backoff**
+    retry of `/session` (e.g. ~0.5 s → ~8 s, capped, a few attempts), and **does not clear the
+    breadcrumb** on a 503 (only a `401 login_required` clears it). This avoids the confusing
+    "anonymous-but-actually-recoverable first load" where a transient provisioning 503 would otherwise
+    look like a logged-out user *and* clear the breadcrumb, suppressing the next probe. `onAuthStateChange`
+    emits no `SIGNED_OUT` for a 503; it stays quiet (or emits the optional `RECOVERING` event) until the
+    retry resolves to `SIGNED_IN` (recovered) or the backoff exhausts (then surface a typed
+    `AuthError{code:'client_not_provisioned'}` the app can show as "still starting up", **without**
+    clearing the breadcrumb). The optional event is the typed `RECOVERING` `AuthChangeEvent` (§4.2). A
+    `401` at any point is the only thing that transitions to a clean anonymous state + breadcrumb
+    clear. **Test:** a `/session` probe that returns `503`
+    client_not_provisioned then `200` on retry ends in `SIGNED_IN` with the breadcrumb intact and **no**
+    intervening `SIGNED_OUT`. <!-- Added in round 6: addressing residual note — trace cleared breadcrumb × 503 client_not_provisioned; 503 is retryable/recovering (backoff, breadcrumb kept), only 401 clears the breadcrumb; avoid anonymous-but-recoverable first load -->
 
 
 ### 4.4 Popup / relay mechanics (no iframe)
@@ -2358,17 +2524,19 @@ CREATE TABLE auth.app_session_anchors (
   refresh_token_enc   bytea       NOT NULL,            -- encrypted server-held rotating refresh family
   refresh_family_id   text        NOT NULL,            -- Hydra session/lineage id binding the anchor to its family (§1.2)
   cached_access_token text,                            -- last minted WRAPPER access token (shared by concurrent ?mint=1, §1.2)
-  cached_access_exp   timestamptz,                     -- expiry of cached_access_token (= 10-min access TTL)
+  cached_access_exp   timestamptz,                     -- server-side cache window = min(600, ANCHOR_MINT_CACHE_TTL), SECONDS-scale ≪ the 10-min wrapper exp (round-6 single-flight window, §1.2)
   granted_scopes      text[]      NOT NULL DEFAULT '{}',
   created_at          timestamptz NOT NULL DEFAULT now(),
   -- NO idle column: a reload-recovery anchor MUST survive long idle gaps (§2 BLOCKER fix).
-  abs_expires_at      timestamptz NOT NULL,            -- = min(created_at + 30d, refresh-family ceiling); NO 30-min idle slide
+  abs_expires_at      timestamptz NOT NULL,            -- = created_at + 30d, SET ONCE at create, NEVER slid; NO 30-min idle (round-6 MAJOR). The 720h family ceiling is enforced ONLY by Hydra invalid_grant → anchor deleted.
   revoked_at          timestamptz
 );
 CREATE INDEX app_session_anchors_user ON auth.app_session_anchors (app_id, global_user_id) WHERE revoked_at IS NULL;
 -- The anchor does NOT reuse auth.gateway_sessions (ABSOLUTE_HOURS=12 / IDLE_MINUTES=30, sessions.rs:46-50),
 -- whose 30-min idle expiry would kill "return tomorrow" recovery. This store has no idle window.
--- /__zs/auth/session?mint=1 takes pg_advisory_xact_lock(hash(id)) ACROSS the Hydra refresh (§1.2 BLOCKER fix).
+-- /__zs/auth/session?mint=1 coalesces concurrent minters via a PER-NODE in-process single-flight keyed
+-- on id + a short cached wrapper (cached_access_token/exp); NO db lock or connection is held across the
+-- Hydra refresh (§1.2 round-6 BLOCKER redesign — AppState.db is a single Arc<Client>, migrated to a Pool).
 ```
 
 `auth.token_revocations` (cross-node access-token revocation — round-3 MAJOR fix; the
@@ -2483,11 +2651,13 @@ are **all 30 days** (NOT `auth.gateway_sessions`, which stays at its `ABSOLUTE_H
 `IDLE_MINUTES=30` for the interactive cookie redirect flow — §8.1). The anchor has **no idle window**
 (a reload-recovery credential must survive long idle gaps), so it does not die after a 30-min gap.
 The browser **access token** is the **10-min** wrapper (§8.5; refreshed via `/__zs/auth/session?mint=1`
-under the anchor lock); the **server-held refresh family** is `720h` (Hydra), and the anchor's
-absolute expiry is `min(created_at + 30d, refresh-family ceiling)` — each active `?mint=1` slides the
-720h family, so an actively-used anchor practically caps at 30 days of total inactivity. When the
-anchor expires (or Hydra returns `invalid_grant` at the 720h ceiling), recovery falls back to
-interactive login. `Max-Age` values are documented, not derived per-handler. <!-- Added in round 1: addressing MINOR — lifetime reconciliation; Updated in round 3: anchor is app_session_anchors (no idle slide), gateway_sessions stays 12h/30min; access token is 10-min wrapper -->
+via per-node single-flight); the **server-held refresh family** is `720h` (Hydra), and the anchor's
+absolute expiry is **`created_at + 30d`, set once and never slid (round-6 MAJOR)**. The 720h family
+ceiling is **not** mirrored into `abs_expires_at`; it is enforced solely by Hydra returning
+`invalid_grant` on a `?mint=1` refresh, which the gateway treats as anchor-dead (delete anchor +
+clear breadcrumb → interactive login). So the anchor ends at whichever fires first: its own 30-day
+absolute expiry, or a Hydra `invalid_grant`. `Max-Age` values are documented, not derived
+per-handler. <!-- Added in round 1: lifetime reconciliation; Round 3: anchor is app_session_anchors (no idle slide); Round 6 (MAJOR): abs_expires_at = created_at+30d set once, NOT min(.,family-ceiling); family ceiling enforced only by Hydra invalid_grant -->
 
 ⚠️ The `__Host-zs_app_session` cookie attribute table row (above) is the **anchor cookie pointing at
 an `auth.app_session_anchors` row**, not a `gateway_sessions` row — corrected in round 3 so the
@@ -2602,10 +2772,14 @@ first-party server code, and we say so plainly — it is the accepted cost of tr
   `(client_id, sub, revoked_after)` **family marker** (the PRIMARY mechanism, since signout cannot
   enumerate per-node jtis), with a PG-backed per-jti `TieredJtiCache` for single-token admin revokes
   — closes this to **cross-node immediate for the family case** (one PG upsert, visible to every gate
-  node on its next read-through, bounded by a seconds-scale cache TTL) and the residual window for a
-  token not yet covered by a marker is the 10-min TTL. ⚠️ This is **not** backed by the in-memory
-  `logout_jti_cache` (per-process only) — it is the PG-tiered store used by `dpop_jti`, so it is
-  sound under `--scale` and multiple gate nodes (§1.3 step 2). DPoP binding (one flag, `useDpop`)
+  node on its next read-through, bounded by a **seconds-scale** read-through TTL set explicitly for
+  this freshness cache — **NOT** the `dpop_jti` cache's default TTL, which is sized to the
+  minutes-scale DPoP-proof replay window; the wrapper-revocation TTL directly bounds cross-node
+  staleness and is deliberately a few seconds, §1.3) and the residual window for a token not yet
+  covered by a marker is the 10-min TTL. ⚠️ This is **not** backed by the in-memory
+  `logout_jti_cache` (per-process only) — it is a PG-tiered store of the same *class* as `dpop_jti`
+  but with its **own** seconds-scale TTL, so it is sound under `--scale` and multiple gate nodes
+  (§1.3 step 2). DPoP binding (one flag, `useDpop`)
   upgrades to per-request sender-constraint and is the documented recommendation for sensitive-scope
   apps. <!-- Added in round 2: addressing MAJOR — Sec-Fetch-Site matrix, quantified replay window; Updated in round 3: cross-node family-marker denylist backed by shared PG, not the in-memory logout cache; MINOR — SameSite=Strict anchor -->
 - **`__Host-` attributes** on the anchor: `Path=/`, no `Domain`, `Secure`, **`SameSite=Strict`**
@@ -2759,33 +2933,38 @@ need production observability and abuse limits — absent from round 1. They reu
   - `GET /__zs/auth/session?mint=1` — minting; per-IP + per-app cap (tighter than `/token` since a
     valid anchor can mint repeatedly).
   - `POST /__zs/auth/signout`, `GET /__zs/auth/authorize` — looser caps (cheap), still bounded.
-- **Hydra back-pressure**: when `/oauth2/token` is slow or 5xx-ing, the proxy applies a bounded
-  timeout + circuit-breaker and returns `503 upstream_unavailable` (not a hang), so a Hydra brownout
-  cannot exhaust gateway connections.
-- ⚠️ **Anchor advisory-lock held across the Hydra refresh — connection-pin cost, bounded (round-5
-  MINOR).** `?mint=1` holds `pg_advisory_xact_lock(hash(anchor.id))` **across** the outbound Hydra
-  refresh (§1.2). Even on compio/io_uring (no thread blocks), the open transaction **pins one
-  compio-postgres connection** for the full Hydra RTT, and N minters serialized on one anchor have
-  tail latency ≈ N × Hydra-RTT with a connection held the whole time — a pool-exhaustion vector under
-  a Hydra brownout. We keep the lock-across-call (the alternative — release before the Hydra call,
-  re-acquire to write — reopens the tab-vs-tab double-rotation the round-3 design closed) but **bound
-  it on three axes**: <!-- Added in round 5: addressing MINOR — bound the advisory-lock-held-across-Hydra connection pin; tie the lock-wait + per-mint Hydra timeout to the circuit breaker so a brownout can't hold DB connections for the breaker timeout -->
-  1. **Per-mint Hydra timeout** = the same bounded `/oauth2/token` timeout above (a few seconds), so a
-     single held connection is bounded by that timeout, **not** the circuit-breaker's open duration.
-     When the breaker is **open**, `?mint=1` short-circuits to `503 upstream_unavailable` **before**
-     acquiring the lock or a connection — so a Hydra brownout holds **zero** DB connections for the
-     breaker timeout (it fails fast, lock-free).
-  2. **Bounded lock-wait**: a minter that cannot acquire the anchor lock within a short cap (e.g. the
-     per-mint timeout) returns `503` with `Retry-After` rather than queueing behind N minters — the
-     SDK retries with backoff. The common case (the first minter populates `cached_access_token`)
-     means later minters acquire the lock fast and take the cache branch with no Hydra call at all.
-  3. **Connection-budget isolation**: the mint path uses the gateway's bounded compio-postgres pool;
-     because (1) caps hold time and (2) caps queueing, the worst-case held-connection count is bounded
-     by the per-anchor concurrency the rate limiter already caps (per-IP + per-app, above). The
-     `auth_session_mint_total{result=upstream_error}` and a new `auth_mint_lock_wait_timeout_total`
-     metric surface saturation.
-  This stays zero-tokio (all on compio/ntex); the point is the *transaction-held-across-HTTP* cost is
-  acknowledged and explicitly bounded, not that a thread blocks.
+- **Shared, breaker-guarded Hydra client (round-6 MAJOR #3).** ⚠️ The gateway's `oidc_rp` today calls
+  `cyper::Client::new()` **per request** (`oidc_rp.rs:191,276`), which gives every call a fresh
+  connection pool and no shared breaker/timeout state — undercutting the bounded-timeout/circuit-breaker
+  claims here. **`OidcRp` instead holds ONE `cyper::Client` built at construction and stored on the
+  struct**, and the bounded `/oauth2/token` timeout + circuit-breaker + connection-budget state attach
+  to **that** shared client. No per-call client construction anywhere on the browser-auth or DPoP path.
+  When `/oauth2/token` is slow or 5xx-ing, the breaker on the shared client opens and the proxy returns
+  `503 upstream_unavailable` (not a hang), so a Hydra brownout cannot exhaust gateway connections. <!-- Added in round 6: addressing MAJOR #3 — oidc_rp holds one reused cyper::Client; breaker + timeout attach to it; no per-call cyper::Client::new() -->
+- ⚠️ **Mint single-flight + cached wrapper — NO db connection held across the Hydra call (round-6
+  BLOCKER redesign).** `?mint=1` no longer holds any advisory lock or transaction across the outbound
+  Hydra refresh. The round-3 "`pg_advisory_xact_lock` across the Hydra round-trip" was removed (it was
+  unbuildable: `AppState.db` is a single `Arc<Client>`, not a pool, and a transaction needs `&mut self`
+  — §1.2). Instead a **per-node in-process single-flight** (`Mutex<HashMap<AnchorId, Shared<…>>>`)
+  coalesces concurrent minters for one anchor into ONE Hydra refresh, and a **short cached wrapper**
+  (`ANCHOR_MINT_CACHE_TTL`, seconds-scale) lets a reload-storm skip Hydra entirely. The DB is touched
+  only by the short pre-read and post-write, each on a **pooled** connection (the migrated `AppState`
+  Pool, §1.2) checked out and released around — never across — the Hydra call. The bounds are now: <!-- Added in round 6: addressing BLOCKER — single-flight + cached wrapper instead of a db lock across Hydra; bound via per-mint timeout, breaker fail-fast, and the bounded pool -->
+  1. **Per-mint Hydra timeout** = the bounded `/oauth2/token` timeout above (a few seconds), on the
+     shared breaker-guarded client. When the breaker is **open**, `?mint=1` short-circuits to
+     `503 upstream_unavailable` **before** issuing the Hydra call — fail-fast, holding **zero** DB
+     connections for the breaker timeout (no connection is pinned across the call in any case).
+  2. **No connection pinned across HTTP**: because the single-flight future holds no checked-out
+     connection while awaiting Hydra, a Hydra brownout cannot exhaust the pool — concurrent unrelated
+     gateway DB work proceeds normally. N concurrent minters for one anchor share one future, so they
+     incur **one** Hydra RTT total, not N.
+  3. **Cross-node tolerance via Hydra rotation grace**: the rare simultaneous mint across two gateway
+     nodes is absorbed by Hydra's `rotation_grace_period: 30s` / `rotation_grace_reuse_count: 3`
+     within the seconds-scale cached-wrapper window (§1.2), not by a distributed lock. The
+     `auth_session_mint_total{result=upstream_error}` and a new `auth_mint_singleflight_coalesced_total`
+     metric surface load shedding and coalescing effectiveness.
+  This stays zero-tokio (all on compio/ntex); the point is the mint path no longer holds a DB
+  connection or lock across an outbound HTTP call at all.
 - **Metrics** (emit on the existing gateway metrics path):
   - `auth_token_mint_total{result=success|invalid_grant|upstream_error}`,
   - `auth_session_mint_total{result}`,
@@ -2804,42 +2983,57 @@ Each slice is independently testable and committable (commit-only, never push). 
 1 → 2 → 3 → 4 → 5; the consent *mechanism* in Slice 1.3 lets 3/4/5 swap content in without
 reshaping the SDK.
 
-**Slice 1 — foundation (Subsystem 1).** Reviewable sub-slices:
+**Slice 1 — foundation (Subsystem 1).** Reviewable sub-slices. ⚠️ **Round-6 — Slice 1b is SPLIT into
+`1b-mech` (mechanical, low-risk) and `1b-endpoints` (high-risk), and the order is resequenced** so the
+mechanical wire-format + `wrapper_token` refactor lands and reviews independently of the riskier
+endpoint/DB/single-flight work, and so 1c (the Bearer wrapper arm) and 1d (per-app client) precede the
+1b-endpoints e2e. **New order: 1a → 1b-mech → 1c → 1d → 1b-endpoints → 2 → 3 → 4 → 5.** <!-- Added in round 6: addressing slice-plan ruling — split 1b into 1b-mech (refactor + wire format) and 1b-endpoints (endpoints + Liquibase + mint + Pool migration); reorder so 1c depends on 1b-mech and 1d precedes 1b-endpoints e2e -->
 - 1a. `env.auth` `AuthPlugin` registration **in BOTH `crates/worker/src/cache.rs` `create_plugins()`
   (the production path) AND the CLI `zeroship serve` vector** (round-3 §1.4) + a runtime regression
   test driven through the **worker** path (smallest, unblocks server SDK).
-- 1b. **Wire-format first (§1.5):** extend `RouteEntry` with `oauth_client_id`+`sector_identifier`
-  (both `#[serde(default)]`⇒`None`), populate from `registry.rs::get_routes` (LEFT JOIN
-  `app_oauth_clients`), surface on `CompiledRoute`; update every producer/consumer/fixture (incl. the
-  mixed-default round-trip) in the same patch (a deliberate wire-format break). **Then refactor
-  `wrapper_token.rs` (§1.2 round-5):** `Issuer::issue` → claims-builder (free
-  `sub`/`email`/`exp`/`cnf`/`wraps`), `Verifier::verify` → optional `client_id` match, update the sole
-  caller `dpop_exchange.rs:209` + lib tests + `WRAPPER_EXPIRES_IN_SECS`. Then gateway `browser_auth.rs`:
-  `/authorize`, `/popup-callback` (with BroadcastChannel/localStorage relay fallback), `/token`
-  (validate id_token via `verify_id_token(expected_aud=client_id, expected_nonce=None)`; mint per-app
-  **wrapper** access token sub=`pws_` via the refactored issuer; server-held refresh family in
-  `auth.app_session_anchors`; **same-origin-only, no credentialed CORS**), `/session` (`?mint=1`
-  under an **anchor-id advisory lock across the Hydra refresh** with a **bounded lock-wait +
-  breaker-gated fail-fast**, §8.7; rotates the raw family, **locally JWKS-verifies** the rotated JWT,
-  re-mints + **caches the wrapper**), `/signout` (fixes the live bug; per-app `global`; writes
-  `auth.token_revocations` marker) + anchor cookie via `app_session_cookie_name`. **New Liquibase
-  changesets: `auth.app_session_anchors`, `auth.token_revocations`, and
-  `auth.gateway_sessions.granted_scopes` (ALTER ADD COLUMN)** (§8.1); extend `sessions::create` to
-  write `granted_scopes`. Handler-level tests (incl. N-parallel-mint, **zero-introspection on mint**,
-  foreign-Origin reject, >30-min-idle recovery, first-login alias) + a loopback-Hydra integration test.
+- **1b-mech (mechanical, low-risk).** Two in-patch refactors with no new endpoints or DB:
+  (i) **Wire-format (§1.5):** extend `RouteEntry` with `oauth_client_id`+`sector_identifier` (both
+  `#[serde(default)]`⇒`None`), populate from `registry.rs::get_routes` (LEFT JOIN `app_oauth_clients`),
+  surface on `CompiledRoute`; update every producer/consumer/fixture (incl. the mixed-default
+  round-trip) in the same patch (a deliberate wire-format break). (ii) **`wrapper_token.rs` refactor
+  (§1.2 round-6):** `Issuer::issue` → claims-builder (free `sub`/`email`/`exp`/`cnf`/`wraps`),
+  `Verifier::verify` → optional `client_id` match, **`Verifier` accepts a current+previous ed25519 key
+  by `kid` (the wrapper signing-key rotation/overlap story, §1.2)**, update the sole caller
+  `dpop_exchange.rs:209` + lib tests + `WRAPPER_EXPIRES_IN_SECS`. Tests: mixed-default `RouteEntry`
+  round-trip; plain-Bearer wrapper round-trip; `verify` with `Some(wrong_client_id)` rejects; current-
+  vs-previous-key acceptance during overlap. (1c's Bearer wrapper arm depends on this.)
 - 1c. Gateway Bearer arm in `router/auth.rs` (**wrapper path via `state.wrapper_verifier` + raw-Hydra
   path via JWKS**, issuer discriminator, **per-app `client_id`-claim binding**, cross-node
   `token_revocations` family-marker check, expired-Bearer-falls-through-on-Anon, `encode_user_header`)
-  + regression tests. **Live-Hydra spike (S1, confirmation-only)**: confirm a per-app public client's
-  raw access JWT carries `client_id` (the locked binding claim, §1.3); if absent, switch to the
-  pre-decided `audience=[client_id]` + `aud` fallback. Either way the binding ships.
+  + regression tests. Depends on the 1b-mech `RouteEntry`/`Verifier` shapes. **Live-Hydra spike (S1,
+  confirmation-only)**: confirm a per-app public client's raw access JWT carries `client_id` (the
+  locked binding claim, §1.3); if absent, switch to the pre-decided `audience=[client_id]` + `aud`
+  fallback. Either way the binding ships.
 - 1d. Control plane per-app client lifecycle (`app_oauth_client.rs`: `ensure_app_client` writes the
   per-app client to **`control.oauth_clients`** (`oac_<base62>`, `skip_consent=FALSE`,
   `backchannel_logout_uri`) **and** the `control.app_oauth_clients` extension row (sector + app link)
   in one transaction, satisfying the `oauth_grants` FK; sync redirect URIs/scope on the `oauth_clients`
   row on deploy (diff-then-PUT); delete on app-delete) + `control.app_oauth_clients` Liquibase
   changeset + idempotency/FK tests. Update `backchannel_logout.rs` to disambiguate per-app `aud` and
-  revoke per-app sessions.
+  revoke per-app sessions. **Must land before 1b-endpoints** — the endpoint e2e needs a provisioned
+  per-app client.
+- **1b-endpoints (high-risk).** Gateway `browser_auth.rs`: `/authorize`, `/popup-callback` (with
+  BroadcastChannel/localStorage relay fallback), `/token` (validate id_token via
+  `verify_id_token(expected_aud=client_id, expected_nonce=None)`; mint per-app **wrapper** access token
+  sub=`pws_` via the refactored issuer; server-held refresh family in `auth.app_session_anchors`;
+  **same-origin-only, no credentialed CORS**), `/session` (`?mint=1` via **per-node in-process
+  single-flight keyed on anchor_id + a short cached wrapper**, with **NO db connection/lock held across
+  the Hydra refresh** + **breaker-gated fail-fast on the shared `cyper::Client`**, §1.2/§8.7; rotates
+  the raw family, **locally JWKS-verifies** the rotated JWT, re-mints + **caches the wrapper**),
+  `/signout` (fixes the live bug; per-app `global`; writes `auth.token_revocations` marker) + anchor
+  cookie via `app_session_cookie_name`. **Migrate `AppState.db` from `Arc<Client>` to a compio-postgres
+  `Pool`** (`pool.rs:224` `PooledClient`); update `sessions::create`/`validate`/`revoke*` + the anchor
+  read/write to take a pooled conn (§1.2). **New Liquibase changesets: `auth.app_session_anchors`,
+  `auth.token_revocations`, and `auth.gateway_sessions.granted_scopes` (ALTER ADD COLUMN)** (§8.1);
+  extend `sessions::create` to write `granted_scopes`. Handler-level tests (incl. N-parallel-mint ⇒ one
+  Hydra call via single-flight, **no-conn-held-across-Hydra**, **zero-introspection on mint**,
+  foreign-Origin reject, >30-min-idle recovery, `created_at+30d` absolute expiry, Hydra-`invalid_grant`
+  ⇒ anchor cleared, first-login alias) + a loopback-Hydra integration test.
 
 **Slice 2 — SDK (Subsystem 2).** Restructure `sdks/auth` to subpath exports; implement
 `types.ts`, repaired `server.ts`, `client.ts` (cache/worker/locks/popup/relay/**transaction
@@ -2888,7 +3082,15 @@ aligned five load-bearing feasibility claims with the live tree (the `wrapper_to
 missing `gateway_sessions.granted_scopes` column, the `oauth_clients` FK/`skip_consent` reconciliation,
 the `?mint=1` raw→wrapper transform, the consent→`/token` ordering) and resolved six minors
 (`oac_`-prefixed client_id, dropped gateway nonce echo, removed `client_id_implicit`, bounded
-lock-held-across-Hydra, named `RouteEntry` producer, confirmed anchor `SameSite=Strict`). <!-- Updated in round 4: pilot ruling locked O7/O8/S1/S2. Round 5: code-grounded feasibility alignment, no decision changed -->
+lock-held-across-Hydra, named `RouteEntry` producer, confirmed anchor `SameSite=Strict`). **Round 6**
+also changed no decision; it corrected feasibility per the round-5 review: replaced the **unbuildable
+`?mint=1` cross-node advisory lock** with a per-node single-flight + cached wrapper + Hydra rotation
+grace and migrated `AppState.db` to a `Pool`; added a **wrapper signing-key rotation/overlap** story;
+specified a **single reused `cyper::Client`** with the breaker attached; fixed
+`abs_expires_at = created_at + 30d` (set once, not slid, family ceiling enforced only by Hydra
+`invalid_grant`); split **Slice 1b into 1b-mech + 1b-endpoints** and reordered; pinned the
+wrapper-revocation read-through TTL to **seconds-scale (not the `dpop_jti` default)**; and traced the
+cleared-breadcrumb × `503 client_not_provisioned` recovery interaction. <!-- Updated in round 4: pilot ruling locked O7/O8/S1/S2. Round 5: code-grounded feasibility alignment. Round 6: round-5-review corrections (mint single-flight + Pool, key rotation, shared client, abs_expires_at, slice split, revocation TTL, 503 recovery) -->
 
 **Round-4 pilot rulings (DECIDED — folded into the body):**
 - **O8 — app scopes declared in the manifest.** App permission scopes live in the **app manifest**
@@ -2923,9 +3125,12 @@ lock-held-across-Hydra, named `RouteEntry` producer, confirmed anchor `SameSite=
   revocation mechanism (signout cannot enumerate per-node jtis).
 - **O3 — server-held refresh (§1.2/§2).** The rotating refresh family lives server-side in the
   dedicated `auth.app_session_anchors` store (single-holder); the browser holds none by default, or
-  its *own separate* family from a *separate* code. Same-family tab-vs-tab `?mint=1` is serialized by
-  an anchor-id advisory lock held **across** the Hydra refresh + a cached minted access token. The
-  silent-iframe alternative is deleted (3p-cookie blocked).
+  its *own separate* family from a *separate* code. Same-family tab-vs-tab `?mint=1` is coalesced by a
+  **per-node in-process single-flight keyed on `anchor_id`** + a short cached minted wrapper
+  (seconds-scale TTL), with **no db connection or lock held across the Hydra refresh** (round-6
+  redesign — the round-3 cross-node advisory lock was unbuildable against the single `Arc<Client>`
+  gateway DB; the rare cross-node mint is absorbed by Hydra's rotation grace, and `AppState.db`
+  migrates to a `Pool`). The silent-iframe alternative is deleted (3p-cookie blocked).
 - **O4 — pairwise mechanism (§6.2; = S2 above).** Hydra keeps `subject_type: public` and emits the
   global UUID (bound at `accept_login`); the gateway projects `pws_…` at the `ZeroShip-User` boundary
   (cookie + raw-Hydra Bearer arms) and mints a per-app wrapper access token (`sub = pws_`) for the
@@ -2955,9 +3160,14 @@ pin `AuthPlugin` to BOTH sites) · `consent.rs:69-125` (`skip_consent` fast path
 `control.oauth_grants` ⇒ single ledger, per-app `skip_consent=false`) · `core/dpop.rs:980`
 (`TieredJtiCache::with_pg` is cross-node) vs `core/logout_token.rs:99` (in-memory ⇒ back the denylist
 with PG) · `gateway/wrapper_token.rs` + `lib.rs:136/147` (`Issuer`/`WrapperClaims` +
-`wrapper_issuer`/`wrapper_verifier` ⇒ mint the `pws_` wrapper) · `ops/hydra-dev.yaml:49-51`
-(`rotation_grace_period 30s`, `reuse_count 3`, refresh `720h` ⇒ ≥3 concurrent minters trip revocation
-⇒ anchor-lock mint).
+`wrapper_issuer`/`wrapper_verifier` ⇒ mint the `pws_` wrapper) · `gateway/src/lib.rs:116` +
+`main.rs:450-456` (`AppState.db` is a single `Option<Arc<compio_postgres::Client>>`, NOT a pool) +
+`compio-postgres/src/pool.rs:224` (`PooledClient`) ⇒ no transaction-across-Hydra is reachable from an
+`Arc<Client>` (`Transaction` needs `&mut self`); mint uses per-node single-flight, `AppState.db`
+migrates to a `Pool` · `gateway/src/oidc_rp.rs:191,276` (`cyper::Client::new()` per call) ⇒ hold ONE
+reused client + attach the breaker/timeout to it · `ops/hydra-dev.yaml:49-51`
+(`rotation_grace_period 30s`, `reuse_count 3`, refresh `720h` ⇒ the rare cross-node concurrent mint
+stays within the reuse-count budget ⇒ per-node single-flight + cached wrapper, no distributed lock).
 
 **Round-5 grounded-fact anchors (the feasibility-fix evidence):**
 `gateway/wrapper_token.rs:167-230` (`issue(aud, &IntrospectionResponse, proof_jkt, hydra_token)` —
