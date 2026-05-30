@@ -7,11 +7,12 @@
  *
  *   <PageHeader>
  *     <PageHeader.Text>
- *       <PageHeader.Breadcrumbs>        {/* optional *​/}
- *         <li><a href="/">Home</a></li>
- *         <li aria-hidden="true">/</li>
- *         <li><a href="/projects">Projects</a></li>
- *       </PageHeader.Breadcrumbs>
+ *       <PageHeader.Breadcrumbs                {/* optional *​/}
+ *         items={[
+ *           { label: "Home", href: "/" },
+ *           { label: "Projects", href: "/projects" },
+ *         ]}
+ *       />
  *       <PageHeader.Title>Acme dashboard</PageHeader.Title>
  *       <PageHeader.Description>            {/* optional *​/}
  *         Overview of your workspace.
@@ -40,9 +41,11 @@
  *     `asChild` reLEVELS it (e.g. to `<h2>`) so the heading matches the
  *     surrounding document outline when the band is not the top of the
  *     page.
- *   - `.Breadcrumbs` is a `<nav aria-label="Breadcrumb">` wrapping an
- *     ordered list (`<ol>`); consumers place `<li>` items with `<a>`
- *     links and any visual separators inside.
+ *   - `.Breadcrumbs` composes the `Breadcrumbs` block: a
+ *     `<nav aria-label="Breadcrumb">` wrapping an `<ol>`. Pass an
+ *     ergonomic `items` array or the compound `Breadcrumbs.*` parts; the
+ *     block owns separators, the current-page `aria-current`, and
+ *     collapse.
  *   - `.Description` is a muted `<p>`.
  *   - `.Actions` is a right-aligned `Cluster` (no role — a layout group
  *     of buttons/links).
@@ -67,6 +70,7 @@ import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
 import { Stack } from "../Stack";
 import { Cluster } from "../Cluster";
+import { Breadcrumbs, type BreadcrumbsProps } from "../../blocks/Breadcrumbs";
 
 /* ─── props ───────────────────────────────────────────────────────────── */
 
@@ -80,14 +84,16 @@ export interface PageHeaderProps extends ComponentPropsWithoutRef<"div"> {
   asChild?: boolean;
 }
 
-export type PageHeaderBreadcrumbsProps = ComponentPropsWithoutRef<"nav"> & {
-  /**
-   * Accessible label for the breadcrumb landmark. Defaults to
-   * `"Breadcrumb"` (the conventional value). Localized consumers
-   * override.
-   */
-  label?: string;
-};
+/**
+ * `PageHeader.Breadcrumbs` composes the `Breadcrumbs` block. It accepts
+ * the full Breadcrumbs surface (ergonomic `items`, compound parts via
+ * `children`, `separator`, `maxItems`, `aria-label`) and forces the
+ * `data-slot="page-header-breadcrumbs"` the band owns. Use `items` for
+ * the common trail or the compound `Breadcrumbs.*` parts for full
+ * control. `data-slot` is omitted from the public surface because the
+ * wrapper always forces `"page-header-breadcrumbs"`.
+ */
+export type PageHeaderBreadcrumbsProps = Omit<BreadcrumbsProps, "data-slot">;
 export interface PageHeaderTitleProps
   extends ComponentPropsWithoutRef<"h1"> {
   /**
@@ -132,28 +138,27 @@ const PageHeaderRoot = forwardRef<HTMLDivElement, PageHeaderProps>(
 );
 PageHeaderRoot.displayName = "PageHeader";
 
-/* ─── Breadcrumbs — <nav aria-label="Breadcrumb"> wrapping an <ol> ────── */
-
+/* ─── Breadcrumbs — composes the Breadcrumbs block ────────────────────────
+ *
+ * Renders the standalone `Breadcrumbs` block and overrides its root
+ * `data-slot` to the `"page-header-breadcrumbs"` the band owns. All other
+ * props (ergonomic `items`, compound `children`, `separator`, `maxItems`,
+ * `aria-label`, `className`) pass straight through, so the band gets the
+ * full trail surface — collapse, asChild router links, the dual API — for
+ * free. The `zs-page-header__breadcrumbs` class is composed alongside the
+ * block's own class so the band CSS can still target the region.
+ */
 const PageHeaderBreadcrumbs = forwardRef<
   HTMLElement,
   PageHeaderBreadcrumbsProps
->(function PageHeaderBreadcrumbs(
-  { label = "Breadcrumb", className, children, ...rest },
-  ref,
-) {
-  // Rest spread BEFORE internal data-slot / aria-label so callers cannot
-  // desync the contract attrs via raw spread; the documented surface for
-  // the label is the `label` prop.
+>(function PageHeaderBreadcrumbs({ className, ...rest }, ref) {
   return (
-    <nav
+    <Breadcrumbs
       {...rest}
-      ref={ref as Ref<HTMLElement>}
+      ref={ref}
       data-slot="page-header-breadcrumbs"
-      aria-label={label}
       className={classnames("zs-page-header__breadcrumbs", className)}
-    >
-      <ol className="zs-page-header__breadcrumbs-list">{children}</ol>
-    </nav>
+    />
   );
 });
 PageHeaderBreadcrumbs.displayName = "PageHeader.Breadcrumbs";

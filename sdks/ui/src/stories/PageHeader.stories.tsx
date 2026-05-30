@@ -32,15 +32,12 @@ export const Full: Story = {
   render: () => (
     <PageHeader>
       <PageHeader.Text>
-        <PageHeader.Breadcrumbs>
-          <li>
-            <a href="#">Home</a>
-          </li>
-          <li aria-hidden="true">/</li>
-          <li>
-            <a href="#">Projects</a>
-          </li>
-        </PageHeader.Breadcrumbs>
+        <PageHeader.Breadcrumbs
+          items={[
+            { label: "Home", href: "#" },
+            { label: "Projects", href: "#" },
+          ]}
+        />
         <PageHeader.Title>Acme dashboard</PageHeader.Title>
         <PageHeader.Description>
           Overview of your workspace and recent activity.

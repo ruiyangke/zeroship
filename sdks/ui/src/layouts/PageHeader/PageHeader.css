@@ -4,8 +4,11 @@
  * Anatomy:
  *   .zs-page-header                    — wrapping row (text column ↔ actions)
  *   .zs-page-header__text              — the start-side Stack column
- *   .zs-page-header__breadcrumbs       — <nav aria-label="Breadcrumb">
- *   .zs-page-header__breadcrumbs-list  — the <ol> inside the nav
+ *   .zs-page-header__breadcrumbs       — composed Breadcrumbs block
+ *                                        (<nav aria-label="Breadcrumb">);
+ *                                        the block owns the <ol> reset,
+ *                                        crumb colors, separators, and
+ *                                        forced-colors handling
  *   .zs-page-header__title             — <h1> (or relevelled via asChild)
  *   .zs-page-header__description       — muted <p>
  *   .zs-page-header__actions           — end-aligned Cluster of controls
@@ -44,19 +47,10 @@
   min-inline-size: 0;
 }
 
-/* ─── Breadcrumbs — reset the ordered list to an inline wrapping row ───── */
-.zs-page-header__breadcrumbs-list {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--zs-space-2);
-  margin-block: 0;
-  padding-inline-start: 0;
-  list-style: none;
-  font: var(--zs-text-footnote-weight) var(--zs-text-footnote-size) /
-    var(--zs-text-footnote-line) var(--zs-font-system);
-  color: var(--zs-label-secondary);
-}
+/* The breadcrumb region is now the composed Breadcrumbs block — it owns
+ * the <ol> reset, crumb type/colors, separators, focus rings, and
+ * forced-colors handling. PageHeader only carries the
+ * `.zs-page-header__breadcrumbs` hook (no extra rules needed today). */
 
 /* ─── Title — page heading ────────────────────────────────────────────── */
 .zs-page-header__title {
@@ -87,10 +81,7 @@
  * The authored label tokens are dropped in a forced-colors pass; mirror
  * the painted text so each region resolves to a system color. */
 @media (forced-colors: active) {
-  .zs-page-header__breadcrumbs-list,
-  .zs-page-header__description {
-    color: CanvasText;
-  }
+  .zs-page-header__description,
   .zs-page-header__title {
     color: CanvasText;
   }

@@ -55,6 +55,17 @@ export {
   type DescriptionListDetailProps,
 } from "./DescriptionList";
 
+// Navigation block — breadcrumb trail (dual ergonomic + compound surface).
+export {
+  Breadcrumbs,
+  type BreadcrumbsProps,
+  type BreadcrumbItem,
+  type BreadcrumbsItemProps,
+  type BreadcrumbsLinkProps,
+  type BreadcrumbsPageProps,
+  type BreadcrumbsSeparatorProps,
+} from "./Breadcrumbs";
+
 // Data block (Wave 3) — presentational, generic data table.
 export {
   DataTable,
