@@ -17,12 +17,53 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const ID_TOKEN_IAT_SKEW_SECS: i64 = 300;
 const ID_TOKEN_NBF_SKEW_SECS: i64 = 30;
+
+/// Bounded wall-clock budget for a single JWKS HTTP fetch. A hung or slow
+/// Hydra JWKS endpoint must not block ID-token verification indefinitely:
+/// `refresh()` wraps its GET in a [`compio::time::timeout`] of this duration
+/// and, on expiry, returns [`OidcError::FetchJwks`] while leaving the cache's
+/// last-good keys intact (stale-on-error — a transient JWKS blip must not
+/// break verification while cached keys are still valid). Mirrors the gateway
+/// `hydra_client::DEFAULT_HYDRA_TIMEOUT` idiom for the token/introspect mint
+/// path; JWKS is the remaining unbounded outbound Hydra call (though 5-min
+/// cached, so lower-frequency).
+const DEFAULT_JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+thread_local! {
+    /// One reused `cyper::Client` per thread, shared across every JWKS
+    /// refresh that runs on that thread. `cyper::Client`'s connector wraps
+    /// its connect future in `send_wrapper::SendWrapper`, which *panics* if
+    /// the client is used on a thread other than the one that created it —
+    /// so it is effectively `!Send` and cannot be stored on the `Send + Sync`
+    /// `JwksCache` (every consumer shares it as `Arc<JwksCache>` across ntex
+    /// worker arbiter threads). We mirror the gateway `hydra_client` /
+    /// compio-postgres `Pool` idiom: build the client lazily on first use per
+    /// thread and reuse it thereafter. `cyper::Client` is internally
+    /// `Arc<ClientInner>`, so the clone is a cheap refcount bump — not a new
+    /// connection pool per fetch (the previous `cyper::Client::new()`-per-call
+    /// behavior).
+    static JWKS_CLIENT: RefCell<Option<cyper::Client>> = const { RefCell::new(None) };
+}
+
+/// Get (build-once) this thread's reused `cyper::Client` for JWKS fetches.
+fn thread_jwks_client() -> cyper::Client {
+    JWKS_CLIENT.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some(existing) = slot.as_ref() {
+            return existing.clone();
+        }
+        let client = cyper::Client::new();
+        *slot = Some(client.clone());
+        client
+    })
+}
 
 #[derive(Debug, Error)]
 pub enum OidcError {
@@ -79,6 +120,11 @@ pub struct JwksCache {
     url: String,
     inner: Arc<RwLock<JwksState>>,
     ttl: Duration,
+    /// Bounded budget for a single JWKS HTTP fetch (see
+    /// [`DEFAULT_JWKS_FETCH_TIMEOUT`]). Internal — not part of the public
+    /// constructor surface; defaults to 5s and is only overridable from
+    /// in-crate tests via [`JwksCache::with_fetch_timeout_for_test`].
+    fetch_timeout: Duration,
 }
 
 impl std::fmt::Debug for JwksCache {
@@ -87,6 +133,7 @@ impl std::fmt::Debug for JwksCache {
         f.debug_struct("JwksCache")
             .field("url", &self.url)
             .field("ttl", &self.ttl)
+            .field("fetch_timeout", &self.fetch_timeout)
             .field("key_count", &state.keys.len())
             .field("fetched_at", &state.fetched_at)
             .finish()
@@ -127,7 +174,19 @@ impl JwksCache {
             url: url.into(),
             inner: Arc::new(RwLock::new(JwksState::default())),
             ttl: Duration::from_secs(300), // 5 min
+            fetch_timeout: DEFAULT_JWKS_FETCH_TIMEOUT,
         }
+    }
+
+    /// Override the per-fetch timeout. Test-only: the production constructor
+    /// always uses [`DEFAULT_JWKS_FETCH_TIMEOUT`], so the public API is
+    /// unchanged. Used by the in-crate resilience test to drive a short,
+    /// deterministic timeout against a hung loopback JWKS server.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_fetch_timeout_for_test(mut self, timeout: Duration) -> Self {
+        self.fetch_timeout = timeout;
+        self
     }
 
     /// Get the current set of decoding keys. Refreshes if the cache is
@@ -164,29 +223,63 @@ impl JwksCache {
                 fetched_at: Some(Instant::now()),
             })),
             ttl: Duration::from_secs(300),
+            fetch_timeout: DEFAULT_JWKS_FETCH_TIMEOUT,
         }
     }
 
     /// Force-refresh the cache. Call after a signature-verification
     /// failure (e.g. JWKS rotated under us).
     ///
+    /// The HTTP GET runs under a bounded [`compio::time::timeout`]
+    /// ([`DEFAULT_JWKS_FETCH_TIMEOUT`], 5s by default) and over this thread's
+    /// *reused* `cyper::Client` (built once per thread, not per call). A hung
+    /// or slow Hydra JWKS endpoint therefore returns a fast
+    /// [`OidcError::FetchJwks`] instead of blocking ID-token verification
+    /// indefinitely. On ANY error — timeout, transport, non-2xx, or malformed
+    /// JWKS — the cache's last-good keys are left untouched: the failing
+    /// refresh returns its error and `keys()` keeps serving the previously
+    /// cached keys until the TTL expires (stale-on-error), so a transient
+    /// JWKS blip cannot break verification while cached keys are valid. The
+    /// cache is only mutated at the very end, after a fully successful fetch +
+    /// parse.
+    ///
     /// # Errors
-    /// `OidcError::FetchJwks` on network / non-2xx, `ParseJwks` on
+    /// `OidcError::FetchJwks` on timeout / network / non-2xx, `ParseJwks` on
     /// malformed JWKS or unusable key components.
     pub async fn refresh(&self) -> Result<()> {
-        let client = cyper::Client::new();
-        let resp = client
-            .request(http::Method::GET, &self.url)
-            .map_err(|e| OidcError::FetchJwks(format!("build: {e}")))?
-            .send()
-            .await
-            .map_err(|e| OidcError::FetchJwks(format!("send: {e}")))?;
+        let client = thread_jwks_client();
+        // Bound the whole request/response round-trip (connect → send →
+        // read body) on a single wall-clock budget. `cyper::Response::text`
+        // streams the body, so a server that sends headers fast but then
+        // stalls the body would otherwise still hang — keep the body read
+        // inside the timeout too.
+        let fetch = async {
+            let resp = client
+                .request(http::Method::GET, &self.url)
+                .map_err(|e| OidcError::FetchJwks(format!("build: {e}")))?
+                .send()
+                .await
+                .map_err(|e| OidcError::FetchJwks(format!("send: {e}")))?;
+            let status = resp.status().as_u16();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| OidcError::FetchJwks(format!("read: {e}")))?;
+            Ok::<(u16, String), OidcError>((status, body))
+        };
 
-        let status = resp.status().as_u16();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| OidcError::FetchJwks(format!("read: {e}")))?;
+        let (status, body) = match compio::time::timeout(self.fetch_timeout, fetch).await {
+            Ok(inner) => inner?,
+            Err(_elapsed) => {
+                // Bounded timeout fired. Leave the cached keys intact
+                // (stale-on-error) and surface the error to the caller.
+                return Err(OidcError::FetchJwks(format!(
+                    "timeout after {:?} fetching {}",
+                    self.fetch_timeout, self.url
+                )));
+            }
+        };
+
         if !(200..300).contains(&status) {
             return Err(OidcError::FetchJwks(format!("HTTP {status}: {body}")));
         }
@@ -688,5 +781,282 @@ mod tests {
         ))
         .expect_err("future nbf beyond skew must reject");
         assert!(matches!(err, OidcError::NbfInFuture), "got: {err:?}");
+    }
+}
+
+/// Resilience tests for the bounded, client-reused JWKS [`JwksCache::refresh`]:
+/// a slow/hung Hydra JWKS endpoint must NOT block ID-token verification
+/// indefinitely, and a failed refresh must NOT wipe the last-good keys.
+///
+/// These run the REAL path end to end — a real [`JwksCache`], a real
+/// loopback HTTP server (ntex on its own thread, the same idiom as
+/// `tests/hydra_introspect.rs`), a real `cyper` GET, and the real
+/// `compio::time::timeout` — no shim. The mock can switch between a fast
+/// JWKS response and a multi-second hang via shared atomic state, so the
+/// same `JwksCache` URL covers both phases.
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::SigningKey;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use ntex::web::{self, HttpResponse};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+
+    /// How long the "hung" mode of the mock server stalls a JWKS request.
+    /// Far larger than the test's bounded fetch timeout so a regression that
+    /// drops the timeout would hang for (effectively) this long — the test's
+    /// assertion that `refresh()` returns in a small fraction of it is what
+    /// proves the timeout fires. Kept finite so a failing run can't wedge CI.
+    const HANG_SECS: u64 = 30;
+    /// Short, deterministic per-fetch timeout for the test (the production
+    /// default is 5s — see [`DEFAULT_JWKS_FETCH_TIMEOUT`]).
+    const TEST_FETCH_TIMEOUT: Duration = Duration::from_millis(200);
+
+    struct MockState {
+        /// JWKS document body served in fast mode.
+        jwks_body: String,
+        /// When set, the handler sleeps `HANG_SECS` before responding —
+        /// simulating a hung/slow Hydra JWKS endpoint.
+        hang: AtomicBool,
+        /// Number of times the handler was entered (proves the hung path
+        /// actually reached the server and was cut off by the timeout, vs.
+        /// failing to connect at all).
+        hits: AtomicUsize,
+    }
+
+    struct MockJwks {
+        base: String,
+        state: Arc<MockState>,
+        shutdown: Option<mpsc::Sender<()>>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockJwks {
+        fn start(jwks_body: String) -> Self {
+            let state = Arc::new(MockState {
+                jwks_body,
+                hang: AtomicBool::new(false),
+                hits: AtomicUsize::new(0),
+            });
+            let factory_state = state.clone();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (shutdown_tx, shutdown_rx) = mpsc::channel();
+            let thread = thread::spawn(move || {
+                ntex::rt::System::build()
+                    .name("jwks-resilience-mock")
+                    .testing()
+                    .build(ntex::rt::DefaultRuntime)
+                    .block_on(async move {
+                        let server = web::test::server(move || {
+                            let state = factory_state.clone();
+                            async move {
+                                web::App::new().state(state).service(
+                                    web::resource("/.well-known/jwks.json")
+                                        .route(web::get().to(jwks_handler)),
+                                )
+                            }
+                        })
+                        .await;
+                        let addr = server.addr();
+                        started_tx.send(addr).expect("send mock server addr");
+                        let _ = shutdown_rx.recv();
+                        drop(server);
+                    });
+            });
+            let addr = started_rx.recv().expect("mock server starts");
+            let base = format!("http://{addr}");
+            Self {
+                base,
+                state,
+                shutdown: Some(shutdown_tx),
+                thread: Some(thread),
+            }
+        }
+
+        fn jwks_url(&self) -> String {
+            format!("{}/.well-known/jwks.json", self.base)
+        }
+
+        fn set_hang(&self, hang: bool) {
+            self.state.hang.store(hang, Ordering::SeqCst);
+        }
+
+        fn hits(&self) -> usize {
+            self.state.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for MockJwks {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    async fn jwks_handler(state: web::types::State<Arc<MockState>>) -> HttpResponse {
+        state.hits.fetch_add(1, Ordering::SeqCst);
+        if state.hang.load(Ordering::SeqCst) {
+            // Stall well past the client's bounded fetch timeout.
+            ntex::time::sleep(Duration::from_secs(HANG_SECS)).await;
+        }
+        HttpResponse::Ok()
+            .content_type("application/json")
+            .body(state.jwks_body.clone())
+    }
+
+    /// Deterministic Ed25519 signing key + the matching public JWKS document
+    /// the mock server serves, so a token signed here verifies against keys
+    /// fetched over the wire.
+    struct TestKeyPair {
+        encoding: EncodingKey,
+        kid: String,
+        jwks_body: String,
+    }
+
+    fn make_keypair() -> TestKeyPair {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pkcs8 = sk.to_pkcs8_der().expect("encode pkcs8");
+        let encoding = EncodingKey::from_ed_der(pkcs8.as_bytes());
+        let pub_b64 = URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes());
+        let kid = "jwks-resilience-kid".to_string();
+        let jwks_body = serde_json::json!({
+            "keys": [{
+                "kid": kid,
+                "kty": "OKP",
+                "alg": "EdDSA",
+                "crv": "Ed25519",
+                "x": pub_b64,
+            }]
+        })
+        .to_string();
+        TestKeyPair {
+            encoding,
+            kid,
+            jwks_body,
+        }
+    }
+
+    fn sign(kp: &TestKeyPair, claims: &serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(kp.kid.clone());
+        encode(&header, claims, &kp.encoding).expect("encode jwt")
+    }
+
+    fn now_secs() -> i64 {
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()
+    }
+
+    fn fresh_claims() -> serde_json::Value {
+        serde_json::json!({
+            "sub": "usr_resilience",
+            "iss": "https://auth.zeroship.ai/",
+            "aud": "gateway",
+            "exp": now_secs() + 300,
+            "iat": now_secs(),
+            "nonce": "nonce-xyz",
+        })
+    }
+
+    #[compio::test]
+    async fn fast_endpoint_refreshes_and_verifies() {
+        // Baseline: an available JWKS endpoint refreshes successfully and the
+        // fetched-over-the-wire key verifies a token. This is the unchanged
+        // success path.
+        let kp = make_keypair();
+        let mock = MockJwks::start(kp.jwks_body.clone());
+        let cache = JwksCache::new(mock.jwks_url()).with_fetch_timeout_for_test(TEST_FETCH_TIMEOUT);
+
+        cache.refresh().await.expect("fast endpoint refreshes");
+        let keys = cache.keys().await.expect("keys after refresh");
+        assert_eq!(keys.len(), 1, "one signing key fetched");
+
+        let token = sign(&kp, &fresh_claims());
+        verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-xyz"),
+            None,
+            None,
+        )
+        .await
+        .expect("token verifies against freshly-fetched key");
+    }
+
+    #[compio::test]
+    async fn hung_endpoint_times_out_and_preserves_cached_keys() {
+        // 1. Prime the cache from the fast endpoint and prove a token verifies.
+        let kp = make_keypair();
+        let mock = MockJwks::start(kp.jwks_body.clone());
+        let cache = JwksCache::new(mock.jwks_url()).with_fetch_timeout_for_test(TEST_FETCH_TIMEOUT);
+        cache.refresh().await.expect("initial refresh");
+
+        let token = sign(&kp, &fresh_claims());
+        verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-xyz"),
+            None,
+            None,
+        )
+        .await
+        .expect("token verifies before the endpoint hangs");
+
+        // 2. Flip the endpoint to hung mode. A forced refresh must return an
+        //    error within ~the timeout — NOT block for HANG_SECS. Pre-fix
+        //    (no `compio::time::timeout`), this await would hang for the full
+        //    server-side stall.
+        mock.set_hang(true);
+        let hits_before = mock.hits();
+        let started = Instant::now();
+        let err = cache.refresh().await.expect_err("hung endpoint must error");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(err, OidcError::FetchJwks(_)),
+            "hung refresh should surface FetchJwks, got: {err:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(HANG_SECS) / 2,
+            "refresh() must return within ~the bounded timeout, not hang \
+             (elapsed {elapsed:?}, server stall {HANG_SECS}s)",
+        );
+        assert!(
+            mock.hits() > hits_before,
+            "the hung refresh actually reached the server and was cut off by \
+             the timeout (not a connect failure)",
+        );
+
+        // 3. Stale-on-error: the failed refresh did NOT wipe the cache, so the
+        //    previously-cached key still verifies the token.
+        let keys = cache.keys().await.expect("keys still served after failed refresh");
+        assert_eq!(keys.len(), 1, "last-good key retained after timeout");
+        verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-xyz"),
+            None,
+            None,
+        )
+        .await
+        .expect("cached key still verifies after a failed (timed-out) refresh");
     }
 }
