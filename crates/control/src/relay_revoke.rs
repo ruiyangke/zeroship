@@ -11,14 +11,30 @@
 //!
 //! Control's revoke paths own the cascade. AGENTS.md guarantees ONE Postgres
 //! instance with `control` and `auth` as separate schemas, so a single
-//! cross-schema transaction is physically possible — the question is *which
-//! client object* opens it. `AppState.auth_pg` is an `Arc<Client>`
-//! (a shared connection), and `Client::transaction()` needs `&mut self`, so
-//! `auth_pg` **cannot** open a transaction. AppState already carries the
-//! answer: `auth_db_url`, the URL the field doc says exists *"for short-lived
-//! dedicated sessions"*. We open a **fresh, owned `Client`** on that URL (the
-//! exact pattern `http_util.rs` already uses), giving an owned `mut` client
-//! that CAN open a transaction.
+//! cross-schema transaction is physically possible on ONE connection: a
+//! schema-qualified `DELETE control.oauth_grants … ; UPDATE
+//! auth.app_user_identities …` reaches both schemas over the same client.
+//!
+//! **The cascade runs on a DEDICATED, owned `Client` — never on the shared
+//! `AppState.auth_pg`.** `auth_pg` is a single `Arc<Client>` that every other
+//! control handler (authz_guard, admin, oauth, token, backchannel_logout,
+//! auth_audit, stripe, env) drives concurrently, and compio-postgres pipelines
+//! all callers' statements onto that one connection with NO transaction-level
+//! mutual exclusion. Multiplexing a multi-statement `BEGIN…COMMIT` onto it
+//! would let a bystander handler's autocommit statement interleave INSIDE the
+//! relay transaction — rolled back if the cascade aborts, or executed under the
+//! cascade's snapshot/locks if it commits. That is cross-request data
+//! corruption, not a refactor. A dedicated owned `Client` (via
+//! [`dedicated_client`]) gives us the `&mut self` the RAII [`Client::transaction`]
+//! helper needs AND isolates the transaction's snapshot, locks, and any
+//! aborted-transaction state to a throwaway connection that is dropped at the
+//! end of the call. This is the exact pattern `control/src/stripe_store.rs`
+//! uses (`registry.conn()` → a fresh per-call connection per transaction) and
+//! that `http_util.rs`'s dedicated-session helper uses.
+//!
+//! The connection URL is `AppState.auth_db_url` (the auth/control schema URL);
+//! the bounded [`CONNECT_TIMEOUT`] keeps a stalled auth-DB from hanging the
+//! request thread.
 //!
 //! ## Two cascade shapes
 //!
@@ -38,7 +54,10 @@
 //! ## Failure semantics (§6, named)
 //!
 //! - The explicit-revoke `DELETE` + `UPDATE` are one transaction → it is
-//!   impossible to commit one without the other.
+//!   impossible to commit one without the other. On any statement error the
+//!   RAII transaction guard rolls back on drop, so neither write is applied.
+//!   Because the connection is dedicated and discarded after the call, a
+//!   failed/aborted transaction can never poison another caller's connection.
 //! - The app-delete companion runs as an immediately-following statement after
 //!   the control-schema delete (which runs on the registry client, a different
 //!   connection), so it is NOT in the same transaction as the `control.apps`
@@ -66,8 +85,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Open a fresh, owned `Client` against the auth/control DB URL and spawn its
 /// connection task. The returned client is `mut`-able, so it CAN open a
 /// transaction (the shared `Arc<Client>` `auth_pg` cannot — `transaction()`
-/// needs `&mut self`). Mirrors `http_util.rs`'s dedicated-session pattern, but
-/// with a bounded connect timeout so a stalled auth-DB cannot hang the request.
+/// needs `&mut self`) AND its transaction snapshot/locks/abort-state are
+/// isolated from every other caller of `auth_pg`. Mirrors `stripe_store`'s
+/// `registry.conn()` dedicated-connection-per-transaction pattern, but with a
+/// bounded connect timeout so a stalled auth-DB cannot hang the request.
 ///
 /// # Errors
 /// Surfaces the URL-parse error or the underlying connect error (including a
@@ -92,17 +113,20 @@ async fn dedicated_client(auth_db_url: &str) -> Result<Client, Error> {
 /// deleted (0 ⇒ the caller answers 404 and the alias UPDATE is a no-op inside
 /// the same transaction, so nothing is half-applied).
 ///
-/// Both writes run in ONE transaction on a dedicated owned client (the
-/// `Arc<Client>` `auth_pg` cannot open a transaction). The alias UPDATE keys on
-/// `app_client_id = client_id` directly (§6.2) — no cross-schema join. After
-/// commit, inbound to that alias bounces because `resolve_active_alias`'s
-/// `revoked_at IS NULL` gate now fails (5b webhook path).
+/// Both writes run in ONE transaction on a DEDICATED owned client (never the
+/// shared `Arc<Client>` `auth_pg` — that would interleave bystander handlers'
+/// statements into this transaction). The RAII [`Client::transaction`] guard
+/// rolls back on drop. The alias UPDATE keys on `app_client_id = client_id`
+/// directly (§6.2) — no cross-schema join. After commit, inbound to that alias
+/// bounces because `resolve_active_alias`'s `revoked_at IS NULL` gate now fails
+/// (5b webhook path).
 ///
 /// # Errors
 /// Surfaces connect / transaction / statement errors. On any error the
-/// transaction is rolled back (drop guard), so neither the grant delete nor the
-/// alias revoke is applied — the caller treats it as a 500 and the alias stays
-/// in whatever consistent state it was.
+/// transaction is rolled back (RAII drop guard), so neither the grant delete
+/// nor the alias revoke is applied — the caller treats it as a 500 and the
+/// alias stays in whatever consistent state it was. The dedicated connection is
+/// dropped on return, so an aborted transaction never poisons another caller.
 pub async fn revoke_grant_cascade(
     auth_db_url: &str,
     user_id: &uuid::Uuid,
@@ -136,11 +160,16 @@ pub async fn revoke_grant_cascade(
 }
 
 /// Revoke ALL relay aliases for an app's `client_id` (the app-delete companion,
-/// §6). Runs as a single UPDATE on a dedicated owned client — NOT in the
+/// §6). Runs as a single UPDATE on a DEDICATED owned client — NOT in the
 /// `delete_app` control-schema transaction (that runs on the registry client),
-/// but as an immediately-following statement. Because there is no cross-schema
-/// FK from `auth.app_user_identities` to control, this is the ONLY guard
-/// against orphaned live aliases for a deleted app.
+/// but as an immediately-following statement, and NOT on the shared `auth_pg`.
+/// Because there is no cross-schema FK from `auth.app_user_identities` to
+/// control, this is the ONLY guard against orphaned live aliases for a deleted
+/// app.
+///
+/// A single autocommit `UPDATE` is its own transaction — but it still runs on a
+/// dedicated connection so it neither blocks nor is blocked by the shared
+/// `auth_pg` FIFO under a revoke storm.
 ///
 /// Keyed on `app_client_id = client_id` = `client_id_for_app(uuid)` — the SAME
 /// deterministic value the gateway wrote and the explicit-revoke path uses.

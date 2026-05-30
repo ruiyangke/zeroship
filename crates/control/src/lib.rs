@@ -161,8 +161,16 @@ pub struct AppState {
     /// because in multi-DB deployments the auth tables may live in a
     /// separate cluster. Mandatory post-U8.
     pub auth_pg: Arc<compio_postgres::Client>,
-    /// Connection URL for the auth/control auth schema. Used only for
-    /// short-lived dedicated sessions that need session-scoped advisory locks.
+    /// Connection URL for the auth/control auth schema, used to open
+    /// short-lived DEDICATED sessions for work that must not run on the shared
+    /// `auth_pg` connection. The relay revoke cascade
+    /// (`relay_revoke::{revoke_grant_cascade,revoke_all_aliases_for_client}`)
+    /// reads this to open an owned `Client` per cascade: a multi-statement
+    /// `BEGIN…COMMIT` cannot be multiplexed onto `auth_pg` (every other handler
+    /// pipelines onto it with no transaction isolation), and an aborted
+    /// transaction must not poison the shared handle — so the cascade gets its
+    /// own throwaway connection that carries the transaction's
+    /// snapshot/locks/abort-state and is dropped at the end of the call.
     pub auth_db_url: String,
     /// Hydra admin API base URL. Control uses this for admin-owned OAuth
     /// client registration/deletion; Hydra remains the source of truth for

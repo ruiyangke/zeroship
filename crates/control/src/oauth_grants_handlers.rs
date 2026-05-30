@@ -100,11 +100,15 @@ pub async fn revoke_grant(
 
     // Atomic revocation cascade (relay sub-spec §6, B4): DELETE the grant AND
     // revoke the relay alias for THIS (app, user) in ONE transaction on a
-    // dedicated owned client. `auth_pg` is an `Arc<Client>` which cannot open a
-    // transaction (`transaction()` needs `&mut self`), so we open a fresh owned
-    // `Client` on `auth_db_url` — the field that exists for exactly this. After
-    // commit, inbound to that alias bounces (5b `revoked_at IS NULL` gate). No
-    // window exists where the grant is gone but the alias still forwards.
+    // DEDICATED owned connection — NOT the shared `auth_pg`. Driving a
+    // multi-statement transaction on `auth_pg` (the `Arc<Client>` every other
+    // control handler pipelines onto) would let a bystander handler's statement
+    // interleave INSIDE this BEGIN…COMMIT window — a cross-request corruption
+    // hazard. The dedicated client (opened on `auth_db_url`) gives us the
+    // `&mut self` the RAII `transaction()` needs and isolates the transaction's
+    // snapshot/locks/abort-state from everyone else. After commit, inbound to
+    // that alias bounces (5b `revoked_at IS NULL` gate). No window exists where
+    // the grant is gone but the alias still forwards.
     let deleted = match crate::relay_revoke::revoke_grant_cascade(
         &state.auth_db_url,
         &authz.principal_id,

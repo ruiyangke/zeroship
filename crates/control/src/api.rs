@@ -219,7 +219,9 @@ pub async fn delete_app(
             // forwarding third-party mail to real inboxes after the app is gone.
             // Keyed on the SAME deterministic `client_id_for_app(uuid)` the
             // gateway wrote and the explicit-revoke path uses (§6.2). Runs on a
-            // dedicated owned client (auth_db_url), not the registry txn.
+            // DEDICATED owned connection (opened on `auth_db_url`) — NOT the
+            // shared `auth_pg` (multiplexing onto it would block/corrupt other
+            // handlers) and NOT the registry txn.
             //
             // Privacy is load-bearing here, so a failure is NOT swallowed. The
             // app row is already gone (a retry of delete_app is a 404 no-op),

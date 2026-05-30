@@ -52,10 +52,12 @@ impl Fixture {
     }
 
     /// Build a fixture whose `registry` + `auth_pg` use the real `db_url` but
-    /// whose `auth_db_url` (the URL the relay companion opens a dedicated client
+    /// whose `auth_db_url` (the URL the relay cascade opens a DEDICATED client
     /// on) is `auth_db_url`. Pointing `auth_db_url` at an unreachable address
-    /// lets a test exercise the app-delete companion's FAILURE arm without
-    /// breaking the rest of the delete (the registry cascade still succeeds).
+    /// lets a test exercise the cascade's FAILURE arm in isolation — only the
+    /// dedicated relay connection fails, while authz/registry/`auth_pg` keep
+    /// using the real DB and succeed. This is exactly the seam the dedicated
+    /// (non-shared) connection design restores.
     async fn new_with_auth_db_url(db_url: &str, auth_db_url: &str, label: &str) -> Self {
         let hydra = MockHydra::start();
         let (auth_pg_client, auth_pg_conn) = connect(db_url, NoTls).await.expect("auth-pg connect");
@@ -708,9 +710,9 @@ async fn revoke_does_not_affect_other_users() {
 /// 5c §6 — the B4 revocation cascade: revoking a grant sets
 /// `app_user_identities.revoked_at` AND a subsequent inbound to that alias
 /// bounces (the real 5b `resolve_active_alias` gate now returns `None`). The
-/// DELETE + UPDATE commit atomically on a dedicated `auth_db_url` client (NOT
-/// the `Arc<Client>` `auth_pg`). This is the full faithful loop: the relay
-/// alias was forwarding (active) → revoke → it bounces (inactive).
+/// DELETE + UPDATE commit atomically (BEGIN/COMMIT) on control's existing
+/// `auth_pg` connection — no per-call connect. This is the full faithful loop:
+/// the relay alias was forwarding (active) → revoke → it bounces (inactive).
 #[compio::test]
 async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     let Some(db_url) = db_url() else {
@@ -862,6 +864,131 @@ async fn app_delete_revokes_all_relay_aliases() {
     cleanup_user(&fx.state, user_b).await;
 }
 
+/// Isolation regression (review BLOCKER + MAJOR finding 2) — the relay cascade
+/// must run its `BEGIN…COMMIT` on a DEDICATED connection, never on the shared
+/// `auth_pg`. The rejected design multiplexed the transaction onto `auth_pg`,
+/// the single `Arc<Client>` every other control handler pipelines onto with NO
+/// transaction isolation. That had two fatal symptoms this test pins:
+///
+///   1. **Head-of-line blocking.** While the cascade transaction is open, a
+///      concurrent statement on `auth_pg` sits behind it in the connection's
+///      FIFO — on the shared design the bystander write below would BLOCK until
+///      the cascade's transaction resolved. On the dedicated design it returns
+///      immediately.
+///   2. **Transactional capture.** A bystander autocommit write physically
+///      written between the cascade's BEGIN and its COMMIT/ROLLBACK would be
+///      committed/rolled-back WITH the cascade. On the dedicated design it is
+///      its own autocommit and survives the cascade's outcome unconditionally.
+///
+/// We hold the cascade transaction open deterministically by pre-locking (from
+/// a third connection) the `control.oauth_grants` row the cascade's first
+/// statement (DELETE) must touch, so the cascade blocks mid-transaction. While
+/// it is blocked we issue a bystander write on `auth_pg` and assert it returns
+/// promptly and persists — then release the lock and let the cascade finish.
+/// On the shared-connection design this test deadlocks/blocks (symptom 1) and
+/// the bystander write would be inside the cascade transaction (symptom 2).
+#[compio::test]
+async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "isolation-regress").await;
+
+    // The user whose grant the cascade revokes, plus a seeded grant row + alias.
+    let user = insert_user(&fx.state, "isolation-cascade").await;
+    let app_uuid = Uuid::new_v4();
+    let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_uuid);
+    insert_client(&fx.state, &client_id, user).await;
+    insert_grant(&fx.state, user, &client_id, &["email"]).await;
+    let alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    insert_identity_with_alias(&fx.state, &client_id, user, &alias).await;
+
+    // An independent bystander identity + active alias the bystander write
+    // (issued on the SHARED auth_pg) will revoke. Distinct row from the
+    // cascade's — so the only way it could be affected is transactional capture.
+    let bystander_user = insert_user(&fx.state, "isolation-bystander").await;
+    let bystander_client = zeroship_control::app_oauth_client::client_id_for_app(&Uuid::new_v4());
+    let bystander_alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    insert_identity_with_alias(&fx.state, &bystander_client, bystander_user, &bystander_alias)
+        .await;
+
+    // Third connection: hold a lock on the cascade's target grant row so the
+    // cascade's DELETE blocks, keeping its transaction OPEN for the window
+    // below. (A separate client, NOT auth_pg.)
+    let (locker, locker_conn) = connect(&db_url, NoTls).await.expect("locker connect");
+    compio::runtime::spawn(async move {
+        let _ = locker_conn.run().await;
+    })
+    .detach();
+    locker.execute("BEGIN", &[]).await.expect("locker begin");
+    locker
+        .execute(
+            "SELECT 1 FROM control.oauth_grants \
+             WHERE user_id = $1 AND client_id = $2 FOR UPDATE",
+            &[&user, &client_id],
+        )
+        .await
+        .expect("locker holds the grant row");
+
+    // Kick off the cascade on its DEDICATED connection. It will BEGIN then block
+    // on DELETE (the row is locked). We do NOT await it yet.
+    let auth_db_url = fx.state.auth_db_url.clone();
+    let cascade_client_id = client_id.clone();
+    let cascade = compio::runtime::spawn(async move {
+        zeroship_control::relay_revoke::revoke_grant_cascade(
+            &auth_db_url,
+            &user,
+            &cascade_client_id,
+        )
+        .await
+    });
+
+    // Give the cascade a moment to open its transaction and block on the lock.
+    compio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // While the cascade transaction is OPEN (blocked), a bystander write on the
+    // SHARED auth_pg must return PROMPTLY (no head-of-line blocking) — on the
+    // rejected shared-connection design this would deadlock behind the cascade.
+    let bystander = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fx.state.auth_pg.execute(
+            "UPDATE auth.app_user_identities SET revoked_at = now() \
+             WHERE app_client_id = $1 AND global_user_id = $2",
+            &[&bystander_client, &bystander_user],
+        ),
+    )
+    .await
+    .expect("bystander write must NOT block behind the cascade transaction")
+    .expect("bystander autocommit write on auth_pg");
+    assert_eq!(bystander, 1, "bystander revoked exactly its own alias row");
+
+    // Release the lock so the cascade can complete.
+    locker.execute("COMMIT", &[]).await.expect("locker commit");
+    let revoked = cascade.await.expect("cascade joins");
+    revoked.expect("cascade succeeds once the lock is released");
+
+    // The bystander write was its own autocommit on auth_pg — it is committed
+    // and visible REGARDLESS of the cascade's transaction. (Transactional
+    // capture on the shared design would have tied it to the cascade.)
+    assert!(
+        !alias_is_active(&fx.state, &bystander_alias).await,
+        "the bystander's autocommit revoke must persist independently of the cascade"
+    );
+    // And the cascade revoked its OWN alias (its transaction committed cleanly).
+    assert!(
+        !alias_is_active(&fx.state, &alias).await,
+        "the cascade revoked its own alias after the lock released"
+    );
+
+    drop(locker);
+    cleanup_identities(&fx.state, &client_id).await;
+    cleanup_identities(&fx.state, &bystander_client).await;
+    fx.cleanup_clients(&[client_id]).await;
+    cleanup_user(&fx.state, user).await;
+    cleanup_user(&fx.state, bystander_user).await;
+}
+
 /// 5c §6 (review MAJOR) — when the app-delete relay companion FAILS, `delete_app`
 /// must NOT silently return 200: the app row is already gone (a retry is a 404
 /// no-op) and there is no background sweep, so a swallowed failure permanently
@@ -869,10 +996,12 @@ async fn app_delete_revokes_all_relay_aliases() {
 /// as a 500 carrying `{deleted: true, aliases_revoked: false, client_id}` so the
 /// operator can retry the revoke out-of-band. Pre-fix this returned 200.
 ///
-/// We force the companion to fail by pointing the fixture's `auth_db_url` (the
-/// URL the dedicated relay client connects on) at an unreachable address, while
-/// the registry + auth_pg keep using the real DB so the control-schema delete
-/// still succeeds.
+/// We force ONLY the companion to fail by pointing the fixture's `auth_db_url`
+/// (the URL the DEDICATED relay client connects on) at an unreachable address,
+/// while the registry + `auth_pg` keep using the real DB so the authz guard and
+/// the control-schema delete still succeed. This HTTP-level failure-arm
+/// assertion is possible precisely because the cascade uses a dedicated
+/// connection — killing it does not also kill the guard's `auth_pg`.
 #[compio::test]
 async fn app_delete_surfaces_companion_failure_as_500() {
     let Some(db_url) = db_url() else {
