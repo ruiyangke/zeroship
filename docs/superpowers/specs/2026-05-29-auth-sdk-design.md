@@ -1921,7 +1921,10 @@ the click handler.
     opener).
   - **Fallback path (opener severed):** when `window.opener` is `null` at relay time, the
     `/popup-callback` script ALSO posts the `{code,state}` envelope over a **same-origin
-    `BroadcastChannel('zs:auth:<app_ref>')`** and writes a one-shot
+    `BroadcastChannel('zs:auth')`** (the channel name is a bare constant — a `BroadcastChannel` is
+    already partitioned by origin, so each app's channel is isolated without an `app_ref` suffix, and
+    cross-app delivery within an origin can't happen; the `state` de-dup below handles intra-origin
+    concurrency) and writes a one-shot
     `localStorage['@@zsauth@@::relay::<state>']` item (then removes it). The opener's `relay.ts`
     listens on all three (postMessage, BroadcastChannel `message`, and `storage` events) and takes
     whichever arrives first, de-duplicated by `state`. Both fallbacks are same-origin and validated by
