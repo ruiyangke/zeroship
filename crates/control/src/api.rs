@@ -13,6 +13,7 @@ use uuid::Uuid;
 use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, Resource};
 
+use crate::app_oauth_client;
 use crate::authz_guard::AuthzGuard;
 use crate::deploy::{self, IngestError};
 use crate::registry::RegistryError;
@@ -98,7 +99,13 @@ pub async fn create_app(
             // 503. Best-effort relative to the create response: a Hydra/DB
             // hiccup here is logged + metered, and the next deploy re-provisions
             // (ensure_app_client is idempotent). The app still exists.
-            if let Err(e) = state.provision_app_oauth_client(&record.id, &record.name).await {
+            // No manifest exists at create, so no declared scopes yet — the
+            // client gets the baseline allowlist; the first deploy mirrors the
+            // manifest's `auth.scopes`.
+            if let Err(e) = state
+                .provision_app_oauth_client(&record.id, &record.name, &[])
+                .await
+            {
                 tracing::error!(
                     app_id = %record.id,
                     app_name = %record.name,
@@ -354,9 +361,61 @@ pub async fn deploy(
             // re-provisions; the deploy 200 does NOT imply provisioning
             // succeeded (the SDK relies on retryable-503 client_not_provisioned
             // handling for that rare window).
+            // Slice 3 (§5.1/§5.2): re-parse the ingested manifest to extract its
+            // declared `auth.scopes`. `ingest` only enforces scope-id FORMAT
+            // (ScopeDef::validate_id_format inside Manifest::validate), NOT the
+            // platform-vocabulary collision rule — so the deploy handler MUST run
+            // the full `validate_app_scopes` guard here and HARD-FAIL the deploy
+            // before anything is provisioned or committed. A re-parse failure is a
+            // control-side programming error (ingest already parsed+validated the
+            // same bytes), but we still abort the deploy rather than silently drop
+            // declared scopes (which would wipe the app_scope_defs registry on the
+            // next provision).
+            let declared_scopes =
+                match serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json) {
+                    Ok(m) => m.auth.scopes,
+                    Err(e) => {
+                        tracing::error!(
+                            app_id = %uid,
+                            error = %e,
+                            "control: could not re-parse ingested manifest for declared scopes"
+                        );
+                        return web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                            "error": "manifest reparse failed",
+                            "detail": e.to_string(),
+                        }));
+                    }
+                };
+
+            // Reject a colliding/reserved/malformed declared scope (e.g.
+            // `billing:read`) with a 400 BEFORE the manifest is committed or the
+            // route published — the creator gets a real error instead of a
+            // silently un-provisioned scope set.
+            if let Err(e) = app_oauth_client::validate_app_scopes(&declared_scopes) {
+                let (id, reason) = match &e {
+                    app_oauth_client::AppOauthClientError::InvalidScope { id, reason } => {
+                        (id.clone(), reason.clone())
+                    }
+                    other => (String::new(), other.to_string()),
+                };
+                return web::HttpResponse::BadRequest().json(&serde_json::json!({
+                    "error": "invalid_scope",
+                    "scope": id,
+                    "detail": reason,
+                }));
+            }
+
+            // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
+            // manifest commit so the route-sync invariant holds. Scopes are
+            // already validated above, so `ensure_app_client`'s internal
+            // `validate_app_scopes` cannot reject; any error here is a Hydra/DB
+            // hiccup and stays best-effort relative to the deploy response.
             match state.registry.get_app(&uid).await {
                 Ok(Some(app)) => {
-                    if let Err(e) = state.provision_app_oauth_client(&uid, &app.name).await {
+                    if let Err(e) = state
+                        .provision_app_oauth_client(&uid, &app.name, &declared_scopes)
+                        .await
+                    {
                         tracing::error!(
                             app_id = %uid,
                             error = %e,

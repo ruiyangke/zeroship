@@ -85,6 +85,7 @@ fn manifest_for(
         runtime_assets: HashMap::new(),
         asset_version: 0,
         sourcemaps: HashMap::new(),
+        auth: Default::default(),
         metadata: ManifestMetadata {
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),

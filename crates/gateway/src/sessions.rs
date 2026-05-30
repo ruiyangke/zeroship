@@ -26,6 +26,10 @@ pub struct AppSession {
     pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub email_verified: bool,
+    /// OAuth scopes granted to this app for this user at consent (Slice 3,
+    /// §1.4). Read off the same row the cookie path already loads, so the
+    /// per-request `ZeroShip-User.scopes` needs no `control.oauth_grants` join.
+    pub granted_scopes: Vec<String>,
     pub idle_expires_at: chrono::DateTime<chrono::Utc>,
     pub abs_expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -38,6 +42,8 @@ pub struct NewSession<'a> {
     pub name: Option<&'a str>,
     pub avatar_url: Option<&'a str>,
     pub email_verified: bool,
+    /// Granted scope set resolved at session-create from the consent grant.
+    pub granted_scopes: &'a [String],
 }
 
 /// Sliding idle timeout. After this many minutes of inactivity the
@@ -62,12 +68,12 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
         .query(
             "INSERT INTO auth.gateway_sessions \
                 (user_id, app_id, email, name, avatar_url, email_verified, \
-                 idle_expires_at, abs_expires_at) \
-             VALUES ($1, $2, $3::citext, $4, $5, $6, \
+                 granted_scopes, idle_expires_at, abs_expires_at) \
+             VALUES ($1, $2, $3::citext, $4, $5, $6, $9, \
                      NOW() + ($7::text || ' minutes')::interval, \
                      NOW() + ($8::text || ' hours')::interval) \
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, idle_expires_at, abs_expires_at",
+                       email_verified, granted_scopes, idle_expires_at, abs_expires_at",
             &[
                 &user_id,
                 &params.app_id,
@@ -77,6 +83,7 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
                 &params.email_verified,
                 &IDLE_MINUTES.to_string(),
                 &ABSOLUTE_HOURS.to_string(),
+                &params.granted_scopes,
             ],
         )
         .await
@@ -111,7 +118,7 @@ pub async fn validate(conn: &Client, id: Uuid, app_id: &str) -> Result<Option<Ap
                AND idle_expires_at > NOW() \
                AND abs_expires_at > NOW() \
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, idle_expires_at, abs_expires_at",
+                       email_verified, granted_scopes, idle_expires_at, abs_expires_at",
             &[&id, &app_id, &IDLE_MINUTES.to_string()],
         )
         .await
@@ -218,6 +225,7 @@ fn row_to_session(row: &compio_postgres::Row) -> AppSession {
         name: row.try_get("name").ok(),
         avatar_url: row.try_get("avatar_url").ok(),
         email_verified: row.get("email_verified"),
+        granted_scopes: row.try_get("granted_scopes").unwrap_or_default(),
         idle_expires_at: row.get("idle_expires_at"),
         abs_expires_at: row.get("abs_expires_at"),
     }

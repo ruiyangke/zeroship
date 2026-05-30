@@ -228,6 +228,12 @@ impl AppState {
     /// Slice 1d (spec §1.1). On success returns the per-app `client_id`
     /// (`oac_<base62-app-id>`).
     ///
+    /// `declared_scopes` are the app's manifest `auth.scopes` (Slice 3,
+    /// spec §5.1): validated + mirrored into both the Hydra client `scope`
+    /// allowlist and `control.app_scope_defs` atomically. Pass `&[]` at app
+    /// **create** (no manifest yet); the deploy path passes the deployed
+    /// manifest's declared scopes.
+    ///
     /// # Errors
     /// Surfaces the underlying [`app_oauth_client::AppOauthClientError`] as a
     /// string. Callers log + continue (provisioning is best-effort relative
@@ -238,6 +244,7 @@ impl AppState {
         &self,
         app_id: &uuid::Uuid,
         name: &str,
+        declared_scopes: &[zeroship_bundle::ScopeDef],
     ) -> Result<String, String> {
         let scheme = self.app_scheme();
         let apex = self.apex_host_for_app(name);
@@ -249,7 +256,7 @@ impl AppState {
             .await
             .map_err(|e| format!("control db conn: {e}"))?;
         app_oauth_client::ensure_app_client(
-            &mut conn, &hydra, app_id, name, scheme, &hosts,
+            &mut conn, &hydra, app_id, name, scheme, &hosts, declared_scopes,
         )
         .await
         .map_err(|e| e.to_string())

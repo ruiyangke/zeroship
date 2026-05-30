@@ -33,6 +33,9 @@ describe("refreshSession / silent renewal (GET /session?mint=1 under navigator.l
 
     const session = await client.refreshSession();
     assert.equal(session.access_token, "minted.wrapper");
+    // Slice 3: the granted scopes flow through the /session?mint=1 response
+    // onto Session.scopes (the gateway includes them in the user projection).
+    assert.deepEqual(session.scopes, ["openid", "profile", "email"]);
     const req = h.fetch.requests.find((r) => r.url.includes("mint=1"))!;
     assert.equal(req.headers["x-zs-auth"], "1");
     assert.deepEqual(events, ["TOKEN_REFRESHED"]);

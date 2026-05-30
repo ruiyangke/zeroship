@@ -76,6 +76,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             name: Some("Alice"),
             avatar_url: None,
             email_verified: true,
+            granted_scopes: &[],
         },
     )
     .await
@@ -90,6 +91,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             name: Some("Alice"),
             avatar_url: None,
             email_verified: true,
+            granted_scopes: &[],
         },
     )
     .await
@@ -107,6 +109,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             name: Some("Bob"),
             avatar_url: None,
             email_verified: true,
+            granted_scopes: &[],
         },
     )
     .await
@@ -431,6 +434,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
             name: Some("Alice"),
             avatar_url: None,
             email_verified: true,
+            granted_scopes: &[],
         },
     )
     .await

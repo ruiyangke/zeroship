@@ -383,12 +383,14 @@ async fn dispatch_verify_handler(
     //    `resolve_dpop_user_header` produces.
     let email = claims.email.clone().unwrap_or_default();
     let name = claims.name.clone().unwrap_or_default();
+    let scopes: Vec<&str> = claims.scope.split_whitespace().collect();
     let user = WorkerUser {
         id: &claims.sub,
         email: &email,
         name: &name,
         avatar: None,
         email_verified: claims.email_verified.unwrap_or(false),
+        scopes,
     };
     let header = encode_user_header(
         &user,

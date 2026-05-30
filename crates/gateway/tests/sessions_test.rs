@@ -44,6 +44,7 @@ async fn create_validate_revoke_roundtrip() {
             name: Some("Test User"),
             avatar_url: None,
             email_verified: true,
+            granted_scopes: &[],
         },
     )
     .await

@@ -185,7 +185,11 @@ impl OidcRp {
 
     /// Process the callback. Verifies the stash cookie signature, matches
     /// the `state` parameter, exchanges the code for tokens, verifies the
-    /// ID token, and returns `(claims, original_path)` on success.
+    /// ID token, and returns `(claims, original_path, granted_scopes)` on
+    /// success. `granted_scopes` is the token endpoint's `scope` response
+    /// (the scopes the user actually consented to), persisted onto the cookie
+    /// session row so the per-request cookie path can emit `WorkerUser.scopes`
+    /// (Slice 3, §1.4).
     ///
     /// # Errors
     /// - [`OidcRpError::StashInvalid`] — stash cookie absent, malformed,
@@ -201,7 +205,7 @@ impl OidcRp {
         code: &str,
         state_param: &str,
         stash_cookie: &str,
-    ) -> Result<(TokenClaims, String), OidcRpError> {
+    ) -> Result<(TokenClaims, String, Vec<String>), OidcRpError> {
         // 1. Decode + verify stash cookie.
         let stash = Stash::decode(stash_cookie, &self.stash_signing_key)
             .ok_or(OidcRpError::StashInvalid)?;
@@ -277,7 +281,40 @@ impl OidcRp {
         )
         .await?;
 
-        Ok((claims, stash.original_path))
+        // Granted scopes — what the user actually consented to (Slice 3, §1.4).
+        // Persisted onto the cookie session so the per-request path emits
+        // WorkerUser.scopes with no token to decode in the browser.
+        //
+        // Primary source: the token endpoint's `scope` response. But RFC 6749
+        // §5.1 makes that parameter OPTIONAL when the granted scope equals the
+        // requested scope, so Hydra may omit it on a no-narrowing consent. When
+        // it is absent/empty we MUST fall back to the always-present `scope`
+        // claim of the access token — decoded through the SAME JWKS-verified
+        // path the Bearer/raw-Hydra arms use, so the cookie arm records the same
+        // authoritative, non-spoofable scope set as every other arm (instead of
+        // silently persisting `[]`).
+        let access_scope = match tr.scope.as_deref() {
+            // Token-response `scope` present and non-blank — authoritative, no
+            // need to decode the access token at all.
+            Some(s) if !s.trim().is_empty() => None,
+            _ => match verify_access_jwt(&self.jwks, &tr.access_token, &self.issuer).await {
+                Ok(ac) => ac.scope,
+                Err(e) => {
+                    // The access token is a Hydra-issued RFC 9068 JWT here, so a
+                    // verify failure is unexpected; log and fall through to an
+                    // empty scope set rather than failing the whole login.
+                    tracing::warn!(
+                        error = %e,
+                        "gateway oidc_rp: could not decode access-token scope claim for cookie session; recording no granted scopes"
+                    );
+                    None
+                }
+            },
+        };
+        let granted_scopes =
+            resolve_granted_scopes(tr.scope.as_deref(), access_scope.as_deref());
+
+        Ok((claims, stash.original_path, granted_scopes))
     }
 
     /// Introspect an access token at hydra's `/oauth2/introspect`
@@ -614,6 +651,33 @@ struct RawAccessClaims {
     name: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+}
+
+/// Resolve the cookie-arm `granted_scopes` (Slice 3, §1.4) from the two
+/// authoritative sources, in precedence order:
+///
+/// 1. `token_response_scope` — the OAuth token-endpoint `scope` field. Per
+///    RFC 6749 §5.1 it is REQUIRED only when the granted scope differs from
+///    the requested scope, so a server (Hydra) MAY omit it on a no-narrowing
+///    consent. When present and non-blank it wins.
+/// 2. `access_token_scope` — the `scope` claim of the (already JWKS-verified)
+///    access-token JWT (RFC 9068 §2.2.3 makes it mandatory for Hydra-issued
+///    access tokens). Used as the fallback when (1) is absent/blank, so the
+///    cookie arm never silently records `[]` for a consented session.
+///
+/// Each source is whitespace-split into individual scope ids. An entirely
+/// absent/blank pair yields an empty vec.
+fn resolve_granted_scopes(
+    token_response_scope: Option<&str>,
+    access_token_scope: Option<&str>,
+) -> Vec<String> {
+    let chosen = match token_response_scope {
+        Some(s) if !s.trim().is_empty() => Some(s),
+        _ => access_token_scope,
+    };
+    chosen
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 /// Verify a raw Hydra access JWT against `cache`, pinning `iss` and
@@ -1016,6 +1080,15 @@ pub struct WorkerUser<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<&'a str>,
     pub email_verified: bool,
+    /// OAuth scopes granted to THIS app for this user (auth-sdk Slice 3,
+    /// spec §1.4). A PERMANENT kernel-contract field on the `ZeroShip-User`
+    /// projection: app code reads it via `env.auth.getUser().scopes`. Sourced
+    /// from the token `scope` claim (Bearer wrapper + raw-Hydra arms) or the
+    /// session/anchor `granted_scopes` (cookie/anchor arms). Always present
+    /// (empty when the token/session carries no scopes), so the worker JSON
+    /// shape is stable across every auth arm.
+    #[serde(default)]
+    pub scopes: Vec<&'a str>,
 }
 
 /// Serialize the authenticated user as
@@ -1352,5 +1425,50 @@ mod tests {
         assert_eq!(parse_stash_cookie(dev_header, true), Some("abc.def".into()));
         // Prod-named cookie must not match in dev mode.
         assert_eq!(parse_stash_cookie(header, true), None);
+    }
+
+    // ----- Slice 3 §1.4: cookie-arm granted-scope resolution -----------------
+
+    #[test]
+    fn granted_scopes_prefers_token_response_scope() {
+        // When the token endpoint returns a non-blank `scope`, it is
+        // authoritative and the access-token claim is ignored.
+        let out = resolve_granted_scopes(
+            Some("openid read:billing"),
+            Some("openid offline_access SHOULD_NOT_APPEAR"),
+        );
+        assert_eq!(out, vec!["openid".to_string(), "read:billing".to_string()]);
+    }
+
+    #[test]
+    fn granted_scopes_falls_back_to_access_token_claim_when_response_scope_absent() {
+        // RFC 6749 §5.1: the token-response `scope` MAY be omitted when the
+        // granted scope equals the requested scope. The cookie arm must then
+        // recover the consented scopes from the access-token `scope` claim —
+        // NOT silently record `[]` (the bug this fix addresses).
+        let out = resolve_granted_scopes(None, Some("openid offline_access read:billing"));
+        assert_eq!(
+            out,
+            vec![
+                "openid".to_string(),
+                "offline_access".to_string(),
+                "read:billing".to_string(),
+            ],
+            "absent token-response scope must fall back to the access-token claim"
+        );
+    }
+
+    #[test]
+    fn granted_scopes_falls_back_when_response_scope_is_blank() {
+        // An empty / whitespace-only `scope` string is treated the same as
+        // absent — fall back to the access-token claim.
+        let out = resolve_granted_scopes(Some("   "), Some("openid email"));
+        assert_eq!(out, vec!["openid".to_string(), "email".to_string()]);
+    }
+
+    #[test]
+    fn granted_scopes_empty_when_both_sources_missing() {
+        assert!(resolve_granted_scopes(None, None).is_empty());
+        assert!(resolve_granted_scopes(Some(""), None).is_empty());
     }
 }

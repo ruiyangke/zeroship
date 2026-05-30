@@ -22,9 +22,10 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime};
 
 /// The `WorkerUser` projection the gateway forwards as the `ZeroShip-User`
-/// header body: `{ id, email, name, avatar?, email_verified }`. The
+/// header body: `{ id, email, name, avatar?, email_verified, scopes }`. The
 /// callbacks `JSON.parse` this verbatim, so the JS sees exactly this shape.
-const USER_JSON: &str = r#"{"id":"usr_abc123","email":"jane@example.com","name":"Jane Doe","avatar":"https://cdn/x.png","email_verified":true}"#;
+/// `scopes` is the Slice-3 granted-scope array the gateway now always emits.
+const USER_JSON: &str = r#"{"id":"usr_abc123","email":"jane@example.com","name":"Jane Doe","avatar":"https://cdn/x.png","email_verified":true,"scopes":["openid","read:billing"]}"#;
 
 fn build_runtime_with_auth(source: &str) -> Runtime {
     init_v8();
@@ -76,6 +77,7 @@ fn get_user_returns_request_user() {
                     name: u?.name ?? null,
                     avatar: u?.avatar ?? null,
                     email_verified: u?.email_verified ?? null,
+                    scopes: u?.scopes ?? null,
                 });
             }
         };
@@ -91,6 +93,43 @@ fn get_user_returns_request_user() {
     assert_eq!(v["name"], "Jane Doe", "body: {body}");
     assert_eq!(v["avatar"], "https://cdn/x.png", "body: {body}");
     assert_eq!(v["email_verified"], true, "body: {body}");
+    // Slice 3: the granted scopes flow through to env.auth.getUser().scopes.
+    assert_eq!(
+        v["scopes"],
+        serde_json::json!(["openid", "read:billing"]),
+        "body: {body}"
+    );
+}
+
+/// Slice 3: `env.auth.getUser().scopes` is the app's granted-scope array —
+/// app code can read it and (e.g.) gate a feature on a declared scope. Driven
+/// through the REAL worker plumbing (header JSON → per_request_user → V8
+/// JSON.parse), so this proves the kernel-contract field reaches user code.
+#[test]
+fn get_user_exposes_scopes_to_app_code() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                const u = env.auth.getUser();
+                return Response.json({
+                    isArray: Array.isArray(u?.scopes),
+                    count: u?.scopes?.length ?? -1,
+                    hasBilling: (u?.scopes ?? []).includes("read:billing"),
+                    first: u?.scopes?.[0] ?? null,
+                });
+            }
+        };
+    "#,
+    );
+
+    let (status, body) = dispatch_with_user(&runtime, Some(USER_JSON.to_string()));
+    assert_eq!(status, 200, "body: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(v["isArray"], true, "scopes must be an array: {body}");
+    assert_eq!(v["count"], 2, "body: {body}");
+    assert_eq!(v["hasBilling"], true, "body: {body}");
+    assert_eq!(v["first"], "openid", "body: {body}");
 }
 
 /// `env.auth.getUser()` returns `null` when there is no authenticated user

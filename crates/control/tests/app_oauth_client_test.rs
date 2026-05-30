@@ -18,7 +18,7 @@ use std::sync::Arc;
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
+use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs, ScopeDef};
 use zeroship_control::app_oauth_client::{
     self, client_id_for_app, redirect_uris_for_hosts,
 };
@@ -71,7 +71,13 @@ async fn provision_asserts_hydra_db_and_routes() {
     // Best-effort cleanup of any Hydra residue from a prior aborted run.
     let _ = hydra.delete_client(&expected_client_id).await;
 
-    // 2. Provision.
+    // 2. Provision WITH a declared scope (Slice 3) so we can assert the O8
+    //    mirror: the Hydra allowlist + control.app_scope_defs both gain it.
+    let declared = vec![ScopeDef {
+        id: "read:billing".to_string(),
+        label: "View billing".to_string(),
+        description: Some("See invoices and plan.".to_string()),
+    }];
     let client_id = app_oauth_client::ensure_app_client(
         &mut conn,
         &hydra,
@@ -79,6 +85,7 @@ async fn provision_asserts_hydra_db_and_routes() {
         &app_name,
         scheme,
         &[apex.clone()],
+        &declared,
     )
     .await
     .expect("ensure_app_client");
@@ -97,6 +104,12 @@ async fn provision_asserts_hydra_db_and_routes() {
     assert!(hydra_client.response_types.iter().any(|r| r == "code"));
     assert!(hydra_client.scope.contains("openid"));
     assert!(hydra_client.scope.contains("offline_access"));
+    // Slice 3 O8 mirror: the declared scope is appended to the Hydra allowlist.
+    assert!(
+        hydra_client.scope.contains("read:billing"),
+        "declared scope missing from Hydra allowlist: {:?}",
+        hydra_client.scope
+    );
     assert!(!hydra_client.skip_consent, "per-app clients never skip consent");
     assert_eq!(
         hydra_client.backchannel_logout_uri.as_deref(),
@@ -137,6 +150,37 @@ async fn provision_asserts_hydra_db_and_routes() {
         format!("http://{apex}")
     );
 
+    // Slice 3: control.app_scope_defs holds the declared scope (same txn).
+    let defs = raw
+        .query(
+            "SELECT scope_id, label, description FROM control.app_scope_defs WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("query app_scope_defs");
+    assert_eq!(defs.len(), 1, "one declared scope persisted");
+    assert_eq!(defs[0].get::<_, String>("scope_id"), "read:billing");
+    assert_eq!(defs[0].get::<_, String>("label"), "View billing");
+    assert_eq!(
+        defs[0].get::<_, Option<String>>("description").as_deref(),
+        Some("See invoices and plan.")
+    );
+
+    // The oauth_clients.scopes mirror equals the Hydra allowlist (baseline +
+    // declared), so the two sources of truth never drift.
+    let mirror = raw
+        .query(
+            "SELECT scopes FROM control.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .expect("query oauth_clients scopes");
+    let mirrored: Vec<String> = mirror[0].get("scopes");
+    assert!(
+        mirrored.iter().any(|s| s == "read:billing"),
+        "oauth_clients.scopes mirror missing declared scope: {mirrored:?}"
+    );
+
     // 5. get_routes LEFT JOIN surfaces the OAuth fields on the RouteEntry.
     let routes = registry.get_routes().await.expect("get_routes");
     let entry = routes.get(&app_id).expect("route entry for app");
@@ -146,9 +190,9 @@ async fn provision_asserts_hydra_db_and_routes() {
         Some(format!("http://{apex}").as_str())
     );
 
-    // 6. Idempotent re-provision, same host → no Hydra redirect change.
+    // 6. Idempotent re-provision, same host + same declared scope → no drift.
     app_oauth_client::ensure_app_client(
-        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()],
+        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &declared,
     )
     .await
     .expect("re-ensure is idempotent");
@@ -161,6 +205,33 @@ async fn provision_asserts_hydra_db_and_routes() {
         after.redirect_uris.len(),
         want_uris.len(),
         "no redirect_uri drift on idempotent re-run"
+    );
+
+    // 6b. Re-deploy DROPPING the declared scope → app_scope_defs row removed and
+    //     the Hydra allowlist reverts to baseline (registry tracks the manifest
+    //     exactly, delete-then-insert in one txn).
+    app_oauth_client::ensure_app_client(
+        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &[],
+    )
+    .await
+    .expect("re-ensure with no scopes");
+    let defs_after = raw
+        .query(
+            "SELECT scope_id FROM control.app_scope_defs WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .expect("query app_scope_defs after drop");
+    assert!(defs_after.is_empty(), "dropped scope removed from registry");
+    let reverted = hydra
+        .get_client(&client_id)
+        .await
+        .expect("get")
+        .expect("present");
+    assert!(
+        !reverted.scope.contains("read:billing"),
+        "Hydra allowlist still carries the dropped scope: {:?}",
+        reverted.scope
     );
 
     // 7. Reconcile: add a custom domain → diff-then-PUT extends redirect_uris.
@@ -301,7 +372,7 @@ async fn appstate_provision_then_delete_end_to_end() {
     // Clean any residue, then provision through the PRODUCTION wrapper.
     let _ = hydra.delete_client(&expected_client_id).await;
     let client_id = state
-        .provision_app_oauth_client(&app_id, &app_name)
+        .provision_app_oauth_client(&app_id, &app_name, &[])
         .await
         .expect("provision via AppState");
     assert_eq!(client_id, expected_client_id);

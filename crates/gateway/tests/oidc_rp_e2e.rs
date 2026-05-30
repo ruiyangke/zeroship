@@ -446,13 +446,20 @@ async fn gateway_oidc_rp_full_dance() {
     // 13. Hand the code+state+stash to OidcRp::finish_callback. This is
     //     the actual unit under test — code exchange + ID-token verify
     //     against hydra's JWKS.
-    let (claims, original_path) = rp
+    let (claims, original_path, granted_scopes) = rp
         .finish_callback(&code, &state_param, &stash)
         .await
         .expect("finish_callback");
     assert_eq!(
         original_path, "/some/path",
         "stash must preserve original_path"
+    );
+    // The token endpoint's granted-scope response flows through to the cookie
+    // session (Slice 3, §1.4). The interactive flow requests at least `openid`,
+    // so the granted set is non-empty.
+    assert!(
+        granted_scopes.contains(&"openid".to_string()),
+        "granted scopes from finish_callback should include openid: {granted_scopes:?}"
     );
     assert_eq!(
         claims.sub,
@@ -472,6 +479,9 @@ async fn gateway_oidc_rp_full_dance() {
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
             email_verified: claims.email_verified.unwrap_or(false),
+            // Faithful: persist the REAL granted scopes from the token exchange,
+            // so the round-trip below proves the cookie path reads them back.
+            granted_scopes: &granted_scopes,
         },
     )
     .await
@@ -483,6 +493,12 @@ async fn gateway_oidc_rp_full_dance() {
     let validated = validated.expect("session must validate immediately after creation");
     assert_eq!(validated.user_id, claims.sub);
     assert_eq!(validated.app_id, app_id);
+    // Slice 3: granted_scopes round-trips through create → validate on the same
+    // row (the cookie path's scope source — no control.oauth_grants join).
+    assert_eq!(
+        validated.granted_scopes, granted_scopes,
+        "validate() must return the granted_scopes written at create"
+    );
 
     revoke(&pg_client, session.id).await.expect("revoke");
     let after_revoke = validate(&pg_client, session.id, &app_id)

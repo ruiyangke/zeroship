@@ -1272,7 +1272,7 @@ async fn handle_auth_callback(
     };
 
     // 3. Exchange the code with hydra + verify the ID token.
-    let (claims, original_path) = match state
+    let (claims, original_path, granted_scopes) = match state
         .oidc_rp
         .finish_callback(&code, &state_param, &stash)
         .await
@@ -1318,6 +1318,7 @@ async fn handle_auth_callback(
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
             email_verified: claims.email_verified.unwrap_or(false),
+            granted_scopes: &granted_scopes,
         },
     )
     .await

@@ -765,6 +765,8 @@ fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -
         email: claims.email.clone().unwrap_or_default(),
         name: claims.name.clone().unwrap_or_default(),
         email_verified: claims.email_verified.unwrap_or(false),
+        // Raw-Hydra arm: scopes come from the access token's `scope` claim.
+        scopes: split_scope_claim(claims.scope.as_deref().unwrap_or_default()),
     }
 }
 
@@ -782,6 +784,9 @@ fn build_worker_user_from_wrapper(claims: &crate::wrapper_token::WrapperClaims) 
         email: claims.email.clone().unwrap_or_default(),
         name: claims.name.clone().unwrap_or_default(),
         email_verified: claims.email_verified.unwrap_or(false),
+        // Bearer-wrapper arm: scopes come from the wrapper's `scope` claim
+        // (the gateway populated it from the granted scope set at mint, U3).
+        scopes: split_scope_claim(&claims.scope),
     }
 }
 
@@ -798,6 +803,8 @@ fn build_worker_user_from_introspection(
         email: info.email.clone().unwrap_or_default(),
         name: info.name.clone().unwrap_or_default(),
         email_verified: info.email_verified.unwrap_or(false),
+        // Introspection fallback: scopes come from the response `scope` field.
+        scopes: split_scope_claim(info.scope.as_deref().unwrap_or_default()),
     }
 }
 
@@ -811,6 +818,9 @@ struct OwnedWorkerUser {
     email: String,
     name: String,
     email_verified: bool,
+    /// Granted scopes (Slice 3, §1.4). Owned here so the borrowed
+    /// `WorkerUser.scopes` can survive through `encode_user_header`.
+    scopes: Vec<String>,
 }
 
 impl<'a> From<&'a OwnedWorkerUser> for oidc_rp::WorkerUser<'a> {
@@ -821,8 +831,16 @@ impl<'a> From<&'a OwnedWorkerUser> for oidc_rp::WorkerUser<'a> {
             name: &owned.name,
             avatar: None,
             email_verified: owned.email_verified,
+            scopes: owned.scopes.iter().map(String::as_str).collect(),
         }
     }
+}
+
+/// Split an OAuth `scope` claim (space-delimited) into a scope vector. Empty
+/// or whitespace-only ⇒ empty vec, so `WorkerUser.scopes` is `[]` (never a
+/// `[""]`) when the token carries no scopes.
+fn split_scope_claim(scope: &str) -> Vec<String> {
+    scope.split_whitespace().map(str::to_string).collect()
 }
 
 /// Resolve the `ZeroShip-User` header value from the per-origin app
@@ -875,6 +893,9 @@ async fn resolve_app_session_user_header_inner(
         name: session.name.as_deref().unwrap_or(""),
         avatar: session.avatar_url.as_deref(),
         email_verified: session.email_verified,
+        // Cookie arm: scopes come from the session row's granted_scopes column
+        // (Slice 3, §1.4) — no control.oauth_grants hot-path join.
+        scopes: session.granted_scopes.iter().map(String::as_str).collect(),
     };
     Some(oidc_rp::encode_user_header(
         &user,
@@ -1045,6 +1066,74 @@ mod tests {
         assert_eq!(owned.email, "a@b.test");
         assert_eq!(owned.name, "Alice");
         assert!(owned.email_verified);
+        assert_eq!(owned.scopes, vec!["openid".to_string()]);
+    }
+
+    /// The Bearer-wrapper arm carries the app's granted scopes from the
+    /// wrapper `scope` claim onto `WorkerUser.scopes` (Slice 3, §1.4), and they
+    /// survive the encode → verify → JSON-parse round-trip the worker performs.
+    #[test]
+    fn worker_user_scopes_round_trip_through_header() {
+        use crate::wrapper_token::{Cnf, WrapperClaims};
+        let claims = WrapperClaims {
+            iss: "https://api.zeroship.ai".into(),
+            aud: "myapp.zeroship.ai".into(),
+            sub: "pws_abc".into(),
+            exp: 0,
+            iat: 0,
+            jti: "j".into(),
+            cnf: Some(Cnf { jkt: "k".into() }),
+            scope: "openid read:billing write:projects".into(),
+            client_id: "oac_app".into(),
+            email: Some("a@b.test".into()),
+            email_verified: Some(true),
+            name: Some("Alice".into()),
+            wraps: None,
+        };
+        let owned = build_worker_user_from_wrapper(&claims);
+        assert_eq!(
+            owned.scopes,
+            vec!["openid", "read:billing", "write:projects"]
+        );
+
+        // Encode the WorkerUser as the worker would receive it, verify the MAC,
+        // and JSON-parse it back — `scopes` must survive verbatim.
+        let user: oidc_rp::WorkerUser<'_> = (&owned).into();
+        let key = "worker-key-1234567890";
+        let rid = Uuid::new_v4();
+        let header = oidc_rp::encode_user_header(&user, key, rid);
+        let json = zeroship_core::auth::verify_zeroship_user_header(key.as_bytes(), &header)
+            .expect("MAC verifies");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("user json");
+        assert_eq!(
+            parsed["scopes"],
+            serde_json::json!(["openid", "read:billing", "write:projects"]),
+            "scopes must round-trip through the ZeroShip-User header"
+        );
+    }
+
+    /// No granted scopes (e.g. client-credentials) ⇒ `WorkerUser.scopes` is an
+    /// empty vec, never a `[""]`.
+    #[test]
+    fn worker_user_scopes_empty_when_no_scope_claim() {
+        use crate::wrapper_token::{Cnf, WrapperClaims};
+        let claims = WrapperClaims {
+            iss: "https://api.zeroship.ai".into(),
+            aud: "myapp.zeroship.ai".into(),
+            sub: "usr_x".into(),
+            exp: 0,
+            iat: 0,
+            jti: "j".into(),
+            cnf: Some(Cnf { jkt: "k".into() }),
+            scope: "   ".into(),
+            client_id: "oac_app".into(),
+            email: None,
+            email_verified: None,
+            name: None,
+            wraps: None,
+        };
+        let owned = build_worker_user_from_wrapper(&claims);
+        assert!(owned.scopes.is_empty(), "whitespace-only scope ⇒ empty vec");
     }
 
     #[test]
@@ -1098,6 +1187,26 @@ mod tests {
         assert_eq!(owned.email, "u@x.test");
         assert_eq!(owned.name, "Bob");
         assert!(owned.email_verified);
+        assert_eq!(owned.scopes, vec!["openid".to_string(), "email".to_string()]);
+    }
+
+    /// The raw-Hydra Bearer arm carries `scope` from the access-token claims
+    /// onto `WorkerUser.scopes`.
+    #[test]
+    fn build_worker_user_from_access_claims_carries_scopes() {
+        let claims = crate::oidc_rp::AccessClaims {
+            sub: "usr_global".into(),
+            client_id: Some("oac_app".into()),
+            aud: vec!["oac_app".into()],
+            iat: 0,
+            email: Some("u@x.test".into()),
+            email_verified: Some(true),
+            name: Some("Carol".into()),
+            scope: Some("openid read:billing".into()),
+        };
+        let owned = build_worker_user_from_access_claims(&claims);
+        assert_eq!(owned.id, "usr_global");
+        assert_eq!(owned.scopes, vec!["openid".to_string(), "read:billing".to_string()]);
     }
 
     // ─── cnf.jkt enforcement (Phase 8 U4) ──────────────────────────────
@@ -2767,6 +2876,7 @@ mod tests {
                     name: Some("Cookie User"),
                     avatar_url: None,
                     email_verified: true,
+                    granted_scopes: &[],
                 },
             )
             .await

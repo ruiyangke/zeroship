@@ -6,7 +6,7 @@
 //! These tests pin both directions.
 
 use serde_json::{Value, json};
-use zeroship_bundle::{HandlerEntry, Manifest, ManifestExports};
+use zeroship_bundle::{AuthConfig, HandlerEntry, Manifest, ManifestExports, ScopeDef};
 
 /// An old manifest produced before `exports` existed must deserialize
 /// unchanged, and round-trip serialize without inventing the field.
@@ -102,4 +102,88 @@ fn handler_entries_round_trip() {
     assert_eq!(handlers[0].path, "src/api/query/listTodos.ts");
     assert_eq!(handlers[0].capability, "query");
     assert_eq!(handlers[0].name, "listTodos");
+}
+
+// ── auth.scopes (declared-scope vocabulary, Slice 3a) ────────────────────────
+
+/// A manifest declaring `auth.scopes` round-trips through serde with every
+/// `{ id, label, description }` field intact.
+#[test]
+fn auth_scopes_round_trip() {
+    let mut m = Manifest::default();
+    m.auth = AuthConfig {
+        scopes: vec![
+            ScopeDef {
+                id: "read:billing".to_string(),
+                label: "View billing".to_string(),
+                description: Some("See invoices and plan.".to_string()),
+            },
+            ScopeDef {
+                id: "write:projects".to_string(),
+                label: "Manage projects".to_string(),
+                description: None,
+            },
+        ],
+    };
+    let json_str = serde_json::to_string(&m).expect("serialize");
+    let m2: Manifest = serde_json::from_str(&json_str).expect("parse");
+    assert_eq!(m2.auth.scopes.len(), 2);
+    assert_eq!(m2.auth.scopes[0].id, "read:billing");
+    assert_eq!(m2.auth.scopes[0].label, "View billing");
+    assert_eq!(
+        m2.auth.scopes[0].description.as_deref(),
+        Some("See invoices and plan.")
+    );
+    assert_eq!(m2.auth.scopes[1].id, "write:projects");
+    // Absent description omits the key on the wire.
+    let v: Value = serde_json::to_value(&m).expect("serialize value");
+    let scopes = v["auth"]["scopes"].as_array().expect("scopes array");
+    assert!(scopes[1].get("description").is_none(), "got {v}");
+}
+
+/// An app with no declared scopes serializes to NO `auth` key at all, so a
+/// scope-free manifest is wire-identical to one with no `auth` field.
+#[test]
+fn empty_auth_omits_the_key() {
+    let m = Manifest::default();
+    let v: Value = serde_json::to_value(&m).expect("serialize");
+    assert!(v.get("auth").is_none(), "auth must be omitted when empty — got {v}");
+
+    // And an old manifest without an `auth` key deserializes to the empty
+    // default and round-trips back to no key.
+    let original = json!({ "version": 1 });
+    let parsed: Manifest = serde_json::from_value(original).expect("parse");
+    assert!(parsed.auth.is_empty());
+    let back: Value = serde_json::to_value(&parsed).expect("serialize");
+    assert!(back.get("auth").is_none());
+}
+
+/// `Manifest::validate()` rejects a malformed scope id (format-level —
+/// platform-vocab collision is the control plane's job).
+#[test]
+fn validate_rejects_malformed_scope_id() {
+    let mut m = Manifest::default();
+    m.auth = AuthConfig {
+        scopes: vec![ScopeDef {
+            id: "Read:Billing".to_string(), // uppercase ⇒ rejected
+            label: "x".to_string(),
+            description: None,
+        }],
+    };
+    let err = m.validate().expect_err("uppercase scope id must be rejected");
+    assert!(err.contains("Read:Billing"), "{err}");
+}
+
+/// `Manifest::validate()` accepts well-formed `verb:resource` ids.
+#[test]
+fn validate_accepts_wellformed_scope_id() {
+    let mut m = Manifest::default();
+    m.auth = AuthConfig {
+        scopes: vec![
+            ScopeDef { id: "read:billing".to_string(), label: "x".to_string(), description: None },
+            ScopeDef { id: "manage_team".to_string(), label: "y".to_string(), description: None },
+            ScopeDef { id: "a:b:c".to_string(), label: "z".to_string(), description: None },
+        ],
+    };
+    m.validate().expect("well-formed scope ids accepted");
 }

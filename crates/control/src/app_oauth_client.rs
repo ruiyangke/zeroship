@@ -62,6 +62,8 @@ use compio_postgres::Client;
 use uuid::Uuid;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_authz::Scope;
+use zeroship_bundle::ScopeDef;
 use zeroship_core::typed_id::uuid_to_base62;
 
 /// Per-app custom-domain cap (default 50). With 2 redirect_uris per host
@@ -97,6 +99,9 @@ pub enum AppOauthClientError {
     TooManyHosts { requested: usize, cap: usize },
     /// No hosts at all — a per-app client must have at least one redirect host.
     NoHosts,
+    /// A declared `auth.scopes` id is malformed or collides with the closed
+    /// platform-delegated vocabulary / a reserved identity scope (spec §5.1).
+    InvalidScope { id: String, reason: String },
 }
 
 impl std::fmt::Display for AppOauthClientError {
@@ -108,6 +113,9 @@ impl std::fmt::Display for AppOauthClientError {
                 write!(f, "too many hosts: {requested} > cap {cap}")
             }
             Self::NoHosts => write!(f, "no hosts supplied"),
+            Self::InvalidScope { id, reason } => {
+                write!(f, "invalid declared scope {id:?}: {reason}")
+            }
         }
     }
 }
@@ -132,6 +140,89 @@ pub fn client_id_for_app(app_id: &Uuid) -> String {
 #[must_use]
 pub fn sector_identifier(scheme: &str, apex_host: &str) -> String {
     format!("{scheme}://{apex_host}")
+}
+
+/// Reserved OIDC identity scopes (namespace-(b), platform-defined). An app may
+/// NOT redeclare these in `auth.scopes` — they are always present in the
+/// baseline allowlist ([`BASE_SCOPE`]) and rendered by the consent screen with
+/// fixed labels (spec §5.1).
+const RESERVED_IDENTITY_SCOPES: [&str; 4] = ["openid", "profile", "email", "offline_access"];
+
+/// Reserved scope-id prefixes for future platform/org delegation (spec §5.1).
+/// An app-declared scope may not start with one of these.
+const RESERVED_SCOPE_PREFIXES: [&str; 2] = ["platform:", "org:"];
+
+/// Validate the app's manifest-declared scopes (spec §5.1). Each id must:
+/// 1. be well-formed (`verb:resource`, lowercase — [`ScopeDef::validate_id_format`]),
+/// 2. NOT parse as a closed platform-delegated scope ([`Scope::parse`] —
+///    `apps:*`, `env:*`, `secrets:*`, `billing:*`, `team:*`, `account:*`,
+///    `deployments:*`), and
+/// 3. NOT use a reserved prefix (`platform:`, `org:`) or be a bare reserved
+///    identity scope (`openid`/`profile`/`email`/`offline_access`).
+///
+/// Binding the guard to `Scope::parse` (not a hand-listed prefix set) makes the
+/// app-scope namespace and the platform-scope vocabulary provably disjoint, so
+/// a declared scope can never be silently classified self-grantable while it
+/// also parses as a real platform scope.
+///
+/// # Errors
+/// [`AppOauthClientError::InvalidScope`] on the first offending id.
+pub fn validate_app_scopes(scopes: &[ScopeDef]) -> Result<()> {
+    for scope in scopes {
+        let id = scope.id.as_str();
+        // (1) format.
+        if let Err(reason) = ScopeDef::validate_id_format(id) {
+            return Err(AppOauthClientError::InvalidScope {
+                id: id.to_string(),
+                reason,
+            });
+        }
+        // (2) closed platform-delegated vocabulary collision.
+        if Scope::parse(id).is_ok() {
+            return Err(AppOauthClientError::InvalidScope {
+                id: id.to_string(),
+                reason: "collides with a platform-delegated scope".to_string(),
+            });
+        }
+        // (3) reserved prefixes + bare reserved identity scopes.
+        if RESERVED_SCOPE_PREFIXES.iter().any(|p| id.starts_with(p)) {
+            return Err(AppOauthClientError::InvalidScope {
+                id: id.to_string(),
+                reason: "uses a reserved scope prefix (platform:/org:)".to_string(),
+            });
+        }
+        if RESERVED_IDENTITY_SCOPES.contains(&id) {
+            return Err(AppOauthClientError::InvalidScope {
+                id: id.to_string(),
+                reason: "collides with a reserved identity scope".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Build the per-app Hydra client `scope` allowlist string (spec §5.1):
+/// `"openid offline_access profile email " + declared ids`, deduped and
+/// order-stable (baseline first, then declared ids in manifest order). This is
+/// the exact value written to BOTH the live Hydra client and the
+/// `control.oauth_clients.scopes` mirror, so the two never drift.
+///
+/// Caller MUST have run [`validate_app_scopes`] first — a declared id here can
+/// never duplicate a baseline scope (the validator rejects the reserved
+/// identity scopes), so dedup only guards against a repeated declared id.
+#[must_use]
+pub fn build_scope_allowlist(declared: &[ScopeDef]) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<&str> = Vec::new();
+    for s in BASE_SCOPE
+        .split_whitespace()
+        .chain(declared.iter().map(|s| s.id.as_str()))
+    {
+        if seen.insert(s) {
+            out.push(s);
+        }
+    }
+    out.join(" ")
 }
 
 /// The two same-origin OAuth callback paths registered per host (spec §1.1).
@@ -302,6 +393,7 @@ fn build_client_body(
     scheme: &str,
     apex_host: &str,
     redirect_uris: Vec<String>,
+    scope: &str,
 ) -> OAuth2Client {
     OAuth2Client {
         client_id: client_id.to_string(),
@@ -311,7 +403,7 @@ fn build_client_body(
         response_types: vec!["code".into()],
         redirect_uris,
         post_logout_redirect_uris: post_logout_redirect_uris(scheme, apex_host),
-        scope: BASE_SCOPE.to_string(),
+        scope: scope.to_string(),
         token_endpoint_auth_method: "none".to_string(),
         subject_type: "public".to_string(),
         access_token_strategy: Some("jwt".to_string()),
@@ -362,9 +454,20 @@ fn build_client_body(
 /// `hosts[0]` is treated as the apex host (sector + BCL + post-logout origin);
 /// all hosts contribute redirect_uris.
 ///
+/// **Declared scopes (Slice 3, spec §5.1 O8 mirror).** `declared_scopes` are
+/// the app's manifest `auth.scopes`. They are validated ([`validate_app_scopes`]
+/// — format + platform-vocab collision) BEFORE any Hydra/DB write, then mirrored
+/// ATOMICALLY: the per-app Hydra client `scope` allowlist is set to
+/// `"openid offline_access profile email " + declared ids`, and
+/// `control.app_scope_defs` is replaced with the declared set — both in the same
+/// control-plane transaction as the client rows. The allowlist diff feeds the
+/// existing diff-then-PUT so a no-op-scope deploy still issues no Hydra call.
+/// Pass `&[]` for an app declaring no custom scopes (the baseline allowlist).
+///
 /// # Errors
 /// [`AppOauthClientError`] on Hydra-admin failure, DB failure, an invalid host
-/// list, or a merged set that would exceed [`MAX_REDIRECT_URIS`].
+/// list, a merged set that would exceed [`MAX_REDIRECT_URIS`], or an invalid
+/// declared scope.
 pub async fn ensure_app_client(
     pg: &mut Client,
     hydra: &impl HydraClientAdmin,
@@ -372,7 +475,13 @@ pub async fn ensure_app_client(
     app_name: &str,
     scheme: &str,
     hosts: &[String],
+    declared_scopes: &[ScopeDef],
 ) -> Result<String> {
+    // Validate declared scopes FIRST — reject before touching Hydra or the DB
+    // so a bad manifest can never half-provision (spec §5.1).
+    validate_app_scopes(declared_scopes)?;
+    let scope_allowlist = build_scope_allowlist(declared_scopes);
+
     let apex_host = hosts.first().ok_or(AppOauthClientError::NoHosts)?.clone();
     let client_id = client_id_for_app(app_id);
     let incoming_uris = redirect_uris_for_hosts(scheme, hosts)?;
@@ -388,6 +497,7 @@ pub async fn ensure_app_client(
                 scheme,
                 &apex_host,
                 incoming_uris.clone(),
+                &scope_allowlist,
             );
             hydra.create_client(&body).await?;
             incoming_uris
@@ -400,10 +510,21 @@ pub async fn ensure_app_client(
                     cap: MAX_HOSTS,
                 });
             }
-            // Reconcile redirect_uris (diff-then-PUT). Only PUT on a real diff.
-            if let Some(next) = reconcile_redirect_uris(&existing.redirect_uris, &merged) {
-                let body =
-                    build_client_body(&client_id, app_name, scheme, &apex_host, next);
+            // Reconcile redirect_uris (diff-then-PUT) AND the scope allowlist.
+            // Either a URI delta OR a scope delta triggers the PUT, so a deploy
+            // that only adds a declared scope still re-registers the client.
+            let uri_delta = reconcile_redirect_uris(&existing.redirect_uris, &merged);
+            let scope_changed = existing.scope != scope_allowlist;
+            if uri_delta.is_some() || scope_changed {
+                let next_uris = uri_delta.unwrap_or(merged.clone());
+                let body = build_client_body(
+                    &client_id,
+                    app_name,
+                    scheme,
+                    &apex_host,
+                    next_uris,
+                    &scope_allowlist,
+                );
                 hydra.update_client(&body).await?;
             }
             merged
@@ -411,7 +532,17 @@ pub async fn ensure_app_client(
     };
 
     let sector = sector_identifier(scheme, &apex_host);
-    upsert_db_rows(pg, app_id, &client_id, app_name, &sector, &effective_uris).await?;
+    upsert_db_rows(
+        pg,
+        app_id,
+        &client_id,
+        app_name,
+        &sector,
+        &effective_uris,
+        &scope_allowlist,
+        declared_scopes,
+    )
+    .await?;
     Ok(client_id)
 }
 
@@ -438,24 +569,48 @@ pub async fn sync_app_redirect_uris(
 
     let Some(existing) = hydra.get_client(&client_id).await? else {
         // Not provisioned yet — caller should ensure_app_client first. Treat as
-        // a full provision so deploy is self-healing.
+        // a full provision so deploy is self-healing. No manifest is in hand on
+        // this redirect-only path, so the client gets the baseline scope
+        // allowlist; the next `ensure_app_client` (deploy) re-mirrors declared
+        // scopes. The scope-defs registry is owned by `ensure_app_client`, so
+        // this fallback writes the empty declared set.
         let body = build_client_body(
             &client_id,
             app_name,
             scheme,
             &apex_host,
             desired_uris.clone(),
+            BASE_SCOPE,
         );
         hydra.create_client(&body).await?;
         let sector = sector_identifier(scheme, &apex_host);
-        upsert_db_rows(pg, app_id, &client_id, app_name, &sector, &desired_uris).await?;
+        upsert_db_rows(
+            pg,
+            app_id,
+            &client_id,
+            app_name,
+            &sector,
+            &desired_uris,
+            BASE_SCOPE,
+            &[],
+        )
+        .await?;
         return Ok(true);
     };
 
     match reconcile_redirect_uris(&existing.redirect_uris, &desired_uris) {
         None => Ok(false),
         Some(next) => {
-            let body = build_client_body(&client_id, app_name, scheme, &apex_host, next);
+            // Redirect-only path: PRESERVE the live client's scope allowlist
+            // (declared scopes are mirrored by `ensure_app_client`, not here).
+            let body = build_client_body(
+                &client_id,
+                app_name,
+                scheme,
+                &apex_host,
+                next,
+                &existing.scope,
+            );
             hydra.update_client(&body).await?;
             update_redirect_uri_mirror(pg, &client_id, &desired_uris).await?;
             Ok(true)
@@ -474,8 +629,14 @@ pub async fn delete_app_client(hydra: &impl HydraClientAdmin, app_id: &Uuid) -> 
     hydra.delete_client(&client_id).await
 }
 
-/// Upsert both the `control.oauth_clients` identity row and the
-/// `control.app_oauth_clients` extension row in one transaction (spec §8.1).
+/// Upsert the `control.oauth_clients` identity row, the
+/// `control.app_oauth_clients` extension row, AND the `control.app_scope_defs`
+/// declared-scope registry — all in ONE transaction (spec §8.1 / §5.1 O8
+/// mirror). The `oauth_clients.scopes` mirror and the `app_scope_defs` rows are
+/// derived from the SAME validated `scope_allowlist` / `declared_scopes`, so
+/// the Hydra allowlist, the mirror, and the registry can never disagree —
+/// which is what keeps the consent classifier sound (no deploy-race can let
+/// Hydra accept a scope the registry hasn't learned).
 async fn upsert_db_rows(
     pg: &mut Client,
     app_id: &Uuid,
@@ -483,8 +644,10 @@ async fn upsert_db_rows(
     client_name: &str,
     sector: &str,
     redirect_uris: &[String],
+    scope_allowlist: &str,
+    declared_scopes: &[ScopeDef],
 ) -> Result<()> {
-    let scopes: Vec<&str> = BASE_SCOPE.split_whitespace().collect();
+    let scopes: Vec<&str> = scope_allowlist.split_whitespace().collect();
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
     let created_by: Option<Uuid> = None;
 
@@ -495,7 +658,8 @@ async fn upsert_db_rows(
 
     // control.oauth_clients — the FK target + skip_consent reader. skip_consent
     // is hard FALSE for per-app end-user clients (spec §5.2). hydra_client_id
-    // == client_id == oac_<base62>.
+    // == client_id == oac_<base62>. `scopes` mirrors the Hydra allowlist
+    // (baseline + declared).
     tx.execute(
         "INSERT INTO control.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
@@ -522,6 +686,26 @@ async fn upsert_db_rows(
     )
     .await
     .map_err(|e| AppOauthClientError::Db(e.to_string()))?;
+
+    // control.app_scope_defs — REPLACE the declared-scope registry for this app
+    // wholesale (delete-then-insert): a deploy that drops a previously-declared
+    // scope must remove its row, so the registry exactly tracks the current
+    // manifest. Same transaction ⇒ atomic with the allowlist mirror above.
+    tx.execute(
+        "DELETE FROM control.app_scope_defs WHERE app_id = $1",
+        &[app_id],
+    )
+    .await
+    .map_err(|e| AppOauthClientError::Db(e.to_string()))?;
+    for scope in declared_scopes {
+        tx.execute(
+            "INSERT INTO control.app_scope_defs (app_id, scope_id, label, description) \
+             VALUES ($1, $2, $3, $4)",
+            &[app_id, &scope.id, &scope.label, &scope.description],
+        )
+        .await
+        .map_err(|e| AppOauthClientError::Db(e.to_string()))?;
+    }
 
     tx.commit()
         .await
@@ -750,7 +934,14 @@ mod tests {
             &["apex.zeroship.ai".to_string(), "custom.example.com".to_string()],
         )
         .unwrap();
-        let body = build_client_body(&client_id, "app", "https", "apex.zeroship.ai", seeded.clone());
+        let body = build_client_body(
+            &client_id,
+            "app",
+            "https",
+            "apex.zeroship.ai",
+            seeded.clone(),
+            BASE_SCOPE,
+        );
         (&hydra).create_client(&body).await.unwrap();
         assert_eq!(*hydra.creates.borrow(), 1);
 
@@ -776,7 +967,14 @@ mod tests {
     #[test]
     fn client_body_is_public_pkce_with_per_app_bcl() {
         let uris = redirect_uris_for_hosts("https", &["apex.zeroship.ai".to_string()]).unwrap();
-        let body = build_client_body("oac_x", "my app", "https", "apex.zeroship.ai", uris);
+        let body = build_client_body(
+            "oac_x",
+            "my app",
+            "https",
+            "apex.zeroship.ai",
+            uris,
+            BASE_SCOPE,
+        );
         assert_eq!(body.token_endpoint_auth_method, "none");
         assert!(body.client_secret.is_none());
         assert_eq!(body.subject_type, "public");
@@ -907,25 +1105,185 @@ mod tests {
         scheme: &str,
         hosts: &[String],
     ) {
+        run_hydra_only_ensure_scopes(hydra, client_id, scheme, hosts, &[]).await;
+    }
+
+    /// Like [`run_hydra_only_ensure`] but threads declared scopes — mirrors the
+    /// REAL `ensure_app_client` scope+URI diff (PUT on EITHER a URI or scope
+    /// delta), so the Hydra-only tests faithfully exercise the scope-allowlist
+    /// reconciliation, not a stub of it.
+    async fn run_hydra_only_ensure_scopes(
+        hydra: &MockHydra,
+        client_id: &str,
+        scheme: &str,
+        hosts: &[String],
+        declared_scopes: &[ScopeDef],
+    ) {
         // The trait is impl'd for `&MockHydra`; method syntax on `hydra`
         // (`&MockHydra`) resolves to that impl.
+        validate_app_scopes(declared_scopes).unwrap();
+        let scope_allowlist = build_scope_allowlist(declared_scopes);
         let apex = hosts.first().unwrap().clone();
         let incoming = redirect_uris_for_hosts(scheme, hosts).unwrap();
         match hydra.get_client(client_id).await.unwrap() {
             None => {
-                let body =
-                    build_client_body(client_id, "app", scheme, &apex, incoming.clone());
+                let body = build_client_body(
+                    client_id,
+                    "app",
+                    scheme,
+                    &apex,
+                    incoming.clone(),
+                    &scope_allowlist,
+                );
                 hydra.create_client(&body).await.unwrap();
             }
             Some(existing) => {
                 let merged = merge_preserving_existing(&existing.redirect_uris, &incoming);
-                if let Some(next) =
-                    reconcile_redirect_uris(&existing.redirect_uris, &merged)
-                {
-                    let body = build_client_body(client_id, "app", scheme, &apex, next);
+                let uri_delta = reconcile_redirect_uris(&existing.redirect_uris, &merged);
+                let scope_changed = existing.scope != scope_allowlist;
+                if uri_delta.is_some() || scope_changed {
+                    let next_uris = uri_delta.unwrap_or(merged.clone());
+                    let body = build_client_body(
+                        client_id,
+                        "app",
+                        scheme,
+                        &apex,
+                        next_uris,
+                        &scope_allowlist,
+                    );
                     hydra.update_client(&body).await.unwrap();
                 }
             }
         }
+    }
+
+    // ── declared-scope validation (spec §5.1) ───────────────────────────────
+
+    #[test]
+    fn validate_rejects_platform_vocab_collision() {
+        // billing:read is in the closed Scope::parse vocabulary — it MUST be
+        // rejected even though it is a well-formed verb:resource id (the
+        // round-1 hole this guard closes).
+        let scopes = vec![ScopeDef {
+            id: "billing:read".to_string(),
+            label: "x".to_string(),
+            description: None,
+        }];
+        let err = validate_app_scopes(&scopes).unwrap_err();
+        assert!(
+            matches!(&err, AppOauthClientError::InvalidScope { id, .. } if id == "billing:read"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_every_closed_platform_scope() {
+        // Every member of the closed vocabulary must be rejected — pins the
+        // disjointness invariant against the full set, not just one example.
+        for id in [
+            "apps:read", "apps:deploy", "env:read", "env:write", "secrets:read",
+            "secrets:write", "billing:read", "billing:write", "team:read", "team:write",
+            "account:read", "account:write", "deployments:read", "deployments:rollback",
+        ] {
+            let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
+            assert!(
+                validate_app_scopes(&scopes).is_err(),
+                "platform scope {id} must be rejected as an app-declared scope"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_reserved_prefixes_and_identity() {
+        for id in ["platform:admin", "org:owner", "openid", "profile", "email", "offline_access"] {
+            let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
+            assert!(validate_app_scopes(&scopes).is_err(), "reserved {id} must be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_malformed_ids() {
+        for id in ["Read:Billing", "read billing", "1read", ":read", "read:"] {
+            let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
+            assert!(validate_app_scopes(&scopes).is_err(), "malformed {id} must be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_noncolliding_app_scopes() {
+        // The mirror image of the platform-collision test: read:billing (note
+        // the order) is NOT in the platform vocabulary, so it is accepted.
+        let scopes = vec![
+            ScopeDef { id: "read:billing".into(), label: "View billing".into(), description: None },
+            ScopeDef { id: "write:projects".into(), label: "Manage".into(), description: None },
+        ];
+        validate_app_scopes(&scopes).expect("non-colliding app scopes accepted");
+    }
+
+    // ── allowlist string (baseline + declared, deduped) ─────────────────────
+
+    #[test]
+    fn allowlist_appends_declared_after_baseline() {
+        let declared = vec![
+            ScopeDef { id: "read:billing".into(), label: "x".into(), description: None },
+            ScopeDef { id: "write:projects".into(), label: "y".into(), description: None },
+        ];
+        assert_eq!(
+            build_scope_allowlist(&declared),
+            "openid offline_access profile email read:billing write:projects"
+        );
+    }
+
+    #[test]
+    fn allowlist_empty_declared_is_baseline() {
+        assert_eq!(build_scope_allowlist(&[]), BASE_SCOPE);
+    }
+
+    /// A deploy that adds a declared scope (no URI change) STILL issues a Hydra
+    /// PUT, because the scope allowlist changed — the O8 mirror invariant.
+    #[compio::test]
+    async fn scope_only_change_triggers_put() {
+        let hydra = MockHydra::default();
+        let app = Uuid::new_v4();
+        let client_id = client_id_for_app(&app);
+
+        // Create with no declared scopes (baseline allowlist).
+        run_hydra_only_ensure_scopes(&hydra, &client_id, "https", &["apex.zeroship.ai".into()], &[])
+            .await;
+        assert_eq!(*hydra.creates.borrow(), 1);
+        assert_eq!(*hydra.updates.borrow(), 0);
+        assert_eq!(hydra.store.borrow().get(&client_id).unwrap().scope, BASE_SCOPE);
+
+        // Re-ensure SAME hosts but now declaring read:billing → exactly one PUT,
+        // even though no redirect_uri changed.
+        let declared = vec![ScopeDef {
+            id: "read:billing".into(),
+            label: "View billing".into(),
+            description: None,
+        }];
+        run_hydra_only_ensure_scopes(
+            &hydra,
+            &client_id,
+            "https",
+            &["apex.zeroship.ai".into()],
+            &declared,
+        )
+        .await;
+        assert_eq!(*hydra.updates.borrow(), 1, "scope-only delta ⇒ one PUT");
+        assert_eq!(
+            hydra.store.borrow().get(&client_id).unwrap().scope,
+            "openid offline_access profile email read:billing"
+        );
+
+        // Re-ensure with the SAME declared scope → no further PUT (idempotent).
+        run_hydra_only_ensure_scopes(
+            &hydra,
+            &client_id,
+            "https",
+            &["apex.zeroship.ai".into()],
+            &declared,
+        )
+        .await;
+        assert_eq!(*hydra.updates.borrow(), 1, "no PUT on unchanged scopes+hosts");
     }
 }
