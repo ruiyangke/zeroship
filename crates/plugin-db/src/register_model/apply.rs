@@ -128,10 +128,18 @@ pub(crate) async fn apply<
             | ChangeKind::AddForeignKey
             | ChangeKind::DropForeignKey => {
                 if let Some(sql) = &op.sql {
+                    // DDL apply uses the simple query protocol
+                    // (`pool_exec_ddl`): CREATE TABLE bundles the table
+                    // body with its implicit system-field CREATE INDEXes
+                    // (and PG `COMMENT ON COLUMN` mask sentinels) into one
+                    // `;`-separated script, which the extended/prepared
+                    // protocol used by `pool_exec` rejects with `cannot
+                    // insert multiple commands into a prepared statement`.
+                    // ADD COLUMN / ADD/DROP FK are single statements but
+                    // ride the same parameterless path.
                     backend
-                        .pool_exec(sql, &[])
+                        .pool_exec_ddl(sql)
                         .await
-                        .map(|_| ())
                         .map_err(|e| match e {
                             // Preserve the operator-facing prefix
                             // ("db: ADD COLUMN failed: ...") only for

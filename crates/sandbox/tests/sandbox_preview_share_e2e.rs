@@ -529,7 +529,7 @@ async fn delete_per_token_returns_501_deferred_to_phase_5() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     let bytes = test::read_body(resp).await; let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["code"].as_str().unwrap(), "deferred-to-phase-5");
+    assert_eq!(body["error"].as_str().unwrap(), "deferred_to_phase_5");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -581,7 +581,7 @@ async fn expired_token_returns_401_with_expired_code() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let bytes = test::read_body(resp).await; let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["code"].as_str().unwrap(), "expired");
+    assert_eq!(body["error"].as_str().unwrap(), "expired");
 }
 
 /// Dispatch-path scope mismatch — the cookie validates fully (HMAC,
@@ -618,7 +618,7 @@ async fn ro_token_post_via_dispatch_returns_404_uniform() {
     );
     let bytes = test::read_body(resp).await;
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    assert_eq!(body["error"].as_str().unwrap(), "not_found");
 }
 
 /// Cookie-conversion scope-mismatch — the helpful 403 path.
@@ -651,7 +651,7 @@ async fn scope_forbidden_via_cookie_conversion_returns_403() {
     );
     let bytes = test::read_body(resp).await;
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["code"].as_str().unwrap(), "scope_forbidden");
+    assert_eq!(body["error"].as_str().unwrap(), "scope_forbidden");
 }
 
 #[ntex::test]
@@ -801,7 +801,7 @@ async fn missing_sec_fetch_site_returns_400_client_too_old() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let bytes = test::read_body(resp).await; let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["code"].as_str().unwrap(), "client_too_old");
+    assert_eq!(body["error"].as_str().unwrap(), "client_too_old");
 }
 
 #[ntex::test]

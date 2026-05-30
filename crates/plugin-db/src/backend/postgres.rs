@@ -160,6 +160,21 @@ impl SqlExecutor for PostgresBackend {
         Ok(rows.len() as u64)
     }
 
+    async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
+        // Multi-statement DDL (CREATE TABLE + implicit system-field
+        // CREATE INDEXes + `COMMENT ON COLUMN` mask sentinels) must use
+        // the simple query protocol — `query_text_params` (extended
+        // protocol) rejects it with `cannot insert multiple commands
+        // into a prepared statement`. `batch_execute` issues a single
+        // `Query` message and runs the `;`-separated statements in one
+        // implicit transaction.
+        let client = self.pool.get().await.map_err(|e| DbError::from_pg(&e))?;
+        client
+            .batch_execute(sql)
+            .await
+            .map_err(|e| DbError::from_pg(&e))
+    }
+
     async fn client_exec(
         &self,
         client: &Self::Client,

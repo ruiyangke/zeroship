@@ -29,6 +29,11 @@ pub async fn is_subject_revoked_since(
     subject: Uuid,
     iat: i64,
 ) -> Result<bool, Error> {
+    // `to_timestamp(...)` takes `double precision`; the explicit
+    // `$2::double precision` cast makes Postgres report the bind param as
+    // `Float8`, so the value must be encoded as `f64` — binding an `i64`
+    // here fails with a "serializing parameter" / `WrongType` error.
+    let iat = iat as f64;
     let row = db
         .query_one(
             "SELECT EXISTS ( \

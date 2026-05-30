@@ -949,6 +949,11 @@ impl PgJtiCache {
     ///
     /// Returns the underlying PG error if the delete fails.
     pub async fn sweep(&self, ttl_secs: i64) -> Result<u64, compio_postgres::Error> {
+        // `make_interval(secs => ...)` takes `double precision`, and the
+        // explicit `$1::double precision` cast makes Postgres report the
+        // bind param as `Float8` — so the value must be encoded as `f64`,
+        // not `i64` (which the driver rejects with `WrongType`).
+        let ttl_secs = ttl_secs as f64;
         self.db
             .execute(
                 "DELETE FROM auth.dpop_jti \
