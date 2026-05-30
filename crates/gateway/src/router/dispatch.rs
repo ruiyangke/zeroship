@@ -1366,6 +1366,12 @@ fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
 
 fn oidc_callback_public_error(e: &oidc_rp::OidcRpError) -> &'static str {
     match e {
+        oidc_rp::OidcRpError::UpstreamUnavailable(_) => {
+            // Hydra is browning out (breaker open / bounded timeout). Tell the
+            // user it's transient rather than implying their credentials are
+            // bad — the §8.7 fast-fail surfaces here on the cookie flow.
+            "sign-in is temporarily unavailable, please try again shortly"
+        }
         oidc_rp::OidcRpError::StashInvalid
         | oidc_rp::OidcRpError::StateMismatch
         | oidc_rp::OidcRpError::TokenExchange(_)

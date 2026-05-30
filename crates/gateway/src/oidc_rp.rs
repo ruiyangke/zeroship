@@ -49,6 +49,19 @@ pub struct OidcRp {
     /// HMAC-SHA256 key used to sign the `__Host-zs_oidc_stash` cookie body.
     /// Must be at least 32 random bytes in prod.
     pub stash_signing_key: Vec<u8>,
+    /// Shared circuit breaker for ALL outbound Hydra token/introspect/revoke
+    /// calls (auth-sdk §8.7, round-6 MAJOR #3). `Arc`-shared so a Hydra
+    /// brownout observed on one ntex worker thread trips the breaker for
+    /// every thread — the reused `cyper::Client` itself is per-worker-thread
+    /// (`!Send` in practice; see [`crate::hydra_client`]), but the breaker
+    /// state is one-per-process. When open, every Hydra call fast-fails with
+    /// `HydraError::Open` (→ `503 upstream_unavailable`) instead of opening a
+    /// fresh connection into the brownout.
+    pub breaker: Arc<crate::hydra_client::CircuitBreaker>,
+    /// Bounded per-call timeout for every outbound Hydra request. A hung
+    /// Hydra returns a fast `HydraError::Timeout` (counted as a breaker
+    /// failure) rather than an unbounded await pinning a connection.
+    pub hydra_timeout: std::time::Duration,
 }
 
 impl OidcRp {
@@ -79,7 +92,28 @@ impl OidcRp {
             client_secret: client_secret.into(),
             jwks: Arc::new(JwksCache::new(jwks_url)),
             stash_signing_key: stash_signing_key.into(),
+            breaker: Arc::new(crate::hydra_client::CircuitBreaker::default()),
+            hydra_timeout: crate::hydra_client::DEFAULT_HYDRA_TIMEOUT,
         }
+    }
+
+    /// Override the shared circuit breaker (tests inject a fast-tripping
+    /// breaker; production uses the [`CircuitBreaker::default`] from
+    /// [`OidcRp::new`]).
+    ///
+    /// [`CircuitBreaker::default`]: crate::hydra_client::CircuitBreaker::default
+    #[must_use]
+    pub fn with_breaker(mut self, breaker: Arc<crate::hydra_client::CircuitBreaker>) -> Self {
+        self.breaker = breaker;
+        self
+    }
+
+    /// Override the bounded per-call Hydra timeout (tests use a short value
+    /// to exercise the timeout→breaker-failure path quickly).
+    #[must_use]
+    pub fn with_hydra_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.hydra_timeout = timeout;
+        self
     }
 
     /// Override the expected ID-token `iss` claim. Used when the
@@ -189,20 +223,24 @@ impl OidcRp {
             .append_pair("code_verifier", &stash.verifier)
             .finish();
 
-        let client = cyper::Client::new();
         let token_url = format!(
             "{}/oauth2/token",
             self.auth_ui_url.trim_end_matches('/')
         );
-        let resp = client
-            .request(http::Method::POST, &token_url)
-            .map_err(|e| OidcRpError::TokenExchange(format!("build: {e}")))?
-            .header("content-type", "application/x-www-form-urlencoded")
-            .map_err(|e| OidcRpError::TokenExchange(format!("header: {e}")))?
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| OidcRpError::TokenExchange(format!("send: {e}")))?;
+        // Reused, breaker-guarded, bounded-timeout client (§8.7). A failed
+        // build is a programming error (bad URL), not a transport failure, so
+        // it never reaches the breaker; the `send()` await is what the breaker
+        // and timeout wrap.
+        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+            client
+                .request(http::Method::POST, &token_url)?
+                .header("content-type", "application/x-www-form-urlencoded")?
+                .body(body)
+                .send()
+                .await
+        })
+        .await
+        .map_err(|e| OidcRpError::from_hydra(e, "token"))?;
 
         let status = resp.status().as_u16();
         let resp_body = resp
@@ -278,18 +316,18 @@ impl OidcRp {
         let creds = format!("{}:{}", self.client_id, self.client_secret);
         let auth = format!("Basic {}", B64.encode(&creds));
 
-        let client = cyper::Client::new();
-        let resp = client
-            .request(http::Method::POST, &url)
-            .map_err(|e| OidcRpError::TokenExchange(format!("introspect build: {e}")))?
-            .header("content-type", "application/x-www-form-urlencoded")
-            .map_err(|e| OidcRpError::TokenExchange(format!("introspect ct: {e}")))?
-            .header("authorization", &auth)
-            .map_err(|e| OidcRpError::TokenExchange(format!("introspect auth: {e}")))?
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| OidcRpError::TokenExchange(format!("introspect send: {e}")))?;
+        // Reused, breaker-guarded, bounded-timeout client (§8.7).
+        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+            client
+                .request(http::Method::POST, &url)?
+                .header("content-type", "application/x-www-form-urlencoded")?
+                .header("authorization", &auth)?
+                .body(body)
+                .send()
+                .await
+        })
+        .await
+        .map_err(|e| OidcRpError::from_hydra(e, "introspect"))?;
 
         let status = resp.status().as_u16();
         let resp_body = resp
@@ -431,17 +469,18 @@ impl OidcRp {
             .append_pair("token_type_hint", "refresh_token")
             .append_pair("client_id", client_id)
             .finish();
-        let client = cyper::Client::new();
         let url = format!("{}/oauth2/revoke", self.auth_ui_url.trim_end_matches('/'));
-        let resp = client
-            .request(http::Method::POST, &url)
-            .map_err(|e| OidcRpError::TokenExchange(format!("revoke build: {e}")))?
-            .header("content-type", "application/x-www-form-urlencoded")
-            .map_err(|e| OidcRpError::TokenExchange(format!("revoke ct: {e}")))?
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| OidcRpError::TokenExchange(format!("revoke send: {e}")))?;
+        // Reused, breaker-guarded, bounded-timeout client (§8.7).
+        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+            client
+                .request(http::Method::POST, &url)?
+                .header("content-type", "application/x-www-form-urlencoded")?
+                .body(body)
+                .send()
+                .await
+        })
+        .await
+        .map_err(|e| OidcRpError::from_hydra(e, "revoke"))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             // Body MAY echo an error code, but NEVER the token (we sent it,
@@ -453,17 +492,21 @@ impl OidcRp {
 
     /// Shared `POST /oauth2/token` for the public-client grants above.
     async fn post_token(&self, body: String) -> Result<TokenSet, OidcRpError> {
-        let client = cyper::Client::new();
         let token_url = format!("{}/oauth2/token", self.auth_ui_url.trim_end_matches('/'));
-        let resp = client
-            .request(http::Method::POST, &token_url)
-            .map_err(|e| OidcRpError::TokenExchange(format!("build: {e}")))?
-            .header("content-type", "application/x-www-form-urlencoded")
-            .map_err(|e| OidcRpError::TokenExchange(format!("header: {e}")))?
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| OidcRpError::TokenExchange(format!("send: {e}")))?;
+        // Reused, breaker-guarded, bounded-timeout client (§8.7). This is the
+        // mint hot path — `exchange_code_public` / `refresh_token_public` both
+        // funnel through here, so the breaker here is what protects the
+        // gateway from a Hydra `/oauth2/token` brownout.
+        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+            client
+                .request(http::Method::POST, &token_url)?
+                .header("content-type", "application/x-www-form-urlencoded")?
+                .body(body)
+                .send()
+                .await
+        })
+        .await
+        .map_err(|e| OidcRpError::from_hydra(e, "token"))?;
         let status = resp.status().as_u16();
         let resp_body = resp
             .text()
@@ -694,6 +737,43 @@ pub enum OidcRpError {
     TokenExchange(String),
     #[error("verify id_token: {0}")]
     VerifyIdToken(#[from] OidcError),
+    /// The shared Hydra circuit breaker is open (or the bounded per-call
+    /// timeout fired) — Hydra is browning out. Handlers surface this as
+    /// `503 upstream_unavailable` rather than a generic token-exchange error,
+    /// and the mint path short-circuits before holding any DB connection
+    /// (auth-sdk §8.7).
+    #[error("upstream unavailable: {0}")]
+    UpstreamUnavailable(String),
+}
+
+impl OidcRpError {
+    /// Map a [`HydraError`](crate::hydra_client::HydraError) from the shared
+    /// breaker-guarded client into an `OidcRpError`, tagging it with the
+    /// `context` of the call site (`"token"`, `"introspect"`, `"revoke"`) so
+    /// the surfaced `Display` still identifies WHICH Hydra call failed — the
+    /// per-site discriminator the pre-shared-client code carried in its
+    /// inline `format!` prefixes. The brownout-vs-transport distinction is
+    /// preserved: breaker-open / bounded-timeout → `UpstreamUnavailable`
+    /// (→ 503), a transport error → `TokenExchange` (already counted as a
+    /// breaker failure inside [`hydra_client::call`](crate::hydra_client::call)).
+    fn from_hydra(e: crate::hydra_client::HydraError, context: &str) -> Self {
+        use crate::hydra_client::HydraError;
+        match e {
+            HydraError::Open | HydraError::Timeout(_) => {
+                OidcRpError::UpstreamUnavailable(format!("{context} {e}"))
+            }
+            HydraError::Upstream(msg) => {
+                OidcRpError::TokenExchange(format!("{context} send: {msg}"))
+            }
+        }
+    }
+
+    /// `true` when this error is a Hydra brownout (breaker open or bounded
+    /// timeout) — the signal handlers use to emit `503 upstream_unavailable`.
+    #[must_use]
+    pub const fn is_upstream_unavailable(&self) -> bool {
+        matches!(self, OidcRpError::UpstreamUnavailable(_))
+    }
 }
 
 /// `/oauth2/token` response body (subset). Hydra emits the OIDC standard
