@@ -362,6 +362,95 @@ impl OidcRp {
         self.post_token(body).await
     }
 
+    /// Build the Hydra `/oauth2/auth` URL for the browser PKCE flow
+    /// (auth-sdk Slice 1b-browser, `GET /__zs/auth/authorize`, spec §1.2).
+    ///
+    /// Unlike [`OidcRp::build_authorize_redirect`] (the interactive cookie
+    /// flow, which generates the PKCE verifier/state/nonce server-side and
+    /// stashes the verifier in a signed cookie), this is the SUPABASE-style
+    /// public-client flow: **the browser holds the PKCE verifier**, so the
+    /// gateway is given the already-computed `code_challenge` (S256), the
+    /// browser-chosen `state` + `nonce`, the requested `scope`, and the
+    /// per-app `redirect_uri`. The gateway holds NO server-side state — it
+    /// just assembles the redirect. `prompt` is a PASSTHROUGH (omitted in
+    /// the common interactive-popup case so Hydra's SSO skip fires; `login`
+    /// / `consent` only on explicit step-up — `none` is not supported here,
+    /// the silent-iframe path having been removed, but the gateway does not
+    /// reject it: the caller validates `prompt` before calling).
+    ///
+    /// `client_id` is the per-app PUBLIC client (`route.oauth_client_id`),
+    /// injected by the gateway (the browser never supplies it).
+    #[must_use]
+    pub fn build_browser_authorize_url(&self, client_id: &str, p: &BrowserAuthorizeParams<'_>) -> String {
+        let mut q = url::form_urlencoded::Serializer::new(String::new());
+        q.append_pair("client_id", client_id);
+        q.append_pair("response_type", "code");
+        q.append_pair("scope", p.scope);
+        q.append_pair("redirect_uri", p.redirect_uri);
+        q.append_pair("state", p.state);
+        q.append_pair("nonce", p.nonce);
+        q.append_pair("code_challenge", p.code_challenge);
+        q.append_pair("code_challenge_method", "S256");
+        // `prompt` is optional — omitted in the common case so Hydra's
+        // SSO/`remember` skip path fires (spec §1.2 round-2). Passthrough
+        // when the browser explicitly asks for `login`/`consent` step-up.
+        if let Some(prompt) = p.prompt {
+            if !prompt.is_empty() {
+                q.append_pair("prompt", prompt);
+            }
+        }
+        let query = q.finish();
+        format!(
+            "{}/oauth2/auth?{}",
+            self.auth_ui_url.trim_end_matches('/'),
+            query
+        )
+    }
+
+    /// Best-effort revoke a token (refresh family) at Hydra's RFC 7009
+    /// `/oauth2/revoke` endpoint as a PUBLIC PKCE client (auth-sdk Slice
+    /// 1b-browser, `POST /__zs/auth/signout`, spec §1.2). The per-app
+    /// `client_id` is sent (public client; no secret) so Hydra scopes the
+    /// revoke to this client's family. `token_type_hint=refresh_token`
+    /// because signout revokes the server-held refresh family.
+    ///
+    /// RFC 7009 §2.2: the AS returns `200` even for an unknown/already-dead
+    /// token, so callers treat any non-2xx as a transient failure to log,
+    /// NOT a signout blocker — the anchor delete + family marker are the
+    /// authoritative revocation; this revoke is defense-in-depth.
+    ///
+    /// # Errors
+    /// [`OidcRpError::TokenExchange`] on transport error or non-2xx status.
+    pub async fn revoke_token_public(
+        &self,
+        client_id: &str,
+        token: &str,
+    ) -> Result<(), OidcRpError> {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", token)
+            .append_pair("token_type_hint", "refresh_token")
+            .append_pair("client_id", client_id)
+            .finish();
+        let client = cyper::Client::new();
+        let url = format!("{}/oauth2/revoke", self.auth_ui_url.trim_end_matches('/'));
+        let resp = client
+            .request(http::Method::POST, &url)
+            .map_err(|e| OidcRpError::TokenExchange(format!("revoke build: {e}")))?
+            .header("content-type", "application/x-www-form-urlencoded")
+            .map_err(|e| OidcRpError::TokenExchange(format!("revoke ct: {e}")))?
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| OidcRpError::TokenExchange(format!("revoke send: {e}")))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            // Body MAY echo an error code, but NEVER the token (we sent it,
+            // it is not in the response). Surface status only.
+            return Err(OidcRpError::TokenExchange(format!("revoke HTTP {status}")));
+        }
+        Ok(())
+    }
+
     /// Shared `POST /oauth2/token` for the public-client grants above.
     async fn post_token(&self, body: String) -> Result<TokenSet, OidcRpError> {
         let client = cyper::Client::new();
@@ -637,6 +726,27 @@ pub struct TokenSet {
     pub expires_in: Option<i64>,
 }
 
+/// Browser-supplied parameters for [`OidcRp::build_browser_authorize_url`]
+/// (auth-sdk Slice 1b-browser). Every value originates in the SDK and is
+/// passed through to Hydra verbatim — the gateway holds no PKCE verifier
+/// (the browser does). `prompt` is optional (omitted ⇒ Hydra SSO skip).
+#[derive(Debug, Clone)]
+pub struct BrowserAuthorizeParams<'a> {
+    /// PKCE S256 challenge the browser derived from its own verifier.
+    pub code_challenge: &'a str,
+    /// `OAuth2` `state` (the SDK's CSRF/relay-match token).
+    pub state: &'a str,
+    /// OIDC `nonce` (the SDK's cross-flow guard; not echoed back to gateway).
+    pub nonce: &'a str,
+    /// Space-delimited requested scopes.
+    pub scope: &'a str,
+    /// The app's own registered callback (defaults to `.../popup-callback`).
+    pub redirect_uri: &'a str,
+    /// Optional `prompt` passthrough (`login`/`consent` for step-up;
+    /// omitted in the common interactive case).
+    pub prompt: Option<&'a str>,
+}
+
 /// Server-side state stashed in the signed `__Host-zs_oidc_stash` cookie
 /// between the initial 302 → hydra and the eventual callback. Sized to
 /// fit comfortably under the 4 KiB cookie limit (well under, in
@@ -891,6 +1001,85 @@ mod tests {
         assert!(url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zs%2Fauth%2Fcallback"));
         // Stash is non-empty and contains the dot-separator.
         assert!(stash.contains('.'));
+    }
+
+    #[test]
+    fn browser_authorize_url_carries_browser_pkce_and_no_stash() {
+        // The browser flow (Slice 1b-browser): the gateway is HANDED the
+        // already-computed code_challenge + browser-chosen state/nonce, and
+        // injects the per-app PUBLIC client_id. No stash cookie is minted
+        // (the verifier lives in the browser). Assert every passthrough
+        // param lands and the per-app client_id (not "gateway") is used.
+        let rp = OidcRp::new(
+            "https://auth.zeroship.ai",
+            "gateway",
+            "secret",
+            b"k".repeat(32),
+        );
+        let params = BrowserAuthorizeParams {
+            code_challenge: "BROWSER_CHALLENGE_abc",
+            state: "STATE_xyz",
+            nonce: "NONCE_123",
+            scope: "openid profile read:billing",
+            redirect_uri: "https://myapp.zeroship.ai/__zs/auth/popup-callback",
+            prompt: None,
+        };
+        let url = rp.build_browser_authorize_url("oac_myapp", &params);
+        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"), "{url}");
+        // PER-APP client_id, never the gateway confidential client.
+        assert!(url.contains("client_id=oac_myapp"), "{url}");
+        assert!(!url.contains("client_id=gateway"), "{url}");
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("code_challenge=BROWSER_CHALLENGE_abc"), "{url}");
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("state=STATE_xyz"), "{url}");
+        assert!(url.contains("nonce=NONCE_123"), "{url}");
+        // scope URL-encoded (form_urlencoded uses `+` for space).
+        assert!(url.contains("scope=openid+profile+read%3Abilling"), "{url}");
+        assert!(
+            url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zs%2Fauth%2Fpopup-callback"),
+            "{url}"
+        );
+        // No prompt in the common case (so Hydra's SSO skip fires).
+        assert!(!url.contains("prompt="), "default omits prompt: {url}");
+    }
+
+    #[test]
+    fn browser_authorize_url_passes_prompt_through_when_present() {
+        // `prompt=consent` (incremental-scope step-up) and `prompt=login`
+        // (re-auth) are passed straight through; an empty prompt is dropped.
+        let rp = OidcRp::new("https://auth.zeroship.ai", "gateway", "s", b"k".repeat(32));
+        let base = BrowserAuthorizeParams {
+            code_challenge: "c",
+            state: "s",
+            nonce: "n",
+            scope: "openid",
+            redirect_uri: "https://app/cb",
+            prompt: Some("consent"),
+        };
+        let url = rp.build_browser_authorize_url("oac_app", &base);
+        assert!(url.contains("prompt=consent"), "{url}");
+
+        let login = BrowserAuthorizeParams { prompt: Some("login"), ..base.clone() };
+        assert!(rp.build_browser_authorize_url("oac_app", &login).contains("prompt=login"));
+
+        let empty = BrowserAuthorizeParams { prompt: Some(""), ..base };
+        assert!(!rp.build_browser_authorize_url("oac_app", &empty).contains("prompt="));
+    }
+
+    #[test]
+    fn browser_authorize_url_trims_trailing_slash() {
+        let rp = OidcRp::new("https://auth.zeroship.ai/", "gateway", "s", b"k".repeat(32));
+        let params = BrowserAuthorizeParams {
+            code_challenge: "c",
+            state: "s",
+            nonce: "n",
+            scope: "openid",
+            redirect_uri: "https://app/cb",
+            prompt: None,
+        };
+        let url = rp.build_browser_authorize_url("oac_app", &params);
+        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"), "no double slash: {url}");
     }
 
     #[test]

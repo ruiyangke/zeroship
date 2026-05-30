@@ -46,7 +46,7 @@ use crate::anchors::{self, MintError, MintOk, MintResult};
 use crate::oidc_rp::TokenSet;
 use crate::GateState;
 
-const CACHE_NO_STORE: &str = "no-store";
+pub(crate) const CACHE_NO_STORE: &str = "no-store";
 const X_ZS_AUTH: &str = "x-zs-auth";
 
 /// Headroom (seconds) the cached-wrapper short-circuit requires before
@@ -56,21 +56,21 @@ const X_ZS_AUTH: &str = "x-zs-auth";
 const CACHE_SKEW_SECS: i64 = 2;
 
 /// Resolved per-request route facts the auth endpoints need.
-struct RouteCtx {
-    app_name: String,
-    host: String,
-    client_id: String,
+pub(crate) struct RouteCtx {
+    pub(crate) app_name: String,
+    pub(crate) host: String,
+    pub(crate) client_id: String,
     /// The app's stable apex origin used to scope the per-app pairwise
     /// `pws_…` subject (§6.2). `None` until the control plane provisions
     /// it; the browser wrapper then hard-fails closed (no `pws_`, 503)
     /// rather than fall back to the global UUID.
-    sector_identifier: Option<String>,
+    pub(crate) sector_identifier: Option<String>,
 }
 
 /// Resolve the app name (subdomain), Host, and per-app `oauth_client_id`
 /// from the request. Returns `Err(response)` when the host is not a
 /// provisioned app or the app has no OAuth client yet (`503`).
-fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<RouteCtx, HttpResponse> {
+pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<RouteCtx, HttpResponse> {
     let host = req
         .headers()
         .get(http::header::HOST)
@@ -131,7 +131,7 @@ fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Op
 ///
 /// `require_custom_header` is `true` for `?mint=1` (a top-level navigation
 /// cannot set it) and for POST `/token`.
-fn same_origin_guard(
+pub(crate) fn same_origin_guard(
     req: &HttpRequest,
     host: &str,
     insecure_dev: bool,
@@ -857,7 +857,7 @@ fn parse_token_request(req: &HttpRequest, body: &[u8]) -> TokenRequest {
     }
 }
 
-fn error_response(
+pub(crate) fn error_response(
     mut builder: ntex::web::HttpResponseBuilder,
     code: &str,
     detail: &str,
@@ -875,7 +875,7 @@ fn login_required(host: &str, insecure_dev: bool) -> HttpResponse {
         .json(&json!({ "error": "login_required" }))
 }
 
-fn db_error(e: compio_postgres::Error) -> HttpResponse {
+pub(crate) fn db_error(e: compio_postgres::Error) -> HttpResponse {
     tracing::warn!(error = %e, "auth endpoint: pg pool checkout failed");
     error_response(
         HttpResponse::ServiceUnavailable(),

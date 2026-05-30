@@ -142,6 +142,7 @@ fn build_state_with_auth_ui_url(with_issuer: bool, auth_ui_url: &str) -> Arc<Gat
         dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: signing_key_arc,
+        prev_signing_key: None,
         wrapper_issuer,
         wrapper_verifier,
         anchor_enc_key: [0u8; 32],

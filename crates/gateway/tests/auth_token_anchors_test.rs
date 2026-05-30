@@ -319,6 +319,7 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: Some(Arc::new(signing_key)),
+        prev_signing_key: None,
         wrapper_issuer: Some(Arc::new(issuer)),
         wrapper_verifier: Some(Arc::new(verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),

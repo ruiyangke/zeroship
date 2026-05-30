@@ -290,6 +290,48 @@ pub async fn delete(conn: &Client, id: Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Delete EVERY anchor row for an `(app_id, global_user_id)` pair and
+/// return the encrypted refresh families that were removed (auth-sdk Slice
+/// 1b-browser, `scope: 'global'` signout — "this app, every device", §1.2).
+///
+/// Returns each row's `(refresh_token_enc, client_id)` so the caller can
+/// best-effort revoke each family at Hydra. The delete is the authoritative
+/// step; the returned ciphertexts are only for the (best-effort) Hydra
+/// revoke and the `(client_id, sub)` family-marker upsert.
+///
+/// # Errors
+/// [`GatewayError::Db`] on PG failure.
+pub async fn delete_all_for_user(
+    conn: &Client,
+    app_id: &str,
+    global_user_id: Uuid,
+) -> Result<Vec<DeletedFamily>> {
+    let rows = conn
+        .query(
+            "DELETE FROM auth.app_session_anchors \
+             WHERE app_id = $1 AND global_user_id = $2 \
+             RETURNING refresh_token_enc, client_id",
+            &[&app_id, &global_user_id],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors delete_all_for_user: {e}")))?;
+    Ok(rows
+        .iter()
+        .map(|row| DeletedFamily {
+            refresh_token_enc: row.get("refresh_token_enc"),
+            client_id: row.get("client_id"),
+        })
+        .collect())
+}
+
+/// One deleted anchor's family ciphertext + its client_id (for the
+/// best-effort Hydra revoke fan-out on `global` signout).
+#[derive(Debug, Clone)]
+pub struct DeletedFamily {
+    pub refresh_token_enc: Vec<u8>,
+    pub client_id: String,
+}
+
 fn row_to_anchor(row: &compio_postgres::Row) -> Anchor {
     Anchor {
         id: row.get("id"),

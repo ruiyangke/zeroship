@@ -1292,6 +1292,7 @@ mod tests {
                 zeroship_core::logout_token::LogoutJtiCache::default(),
             ),
             signing_key: Some(StdArc::new(signing)),
+            prev_signing_key: None,
             wrapper_issuer: Some(StdArc::new(issuer)),
             wrapper_verifier: Some(StdArc::new(verifier)),
             anchor_enc_key: [0u8; 32],

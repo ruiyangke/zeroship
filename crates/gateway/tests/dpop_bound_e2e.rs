@@ -269,6 +269,7 @@ fn build_state(
         dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: Some(Arc::new(signing.clone())),
+        prev_signing_key: None,
         wrapper_issuer: Some(Arc::new(issuer)),
         wrapper_verifier: Some(Arc::new(verifier)),
         anchor_enc_key: [0u8; 32],

@@ -13,8 +13,8 @@ use zeroship_core::config::{
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
-    auth_token, backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp,
-    proxy, router, signing, sync, wrapper_token, GateConfig, GateState,
+    auth_token, backchannel_logout, blob_cache, browser_auth, dpop_exchange, enforce, idempotency,
+    oidc_rp, proxy, router, signing, sync, wrapper_token, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -93,6 +93,18 @@ struct GateCli {
         default_value = ""
     )]
     gateway_signing_key_file: String,
+
+    /// PEM/PKCS#8 PREVIOUS signing key file for the wrapper-token rotation
+    /// overlap (auth-sdk §8.5). Set ONLY during a key roll: the Verifier
+    /// then accepts wrappers signed by EITHER the current or this previous
+    /// key, and `/__zs/auth/jwks` publishes both. The Issuer always signs
+    /// with the current key only. Empty (default) ⇒ single-key Verifier.
+    #[arg(
+        long = "prev-signing-key-file",
+        env = "GATEWAY_PREV_SIGNING_KEY_FILE",
+        default_value = ""
+    )]
+    gateway_prev_signing_key_file: String,
 
     /// Public URL advertised as the gateway wrapper-token issuer.
     #[arg(
@@ -265,6 +277,7 @@ fn main() -> std::io::Result<()> {
     // File-PATH field (names a file to read), NOT a secret value — left
     // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
+    let prev_signing_key_path = cli.gateway_prev_signing_key_file;
     let public_url = cli.gateway_public_url;
 
     if let Err(message) =
@@ -348,6 +361,33 @@ fn main() -> std::io::Result<()> {
         Arc::new(issuer)
     });
 
+    // auth-sdk Slice 1b-browser — load the PREVIOUS wrapper signing key for
+    // the rotation overlap (§8.5). Set ONLY during a key roll. When present,
+    // the Verifier is built via `Verifier::with_previous` (accepts wrappers
+    // signed by EITHER key), and `/__zs/auth/jwks` publishes both — resolving
+    // the rotation TODO that 1c left. Ignored (with a warning) when no
+    // current key is configured, since there is nothing to overlap with.
+    let prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>> =
+        if prev_signing_key_path.is_empty() {
+            None
+        } else if signing_key.is_none() {
+            tracing::warn!(
+                "GATEWAY_PREV_SIGNING_KEY_FILE set but no current signing key — ignoring \
+                 (a previous key needs a current key to overlap with)"
+            );
+            None
+        } else {
+            let key = signing::load_from_path(std::path::Path::new(&prev_signing_key_path))
+                .expect("gateway: load previous signing key");
+            let kid = signing::jwk_thumbprint(&key);
+            tracing::info!(
+                path = %prev_signing_key_path,
+                kid = %kid,
+                "gateway PREVIOUS signing key loaded (rotation overlap active)"
+            );
+            Some(Arc::new(key))
+        };
+
     // Phase 8 U4 — wrapper-token verifier. Built from the PUBLIC half
     // of the same signing key in lockstep with `wrapper_issuer` (both
     // Some, or both None). The dispatch path consults this to detect
@@ -356,18 +396,23 @@ fn main() -> std::io::Result<()> {
     // encoding — `DecodingKey::from_ed_der` accepts the raw 32-byte
     // public key), so we just build it eagerly at boot.
     //
-    // ROTATION (deferred): this builds a CURRENT-key-only verifier via
-    // `Verifier::new`. The previous-key overlap mechanism
-    // (`Verifier::with_previous`) is implemented and unit-tested, but is
-    // NOT yet wired to a config path — there is no `--prev-signing-key-file`
-    // flag, so wrapper-signing-key rotation is not operable end-to-end and a
-    // key roll would orphan in-flight wrappers at cutover. Wiring previous-key
-    // loading is deferred to the slice that makes the gateway wrapper the
-    // primary browser-held token (1b-endpoints); see the rotation runbook in
-    // docs/superpowers/specs/2026-05-29-auth-sdk-design.md.
+    // ROTATION (auth-sdk Slice 1b-browser): when `--prev-signing-key-file`
+    // is set we build the verifier via `Verifier::with_previous` so a
+    // wrapper minted just before a key roll still verifies during the
+    // overlap window (≥ wrapper TTL + skew). In steady state (no previous
+    // key) it is a single-key `Verifier::new`. The Issuer always signs with
+    // the CURRENT key only. This resolves the rotation TODO 1c left.
     let wrapper_verifier: Option<Arc<wrapper_token::Verifier>> = signing_key.as_ref().map(|sk| {
-        let public = sk.verifying_key();
-        Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
+        let current = sk.verifying_key();
+        let verifier = match prev_signing_key.as_ref() {
+            Some(prev) => wrapper_token::Verifier::with_previous(
+                &current,
+                &prev.verifying_key(),
+                public_url.clone(),
+            ),
+            None => wrapper_token::Verifier::new(&current, public_url.clone()),
+        };
+        Arc::new(verifier)
     });
 
     if cli.check_config {
@@ -581,6 +626,7 @@ fn main() -> std::io::Result<()> {
         dpop_jti_cache: Arc::new(dpop_jti_cache),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key,
+        prev_signing_key,
         wrapper_issuer,
         wrapper_verifier,
         anchor_enc_key,
@@ -635,6 +681,28 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/__zs/auth/session")
                     .route(web::get().to(auth_token::session)),
+            )
+            // auth-sdk Slice 1b-browser — the browser-facing auth HTTP
+            // surface. Same mounting discipline (BEFORE the subdomain
+            // catch-all). `/authorize` 302s to Hydra (the one cross-site
+            // hop); `/popup-callback` serves the same-origin relay page;
+            // `/signout` revokes + clears (fixes the live bug);
+            // `/jwks` publishes the wrapper signing keys.
+            .service(
+                web::resource("/__zs/auth/authorize")
+                    .route(web::get().to(browser_auth::authorize)),
+            )
+            .service(
+                web::resource("/__zs/auth/popup-callback")
+                    .route(web::get().to(browser_auth::popup_callback)),
+            )
+            .service(
+                web::resource("/__zs/auth/signout")
+                    .route(web::post().to(browser_auth::signout)),
+            )
+            .service(
+                web::resource("/__zs/auth/jwks")
+                    .route(web::get().to(browser_auth::jwks)),
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the

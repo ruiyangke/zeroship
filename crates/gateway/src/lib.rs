@@ -15,6 +15,7 @@ pub mod auth;
 pub mod auth_token;
 pub mod backchannel_logout;
 pub mod blob_cache;
+pub mod browser_auth;
 pub mod compiled;
 pub mod db;
 pub mod dispatch;
@@ -147,6 +148,14 @@ pub struct GateState {
     /// endpoints return 503 in that mode, but every other gateway path
     /// keeps working.
     pub signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// PREVIOUS wrapper-token signing key (auth-sdk Slice 1b-browser,
+    /// rotation overlap §8.5). Loaded from `--prev-signing-key-file` /
+    /// `GATEWAY_PREV_SIGNING_KEY_FILE` when an operator is mid-roll. `Some`
+    /// only during the overlap window; `None` in steady state. The Issuer
+    /// NEVER signs with this — it is for `Verifier::with_previous` (so a
+    /// wrapper minted just before the roll still verifies) and the
+    /// `/__zs/auth/jwks` endpoint (so external verifiers see both keys).
+    pub prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     /// Wrapper-token issuer (Phase 8 U3). Materialised at boot from
     /// `signing_key` + `config.public_url`; `None` exactly when
     /// `signing_key` is `None`. The `/__zs/auth/dpop-exchange` handler
