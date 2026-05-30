@@ -152,8 +152,35 @@
   background-color: color-mix(in oklch, var(--zs-fill) 80%, transparent);
 }
 
+/* Open-state — a CALM open treatment so the expanded row reads as "current"
+   without the loud rectangular ring that an `:focus-visible` outline alone
+   produced (it looked like a debug/focus box). A quiet accent-tinted surface
+   fill + a thicker accent rule on the inline-start edge flags the open row;
+   the trigger label firms to the full label ink. This is DISTINCT from the
+   focus-visible ring below (a 0.125rem outline), so a keyboard user can tell
+   "focused" from "open" — the two cues never collapse into one box.
+
+   The inline-start accent rule is painted with a box-shadow inset (not a
+   border) so it does not shift the label's text start position when the row
+   opens (a border-inline-start would reflow the padding box). */
+.zs-accordion-trigger[data-panel-open] {
+  background-color: color-mix(in oklch, var(--zs-accent) 7%, transparent);
+  color: var(--zs-label);
+  box-shadow: inset 0.1875rem 0 0 0 var(--zs-accent);
+}
+
+@media (hover: hover) {
+  .zs-accordion-trigger[data-panel-open]:not([data-disabled]):hover {
+    /* Keep the open tint reading on hover (a hair stronger) rather than
+       letting the base hover fill flatten the open cue. */
+    background-color: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+  }
+}
+
 /* Focus ring uses outline so it escapes any clipped surfaces. Same rule
-   Tabs/Toggle use. */
+   Tabs/Toggle use. It stays VISUALLY DISTINCT from the open-state tint above:
+   the open row is a soft fill + an inline-start accent rule, the focus ring is
+   a crisp full-perimeter outline. */
 .zs-accordion-trigger:focus-visible {
   outline: 0.125rem solid var(--zs-button-focus-ring-color);
   outline-offset: calc(var(--zs-focus-ring-offset) * -1);

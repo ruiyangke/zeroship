@@ -162,8 +162,12 @@ export interface PricingTier {
   /** Click handler for the default (`ctaLabel`) `<Button>`. */
   onCtaClick?: () => void;
   /**
-   * Highlight this tier — a raised elevation + a token accent ring. The
-   * featured tier also carries the `badge`. Token-pure; no raw color.
+   * Highlight this tier — the recommended treatment: a colored top accent
+   * cap, the strongest house elevation, a static translate-up that lifts the
+   * card above its siblings (static → reduced-motion-safe), and a token
+   * accent ring. The featured tier also carries the `badge`. Token-pure; no
+   * raw color. "recommended" is always carried by the visible badge, never by
+   * this treatment alone.
    */
   featured?: boolean;
   /**
@@ -367,12 +371,16 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
   // The CTA: a consumer node wins; otherwise a default filled Button from
   // ctaLabel. A featured tier's default CTA reads `filled` (the loud
   // primary); the rest read `tinted` so the featured CTA stands out.
+  // The default CTA reads `filled` (the loud primary) on the featured tier and
+  // `gray` (a firm neutral fill) on the rest. `gray` — not the washed `tinted`
+  // — keeps the non-featured CTAs reading as CLEARLY clickable buttons rather
+  // than disabled chips, so all tiers' actions read live (the R2 contrast fix).
   const ctaNode =
     cta != null ? (
       cta
     ) : ctaLabel != null ? (
       <Button
-        variant={featured ? "filled" : "tinted"}
+        variant={featured ? "filled" : "gray"}
         onClick={onCtaClick}
         className="zs-pricing__cta-button"
       >
@@ -388,9 +396,12 @@ function renderTier(tier: ResolvedTier, Heading: PricingHeadingLevel) {
   // color-blind + SR users get the signal). A consumer-supplied `badge`
   // (string or node) overrides this default.
   const resolvedBadge = badge ?? (featured ? "Most popular" : null);
+  // A `md` solid info Badge — stronger presence than the former `sm` so the
+  // "Most popular" flag reads as a confident recommendation chip, not a tiny
+  // label (the R2 "strengthen the badge" fix).
   const badgeNode =
     typeof resolvedBadge === "string" ? (
-      <Badge intent="info" variant="solid" size="sm">
+      <Badge intent="info" variant="solid" size="md">
         {resolvedBadge}
       </Badge>
     ) : (

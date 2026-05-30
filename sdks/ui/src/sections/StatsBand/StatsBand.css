@@ -37,17 +37,22 @@
      --zs-feature-grid-header-measure): the centered header's readable measure. */
   --zs-stats-band-header-measure: 40rem;
 
-  /* Band rhythm — generous vertical padding so the band reads distinct.
-     No background: composable, the consumer paints the page backdrop. */
+  /* Band rhythm — a tighter vertical rhythm than the other bands so the proof
+     bar reads as a confident, compact strip rather than a roomy section. Less
+     dead space (space-9 vs the space-10 the airier bands use) keeps the
+     billboard values doing the work. No background: composable, the consumer
+     paints the page backdrop. */
   display: block;
-  padding-block: var(--zs-space-10);
+  padding-block: var(--zs-space-9);
   color: var(--zs-label);
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
 .zs-stats-band__header {
   max-inline-size: var(--zs-stats-band-header-measure);
-  margin-block-end: var(--zs-space-9);
+  /* Tighter than the airier bands' space-9 — the proof bar's header sits
+     closer to its values so the strip reads as one compact unit. */
+  margin-block-end: var(--zs-space-7);
 }
 
 .zs-stats-band[data-align="center"] .zs-stats-band__header {
@@ -102,15 +107,61 @@
   text-align: start;
 }
 
-/* The headline metric — the loudest element, at the large-title display
-   scale, in the accent ink so the number reads as the figure of merit. */
+/* ─── Thin dividers between stats ─────────────────────────────────────────
+ *
+ * A hairline rule on each stat's inline-start edge separates the metrics into
+ * discrete columns so the band reads as a deliberate proof bar rather than a
+ * loose row. The FIRST stat in each multi-column ROW carries no rule (its
+ * inline-start sits at the band edge); the divider only paints between stats.
+ *
+ * RESPONSIVE: the dividers only exist once the Grid is a multi-column row (at
+ * --zs-bp-md and up). Below the breakpoint the Grid collapses to a single
+ * stacked column — vertical inline-start rules would read as stray marks down
+ * the left edge of a stack — so the dividers are scoped to the md-and-up
+ * range and dropped on the mobile stack. The composed Grid's gap (gap=7)
+ * provides the inset around the rule. The literal rem in the @media condition
+ * mirrors --zs-bp-md (custom properties cannot appear in an @media query); the
+ * token name is the documented source. */
+@media (min-width: 48rem) {
+  .zs-stats-band__stat {
+    border-inline-start: var(--zs-selection-hairline) solid var(--zs-separator);
+    /* Pad the value off the rule so the hairline sits in the Grid gutter
+       rather than crowding the number. */
+    padding-inline-start: var(--zs-space-6);
+  }
+  /* The first stat of each row hugs the band edge — no leading rule. The
+     stats span N md-columns; the first column resets every row via the
+     grid-auto-flow column index. We can't know N in CSS, so the band stamps
+     the column count on the items wrapper (data-columns); the :nth-child
+     reset keys off it. The 1st, (N+1)th, … stats start a row → no rule. */
+  .zs-stats-band__items[data-columns="2"] .zs-stats-band__stat:nth-child(2n + 1),
+  .zs-stats-band__items[data-columns="3"] .zs-stats-band__stat:nth-child(3n + 1),
+  .zs-stats-band__items[data-columns="4"] .zs-stats-band__stat:nth-child(4n + 1) {
+    border-inline-start: 0;
+    padding-inline-start: 0;
+  }
+}
+
+/* The headline metric — the BILLBOARD figure of merit. Reads the display-2
+   marketing scale (~2.75rem) so the number is the loudest element on the band,
+   markedly bigger than the former large-title. A hero-stat variant
+   (data-hero) bumps a single headline metric to the top display-1 step. The
+   accent ink keeps the number reading as the proof figure. */
 .zs-stats-band__stat-value {
   margin-block: 0;
-  font-size: var(--zs-text-large-title-size);
-  line-height: var(--zs-text-large-title-line);
-  font-weight: var(--zs-text-large-title-weight);
-  letter-spacing: var(--zs-text-large-title-tracking);
+  font-size: var(--zs-text-display-2-size);
+  line-height: var(--zs-text-display-2-line);
+  font-weight: var(--zs-text-display-2-weight);
+  letter-spacing: var(--zs-text-display-2-tracking);
   color: var(--zs-accent-active);
+}
+
+/* Hero stat — a single billboard metric at the top display-1 step. */
+.zs-stats-band[data-hero] .zs-stats-band__stat-value {
+  font-size: var(--zs-text-display-1-size);
+  line-height: var(--zs-text-display-1-line);
+  font-weight: var(--zs-text-display-1-weight);
+  letter-spacing: var(--zs-text-display-1-tracking);
 }
 
 .zs-stats-band__stat-label {
@@ -143,6 +194,22 @@
   .zs-stats-band__stat-label,
   .zs-stats-band__stat-description {
     color: CanvasText;
+  }
+  /* The hairline dividers' --zs-separator token drops out — re-pin them to a
+     system color so the multi-column rhythm survives a forced palette. */
+  @media (min-width: 48rem) {
+    .zs-stats-band__stat {
+      border-inline-start-color: CanvasText;
+    }
+  }
+}
+
+/* On the accent band the --zs-separator divider drops near-invisible against
+   the accent fill; remap it to the translucent accent-ink so the columns stay
+   delineated on the bold band. */
+@media (min-width: 48rem) {
+  [data-tone="accent"] .zs-stats-band__stat {
+    border-inline-start-color: var(--zs-section-ink-secondary);
   }
 }
 

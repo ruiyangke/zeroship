@@ -83,9 +83,13 @@
 }
 
 .zs-footer__brand {
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-weight: var(--zs-text-headline-weight);
+  /* Stronger brand anchoring (R2): the wordmark reads at the title-2 scale,
+     bolder and weightier than the former headline step so the footer has a
+     clear brand anchor at its top-start rather than a quiet label. */
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+  font-weight: var(--zs-text-title-2-weight);
+  letter-spacing: var(--zs-text-title-2-tracking);
   color: var(--zs-label);
 }
 

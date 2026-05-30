@@ -1,6 +1,35 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, within } from "@storybook/test";
 import { Footer, type FooterColumnData } from "../sections";
+import { Button, Icon } from "../components";
+import { GitBranch, MessageCircle, Globe } from "lucide-react";
+
+/* Social links rendered as ICON BUTTONS (R2): a `Button asChild` wraps a real
+ * `<a href>` so the link keeps its anchor semantics while reading as a quiet
+ * gray icon button; the Lucide glyph is decorative and the accessible name
+ * comes from `aria-label` on the Button. A consumer can pass their own glyphs
+ * (Lucide's brand marks are not bundled, so these generic glyphs — a repo
+ * branch, a community bubble, a globe — stand in for source / community /
+ * website). */
+const SocialLinks = () => (
+  <>
+    <Button asChild variant="gray" aria-label="GitHub">
+      <a href="https://github.com/zeroship">
+        <Icon as={GitBranch} size="sm" />
+      </a>
+    </Button>
+    <Button asChild variant="gray" aria-label="Community">
+      <a href="https://community.zeroship.ai">
+        <Icon as={MessageCircle} size="sm" />
+      </a>
+    </Button>
+    <Button asChild variant="gray" aria-label="Website">
+      <a href="https://zeroship.ai">
+        <Icon as={Globe} size="sm" />
+      </a>
+    </Button>
+  </>
+);
 
 const meta: Meta<typeof Footer> = {
   title: "Sections/Footer",
@@ -60,9 +89,11 @@ export const Default: Story = {
         story:
           "The default footer: a brand + blurb block beside three link-group " +
           "columns, a `Separator`, then a bottom bar (copyright at the start, " +
-          "a couple of social links at the end). The root is a real " +
-          "`<footer>` — the page `contentinfo` landmark. Column titles are " +
-          "`<h3>`s; links are real `<a href>` anchors.",
+          "a row of social ICON BUTTONS at the end — `Button asChild` over " +
+          "real `<a href>` anchors with Lucide glyphs, accessible-named via " +
+          "`aria-label`). The root is a real `<footer>` — the page " +
+          "`contentinfo` landmark. Column titles are `<h3>`s; links are real " +
+          "`<a href>` anchors.",
       },
     },
   },
@@ -73,12 +104,7 @@ export const Default: Story = {
       description="Ship software without writing code. AI builds it; we host it."
       columns={threeColumns}
       copyright="© 2026 zeroship, Inc."
-      actions={
-        <>
-          <a href="https://x.com/zeroship">X</a>
-          <a href="https://github.com/zeroship">GitHub</a>
-        </>
-      }
+      actions={<SocialLinks />}
     />
   ),
   play: async ({ canvasElement }) => {
@@ -105,11 +131,13 @@ export const Default: Story = {
     await expect(pricing.tagName).toBe("A");
     await expect(pricing).toHaveAttribute("href", "/pricing");
 
-    // The copyright + social slot render.
+    // The copyright + social slot render. The social links are icon buttons
+    // (Button asChild over real <a href>), accessible-named via aria-label.
     await expect(canvas.getByText("© 2026 zeroship, Inc.")).toBeInTheDocument();
-    await expect(
-      canvas.getByRole("link", { name: "GitHub" }),
-    ).toHaveAttribute("href", "https://github.com/zeroship");
+    const github = canvas.getByRole("link", { name: "GitHub" });
+    await expect(github).toHaveAttribute("href", "https://github.com/zeroship");
+    // The glyph is decorative — no accessible name leaks beyond the button.
+    await expect(github.querySelector("svg")).not.toBeNull();
   },
 };
 

@@ -330,7 +330,7 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
             {hasColumns ? (
               <Grid
                 columns={{ md: Math.min(allColumns.length, 4) }}
-                gap={7}
+                gap={6}
                 data-slot="footer-columns"
                 className="zs-footer__columns"
               >

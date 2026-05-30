@@ -4,9 +4,13 @@ import { Hero } from "../sections";
 import { Button, Badge, Icon } from "../components";
 import { ArrowRight, Sparkles } from "lucide-react";
 
-/* A decorative media placeholder for the split demos — a soft token-tinted
- * panel standing in for a product shot / illustration. SVG attribute units
- * (viewBox space), not CSS px; the fill reads a token via currentColor. */
+/* A decorative media placeholder for the split demos — a faux PRODUCT WINDOW
+ * standing in for a product shot / app screenshot. A token-tinted toolbar bar
+ * (three traffic-light dots + an address pill) sits above content lines + a
+ * call-to-action block, so even the demo placeholder reads as an intentional
+ * app surface inside the Hero's framed media wrapper rather than a flat
+ * skeleton. SVG attribute units (viewBox space), not CSS px; every fill reads
+ * a token via currentColor / accent so it stays token-pure. */
 const MediaPlaceholder = () => (
   <svg
     viewBox="0 0 480 360"
@@ -15,14 +19,24 @@ const MediaPlaceholder = () => (
       inlineSize: "100%",
       blockSize: "auto",
       display: "block",
-      background: "var(--zs-fill-tertiary)",
+      background: "var(--zs-surface)",
       color: "var(--zs-label-quaternary)",
     }}
   >
-    <rect x="40" y="48" width="400" height="40" rx="8" fill="currentColor" opacity="0.5" />
-    <rect x="40" y="112" width="280" height="24" rx="6" fill="currentColor" opacity="0.35" />
-    <rect x="40" y="156" width="340" height="24" rx="6" fill="currentColor" opacity="0.35" />
-    <rect x="40" y="220" width="160" height="56" rx="12" fill="currentColor" opacity="0.5" />
+    {/* Toolbar bar — a quiet header strip reading as a product window chrome. */}
+    <rect x="0" y="0" width="480" height="44" fill="currentColor" opacity="0.12" />
+    {/* Three traffic-light dots. */}
+    <circle cx="28" cy="22" r="6" fill="currentColor" opacity="0.4" />
+    <circle cx="50" cy="22" r="6" fill="currentColor" opacity="0.4" />
+    <circle cx="72" cy="22" r="6" fill="currentColor" opacity="0.4" />
+    {/* Address pill. */}
+    <rect x="104" y="14" width="220" height="16" rx="8" fill="currentColor" opacity="0.2" />
+    {/* Content hint: a heading line, two body lines, and an accent CTA block. */}
+    <rect x="40" y="84" width="320" height="32" rx="8" fill="currentColor" opacity="0.45" />
+    <rect x="40" y="136" width="380" height="18" rx="6" fill="currentColor" opacity="0.25" />
+    <rect x="40" y="166" width="300" height="18" rx="6" fill="currentColor" opacity="0.25" />
+    <rect x="40" y="220" width="156" height="48" rx="12" fill="var(--zs-accent)" opacity="0.85" />
+    <rect x="212" y="220" width="120" height="48" rx="12" fill="currentColor" opacity="0.2" />
   </svg>
 );
 
@@ -38,6 +52,12 @@ const meta: Meta<typeof Hero> = {
         "Full-bleed band tone (the shared page-rhythm system): default " +
         "(transparent), muted (subtle surface panel), accent (accent fill " +
         "with ink remapped to accent-ink).",
+    },
+    backdrop: {
+      control: "boolean",
+      description:
+        "Paint a subtle accent radial backdrop behind the hero for depth " +
+        "(token-pure, reduced-motion-safe, drops out under forced-colors).",
     },
   },
 };
@@ -74,11 +94,13 @@ export const Centered: Story = {
       description="Describe what you want in plain language. AI builds it, and the platform handles hosting, data, auth, and payments."
       actions={
         <>
-          <Button>
+          <Button size="large">
             Get started
             <Icon as={ArrowRight} size="sm" />
           </Button>
-          <Button variant="gray">Read the docs</Button>
+          <Button size="large" variant="gray">
+            Read the docs
+          </Button>
         </>
       }
     />
@@ -117,7 +139,11 @@ export const Split: Story = {
           "With `media` set the band becomes a two-column split (text + " +
           "media) that collapses to a single stacked column below " +
           "`--zs-bp-md`. The text column start-aligns under a split. The " +
-          "media wrapper is decorative (`aria-hidden`).",
+          "media wrapper is a FRAMED PRODUCT SURFACE — a rounded raised panel " +
+          "(border + elevation) so the placeholder reads as a product window, " +
+          "not a flat skeleton — and is decorative (`aria-hidden`). " +
+          "`backdrop` adds a subtle accent radial wash behind the band for " +
+          "depth.",
       },
     },
   },
@@ -129,10 +155,13 @@ export const Split: Story = {
       description="One prompt, one deploy. Your app gets a database, auth, storage, and a global edge runtime — no infrastructure to manage."
       actions={
         <>
-          <Button>Start building</Button>
-          <Button variant="gray">See an example</Button>
+          <Button size="large">Start building</Button>
+          <Button size="large" variant="gray">
+            See an example
+          </Button>
         </>
       }
+      backdrop
       media={<MediaPlaceholder />}
     />
   ),
@@ -174,7 +203,7 @@ export const Minimal: Story = {
     <Hero
       data-testid="hero-minimal"
       title="Build something today"
-      actions={<Button>Get started</Button>}
+      actions={<Button size="large">Get started</Button>}
     />
   ),
   play: async ({ canvasElement }) => {

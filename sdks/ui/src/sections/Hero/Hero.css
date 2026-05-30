@@ -43,6 +43,33 @@
   color: var(--zs-label);
 }
 
+/* ─── Optional accent backdrop — a subtle depth wash behind the hero ──────
+ *
+ * `backdrop` opts a hero into a soft accent radial centered above the band,
+ * fading to transparent — a token-pure depth cue (the house color-mix idiom,
+ * so it tracks the accent token) for a marketing top-of-page band. STATIC
+ * paint, so it is reduced-motion-safe by construction. It layers UNDER the
+ * tone background by sitting on the section's `background-image` (tone paints
+ * `background`/`background-color`), so a `tone="muted"` hero keeps its surface
+ * fill with the wash on top of it; on a `tone="accent"` hero the wash is
+ * redundant against the accent fill and reads as a no-op. */
+.zs-hero[data-backdrop] {
+  background-image: radial-gradient(
+    120% 80% at 50% 0%,
+    color-mix(in oklch, var(--zs-accent) 10%, transparent),
+    transparent 60%
+  );
+  background-repeat: no-repeat;
+}
+
+/* forced-colors: the color-mix wash drops out (it cannot resolve to a system
+   color); suppress it so no stray paint lingers under a forced palette. */
+@media (forced-colors: active) {
+  .zs-hero[data-backdrop] {
+    background-image: none;
+  }
+}
+
 /* ─── Body — single column or two-column split ───────────────────────────── */
 .zs-hero__body {
   display: grid;
@@ -170,11 +197,17 @@
   align-items: center;
   justify-content: center;
   inline-size: 100%;
-  /* The media wrapper rounds + clips its content so consumer images /
-     illustrations adopt the band's corner rhythm without each caller
-     re-specifying it. No background of its own — the content paints. */
+  /* A FRAMED PRODUCT SURFACE (R2): the media wrapper reads as an intentional
+     product window — a rounded raised panel with a hairline border + real
+     house elevation — rather than a flat bare slot. Even the default
+     placeholder content then sits inside a deliberate frame. The wrapper
+     rounds + clips its content so consumer images / illustrations adopt the
+     band's corner rhythm without each caller re-specifying it. */
   border-radius: var(--zs-radius-6);
   overflow: hidden;
+  border: var(--zs-selection-hairline) solid var(--zs-separator);
+  background: var(--zs-surface-raised);
+  box-shadow: var(--zs-shadow-3);
 }
 
 /* Media content fills the column responsively without distorting. The
@@ -202,8 +235,13 @@
   .zs-hero__eyebrow {
     color: CanvasText;
   }
-  /* The media wrapper's border-radius/overflow are harmless under
-     forced-colors; no border is forced since the wrapper is decorative. */
+  /* The framed media surface's authored border + elevation drop out under a
+     forced palette; re-pin the frame to a CanvasText edge so the product
+     window still reads as a deliberate framed panel. */
+  .zs-hero__media {
+    border-color: CanvasText;
+    background: Canvas;
+  }
 }
 
 /* ─── reduced-motion ─────────────────────────────────────────────────────

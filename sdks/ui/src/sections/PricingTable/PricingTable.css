@@ -61,6 +61,12 @@
   --zs-pricing-ring-width: 0.125rem;
   --zs-pricing-lead-measure: 40rem;
   --zs-pricing-icon-nudge: 0.125rem;
+  /* The featured tier's raise: a static translate-up so the recommended card
+     lifts above its siblings. Static (not animated) → reduced-motion-safe by
+     construction. */
+  --zs-pricing-featured-raise: 0.75rem;
+  /* The featured tier's colored top accent cap thickness. */
+  --zs-pricing-featured-cap: 0.25rem;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
      No background: composable, the consumer paints the page backdrop. */
@@ -119,15 +125,34 @@
   gap: var(--zs-space-4);
 }
 
-/* Featured tier — a token accent ring layered as an inset box-shadow on top
-   of the elevated Card's --zs-shadow-2, plus a touch more lift. The ring is
-   a --zs-pricing-ring-width ring in the accent color so the recommended tier
-   reads distinct WITHOUT relying on color alone (the visible "Most popular"
-   badge carries the meaning for AT + color-blind users). */
+/* Featured tier — REAL presence beyond the ring (the brief's R2 lift):
+   - a colored TOP ACCENT CAP (the `::before` strip below) flags the tier;
+   - the strongest house elevation (--zs-shadow-4) raises it off the page;
+   - a static translate-up (`--zs-pricing-featured-raise`) lifts it above its
+     siblings — STATIC, so it is reduced-motion-safe by construction (no
+     animation, just a resting offset);
+   - the accent ring (inset box-shadow) still outlines the card.
+   "recommended" is never carried by this treatment alone — the visible
+   "Most popular" badge is the AT + color-blind signal. */
 .zs-pricing__tier[data-featured] {
+  position: relative;
+  transform: translateY(calc(-1 * var(--zs-pricing-featured-raise)));
   box-shadow:
     inset 0 0 0 var(--zs-pricing-ring-width) var(--zs-accent),
-    var(--zs-shadow-3);
+    var(--zs-shadow-4);
+}
+
+/* The colored top accent cap — a full-bleed accent strip pinned to the card's
+   block-start edge. The Card's own `overflow: hidden` + border-radius clip the
+   strip to the rounded top corners, so it reads as a painted cap rather than a
+   floating bar. Decorative; the badge carries the meaning. */
+.zs-pricing__tier[data-featured]::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  block-size: var(--zs-pricing-featured-cap);
+  background: var(--zs-accent);
 }
 
 /* ─── Header — badge + name + price + description ─────────────────────────── */
@@ -298,6 +323,11 @@
   .zs-pricing__tier[data-featured] {
     border-color: Highlight;
     border-width: calc(var(--zs-pricing-ring-width) * 1.5);
+  }
+  /* The painted accent cap drops out under a forced palette — re-pin it to a
+     thicker Highlight cap on the block-start edge so the flag survives. */
+  .zs-pricing__tier[data-featured]::before {
+    background: Highlight;
   }
 }
 

@@ -147,6 +147,15 @@ export interface StatsBandProps
   align?: StatsBandAlign;
 
   /**
+   * Billboard the metrics at the TOP display step (`--zs-text-display-1`,
+   * ~3.5rem) instead of the default display-2 (~2.75rem). Use for a hero
+   * proof bar where a single big number (or a tight 2–3-stat strip) is the
+   * headline of the band. Default `false` (display-2). Token-pure; affects
+   * only the value type scale, never the layout.
+   */
+  hero?: boolean;
+
+  /**
    * Container width for the band body, from the `--zs-container-*` tokens.
    * Default `lg`.
    */
@@ -269,6 +278,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
       stats,
       columns,
       align = "center",
+      hero = false,
       size = "lg",
       tone = "default",
       className,
@@ -333,6 +343,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
         data-align={align}
+        data-hero={hero ? "" : undefined}
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}
@@ -369,6 +380,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
             columns={{ md: resolvedColumns }}
             gap={7}
             data-slot="stats-band-items"
+            data-columns={resolvedColumns}
             className="zs-stats-band__items"
           >
             {allStats.map((stat) => renderStat(stat))}

@@ -42,10 +42,16 @@
      consumer can retune in one place.
        --zs-feature-grid-header-measure — the centered header's max measure
        --zs-feature-grid-icon-size      — the tinted icon badge box size
+       --zs-feature-grid-icon-glyph     — the glyph size inside the badge
        --zs-feature-grid-icon-tint      — the badge's accent-tint percentage
   */
   --zs-feature-grid-header-measure: 40rem;
-  --zs-feature-grid-icon-size: 3rem;
+  /* Bigger badge box (R2 "more presence") — a confident 3.5rem square that
+     reads as a deliberate mark rather than a small chip. */
+  --zs-feature-grid-icon-size: 3.5rem;
+  /* The glyph is sized UP to 1.75rem inside the bigger badge (above the
+     Icon `lg` 1.5rem default) so the mark fills the box with presence. */
+  --zs-feature-grid-icon-glyph: 1.75rem;
   --zs-feature-grid-icon-tint: 12%;
 
   /* Band rhythm — generous vertical padding so the band reads distinct.
@@ -109,7 +115,11 @@
 .zs-feature-grid__item {
   display: flex;
   flex-direction: column;
-  gap: var(--zs-space-3);
+  /* The title→description pair sits on a tight gap; the icon badge gets a
+     touch more separation below it (its own margin, set on the badge) so the
+     cell reads as a deliberate badge → title → copy rhythm rather than three
+     evenly-spaced rows. */
+  gap: var(--zs-space-2);
 }
 
 /* Centered band: center the icon badge + text within each cell. */
@@ -136,13 +146,27 @@
   flex: 0 0 auto;
   inline-size: var(--zs-feature-grid-icon-size);
   block-size: var(--zs-feature-grid-icon-size);
-  border-radius: var(--zs-radius-4);
+  /* A touch more breathing room beneath the bigger badge so it reads as a
+     distinct mark above the text group (the R2 "more structure per item"). */
+  margin-block-end: var(--zs-space-2);
+  /* radius-5 (12) sits in proportion with the larger 3.5rem box. */
+  border-radius: var(--zs-radius-5);
   background: color-mix(
     in oklch,
     var(--zs-accent) var(--zs-feature-grid-icon-tint),
     var(--zs-surface)
   );
   color: var(--zs-accent-active);
+}
+
+/* Size the glyph UP inside the bigger badge. The composed Icon sets its own
+   `--zs-icon-*` box via `.zs-icon--lg` (0,1,0); this descendant rule (0,2,0)
+   outranks it regardless of stylesheet concat order, so the badge owns the
+   glyph size — the same scoping idiom the Accordion chevron uses. The svg fills
+   to the badge's glyph token. */
+.zs-feature-grid__item-icon .zs-icon {
+  inline-size: var(--zs-feature-grid-icon-glyph);
+  block-size: var(--zs-feature-grid-icon-glyph);
 }
 
 .zs-feature-grid__item-title {

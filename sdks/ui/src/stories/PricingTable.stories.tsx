@@ -82,7 +82,7 @@ const threeTiers: PricingTier[] = [
       { label: "SSO & audit logs" },
     ],
     cta: (
-      <Button variant="tinted" className="zs-pricing__cta-button">
+      <Button variant="gray" className="zs-pricing__cta-button">
         Contact sales
       </Button>
     ),
@@ -97,11 +97,15 @@ export const ThreeTiers: Story = {
       description: {
         story:
           "The default band: three tiers in a responsive Grid that collapses " +
-          "to a single column below `--zs-bp-md`. The featured Pro tier is " +
-          "elevated + accent-ringed and carries a 'Most popular' badge. Each " +
-          "tier name is an `<h3>`; the feature list is a real `<ul>` where " +
-          "inclusion is conveyed by an icon + a visually-hidden word, never " +
-          "color alone. CTAs pin to the card bottom for cross-tier alignment.",
+          "to a single column below `--zs-bp-md`. The featured Pro tier reads " +
+          "as the recommendation — a colored top accent cap, the strongest " +
+          "house elevation, a static lift above its siblings, and an accent " +
+          "ring — and carries a 'Most popular' badge (the AT-facing signal). " +
+          "Each tier name is an `<h3>`; the feature list is a real `<ul>` " +
+          "where inclusion is conveyed by an icon + a visually-hidden word, " +
+          "never color alone. The non-featured CTAs read `gray` (a firm " +
+          "neutral fill) so all three actions read clearly clickable. CTAs " +
+          "pin to the card bottom for cross-tier alignment.",
       },
     },
   },
@@ -196,7 +200,7 @@ export const Compound: Story = {
         price="Custom"
         description="For large organizations."
         cta={
-          <Button variant="tinted" className="zs-pricing__cta-button">
+          <Button variant="gray" className="zs-pricing__cta-button">
             Contact sales
           </Button>
         }

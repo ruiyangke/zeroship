@@ -232,6 +232,17 @@ export interface HeroProps
    */
   tone?: SectionTone;
 
+  /**
+   * Paint a subtle accent radial backdrop behind the hero for depth — a
+   * token-pure wash (the house `color-mix` idiom, so it tracks the accent
+   * token) centered above the band and fading to transparent. Default
+   * `false`. Static paint → reduced-motion-safe; it drops out cleanly under
+   * forced-colors. Layers under the `tone` background, so a `muted` hero
+   * keeps its surface fill with the wash on top; on an `accent` hero the wash
+   * is redundant against the accent fill.
+   */
+  backdrop?: boolean;
+
   /** Band contents — compound parts and/or arbitrary children. */
   children?: ReactNode;
 
@@ -255,6 +266,7 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
     align = "center",
     size = "lg",
     tone = "default",
+    backdrop = false,
     className,
     children,
     "data-slot": dataSlot = "hero",
@@ -409,6 +421,7 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
         data-align={align}
         data-layout={dataLayout}
         data-tone={tone}
+        data-backdrop={backdrop ? "" : undefined}
         aria-labelledby={hasHeadline ? titleId : undefined}
         className={composedClassName}
       >
