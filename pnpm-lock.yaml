@@ -791,12 +791,21 @@ importers:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
         version: 0.18.2
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.2.14
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types
       publint:
         specifier: ^0.3.21
         version: 0.3.21
+      react:
+        specifier: 'catalog:'
+        version: 19.2.5
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
