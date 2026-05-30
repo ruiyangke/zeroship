@@ -1056,9 +1056,6 @@ mod tests {
             let _ = connection.run().await;
         })
         .detach();
-        zeroship_auth::store::migrations::migrate(&client)
-            .await
-            .expect("migrate");
         let db = std::sync::Arc::new(client);
 
         let subject = Uuid::new_v4();

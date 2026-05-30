@@ -280,9 +280,6 @@ async fn pg(dsn: &str) -> Client {
         let _ = connection.run().await;
     })
     .detach();
-    zeroship_auth::store::migrations::migrate(&client)
-        .await
-        .expect("migrate auth/control authz tables");
     client
 }
 
