@@ -50,15 +50,25 @@ export const BasicItems: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const trigger = canvas.getByRole("button", { name: /^actions$/i });
 
+    // Base UI 1.5.0 Menu triggers advertise the popup via
+    // aria-haspopup="menu" — they do NOT toggle aria-expanded (that is a
+    // Dialog/Popover trigger affordance). Open-state is observed through
+    // the menu popup itself appearing, not a trigger attribute.
+    await expect(trigger).toHaveAttribute("aria-haspopup", "menu");
     await userEvent.click(trigger);
-    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    // findByRole polls until Base UI commits the open and mounts the
+    // popup — this is the faithful "menu is open" signal.
     await expect(
       await body.findByRole("menuitem", { name: /new file/i }),
     ).toBeVisible();
 
     await userEvent.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    // Enter activates the highlighted item and closes the menu; the
+    // popup unmounts, so the menuitem leaves the accessibility tree.
     await waitFor(() =>
-      expect(trigger).toHaveAttribute("aria-expanded", "false"),
+      expect(
+        body.queryByRole("menuitem", { name: /new file/i }),
+      ).not.toBeInTheDocument(),
     );
   },
 };
@@ -513,8 +523,22 @@ export const DisabledItem: Story = {
     });
 
     await expect(duplicate).toHaveAttribute("aria-disabled", "true");
+    // Clicking a disabled item must NOT activate it: Base UI keeps the
+    // popup open and the item stays aria-disabled (no onSelect / close).
+    // Note Base UI 1.5.0 DOES highlight/focus a disabled item on pointer
+    // press — disabled menu rows stay focusable (aria-disabled, not the
+    // `disabled` attribute) so AT users can perceive them — so we assert
+    // the non-activation contract, not the absence of focus.
     await userEvent.click(duplicate);
-    await expect(duplicate).not.toHaveFocus();
+    await expect(duplicate).toHaveAttribute("aria-disabled", "true");
+    // The popup stays open after the no-op click — the disabled item is
+    // still mounted and visible (activating it would unmount the popup).
+    // (Base UI Menu triggers expose aria-haspopup, not aria-expanded, so
+    // open-state is observed through the popup's own presence.)
+    await expect(duplicate).toBeVisible();
+    await expect(
+      body.getByRole("menuitem", { name: /^open$/i }),
+    ).toBeVisible();
     await userEvent.keyboard("{Escape}");
   },
 };

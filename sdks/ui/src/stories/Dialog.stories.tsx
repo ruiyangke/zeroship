@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, within } from "@storybook/test";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useMemo, useRef, useState } from "react";
 import { Button, createDialogHandle, Dialog, Field, Input } from "../components";
 
@@ -317,7 +317,15 @@ export const InitialFocus: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: /sign in/i }));
     await page.findByRole("dialog", { name: /sign in/i });
-    await expect(page.getByRole("textbox", { name: /username/i })).toHaveFocus();
+    // Base UI moves initial focus AFTER the open transition commits, so
+    // a bare synchronous assertion races the autofocus. waitFor polls
+    // until the username field actually holds focus — same assertion,
+    // just deflaked.
+    await waitFor(() =>
+      expect(
+        page.getByRole("textbox", { name: /username/i }),
+      ).toHaveFocus(),
+    );
   },
 };
 
@@ -720,7 +728,9 @@ export const CloseAsChildLink: Story = {
               <Dialog.Title>Link close target</Dialog.Title>
               <Dialog.Description>
                 Dialog.Close can route Base UI close behavior into a
-                non-button element.
+                non-button element. The element keeps its `&lt;a href&gt;`
+                tag, but Base UI assigns `role="button"` because a close
+                control IS a button semantically.
               </Dialog.Description>
             </Dialog.Header>
             <Dialog.Footer>
@@ -741,7 +751,14 @@ export const CloseAsChildLink: Story = {
       name: /open link close/i,
     }));
     await page.findByRole("dialog", { name: /link close target/i });
-    const link = page.getByRole("link", { name: /done as link/i });
+    // Base UI's Close primitive runs the asChild target through useButton
+    // with nativeButton={false}; useButton unconditionally assigns
+    // role="button" to non-native-button render targets (a close control
+    // is a button, not a link). So the accessible role is "button" even
+    // though the underlying element stays an <a href>. We query by the
+    // real role and assert the tag/href to prove asChild routed onto the
+    // anchor element.
+    const link = page.getByRole("button", { name: /done as link/i });
 
     await expect(link.tagName).toBe("A");
     await expect(link).toHaveAttribute("href", "#dialog-link-close");

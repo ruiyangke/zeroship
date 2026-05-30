@@ -639,7 +639,13 @@ export const CloseAsChildComposition: Story = {
       body.getByRole("dialog", { name: /child close/i }),
     ).toBeInTheDocument();
 
-    await userEvent.click(body.getByRole("link", { name: /close link/i }));
+    // The asChild <a> target runs through Base UI's useButton with
+    // nativeButton={false}, which assigns role="button" to the anchor
+    // (a close control is a button, not a link). The accessible role is
+    // therefore "button" even though the element stays an <a href>.
+    const closeLink = body.getByRole("button", { name: /close link/i });
+    await expect(closeLink.tagName).toBe("A");
+    await userEvent.click(closeLink);
     await waitFor(() =>
       expect(
         body.queryByRole("dialog", { name: /child close/i }),
