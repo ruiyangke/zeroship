@@ -1,84 +1,101 @@
 /*
- * DataTable v2 — a presentational data grid with an opt-in MANAGED engine.
+ * DataTable v3 — a presentational data grid with an opt-in MANAGED engine,
+ * now driven by the headless @tanstack/react-table engine.
  *
  * The block still renders a REAL semantic `<table>` — `<caption?>`,
  * `<thead><tr><th scope="col">`, `<tbody><tr><td>` — so assistive tech
  * gets the native table model for free (row/column navigation, header
- * association). v2 adds, AROUND that table, a toolbar (title + actions +
+ * association). Around that table sit a toolbar (title + actions +
  * global search), an optional per-column text-filter row, and a footer
  * that composes the real `Pagination` block.
  *
- * ─── The managed / manual matrix (the v2 DX win) ──────────────────────
+ * ─── Engine: @tanstack/react-table (headless) ─────────────────────────
  *
- * DataTable now SORTS, FILTERS, and PAGINATES `data` itself by default —
+ * The sort / filter / paginate / selection pipeline is now a TanStack
+ * `useReactTable` instance — the same architecture we use elsewhere
+ * (Base UI = headless engine for interactive primitives; TanStack =
+ * headless engine for the table). The VISUAL layer, the `--zs-*` token
+ * system, the cell-type renderers, RowActions, the Pagination/Badge/Menu/
+ * Input/Checkbox/Skeleton/EmptyState composition, the `data-slot`
+ * vocabulary, and every a11y wire stay OURS. TanStack only owns the
+ * row-model math.
+ *
+ * Each `DataTableColumn<T>` maps to a TanStack `ColumnDef<T>`:
+ *   - `accessorFn` = `column.accessor ?? (row) => row[key]`
+ *   - `id` = `column.key`
+ *   - `enableSorting` = `!!column.sortable` (actions never sortable)
+ *   - `enableColumnFilter` = `column.filterable !== false`
+ *   - `align` / `width` / `minWidth` / `truncate` ride in `column.meta`
+ * The selection checkbox and the actions kebab are NOT TanStack display
+ * columns — they live outside the column model (our `<th>`/`<td>` chrome),
+ * because their a11y + the visible-only/off-page selection semantics are
+ * hand-tuned (see Selection below).
+ *
+ * ─── The managed / manual matrix (unchanged DX) ──────────────────────
+ *
+ * DataTable SORTS, FILTERS, and PAGINATES `data` itself by default —
  * `<DataTable columns data rowKey />` is a working grid out of the box.
- * It holds internal state for each axis (sort / globalFilter /
- * columnFilters / page / pageSize), seeded by `defaultSort` /
- * `defaultGlobalFilter` / `defaultColumnFilters` / `defaultPage` /
- * `defaultPageSize`. Each axis is independently CONTROLLABLE (pass the
- * value prop + its `on…Change`) and independently MANUAL (pass the
- * `manual…` flag to keep DataTable from transforming that axis).
- *
- * Per axis, the behavior is the cross-product of two booleans —
- * "is the value controlled?" and "is the transform manual?":
+ * Each axis (sort / globalFilter / columnFilters / page+pageSize) is:
+ *   - MANAGED (default): TanStack's `getSorted/Filtered/PaginationRowModel`
+ *     transform `data`; seeded from our `default*`; `on…Change` still fires.
+ *   - CONTROLLED: pass the value prop + `on…Change`; we feed it into the
+ *     TanStack `state`, TanStack still transforms.
+ *   - MANUAL: pass the `manual…` flag → set the matching TanStack
+ *     `manual…: true` so TanStack does NOT transform that axis; we render
+ *     the consumer-provided rows/`total` and only emit intent.
  *
  *   controlled?  manual?   behavior
  *   ──────────── ──────── ─────────────────────────────────────────────
- *   no           no       MANAGED (default). Internal state; DataTable
- *                         transforms `data`; on…Change still fires so a
- *                         consumer can observe.
- *   yes          no       Controlled value, DataTable still transforms.
- *                         (e.g. lift sort state up but let the grid sort.)
- *   no           yes      DataTable owns the value but does NOT transform.
- *                         Rare; the consumer reads it back via on…Change
- *                         and transforms upstream.
- *   yes          yes      Fully presentational — the v1 contract. The
- *                         consumer owns the value AND the transform;
- *                         DataTable renders `data` as-given and only
- *                         emits intent. Server-side grids live here.
+ *   no           no       MANAGED (default). Internal TanStack state;
+ *                         `data` is transformed; on…Change still fires.
+ *   yes          no       Controlled value, TanStack still transforms.
+ *   no           yes      We own the value, TanStack does NOT transform.
+ *   yes          yes      Fully presentational — the consumer owns the
+ *                         value AND the transform; server-side grids.
  *
  * `manualPagination` needs `total` (the unpaginated row count) for the
  * page math; without it `total` falls back to `data.length`. In managed
- * pagination `total` is the post-filter row count and is computed for you.
+ * pagination `total` is the post-filter row count (TanStack's filtered
+ * model length) and is computed for you.
  *
- * ─── Cell-type system ─────────────────────────────────────────────────
+ * Single-column sort toggle (asc→desc) and "reset to page 1 on
+ * filter/sort/pageSize change in managed pagination" are preserved.
+ *
+ * ─── Cell-type system (unchanged) ─────────────────────────────────────
  *
  * A column declares a `type` preset that drives a default renderer; an
  * explicit `column.cell` ALWAYS overrides it. The default renderer reads
  * the raw value via `column.accessor?.(row)` (else `row[column.key]`) and
  * formats by type, using only `Intl` (no deps):
- *   text       — String(value)
- *   number     — Intl.NumberFormat (+ column.numberOptions), end-aligned
- *   currency   — Intl.NumberFormat style:currency (+ column.currency,
- *                default "USD"), end-aligned
- *   date|datetime — Intl.DateTimeFormat (+ column.dateOptions); accepts
- *                Date | number(epoch ms) | ISO string
- *   boolean    — a check / dash glyph WITH a text label ("Yes"/"No"), so
- *                meaning never rides on color or glyph alone
- *   badge      — the real `Badge`; column.badgeIntent?.(value) → intent
- *   link       — an `<a>` via column.href?.(row) (+ linkTarget/linkRel);
- *                falls back to text when no href
- *   actions    — a trailing RowActions kebab: a real `Menu` opened by an
- *                icon-only `Button aria-label="Row actions"`, items from
- *                column.actions?.(row)
+ *   text · number · currency · date|datetime · boolean · badge · link · actions
+ * (see DefaultCell below).
  *
- * ─── Composition ─────────────────────────────────────────────────────
+ * ─── Selection ────────────────────────────────────────────────────────
  *
- * The footer composes the real `Pagination` block (which itself composes
- * `Button` + `Select` and shares `buildPageItems`). The toolbar composes
- * `Input` (global search) and `Cluster` (layout). Selection composes
- * `Checkbox`; loading composes `Skeleton`; the empty slot composes
- * `EmptyState`. Rich cells compose `Badge`, `Menu`, and `Button`. Nothing
- * here is re-rolled.
+ * `selection` (`none`/`single`/`multiple`) maps to TanStack
+ * `enableRowSelection` / `enableMultiRowSelection` with `getRowId =
+ * rowKey`, and our controlled `selectedKeys[]` feeds the TanStack
+ * `rowSelection` record. We DO NOT delegate select-all / per-row toggle
+ * to TanStack's handlers, because our contract is stricter than
+ * TanStack's row-model default:
+ *   - `selectedKeys` may include keys NOT present in the current `data`
+ *     (an off-page selection); those have no TanStack row and must SURVIVE
+ *     a select-all / clear-all.
+ *   - select-all / clear-all touch ONLY the currently-VISIBLE rows.
+ *   - `onSelectionChange` emits the next full `string[]` of keys.
+ * So selection emission stays in our handlers (computed over the visible
+ * row keys), while TanStack still tracks `rowSelection` for `getIsSelected`
+ * parity. The header select-all checkbox shows `indeterminate` for a
+ * partial visible selection.
  *
  * ─── Virtualization — STILL DEFERRED ──────────────────────────────────
  *
  * There is no row windowing. The scale strategy is PAGINATION: managed
- * mode renders only the current page, which keeps the DOM bounded
- * regardless of `data` size. A first-class windowing mode is a future
- * slice; we will not pull a windowing dependency into the block library
- * before it is designed. For server-scale data, use `manualPagination`
- * and feed one page at a time.
+ * mode renders only the current page, which keeps the DOM bounded. The
+ * documented future windowing path is TanStack + `@tanstack/react-virtual`
+ * (the row virtualizer composes cleanly with `getRowModel().rows`); we
+ * will not pull a windowing dependency in before it is designed. For
+ * server-scale data, use `manualPagination` and feed one page at a time.
  *
  * ─── State-slot precedence (highest wins): error > loading > empty > data
  *   - error:   `renderError` returns a truthy node → fills a full-span row.
@@ -90,8 +107,7 @@
  *
  * ─── Glass rule ──────────────────────────────────────────────────────
  * The sticky header paints an OPAQUE background; the selected-row tint is
- * an opaque `color-mix(... var(--zs-surface))`, never translucent (axe's
- * contrast walk can't see through translucency).
+ * an opaque `color-mix(... var(--zs-surface))`, never translucent.
  *
  * ─── Accessible name ─────────────────────────────────────────────────
  * Provide either a `caption` (a real `<caption>`) or an `aria-label`. A
@@ -100,9 +116,7 @@
  * ─── Interactive rows ────────────────────────────────────────────────
  * `onRowClick` makes a row clickable (cursor + activation) but the row is
  * NOT a button — that would nest interactive controls and break the table
- * semantics. For a primary row action prefer a `link`/`actions` column;
- * `onRowClick` is a convenience for whole-row navigation where the cell
- * controls already carry their own names.
+ * semantics.
  */
 import {
   forwardRef,
@@ -113,6 +127,20 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import {
+  useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  type ColumnDef,
+  type SortingState,
+  type ColumnFiltersState,
+  type PaginationState,
+  type RowSelectionState,
+  type Row,
+  type FilterFn,
+} from "@tanstack/react-table";
 import { classnames } from "../../components/_classnames";
 import { Badge, type BadgeIntent } from "../../components/Badge";
 import { Button } from "../../components/Button";
@@ -164,8 +192,8 @@ export interface DataTableRowAction {
 
 export interface DataTableColumn<T> {
   /** Stable column identity. Used as the React key, the `sort.key`
-   *  emitted on header click, the per-column `data-column` attr, and the
-   *  `columnFilters` key. */
+   *  emitted on header click, the per-column `data-column` attr, the
+   *  `columnFilters` key, and the TanStack `ColumnDef.id`. */
   key: string;
   /** Header content — rendered in `<th scope="col">` (inside a
    *  `<button>` when `sortable`). For an `actions` column, pass a
@@ -267,8 +295,9 @@ export interface DataTableProps<T>
   /** Row data. In managed mode DataTable sorts/filters/paginates these;
    *  under the matching `manual…` flags it renders them as-given. */
   data: T[];
-  /** Derives a stable string key for a row — the React key AND the
-   *  selection identity emitted in `onSelectionChange`. */
+  /** Derives a stable string key for a row — the React key, the TanStack
+   *  `getRowId`, AND the selection identity emitted in
+   *  `onSelectionChange`. */
   rowKey: (row: T) => string;
 
   /** A real `<caption>` — the preferred accessible name. When omitted,
@@ -387,6 +416,12 @@ export interface DataTableProps<T>
   "data-slot"?: string;
 }
 
+/* ─── column meta carried on the TanStack ColumnDef ───────────────────── */
+interface DataTableColumnMeta<T> {
+  column: DataTableColumn<T>;
+  align: DataTableAlign;
+}
+
 /* ─── small generic helpers ──────────────────────────────────────────── */
 
 /** Maps the column `align` to the resolved `data-align` value, applying
@@ -426,35 +461,6 @@ function toDate(value: unknown): Date | null {
     return Number.isNaN(d.getTime()) ? null : d;
   }
   return null;
-}
-
-/** Maps the active sort to a `<th>` `aria-sort` value for a column. */
-function ariaSortFor(
-  column: DataTableColumn<unknown>,
-  sort: DataTableSort | null | undefined,
-): "ascending" | "descending" | "none" | undefined {
-  // Non-sortable headers carry NO aria-sort (absent), per the WAI-ARIA
-  // pattern — aria-sort="none" is reserved for sortable-but-inactive
-  // columns so AT can distinguish "you can sort this" from "you can't".
-  if (!column.sortable || column.type === "actions") return undefined;
-  if (sort && sort.key === column.key) {
-    return sort.direction === "asc" ? "ascending" : "descending";
-  }
-  return "none";
-}
-
-/** Computes the next sort when a sortable header is activated. */
-function nextSort(
-  columnKey: string,
-  current: DataTableSort | null | undefined,
-): DataTableSort {
-  if (current && current.key === columnKey) {
-    return {
-      key: columnKey,
-      direction: current.direction === "asc" ? "desc" : "asc",
-    };
-  }
-  return { key: columnKey, direction: "asc" };
 }
 
 /** Default ascending comparator for a column's raw values: numbers
@@ -766,7 +772,12 @@ function DataTableInner<T>(
     }
   }
 
-  /* ─── axis state (controlled-or-internal) ─────────────────────────── */
+  /* ─── axis state (controlled-or-internal, OUR public contract) ─────
+   * We keep our own controllable state for each axis so the public
+   * value/`on…Change`/`default…` props behave exactly as documented;
+   * the values are then PROJECTED into the TanStack `state` shape below.
+   * TanStack is the transform engine, not the source of truth for our
+   * public surface. */
   const [sort, setSort] = useControllableState<DataTableSort | null>(
     sortProp,
     defaultSort,
@@ -797,69 +808,161 @@ function DataTableInner<T>(
   const hasSelection = selection !== "none";
   const isMultiple = selection === "multiple";
 
-  /* ─── managed transform pipeline: filter → sort → paginate ────────── */
-  const query = globalFilter.trim().toLowerCase();
+  /* ─── column lookups + a quick key→DataTableColumn map ────────────── */
+  const columnByKey = useMemo(() => {
+    const m = new Map<string, DataTableColumn<T>>();
+    for (const c of columns) m.set(c.key, c);
+    return m;
+  }, [columns]);
 
-  const filteredRows = useMemo(() => {
-    if (manualFiltering) return data;
-    let rows = data;
+  /* ─── DataTableColumn<T> → TanStack ColumnDef<T> ──────────────────── */
+  const tableColumns = useMemo<ColumnDef<T, unknown>[]>(
+    () =>
+      columns.map((column) => {
+        const align = resolveAlign(column as DataTableColumn<unknown>);
+        const isActions = column.type === "actions";
+        return {
+          id: column.key,
+          // accessorFn drives TanStack's getValue → our sort/filter engine.
+          accessorFn: (row: T) => readValue(column, row),
+          enableSorting: !!column.sortable && !isActions,
+          enableColumnFilter: column.filterable !== false && !isActions,
+          // Opt EVERY searchable column into global filtering explicitly.
+          // TanStack's default `getColumnCanGlobalFilter` otherwise gates on
+          // the FIRST row's value being string/number, so a table whose
+          // searchable columns are all non-string-typed (date/boolean/object,
+          // or a null first row) would silently skip global search. We pair
+          // this with a table-level `getColumnCanGlobalFilter: () => true`
+          // (below) so `enableGlobalFilter` is the SOLE gate and our custom
+          // type-agnostic `globalFilterFn` always runs.
+          enableGlobalFilter: column.filterable !== false && !isActions,
+          // Our default-compare wins over TanStack's built-in alphanumeric.
+          sortingFn: column.sortFn
+            ? (rowA: Row<T>, rowB: Row<T>) =>
+                column.sortFn!(rowA.original, rowB.original)
+            : (rowA: Row<T>, rowB: Row<T>) =>
+                defaultCompare(
+                  readValue(column, rowA.original),
+                  readValue(column, rowB.original),
+                ),
+          // Per-column filter: case-insensitive "contains" over filter text.
+          filterFn: ((row: Row<T>, _id, value) => {
+            const q = String(value ?? "").trim().toLowerCase();
+            if (q === "") return true;
+            return filterText(column, row.original).toLowerCase().includes(q);
+          }) as FilterFn<T>,
+          meta: { column, align } satisfies DataTableColumnMeta<T>,
+        } satisfies ColumnDef<T, unknown>;
+      }),
+    [columns],
+  );
 
-    // Global search: ANY searchable column's text contains the query.
-    if (query !== "") {
-      rows = rows.filter((row) =>
-        columns.some((column) => {
-          if (column.filterable === false || column.type === "actions")
-            return false;
-          return filterText(column, row).toLowerCase().includes(query);
-        }),
-      );
-    }
+  /* ─── project OUR state → TanStack state shapes ───────────────────── */
+  const sortingState = useMemo<SortingState>(
+    () => (sort ? [{ id: sort.key, desc: sort.direction === "desc" }] : []),
+    [sort],
+  );
+  const columnFiltersState = useMemo<ColumnFiltersState>(
+    () =>
+      Object.entries(columnFilters)
+        .filter(([id, q]) => {
+          if (q == null || q.trim() === "") return false;
+          // Only project filters for columns that EXIST and are eligible.
+          // TanStack's `enableColumnFilter: false` does NOT stop the filtered
+          // row model from applying a column's `filterFn` once a
+          // columnFilters entry is present, so a stray filter on a
+          // `filterable: false` / `actions` column (or an unknown key) would
+          // still narrow the rows. The bespoke baseline ignored those — match it.
+          const col = columnByKey.get(id);
+          return col != null && col.filterable !== false && col.type !== "actions";
+        })
+        .map(([id, value]) => ({ id, value })),
+    [columnFilters, columnByKey],
+  );
+  const safePageSize = Math.max(1, pageSize);
+  const paginationState = useMemo<PaginationState>(
+    () => ({ pageIndex: Math.max(0, page - 1), pageSize: safePageSize }),
+    [page, safePageSize],
+  );
+  const rowSelectionState = useMemo<RowSelectionState>(() => {
+    const sel: RowSelectionState = {};
+    for (const k of selectedKeys ?? []) sel[k] = true;
+    return sel;
+  }, [selectedKeys]);
 
-    // Per-column filters: each non-empty entry is a case-insensitive
-    // "contains" against that column's filter text.
-    const activeColumnFilters = Object.entries(columnFilters).filter(
-      ([, q]) => q != null && q.trim() !== "",
-    );
-    if (activeColumnFilters.length > 0) {
-      rows = rows.filter((row) =>
-        activeColumnFilters.every(([key, q]) => {
-          const column = columns.find((c) => c.key === key);
-          if (!column || column.filterable === false) return true;
-          return filterText(column, row).toLowerCase().includes(q.trim().toLowerCase());
-        }),
-      );
-    }
-    return rows;
-  }, [data, columns, query, columnFilters, manualFiltering]);
+  /* ─── global-filter fn: ANY searchable column's text contains query ─ */
+  const globalFilterFn = useCallback<FilterFn<T>>(
+    (row, _columnId, value) => {
+      const q = String(value ?? "").trim().toLowerCase();
+      if (q === "") return true;
+      return columns.some((column) => {
+        if (column.filterable === false || column.type === "actions")
+          return false;
+        return filterText(column, row.original).toLowerCase().includes(q);
+      });
+    },
+    [columns],
+  );
 
-  const sortedRows = useMemo(() => {
-    if (manualSorting || !sort) return filteredRows;
-    const column = columns.find((c) => c.key === sort.key);
-    if (!column) return filteredRows;
-    const dir = sort.direction === "asc" ? 1 : -1;
-    const compare = column.sortFn
-      ? (a: T, b: T) => column.sortFn!(a, b)
-      : (a: T, b: T) => defaultCompare(readValue(column, a), readValue(column, b));
-    // Stable sort: decorate with the original index, restore on ties.
-    return filteredRows
-      .map((row, index) => ({ row, index }))
-      .sort((x, y) => {
-        const c = compare(x.row, y.row);
-        return c !== 0 ? c * dir : x.index - y.index;
-      })
-      .map((d) => d.row);
-  }, [filteredRows, columns, sort, manualSorting]);
+  /* ─── the headless TanStack engine ────────────────────────────────── */
+  const table = useReactTable<T>({
+    data,
+    columns: tableColumns,
+    getRowId: (row) => rowKey(row),
+    state: {
+      sorting: sortingState,
+      columnFilters: columnFiltersState,
+      globalFilter,
+      pagination: paginationState,
+      rowSelection: rowSelectionState,
+    },
+    manualSorting,
+    manualFiltering,
+    manualPagination,
+    // Under manual pagination we report the consumer `total` so
+    // getPageCount() reflects the SERVER total, not the local page.
+    ...(manualPagination
+      ? { rowCount: totalProp ?? data.length }
+      : manualFiltering
+        ? { rowCount: totalProp ?? data.length }
+        : {}),
+    enableRowSelection: hasSelection,
+    enableMultiRowSelection: isMultiple,
+    globalFilterFn,
+    // Let the per-column `enableGlobalFilter` be the SOLE gate on which
+    // columns are globally filterable. TanStack's default sniffs the first
+    // row's value type (string/number) here, which would skip global search
+    // for a table whose searchable columns are all non-string-typed; our
+    // `globalFilterFn` is type-agnostic, so we override the type sniff to true.
+    getColumnCanGlobalFilter: () => true,
+    // We drive state ourselves; these no-op so TanStack never tries to own
+    // it (our handlers below call setSort/setPage/etc. + fire on…Change).
+    onSortingChange: () => {},
+    onColumnFiltersChange: () => {},
+    onGlobalFilterChange: () => {},
+    onPaginationChange: () => {},
+    onRowSelectionChange: () => {},
+    getCoreRowModel: getCoreRowModel(),
+    // Managed axes get their row model; manual axes set manual* above so
+    // TanStack passes the rows through that model untransformed.
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    autoResetPageIndex: false,
+  });
 
-  // The unpaginated count the footer reports. Managed: post-filter size.
-  // Manual pagination: consumer-supplied `total` (or data.length fallback).
+  // The unpaginated count the footer reports. Managed: post-filter size
+  // (TanStack's filtered model — independent of the pagination slice).
+  // Manual pagination/filtering: consumer `total` (or data.length fallback).
   const total = manualPagination
     ? totalProp ?? data.length
     : manualFiltering
-      ? totalProp ?? sortedRows.length
-      : sortedRows.length;
+      ? totalProp ?? data.length
+      : table.getFilteredRowModel().rows.length;
 
-  const safePageSize = Math.max(1, pageSize);
   const pageCount = Math.max(1, Math.ceil(total / safePageSize));
+  // The CLAMPED current page — the single source of truth for BOTH the
+  // body slice and the <Pagination> footer, so they can never disagree.
   const currentPage = Math.min(Math.max(page, 1), pageCount);
 
   // Decide whether to show the footer. Default: any time the row count
@@ -870,25 +973,33 @@ function DataTableInner<T>(
   const autoPaginate = total > smallestSize;
   const showPagination = paginated ?? autoPaginate;
 
-  // The rows actually rendered. Manual pagination renders `data` as the
-  // page as-given; managed slices the sorted rows.
-  const visibleRows = useMemo(() => {
-    if (manualPagination) return data;
-    if (!showPagination) return sortedRows;
-    const start = (currentPage - 1) * safePageSize;
-    return sortedRows.slice(start, start + safePageSize);
-  }, [
-    manualPagination,
-    data,
-    showPagination,
-    sortedRows,
-    currentPage,
-    safePageSize,
-  ]);
+  /* ─── the rows actually rendered ──────────────────────────────────────
+   * We slice the body ourselves from the PRE-pagination row model rather
+   * than reading `table.getRowModel().rows`, for two correctness reasons:
+   *   (1) paginated={false} (managed): TanStack's getRowModel ALWAYS runs
+   *       through getPaginationRowModel, so it would render only the first
+   *       `pageSize` rows even with the footer hidden. The baseline showed
+   *       every sorted/filtered row. We render the full pre-pagination model.
+   *   (2) page agreement: when the footer IS shown we slice by the CLAMPED
+   *       `currentPage`, so an out-of-range/stale controlled `page` (or a
+   *       page count that shrank under a filter) can't leave the body empty
+   *       while the footer shows the clamped last page.
+   * Manual pagination/filtering bypass the managed slice: TanStack passes
+   * `data` through untransformed (manual* flags), so we render it as-given. */
+  const visibleRowObjs: Row<T>[] =
+    manualPagination || !showPagination
+      ? table.getPrePaginationRowModel().rows
+      : table
+          .getPrePaginationRowModel()
+          .rows.slice(
+            (currentPage - 1) * safePageSize,
+            (currentPage - 1) * safePageSize + safePageSize,
+          );
+  const visibleRows = visibleRowObjs.map((r) => r.original);
+  const visibleRowKeys = visibleRowObjs.map((r) => r.id);
 
   /* ─── selection (derived over the VISIBLE rows) ───────────────────── */
   const selectedSet = useMemo(() => new Set(selectedKeys ?? []), [selectedKeys]);
-  const visibleRowKeys = visibleRows.map((row) => rowKey(row));
   const selectedVisibleCount = visibleRowKeys.filter((k) =>
     selectedSet.has(k),
   ).length;
@@ -899,9 +1010,17 @@ function DataTableInner<T>(
   const totalColumns = columns.length + (hasSelection ? 1 : 0);
 
   /* ─── handlers ────────────────────────────────────────────────────── */
+  // Single-column sort toggle: a fresh column starts asc; re-click toggles.
   const handleHeaderSort = (column: DataTableColumn<T>) => {
     if (!column.sortable || column.type === "actions") return;
-    setSort(nextSort(column.key, sort));
+    const next: DataTableSort =
+      sort && sort.key === column.key
+        ? {
+            key: column.key,
+            direction: sort.direction === "asc" ? "desc" : "asc",
+          }
+        : { key: column.key, direction: "asc" };
+    setSort(next);
     // Sorting changes the row order; reset to page 1 in managed pagination.
     if (!manualPagination) setPage(1);
   };
@@ -916,6 +1035,8 @@ function DataTableInner<T>(
     if (!manualPagination) setPage(1);
   };
 
+  // Select-all / clear-all touch ONLY the visible rows; off-page keys
+  // (keys in `selectedKeys` with no current row) survive untouched.
   const handleSelectAll = () => {
     if (!onSelectionChange) return;
     const current = selectedKeys ?? [];
@@ -950,7 +1071,7 @@ function DataTableInner<T>(
   // the empty slot can show the right message.
   const hasActiveFilter =
     !manualFiltering &&
-    (query !== "" ||
+    (globalFilter.trim() !== "" ||
       Object.values(columnFilters).some((q) => q != null && q.trim() !== ""));
   const emptyDueToFilter =
     showEmpty && (hasActiveFilter || (manualFiltering && data.length === 0));
@@ -987,6 +1108,18 @@ function DataTableInner<T>(
     column.minWidth != null
       ? ({ "--zs-data-table-cell-min": column.minWidth } as CSSProperties)
       : undefined;
+
+  // aria-sort for a header column: absent for non-sortable/actions; else
+  // "ascending"/"descending"/"none" from the TanStack sort direction.
+  const ariaSortFor = (
+    column: DataTableColumn<T>,
+  ): "ascending" | "descending" | "none" | undefined => {
+    if (!column.sortable || column.type === "actions") return undefined;
+    if (sort && sort.key === column.key) {
+      return sort.direction === "asc" ? "ascending" : "descending";
+    }
+    return "none";
+  };
 
   return (
     <div
@@ -1085,10 +1218,7 @@ function DataTableInner<T>(
                 </th>
               ) : null}
               {columns.map((column) => {
-                const sortState = ariaSortFor(
-                  column as DataTableColumn<unknown>,
-                  sort,
-                );
+                const sortState = ariaSortFor(column);
                 const align = resolveAlign(column as DataTableColumn<unknown>);
                 const isActions = column.type === "actions";
                 return (
@@ -1146,6 +1276,10 @@ function DataTableInner<T>(
                       key={column.key}
                       className="zs-data-table__filter-cell"
                       data-column={column.key}
+                      // An ineligible column renders no filter input → the
+                      // <th> would be an empty header (axe `empty-table-header`).
+                      // Hide it from AT, matching the select-cell filter <th>.
+                      aria-hidden={eligible ? undefined : "true"}
                     >
                       {eligible ? (
                         <Input
@@ -1208,8 +1342,9 @@ function DataTableInner<T>(
                           ),
                       "data-table-empty",
                     )
-                  : visibleRows.map((row, index) => {
-                      const key = visibleRowKeys[index];
+                  : visibleRowObjs.map((rowObj, index) => {
+                      const row = rowObj.original;
+                      const key = rowObj.id;
                       const selected = selectedSet.has(key);
                       return (
                         <tr
@@ -1304,7 +1439,11 @@ function DataTableInner<T>(
             page={currentPage}
             pageSize={safePageSize}
             total={total}
-            onPageChange={(next) => setPage(next)}
+            onPageChange={(next) => {
+              // OUR page state is the source of truth; TanStack reads it
+              // back through `state.pagination` (pageIndex = page-1).
+              setPage(next);
+            }}
             pageSizeOptions={pageSizeOptions}
             onPageSizeChange={(size) => {
               setPageSize(size);
@@ -1320,8 +1459,8 @@ function DataTableInner<T>(
 }
 
 /**
- * DataTable — a presentational data grid with an opt-in managed engine,
- * generic over the row type `T`.
+ * DataTable — a presentational data grid with an opt-in managed engine
+ * (driven by @tanstack/react-table), generic over the row type `T`.
  *
  * @example Managed (default — sorts/filters/paginates `data` itself)
  * ```tsx

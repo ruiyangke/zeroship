@@ -313,6 +313,18 @@ export const StickyHeader: Story = {
       </div>
     );
   },
+  // Regression (🔴 1): with pagination forced OFF, ALL 24 rows must render
+  // (the full pre-pagination model), not just the first page. Pre-fix the
+  // body read `getRowModel()` which always paginates → only 10 rows + no
+  // footer, leaving 14 rows unreachable in the supposedly-full scroll view.
+  play: async ({ canvasElement }) => {
+    const rows = canvasElement.querySelectorAll('[data-slot="data-table-row"]');
+    expect(rows.length).toBe(24);
+    // No pagination footer is rendered when paginated={false}.
+    expect(
+      canvasElement.querySelector('[data-slot="data-table-pagination"]'),
+    ).toBeNull();
+  },
 };
 
 /* ─── 7. Density (compact) ──────────────────────────────────────────── */
@@ -733,5 +745,187 @@ export const ColumnFilters: Story = {
     const roleFilter = canvas.getByTestId("data-table-filter-role");
     await userEvent.type(roleFilter, "Engineer");
     await waitFor(() => expect(rowCount()).toBe(2));
+  },
+};
+
+/* ─── 13. PageClamp (🔴 2 regression) ───────────────────────────────── */
+export const PageClamp: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for body/footer page agreement: a CONTROLLED `page` is " +
+          "set beyond the last page (page 9 of a 3-page set). The body must " +
+          "render the CLAMPED last page's rows (non-empty) — matching the " +
+          "<Pagination> footer's current page — never an empty body. Pre-fix " +
+          "TanStack received the raw out-of-range pageIndex and sliced to " +
+          "zero rows while the footer clamped to the last page.",
+      },
+    },
+  },
+  render: function PageClampRender() {
+    // 25 rows, pageSize 10 → 3 pages. Controlled page 9 is out of range.
+    const [page] = useState(9);
+    return (
+      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+        <DataTable<Person>
+          data-testid="dt-pageclamp"
+          caption="Controlled page beyond the last page"
+          columns={COLUMNS}
+          data={MANY}
+          rowKey={(p) => p.id}
+          page={page}
+          defaultPageSize={10}
+          onPageChange={() => {}}
+        />
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const rowCount = () =>
+      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+
+    // The body is NON-EMPTY — it shows the clamped last page (page 3 → the
+    // final 5 of 25 rows), not an empty slice for the out-of-range page 9.
+    expect(rowCount()).toBe(5);
+
+    // The footer's current page is the SAME clamped page (3), so body and
+    // footer agree. Page 3's "Go to page 3" button is aria-current.
+    const pagination = canvas.getByTestId("data-table-pagination");
+    expect(
+      within(pagination).getByRole("button", { name: /go to page 3/i }),
+    ).toHaveAttribute("aria-current", "page");
+
+    // The last data row (Member 25) is on this clamped page.
+    expect(canvas.getByText("Member 25")).toBeInTheDocument();
+  },
+};
+
+/* ─── 14. NonFilterableIgnored (🔴 3 regression) ────────────────────── */
+export const NonFilterableIgnored: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: a controlled `columnFilters` entry targeting a " +
+          "`filterable: false` column must be IGNORED — the rows are not " +
+          "narrowed by it. Pre-fix the projected `columnFiltersState` kept " +
+          "every non-empty entry and TanStack applied the column's filterFn " +
+          "(enableColumnFilter:false does NOT stop a present columnFilters " +
+          "entry), shrinking the rows against the contract.",
+      },
+    },
+  },
+  render: function NonFilterableRender() {
+    // `role` is opted OUT of filtering. A stray filter on it must no-op.
+    const cols: DataTableColumn<Person>[] = [
+      { key: "name", header: "Name", cell: (p) => p.name },
+      { key: "role", header: "Role", cell: (p) => p.role, filterable: false },
+      { key: "commits", header: "Commits", cell: (p) => p.commits, align: "end" },
+    ];
+    const [filters] = useState<DataTableColumnFilters>({
+      // No "Engineer" should match if this were applied (it would drop the
+      // 2 non-Engineers); since `role` is filterable:false it must no-op.
+      role: "Engineer",
+    });
+    return (
+      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+        <DataTable<Person>
+          data-testid="dt-nonfilterable"
+          caption="Filter on a non-filterable column is ignored"
+          columns={cols}
+          data={PEOPLE}
+          rowKey={(p) => p.id}
+          filterable
+          columnFilters={filters}
+          onColumnFiltersChange={() => {}}
+        />
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const rowCount = () =>
+      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+    // All 4 rows remain — the filter on the non-filterable `role` is ignored.
+    expect(rowCount()).toBe(4);
+  },
+};
+
+/* ─── 15. GlobalSearchNonString (🟡 4 regression) ───────────────────── */
+interface Event {
+  id: string;
+  when: Date;
+  ends: Date;
+}
+
+const EVENTS: Event[] = [
+  {
+    id: "e_1",
+    when: new Date("2026-01-15T00:00:00Z"),
+    ends: new Date("2026-01-16T00:00:00Z"),
+  },
+  {
+    id: "e_2",
+    when: new Date("2026-02-20T00:00:00Z"),
+    ends: new Date("2026-02-21T00:00:00Z"),
+  },
+  {
+    id: "e_3",
+    when: new Date("2026-03-25T00:00:00Z"),
+    ends: new Date("2026-03-26T00:00:00Z"),
+  },
+];
+
+export const GlobalSearchNonString: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: global search must work when NO searchable column's " +
+          "first-row value is a string/number. Both columns here are `date` " +
+          "type — every row's value is a Date object. Pre-fix TanStack's " +
+          "default `getColumnCanGlobalFilter` sniffed the first row's value " +
+          "type (Date → not string/number) and marked NO column globally " +
+          "filterable, so the search was a silent no-op (all rows stayed). " +
+          "Post-fix `enableGlobalFilter` + the table-level " +
+          "`getColumnCanGlobalFilter: () => true` keep our type-agnostic " +
+          "`globalFilterFn` (which matches each column's ISO text) running.",
+      },
+    },
+  },
+  render: function GlobalSearchNonStringRender() {
+    const cols: DataTableColumn<Event>[] = [
+      { key: "when", header: "Starts", type: "date" },
+      { key: "ends", header: "Ends", type: "date" },
+    ];
+    return (
+      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+        <DataTable<Event>
+          data-testid="dt-globalsearch-nonstring"
+          caption="Search a non-string column"
+          columns={cols}
+          data={EVENTS}
+          rowKey={(e) => e.id}
+          searchable
+        />
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const rowCount = () =>
+      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+
+    // All 3 events show first.
+    expect(rowCount()).toBe(3);
+
+    // Search "2026-02" — matches only e_2's ISO date text. filterText() of a
+    // date column is the row's ISO string, so a type-agnostic global search
+    // narrows to 1 row. Pre-fix this was a no-op (no column passed the
+    // first-row string/number sniff → still 3 rows).
+    const search = canvas.getByTestId("data-table-search");
+    await userEvent.type(search, "2026-02");
+    await waitFor(() => expect(rowCount()).toBe(1));
   },
 };
