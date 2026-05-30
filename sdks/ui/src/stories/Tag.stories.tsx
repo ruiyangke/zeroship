@@ -1,10 +1,10 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, fn, userEvent, within } from "@storybook/test";
-import { Tag } from "../blocks";
+import { Tag } from "../components";
 
 const meta: Meta<typeof Tag> = {
-  title: "Blocks/Tag",
+  title: "Components/Tag",
   component: Tag,
   parameters: { layout: "fullscreen" },
   argTypes: {

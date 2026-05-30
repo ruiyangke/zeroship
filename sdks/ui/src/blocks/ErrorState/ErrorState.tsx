@@ -56,7 +56,7 @@ import { classnames } from "../../components/_classnames";
 import { Center } from "../../layouts/Center";
 import { Stack } from "../../layouts/Stack";
 import { Button } from "../../components/Button";
-import type { Intent } from "../_intent";
+import type { Intent } from "../../components/_intent";
 
 /**
  * ErrorState narrows the shared {@link Intent} vocabulary to the two

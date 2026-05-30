@@ -55,7 +55,7 @@ import {
 } from "react";
 import { classnames } from "../../components/_classnames";
 import { Checkbox } from "../../components/Checkbox";
-import { Skeleton } from "../Skeleton";
+import { Skeleton } from "../../components/Skeleton";
 import { EmptyState } from "../EmptyState";
 
 /**

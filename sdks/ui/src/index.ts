@@ -196,6 +196,21 @@ export {
   Progress,
   type ProgressProps,
   type ProgressSize,
+  Skeleton,
+  type SkeletonProps,
+  type SkeletonVariant,
+  Spinner,
+  type SpinnerProps,
+  type SpinnerSize,
+  Badge,
+  type BadgeProps,
+  type BadgeIntent,
+  type BadgeVariant,
+  type BadgeSize,
+  Tag,
+  type TagProps,
+  type TagSize,
+  type Intent,
   Avatar,
   AvatarRoot,
   AvatarImage,
@@ -349,9 +364,15 @@ export {
   type ScrollAreaScrollbarProps,
   type ScrollAreaThumbProps,
   type ScrollAreaCornerProps,
+  Breadcrumbs,
+  type BreadcrumbsProps,
+  type BreadcrumbItem,
+  type BreadcrumbsItemProps,
+  type BreadcrumbsLinkProps,
+  type BreadcrumbsPageProps,
+  type BreadcrumbsSeparatorProps,
 } from "./components";
 
-// Layout primitives + compositions, and composed blocks (Badge + Tag
-// chip blocks are exported from ./blocks).
+// Layout primitives + compositions, and composed blocks.
 export * from "./layouts";
 export * from "./blocks";

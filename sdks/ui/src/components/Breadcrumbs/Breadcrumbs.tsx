@@ -70,8 +70,8 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
+import { Slot } from "../_slot";
+import { classnames } from "../_classnames";
 
 /* ─── public types ─────────────────────────────────────────────────────── */
 

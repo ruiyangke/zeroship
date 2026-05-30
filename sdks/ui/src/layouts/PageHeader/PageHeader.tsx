@@ -70,7 +70,7 @@ import { Slot } from "../../components/_slot";
 import { classnames } from "../../components/_classnames";
 import { Stack } from "../Stack";
 import { Cluster } from "../Cluster";
-import { Breadcrumbs, type BreadcrumbsProps } from "../../blocks/Breadcrumbs";
+import { Breadcrumbs, type BreadcrumbsProps } from "../../components/Breadcrumbs";
 
 /* ─── props ───────────────────────────────────────────────────────────── */
 

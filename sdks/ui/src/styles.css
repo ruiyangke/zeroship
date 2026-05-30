@@ -51,6 +51,11 @@
 @import "./components/ScrollArea/ScrollArea.css";
 @import "./components/Avatar/Avatar.css";
 @import "./components/Separator/Separator.css";
+@import "./components/Skeleton/Skeleton.css";
+@import "./components/Spinner/Spinner.css";
+@import "./components/Badge/Badge.css";
+@import "./components/Tag/Tag.css";
+@import "./components/Breadcrumbs/Breadcrumbs.css";
 
 /* ─── Layout primitives — arrange-only, paint nothing. */
 @import "./layouts/Stack/Stack.css";
@@ -67,15 +72,10 @@
 /* ─── Composed blocks — empty/error/loading state family. */
 @import "./blocks/EmptyState/EmptyState.css";
 @import "./blocks/ErrorState/ErrorState.css";
-@import "./blocks/Skeleton/Skeleton.css";
-@import "./blocks/Spinner/Spinner.css";
-@import "./blocks/Badge/Badge.css";
-@import "./blocks/Tag/Tag.css";
 @import "./blocks/StatCard/StatCard.css";
 @import "./blocks/Banner/Banner.css";
 @import "./blocks/DescriptionList/DescriptionList.css";
 @import "./blocks/DataTable/DataTable.css";
-@import "./blocks/Breadcrumbs/Breadcrumbs.css";
 
 *,
 *::before,

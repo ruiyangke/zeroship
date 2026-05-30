@@ -40,8 +40,8 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { Slot } from "../../components/_slot";
-import { classnames } from "../../components/_classnames";
+import { Slot } from "../_slot";
+import { classnames } from "../_classnames";
 import type { Intent } from "../_intent";
 
 /** Badge spans the full shared {@link Intent} vocabulary. */

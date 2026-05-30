@@ -1,9 +1,9 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, within } from "@storybook/test";
-import { Skeleton } from "../blocks";
+import { Skeleton } from "../components";
 
 const meta: Meta<typeof Skeleton> = {
-  title: "Blocks/Skeleton",
+  title: "Components/Skeleton",
   component: Skeleton,
   parameters: { layout: "fullscreen" },
 };

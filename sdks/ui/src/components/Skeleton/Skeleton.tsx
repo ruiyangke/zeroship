@@ -27,7 +27,7 @@ import {
   type ComponentPropsWithoutRef,
   type CSSProperties,
 } from "react";
-import { classnames } from "../../components/_classnames";
+import { classnames } from "../_classnames";
 
 export type SkeletonVariant = "text" | "rect" | "circle";
 

@@ -1,10 +1,10 @@
 import { forwardRef, type ComponentPropsWithoutRef } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, within } from "@storybook/test";
-import { Breadcrumbs } from "../blocks";
+import { Breadcrumbs } from "../components";
 
 const meta: Meta<typeof Breadcrumbs> = {
-  title: "Blocks/Breadcrumbs",
+  title: "Components/Breadcrumbs",
   component: Breadcrumbs,
   parameters: { layout: "fullscreen" },
 };

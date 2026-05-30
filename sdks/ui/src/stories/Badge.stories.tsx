@@ -1,8 +1,8 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Badge, type BadgeIntent, type BadgeVariant } from "../blocks";
+import { Badge, type BadgeIntent, type BadgeVariant } from "../components";
 
 const meta: Meta<typeof Badge> = {
-  title: "Blocks/Badge",
+  title: "Components/Badge",
   component: Badge,
   parameters: { layout: "fullscreen" },
   argTypes: {

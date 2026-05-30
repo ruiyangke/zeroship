@@ -42,7 +42,7 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { classnames } from "../../components/_classnames";
+import { classnames } from "../_classnames";
 
 export type TagSize = "sm" | "md";
 

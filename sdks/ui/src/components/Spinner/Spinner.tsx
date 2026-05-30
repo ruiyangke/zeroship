@@ -20,7 +20,7 @@
  * `role="status"` label still conveys "loading" to AT. See Spinner.css.
  */
 import { forwardRef, useId, type ComponentPropsWithoutRef } from "react";
-import { classnames } from "../../components/_classnames";
+import { classnames } from "../_classnames";
 
 export type SpinnerSize = "sm" | "md" | "lg";
 

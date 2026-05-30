@@ -51,7 +51,7 @@ import {
 } from "react";
 import { classnames } from "../../components/_classnames";
 import { Stack } from "../../layouts/Stack";
-import type { Intent } from "../_intent";
+import type { Intent } from "../../components/_intent";
 
 /**
  * Banner derives from the shared {@link Intent} vocabulary but excludes

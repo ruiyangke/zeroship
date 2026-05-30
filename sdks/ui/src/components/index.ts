@@ -1,3 +1,6 @@
+// Shared status-intent vocabulary — Badge/Banner/ErrorState derive from it.
+export type { Intent } from "./_intent";
+
 export { Button } from "./Button";
 export type {
   ButtonProps,
@@ -234,6 +237,19 @@ export type { MeterProps, MeterSize, MeterIntent } from "./Meter";
 export { Progress } from "./Progress";
 export type { ProgressProps, ProgressSize } from "./Progress";
 
+export { Skeleton, type SkeletonProps, type SkeletonVariant } from "./Skeleton";
+export { Spinner, type SpinnerProps, type SpinnerSize } from "./Spinner";
+
+// Chip primitives — static status/label chip + interactive chip.
+export {
+  Badge,
+  type BadgeProps,
+  type BadgeIntent,
+  type BadgeVariant,
+  type BadgeSize,
+} from "./Badge";
+export { Tag, type TagProps, type TagSize } from "./Tag";
+
 export { Menu, createMenuHandle } from "./Menu";
 export type {
   MenuProps,
@@ -326,6 +342,17 @@ export type {
   NavMenuArrowProps,
   NavMenuIconProps,
 } from "./NavigationMenu";
+
+// Navigation primitive — breadcrumb trail (dual ergonomic + compound surface).
+export {
+  Breadcrumbs,
+  type BreadcrumbsProps,
+  type BreadcrumbItem,
+  type BreadcrumbsItemProps,
+  type BreadcrumbsLinkProps,
+  type BreadcrumbsPageProps,
+  type BreadcrumbsSeparatorProps,
+} from "./Breadcrumbs";
 
 export {
   Accordion,
