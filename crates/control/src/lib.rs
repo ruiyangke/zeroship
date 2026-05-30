@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod admin_handlers;
+pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;
 pub mod authz_guard;
@@ -166,6 +167,12 @@ pub struct AppState {
     /// client registration/deletion; Hydra remains the source of truth for
     /// generated client secrets.
     pub hydra_admin_url: String,
+    /// Apex domain hosted creator apps serve under, e.g. `zeroship.ai`
+    /// (prod) or `zeroship.localhost` (dev). An app named `myapp` serves
+    /// at `myapp.{app_base_domain}`; the per-app OAuth client's
+    /// redirect_uris / sector_identifier are derived from that apex host
+    /// (Slice 1d, spec §1.1).
+    pub app_base_domain: String,
     /// OAuth client IDs that get `skip_consent=true` when registered.
     pub trusted_oauth_clients: HashSet<String>,
     /// Expected audience for OAuth access tokens accepted by the control
@@ -193,6 +200,80 @@ impl AppState {
     #[must_use]
     pub fn is_trusted(&self, client_id: &str) -> bool {
         Self::is_trusted_client_id(&self.trusted_oauth_clients, client_id)
+    }
+
+    /// The URL scheme hosted apps serve under: `http` in dev-insecure,
+    /// `https` otherwise. Drives per-app OAuth redirect_uri derivation.
+    #[must_use]
+    pub fn app_scheme(&self) -> &'static str {
+        if self.insecure_dev {
+            "http"
+        } else {
+            "https"
+        }
+    }
+
+    /// The apex host an app named `name` serves at:
+    /// `{name}.{app_base_domain}`. The per-app OAuth client's
+    /// redirect_uris / sector_identifier anchor here (Slice 1d, §1.1).
+    #[must_use]
+    pub fn apex_host_for_app(&self, name: &str) -> String {
+        format!("{name}.{}", self.app_base_domain)
+    }
+
+    /// Idempotently provision (or reconcile) the per-app public PKCE OAuth
+    /// client for `app_id` named `name`, using the apex host derived from
+    /// `app_base_domain`. Wraps [`app_oauth_client::ensure_app_client`] with
+    /// a fresh control-DB connection + a `HydraAdmin` over `hydra_admin_url`.
+    /// Slice 1d (spec §1.1). On success returns the per-app `client_id`
+    /// (`oac_<base62-app-id>`).
+    ///
+    /// # Errors
+    /// Surfaces the underlying [`app_oauth_client::AppOauthClientError`] as a
+    /// string. Callers log + continue (provisioning is best-effort relative
+    /// to the create/deploy response, but the route-sync invariant — every
+    /// deployed app's `RouteEntry` carries `Some(oauth_client_id)` — is held
+    /// by re-provisioning on deploy).
+    pub async fn provision_app_oauth_client(
+        &self,
+        app_id: &uuid::Uuid,
+        name: &str,
+    ) -> Result<String, String> {
+        let scheme = self.app_scheme();
+        let apex = self.apex_host_for_app(name);
+        let hosts = vec![apex];
+        let hydra = zeroship_auth::hydra_client::HydraAdmin::new(self.hydra_admin_url.clone());
+        let mut conn = self
+            .registry
+            .conn()
+            .await
+            .map_err(|e| format!("control db conn: {e}"))?;
+        app_oauth_client::ensure_app_client(
+            &mut conn, &hydra, app_id, name, scheme, &hosts,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// Delete the per-app public PKCE OAuth client from Hydra for `app_id`
+    /// (Slice 1d, spec §1.1: "on app delete → DELETE /admin/clients/<id>").
+    /// Wraps [`app_oauth_client::delete_app_client`] over a `HydraAdmin` built
+    /// from `hydra_admin_url`. The `control.oauth_clients` /
+    /// `control.app_oauth_clients` DB rows cascade-delete with the
+    /// `control.apps` row, so this only removes the Hydra-side registration.
+    ///
+    /// Hydra's `DELETE /admin/clients/{id}` is idempotent (404 → Ok), so a
+    /// re-run or a never-provisioned app is a clean no-op.
+    ///
+    /// # Errors
+    /// Surfaces the underlying [`app_oauth_client::AppOauthClientError`] as a
+    /// string. Callers log + continue: a leaked Hydra client is best-effort
+    /// GC, not a delete-blocking failure.
+    pub async fn delete_app_oauth_client(&self, app_id: &uuid::Uuid) -> Result<(), String> {
+        let hydra = zeroship_auth::hydra_client::HydraAdmin::new(self.hydra_admin_url.clone());
+        app_oauth_client::delete_app_client(&hydra, app_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Return whether `client_id` is present in a trusted-client set.

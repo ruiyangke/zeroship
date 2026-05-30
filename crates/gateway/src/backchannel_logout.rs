@@ -52,11 +52,31 @@ pub async fn handle(
 ) -> HttpResponse {
     // `state.oidc_rp.issuer` is the canonical hydra issuer string
     // (built from `auth_ui_url` at boot, optionally overridden via
-    // `OidcRp::with_issuer` in tests). `client_id` matches the OIDC
-    // client registered for the gateway in
-    // `ops/auth-clients.example.toml` (currently `"gateway"`).
+    // `OidcRp::with_issuer` in tests).
     let issuer = state.oidc_rp.issuer.clone();
-    let aud = state.oidc_rp.client_id.clone();
+
+    // Per-app BCL disambiguation (auth-sdk Slice 1d, spec §1.2). Each per-app
+    // OAuth client registers its own `backchannel_logout_uri` with its own
+    // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
+    // (routing only — the signature is still verified below) to learn which
+    // client it is for; a per-app client resolves to one app's subdomain so we
+    // revoke only THAT app's sessions. The legacy shared `gateway` client
+    // (`state.oidc_rp.client_id`) still revokes across the subject's gateway
+    // sessions for that aud.
+    //
+    // `revoke_scope` carries the app subdomain when a per-app client matched
+    // (revoke only that app), or `None` for the shared-client all-apps path.
+    let aud_candidates =
+        zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
+    let (aud, revoke_scope): (String, Option<String>) = aud_candidates
+        .iter()
+        .find_map(|cand| {
+            state
+                .routes
+                .lookup_by_oauth_client_id(cand)
+                .map(|(_id, route)| (cand.clone(), Some(route.entry.name.clone())))
+        })
+        .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None));
 
     let token = match zeroship_core::logout_token::verify(
         &state.oidc_rp.jwks,
@@ -98,30 +118,59 @@ pub async fn handle(
     if let Some(db) = state.db.as_ref() {
         match token.sub.as_deref() {
             Some(sub) => {
-                if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub) {
-                    if let Err(e) =
-                        zeroship_core::wrapper_revocation::revoke_subject(db.as_ref(), subject)
+                let revoked = match revoke_scope.as_deref() {
+                    // Per-app client matched (Slice 1d §1.2): revoke ONLY this
+                    // app's sessions for the subject. We do NOT push the subject
+                    // into the global wrapper denylist — that is a cross-app
+                    // nuke; a per-app BCL must not log the user out of other
+                    // apps.
+                    Some(app_name) => sessions::revoke_app_sessions_for_user(db, app_name, sub)
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                error = %e,
+                                app_id = %app_name,
+                                "backchannel_logout: revoke_app_sessions_for_user failed"
+                            );
+                            0
+                        }),
+                    // Shared `gateway` client (legacy path): revoke across the
+                    // subject's gateway sessions and push the subject into the
+                    // wrapper denylist (the original all-apps semantics).
+                    None => {
+                        if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub)
+                        {
+                            if let Err(e) = zeroship_core::wrapper_revocation::revoke_subject(
+                                db.as_ref(),
+                                subject,
+                            )
                             .await
-                    {
-                        tracing::error!(
-                            error = %e,
-                            sub = %sub,
-                            "backchannel_logout: wrapper subject revoke failed"
-                        );
+                            {
+                                tracing::error!(
+                                    error = %e,
+                                    sub = %sub,
+                                    "backchannel_logout: wrapper subject revoke failed"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                sub = %sub,
+                                "backchannel_logout: non-UUID sub cannot enter wrapper denylist"
+                            );
+                        }
+                        sessions::revoke_all_for_user(db, sub).await.unwrap_or_else(|e| {
+                            tracing::error!(
+                                error = %e,
+                                "backchannel_logout: revoke_all_for_user failed"
+                            );
+                            0
+                        })
                     }
-                } else {
-                    tracing::warn!(
-                        sub = %sub,
-                        "backchannel_logout: non-UUID sub cannot enter wrapper denylist"
-                    );
-                }
-                let revoked = sessions::revoke_all_for_user(db, sub).await.unwrap_or_else(|e| {
-                    tracing::error!(error = %e, "backchannel_logout: revoke_all_for_user failed");
-                    0
-                });
+                };
                 tracing::info!(
                     sub = %sub,
                     sid = ?token.sid,
+                    app = ?revoke_scope,
                     revoked,
                     "backchannel_logout: sessions revoked"
                 );

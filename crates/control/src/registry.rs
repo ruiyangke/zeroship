@@ -339,10 +339,16 @@ impl Registry {
     /// always defined (legacy fallback path was removed).
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
         let conn = self.conn().await?;
+        // LEFT JOIN control.app_oauth_clients (§1.5): a provisioned app yields
+        // Some(oauth_client_id)/Some(sector_identifier); an un-provisioned app
+        // (no extension row) yields NULL ⇒ None. The join key is the app id.
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, api_key_hash, deploy_hash, manifest_json \
-                 FROM control.apps",
+                "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
+                        a.manifest_json, c.client_id AS oauth_client_id, \
+                        c.sector_identifier \
+                 FROM control.apps a \
+                 LEFT JOIN control.app_oauth_clients c ON c.app_id = a.id",
                 &[],
             )
             .await?;
@@ -374,17 +380,15 @@ impl Registry {
                     api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
                     manifest,
-                    // OAuth identity fields (§1.5). `None` for every app
-                    // today: no app has a provisioned per-app OAuth
-                    // client yet. Slice 1d adds the per-app client
-                    // lifecycle and this query LEFT JOINs
-                    // `control.app_oauth_clients` to populate
-                    // `Some(client_id)`/`Some(sector_identifier)` for a
-                    // provisioned app (un-provisioned rows yield NULL ⇒
-                    // `None`). The wire field ships now so the gateway's
-                    // `CompiledRoute`/Bearer arm can consume it.
-                    oauth_client_id: None,
-                    sector_identifier: None,
+                    // OAuth identity fields (§1.5), populated by the LEFT JOIN
+                    // on `control.app_oauth_clients` above. A provisioned app
+                    // (Slice 1d created its per-app client) yields
+                    // `Some(client_id)`/`Some(sector_identifier)`; an
+                    // un-provisioned app has no extension row, so the join
+                    // produces NULL ⇒ `None`. The gateway's
+                    // `CompiledRoute`/browser-auth/Bearer arm consume these.
+                    oauth_client_id: row.get("oauth_client_id"),
+                    sector_identifier: row.get("sector_identifier"),
                 },
             );
         }

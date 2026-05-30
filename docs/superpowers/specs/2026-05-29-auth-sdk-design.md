@@ -597,9 +597,14 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
   host, no wildcards. ⚠️ **Round-3 (MINOR) — bound the array and the per-deploy PUT cost.** Two-per-host
   growth (2×N) is bounded by a **per-app custom-domain cap (default 50 ⇒ ≤102 redirect_uris)**, well
   within Hydra's tolerance (it stores them as a JSON array, validates by exact-match lookup). The
-  control plane recomputes the **full set idempotently** on each domain change and `PUT`s only on a
-  diff (no-op deploy ⇒ no-op PUT); concurrent attaches are serialized by the same
-  `control.app_oauth_clients` row update. Because the baseline is `subject_type: public` there is **no**
+  control plane recomputes the desired set **idempotently** on each domain change and `PUT`s only on a
+  diff (no-op deploy ⇒ no-op PUT). Reconciliation is **idempotent last-writer-wins**, NOT serialized:
+  there is no row/advisory lock — the full set is recomputed wholesale from persisted state and
+  PUT/upserted, so a race cannot drop, duplicate, or unboundedly grow URIs (and the apex deploy path
+  is a non-destructive set-UNION, so it can't clobber a concurrently-attached custom-domain URI). A
+  per-app advisory lock is only needed once custom-domain attach lands AND a concurrent apex-deploy +
+  attach could PUT *stale* host snapshots; until then every writer's input is apex-only and convergent.
+  Because the baseline is `subject_type: public` there is **no**
   sector document, so a `redirect_uris` PUT is a cheap local validation, not the outbound JSON
   fetch/re-validation that pushed us away from F4-A (below). (If F4-A is ever adopted, the documented
   escape from both the 2×N growth and the sector re-validation is a single platform-controlled callback
@@ -621,14 +626,30 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
 **Lifecycle** (control plane, `crates/control/src/`):
 - **On app create** (`api.rs:create_app`): create the Hydra client (`POST /admin/clients`) with
   the apex host's redirect URIs. Reuses the exact `HydraCreateClientRequest` shape already in
-  `oauth_handlers.rs` / `bootstrap_builder.rs`.
-- **On deploy / domain attach** (`api.rs:deploy`, custom-domain handler): `PUT /admin/clients/<id>`
-  to add/remove redirect URIs for the new host set. **This is the designed-but-unimplemented
-  per-app redirect registration — implement it here.**
-- **On app delete**: `DELETE /admin/clients/<id>` + cascade pairwise/relay cleanup (Subsystems 4,5).
-- New control module `crates/control/src/app_oauth_client.rs` holds `ensure_app_client(app)`,
-  `sync_app_redirect_uris(app, hosts)`, `delete_app_client(app_id)`; called from the app/deploy
-  handlers. Idempotent (upsert), mirroring `bootstrap_builder.rs`.
+  `oauth_handlers.rs` / `bootstrap_builder.rs`. **Implemented (Slice 1d)** via
+  `AppState::provision_app_oauth_client`, called before the create response returns so the
+  route-sync push that makes the host live already carries `Some(oauth_client_id)`.
+- **On deploy** (`api.rs:deploy`): re-provision (`AppState::provision_app_oauth_client`) **before**
+  the manifest commit, so the commit that makes the route resolvable to the gateway's 5s route-sync
+  pull is strictly after the client + its `control.app_oauth_clients` row exist (no cold-start
+  `client_not_provisioned` window). Diff-then-PUT — a no-op deploy makes no Hydra call. **The deploy
+  re-provision is non-destructive (set-UNION with the live client), so an apex-only deploy never
+  clobbers redirect_uris a future custom-domain attach added. Implemented (Slice 1d).**
+- **On domain attach** (custom-domain handler): `PUT /admin/clients/<id>` to add/remove redirect URIs
+  for the full host set via `sync_app_redirect_uris(app, hosts)`. **Slice-N-deferred:** there is no
+  custom-domain attach handler in the codebase yet, so `sync_app_redirect_uris`, `MAX_HOSTS`, the
+  ≤102 cap, and the multi-host branch are **not wired to a production caller in Slice 1d** — they are
+  kept, unit-tested, and called by the future attach slice. Slice 1d ships **apex-host-only**
+  end-to-end. When attach lands, add a per-app advisory lock if a concurrent apex-deploy + attach
+  could PUT stale host snapshots (see the concurrency note above).
+- **On app delete** (`api.rs:delete_app`): `DELETE /admin/clients/<id>` via
+  `AppState::delete_app_oauth_client` (idempotent — Hydra 404 ⇒ Ok), after the DB delete so a Hydra
+  outage can't strand a live app with no client. Without it every deleted app would leak a live
+  public PKCE client. Pairwise/relay cleanup cascades (Subsystems 4,5). **Implemented (Slice 1d).**
+- Control module `crates/control/src/app_oauth_client.rs` holds `ensure_app_client(app)`,
+  `sync_app_redirect_uris(app, hosts)`, `delete_app_client(app_id)`; wrapped by the
+  `AppState::{provision,delete}_app_oauth_client` handlers. Idempotent (upsert), mirroring
+  `bootstrap_builder.rs`.
 
 ⚠️ **Round-5 (MAJOR) — per-app clients register in the EXISTING `control.oauth_clients`, with
 `skip_consent = false`; `control.app_oauth_clients` is a thin per-app *extension*, not a parallel

@@ -111,6 +111,7 @@ services:
         --hydra-public-url http://auth.zeroship.localhost
         --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
+        --app-base-domain zeroship.localhost
         --bootstrap-builder-client
         --builder-client-secret-file /data/builder-client-secret
     environment:

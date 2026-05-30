@@ -92,6 +92,20 @@ pub async fn create_app(
     }
     match state.registry.create_app(&body.name, &body.plan_id).await {
         Ok(record) => {
+            // Slice 1d (§1.1): provision the per-app public PKCE OAuth client
+            // BEFORE the app is routable, so the route-sync push that makes the
+            // host live already carries Some(oauth_client_id) — no cold-start
+            // 503. Best-effort relative to the create response: a Hydra/DB
+            // hiccup here is logged + metered, and the next deploy re-provisions
+            // (ensure_app_client is idempotent). The app still exists.
+            if let Err(e) = state.provision_app_oauth_client(&record.id, &record.name).await {
+                tracing::error!(
+                    app_id = %record.id,
+                    app_name = %record.name,
+                    error = %e,
+                    "control: per-app OAuth client provisioning failed on create (will retry on deploy)"
+                );
+            }
             // Include api_key in the create response (it's skipped from normal serialization)
             let mut json = serde_json::to_value(&record).unwrap();
             json["api_key"] = serde_json::Value::String(record.api_key.clone());
@@ -174,7 +188,25 @@ pub async fn delete_app(
         }
     }
     match state.registry.delete_app(&uid).await {
-        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true})),
+        Ok(true) => {
+            // Slice 1d (§1.1): on app delete, DELETE the per-app OAuth client
+            // from Hydra. The DB rows cascade with the apps row, but Hydra is a
+            // separate source of truth — without this, every deleted app leaks a
+            // live public PKCE client (oac_<base62>) with valid redirect_uris.
+            // Best-effort + idempotent (Hydra 404 → Ok): a hiccup here is logged,
+            // not fatal — the app row is already gone, so the route is dead. The
+            // residual client can be GC'd later, never minting codes for a live
+            // app. Ordered AFTER the DB delete so a Hydra outage can't strand a
+            // live app with no client.
+            if let Err(e) = state.delete_app_oauth_client(&uid).await {
+                tracing::error!(
+                    app_id = %uid,
+                    error = %e,
+                    "control: per-app OAuth client delete failed on app delete (Hydra client leaked — GC later)"
+                );
+            }
+            web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true}))
+        }
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
@@ -308,8 +340,42 @@ pub async fn deploy(
 
     match result {
         Ok(success) => {
+            // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
+            // manifest commit so the route-sync invariant holds without a
+            // cold-start window. The manifest commit (below) is what makes the
+            // app's host resolvable to the gateway's 5s route-sync pull; doing
+            // the OAuth provisioning first means that by the time the route is
+            // published, the client (and its control.app_oauth_clients row that
+            // get_routes LEFT-JOINs into oauth_client_id) already exists — so a
+            // route-sync pull can never observe a live route with
+            // oauth_client_id=None. Reconcile is diff-then-PUT (a no-op deploy
+            // makes no Hydra call) and idempotent. Best-effort relative to the
+            // deploy response: a Hydra hiccup is logged and the next deploy
+            // re-provisions; the deploy 200 does NOT imply provisioning
+            // succeeded (the SDK relies on retryable-503 client_not_provisioned
+            // handling for that rare window).
+            match state.registry.get_app(&uid).await {
+                Ok(Some(app)) => {
+                    if let Err(e) = state.provision_app_oauth_client(&uid, &app.name).await {
+                        tracing::error!(
+                            app_id = %uid,
+                            error = %e,
+                            "control: per-app OAuth client reconcile failed on deploy"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::error!(
+                    app_id = %uid,
+                    error = %e,
+                    "control: deploy could not load app for OAuth client reconcile"
+                ),
+            }
+
             // Atomic UPDATE: deploy_hash + manifest_json land together
-            // so the gateway never sees half-applied state.
+            // so the gateway never sees half-applied state. Committed AFTER
+            // OAuth provisioning so the route only becomes resolvable once the
+            // client exists.
             match state
                 .registry
                 .set_deploy_with_manifest(&uid, &success.deploy_hash, &success.manifest_json)

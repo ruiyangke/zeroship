@@ -204,6 +204,14 @@ struct ControlCli {
     /// Expected OAuth access-token audience for control bearer auth.
     #[arg(long = "oauth-audience", env = "OAUTH_AUDIENCE", default_value = "control.zeroship.ai")]
     oauth_audience: String,
+
+    /// Apex domain hosted creator apps serve under. An app named `myapp`
+    /// serves at `myapp.{app_base_domain}`; the per-app OAuth client's
+    /// redirect_uris + sector_identifier are derived from that apex host
+    /// (Slice 1d, §1.1). Defaults to the prod apex; dev/compose set
+    /// `zeroship.localhost`.
+    #[arg(long = "app-base-domain", env = "APP_BASE_DOMAIN", default_value = "zeroship.ai")]
+    app_base_domain: String,
 }
 
 impl ControlCli {
@@ -249,6 +257,7 @@ impl std::fmt::Debug for ControlCli {
             .field("stash_signing_key", &"<redacted>")
             .field("auth_db_url", &"<redacted>")
             .field("oauth_audience", &self.oauth_audience)
+            .field("app_base_domain", &self.app_base_domain)
             .finish()
     }
 }
@@ -418,6 +427,7 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let expected_oauth_audience = cli.oauth_audience;
+    let app_base_domain = cli.app_base_domain;
 
     // Pure path resolution only — the writability PROBE (create_dir_all + probe
     // file) is deferred to the real startup path (M1) so `--check-config`
@@ -782,6 +792,7 @@ fn main() -> std::io::Result<()> {
         auth_pg,
         auth_db_url: auth_db_url_resolved,
         hydra_admin_url,
+        app_base_domain,
         trusted_oauth_clients,
         expected_oauth_audience,
         static_policies: zeroship_authz::load_platform_policies()

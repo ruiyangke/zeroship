@@ -307,6 +307,42 @@ pub async fn verify(
     Ok(claims)
 }
 
+/// Peek at a `logout_token`'s `aud` claim **without** verifying its
+/// signature, returning every audience string (the `aud` claim is a string or
+/// an array of strings per RFC 7519).
+///
+/// Per-app back-channel logout (auth-sdk Slice 1d, spec §1.2): the receiver
+/// must learn which per-app `client_id` the token is for **before** it can
+/// pick the expected `aud` to verify against. This peek is for *routing only*
+/// — the caller MUST still call [`verify`] with the chosen `aud` so the
+/// signature, issuer, and audience are all validated against a known key. An
+/// unverified `aud` is never trusted on its own.
+///
+/// Returns an empty vec for a malformed token or an `aud` of an unexpected
+/// JSON shape; the caller treats that as "no matching app" and rejects.
+#[must_use]
+pub fn unverified_aud_candidates(token: &str) -> Vec<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Vec::new();
+    }
+    let Ok(body_bytes) = URL_SAFE_NO_PAD.decode(parts[1]) else {
+        return Vec::new();
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&body_bytes) else {
+        return Vec::new();
+    };
+    match body.get("aud") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(ToString::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Decode-only path for tests that want to inspect the unverified body
 /// (e.g. cross-check what we sign matches what we parse). Not exposed
 /// outside the crate.
@@ -553,5 +589,36 @@ mod tests {
             .expect("verify sid-only");
         assert!(claims.sub.is_none());
         assert_eq!(claims.sid.as_deref(), Some("ses_xyz"));
+    }
+
+    #[test]
+    fn unverified_aud_candidates_handles_string_array_and_malformed() {
+        // Per-app BCL disambiguation (Slice 1d §1.2): peek the aud to route the
+        // token to the right per-app client BEFORE verifying. Supports the
+        // string-aud and array-aud RFC 7519 shapes; malformed tokens yield no
+        // candidates (caller rejects).
+        let (key, _cache) = make_key();
+
+        // String aud (Hydra's per-app client_id case).
+        let mut c = happy_claims();
+        c["aud"] = json!("oac_myapp");
+        let token = sign(&key, &c);
+        assert_eq!(
+            unverified_aud_candidates(&token),
+            vec!["oac_myapp".to_string()]
+        );
+
+        // Array aud.
+        let mut c = happy_claims();
+        c["aud"] = json!(["oac_a", "oac_b"]);
+        let token = sign(&key, &c);
+        assert_eq!(
+            unverified_aud_candidates(&token),
+            vec!["oac_a".to_string(), "oac_b".to_string()]
+        );
+
+        // Malformed token → no candidates.
+        assert!(unverified_aud_candidates("not-a-jwt").is_empty());
+        assert!(unverified_aud_candidates("a.b").is_empty());
     }
 }

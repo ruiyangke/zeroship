@@ -170,6 +170,44 @@ pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
     Ok(affected)
 }
 
+/// Revoke every live session for `user_id` **at one app** (`app_id`, the app
+/// subdomain). Returns the count of rows updated.
+///
+/// Per-app back-channel logout (auth-sdk Slice 1d, spec §1.2): each per-app
+/// OAuth client registers its own `backchannel_logout_uri` with its own `aud`
+/// (= the per-app `client_id`). The BCL handler resolves the `app_id` from that
+/// `aud` and revokes only **that app's** sessions for the subject — not every
+/// app the subject is signed into. A true platform-wide "log out of every app"
+/// is a separate, explicit control-plane action.
+///
+/// Idempotent — already-revoked rows are skipped via the `revoked_at IS NULL`
+/// filter.
+///
+/// # Errors
+/// [`GatewayError::Db`] on PG failure (including an unparseable `user_id`).
+pub async fn revoke_app_sessions_for_user(
+    conn: &Client,
+    app_id: &str,
+    user_id: &str,
+) -> Result<u64> {
+    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions revoke_app_sessions_for_user: invalid user_id: {e}"
+        ))
+    })?;
+    let affected = conn
+        .execute(
+            "UPDATE auth.gateway_sessions SET revoked_at = NOW() \
+             WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL",
+            &[&user_id, &app_id],
+        )
+        .await
+        .map_err(|e| {
+            GatewayError::Db(format!("gateway_sessions revoke_app_sessions_for_user: {e}"))
+        })?;
+    Ok(affected)
+}
+
 fn row_to_session(row: &compio_postgres::Row) -> AppSession {
     let user_id: Uuid = row.get("user_id");
     AppSession {
