@@ -47,16 +47,61 @@ impl ResendMailer {
 }
 
 /// Resend's request body shape. Only the fields we use today.
+///
+/// `reply_to` and `headers` are accepted by Resend's send API
+/// (<https://resend.com/docs/api-reference/emails/send-email>); the driver
+/// previously dropped both. Resend's HTTP API does **not** expose a
+/// per-message envelope-from override, so `Email.envelope_from` cannot be
+/// honoured here — which is why the relay forward path runs on the SMTP driver
+/// (sub-spec §3.2/§5.2), not Resend.
 #[derive(Debug, Serialize)]
 struct ResendRequest<'a> {
     from: String,
     to: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
     subject: &'a str,
     text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     html: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tags: Vec<ResendTag<'a>>,
+}
+
+impl<'a> ResendRequest<'a> {
+    /// Build the wire body from a provider-neutral [`Email`].
+    fn from_email(msg: &'a Email) -> Self {
+        let headers = if msg.headers.is_empty() {
+            None
+        } else {
+            Some(
+                msg.headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            )
+        };
+        Self {
+            from: format_address(&msg.from),
+            to: vec![format_address(&msg.to)],
+            reply_to: msg.reply_to.as_ref().map(format_address),
+            subject: &msg.subject,
+            text: &msg.text,
+            html: msg.html.as_deref(),
+            headers,
+            tags: msg
+                .tags
+                .iter()
+                .enumerate()
+                .map(|(i, t)| ResendTag {
+                    name: format!("zsTag{i}"),
+                    value: t.as_str(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Resend's tag object — `{ name, value }`. We don't have a name/value
@@ -81,22 +126,7 @@ impl Mailer for ResendMailer {
         check_suppression(db, &msg.to.email).await?;
 
         // 2. Build the JSON body.
-        let body = ResendRequest {
-            from: format_address(&msg.from),
-            to: vec![format_address(&msg.to)],
-            subject: &msg.subject,
-            text: &msg.text,
-            html: msg.html.as_deref(),
-            tags: msg
-                .tags
-                .iter()
-                .enumerate()
-                .map(|(i, t)| ResendTag {
-                    name: format!("zsTag{i}"),
-                    value: t.as_str(),
-                })
-                .collect(),
-        };
+        let body = ResendRequest::from_email(&msg);
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| MailerError::Transport(format!("resend encode: {e}")))?;
 
@@ -171,6 +201,71 @@ mod tests {
             }),
             "Ada <x@y.test>",
         );
+    }
+
+    /// §3.4 regression: a `ResendRequest` built from an `Email` carrying a
+    /// `reply_to` and a `headers: [("X-ZS-Relay","1")]` serializes BOTH fields.
+    /// Before the contract extension the driver dropped `headers` entirely and
+    /// had no `reply_to` field, so this assertion fails pre-fix.
+    #[test]
+    fn resend_request_serializes_reply_to_and_headers() {
+        let msg = Email {
+            to: Address {
+                email: "real@inbox.test".into(),
+                name: None,
+            },
+            from: Address {
+                email: "alias@relay.zeroship.ai".into(),
+                name: Some("App via relay".into()),
+            },
+            reply_to: Some(Address {
+                email: "alias@relay.zeroship.ai".into(),
+                name: None,
+            }),
+            envelope_from: None,
+            subject: "Receipt".into(),
+            text: "your receipt".into(),
+            html: None,
+            headers: vec![("X-ZS-Relay".into(), "1".into())],
+            tags: vec![],
+        };
+        let body = ResendRequest::from_email(&msg);
+        let json = serde_json::to_value(&body).expect("serialize");
+
+        assert_eq!(
+            json["reply_to"], "alias@relay.zeroship.ai",
+            "reply_to must serialize: {json}"
+        );
+        assert_eq!(
+            json["headers"]["X-ZS-Relay"], "1",
+            "X-ZS-Relay header must serialize: {json}"
+        );
+    }
+
+    /// Without a `reply_to` / `headers`, both keys are omitted (the
+    /// `skip_serializing_if` guards) so transactional Resend mail is unchanged.
+    #[test]
+    fn resend_request_omits_empty_reply_to_and_headers() {
+        let msg = Email {
+            to: Address {
+                email: "u@test".into(),
+                name: None,
+            },
+            from: Address {
+                email: "auth@zeroship.ai".into(),
+                name: None,
+            },
+            reply_to: None,
+            envelope_from: None,
+            subject: "hi".into(),
+            text: "body".into(),
+            html: None,
+            headers: vec![],
+            tags: vec![],
+        };
+        let json = serde_json::to_value(ResendRequest::from_email(&msg)).expect("serialize");
+        assert!(json.get("reply_to").is_none(), "reply_to omitted: {json}");
+        assert!(json.get("headers").is_none(), "headers omitted: {json}");
     }
 
     /// The Debug impl never reveals the API key — guards the

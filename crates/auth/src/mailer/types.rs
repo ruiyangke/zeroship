@@ -9,9 +9,20 @@ use thiserror::Error;
 pub struct Email {
     pub to: Address,
     pub from: Address,
+    /// Reply-To mailbox. `None` ⇒ no `Reply-To` header is emitted. Relay
+    /// forwards set this to the relay alias so user replies route back to the
+    /// relay (which bounces in v1), never to the real inbox or the third party.
+    pub reply_to: Option<Address>,
+    /// SMTP envelope-from (MAIL FROM / `Return-Path`). `None` ⇒ the driver uses
+    /// `from.email` as today (transactional mail is byte-for-byte unchanged).
+    /// Relay forwards pin this to the relay bounce mailbox so forwarded-mail
+    /// bounces NEVER route to the real inbox or the original sender.
+    pub envelope_from: Option<String>,
     pub subject: String,
     pub text: String,
     pub html: Option<String>,
+    /// Arbitrary `(name, value)` headers. Now actually emitted by the SMTP and
+    /// Resend drivers (the loop-protection `X-ZS-Relay` marker rides here).
     pub headers: Vec<(String, String)>,
     pub tags: Vec<String>,
 }
