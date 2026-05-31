@@ -310,6 +310,7 @@ services:
         --hydra-public-url http://auth.zeroship.localhost
         --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
+        --relay-forward-mailer stdout
         --bootstrap
     ports:
       - "9092:9092"
