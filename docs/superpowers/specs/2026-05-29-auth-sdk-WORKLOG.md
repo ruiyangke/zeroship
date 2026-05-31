@@ -17,11 +17,13 @@ grant-gated platform ops (no token minted). Design: `docs/superpowers/specs/2026
   DPoP-introspection arms (non-browser clients). Workflow `wrumlay3b` (critic 94, 0B/0M); I re-verified:
   gateway 355/0 on live PG+Hydra, no dangling refs, no new broken doc links. Renamed `build_state_with_wrapper*`
   → `build_state_with_session*`; annotated superseded Phase-8 plan pointer in `docs/reference/auth.md`.
-- **R1d** (next) revocation-marker short-TTL read-through cache → fully DB-free cookie hot path. The session
-  cookie verifies locally (sig); `is_family_revoked_since(client_id, pws_, iat)` is the ONLY remaining
-  per-request DB read (cookie arm `router/auth.rs:1218`; also Bearer :729 + DPoP-introspect :964). Security-sensitive.
-- **R2** SDK client rip-out (cacheLocation/InMemoryCache/LocalStorageCache/CacheManager/Web-Worker/navigator.locks/
-  getAccessToken — transport already migrated in R1b).
+- **R1d ✓** `80c8b5d6` short-TTL (5s) read-through `RevocationCache` (core) → cookie hot path fully DB-free on a
+  hit. Caches family latest `revoked_after` (Option<i64>, negative-cached), judged `> iat` LOCALLY; new core
+  `revoked_after_for` (ceil'd epoch), `is_family_revoked_since` delegates; all 3 arms via `family_revocation_decision`;
+  same-node bust via `invalidate()` at /signout + per-app BCL; fail-closed preserved. Workflow `wxo62pxo3` (critic 95,
+  all 6 security booleans true). Re-verified: gateway 359/0 + core green on live PG+Hydra. **GATEWAY-SIDE RESHAPE DONE.**
+- **R2** (next) SDK client rip-out (cacheLocation/InMemoryCache/LocalStorageCache/CacheManager/Web-Worker/navigator.locks/
+  getAccessToken — transport already migrated in R1b). BFF invariant: the browser NEVER holds a power token; identity-only.
 - **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
 - **R5** console collapse (console = pseudo-app on gateway `/__zs/auth/*`; delete builder bespoke RP).
 - **R4** grant-gated platform capabilities (formalize primitive-side grant check).
