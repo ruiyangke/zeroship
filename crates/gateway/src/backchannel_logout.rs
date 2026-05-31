@@ -190,6 +190,12 @@ pub async fn handle(
                                     "backchannel_logout: per-app token-family marker write failed"
                                 );
                             }
+                            // SAME-NODE write-side bust (R1d): a BCL landing on
+                            // THIS node busts the local cache entry for
+                            // `(aud, pws)` so the just-written marker is seen
+                            // immediately here; sibling nodes rely on the TTL
+                            // backstop.
+                            state.revocation_cache.invalidate(&aud, &pws);
                         } else {
                             tracing::warn!(
                                 app_id = %app_name,

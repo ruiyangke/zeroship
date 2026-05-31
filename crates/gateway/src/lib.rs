@@ -143,6 +143,19 @@ pub struct GateState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
+    /// Short-TTL read-through cache for the per-app family-marker revocation
+    /// read (BFF reshape R1d). The cookie / Bearer / DPoP-introspect arms each
+    /// run one per-request `is_family_revoked_since` DB read after the local
+    /// token verify; this cache makes the steady-state (no-revocation) hit
+    /// fully DB-free. It stores the family's latest `revoked_after`
+    /// (`Option<i64>` epoch seconds, `None` = no marker — negative caching is
+    /// mandatory) and the hot path re-judges `> iat` LOCALLY per request, so
+    /// one entry serves every cookie in the family. A cross-node revocation is
+    /// honored within `<= REVOCATION_CACHE_TTL_SECS` on a cache-warm node; a
+    /// SAME-NODE writer (`/signout`, back-channel logout) busts the entry
+    /// immediately via `invalidate`. Fail-closed is preserved: a cache MISS
+    /// followed by a DB error rejects, exactly as the un-cached read did.
+    pub revocation_cache: Arc<zeroship_core::wrapper_revocation::RevocationCache>,
     /// Gateway session-cookie signing key. Loaded from a PKCS#8 PEM/DER file
     /// at boot via `--signing-key-file`. `None` when the operator runs without
     /// the flag — the signed session cookie cannot be issued/verified, so the

@@ -696,6 +696,7 @@ fn main() -> std::io::Result<()> {
         db,
         dpop_jti_cache: Arc::new(dpop_jti_cache),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
         signing_key,
         prev_signing_key,
         session_issuer,

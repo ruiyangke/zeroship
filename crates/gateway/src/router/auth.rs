@@ -49,6 +49,96 @@ pub(crate) enum AuthOutcome {
     InsufficientScope { required: Vec<String> },
 }
 
+/// The per-request family-marker revocation decision, routed through the
+/// short-TTL [`RevocationCache`](zeroship_core::wrapper_revocation::RevocationCache)
+/// (BFF reshape R1d).
+///
+/// `NotRevoked` / `Revoked` are the two clean answers; `Unavailable` means a
+/// cache MISS hit a DB error (or no pooled connection) — every arm maps it to
+/// the SAME fail-closed rejection the un-cached direct read used. Keeping it a
+/// distinct variant (rather than collapsing into `Revoked`) keeps the arms'
+/// log lines accurate ("revocation check failed" vs "family revoked").
+enum RevocationDecision {
+    NotRevoked,
+    Revoked,
+    Unavailable,
+}
+
+/// Family-marker revocation gate for the three per-request auth arms (cookie /
+/// raw-Hydra Bearer / DPoP-introspect), routed through the short-TTL
+/// read-through cache (R1d).
+///
+/// On a FRESH cache hit the decision is computed LOCALLY (`revoked_after >
+/// iat`) with NO DB round-trip — this is the steady-state win that removes the
+/// last per-request DB read from the cookie hot path. On a MISS we check out a
+/// pooled connection, load the family's latest `revoked_after` via
+/// [`revoked_after_for`](zeroship_core::wrapper_revocation::revoked_after_for),
+/// cache it (negative results included — that is the whole point), and decide
+/// locally.
+///
+/// Fail-closed: a MISS that cannot reach the DB (pool checkout/get failure) or
+/// whose query errors returns [`RevocationDecision::Unavailable`] WITHOUT
+/// caching anything, so the next request retries the DB rather than serving a
+/// guessed answer. A cached "not revoked" entry MAY serve through a brief DB
+/// blip until its TTL expires (a small availability gain), after which a
+/// refresh-miss + DB-down fails closed again.
+///
+/// The caller MUST have already confirmed `state.db.is_some()`; this is only
+/// reached on the DB-configured path (the smoke/no-DB path skips revocation
+/// entirely, exactly as before).
+async fn family_revocation_decision(
+    state: &Arc<GateState>,
+    db_cfg: &crate::db::DbConfig,
+    client_id: &str,
+    sub: &str,
+    iat: i64,
+) -> RevocationDecision {
+    let now = std::time::Instant::now();
+
+    // 1. Fast path: a fresh cache entry answers locally, no DB.
+    if let Some(revoked_after) = state.revocation_cache.get(client_id, sub, now) {
+        return if zeroship_core::wrapper_revocation::family_revoked_at(revoked_after, iat) {
+            RevocationDecision::Revoked
+        } else {
+            RevocationDecision::NotRevoked
+        };
+    }
+
+    // 2. Miss: load the marker from the DB and populate the cache. Hold the
+    //    pooled connection only across this single lookup.
+    let pool = match crate::db::checkout(db_cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "revocation: pg pool checkout failed");
+            return RevocationDecision::Unavailable;
+        }
+    };
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "revocation: pg pool get failed");
+            return RevocationDecision::Unavailable;
+        }
+    };
+    match zeroship_core::wrapper_revocation::revoked_after_for(&conn, client_id, sub).await {
+        Ok(revoked_after) => {
+            // Cache the loaded marker (negative caching included) keyed on
+            // `now`; re-read `Instant::now()` is unnecessary — the lookup is
+            // fast and `now` is a tight upper bound on freshness.
+            state.revocation_cache.store(client_id, sub, revoked_after, now);
+            if zeroship_core::wrapper_revocation::family_revoked_at(revoked_after, iat) {
+                RevocationDecision::Revoked
+            } else {
+                RevocationDecision::NotRevoked
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, sub = %sub, "revocation check failed");
+            RevocationDecision::Unavailable
+        }
+    }
+}
+
 /// Resolve the per-request auth gate. Returns `Allowed` when the
 /// resource policy is satisfied, `Unauthenticated` otherwise. The
 /// caller layers the HTML-vs-API response decision on top.
@@ -712,29 +802,11 @@ async fn resolve_dpop_user_header(
         zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
     if let Some(db_cfg) = state.db.as_ref() {
         let iat = info.iat.unwrap_or(0);
-        let pool = match crate::db::checkout(db_cfg).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "DPoP introspection revocation: pg pool checkout failed");
-                return DpopOutcome::None;
-            }
-        };
-        let conn = match pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "DPoP introspection revocation: pg pool get failed");
-                return DpopOutcome::None;
-            }
-        };
-        match zeroship_core::wrapper_revocation::is_family_revoked_since(
-            &conn,
-            expected_client_id,
-            &pws_sub,
-            iat,
-        )
-        .await
-        {
-            Ok(true) => {
+        // Routed through the short-TTL read-through `revocation_cache` (R1d) —
+        // same as the cookie/Bearer arms.
+        match family_revocation_decision(state, db_cfg, expected_client_id, &pws_sub, iat).await {
+            RevocationDecision::NotRevoked => {}
+            RevocationDecision::Revoked => {
                 tracing::warn!(
                     client_id = %expected_client_id,
                     sub = %pws_sub,
@@ -742,11 +814,8 @@ async fn resolve_dpop_user_header(
                 );
                 return DpopOutcome::None;
             }
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, sub = %pws_sub, "DPoP introspection revocation check failed");
-                return DpopOutcome::None;
-            }
+            // Fail-closed: cache-miss + DB error rejects as before.
+            RevocationDecision::Unavailable => return DpopOutcome::None,
         }
     }
 
@@ -945,31 +1014,20 @@ async fn resolve_bearer_user_header(
         // above proved the token agrees and the marker is written against the
         // route's client.
         if let Some(db_cfg) = state.db.as_ref() {
-            // Check out a pooled connection for just this family-marker
-            // lookup and release it on drop.
-            let pool = match crate::db::checkout(db_cfg).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "raw-Hydra Bearer revocation: pg pool checkout failed");
-                    return BearerOutcome::Invalid;
-                }
-            };
-            let conn = match pool.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "raw-Hydra Bearer revocation: pg pool checkout failed");
-                    return BearerOutcome::Invalid;
-                }
-            };
-            match zeroship_core::wrapper_revocation::is_family_revoked_since(
-                &conn,
+            // Routed through the short-TTL read-through `revocation_cache`
+            // (R1d) — same as the cookie/DPoP arms. A fresh hit decides
+            // locally with no DB round-trip; a miss loads + caches the marker.
+            match family_revocation_decision(
+                state,
+                db_cfg,
                 expected_client_id,
                 &pws_sub,
                 claims.iat,
             )
             .await
             {
-                Ok(true) => {
+                RevocationDecision::NotRevoked => {}
+                RevocationDecision::Revoked => {
                     tracing::warn!(
                         client_id = %expected_client_id,
                         sub = %pws_sub,
@@ -977,11 +1035,8 @@ async fn resolve_bearer_user_header(
                     );
                     return BearerOutcome::Invalid;
                 }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, sub = %pws_sub, "raw-Hydra Bearer revocation check failed");
-                    return BearerOutcome::Invalid;
-                }
+                // Fail-closed: cache-miss + DB error rejects as before.
+                RevocationDecision::Unavailable => return BearerOutcome::Invalid,
             }
         }
         // Slice 4 (§6.2): the raw-Hydra `sub` is the GLOBAL Hydra UUID —
@@ -1196,34 +1251,19 @@ async fn resolve_app_session_user_header_inner(
     // Revocation gate — the per-app family marker (spec §8.5), keyed on
     // `(client_id, pws_)` with `iat` as the binding instant. The SAME mechanism
     // the Bearer/DPoP arms use: a revoked family rejects a still-valid signed
-    // cookie. This is a direct `SELECT EXISTS` (NOT cached), so it costs one
-    // revocation DB round-trip per request. Skipped when no DB is configured
-    // (smoke mode) — proving the verify path itself is DB-free for a valid
-    // cookie.
+    // cookie. Routed through the short-TTL read-through `revocation_cache`
+    // (R1d): a fresh cache hit decides `> iat` LOCALLY with NO DB round-trip,
+    // so the steady-state (no-revocation) cookie request is fully DB-free —
+    // the last per-request DB read on the hot path is gone on a cache hit. A
+    // cross-node revocation is honored within `<= REVOCATION_CACHE_TTL_SECS`;
+    // same-node `/signout` busts the entry immediately. Skipped when no DB is
+    // configured (smoke mode) — proving the verify path itself is DB-free for a
+    // valid cookie.
     if let Some(db_cfg) = state.db.as_ref() {
-        let pool = match crate::db::checkout(db_cfg).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "session cookie revocation: pg pool checkout failed");
-                return CookieOutcome::None;
-            }
-        };
-        let conn = match pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "session cookie revocation: pg pool checkout failed");
-                return CookieOutcome::None;
-            }
-        };
-        match zeroship_core::wrapper_revocation::is_family_revoked_since(
-            &conn,
-            &claims.app,
-            &claims.sub,
-            claims.iat,
-        )
-        .await
+        match family_revocation_decision(state, db_cfg, &claims.app, &claims.sub, claims.iat).await
         {
-            Ok(true) => {
+            RevocationDecision::NotRevoked => {}
+            RevocationDecision::Revoked => {
                 tracing::warn!(
                     client_id = %claims.app,
                     sub = %claims.sub,
@@ -1231,11 +1271,9 @@ async fn resolve_app_session_user_header_inner(
                 );
                 return CookieOutcome::None;
             }
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, sub = %claims.sub, "session cookie revocation check failed");
-                return CookieOutcome::None;
-            }
+            // Fail-closed: a cache-miss that could not reach the DB rejects,
+            // exactly as the un-cached direct read did.
+            RevocationDecision::Unavailable => return CookieOutcome::None,
         }
     }
 
@@ -1628,6 +1666,9 @@ mod tests {
             dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: StdArc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),
+            ),
+            revocation_cache: StdArc::new(
+                zeroship_core::wrapper_revocation::RevocationCache::new(),
             ),
             signing_key: Some(StdArc::new(signing)),
             prev_signing_key: None,
@@ -2597,6 +2638,7 @@ mod tests {
             db,
             dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: StdArc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            revocation_cache: StdArc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
             signing_key: Some(StdArc::new(gateway_signing)),
             prev_signing_key: None,
             session_issuer: Some(StdArc::new(session_issuer)),
@@ -2865,6 +2907,11 @@ mod tests {
                 .await
                 .expect("revoke_family app A");
         }
+        // R1d: the pre-revocation read warmed `(client_a, pws_a)` as "not
+        // revoked"; bust it the way the real same-node writer does so the next
+        // read reloads the just-written marker rather than serving the stale
+        // negative entry through its TTL.
+        state_a.revocation_cache.invalidate(client_a, &pws_a);
 
         // Arm 1 — REJECT: app A token now rejected (None). The new family
         // check fires before the pairwise projection / Allowed.
@@ -3106,6 +3153,10 @@ mod tests {
                 .await
                 .expect("revoke_family app A");
         }
+        // R1d: bust the same-node cache entry the pre-revocation read warmed,
+        // mirroring the real gateway writer; otherwise the negative entry would
+        // serve through its TTL and mask the just-written marker.
+        state.revocation_cache.invalidate("oac_app_a", &pws_a);
 
         // App A token: revoked → Invalid. (Sector present so the arm derives
         // the SAME pws_a the marker was written under.)
@@ -4000,7 +4051,10 @@ mod tests {
             "valid signed cookie must Allow before revocation"
         );
 
-        // Revoke the (client_id, pws_) family the way /signout does.
+        // Revoke the (client_id, pws_) family the way /signout does — and bust
+        // the same-node cache the way the real `/signout` writer does (R1d), so
+        // the next read reloads the just-written marker instead of serving the
+        // pre-revocation "not revoked" entry through its TTL.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
@@ -4008,6 +4062,7 @@ mod tests {
                 .await
                 .expect("revoke_family");
         }
+        state.revocation_cache.invalidate(client_id, &pws);
 
         // After revocation: the SAME valid cookie is rejected (stateless verify
         // succeeds, the family-marker gate fails it).
@@ -4034,6 +4089,337 @@ mod tests {
             .await
             .ok();
         }
+    }
+
+    // ─── R1d revocation-cache regression tests ──────────────────────────
+    //
+    // Each is constructed to FAIL on pre-R1d code (no cache) or on a naive
+    // cache (a precomputed bool, a missing negative-cache, no TTL, no bust).
+
+    /// Swap a fresh `RevocationCache` with the given TTL onto a (uniquely-owned)
+    /// state `Arc`. Used by the staleness / fail-closed tests to drive expiry
+    /// deterministically without sleeping.
+    fn set_revocation_cache_ttl(state: &mut std::sync::Arc<crate::GateState>, ttl_secs: u64) {
+        let s = std::sync::Arc::get_mut(state).expect("state Arc must be unique");
+        s.revocation_cache = std::sync::Arc::new(
+            zeroship_core::wrapper_revocation::RevocationCache::with_ttl_and_capacity(
+                ttl_secs, 1024,
+            ),
+        );
+    }
+
+    /// Replace `state.db` (point it at an unreachable DSN, or drop it) on a
+    /// uniquely-owned state `Arc`.
+    fn set_state_db(
+        state: &mut std::sync::Arc<crate::GateState>,
+        db: Option<crate::db::DbConfig>,
+    ) {
+        let s = std::sync::Arc::get_mut(state).expect("state Arc must be unique");
+        s.db = db;
+    }
+
+    /// (a) STALENESS BOUND. Warm the cache with "not revoked", THEN write a
+    /// revocation marker, THEN let the entry expire (TTL=0 ⇒ the next read is a
+    /// miss) — the next check must REJECT, proving a cross-node revocation is
+    /// honored within `<= TTL`.
+    ///
+    /// FAILS on a naive infinite-TTL cache (the stale "not revoked" would serve
+    /// forever) and proves the entry is re-loaded from the DB after expiry.
+    /// PG-gated.
+    #[compio::test]
+    async fn revocation_cache_honors_revocation_after_ttl_expiry() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let mut state = build_state_with_session_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        // TTL=0 ⇒ every stored entry reads back as a MISS, so each request
+        // reloads from the DB. This is the "entry expired" condition.
+        set_revocation_cache_ttl(&mut state, 0);
+
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, "myapp.zeroship.ai")
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request();
+        let rid = Uuid::new_v4();
+
+        // Warm: pre-revocation read caches "not revoked" (which immediately
+        // expires under TTL=0) → Allowed.
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await,
+                CookieOutcome::Allowed(_)
+            ),
+            "valid cookie must Allow before any revocation"
+        );
+
+        // Cross-node revoke: write the marker DIRECTLY (no same-node bust). The
+        // ONLY thing that can make the next read honor it is the TTL expiry
+        // forcing a DB reload.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws)
+                .await
+                .expect("revoke_family");
+        }
+
+        // After TTL expiry: the entry is a miss → DB reload → marker found →
+        // REJECT.
+        let after =
+            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        assert!(
+            matches!(after, CookieOutcome::None),
+            "after TTL expiry the cross-node revocation must be honored, got {after:?}"
+        );
+
+        // Cleanup.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                &[&client_id, &pws],
+            )
+            .await
+            .ok();
+        }
+    }
+
+    /// (b) NEGATIVE-CACHE DB-AVOIDANCE. Warm an unrevoked family via a live DB
+    /// (caches `Some(None)`), THEN point `state.db` at an UNREACHABLE DSN and
+    /// assert the cached "not revoked" entry STILL serves Allowed within the
+    /// TTL — proving the 2nd consecutive check did NOT touch the DB (a DB touch
+    /// against the dead DSN would fail-closed to `None`). After the TTL expires,
+    /// the no-DB miss correctly fails CLOSED.
+    ///
+    /// The no-DB-on-hit property is made observable two ways: (1) the second
+    /// read Allows DESPITE a dead DB (only possible from the cache), and (2)
+    /// `revocation_cache.get(...)` is asserted to hold `Some(None)`. FAILS on a
+    /// cache without negative caching (an unrevoked family would store nothing
+    /// → the second read would hit the dead DB → fail closed). PG-gated.
+    #[compio::test]
+    async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        // Long TTL so the warmed negative entry is unquestionably fresh for the
+        // second read.
+        let mut state = build_state_with_session_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        set_revocation_cache_ttl(&mut state, 600);
+
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        // Ensure no stale marker exists for this fresh family.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                &[&client_id, &pws],
+            )
+            .await
+            .ok();
+        }
+        let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, "myapp.zeroship.ai")
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request();
+        let rid = Uuid::new_v4();
+
+        // Warm (DB present): loads `None` (no marker) and caches it.
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await,
+                CookieOutcome::Allowed(_)
+            ),
+            "first read warms the negative cache entry"
+        );
+        // The negative entry is now present and fresh — observable directly.
+        assert_eq!(
+            state.revocation_cache.get(client_id, &pws, std::time::Instant::now()),
+            Some(None),
+            "negative caching is mandatory: an unrevoked family must be cached as None"
+        );
+
+        // Now point the state's DB at an UNREACHABLE DSN. If the 2nd read hit
+        // the DB it would fail-closed (the miss + DB error path → None). It does
+        // NOT, because the fresh negative cache entry serves the answer with
+        // ZERO DB contact.
+        set_state_db(
+            &mut state,
+            Some(crate::db::DbConfig::new(
+                "postgres://nope:nope@127.0.0.1:1/none",
+                1,
+            )),
+        );
+        let second =
+            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        assert!(
+            matches!(second, CookieOutcome::Allowed(_)),
+            "a fresh negative cache entry must serve Allowed without touching the DB, got {second:?}"
+        );
+
+        // Replace the cache with an empty one (TTL=0): the next read is a cold
+        // miss + unreachable DB → fails CLOSED.
+        set_revocation_cache_ttl(&mut state, 0);
+        // Re-warm under TTL=0 is impossible (the DB is unreachable), so the next
+        // read is a miss against a dead DB.
+        let after_expiry =
+            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        assert!(
+            matches!(after_expiry, CookieOutcome::None),
+            "after TTL expiry a cache miss with a dead DB must fail closed, got {after_expiry:?}"
+        );
+
+        // Cleanup (reconnect via the good DSN).
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                &[&client_id, &pws],
+            )
+            .await
+            .ok();
+        }
+    }
+
+    /// (c) SAME-NODE BUST. A gateway signout/revoke for `(client_id, sub)` makes
+    /// the very next check REJECT WITHOUT waiting for the TTL. Uses a LONG TTL
+    /// (600 s) so a passing result can ONLY come from the immediate bust, not
+    /// from expiry.
+    ///
+    /// FAILS on a cache that lacks a write-side bust (the stale "not revoked"
+    /// would serve for the full 600 s). PG-gated.
+    #[compio::test]
+    async fn revocation_cache_same_node_bust_takes_effect_immediately() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let mut state = build_state_with_session_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        // Long TTL: only the bust (not expiry) can produce a rejection.
+        set_revocation_cache_ttl(&mut state, 600);
+
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, "myapp.zeroship.ai")
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request();
+        let rid = Uuid::new_v4();
+
+        // Warm "not revoked" (cached for 600 s).
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await,
+                CookieOutcome::Allowed(_)
+            ),
+            "valid cookie must Allow before signout"
+        );
+
+        // Same-node signout: write the marker AND bust the cache (exactly what
+        // the real `/signout` writer does, R1d).
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws)
+                .await
+                .expect("revoke_family");
+        }
+        state.revocation_cache.invalidate(client_id, &pws);
+
+        // The very next check rejects — no 600 s TTL wait.
+        let after =
+            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        assert!(
+            matches!(after, CookieOutcome::None),
+            "a same-node bust must reject the very next request without a TTL wait, got {after:?}"
+        );
+
+        // Cleanup.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                &[&client_id, &pws],
+            )
+            .await
+            .ok();
+        }
+    }
+
+    /// (d) FAIL-CLOSED on cache-miss + DB error. With the DB configured but
+    /// UNREACHABLE and a cold cache, the revocation read errors → the cookie arm
+    /// MUST reject (`CookieOutcome::None`), preserving the pre-R1d fail-closed
+    /// posture. No PG needed (the point is the DB is unreachable).
+    #[ntex::test]
+    async fn revocation_cache_miss_plus_db_error_fails_closed() {
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        // DB configured (so the revocation block runs) but pointed at a dead
+        // address — the pool checkout/query will error.
+        let dead_db = crate::db::DbConfig::new("postgres://nope:nope@127.0.0.1:1/none", 1);
+        let state = build_state_with_session_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(dead_db),
+        );
+
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, "myapp.zeroship.ai")
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request();
+        let rid = Uuid::new_v4();
+
+        // Cold cache + dead DB ⇒ miss + DB error ⇒ reject (fail-closed).
+        let outcome =
+            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        assert!(
+            matches!(outcome, CookieOutcome::None),
+            "a cache miss followed by a DB error must fail closed, got {outcome:?}"
+        );
+        // And nothing was cached (the error path must not poison the cache).
+        assert!(
+            state
+                .revocation_cache
+                .get(client_id, &pws, std::time::Instant::now())
+                .is_none(),
+            "a failed DB read must NOT populate the cache"
+        );
     }
 
     /// The LIVE per-request dispatch gate `resolve_auth` authenticates a signed

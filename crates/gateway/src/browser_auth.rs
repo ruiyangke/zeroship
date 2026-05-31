@@ -364,6 +364,15 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             {
                 tracing::warn!(error = %e, "/signout: family-marker upsert failed");
             }
+            // SAME-NODE write-side bust (R1d): drop any cached "not revoked"
+            // entry for this family so a request hitting THIS node right after
+            // signout reloads the just-written marker IMMEDIATELY — no TTL
+            // wait. Cross-node readers rely on the TTL backstop. Invalidate
+            // unconditionally (even on a marker-write error): the entry is now
+            // suspect, and a reload is the safe default.
+            state
+                .revocation_cache
+                .invalidate(&anchor.client_id, pws_sub);
         }
 
         // (c) Delete the anchor row(s) and collect the family ciphertexts
