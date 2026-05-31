@@ -48,9 +48,20 @@ grant-ceiling via AuthzGuard. Control bearer NEVER reaches the browser. SECURITY
 mint an aud=control token. **LOCKED DECISIONS:** (1) SSE-over-fetch sufficient — gateway WS-subscription 501 is NOT a console
 blocker; (2) SHARED worker pool, NO dedicated trusted tier — safety rests on no-ambient-authority (control_key never JS,
 identity re-derived server-side); platform-privileged flag only permits declaring reserved scopes; (3) console on enterprise
-plan (no CPU/wall cap); (4) internal services reached via allowlisted PUBLIC hostnames, no SSRF carve-out. BLOCKER to clear:
+plan (no CPU/wall cap); (4) internal services reached via allowlisted PUBLIC hostnames, no SSRF carve-out. BLOCKER to clear (Phase 2):
 multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin into `crates/worker/src/cache.rs create_plugins()`
-(the console imports @zeroship/kv). Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
+(the console imports @zeroship/kv).
+
+### Console build progress (R4→kernel→R5)
+- **Phase 1 / R4 ✓** `610ad10d` grant-gated power-token mint. Runtime-mediated `env.auth.getAccessToken` async op (control_key
+  never JS); control `/internal/power-token` fail-closed chain (channel→identity-from-signed-header→grant-ceiling→step-up→
+  trusted_oauth_clients audience boundary); ed25519 zs-power+jwt 300s; AuthzGuard::guard_from_power_token; @zeroship/auth/server
+  getAccessToken/fetchAs (server-only). Migration via NEW changeset 0011 (not editing 0006). Workflow `wm3nryq4l` (critic 90, all 8
+  security booleans, RED-TEAM boundary_holds=true / no escalation across 7 vectors). Re-verified on live PG: power_token_test 10/10,
+  control_key_is_never_js_reachable, full control + runtime 227 + worker 18 + gateway 27 + SDK 77. Step-up decision: env:write/apps:write
+  NOT step-up (env:* config vs secrets:* split); deferred minors: split-DB doc note, bounded-60s header replay (v1-ok).
+- **Phase 2 / kernel convergence** (next) wire KvPlugin+StoragePlugin into multi-node worker create_plugins() + config plumbing +
+  faithful regression (all 4 env.* namespaces resolve through the REAL worker path). Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
 never an HTTP route. Cutover DELETES the bespoke RP (builder oauth.ts/session.ts/oauth-store.ts/control-client.ts) + control
 oidc_rp.rs + require_console_session — same patch; control becomes a pure API resource server. Repoint Caddy console → gateway.
 - **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
