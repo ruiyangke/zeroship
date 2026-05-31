@@ -18,10 +18,15 @@
  */
 
 .zs-auth-form-center {
-  /* Give the Center room so vertical centering reads on a tall viewport.
-     A consumer placing AuthForm in a constrained region can override
-     min-block-size via the Center `minHeight` prop. */
-  min-block-size: 100%;
+  /* Give the Center room so vertical centering reads on a full-page auth
+     surface. `100%` only resolves against a definite-height ancestor —
+     without one the box collapses to its content height and the card
+     pins to the top. `100dvh` keys off the dynamic viewport so the
+     centering works on a bare page (the one legitimate viewport-unit use:
+     AuthForm is a full-page sign-in surface). A consumer placing AuthForm
+     in a constrained region can still override min-block-size via the
+     Center `minHeight` prop. */
+  min-block-size: 100dvh;
   padding: var(--zs-space-6);
   font-family: var(--zs-font-system);
 }

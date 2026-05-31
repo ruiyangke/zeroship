@@ -133,7 +133,9 @@
   inline-size: var(--zs-space-6);
   block-size: var(--zs-space-6);
   padding: 0;
-  margin-inline-start: var(--zs-space-2);
+  /* No inline-start margin: the row Stack's own gap already separates the
+     dismiss button from the text column. A margin here would double that
+     gap. */
   border: 0;
   border-radius: var(--zs-radius-2);
   background: transparent;

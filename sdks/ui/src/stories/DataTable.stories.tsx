@@ -987,6 +987,299 @@ export const FractionalPageSize: Story = {
   },
 };
 
+/* ─── 18. BooleanAndDangerInk (🔴 1 regression) ─────────────────────────
+ * The "true" boolean glyph must paint system-green and the destructive
+ * row-action must paint system-red. Pre-fix the CSS referenced
+ * `--zs-success` / `--zs-danger` — tokens defined NOWHERE — so both
+ * silently fell back to the inherited ink (grey), losing the colour cue.
+ * The play() resolves each system token via a probe element (getComputedStyle
+ * normalises the token to the same rgb() the browser computes for the
+ * glyph/action) and asserts the rendered colour matches. */
+interface InkRow {
+  id: string;
+  active: boolean;
+}
+
+const INK_ROWS: InkRow[] = [{ id: "ink_1", active: true }];
+
+export const BooleanAndDangerInk: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: the `true` boolean glyph paints `--zs-system-green` " +
+          "and the destructive row-action paints `--zs-system-red`. Pre-fix " +
+          "the CSS used undefined `--zs-success` / `--zs-danger` tokens, so " +
+          "both lost their colour. The play() compares the rendered colour " +
+          "to a probe element resolving the system token.",
+      },
+    },
+  },
+  render: function BooleanAndDangerInkRender() {
+    const columns: DataTableColumn<InkRow>[] = [
+      { key: "active", header: "Active", type: "boolean", align: "center" },
+      {
+        key: "actions",
+        header: "Actions",
+        type: "actions",
+        actions: () => [
+          {
+            label: "Delete",
+            danger: true,
+            onSelect: () => {},
+            "data-testid": "ink-action-delete",
+          },
+        ],
+      },
+    ];
+    return (
+      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "32rem" }}>
+        {/* Probes resolve each system token to the rgb() the browser computes
+            so the assertion never hardcodes an oklch→rgb conversion. */}
+        <span
+          data-testid="probe-green"
+          style={{ color: "var(--zs-system-green)" }}
+        />
+        <span
+          data-testid="probe-red"
+          style={{ color: "var(--zs-system-red)" }}
+        />
+        <DataTable<InkRow>
+          data-testid="dt-ink"
+          caption="Boolean + danger ink"
+          columns={columns}
+          data={INK_ROWS}
+          rowKey={(r) => r.id}
+        />
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    // Normalize any CSS color string to a serialization-agnostic key: the
+    // empty probe span serializes the SPECIFIED `oklch(...)` while the
+    // rendered glyph reports the USED `oklab(...)` — same color, different
+    // serialization, so a raw string compare fails. Force both through
+    // `color-mix(in srgb, …)` (the browser converts any color space to a
+    // single `color(srgb …)` form), then round the channels so the two
+    // paths' last-digit rounding noise doesn't matter.
+    const norm = (c: string) => {
+      const e = document.createElement("span");
+      e.style.color = `color-mix(in srgb, ${c} 100%, transparent)`;
+      document.body.appendChild(e);
+      const resolved = getComputedStyle(e).color;
+      e.remove();
+      return (resolved.match(/-?\d*\.?\d+(?:e-?\d+)?/g) ?? [])
+        .map((n) => Number(n).toFixed(3))
+        .join(",");
+    };
+
+    const greenProbe = canvas.getByTestId("probe-green");
+    const redProbe = canvas.getByTestId("probe-red");
+    const expectGreen = getComputedStyle(greenProbe).color;
+    const expectRed = getComputedStyle(redProbe).color;
+
+    // The "true" boolean glyph carries data-value="true" and is tinted green.
+    const glyph = canvasElement.querySelector(
+      '.zs-data-table__bool-glyph[data-value="true"]',
+    ) as HTMLElement;
+    expect(glyph).toBeTruthy();
+    expect(norm(getComputedStyle(glyph).color)).toBe(norm(expectGreen));
+
+    // Open the kebab → the destructive item carries the danger class + ink.
+    const trigger = canvas.getByRole("button", { name: "Row actions" });
+    await userEvent.click(trigger);
+    const body = within(document.body);
+    const deleteItem = (await body.findByTestId(
+      "ink-action-delete",
+    )) as HTMLElement;
+    expect(deleteItem).toHaveClass("zs-data-table__row-action--danger");
+    expect(norm(getComputedStyle(deleteItem).color)).toBe(norm(expectRed));
+
+    // Close the menu so Base UI's transient focus-guard spans (tabindex=0 +
+    // aria-hidden, an internal of the open popup) are torn down before the
+    // a11y scan runs — otherwise they trip `aria-hidden-focus`. Other
+    // menu-opening stories close it implicitly by selecting an item; this
+    // story only reads a color, so close it explicitly.
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByTestId("ink-action-delete")).toBeNull(),
+    );
+  },
+};
+
+/* ─── 19. StickyTwoRowHeaderOffset (🔴 2 regression) ─────────────────────
+ * With a sticky header AND a per-column filter row, the filter row must pin
+ * flush beneath the header band — even when a header label WRAPS to two
+ * lines (taller than the old hardcoded 2.5rem fallback). Pre-fix the filter
+ * row's `inset-block-start` was stuck at 2.5rem (the
+ * `--zs-data-table-header-offset` custom property was never set), so a
+ * wrapping header left a gap/overlap. Post-fix a ResizeObserver measures the
+ * header height and publishes it as the offset on the scroll container. */
+const STICKY_OFFSET_ROWS: Person[] = Array.from({ length: 24 }, (_, i) => ({
+  id: `so_${i}`,
+  name: `Person ${i + 1}`,
+  role: i % 2 === 0 ? "Engineer" : "Analyst",
+  commits: (i * 37) % 500,
+}));
+
+export const StickyTwoRowHeaderOffset: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: with a sticky header + filter row, the filter row " +
+          "pins flush beneath the header even when a header label wraps to " +
+          "two lines. A ResizeObserver measures the header band and writes " +
+          "`--zs-data-table-header-offset` on the scroll container; the " +
+          "filter row reads it for its sticky offset. Pre-fix the offset was " +
+          "stuck at the 2.5rem fallback (gap/overlap under a tall header).",
+      },
+    },
+  },
+  render: function StickyTwoRowHeaderOffsetRender() {
+    // A deliberately long header label forced to wrap inside a narrow column.
+    const cols: DataTableColumn<Person>[] = [
+      {
+        key: "name",
+        header:
+          "A deliberately very long header label that wraps onto multiple lines",
+        cell: (p) => p.name,
+        width: "8rem",
+      },
+      { key: "role", header: "Role", cell: (p) => p.role },
+      { key: "commits", header: "Commits", cell: (p) => p.commits, align: "end" },
+    ];
+    return (
+      <div
+        className="zs-story-cell"
+        style={{
+          padding: "1rem",
+          maxInlineSize: "32rem",
+          maxBlockSize: "16rem",
+          overflow: "hidden",
+        }}
+      >
+        <DataTable<Person>
+          data-testid="dt-sticky-offset"
+          caption="Sticky header + filter row, wrapping header label"
+          columns={cols}
+          data={STICKY_OFFSET_ROWS}
+          rowKey={(p) => p.id}
+          stickyHeader
+          filterable
+          paginated={false}
+          style={{ maxBlockSize: "14rem" }}
+        />
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    // The header band height the filter row should sit below.
+    const headerRow = canvasElement.querySelector(
+      'thead tr:first-child',
+    ) as HTMLElement;
+    const filterRow = canvasElement.querySelector(
+      '[data-slot="data-table-filter-row"]',
+    ) as HTMLElement;
+    expect(headerRow).toBeTruthy();
+    expect(filterRow).toBeTruthy();
+
+    const headerHeight = headerRow.getBoundingClientRect().height;
+    const filterTh = filterRow.querySelector("th") as HTMLElement;
+
+    // The measured offset is published on the scroll container and matches
+    // the header band height (NOT the stale 2.5rem fallback). Read the
+    // resolved sticky offset off the filter <th>.
+    await waitFor(() => {
+      const offset = parseFloat(
+        getComputedStyle(filterTh).insetBlockStart || "0",
+      );
+      // The wrapping header is materially taller than the 2.5rem (40px)
+      // fallback, so a still-40px offset means the measurement never ran.
+      expect(offset).toBeGreaterThan(40);
+      expect(Math.abs(offset - headerHeight)).toBeLessThanOrEqual(2);
+    });
+  },
+};
+
+/* ─── 20. TruncateClamps (🟠 4 regression) ──────────────────────────────
+ * A truncating column with a long value in a width-constrained column must
+ * clip to an ellipsis, not overflow / grow the column. Pre-fix the
+ * `.zs-data-table__td--truncate` class had NO rule and the table used auto
+ * layout, so the inner span's `max-inline-size:100%` had no bound and the
+ * long value grew the column (no ellipsis). Post-fix the truncate cell
+ * collapses (`max-inline-size:0`) so the `<col>` width bounds it and the
+ * span clips. */
+interface DocRow {
+  id: string;
+  title: string;
+}
+
+const DOC_ROWS: DocRow[] = [
+  {
+    id: "d_1",
+    title:
+      "A very long document title that absolutely cannot fit inside a narrow column and must be clamped to a single line with an ellipsis",
+  },
+  { id: "d_2", title: "Short" },
+];
+
+export const TruncateClamps: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: a `truncate: true` column with a `width` clips a long " +
+          "value to a single line with an ellipsis instead of overflowing or " +
+          "growing the column. The play() asserts the cell does not overflow " +
+          "(`scrollWidth <= clientWidth + 1`).",
+      },
+    },
+  },
+  render: function TruncateClampsRender() {
+    const cols: DataTableColumn<DocRow>[] = [
+      {
+        key: "title",
+        header: "Title",
+        cell: (r) => r.title,
+        truncate: true,
+        width: "10rem",
+      },
+    ];
+    return (
+      <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "20rem" }}>
+        <DataTable<DocRow>
+          data-testid="dt-truncate"
+          caption="Truncating column"
+          columns={cols}
+          data={DOC_ROWS}
+          rowKey={(r) => r.id}
+        />
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    // The first row's truncate cell must NOT overflow its box.
+    const cell = canvasElement.querySelector(
+      '[data-slot="data-table-row"] .zs-data-table__td--truncate',
+    ) as HTMLElement;
+    expect(cell).toBeTruthy();
+    expect(cell).toHaveClass("zs-data-table__td--truncate");
+
+    const span = cell.querySelector(".zs-data-table__truncate") as HTMLElement;
+    expect(span).toBeTruthy();
+
+    await waitFor(() => {
+      // The clipped span overflows its OWN content (ellipsis active) but the
+      // cell box itself is bounded — it does not grow to fit the long text.
+      expect(span.scrollWidth).toBeGreaterThan(span.clientWidth);
+      expect(cell.scrollWidth).toBeLessThanOrEqual(cell.clientWidth + 1);
+    });
+  },
+};
+
 /* ─── 17. ManualFilteringWithoutPagination (🟠 dev-warn) ────────────────
  * Regression for the dev-only warning when `manualFiltering` is set
  * WITHOUT `manualPagination`. In that combination TanStack does not filter

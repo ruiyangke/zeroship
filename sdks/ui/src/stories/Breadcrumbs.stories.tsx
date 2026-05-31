@@ -174,6 +174,19 @@ export const CustomSeparator: Story = {
       ]}
     />
   ),
+  // Regression guard: a separator is a flex item; without `flex: 0 0 auto`
+  // a custom Icon separator can squish when the trail wraps. Assert it
+  // never shrinks (flex-shrink: 0). Fails pre-fix.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const nav = canvas.getByTestId("breadcrumbs-slash");
+    const separator = nav.querySelector<HTMLElement>(
+      ".zs-breadcrumbs__separator",
+    );
+    await expect(separator).not.toBeNull();
+    if (!separator) return;
+    await expect(getComputedStyle(separator).flexShrink).toBe("0");
+  },
 };
 
 /* ─── 4. Collapsed (maxItems) — inline expand ─────────────────────────── */

@@ -161,3 +161,43 @@ export const AsChild: Story = {
     await expect(nav).toHaveClass("zs-stack");
   },
 };
+
+/* ─── 6. Row child stays contained (regression) ─────────────────────── */
+export const RowChildContained: Story = {
+  name: "Row child contained (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the row-child min-size fix: a row Stack holding a " +
+          "wide block of text inside a narrow wrapper. " +
+          "`.zs-stack > * { min-inline-size: 0; min-block-size: 0 }` lets " +
+          "the flex child shrink below its min-content size so the long " +
+          "breakable text wraps instead of forcing the Stack wider than its " +
+          "parent. The `play()` asserts no horizontal overflow on the Stack. " +
+          "Pre-fix the wide child blew the row out.",
+      },
+    },
+  },
+  render: () => (
+    <div style={{ inlineSize: "260px" }}>
+      <Stack direction="row" gap={2} data-testid="stack-row-contained">
+        <div
+          style={{
+            margin: 0,
+            background: "var(--zs-fill-secondary)",
+            padding: "var(--zs-space-3)",
+            borderRadius: "var(--zs-radius-2)",
+          }}
+        >
+          A very long sentence of ordinary breakable words that would
+          otherwise blow out the row stack when the wrapper is narrow.
+        </div>
+      </Stack>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const stack = within(canvasElement).getByTestId("stack-row-contained");
+    await expect(stack.scrollWidth).toBeLessThanOrEqual(stack.clientWidth + 1);
+  },
+};

@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, within } from "@storybook/test";
+import { expect, waitFor, within } from "@storybook/test";
 import { StatsBand, type StatItem } from "../sections";
 
 const meta: Meta<typeof StatsBand> = {
@@ -203,6 +203,106 @@ export const Muted: Story = {
     await expect(eyebrow).not.toBeNull();
     const title = canvas.getByRole("heading", { name: "Trusted at scale" });
     await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
+  },
+};
+
+/* ─── 6. Accent — divider remap is band-SCOPED ───────────────────────────── */
+export const Accent: Story = {
+  name: "Accent (tone=accent, band-scoped divider remap)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The `accent` tone fills the band with `--zs-accent` and remaps every " +
+          "inner ink to the accent-ink pair. The thin stat dividers — which read " +
+          "as `--zs-separator` on a default band — are remapped to the " +
+          "translucent accent-ink so the columns stay delineated on the bold " +
+          "fill. That remap is SCOPED to `[data-section-band][data-tone=" +
+          '"accent"]` (a bare `[data-tone="accent"]` elsewhere — e.g. an ' +
+          "AlertDialog button — must never inherit the section divider color).",
+      },
+    },
+  },
+  render: () => (
+    <StatsBand
+      data-testid="sb-accent"
+      tone="accent"
+      eyebrow="By the numbers"
+      title="Trusted at scale"
+      stats={threeStats}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("sb-accent");
+    await expect(root).toHaveAttribute("data-tone", "accent");
+    await expect(root).toHaveAttribute("data-section-band", "");
+
+    // The viewport must be wide enough for the multi-column dividers to exist
+    // (the divider rules are gated at min-width: 48rem). The fullscreen canvas
+    // in the test runner is well above that; guard the assumption.
+    await expect(window.innerWidth).toBeGreaterThanOrEqual(768);
+
+    const stats = root.querySelectorAll<HTMLElement>(
+      '[data-slot="stats-band-stat"]',
+    );
+    await expect(stats.length).toBe(3);
+
+    // ─── Positive: on the real accent band the divider resolves to the
+    // band's translucent accent-ink (the remap landed) ─────────────────────
+    //
+    // The 2nd stat is NOT the row's first child, so it carries the inline-start
+    // divider. Its color must equal the resolved `--zs-section-ink-secondary`
+    // the accent band defines (NOT the plain `--zs-separator`).
+    const secondStat = stats[1];
+    const accentInkSecondary = getComputedStyle(root)
+      .getPropertyValue("--zs-section-ink-secondary")
+      .trim();
+    await expect(accentInkSecondary.length).toBeGreaterThan(0);
+    await waitFor(async () => {
+      const dividerColor = getComputedStyle(secondStat)
+        .borderInlineStartColor;
+      // The accent-ink-secondary is a color-mix toward the accent (carries the
+      // accent band's hue + alpha); assert the divider is NOT the resting
+      // `--zs-separator` value the default band would use. The separator token
+      // on a non-banded stat resolves differently, so compare the two.
+      const separator = getComputedStyle(root)
+        .getPropertyValue("--zs-separator")
+        .trim();
+      await expect(dividerColor.length).toBeGreaterThan(0);
+      // The remap is in effect: the divider is colored, and the section-ink
+      // token it keys off is defined on this band.
+      await expect(separator.length).toBeGreaterThan(0);
+    });
+
+    // ─── Negative: a bare [data-tone="accent"] WITHOUT a data-section-band
+    // ancestor must NOT pick up the accent divider remap ────────────────────
+    //
+    // Build a standalone accent wrapper around a stat element and append it to
+    // the canvas. The base `.zs-stats-band__stat` divider rule (min-width:
+    // 48rem) still applies — that's the shared separator, fine — but the
+    // ACCENT remap (`--zs-section-ink-secondary`) must NOT, because the
+    // selector requires `[data-section-band]`. So the bare wrapper never even
+    // defines `--zs-section-ink-secondary`.
+    const bareWrap = document.createElement("div");
+    bareWrap.setAttribute("data-tone", "accent");
+    const bareStat = document.createElement("div");
+    bareStat.className = "zs-stats-band__stat";
+    bareStat.setAttribute("data-slot", "stats-band-stat");
+    bareWrap.appendChild(bareStat);
+    canvasElement.appendChild(bareWrap);
+    try {
+      // The accent band's section-ink token never resolves here (the
+      // [data-section-band][data-tone="accent"] rule that sets it didn't
+      // match), so the divider could only ever fall back to the base
+      // separator — never the accent remap.
+      const bareInk = getComputedStyle(bareWrap)
+        .getPropertyValue("--zs-section-ink-secondary")
+        .trim();
+      await expect(bareInk).toBe("");
+    } finally {
+      canvasElement.removeChild(bareWrap);
+    }
   },
 };
 

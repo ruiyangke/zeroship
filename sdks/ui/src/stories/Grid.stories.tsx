@@ -187,3 +187,45 @@ export const ResponsiveBaseIsOne: Story = {
     ).toBe("1");
   },
 };
+
+/* ─── 7. Intrinsic narrow container (regression) ────────────────────── */
+export const IntrinsicNarrowContainer: Story = {
+  name: "Intrinsic, narrow container (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the intrinsic-overflow fix: an intrinsic grid " +
+          "with `minColWidth` LARGER than its wrapper (24rem min-col inside " +
+          "a 280px box). The track floor is `minmax(min(<minColWidth>, " +
+          "100%), 1fr)`, so the lone column shrinks to fit the container " +
+          "instead of forcing the 24rem column floor wider than the box. " +
+          "The `play()` asserts the grid's `scrollWidth` does not exceed " +
+          "its `clientWidth` (no horizontal overflow). Pre-fix the bare " +
+          "`minmax(<minColWidth>, 1fr)` floor pinned the column at 24rem " +
+          "(384px) inside the 280px box and overflowed.",
+      },
+    },
+  },
+  render: () => (
+    <div style={{ inlineSize: "280px" }}>
+      <Grid minColWidth="24rem" gap={3} data-testid="grid-narrow">
+        <div
+          style={{
+            background: "var(--zs-fill-secondary)",
+            padding: "var(--zs-space-3)",
+            borderRadius: "var(--zs-radius-2)",
+          }}
+        >
+          Card content that wraps normally inside the shrunk column.
+        </div>
+      </Grid>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const grid = within(canvasElement).getByTestId("grid-narrow");
+    // No horizontal overflow: the content fits within the rendered box
+    // (allow a 1px rounding slack).
+    await expect(grid.scrollWidth).toBeLessThanOrEqual(grid.clientWidth + 1);
+  },
+};

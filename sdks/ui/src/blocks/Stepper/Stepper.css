@@ -4,8 +4,14 @@
  * The root is an <ol> laid out as a flex line whose direction is driven
  * by [data-orientation]: a row for `horizontal`, a column for
  * `vertical`. Each <li> (.zs-stepper__step) carries the indicator + text
- * column and the connector to the next step. The connector is drawn as a
- * flex-growing line so steps distribute evenly along the axis.
+ * column and the connector to the next step.
+ *
+ * In HORIZONTAL mode the steps are equal-width (flex:1 1 0) centred
+ * columns (indicator over label) and the connector is an absolutely-
+ * positioned rule running from each indicator's centre to the next one's,
+ * so it links indicator centres rather than trailing the label. In
+ * VERTICAL mode the connector is an in-flow flex-growing block-axis rule
+ * down the indicator column.
  *
  *   .zs-stepper                       <ol> — the step line
  *     .zs-stepper__step               <li> — one step + its connector
@@ -37,9 +43,11 @@
 }
 
 /* ─── orientation ──────────────────────────────────────────────────────
- * horizontal: a row of steps; each step is itself a row (indicator → text)
- *   and the connector runs inline between indicators.
- * vertical: a column of steps; each step is a row (indicator → text) but
+ * horizontal: a row of equal-width steps; each step is a centred COLUMN
+ *   (indicator on top, label under it). The connector is an absolutely-
+ *   positioned inline rule spanning from this step's indicator centre to
+ *   the next step's indicator centre.
+ * vertical: a column of steps; each step is a row (indicator → text) and
  *   the connector runs in the block axis down the indicator column. */
 .zs-stepper[data-orientation="horizontal"] {
   flex-direction: row;
@@ -51,22 +59,30 @@
 }
 
 /* ─── step ─────────────────────────────────────────────────────────────
- * The <li>. In horizontal mode steps grow to share the axis (so the
- * connector stretches between them); the last step doesn't grow so its
- * text isn't pushed off-axis. In vertical mode the step is a block row. */
+ * The <li>. `position: relative` is the containing block for the
+ * horizontal connector (absolutely positioned). In horizontal mode every
+ * step is an equal-width centred column so indicators land on a regular
+ * grid the connector can bridge. In vertical mode the step is a block
+ * column (trigger then in-flow connector). */
 .zs-stepper__step {
   display: flex;
   position: relative;
 }
 
 .zs-stepper[data-orientation="horizontal"] > .zs-stepper__step {
+  /* Equal-width steps so each indicator sits at the step's horizontal
+     centre (50%). The connector is an absolutely-positioned rule running
+     from this centre to the next step's centre, so it needs equal tracks
+     to land on the indicator centres. */
   flex: 1 1 0;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: center;
 }
 
 .zs-stepper[data-orientation="horizontal"] > .zs-stepper__step:last-child {
-  /* Last step: no connector, no need to stretch — keep its text snug. */
-  flex: 0 1 auto;
+  /* Last step has no connector; equal width is unnecessary but harmless
+     and keeps the indicator centred under its label like the others. */
+  flex: 1 1 0;
 }
 
 .zs-stepper[data-orientation="vertical"] > .zs-stepper__step {
@@ -92,6 +108,17 @@
 
 .zs-stepper[data-orientation="vertical"] .zs-stepper__trigger {
   align-items: flex-start;
+}
+
+/* horizontal: label UNDER the indicator. A centred column puts the
+   indicator on the step's horizontal centre so the connector (drawn from
+   centre to centre) links indicator centres, not the trailing edge of a
+   side-by-side label. */
+.zs-stepper[data-orientation="horizontal"] .zs-stepper__trigger {
+  flex-direction: column;
+  align-items: center;
+  gap: var(--zs-space-1);
+  text-align: center;
 }
 
 button.zs-stepper__trigger {
@@ -183,10 +210,12 @@ button.zs-stepper__trigger:focus-visible {
 }
 
 /* ─── connector ────────────────────────────────────────────────────────
- * The line between a step's indicator and the next step's. It grows to
- * fill the gap so steps space evenly. Tint mirrors completion: a
- * connector LEAVING a completed step is accent (the path already walked);
- * everything else is the muted separator. */
+ * The line between a step's indicator and the next step's. In VERTICAL
+ * mode it is an in-flow flex child that grows to fill the gap (the flex
+ * props below); in HORIZONTAL mode it is absolutely positioned (those flex
+ * props are inert). Tint mirrors completion: a connector LEAVING a
+ * completed step is accent (the path already walked); everything else is
+ * the muted separator. */
 .zs-stepper__connector {
   flex: 1 1 auto;
   align-self: center;
@@ -198,23 +227,40 @@ button.zs-stepper__trigger:focus-visible {
   background-color: var(--zs-accent);
 }
 
-/* horizontal: a thin inline rule, vertically centred on the indicator row,
-   with breathing room either side. */
+/* horizontal: a thin inline rule linking THIS step's indicator centre to
+   the NEXT step's indicator centre.
+
+   Geometry: the step is an equal-width (flex:1 1 0) centred column, so the
+   indicator sits at the step's horizontal centre (50%). The connector is
+   taken out of flow and pinned starting at that centre, running one full
+   step width (100%) to land on the next step's centre (its 50% = this
+   step's 150%). The small inline insets keep the rule from touching the
+   badges. Vertically it is pinned to the indicator's centre — half the
+   badge height down from the step's block-start (the trigger's first row
+   is the indicator). */
 .zs-stepper[data-orientation="horizontal"] .zs-stepper__connector {
+  position: absolute;
   block-size: 0.125rem;
-  margin-inline: var(--zs-space-2);
-  /* Pin the line to the indicator's vertical centre rather than the row
-     centre (the text column makes the row taller than the badge). */
-  margin-block-start: calc(var(--zs-stepper-indicator-size) / 2);
-  align-self: flex-start;
+  /* From this indicator's centre to the next indicator's centre, inset a
+     touch on each side so the rule clears the two badges. */
+  inset-inline-start: calc(50% + var(--zs-stepper-indicator-size) / 2 + var(--zs-space-2));
+  inline-size: calc(100% - var(--zs-stepper-indicator-size) - 2 * var(--zs-space-2));
+  /* Vertical centre of the indicator row (badge sits at the top of the
+     trigger column): half the badge down, less half the rule thickness so
+     the 0.125rem line is centred on the indicator's mid-line. */
+  inset-block-start: calc(
+    var(--zs-stepper-indicator-size) / 2 - 0.0625rem
+  );
 }
 
 /* vertical: a thin block-axis rule running down the indicator column.
    The step is a flex-column (trigger then connector); the connector sits
    under the trigger, offset to align with the indicator centre. */
-.zs-stepper[data-orientation="vertical"] .zs-stepper__step {
+.zs-stepper[data-orientation="vertical"] .zs-stepper__step:not(:last-child) {
   /* Give every non-last step a minimum height so the connector has room
-     to run; the connector itself grows to fill it. */
+     to run; the connector itself grows to fill it. Scoped to :not(:last-
+     child) — the last step has no connector, so padding there is dead
+     trailing space. */
   padding-block-end: var(--zs-space-2);
 }
 

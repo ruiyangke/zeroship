@@ -30,6 +30,12 @@
      instead of stretching the full region width. */
   max-inline-size: 28rem;
   text-align: center;
+  /* Center the capped column within the (block-level) region. The merged
+     Center primitive centers this element's CHILDREN, but the column
+     itself is a block-level flex box at inline-start of the region, so
+     without this it hugs the inline-start edge on a wide surface (only
+     the centered text gives the illusion of centering). */
+  margin-inline: auto;
 }
 
 .zs-empty-state__icon {

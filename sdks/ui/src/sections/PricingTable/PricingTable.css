@@ -45,7 +45,7 @@
  *     inset, gap) for RTL.
  *
  * Motion: none of its own (the composed Card / Button honor reduced-motion
- * in their own CSS); the gate below exists for surface parity.
+ * in their own CSS), so there is nothing here to disable.
  */
 
 .zs-pricing {
@@ -327,15 +327,5 @@
      thicker Highlight cap on the block-start edge so the flag survives. */
   .zs-pricing__tier[data-featured]::before {
     background: Highlight;
-  }
-}
-
-/* ─── reduced-motion ─────────────────────────────────────────────────────
- * No-op — PricingTable has no motion of its own (the composed Card / Button
- * honor reduced-motion in their own CSS). The gate exists for parity with the
- * rest of the surface. */
-@media (prefers-reduced-motion: reduce) {
-  .zs-pricing {
-    /* nothing to disable; placeholder for surface parity */
   }
 }

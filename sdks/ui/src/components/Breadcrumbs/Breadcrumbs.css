@@ -107,6 +107,9 @@
 .zs-breadcrumbs__separator {
   display: inline-flex;
   align-items: center;
+  /* Never shrink — a custom Icon separator must keep its intrinsic size
+     when the trail wraps; without this it could squish as a flex item. */
+  flex: 0 0 auto;
   color: var(--zs-label-tertiary);
   user-select: none;
 }

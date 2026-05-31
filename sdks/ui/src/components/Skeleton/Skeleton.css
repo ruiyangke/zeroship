@@ -59,10 +59,14 @@
 
 .zs-skeleton--circle {
   /* Square aspect forced to a circle. Default size keyed to a typical
-     avatar; consumers override via width/height (set BOTH for a true
-     circle). */
+     avatar. A consumer can pass just `width` (or just `height`) and the
+     `aspect-ratio: 1` keeps it round — the unconstrained axis derives
+     from the constrained one rather than locking to the default and
+     producing an ellipse. `block-size: auto` lets the ratio drive height
+     off the inline-size; the default inline-size covers the unsized case. */
   inline-size: var(--zs-space-10);
-  block-size: var(--zs-space-10);
+  block-size: auto;
+  aspect-ratio: 1;
   border-radius: var(--zs-radius-full);
 }
 

@@ -25,10 +25,37 @@
   align-items: center;
   flex-wrap: wrap;
   gap: var(--zs-space-3);
-  /* Summary anchors the start; the page row drifts to the end so the
-     control reads "context … actions" on a wide footer. */
-  justify-content: space-between;
+  /* Summary anchors the start; the page-size control + page row cluster at
+     the end via the auto inline-margin on the page-size (or, when it is
+     absent, on the page row — see those rules). Using auto-margins rather
+     than `justify-content: space-between` because space-between would
+     SPREAD all three regions (summary | page-size | pages) when a
+     page-size control is present, instead of clustering the two controls
+     at the end. The two mechanisms are mutually exclusive — auto-margins
+     win here. */
+  justify-content: flex-start;
   inline-size: 100%;
+  /* Containment context so the Prev/Next edge labels can collapse to a
+     chevron-only control keyed off the pagination's OWN width (it lives
+     in footers of varying width), not the viewport. */
+  container-type: inline-size;
+}
+
+/* ─── Prev / Next edge label ──────────────────────────────────────────────
+ * The "Prev"/"Next" word sits beside the chevron. On a narrow control it
+ * collapses to chevron-only so the page-number track keeps room; the
+ * aria-label on the Button carries the meaning regardless. */
+
+.zs-pagination__edge-label {
+  display: inline;
+}
+
+@container (max-width: 30rem) {
+  .zs-pagination__edge-label {
+    /* Hidden, not removed: the Button's aria-label still announces
+       "Go to previous/next page", so AT is unaffected. */
+    display: none;
+  }
 }
 
 /* ─── summary ──────────────────────────────────────────────────────────── */
@@ -65,13 +92,27 @@
 
 /* ─── page row ───────────────────────────────────────────────────────────
  * When a page-size control is present it already claimed the auto margin,
- * so the page row just trails it. When it is absent the page row takes the
- * end via the parent's space-between. */
+ * so the page row just trails it (the cluster sits at the end together).
+ * When it is absent the page row itself takes the auto margin to drift to
+ * the end, away from the start-anchored summary. */
 
 .zs-pagination__pages {
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-1);
+  /* Push to the inline end so it drifts away from the start-anchored
+     summary. */
+  margin-inline-start: auto;
+}
+
+/* When a page-size control is present it sits just before the page row and
+   already owns the trailing auto-margin (it consumes all the free space,
+   pulling itself AND the page row to the end as one cluster). Two
+   auto-margins would instead SPLIT the free space and scatter the two
+   controls, so drop the page row's auto-margin in that case — the page
+   row then trails the page-size with only the flex gap between them. */
+.zs-pagination__page-size + .zs-pagination__pages {
+  margin-inline-start: 0;
 }
 
 /* ─── buttons ────────────────────────────────────────────────────────────

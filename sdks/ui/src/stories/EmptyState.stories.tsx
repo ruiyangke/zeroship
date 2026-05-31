@@ -126,16 +126,57 @@ export const Compound: Story = {
   },
 };
 
+/* ─── WideCentering (centering guard) ───────────────────────────────────
+ * Regression for the off-center column: on a WIDE surface the capped
+ * `__column` must sit horizontally centered, not hug the inline-start
+ * edge. The fix is `margin-inline:auto` on `.zs-empty-state__column`.
+ * Pre-fix the column hugs left and this assertion fails. */
+export const WideCentering: Story = {
+  name: "Wide container (centering guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Rendered in a 60rem-wide surface. The capped centered column " +
+          "must be horizontally centered within the region — the play() " +
+          "asserts the column's bounding-box center-x ≈ the region's.",
+      },
+    },
+  },
+  render: () => (
+    <div data-testid="empty-wide" style={{ inlineSize: "60rem" }}>
+      <EmptyState
+        icon={<InboxGlyph />}
+        title="No messages yet"
+        description="When someone writes to you, their messages will appear here."
+        action={<Button>Compose</Button>}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const region = canvas.getByTestId("empty-wide");
+    const column = region.querySelector(
+      "[data-slot='empty-state-column']",
+    ) as HTMLElement;
+    await expect(column).not.toBeNull();
+    const r = region.getBoundingClientRect();
+    const c = column.getBoundingClientRect();
+    const regionCenter = r.left + r.width / 2;
+    const columnCenter = c.left + c.width / 2;
+    // Centered within a few px (allow rounding + sub-pixel layout slack).
+    await expect(Math.abs(columnCenter - regionCenter)).toBeLessThanOrEqual(2);
+  },
+};
+
 /* ─── DoubleHeading (dev-warn guard) ────────────────────────────────────
  * Regression for the dev-only warning when BOTH the ergonomic `title` prop
  * AND a compound `<EmptyState.Title>` child are supplied. They are additive,
  * so two same-level headings land in the document outline — a real a11y
- * outline defect. The block emits a `console.warn` telling the author to use
- * one or the other. We install a console.warn spy in beforeEach (the warn
- * renders two same-level headings. The dev-only `console.warn` telling the
- * author to use one or the other is compiled out of the production build, so
- * it cannot be asserted via the test-runner gate; this is a behavioral guard
- * that the dual-mode footgun produces two headings. Tagged `!autodocs`; the
+ * outline defect. The dev-only `console.warn` telling the author to use one
+ * or the other is compiled out of the production build, so it cannot be
+ * asserted via the test-runner gate; this is a behavioral guard that the
+ * dual-mode footgun produces two headings. Tagged `!autodocs`; the
  * heading-order axe rule is disabled because the duplicate outline is the
  * very defect this story demonstrates. */
 export const DoubleHeading: Story = {

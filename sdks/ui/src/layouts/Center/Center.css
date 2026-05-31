@@ -3,6 +3,8 @@
  *
  * Anatomy:
  *   .zs-center            — the centering flex box
+ *   .zs-center > *        — children (min-inline-size:0 + max-inline-size:100%
+ *                           so a wide/unbreakable child stays contained)
  *   .zs-center--inline    — horizontal-only variant (drops vertical)
  *
  * Driven by inline custom properties set from props:
@@ -23,6 +25,18 @@
   align-items: center;
   justify-content: center;
   min-block-size: var(--center-min-block, 0);
+  /* Let the box itself shrink below its content's intrinsic min-size so a
+   * wide unbreakable child can't push the Center wider than its parent. */
+  min-inline-size: 0;
+}
+
+/* Keep a wide/unbreakable child within the Center: `min-inline-size: 0`
+ * lets it shrink past its min-content size, `max-inline-size: 100%` caps
+ * it at the box so it can't spill out either side. Logical properties so
+ * RTL + vertical writing modes stay correct. */
+.zs-center > * {
+  min-inline-size: 0;
+  max-inline-size: 100%;
 }
 
 /* Horizontal-only: keep justify-content centered (main axis = inline in

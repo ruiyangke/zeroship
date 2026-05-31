@@ -15,11 +15,15 @@
  *   [data-sidebar-open]         present when open; absent collapses the rail
  *
  * Layout discipline:
- *   - The root is a flex COLUMN so the three bands stack; it sets
- *     `min-block-size: 100dvh` so the shell fills the dynamic viewport
- *     height (dvh, not px — tracks mobile browser-chrome show/hide; the
- *     no-raw-px rule explicitly permits dvh/%). The body Split gets
- *     `flex: 1` so it absorbs the remaining height between Header/Footer.
+ *   - The root is a flex COLUMN so the three bands stack; it sets a
+ *     DEFINITE `block-size: 100dvh` (a 100vh @supports fallback) so the
+ *     frame has a fixed height: Header/Footer pin to the band edges and
+ *     Main owns the scroll. A `min-block-size` would let tall content grow
+ *     the shell past the viewport and scroll the DOCUMENT instead (dvh,
+ *     not px — tracks mobile browser-chrome show/hide; the no-raw-px rule
+ *     explicitly permits dvh/%). The body Split gets `flex: 1` (and
+ *     `min-block-size: 0`) so it absorbs the remaining height between
+ *     Header/Footer and its scrollable Main can shrink to fit.
  *   - Surface hierarchy: the Header paints `--zs-surface-raised` (a step
  *     ABOVE the canvas) with a bottom hairline; the Sidebar rail paints
  *     `--zs-surface-sunken` (a step BELOW the canvas) with a hairline on
@@ -28,11 +32,15 @@
  *     content — wrap Main content in a `Container` or your own padded
  *     region). The Footer paints a top hairline. Raised header > canvas
  *     main > sunken rail is the deliberate layering.
- *   - The sidebar collapse is a width/visibility toggle keyed off
+ *   - The sidebar collapse is a width toggle keyed off
  *     `[data-sidebar-open]`: open → the rail keeps its
- *     `--app-shell-sidebar-width`; closed → it collapses to zero and is
- *     removed from layout (`display: none`) so Main spans full width.
- *     The inline-size transition is guarded by `prefers-reduced-motion`.
+ *     `--app-shell-sidebar-width`; closed → it ANIMATES to zero
+ *     (flex-basis/inline-size/min-inline-size/padding-inline/border-inline)
+ *     so Main spans full width. We animate to zero rather than
+ *     `display: none` so the inline-size transition is real (`display`
+ *     can't animate); AppShell.tsx puts the collapsed rail out of the
+ *     focus order + AT tree with `inert` + `aria-hidden`. The transition
+ *     is guarded by `prefers-reduced-motion`.
  *   - Logical properties throughout (block/inline) so RTL + vertical
  *     writing modes stay correct.
  *
@@ -47,12 +55,27 @@
    * the whole frame to a narrow column). Paired with the dvh min-height so
    * the frame fills both axes of its container/viewport. */
   inline-size: 100%;
-  /* dvh (dynamic viewport height) tracks the visible viewport as mobile
+  /* A DEFINITE block-size (not a min) so the body has a fixed height to
+   * flex within: Header/Footer pin to the band edges and Main owns the
+   * scroll. With a `min-block-size` the shell would grow past the viewport
+   * when Main is tall and the DOCUMENT would scroll instead — leaving
+   * Main's `overflow: auto` dead and the bands un-pinned.
+   *
+   * dvh (dynamic viewport height) tracks the visible viewport as mobile
    * browser chrome shows/hides — not a raw px length. Permitted by the
-   * no-raw-px rule (dvh/% are allowed). */
-  min-block-size: 100dvh;
+   * no-raw-px rule (dvh/% are allowed). The @supports fallback uses 100vh
+   * for engines without dvh support. */
+  block-size: 100dvh;
   background: var(--zs-surface);
   color: var(--zs-label);
+}
+
+/* Fallback for engines without dynamic-viewport-unit support: a definite
+ * 100vh so the frame still has a fixed height for Main to scroll within. */
+@supports not (height: 100dvh) {
+  .zs-app-shell {
+    block-size: 100vh;
+  }
 }
 
 /* ─── Header — raised band + bottom hairline ──────────────────────────── */
@@ -92,12 +115,13 @@
  * `--app-shell-sidebar-width`), so this rule owns only the surface,
  * the divider, padding, overflow, and the collapse transition. */
 .zs-app-shell__sidebar {
-  overflow: auto;
+  overflow: hidden auto;
   background: var(--zs-surface-sunken);
   padding-block: var(--zs-space-4);
   padding-inline: var(--zs-space-3);
   transition: flex-basis var(--zs-motion-base) var(--zs-motion-ease),
-    inline-size var(--zs-motion-base) var(--zs-motion-ease);
+    inline-size var(--zs-motion-base) var(--zs-motion-ease),
+    padding-inline var(--zs-motion-base) var(--zs-motion-ease);
 }
 
 /* Divider hairline on the rail edge facing Main. Default (start side, the
@@ -112,13 +136,21 @@
   border-inline-start: var(--zs-selection-hairline) solid var(--zs-separator);
 }
 
-/* Closed — the rail collapses out of the layout. The collapse is keyed
+/* Closed — the rail collapses to zero inline-size. The collapse is keyed
  * off the body Split losing [data-sidebar-open]; we target the sidebar
- * inside a closed body so Main spans full width. Using `display: none`
- * (not just zero width) so the rail leaves the layout AND the AT tree
- * when collapsed. */
+ * inside a closed body so Main spans full width. We animate to zero
+ * (basis + inline-size + min-inline-size + padding-inline + border-inline,
+ * with overflow already clipped) rather than `display: none` so the
+ * documented width transition is REAL — `display` is not animatable.
+ * Removal from the AT tree + focus order is handled by `inert` +
+ * `aria-hidden` on the rail element (set from AppShell.tsx when closed),
+ * which is the animation-safe equivalent of dropping it via display. */
 .zs-app-shell__body:not([data-sidebar-open]) > .zs-app-shell__sidebar {
-  display: none;
+  flex-basis: 0;
+  inline-size: 0;
+  min-inline-size: 0;
+  padding-inline: 0;
+  border-inline: 0;
 }
 
 /* ─── Main — fluid; arrange-only (no paint of its own) ────────────────── */

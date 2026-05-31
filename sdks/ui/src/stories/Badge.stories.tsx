@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, within } from "@storybook/test";
 import { Badge, type BadgeIntent, type BadgeVariant } from "../components";
 
 const meta: Meta<typeof Badge> = {
@@ -135,4 +136,52 @@ export const AsChildLink: Story = {
       <a href="#deployed">deployed</a>
     </Badge>
   ),
+};
+
+/* ─── 4. Long label ellipsizes (regression guard) ────────────────────── *
+ *
+ * A long label in a narrow container must CLAMP with an ellipsis, not
+ * hard-clip. `text-overflow: ellipsis` is inert on the inline-flex root,
+ * so the clamp lives on the inner `.zs-badge__label` block span. This
+ * guard fails pre-fix (when the clamp sat on the flex root). */
+export const LongLabelEllipsis: Story = {
+  name: "Long label ellipsizes",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "A long label in a narrow container clamps with an ellipsis via " +
+          "the inner `.zs-badge__label` block span — `text-overflow` is " +
+          "ignored on the inline-flex root, so the clamp must live on a " +
+          "block descendant (mirrors Tag).",
+      },
+    },
+  },
+  render: () => (
+    <div style={{ inlineSize: "6rem" }} data-testid="badge-clamp-container">
+      <Badge intent="info" data-testid="badge-long">
+        supercalifragilisticexpialidocious
+      </Badge>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const badge = canvas.getByTestId("badge-long");
+    const label = badge.querySelector<HTMLElement>(".zs-badge__label");
+    await expect(label).not.toBeNull();
+    if (!label) return;
+
+    // The clamp is on the label span, not the flex root.
+    await expect(getComputedStyle(label).textOverflow).toBe("ellipsis");
+    await expect(getComputedStyle(label).overflow).toBe("hidden");
+
+    // Content is actually clamped (text wider than the rendered box).
+    await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth);
+
+    // And the badge does not overflow its narrow container.
+    const container = canvas.getByTestId("badge-clamp-container");
+    await expect(badge.getBoundingClientRect().width).toBeLessThanOrEqual(
+      container.getBoundingClientRect().width + 1,
+    );
+  },
 };

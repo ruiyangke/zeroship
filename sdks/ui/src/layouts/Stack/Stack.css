@@ -3,6 +3,8 @@
  *
  * Anatomy:
  *   .zs-stack    — the flex container
+ *   .zs-stack > * — children (min-inline-size/min-block-size: 0 so a long
+ *                   token or wide <pre> can shrink instead of overflowing)
  *
  * Driven by inline custom properties set from props:
  *   --stack-direction   row | column     (default column)
@@ -29,4 +31,14 @@
   flex-wrap: var(--stack-wrap, nowrap);
   align-items: var(--stack-align, stretch);
   justify-content: var(--stack-justify, flex-start);
+}
+
+/* Children may shrink below their intrinsic min-size on both axes. Without
+ * this a row Stack holding a long unbreakable string or a wide `<pre>`
+ * forces the flex item to its min-content width and blows the Stack out
+ * past its parent; the logical min-sizes keep RTL + vertical writing modes
+ * correct. */
+.zs-stack > * {
+  min-inline-size: 0;
+  min-block-size: 0;
 }

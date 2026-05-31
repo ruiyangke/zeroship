@@ -242,11 +242,21 @@
    * steady centred value (mirrors the base `.zs-dialog-popup` rule;
    * `--nested-*` custom props keep nested-dialog scaling intact). */
   .zs-dialog-popup[data-starting-style],
-  .zs-dialog-popup[data-ending-style],
+  .zs-dialog-popup[data-ending-style] {
+    opacity: 1;
+    transform: translate(-50%, calc(-50% + var(--zs-nested-offset)))
+      scale(var(--zs-nested-scale));
+  }
+  /* Top placement is `top`-anchored — its steady state has NO -50%
+     vertical (only `--zs-nested-offset`). Lumping it into the centered
+     rule above re-added a -50% the steady state never had, causing a
+     one-frame vertical jump on open/close under reduced motion. Mirror
+     the steady top transform here instead (see the [data-placement="top"]
+     rule near line 199). */
   .zs-dialog-popup[data-placement="top"][data-starting-style],
   .zs-dialog-popup[data-placement="top"][data-ending-style] {
     opacity: 1;
-    transform: translate(-50%, calc(-50% + var(--zs-nested-offset)))
+    transform: translate(-50%, calc(var(--zs-nested-offset)))
       scale(var(--zs-nested-scale));
   }
   /* Full-takeover popups anchor to the viewport edges (transform: none);

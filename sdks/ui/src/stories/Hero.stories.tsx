@@ -466,3 +466,53 @@ export const AsChildFragmentRejected: Story = {
     }
   },
 };
+
+/* ─── Muted + backdrop — the wash survives the surface fill ───────────────── */
+export const MutedBackdrop: Story = {
+  name: "Muted + backdrop (surface fill AND radial wash coexist)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "A `tone=\"muted\"` Hero that also opts into `backdrop`. The tone " +
+          "paints the band's surface fill via `background-color`, and the " +
+          "backdrop layers its accent radial wash on `background-image` — the " +
+          "two are independent background longhands, so BOTH survive. (Before " +
+          "the fix the muted rule used the `background` SHORTHAND, which reset " +
+          "`background-image` to `none` and silently wiped the wash.)",
+      },
+    },
+  },
+  render: () => (
+    <Hero
+      data-testid="hero-muted-backdrop"
+      tone="muted"
+      backdrop
+      eyebrow={<Badge variant="soft">Platform</Badge>}
+      title="From idea to live app in minutes"
+      description="The muted surface fill and the accent backdrop wash coexist."
+      actions={<Button size="large">Start building</Button>}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("hero-muted-backdrop");
+    await expect(root).toHaveAttribute("data-tone", "muted");
+    await expect(root).toHaveAttribute("data-backdrop", "");
+
+    const styles = getComputedStyle(root);
+
+    // The backdrop wash SURVIVES: background-image is a real gradient, not
+    // `none`. Pre-fix the muted `background` shorthand reset it to `none`.
+    await expect(styles.backgroundImage).not.toBe("none");
+    await expect(styles.backgroundImage).toContain("gradient");
+
+    // …AND the muted surface fill is still painted (the tone's
+    // `background-color`), so both layers genuinely coexist rather than one
+    // clobbering the other.
+    const surface = styles.getPropertyValue("--zs-surface").trim();
+    await expect(surface.length).toBeGreaterThan(0);
+    await expect(styles.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    await expect(styles.backgroundColor).not.toBe("transparent");
+  },
+};

@@ -116,3 +116,47 @@ export const WithDivider: Story = {
     </DescriptionList>
   ),
 };
+
+/* ─── 4. Long unbreakable value (overflow guard) ─────────────────────────
+ * Regression guard for the horizontal-grid overflow: a long unbreakable
+ * detail value must wrap inside a narrow container instead of forcing the
+ * 1fr track wider than the container. The fix is the `minmax(0, 1fr)`
+ * track + `min-inline-size:0; overflow-wrap:break-word` on the detail.
+ * Pre-fix the container scrolls horizontally. */
+export const LongValueOverflow: Story = {
+  name: "Long value (overflow guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "A long unbreakable detail value inside a deliberately narrow " +
+          "container. The detail must wrap rather than overflow — the " +
+          "play() asserts the container does not scroll horizontally.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      data-testid="dl-narrow"
+      style={{ inlineSize: "20rem", overflow: "hidden" }}
+    >
+      <DescriptionList data-testid="dl-long">
+        <DescriptionList.Item>
+          <DescriptionList.Term>Token</DescriptionList.Term>
+          <DescriptionList.Detail>
+            urn:zeroship:token:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP
+          </DescriptionList.Detail>
+        </DescriptionList.Item>
+      </DescriptionList>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const container = canvas.getByTestId("dl-narrow");
+    // The long value wraps instead of forcing the grid track wider than
+    // the container; no horizontal overflow (allow 1px rounding slack).
+    await expect(container.scrollWidth).toBeLessThanOrEqual(
+      container.clientWidth + 1,
+    );
+  },
+};

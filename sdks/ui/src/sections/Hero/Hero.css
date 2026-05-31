@@ -241,13 +241,3 @@
     background: Canvas;
   }
 }
-
-/* ─── reduced-motion ─────────────────────────────────────────────────────
- * No-op — the Hero has no motion of its own (the composed Button / Badge /
- * Cluster honor reduced-motion in their own CSS). The gate exists for parity
- * with the rest of the surface. */
-@media (prefers-reduced-motion: reduce) {
-  .zs-hero {
-    /* nothing to disable; placeholder for surface parity */
-  }
-}

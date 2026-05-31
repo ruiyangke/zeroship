@@ -144,3 +144,46 @@ export const ValueOnly: Story = {
     <StatCard label="Total storage" value="2.4 TB" />
   ),
 };
+
+/* ─── 6. Long value (overflow guard) ─────────────────────────────────────
+ * Regression guard: a long unbreakable value must wrap/shrink inside the
+ * tile rather than blow out the card width. The fix is
+ * `min-inline-size:0; overflow-wrap:break-word` on the value. Pre-fix the
+ * card scrolls horizontally inside a narrow container. */
+export const LongValueOverflow: Story = {
+  name: "Long value (overflow guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "A long unbreakable value in a deliberately narrow container. " +
+          "The value must wrap rather than overflow the tile — the play() " +
+          "asserts the card does not scroll horizontally.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      data-testid="statcard-narrow"
+      style={{ inlineSize: "14rem", overflow: "hidden" }}
+    >
+      <StatCard
+        data-testid="statcard-long"
+        label="Wallet address"
+        value="0x4f3edF8a9b2C1d0E7a6B5c4D3e2F1a0B9c8D7e6F"
+        delta={{ value: "0%", direction: "flat" }}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const container = canvas.getByTestId("statcard-narrow");
+    const card = canvas.getByTestId("statcard-long");
+    // The value wraps; neither the wrapper nor the card overflows
+    // horizontally (allow 1px rounding slack).
+    await expect(container.scrollWidth).toBeLessThanOrEqual(
+      container.clientWidth + 1,
+    );
+    await expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth + 1);
+  },
+};

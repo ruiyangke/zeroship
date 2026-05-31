@@ -37,10 +37,12 @@
  * We COMPOSE the `Split` primitive for the body (Sidebar = Split.Side,
  * Main = Split.Main) rather than re-rolling a rail/fluid flex row. The
  * root is a flex column so the Header/body/Footer bands stack; the body
- * `Split` flexes to fill the remaining block-size. The root sets
- * `min-block-size: 100dvh` so the shell fills the dynamic viewport height
- * (dvh, not px — it tracks mobile browser chrome show/hide; the
- * no-raw-px rule explicitly permits dvh/%). A consumer that mounts the
+ * `Split` flexes to fill the remaining block-size. The root sets a
+ * DEFINITE `block-size: 100dvh` (a 100vh @supports fallback) so the frame
+ * has a fixed height: Header/Footer pin to the edges and Main owns the
+ * scroll (a `min-block-size` would let tall content scroll the document
+ * instead). dvh, not px — it tracks mobile browser chrome show/hide; the
+ * no-raw-px rule explicitly permits dvh/%. A consumer that mounts the
  * shell inside a smaller region can override via `style`/`className`.
  *
  * Sidebar collapse — CONTROLLED / uncontrolled, mirroring `Drawer`'s
@@ -54,11 +56,12 @@
  * `AppShell.Header` content and flips `sidebarOpen` (controlled) or calls
  * `useAppShellSidebar().setOpen` (uncontrolled). This matches Drawer:
  * the surface exposes state + setter, the consumer owns the control.
- * When closed, the Sidebar collapses to zero inline-size and is removed
- * from the layout (`display: none`); Main spans the full width. The
- * collapse rides on `data-sidebar-open` data-attributes consumed by
- * AppShell.css, with a `prefers-reduced-motion` guard on the width
- * transition.
+ * When closed, the Sidebar ANIMATES to zero inline-size (basis + width +
+ * padding) and Main spans the full width; it is taken out of the focus
+ * order + accessibility tree via `inert` + `aria-hidden` (not
+ * `display: none`, which cannot animate). The collapse rides on
+ * `data-sidebar-open` data-attributes consumed by AppShell.css, with a
+ * `prefers-reduced-motion` guard on the width transition.
  *
  * a11y landmarks:
  *   - Header  → `<header>`  (banner)
@@ -322,6 +325,12 @@ const AppShellSidebar = forwardRef<HTMLElement, AppShellSidebarProps>(
     // Our class / `data-sidebar-open` ride on the landmark element (the
     // CSS collapse keys off the body, but the state attr stays on the rail
     // for consumer hooks).
+    // When collapsed the rail animates to zero inline-size (AppShell.css)
+    // rather than `display: none`, so it stays in the layout for the width
+    // transition. `inert` + `aria-hidden` take it out of the focus order
+    // and the accessibility tree while collapsed — the animation-safe
+    // equivalent of the old display-removal.
+    const collapsed = ctx != null && !ctx.sidebarOpen;
     const Comp = asChild ? Slot : "aside";
     return (
       <Split.Side asChild data-slot="app-shell-sidebar">
@@ -329,6 +338,8 @@ const AppShellSidebar = forwardRef<HTMLElement, AppShellSidebarProps>(
           {...rest}
           ref={ref as Ref<HTMLElement>}
           data-sidebar-open={ctx?.sidebarOpen ? "" : undefined}
+          inert={collapsed ? true : undefined}
+          aria-hidden={collapsed ? true : undefined}
           className={classnames("zs-app-shell__sidebar", className)}
         >
           {children}

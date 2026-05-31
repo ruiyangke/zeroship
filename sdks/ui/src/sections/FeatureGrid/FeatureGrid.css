@@ -32,7 +32,7 @@
  *     gap) for RTL.
  *
  * Motion: none of its own (the composed Icon paints with currentColor and
- * carries no motion); the gate below exists for surface parity.
+ * carries no motion), so there is nothing here to disable.
  */
 
 .zs-feature-grid {
@@ -209,14 +209,5 @@
   .zs-feature-grid__item-icon {
     border: var(--zs-selection-hairline) solid CanvasText;
     color: CanvasText;
-  }
-}
-
-/* ─── reduced-motion ─────────────────────────────────────────────────────
- * No-op — FeatureGrid has no motion of its own (the composed Icon / Stack /
- * Grid carry none). The gate exists for parity with the rest of the surface. */
-@media (prefers-reduced-motion: reduce) {
-  .zs-feature-grid {
-    /* nothing to disable; placeholder for surface parity */
   }
 }

@@ -11,7 +11,7 @@
  *     defined height and you only want horizontal centering.
  *   - `minHeight` gives the box a floor so vertical centering has room
  *     to work even when the content is short (e.g. a full-viewport
- *     empty state: `minHeight="60vh"`).
+ *     empty state: `minHeight="60dvh"`).
  *
  * A Center paints NOTHING — no background, no border. It only arranges.
  *
@@ -38,7 +38,7 @@ export interface CenterProps extends ComponentPropsWithoutRef<"div"> {
   inline?: boolean;
   /**
    * Minimum block-size (height) so vertical centering has room when the
-   * content is short. A free CSS length, e.g. `"60vh"`.
+   * content is short. A free CSS length, e.g. `"60dvh"`.
    */
   minHeight?: string;
   /** Render-as the single child element rather than a `<div>`. */

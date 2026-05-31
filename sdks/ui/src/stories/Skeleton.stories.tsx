@@ -94,6 +94,39 @@ export const MultiLineText: Story = {
   },
 };
 
+/* ─── 2b. Circle stays round with a single dimension (regression guard) ─ *
+ *
+ * A circle skeleton given only `width` must stay round — `aspect-ratio: 1`
+ * derives the other axis. Pre-fix the variant locked BOTH inline+block to
+ * the default size, so a lone `width` produced an ellipse. */
+export const CircleSingleDimension: Story = {
+  name: "Circle stays round (single dimension)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "A circle given only `width` keeps a 1:1 aspect via " +
+          "`aspect-ratio: 1` (block-size derives from inline-size) — no " +
+          "ellipse when a single dimension is passed.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Circle single dimension">
+      <div className="zs-story-cell">
+        <Skeleton variant="circle" width="4rem" data-testid="skeleton-circle-w" />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const el = canvas.getByTestId("skeleton-circle-w") as HTMLElement;
+    // Round: rendered width === rendered height despite only `width` set.
+    await expect(el.offsetWidth).toBe(el.offsetHeight);
+    await expect(getComputedStyle(el).aspectRatio).toBe("1 / 1");
+  },
+};
+
 /* ─── 3. Reduced motion ─────────────────────────────────────────────── *
  *
  * Under prefers-reduced-motion the shimmer animation is disabled while

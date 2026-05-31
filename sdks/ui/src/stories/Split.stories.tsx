@@ -183,3 +183,49 @@ export const AsChildRoot: Story = {
     await expect(root).toHaveClass("zs-split");
   },
 };
+
+/* ─── 6. Oversized rail in a narrow container (regression) ──────────── */
+export const OversizedRailNarrowContainer: Story = {
+  name: "Oversized rail, narrow container (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the rigid-rail fix: a `sideWidth` (32rem ≈ 512px) " +
+          "far wider than the wrapper (280px). The rail is `flex: 0 1 " +
+          "min(<sideWidth>, 100%)` (shrinkable, capped at the container) " +
+          "with `min-inline-size: 0`, so the oversized basis caps to the " +
+          "280px box instead of blowing past it. The `play()` asserts the " +
+          "rail is capped to the container (its width never exceeds the " +
+          "wrapper) AND there is no horizontal overflow on the split. " +
+          "Pre-fix the rigid `flex: 0 0 <sideWidth>` rail forced the row to " +
+          "the full 512rem basis and overflowed the box.",
+      },
+    },
+  },
+  render: () => (
+    // The oversized rail is the subject. Its content (a short label) fits
+    // within the capped 280px rail; Main fills whatever the rail leaves.
+    // Both parts carry `min-inline-size: 0`, so the row never exceeds the
+    // 280px wrapper — the rail's 32rem basis caps to `100%`.
+    <div style={{ inlineSize: "280px" }}>
+      <Split sideWidth="32rem" gap={3} data-testid="split-oversized">
+        <Split.Side data-testid="split-oversized-side">Rail</Split.Side>
+        <Split.Main />
+      </Split>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("split-oversized");
+    const side = canvas.getByTestId("split-oversized-side");
+    // The rail's 32rem (≈512px) basis caps to the 280px container — its
+    // rendered width never exceeds the wrapper. Pre-fix the rigid basis
+    // forced it to ~512px.
+    await expect(side.getBoundingClientRect().width).toBeLessThanOrEqual(
+      root.getBoundingClientRect().width + 1,
+    );
+    // And the split as a whole does not overflow horizontally.
+    await expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
+  },
+};

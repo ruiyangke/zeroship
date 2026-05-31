@@ -68,6 +68,13 @@
   line-height: var(--zs-text-title-1-line);
   font-weight: var(--zs-text-title-1-weight);
   letter-spacing: var(--zs-text-title-1-tracking);
+  /* A long unbreakable value (a big number, a long currency string) must
+     wrap/shrink inside the card rather than blow out the tile width.
+     min-inline-size:0 releases the flex min-content floor (the value is a
+     child of Card's flex column); overflow-wrap breaks an unbreakable
+     run as a last resort. */
+  min-inline-size: 0;
+  overflow-wrap: break-word;
 }
 
 .zs-stat-card__delta {

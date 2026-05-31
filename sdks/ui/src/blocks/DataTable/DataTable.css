@@ -287,7 +287,9 @@
 .zs-data-table--sticky thead th {
   position: sticky;
   inset-block-start: 0;
-  z-index: 1;
+  /* Above the filter row (z-index:1) so if the two sticky rows ever
+     overlap during a scroll/reflow the header band wins. */
+  z-index: 2;
 }
 
 /* ─── reduced motion ──────────────────────────────────────────────── */
@@ -379,7 +381,7 @@
 }
 
 .zs-data-table__bool-glyph[data-value="true"] {
-  color: var(--zs-success);
+  color: var(--zs-system-green);
 }
 
 .zs-data-table__bool-glyph[data-value="false"] {
@@ -428,10 +430,21 @@
 
 /* danger row-action: destructive ink on the menu item. */
 .zs-data-table__row-action--danger {
-  color: var(--zs-danger);
+  color: var(--zs-system-red);
 }
 
-/* ─── cell truncation ─────────────────────────────────────────────────── */
+/* ─── cell truncation ─────────────────────────────────────────────────
+ * For the inner span's `max-inline-size:100%` to actually BOUND the text
+ * (so the ellipsis engages) the cell box must itself be bounded. Under the
+ * default `table-layout: auto`, a wide value would otherwise grow the
+ * column and the span would never overflow. `max-inline-size: 0` collapses
+ * the cell's contribution to the column's auto-width so the column width
+ * is driven by its `<col>` width hint (required when `truncate: true` — see
+ * the DataTable.tsx dev-warn); the span then clips to that width. */
+.zs-data-table__td--truncate {
+  max-inline-size: 0;
+}
+
 .zs-data-table__truncate {
   display: block;
   min-inline-size: var(--zs-data-table-cell-min, 0);

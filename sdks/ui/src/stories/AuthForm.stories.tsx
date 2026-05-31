@@ -256,3 +256,51 @@ export const WithSocial: Story = {
     ).toBeInTheDocument();
   },
 };
+
+/* ─── FullPageCentering (vertical-centering guard) ──────────────────────
+ * Regression for the card pinning to the top: the centering wrapper must
+ * take a real block-size floor (`min-block-size: 100dvh`) so vertical
+ * centering has room on a bare page. Pre-fix `min-block-size: 100%`
+ * collapses to content height (no definite-height ancestor) and the card
+ * pins to the top. The play() asserts the card's center-y sits near the
+ * middle of the centering box, not at its top. */
+export const FullPageCentering: Story = {
+  name: "Full-page centering (guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The auth surface fills the viewport (100dvh) and centers the " +
+          "card vertically. The play() asserts the card's center-y is " +
+          "roughly the centering box's mid-point, not pinned to the top.",
+      },
+    },
+  },
+  args: { mode: "signIn" },
+  play: async ({ canvasElement }) => {
+    const center = canvasElement.querySelector(
+      "[data-slot='auth-form-center']",
+    ) as HTMLElement;
+    const card = canvasElement.querySelector(
+      "[data-slot='auth-form']",
+    ) as HTMLElement;
+    await expect(center).not.toBeNull();
+    await expect(card).not.toBeNull();
+
+    const box = center.getBoundingClientRect();
+    const c = card.getBoundingClientRect();
+    // The centering box took a real (viewport) height floor — much taller
+    // than the card — so vertical centering has room to work.
+    await expect(box.height).toBeGreaterThan(c.height + 40);
+
+    const boxCenter = box.top + box.height / 2;
+    const cardCenter = c.top + c.height / 2;
+    // The card sits near the box's vertical middle (well below a top pin).
+    // Tolerance is generous: padding + sub-pixel layout. The key signal is
+    // that cardCenter is NOT up near box.top (the pre-fix failure mode).
+    await expect(Math.abs(cardCenter - boxCenter)).toBeLessThanOrEqual(
+      box.height / 4,
+    );
+    await expect(cardCenter - box.top).toBeGreaterThan(box.height / 4);
+  },
+};

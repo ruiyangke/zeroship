@@ -37,6 +37,11 @@
 .zs-error-state__column {
   max-inline-size: 28rem;
   text-align: center;
+  /* Center the capped column within the (block-level) region. The merged
+     Center primitive centers this element's CHILDREN, not the column
+     itself, so without this auto-margin the column hugs the inline-start
+     edge on a wide surface. */
+  margin-inline: auto;
 }
 
 .zs-error-state__icon {

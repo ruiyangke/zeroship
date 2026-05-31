@@ -45,8 +45,21 @@
      transparent same-width border so the box size is identical across
      variants (no layout shift when a consumer swaps variant). */
   border: var(--zs-selection-hairline) solid transparent;
-  /* Long-label safety: clip + ellipsize rather than wrap (a chip is a
-     single token). */
+  /* Long-label safety lives on the inner `.zs-badge__label` span — a flex
+     container ignores `text-overflow`, so the clamp must sit on a block
+     descendant (mirrors Tag). The root keeps `min-inline-size: 0` so the
+     flex item is allowed to shrink below its content size and the label
+     can actually ellipsize. */
+  min-inline-size: 0;
+}
+
+/* The text token. `display: block` + `min-inline-size: 0` make
+   `text-overflow: ellipsis` effective (it is inert on the inline-flex
+   root). Leading/trailing icons stay OUTSIDE this span so only the text
+   clamps. */
+.zs-badge__label {
+  display: block;
+  min-inline-size: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }

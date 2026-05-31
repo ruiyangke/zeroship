@@ -88,6 +88,8 @@
  * hover/active wash so the affordance reads.
  */
 .zs-tag__remove {
+  /* Relative so the invisible hit-area `::before` centers on the button. */
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -117,6 +119,24 @@
 }
 .zs-tag__remove-glyph {
   line-height: 1;
+}
+/* 44pt minimum tap target. The visible button stays small (1–1.25rem) so
+   the chip rhythm is unchanged, but an invisible centered `::before`
+   expands the pointer/click region to --zs-hit-min in BOTH axes. Overlay
+   only (no layout) — `max(100%, …)` so the visible box is never shrunk.
+   Mirrors Button.css's coarse-pointer hit-target trick, applied on every
+   pointer here because the × is too small to reliably hit even with a
+   mouse. */
+.zs-tag__remove::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  transform: translate(-50%, -50%);
+  inline-size: max(100%, var(--zs-hit-min));
+  block-size: max(100%, var(--zs-hit-min));
+  /* Keep the expanded region clickable. */
+  pointer-events: auto;
 }
 @media (hover: hover) {
   .zs-tag__remove:hover {

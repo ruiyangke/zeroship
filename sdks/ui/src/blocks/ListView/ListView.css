@@ -78,7 +78,14 @@
   cursor: pointer;
   border-radius: var(--zs-radius-2);
   /* Pull the rounded hover/focus surface a hair past the text so the
-     tint reads as a row affordance, not a tight text box. */
+     tint reads as a row affordance, not a tight text box.
+     GUARD: this negative inline-margin bleeds the affordance (and its
+     focus-visible ring) one space step past the row's content box. If a
+     consumer clips the ListView in an `overflow: hidden` ancestor whose
+     inline padding is < --zs-space-2 + the focus-ring offset, the ring
+     can be clipped on the inline-start edge. Give the list container at
+     least `--zs-space-2` of inline padding (or avoid overflow:hidden on a
+     tight wrapper) so the affordance has room to breathe. */
   padding-inline: var(--zs-space-2);
   margin-inline: calc(-1 * var(--zs-space-2));
   transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);

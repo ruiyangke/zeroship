@@ -20,6 +20,10 @@
  *     so start/end resolve to the correct inline edge under RTL.
  *   - The Main gets `min-inline-size: 0` so long/overflowing content can
  *     shrink or scroll instead of forcing the row wider than its parent.
+ *   - The rail is `flex: 0 1 min(--split-side-width, 100%)` — it holds its
+ *     configured width but may shrink and is capped at the container width
+ *     so an oversized `sideWidth` in a narrow container can't overflow the
+ *     row or starve Main to zero.
  *   - The @media collapse conditions use literal rem values (custom
  *     properties cannot appear in a media query condition); each literal
  *     is commented with the --zs-bp-* token it mirrors.
@@ -40,7 +44,13 @@
 }
 
 .zs-split__side {
-  flex: 0 0 var(--split-side-width, 16rem);
+  /* Rail at its configured width, but allowed to shrink (flex-shrink 1)
+   * and floored at the container width via `min(…, 100%)`. A rigid
+   * `0 0 <width>` rail would overflow — and starve Main to zero — when
+   * `--split-side-width` exceeds a narrow container; the cap keeps the
+   * row contained. */
+  flex: 0 1 min(var(--split-side-width, 16rem), 100%);
+  min-inline-size: 0;
 }
 
 .zs-split__main {

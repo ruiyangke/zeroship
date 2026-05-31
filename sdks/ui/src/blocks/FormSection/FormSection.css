@@ -22,11 +22,14 @@
  *
  * aside: a two-column grid (settings-page style). The header sits in the
  *   start column, the body in the end column, and the footer SPANS both
- *   columns under the body. Below --zs-bp-md (48rem) the grid collapses
- *   back to a single column (stacked) — a fixed two-column split is
- *   unreadable on narrow viewports. The collapse @media uses the literal
- *   rem value of --zs-bp-md (custom properties cannot appear in a media
- *   query condition).
+ *   columns under the header/body row (a full-width action band). Below
+ *   --zs-bp-md (48rem) of the SECTION'S OWN width the grid collapses back
+ *   to a single column (stacked) — a fixed two-column split is unreadable
+ *   narrow. The collapse is a @container query (the section establishes an
+ *   inline-size containment context) keyed off the section's width, not
+ *   the viewport, since FormSection is a container-sized region. The
+ *   condition uses the literal rem value of --zs-bp-md (custom properties
+ *   cannot appear in a container query condition).
  *
  * ── Motion ──────────────────────────────────────────────────────────── *
  *   None. The reduced-motion gate exists for parity with the surface.
@@ -44,6 +47,12 @@
   display: grid;
   font-family: var(--zs-font-system);
   color: var(--zs-label);
+  /* Establish an inline-size containment context so the aside→stacked
+     collapse below keys off THIS section's own width (it is a
+     container-sized region inside an arbitrary panel), not the viewport.
+     A viewport @media would collapse the wrong axis in a narrow panel on
+     a wide viewport (and vice-versa). */
+  container-type: inline-size;
 }
 
 /* ─── header ──────────────────────────────────────────────────────────
@@ -130,9 +139,13 @@
  * them into the two-column arrangement. */
 .zs-form-section--aside {
   grid-template-columns: var(--zs-form-section-aside-col) 1fr;
+  /* The footer SPANS both columns (full-width action band under the
+     two-column header/body), matching the file-header contract. The
+     prior `". footer"` indented it under the body track — reconciled
+     here in favour of the documented span. */
   grid-template-areas:
     "header body"
-    ".      footer";
+    "footer footer";
   column-gap: var(--zs-form-section-aside-gap);
   row-gap: var(--zs-form-section-gap);
 }
@@ -149,11 +162,15 @@
   grid-area: footer;
 }
 
-/* Below --zs-bp-md (48rem): collapse the two-column aside back to a
- * single stacked column. A fixed two-column split is unreadable narrow.
- * Custom properties can't appear in the @media condition, so the literal
- * 47.999rem mirrors --zs-bp-md (48rem). */
-@media (max-width: 47.999rem) {
+/* Below --zs-bp-md (48rem) of the SECTION'S OWN inline-size: collapse the
+ * two-column aside back to a single stacked column. A fixed two-column
+ * split is unreadable narrow. This is a CONTAINER query (the section sets
+ * container-type: inline-size above), not a viewport @media — FormSection
+ * is a container-sized region, so a viewport query would collapse the
+ * wrong axis when the section is narrow inside a wide viewport (a settings
+ * panel) or wide inside a narrow one. Custom properties can't appear in
+ * the @container condition, so the literal 48rem mirrors --zs-bp-md. */
+@container (max-width: 48rem) {
   .zs-form-section--aside {
     grid-template-columns: 1fr;
     grid-template-areas:

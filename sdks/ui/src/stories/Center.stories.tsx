@@ -39,7 +39,7 @@ export const BothAxes: Story = {
     },
   },
   render: () => (
-    <Center minHeight="60vh" data-testid="center-both">
+    <Center minHeight="60dvh" data-testid="center-both">
       {card("Centered on both axes")}
     </Center>
   ),
@@ -92,7 +92,7 @@ export const AsChild: Story = {
     },
   },
   render: () => (
-    <Center asChild minHeight="40vh">
+    <Center asChild minHeight="40dvh">
       <section data-testid="center-aschild" aria-label="Empty state">
         {card("Empty state section")}
       </section>
@@ -102,5 +102,43 @@ export const AsChild: Story = {
     const section = within(canvasElement).getByTestId("center-aschild");
     await expect(section.tagName).toBe("SECTION");
     await expect(section).toHaveClass("zs-center");
+  },
+};
+
+/* ─── 4. Wide child stays contained (regression) ────────────────────── */
+export const WideChildContained: Story = {
+  name: "Wide child contained (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the child-overflow fix: a wide unbreakable child " +
+          "inside a narrow Center. `.zs-center { min-inline-size: 0 }` plus " +
+          "`.zs-center > * { min-inline-size: 0; max-inline-size: 100% }` " +
+          "keep the child within the box instead of spilling out both " +
+          "sides. The `play()` asserts no horizontal overflow on the " +
+          "Center. Pre-fix the unbreakable token blew the box out.",
+      },
+    },
+  },
+  render: () => (
+    <div style={{ inlineSize: "240px" }}>
+      <Center minHeight="20dvh" data-testid="center-wide">
+        <div
+          style={{
+            background: "var(--zs-fill-secondary)",
+            padding: "var(--zs-space-3)",
+            borderRadius: "var(--zs-radius-2)",
+            overflowWrap: "anywhere",
+          }}
+        >
+          aVeryLongUnbreakableTokenThatWouldOtherwiseSpillOutBothSides
+        </div>
+      </Center>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const c = within(canvasElement).getByTestId("center-wide");
+    await expect(c.scrollWidth).toBeLessThanOrEqual(c.clientWidth + 1);
   },
 };

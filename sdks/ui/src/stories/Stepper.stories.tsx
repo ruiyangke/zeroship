@@ -86,6 +86,64 @@ export const Horizontal: Story = {
   },
 };
 
+/* ─── 1b. Horizontal connector geometry (guard) ─────────────────────────
+ * Regression for the connector rendering AFTER the whole label instead of
+ * between indicator centres. Post-restructure the horizontal trigger is a
+ * centred column (label UNDER the indicator) and the connector is an
+ * absolutely-positioned rule spanning from this step's indicator centre to
+ * the next step's. The play() asserts each connector sits horizontally
+ * BETWEEN consecutive indicators and vertically overlaps the indicator
+ * row. Pre-fix the connector sat to the right of the label and this fails. */
+export const HorizontalConnectorGeometry: Story = {
+  name: "Horizontal connector geometry (guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Geometry guard: each connector's box sits between consecutive " +
+          "step indicators (left edge ≥ prev indicator right, right edge ≤ " +
+          "next indicator left) and vertically overlaps the indicator row.",
+      },
+    },
+  },
+  render: () => (
+    <div style={{ padding: "var(--zs-space-6)", inlineSize: "48rem" }}>
+      <Stepper data-testid="stepper" steps={STEPS} current={1} />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("stepper");
+    const steps = Array.from(
+      root.querySelectorAll('[data-slot="stepper-step"]'),
+    );
+
+    for (let i = 0; i < steps.length - 1; i++) {
+      const connector = steps[i].querySelector(
+        '[data-slot="stepper-connector"]',
+      ) as HTMLElement;
+      await expect(connector).not.toBeNull();
+      const thisInd = steps[i].querySelector(
+        '[data-slot="stepper-indicator"]',
+      ) as HTMLElement;
+      const nextInd = steps[i + 1].querySelector(
+        '[data-slot="stepper-indicator"]',
+      ) as HTMLElement;
+
+      const conn = connector.getBoundingClientRect();
+      const a = thisInd.getBoundingClientRect();
+      const b = nextInd.getBoundingClientRect();
+
+      // Horizontally between the two indicators (1px slack for rounding).
+      await expect(conn.left).toBeGreaterThanOrEqual(a.right - 1);
+      await expect(conn.right).toBeLessThanOrEqual(b.left + 1);
+      // Vertically overlaps the indicator row (not below the label).
+      await expect(conn.top).toBeLessThanOrEqual(a.bottom);
+      await expect(conn.bottom).toBeGreaterThanOrEqual(a.top);
+    }
+  },
+};
+
 /* ─── 2. Vertical ────────────────────────────────────────────────────── */
 export const Vertical: Story = {
   name: "Vertical (current = 2)",

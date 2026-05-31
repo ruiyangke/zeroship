@@ -21,7 +21,7 @@
  *
  * Motion: none of its own — the disclosure motion (panel open/close, chevron
  * rotation) lives in the composed Accordion, which already honors
- * reduced-motion. The gate below exists for surface parity.
+ * reduced-motion. Nothing here to disable.
  */
 
 .zs-faq {
@@ -84,15 +84,5 @@
   .zs-faq__title,
   .zs-faq__description {
     color: CanvasText;
-  }
-}
-
-/* ─── reduced-motion ─────────────────────────────────────────────────────
- * No-op — Faq has no motion of its own; the disclosure motion lives in the
- * composed Accordion, which honors reduced-motion in its own CSS. The gate
- * exists for parity with the rest of the surface. */
-@media (prefers-reduced-motion: reduce) {
-  .zs-faq {
-    /* nothing to disable; placeholder for surface parity */
   }
 }

@@ -160,13 +160,25 @@
    focus-visible ring below (a 0.125rem outline), so a keyboard user can tell
    "focused" from "open" — the two cues never collapse into one box.
 
-   The inline-start accent rule is painted with a box-shadow inset (not a
-   border) so it does not shift the label's text start position when the row
-   opens (a border-inline-start would reflow the padding box). */
+   The inline-start accent rule is painted with a `::before` overlay (not a
+   box-shadow or a border): box-shadow can only target a PHYSICAL edge
+   (`inset X 0 0 0` is always the left edge, wrong under RTL), and a
+   `border-inline-start` would reflow the padding box and shift the label.
+   The `::before` pins to `inset-inline-start` (logical → RTL-correct) and
+   sits as an overlay, so it adds no layout. */
 .zs-accordion-trigger[data-panel-open] {
   background-color: color-mix(in oklch, var(--zs-accent) 7%, transparent);
   color: var(--zs-label);
-  box-shadow: inset 0.1875rem 0 0 0 var(--zs-accent);
+}
+.zs-accordion-trigger[data-panel-open]::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 0.1875rem;
+  background-color: var(--zs-accent);
+  /* Overlay only — never reflows the trigger's padding box. */
+  pointer-events: none;
 }
 
 @media (hover: hover) {
@@ -342,6 +354,12 @@
   .zs-accordion-trigger[data-panel-open] {
     color: HighlightText;
     background-color: Highlight;
+  }
+  /* The open marker `::before` paints `--zs-accent`, which collapses under
+     forced-colors; map it to HighlightText so the inline-start rule stays
+     visible against the Highlight fill. */
+  .zs-accordion-trigger[data-panel-open]::before {
+    background-color: HighlightText;
   }
   @media (hover: hover) {
     .zs-accordion-trigger[data-panel-open]:not([data-disabled]):hover {

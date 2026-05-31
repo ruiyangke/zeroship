@@ -135,6 +135,41 @@ export const PlacementTop: Story = {
       </Dialog>
     </div>
   ),
+  // Regression guard (#6): top placement is `top`-anchored — its steady
+  // transform has NO -50% vertical translate (only --zs-nested-offset,
+  // which is 0 for a non-nested dialog). The reduced-motion enter/leave
+  // override now MIRRORS this (it previously re-added a -50% it never had,
+  // causing a one-frame vertical jump). After open + transition settle,
+  // assert the rendered vertical translate is ~0, not -half the popup
+  // height (which a -50% translate would produce).
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByTestId("dialog-trigger"));
+
+    const popup = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(
+        '[data-testid="dialog-placement-top"]',
+      );
+      if (!el) throw new Error("popup not mounted");
+      return el;
+    });
+
+    // Let the enter transition settle so we read the steady transform, not
+    // the data-starting-style frame.
+    await waitFor(async () => {
+      await expect(popup).not.toHaveAttribute("data-starting-style");
+    });
+
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(popup).transform);
+    // matrix.f is the resolved vertical translate in px. Top placement is
+    // top-anchored: no -50% of the popup height. A -50% translate would put
+    // |f| ≈ height/2 (tens of px). Steady top translate is just the nested
+    // offset (0 here), so |f| must be small.
+    await expect(Math.abs(matrix.f)).toBeLessThan(2);
+    // Sanity: the popup actually has a meaningful height, so a -50% would
+    // have been large and this assertion is non-trivial.
+    await expect(popup.getBoundingClientRect().height).toBeGreaterThan(20);
+  },
 };
 
 /* ─── 4. Backdrop tints ──────────────────────────────────────────────── */

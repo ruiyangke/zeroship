@@ -153,7 +153,11 @@ export const Badge = forwardRef<HTMLElement, BadgeProps>(function Badge(
       ref={ref as Ref<HTMLSpanElement>}
       className={composedClassName}
     >
-      {children}
+      {/* Text rides in a block label span so `text-overflow: ellipsis`
+          works (it is inert on the inline-flex root). If a consumer adds
+          leading/trailing icons they sit OUTSIDE this span, so only the
+          text clamps — mirrors Tag's anatomy. */}
+      <span className="zs-badge__label">{children}</span>
     </span>
   );
 });

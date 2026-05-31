@@ -46,8 +46,8 @@
  * `Canvas` / `CanvasText` so the high-contrast user still gets a legible,
  * system-colored band — never invisible white-on-white.
  *
- * Motion: none. Tone is a paint-only concern; the reduced-motion gate is a
- * no-op kept for surface parity.
+ * Motion: none. Tone is a paint-only concern — there is no transition to
+ * disable, so no reduced-motion gate is needed.
  */
 
 /* ─── Full-bleed band background ──────────────────────────────────────────
@@ -72,9 +72,14 @@
   inline-size: 100%;
 }
 
-/* muted — a subtle surface fill so the band reads as its own panel. */
+/* muted — a subtle surface fill so the band reads as its own panel.
+ * Uses `background-color` (NOT the `background` shorthand) so it sets ONLY the
+ * fill and leaves `background-image` untouched: a `tone="muted"` Hero that also
+ * opts into `[data-backdrop]` (which paints its accent wash on `background-image`)
+ * keeps both layers — the surface fill behind the radial wash. The shorthand
+ * would reset `background-image` to `none` and silently wipe the wash. */
 [data-section-band][data-tone="muted"] {
-  background: var(--zs-surface);
+  background-color: var(--zs-surface);
 }
 
 /* accent — the bold contrast band. */
@@ -196,6 +201,7 @@
   }
 }
 
+
 /* ─── Eyebrow — the cohesive section lead-in label ────────────────────────
  *
  * ONE confident eyebrow treatment shared across Hero / FeatureGrid / Cta /
@@ -256,14 +262,5 @@
     color: CanvasText;
     border: var(--zs-selection-hairline) solid CanvasText;
     background: Canvas;
-  }
-}
-
-/* ─── reduced-motion ───────────────────────────────────────────────────────
- * No-op — tone is paint-only. The gate exists for parity with the rest of
- * the surface. */
-@media (prefers-reduced-motion: reduce) {
-  [data-section-band] {
-    /* nothing to disable; placeholder for surface parity */
   }
 }

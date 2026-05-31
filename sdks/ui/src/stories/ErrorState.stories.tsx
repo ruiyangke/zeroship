@@ -116,3 +116,43 @@ export const WarningCompound: Story = {
     ).toBeInTheDocument();
   },
 };
+
+/* ─── WideCentering (centering guard) ───────────────────────────────────
+ * Regression for the off-center column: on a WIDE surface the capped
+ * `__column` must sit horizontally centered, not hug the inline-start
+ * edge. The fix is `margin-inline:auto` on `.zs-error-state__column`.
+ * Pre-fix the column hugs left and this assertion fails. */
+export const WideCentering: Story = {
+  name: "Wide container (centering guard)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Rendered in a 60rem-wide surface. The capped centered column " +
+          "must be horizontally centered within the region — the play() " +
+          "asserts the column's bounding-box center-x ≈ the region's.",
+      },
+    },
+  },
+  render: () => (
+    <div data-testid="error-wide" style={{ inlineSize: "60rem" }}>
+      <ErrorState
+        title="Couldn't load your projects"
+        description="Something went wrong on our end. Check your connection and try again."
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const region = canvas.getByTestId("error-wide");
+    const column = region.querySelector(
+      "[data-slot='error-state-column']",
+    ) as HTMLElement;
+    await expect(column).not.toBeNull();
+    const r = region.getBoundingClientRect();
+    const c = column.getBoundingClientRect();
+    const regionCenter = r.left + r.width / 2;
+    const columnCenter = c.left + c.width / 2;
+    await expect(Math.abs(columnCenter - regionCenter)).toBeLessThanOrEqual(2);
+  },
+};

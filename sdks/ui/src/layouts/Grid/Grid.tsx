@@ -4,10 +4,12 @@
  * Two ways to size columns, in priority order:
  *
  *   1. `minColWidth` (PREFERRED — breakpoint-free, intrinsic). Sets
- *      `repeat(auto-fit, minmax(<minColWidth>, 1fr))` so the grid packs
- *      as many equal columns as fit and reflows fluidly with no media
- *      queries. Reach for this first — it is responsive by construction.
- *      When set, `columns` is ignored.
+ *      `repeat(auto-fit, minmax(min(<minColWidth>, 100%), 1fr))` so the
+ *      grid packs as many equal columns as fit and reflows with no media
+ *      queries. The `min(…, 100%)` floor means that when the container is
+ *      narrower than `minColWidth` the lone column shrinks to fit instead
+ *      of overflowing — so it stays contained at every width. Reach for
+ *      this first. When set, `columns` is ignored.
  *
  *   2. `columns` (explicit count). A number fixes the column count at
  *      every width. A `{ sm, md, lg }` object changes the count at the
@@ -68,8 +70,10 @@ export interface GridProps extends ComponentPropsWithoutRef<"div"> {
   flow?: "row" | "column" | "dense";
   /**
    * Intrinsic, breakpoint-free sizing. When set, the grid becomes
-   * `repeat(auto-fit, minmax(<minColWidth>, 1fr))` and `columns` is
-   * ignored. Pass a CSS length (e.g. `"16rem"`). Prefer this.
+   * `repeat(auto-fit, minmax(min(<minColWidth>, 100%), 1fr))` and
+   * `columns` is ignored. The `min(…, 100%)` floor keeps the lone column
+   * from overflowing when the container is narrower than `minColWidth`.
+   * Pass a CSS length (e.g. `"16rem"`). Prefer this.
    */
   minColWidth?: string;
   /** Render-as the single child element rather than a `<div>`. */

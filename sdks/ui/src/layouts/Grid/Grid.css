@@ -3,6 +3,7 @@
  *
  * Anatomy:
  *   .zs-grid              — the grid container
+ *   .zs-grid > *          — cells (min-inline-size: 0 so content can shrink)
  *   .zs-grid--intrinsic   — minColWidth path (auto-fit, breakpoint-free)
  *   .zs-grid--explicit    — fixed-count path (columns number/object)
  *
@@ -32,12 +33,25 @@
   grid-auto-flow: var(--grid-flow, row);
 }
 
+/* Cells may shrink below their intrinsic min-content size. Without this a
+ * long unbreakable token (a URL, a code span) inside a cell forces the
+ * track wider than its share and blows the whole grid out horizontally —
+ * on both the intrinsic and explicit paths. The logical form keeps RTL +
+ * vertical writing modes correct. */
+.zs-grid > * {
+  min-inline-size: 0;
+}
+
 /* Intrinsic path — fluid, breakpoint-free. Packs as many equal columns
- * as fit the available inline-size, each at least --grid-min-col wide. */
+ * as fit the available inline-size, each at least --grid-min-col wide.
+ * The track floor is `min(--grid-min-col, 100%)` rather than the bare
+ * --grid-min-col: when the container is narrower than --grid-min-col the
+ * `100%` arm wins so the single column shrinks to fit instead of forcing
+ * horizontal overflow. */
 .zs-grid--intrinsic {
   grid-template-columns: repeat(
     auto-fit,
-    minmax(var(--grid-min-col), 1fr)
+    minmax(min(var(--grid-min-col), 100%), 1fr)
   );
 }
 

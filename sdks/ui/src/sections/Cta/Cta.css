@@ -26,7 +26,7 @@
  *     margin-inline) for RTL.
  *
  * Motion: none of its own (the composed Button / Cluster carry their own
- * motion + reduced-motion handling). The gate below exists for surface parity.
+ * motion + reduced-motion handling), so there is nothing here to disable.
  */
 
 .zs-cta {
@@ -125,15 +125,5 @@
   }
   .zs-cta__panel[data-variant="tinted"] {
     border: var(--zs-selection-hairline) solid CanvasText;
-  }
-}
-
-/* ─── reduced-motion ─────────────────────────────────────────────────────
- * No-op — Cta has no motion of its own (the composed Button / Cluster carry
- * their own reduced-motion handling). The gate exists for parity with the
- * rest of the surface. */
-@media (prefers-reduced-motion: reduce) {
-  .zs-cta {
-    /* nothing to disable; placeholder for surface parity */
   }
 }

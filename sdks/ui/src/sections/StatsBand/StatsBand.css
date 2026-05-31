@@ -29,7 +29,7 @@
  * the loudest element); the label + description read muted/small. These are plain
  * `<p>` text, NOT headings — a stats row is not part of the heading outline.
  *
- * Motion: none of its own; the gate below exists for surface parity.
+ * Motion: none of its own, so there is nothing to disable.
  */
 
 .zs-stats-band {
@@ -206,16 +206,7 @@
    the accent fill; remap it to the translucent accent-ink so the columns stay
    delineated on the bold band. */
 @media (min-width: 48rem) {
-  [data-tone="accent"] .zs-stats-band__stat {
+  [data-section-band][data-tone="accent"] .zs-stats-band__stat {
     border-inline-start-color: var(--zs-section-ink-secondary);
-  }
-}
-
-/* ─── reduced-motion ─────────────────────────────────────────────────────
- * No-op — StatsBand has no motion of its own (the composed Stack / Grid carry
- * none). The gate exists for parity with the rest of the surface. */
-@media (prefers-reduced-motion: reduce) {
-  .zs-stats-band {
-    /* nothing to disable; placeholder for surface parity */
   }
 }

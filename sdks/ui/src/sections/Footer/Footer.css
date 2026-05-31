@@ -31,9 +31,10 @@
  *     actions at the inline-end; it wraps on narrow widths.
  *   - Logical properties throughout for RTL.
  *
- * Motion: none of its own (the composed Separator carries none; consumer
- * links / icon buttons in the actions slot bring their own). The gate below
- * exists for surface parity.
+ * Motion: a single color transition on the column links (the composed
+ * Separator carries none; consumer icon buttons in the actions slot bring
+ * their own). The reduced-motion gate below flattens that link transition so
+ * the hover/focus ink change arrives instantly.
  */
 
 .zs-footer {
@@ -57,13 +58,15 @@
   flex-wrap: wrap;
   gap: var(--zs-space-9);
   align-items: flex-start;
-  /* Anchor the brand at the inline-start and drive the link columns toward
-     the inline-end so the row reads balanced rather than left-weighted: the
-     brand sits at the start, the columns group spans across the remaining
-     track and finishes at the inline-end edge with no trailing dead space.
-     The columns block (`flex: 2 1`) still absorbs the bulk of the free space;
-     space-between removes any residual slack to the trailing edge. */
-  justify-content: space-between;
+  /* The two children carry flex-grow (brand `flex: 1 1`, columns `flex: 2 1`),
+     so they already absorb ALL free space between them — the row finishes flush
+     at the inline-end edge with no trailing slack. `flex-start` is the honest
+     justification: `space-between` would have nothing to distribute (grow > 0
+     leaves no residual free space) yet, before the children grew, it stranded
+     the brand far-start and the columns far-end with a void at mid widths. With
+     grow doing the distribution, flex-start packs them from the start and the
+     grow ratio carries them to the trailing edge. */
+  justify-content: flex-start;
   margin-block-end: var(--zs-space-8);
 }
 
@@ -156,7 +159,7 @@
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
   border-radius: var(--zs-radius-2);
-  transition: color var(--zs-duration-1) var(--zs-ease-out);
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
 .zs-footer__links a:hover {
@@ -165,7 +168,7 @@
 }
 
 .zs-footer__links a:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
   color: var(--zs-label);
 }

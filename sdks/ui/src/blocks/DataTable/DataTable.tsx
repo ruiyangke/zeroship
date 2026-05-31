@@ -121,7 +121,9 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentPropsWithoutRef,
   type CSSProperties,
@@ -771,6 +773,18 @@ function DataTableInner<T>(
           "`manualPagination` and pass `total`).",
       );
     }
+    for (const column of columns) {
+      if (column.truncate && column.width == null) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `DataTable: column "${column.key}" sets \`truncate: true\` but no ` +
+            "`width`. Truncation collapses the cell box (max-inline-size:0) " +
+            "so the column width is driven by the `<col>` width hint — " +
+            "without a `width` the column has no bound and the ellipsis " +
+            "cannot engage. Set `width` (e.g. \"12rem\") on a truncating column.",
+        );
+      }
+    }
   }
 
   /* ─── axis state (controlled-or-internal, OUR public contract) ─────
@@ -808,6 +822,18 @@ function DataTableInner<T>(
 
   const hasSelection = selection !== "none";
   const isMultiple = selection === "multiple";
+
+  /* ─── sticky two-row header offset (measured) ──────────────────────────
+   * When the header is sticky AND a per-column filter row is shown, the
+   * filter row must pin directly beneath the header band. The header's
+   * height is intrinsic — it grows when a header label wraps or density
+   * changes — so a hardcoded offset (the old `2.5rem` fallback) leaves a
+   * gap or an overlap. We measure the header `<thead>` with a
+   * ResizeObserver and publish its block-size as the
+   * `--zs-data-table-header-offset` custom property on the scroll
+   * container, which the filter row reads for its `inset-block-start`. */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const theadRef = useRef<HTMLTableSectionElement | null>(null);
 
   /* ─── column lookups + a quick key→DataTableColumn map ────────────── */
   const columnByKey = useMemo(() => {
@@ -1099,6 +1125,42 @@ function DataTableInner<T>(
   );
   const showColumnFilters = filterable && filterableColumns.length > 0;
 
+  /* Measure the header height → publish `--zs-data-table-header-offset` on
+   * the scroll container so the sticky filter row pins flush beneath the
+   * header band. Only needed when BOTH the header is sticky AND the filter
+   * row is shown (two stacked sticky rows). SSR-safe: the effect (and the
+   * ResizeObserver guard) never run on the server, and the CSS fallback
+   * (`2.5rem`) covers the first paint / no-RO environments. */
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    const thead = theadRef.current;
+    if (!scroll || !thead) return;
+    if (!(stickyHeader && showColumnFilters)) {
+      scroll.style.removeProperty("--zs-data-table-header-offset");
+      return;
+    }
+    const measure = () => {
+      // The filter row lives INSIDE the <thead>; subtract its own height so
+      // the offset is the HEADER band only (the first row), not the whole
+      // <thead> (header + filter rows).
+      const filterRow = thead.querySelector<HTMLElement>(
+        '[data-slot="data-table-filter-row"]',
+      );
+      const headerHeight =
+        thead.getBoundingClientRect().height -
+        (filterRow?.getBoundingClientRect().height ?? 0);
+      scroll.style.setProperty(
+        "--zs-data-table-header-offset",
+        `${Math.max(0, Math.round(headerHeight))}px`,
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(thead);
+    return () => ro.disconnect();
+  }, [stickyHeader, showColumnFilters, density, columns]);
+
   const tableClassName = classnames(
     "zs-data-table",
     `zs-data-table--${density}`,
@@ -1172,6 +1234,7 @@ function DataTableInner<T>(
       ) : null}
 
       <div
+        ref={scrollRef}
         className="zs-data-table__scroll"
         data-slot="data-table-scroll"
         data-sticky={stickyHeader ? "" : undefined}
@@ -1204,7 +1267,7 @@ function DataTableInner<T>(
             </colgroup>
           ) : null}
 
-          <thead data-slot="data-table-head">
+          <thead ref={theadRef} data-slot="data-table-head">
             <tr>
               {hasSelection ? (
                 <th

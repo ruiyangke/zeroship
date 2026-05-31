@@ -577,9 +577,10 @@ export const SidebarCollapsed: Story = {
       description: {
         story:
           "Controlled `sidebarOpen={false}`: the shell does not track its " +
-          "own state; the rail collapses out of the layout (and the AT " +
-          "tree) so Main spans full width. The consumer owns the trigger " +
-          "and passes `sidebarOpen` / `onSidebarOpenChange`.",
+          "own state; the rail animates to zero inline-size and is taken " +
+          "out of the AT tree via `inert` + `aria-hidden` so Main spans " +
+          "full width. The consumer owns the trigger and passes " +
+          "`sidebarOpen` / `onSidebarOpenChange`.",
       },
     },
   },
@@ -613,8 +614,8 @@ export const SidebarCollapsed: Story = {
     </AppShell>
   ),
   play: async ({ canvasElement }) => {
-    // Collapsed: the sidebar rail is display:none → not in the AT tree, so
-    // the navigation landmark should not be queryable.
+    // Collapsed: the sidebar rail carries inert + aria-hidden → out of the
+    // AT tree, so the navigation landmark should not be queryable.
     const canvas = within(canvasElement);
     await expect(
       canvas.queryByRole("navigation", { name: /primary/i }),
@@ -781,4 +782,83 @@ export const SidebarEnd: Story = {
       </AppShell.Footer>
     </AppShell>
   ),
+};
+
+/* ─── 5. Scroll frame — Main owns the scroll (regression) ───────────────── */
+export const ScrollFrame: Story = {
+  name: "Scroll frame (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the fixed-frame fix: the shell is a DEFINITE " +
+          "`block-size: 100dvh` (not a `min-block-size`), so when Main " +
+          "content is taller than the frame the `.zs-app-shell__main` " +
+          "element owns the scroll while Header/Footer stay pinned to the " +
+          "band edges. The `play()` constrains the shell to a fixed height, " +
+          "asserts Main is the scroller (`scrollHeight > clientHeight`), " +
+          "scrolls Main, and asserts the header's top stays put. Pre-fix the " +
+          "`min-block-size` let the document scroll instead and Main's " +
+          "`overflow: auto` never engaged.",
+      },
+    },
+  },
+  render: () => (
+    // Constrain the shell to a fixed, smallish frame so the tall Main
+    // content must scroll WITHIN it rather than growing the page.
+    <div style={{ blockSize: "320px" }}>
+      <AppShell style={{ blockSize: "100%" }}>
+        <AppShell.Header>
+          <HeaderBar />
+        </AppShell.Header>
+        <AppShell.Body>
+          <AppShell.Sidebar asChild>
+            <nav aria-label="Primary">
+              <PrimaryNav groups={PRIMARY_NAV} />
+            </nav>
+          </AppShell.Sidebar>
+          <AppShell.Main>
+            <Container size="lg" style={{ paddingBlock: "var(--zs-space-6)" }}>
+              {/* Real app main areas carry focusable controls; a leading
+                  action makes the scroll region keyboard-reachable so it is
+                  not an inaccessible scroll trap (axe
+                  scrollable-region-focusable). */}
+              <Button variant="filled" size="small">
+                New row
+              </Button>
+              {Array.from({ length: 40 }, (_, i) => (
+                <p key={i}>
+                  Row {i + 1} —{" "}
+                  <a href="#">tall content that overflows the fixed frame</a> so
+                  Main must scroll within the shell.
+                </p>
+              ))}
+            </Container>
+          </AppShell.Main>
+        </AppShell.Body>
+        <AppShell.Footer>
+          <FooterBar />
+        </AppShell.Footer>
+      </AppShell>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const main = canvasElement.querySelector<HTMLElement>(
+      "main.zs-app-shell__main",
+    );
+    const header = canvasElement.querySelector<HTMLElement>(
+      ".zs-app-shell__header",
+    );
+    await expect(main).not.toBeNull();
+    await expect(header).not.toBeNull();
+    // Main is the scroller: its content is taller than its box.
+    await expect(main!.scrollHeight).toBeGreaterThan(main!.clientHeight);
+    // Header is pinned: scrolling Main does not move the header's top.
+    const headerTopBefore = header!.getBoundingClientRect().top;
+    main!.scrollTop = main!.scrollHeight;
+    const headerTopAfter = header!.getBoundingClientRect().top;
+    await expect(Math.abs(headerTopAfter - headerTopBefore)).toBeLessThanOrEqual(
+      1,
+    );
+  },
 };

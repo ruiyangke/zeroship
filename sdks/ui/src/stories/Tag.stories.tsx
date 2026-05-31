@@ -151,6 +151,52 @@ export const Filter: Story = {
   },
 };
 
+/* ─── 5b. Remove button meets 44pt tap target (regression guard) ─────── *
+ *
+ * The visible × button is small (1–1.25rem), but an invisible centered
+ * `::before` must expand the tap region to --zs-hit-min (2.75rem = 44px)
+ * in BOTH axes without affecting layout. This guard reads the `::before`
+ * box geometry and fails pre-fix (when no hit-area expansion existed). */
+export const RemoveHitTarget: Story = {
+  name: "Remove button 44pt tap target",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The remove × stays visually small but its `::before` expands " +
+          "the tap target to --zs-hit-min (44px) in both axes. The visible " +
+          "button box is unchanged; only the hit region grows.",
+      },
+    },
+  },
+  render: () => (
+    <Tag data-testid="tag-hit" removable onRemove={() => {}}>
+      React
+    </Tag>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const remove = canvas.getByRole("button", { name: /remove react/i });
+
+    // The button itself is position:relative so the ::before centers on it.
+    await expect(getComputedStyle(remove).position).toBe("relative");
+
+    // --zs-hit-min resolves to 44px (2.75rem at the default 16px root).
+    const hitMin = parseFloat(
+      getComputedStyle(remove).getPropertyValue("--zs-hit-min"),
+    );
+    // 2.75rem; tolerate non-rem themes by checking the resolved ::before box.
+    await expect(Number.isNaN(hitMin)).toBe(false);
+
+    // The hit-area ::before is at least 44px in both axes.
+    const before = getComputedStyle(remove, "::before");
+    const w = parseFloat(before.inlineSize || before.width);
+    const h = parseFloat(before.blockSize || before.height);
+    await expect(w).toBeGreaterThanOrEqual(44);
+    await expect(h).toBeGreaterThanOrEqual(44);
+  },
+};
+
 /* ─── 5. Sizes ───────────────────────────────────────────────────────── */
 export const Sizes: Story = {
   name: "Sizes (sm / md)",
