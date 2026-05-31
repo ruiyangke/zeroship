@@ -333,11 +333,23 @@ impl RateLimit {
     fn default_per() -> RateLimitPer { RateLimitPer::Ip }
 }
 
+/// Identity a per-rule rate-limit buckets requests by. Mirrors the
+/// authoring surface's `RateLimitScope` (`@zeroship/server`) one-for-one —
+/// the wire format must carry every scope the SDK accepts, or an app that
+/// declares one the runtime can't parse produces an un-ingestable `.zship`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitPer {
+    /// Client IP.
     Ip,
+    /// Authenticated user identity (the JWT `sub`). Stable across a user's
+    /// many sessions/devices, unlike [`Self::Session`]. Anonymous callers
+    /// fall back to the session cookie, then the IP.
+    User,
+    /// Per-origin session id (the `__Host-zs_app_session` cookie). One bucket
+    /// per browser/tab, not per user.
     Session,
+    /// A single platform-wide bucket shared by every caller of the rule.
     App,
 }
 
@@ -513,6 +525,47 @@ mod procedure_kind_tests {
             let entry: ResourceEntry = serde_json::from_str(&json).expect("must deserialise");
             assert_eq!(entry.kind, Some(k));
         }
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_per_tests {
+    use super::*;
+
+    /// Every scope the authoring surface (`@zeroship/server` `RateLimitScope`)
+    /// accepts MUST deserialise from the wire. `user` is the one that
+    /// regressed: the console emits `per: "user"` on its authenticated rules,
+    /// and before the `User` variant existed `zeroship_bundle::ingest` rejected
+    /// the real `apps/zeroship-builder/dist/app.zship` outright.
+    #[test]
+    fn rate_limit_per_parses_all_four_authoring_scopes() {
+        for (s, want) in [
+            ("ip", RateLimitPer::Ip),
+            ("user", RateLimitPer::User),
+            ("session", RateLimitPer::Session),
+            ("app", RateLimitPer::App),
+        ] {
+            let json = format!(r#"{{ "rpm": 600, "per": "{s}" }}"#);
+            let rl: RateLimit = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("per={s:?} must deserialise: {e}"));
+            assert_eq!(rl.per, want, "per={s:?}");
+            // snake_case round-trips back to the same wire token.
+            let back = serde_json::to_value(rl).unwrap();
+            assert_eq!(back["per"], s);
+        }
+    }
+
+    /// A console-shaped rule (`{ rpm: 600, per: "user" }`) round-trips inside a
+    /// full `ResourceEntry` — the exact shape the prebuilt console manifest
+    /// carries on `/api/preview`, `rpc:apps`, etc.
+    #[test]
+    fn console_user_scoped_rule_round_trips_in_resource_entry() {
+        let json = r#"{ "auth": "user", "rate_limit": { "rpm": 600, "per": "user" } }"#;
+        let entry: ResourceEntry =
+            serde_json::from_str(json).expect("console user-scoped rule must deserialise");
+        let rl = entry.rate_limit.expect("rate_limit present");
+        assert_eq!(rl.per, RateLimitPer::User);
+        assert_eq!(rl.rpm, Some(600));
     }
 }
 

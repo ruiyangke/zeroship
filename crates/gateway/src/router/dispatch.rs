@@ -95,6 +95,13 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 /// * `RateLimitPer::Ip` — request's client IP. Falls back to "unknown"
 ///   when the connection has no peer address (test fixtures, exotic
 ///   transports). Uses the peer socket unless `trust_proxy` is enabled.
+/// * `RateLimitPer::User` — the authenticated user identity (the JWT
+///   `sub`, read unverified — the auth gate already verified it upstream;
+///   here we only need a stable bucket discriminator). Unlike `Session`,
+///   one user's many sessions/devices share a bucket. Anonymous callers
+///   (no bearer JWT) fall back to the session cookie, then the IP, so an
+///   unauthenticated burst still gets bucketed instead of sharing one ""
+///   key.
 /// * `RateLimitPer::Session` — the `__Host-zs_app_session` cookie
 ///   value (the per-origin session id the gateway mints on
 ///   `/__zs/auth/callback`). Anonymous callers (no cookie) fall back
@@ -112,6 +119,29 @@ pub(crate) fn compute_bucket_id(
     use zeroship_bundle::RateLimitPer;
     match per {
         RateLimitPer::Ip => client_ip(req, trust_proxy),
+        RateLimitPer::User => {
+            if let Some(sub) = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|auth| {
+                    auth.strip_prefix("Bearer ")
+                        .or_else(|| auth.strip_prefix("bearer "))
+                })
+                .and_then(|jwt| jwt_subject_unverified(jwt.trim()))
+            {
+                return format!("sub:{sub}");
+            }
+            // Unauthenticated caller hitting a user-scoped rule: degrade to
+            // the session cookie, then the IP — never share one empty bucket.
+            let cookie = req
+                .headers()
+                .get("cookie")
+                .and_then(|v| v.to_str().ok());
+            extract_session_cookie(cookie, insecure_dev)
+                .map(|s| format!("sess:{s}"))
+                .unwrap_or_else(|| client_ip(req, trust_proxy))
+        }
         RateLimitPer::Session => {
             let cookie = req
                 .headers()
@@ -1767,6 +1797,82 @@ mod tests {
             .to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
         assert_eq!(id, "unknown");
+    }
+
+    /// Build an unsigned-but-structurally-valid JWT with the given `sub`. Only
+    /// the payload segment matters to `jwt_subject_unverified` (it never checks
+    /// the signature), so a fixed header + dummy signature suffice.
+    fn jwt_with_sub(sub: &str) -> String {
+        use base64::Engine as _;
+        let b64 = |v: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(v).unwrap())
+        };
+        let header = b64(&serde_json::json!({ "alg": "none", "typ": "JWT" }));
+        let payload = b64(&serde_json::json!({ "sub": sub }));
+        format!("{header}.{payload}.sig")
+    }
+
+    #[test]
+    fn compute_bucket_id_user_uses_jwt_subject() {
+        // RateLimitPer::User buckets by the authenticated JWT `sub` — the
+        // wire scope that round-trips the console's `per: "user"` rules.
+        let req = ntex::web::test::TestRequest::default()
+            .header("authorization", format!("Bearer {}", jwt_with_sub("usr_alice")))
+            .to_http_request();
+        let id = compute_bucket_id(&req, RateLimitPer::User, false, false);
+        assert_eq!(id, "sub:usr_alice");
+    }
+
+    #[test]
+    fn compute_bucket_id_user_distinct_per_subject_not_per_session() {
+        // One user, two sessions (distinct cookies) → SAME user bucket; the
+        // whole point of `user` vs `session`. Then a second user → different.
+        let alice = jwt_with_sub("usr_alice");
+        let req_a1 = ntex::web::test::TestRequest::default()
+            .header("authorization", format!("Bearer {alice}"))
+            .header("cookie", "__Host-zs_app_session=device-1")
+            .to_http_request();
+        let req_a2 = ntex::web::test::TestRequest::default()
+            .header("authorization", format!("Bearer {alice}"))
+            .header("cookie", "__Host-zs_app_session=device-2")
+            .to_http_request();
+        let req_bob = ntex::web::test::TestRequest::default()
+            .header("authorization", format!("Bearer {}", jwt_with_sub("usr_bob")))
+            .to_http_request();
+        let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, false);
+        let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, false);
+        let bob = compute_bucket_id(&req_bob, RateLimitPer::User, false, false);
+        assert_eq!(a1, a2, "same user shares a bucket across sessions");
+        assert_ne!(a1, bob, "different users get different buckets");
+    }
+
+    #[test]
+    fn compute_bucket_id_user_falls_back_to_session_then_ip() {
+        // No bearer JWT but a session cookie → degrade to sess:<cookie>.
+        let req_sess = ntex::web::test::TestRequest::default()
+            .header("cookie", "__Host-zs_app_session=anon-tab")
+            .to_http_request();
+        assert_eq!(
+            compute_bucket_id(&req_sess, RateLimitPer::User, false, false),
+            "sess:anon-tab"
+        );
+        // Neither bearer nor cookie → IP ("unknown" for the peer-less fixture).
+        let req_none = ntex::web::test::TestRequest::default().to_http_request();
+        assert_eq!(
+            compute_bucket_id(&req_none, RateLimitPer::User, false, false),
+            "unknown"
+        );
+        // A malformed bearer (no decodable payload) is treated as anonymous —
+        // degrade rather than key everyone onto one empty bucket.
+        let req_bad = ntex::web::test::TestRequest::default()
+            .header("authorization", "Bearer not-a-jwt")
+            .header("cookie", "__Host-zs_app_session=anon-tab")
+            .to_http_request();
+        assert_eq!(
+            compute_bucket_id(&req_bad, RateLimitPer::User, false, false),
+            "sess:anon-tab"
+        );
     }
 
     // -----------------------------------------------------------------------

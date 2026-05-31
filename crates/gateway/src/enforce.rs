@@ -123,8 +123,8 @@ pub fn check_rate_limit(
 // * Per-rule limit — creator-defined business logic, declared on a
 //   `Action::Worker.rate_limit` entry in the manifest, changes with every
 //   deploy, keyed by `(app_id, rule_idx, bucket)` where `bucket` is
-//   derived from `RateLimitPer` (client IP, session id, or "app" for a
-//   single platform-wide bucket).
+//   derived from `RateLimitPer` (client IP, authenticated user `sub`,
+//   session id, or "app" for a single platform-wide bucket).
 //
 // Per-rule fires FIRST in the request path because it's cheaper for
 // high-rule-rate cases — early reject before the global check. A rule
@@ -139,6 +139,8 @@ pub struct PerRuleKey {
     pub rule_idx: u32,
     /// Bucket discriminator derived from `RateLimitPer`:
     /// * `Ip` → request's client IP string
+    /// * `User` → authenticated `sub:<jwt-sub>` (falls back to the session
+    ///   cookie, then IP, for anonymous callers)
     /// * `Session` → `__Host-zs_app_session` cookie value (or fallback IP)
     /// * `App` → constant `"app"` (single bucket shared by all clients)
     pub bucket: String,

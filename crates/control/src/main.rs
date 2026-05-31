@@ -13,9 +13,9 @@ use zeroship_core::config::{
 };
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
-    oauth_grants_handlers, oauth_handlers, oidc_rp, stripe_handlers, token_handlers, AppState,
-    EnvStore, Quota, RateLimiter, Registry, StripeStore,
+    admin_handlers, api, backchannel_logout, bootstrap_builder, bootstrap_console, env_handlers,
+    internal, oauth_grants_handlers, oauth_handlers, oidc_rp, stripe_handlers, token_handlers,
+    AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -135,6 +135,33 @@ struct ControlCli {
     )]
     builder_client_secret_file: PathBuf,
 
+    /// Seed the console (`apps/zeroship-builder`) as a platform-owned regular
+    /// app at startup: upsert its `control.apps` row (enterprise plan), its
+    /// public-PKCE OAuth client (explicit `sector_identifier` = console host),
+    /// ingest the prebuilt `.zship`, and mint the server-only
+    /// `ZS_CONTROL_SERVICE_TOKEN` PAT. In-process + idempotent; NEVER an HTTP
+    /// route. Off by default.
+    #[arg(long = "bootstrap-console", action = clap::ArgAction::SetTrue)]
+    bootstrap_console: bool,
+
+    /// Environment half of `--bootstrap-console`; `1`/`true` are truthy.
+    #[arg(skip = env_is_truthy("BOOTSTRAP_CONSOLE"))]
+    bootstrap_console_env: bool,
+
+    /// Path to the prebuilt console `.zship` ingested by `--bootstrap-console`.
+    #[arg(
+        long = "console-zship",
+        env = "CONSOLE_ZSHIP",
+        default_value = bootstrap_console::DEFAULT_CONSOLE_ZSHIP
+    )]
+    console_zship: PathBuf,
+
+    /// The console host (explicit OAuth `sector_identifier`) seeded by
+    /// `--bootstrap-console`. Defaults to the dev host under `--dev-insecure`
+    /// and the prod host otherwise (resolved in `main`).
+    #[arg(long = "console-host", env = "CONSOLE_HOST")]
+    console_host: Option<String>,
+
     /// Directory for in-flight deploy bodies; empty means the OS temp dir.
     #[arg(long = "deploy-tmp-dir", env = "DEPLOY_TMP_DIR", default_value = "")]
     deploy_tmp_dir: String,
@@ -236,6 +263,10 @@ impl ControlCli {
     fn bootstrap_builder_client(&self) -> bool {
         self.bootstrap_builder_client || self.bootstrap_builder_client_env
     }
+
+    fn bootstrap_console(&self) -> bool {
+        self.bootstrap_console || self.bootstrap_console_env
+    }
 }
 
 // S2: hand-written `Debug` that redacts every raw-secret field. The derive is
@@ -262,6 +293,10 @@ impl std::fmt::Debug for ControlCli {
             .field("bootstrap_builder_client_env", &self.bootstrap_builder_client_env)
             .field("builder_redirect_uri", &self.builder_redirect_uri)
             .field("builder_client_secret_file", &self.builder_client_secret_file)
+            .field("bootstrap_console", &self.bootstrap_console)
+            .field("bootstrap_console_env", &self.bootstrap_console_env)
+            .field("console_zship", &self.console_zship)
+            .field("console_host", &self.console_host)
             .field("deploy_tmp_dir", &self.deploy_tmp_dir)
             .field("config_path", &self.config_path)
             .field("no_config", &self.no_config)
@@ -333,6 +368,7 @@ fn main() -> std::io::Result<()> {
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
     let allow_remote_hydra_admin = cli.allow_remote_hydra_admin.unwrap_or(false);
     let bootstrap_builder_client = cli.bootstrap_builder_client();
+    let bootstrap_console = cli.bootstrap_console();
 
     let hydra_admin_url = resolve_overlay_string(
         cli.hydra_admin_url,
@@ -456,6 +492,17 @@ fn main() -> std::io::Result<()> {
     };
     let builder_redirect_uri = cli.builder_redirect_uri;
     let builder_client_secret_path = cli.builder_client_secret_file;
+    let console_zship = cli.console_zship;
+    // The console host is the explicit OAuth sector_identifier. Default to the
+    // dev host under --dev-insecure (compose / *.zeroship.localhost) and the
+    // prod host otherwise; an explicit --console-host / CONSOLE_HOST wins.
+    let console_host = cli.console_host.unwrap_or_else(|| {
+        if insecure_dev {
+            bootstrap_console::DEV_CONSOLE_HOST.to_string()
+        } else {
+            bootstrap_console::PROD_CONSOLE_HOST.to_string()
+        }
+    });
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
     let console_oidc_secret = zeroship_core::config::obtain_secret(
         "CONSOLE_OIDC_SECRET / --console-oidc-secret",
@@ -665,6 +712,14 @@ fn main() -> std::io::Result<()> {
             "bootstrap_builder_client",
             CheckValue::Flag(bootstrap_builder_client),
         );
+        report.field("bootstrap_console", CheckValue::Flag(bootstrap_console));
+        if bootstrap_console {
+            report.field("console_host", CheckValue::Plain(console_host.clone()));
+            report.field(
+                "console_zship",
+                CheckValue::Plain(console_zship.display().to_string()),
+            );
+        }
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field(
             "deploy_tmp_dir",
@@ -852,6 +907,67 @@ fn main() -> std::io::Result<()> {
                 tracing::error!(error = %err, "control: builder OAuth client bootstrap failed");
                 std::io::Error::other(err.to_string())
             })?;
+    }
+
+    // Console seed (R5a): make the console deployable as a platform-owned
+    // regular app. In-process + idempotent + trusted; NEVER an HTTP route.
+    // Runs AFTER migrate (Liquibase, out of band), AFTER the registry / env
+    // store / blob store / PAT issuer / auth-pg are up, and BEFORE AppState is
+    // constructed (registry + env_store are moved into it below). Mirrors the
+    // `bootstrap_builder` invocation above.
+    //
+    // COMPOSE PLUMBING NOTE (next, non-destructive slice — NOT done here):
+    //   * Build the console `.zship` in the frontend image (`apps/zeroship-
+    //     builder` → `dist/app.zship`, R5a `pnpm build`) and make it readable by
+    //     the control container at `--console-zship` (default
+    //     `apps/zeroship-builder/dist/app.zship`).
+    //   * Pass `--bootstrap-console` (or `BOOTSTRAP_CONSOLE=1`) +
+    //     `--console-zship <path>` to the control service, ordered AFTER the
+    //     `migrate` service is healthy (same dependency as the rest of control
+    //     boot).
+    //   * Do NOT flip `ops/Caddyfile` / compose `console.*` ROUTING here — that
+    //     is the later, destructive cutover slice (R5b). This seed is ADDITIVE:
+    //     the Vite-served console keeps working untouched until routing flips.
+    if bootstrap_console {
+        let console_scheme = if insecure_dev { "http" } else { "https" };
+        let cfg = bootstrap_console::ConsoleBootstrapConfig {
+            enabled: true,
+            console_host: console_host.clone(),
+            console_zship,
+            scheme: console_scheme.to_string(),
+            hydra_admin_url: hydra_admin_url.clone(),
+        };
+        // The seed's per-app OAuth client upsert (`ensure_app_client`) needs an
+        // owned, MUTABLE control-schema connection (it runs a transaction). Open
+        // a dedicated one on the control DSN; it is dropped at the end of the
+        // seed (Terminate sent on drop).
+        let mut control_pg = {
+            let (pg_client, pg_conn) =
+                compio_postgres::connect(&db_url, compio_postgres::NoTls)
+                    .await
+                    .expect("control: console-seed control-pg connect");
+            compio::runtime::spawn(async move {
+                if let Err(e) = pg_conn.run().await {
+                    tracing::error!(error = %e, "control/console-seed-pg connection ended");
+                }
+            })
+            .detach();
+            pg_client
+        };
+        bootstrap_console::bootstrap_console(
+            &cfg,
+            &registry,
+            &env_store,
+            &blob_store,
+            &pat_issuer,
+            &mut control_pg,
+            &auth_pg,
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: console bootstrap failed");
+            std::io::Error::other(err.to_string())
+        })?;
     }
 
     let state = Arc::new(AppState {
