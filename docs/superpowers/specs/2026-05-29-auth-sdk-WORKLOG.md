@@ -76,6 +76,14 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
   NOT enforced control-side; ZeroShip-Acting-User header is an attribution breadcrumb control doesn't read; console (trusted
   first-party) self-scopes. Workflow `wdx3qy11d` (critic 90, all 6 booleans). Re-verified: dist/app.zship (1.23MB, worker + 22
   rpc), credential absent from dist/assets, only apps/zeroship-builder touched, builder 21/21.
+- **R5-seed ✓** `b9009917` `--bootstrap-console` install-time seed (additive, idempotent, boot-gated never-HTTP-route):
+  control.apps row (enterprise plan) + public PKCE client (explicit sector_identifier) + ingest .zship + service-token
+  env (ZS_CONTROL_SERVICE_TOKEN, a control PAT, server-only). DOGFOOD FIX (same commit): the console surfaced a TS↔Rust
+  rate-limit wire drift — added RateLimitPer::User to crates/bundle + per-user bucketing in gateway compute_bucket_id + 5
+  regression tests. Workflow `wabcj40r6` (critic 93). Re-verified: control + bundle + gateway full suites green (gateway lib 294).
+- **R5 ingest-fix ✓** `93c53a9b` builder config override markers (/auth/* → ["auth","publicly_accessible"]; /api/preview/* →
+  ["auth","rate_limit"]) so the console .zship passes Manifest::validate. **The REAL console .zship now BUILDS + INGESTS
+  end-to-end** (seed test trial-ingests the real artifact, no fallback). Console is a DEPLOYABLE regular app.
 - **R5-CUTOVER (NEXT — DESTRUCTIVE, CHECKPOINT BEFORE PROCEEDING)** the interdependent coordinated flip, paused for owner
   go-ahead (irreversible RP deletion + deployment routing + split-brain window):
   1. `--bootstrap-console` seed (additive): INSERT console.apps row (platform-privileged flag) + app_oauth_clients public PKCE
