@@ -76,7 +76,15 @@ export const Basic: Story = {
     await waitFor(() =>
       expect(body.getByRole("option", { name: /mango/i })).toBeVisible(),
     );
-    await userEvent.click(body.getByRole("option", { name: /mango/i }));
+    // Commit via the keyboard (ArrowDown highlights the first match,
+    // Enter selects it). Base UI's `<Combobox.Item>` calls
+    // `event.preventDefault()` in `onPointerDownCapture`, which cancels
+    // the compatibility click that testing-library's `userEvent.click`
+    // relies on — so a synthetic option click never reaches the item's
+    // `onClick` → `commitSelection` path and the input keeps the typed
+    // query. Keyboard selection is the documented interaction and the
+    // path AT users take; it commits reliably.
+    await userEvent.keyboard("{ArrowDown}{Enter}");
     await waitFor(() => expect(input).toHaveValue("mango"));
   },
 };
@@ -134,7 +142,13 @@ export const Multiple: Story = {
     await waitFor(() =>
       expect(body.getByRole("option", { name: /peach/i })).toBeVisible(),
     );
-    await userEvent.click(body.getByRole("option", { name: /peach/i }));
+    // Commit via keyboard (ArrowDown highlights "Peach", the first
+    // match, then Enter selects it). Base UI's `<Combobox.Item>`
+    // `preventDefault()`s in `onPointerDownCapture`, cancelling the
+    // compatibility click `userEvent.click` depends on — a synthetic
+    // option click never reaches `commitSelection`. Keyboard selection
+    // is the AT path and commits the chip reliably.
+    await userEvent.keyboard("{ArrowDown}{Enter}");
     await waitFor(() => expect(canvas.getByText("peach")).toBeVisible());
   },
 };
@@ -335,7 +349,7 @@ export const Required: Story = {
     return (
       <div className="zs-story-row" role="group" aria-label="Required">
         <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
-          <form onSubmit={(e) => e.preventDefault()}>
+          <Form onSubmit={(e) => e.preventDefault()}>
             <Field required>
               <Field.Label>
                 Favorite fruit <Field.Required />
@@ -359,7 +373,7 @@ export const Required: Story = {
                 Submit
               </Button>
             </div>
-          </form>
+          </Form>
         </div>
       </div>
     );
@@ -651,8 +665,22 @@ export const FieldAriaAutowiring: Story = {
     const input = canvas.getByRole("combobox", {
       name: /favorite fruit \(field-wired\)/i,
     });
-    await expect(input).toHaveAttribute("aria-labelledby", /\S+/);
-    await expect(input).toHaveAttribute("aria-describedby", /\S+/);
+    // jest-dom's `toHaveAttribute(name, value)` compares the attribute
+    // string against `value` with strict equality unless `value` is an
+    // asymmetric matcher — a bare RegExp is NOT one, so
+    // `toHaveAttribute("aria-labelledby", /\S+/)` reduces to
+    // `getAttribute(...) === /\S+/`, which is always false even when the
+    // id is correctly wired. Use `expect.stringMatching` (a real
+    // asymmetric matcher) so jest-dom pattern-matches the value: this
+    // asserts the auto-wired id is present AND non-empty.
+    await expect(input).toHaveAttribute(
+      "aria-labelledby",
+      expect.stringMatching(/\S+/),
+    );
+    await expect(input).toHaveAttribute(
+      "aria-describedby",
+      expect.stringMatching(/\S+/),
+    );
   },
 };
 

@@ -583,7 +583,15 @@ export const Nested: Story = {
       role="group"
       aria-label="Drawer inside main content"
     >
-      <main
+      {/* A labeled <section>, not a <main>: Storybook's story decorator
+          already wraps every story in <main class="zs-story-main">, so a
+          second <main> here would trip axe's landmark-no-duplicate-main
+          AND landmark-main-is-top-level (a main nested in another
+          landmark). A section with an accessible name conveys the same
+          "page content area" semantics without minting a second main
+          landmark. */}
+      <section
+        aria-label="Main content"
         style={{
           padding: "var(--zs-space-6)",
           minBlockSize: "60dvh",
@@ -627,7 +635,7 @@ export const Nested: Story = {
             </Drawer.Content>
           </Drawer.Portal>
         </Drawer>
-      </main>
+      </section>
     </div>
   ),
   play: async ({ canvasElement }) => {

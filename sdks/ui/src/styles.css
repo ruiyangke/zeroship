@@ -51,11 +51,130 @@
 @import "./components/ScrollArea/ScrollArea.css";
 @import "./components/Avatar/Avatar.css";
 @import "./components/Separator/Separator.css";
+@import "./components/Skeleton/Skeleton.css";
+@import "./components/Spinner/Spinner.css";
+@import "./components/Badge/Badge.css";
+@import "./components/Tag/Tag.css";
+@import "./components/Breadcrumbs/Breadcrumbs.css";
+@import "./components/Icon/Icon.css";
+
+/* ─── Layout primitives — arrange-only, paint nothing. */
+@import "./layouts/Stack/Stack.css";
+@import "./layouts/Grid/Grid.css";
+@import "./layouts/Cluster/Cluster.css";
+@import "./layouts/Container/Container.css";
+@import "./layouts/Split/Split.css";
+@import "./layouts/Center/Center.css";
+
+/* ─── Layout compositions — built FROM the primitives above. */
+@import "./layouts/AppShell/AppShell.css";
+@import "./layouts/PageHeader/PageHeader.css";
+
+/* ─── Composed blocks — empty/error/loading state family. */
+@import "./blocks/EmptyState/EmptyState.css";
+@import "./blocks/ErrorState/ErrorState.css";
+@import "./blocks/StatCard/StatCard.css";
+@import "./blocks/Banner/Banner.css";
+@import "./blocks/DescriptionList/DescriptionList.css";
+@import "./blocks/DataTable/DataTable.css";
+@import "./blocks/Pagination/Pagination.css";
+@import "./blocks/FilterBar/FilterBar.css";
+@import "./blocks/ListView/ListView.css";
+@import "./blocks/FormSection/FormSection.css";
+@import "./blocks/AuthForm/AuthForm.css";
+@import "./blocks/Stepper/Stepper.css";
+
+/* ─── Page sections — full-width marketing/content bands built FROM the
+   primitives + components above. The shared tone/surface system
+   (_section-tone.css) is the page-rhythm backbone: every section root
+   stamps `data-tone` and this ONE sheet defines the full-bleed band
+   treatments (default/muted/accent + the accent ink remap). Imported AFTER
+   the per-section sheets so its `[data-tone="…"]` rules win by both
+   specificity and order over the sections' base ink colors. */
+@import "./sections/Hero/Hero.css";
+@import "./sections/PricingTable/PricingTable.css";
+@import "./sections/FeatureGrid/FeatureGrid.css";
+@import "./sections/Cta/Cta.css";
+@import "./sections/StatsBand/StatsBand.css";
+@import "./sections/Faq/Faq.css";
+@import "./sections/Footer/Footer.css";
+@import "./sections/_section-tone.css";
 
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Visually hidden but available to assistive tech (the canonical
+   "sr-only" idiom). Used by Spinner's status label and any future
+   block that needs an SR-only accessible name. This is the SINGLE
+   place in the package allowed to use raw `px`: the 1px clip-box is
+   the well-known cross-browser sr-only recipe — a `0` box collapses
+   out of the AT tree in some engines, and a rem value rounds to a
+   sub-pixel that some screen readers skip. Do NOT introduce other
+   raw px anywhere in the codebase. */
+.zs-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip-to-content link — the canonical "jump past the chrome" affordance
+   baked into AppShell as the first focusable child. It reuses the
+   visually-hidden idiom (the same 1px clip-box recipe as
+   .zs-visually-hidden — the one place raw px is allowed) so it is offered
+   to the AT tree but invisible until keyboard focus lands on it; on
+   :focus / :focus-visible it un-hides and pins to the inline-start/top of
+   the shell as a real, styled control. Logical properties keep the pin
+   correct under RTL. */
+.zs-skip-link {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.zs-skip-link:focus,
+.zs-skip-link:focus-visible {
+  position: fixed;
+  inset-block-start: var(--zs-space-2);
+  inset-inline-start: var(--zs-space-2);
+  z-index: var(--zs-z-modal);
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-4);
+  overflow: visible;
+  clip: auto;
+  background: var(--zs-surface-raised);
+  color: var(--zs-label);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-3);
+  box-shadow: var(--zs-shadow-2);
+  text-decoration: none;
+  outline-color: var(--zs-focus);
+}
+
+@media (forced-colors: active) {
+  .zs-skip-link:focus,
+  .zs-skip-link:focus-visible {
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
 }
 
 :root {
@@ -68,6 +187,29 @@
 
   /* ─── Type scale — sizes in rem so user font-size preference (the
      web equivalent of Dynamic Type) is honored. */
+
+  /* Marketing display scale — sits ABOVE large-title. These are the
+     page-band headline sizes (Hero <h1>, big section <h2>s, billboard
+     stat values) where the standard product type scale (which tops at
+     large-title / 34) reads too timid for a premium marketing surface.
+     Tight line-heights + negative tracking give the confident, dense
+     display feel; sections pair these with `text-wrap: balance`. rem-only,
+     theme-invariant — same values across every theme. */
+  --zs-text-display-1-size: 3.5rem;            /* 56 — hero <h1> */
+  --zs-text-display-1-line: 3.75rem;           /* 60 — tight */
+  --zs-text-display-1-weight: 700;
+  --zs-text-display-1-tracking: -0.03em;
+
+  --zs-text-display-2-size: 2.75rem;           /* 44 — billboard stats / big */
+  --zs-text-display-2-line: 3rem;              /* 48 */
+  --zs-text-display-2-weight: 700;
+  --zs-text-display-2-tracking: -0.026em;
+
+  --zs-text-display-3-size: 2.25rem;           /* 36 — confident section <h2> */
+  --zs-text-display-3-line: 2.5rem;            /* 40 */
+  --zs-text-display-3-weight: 700;
+  --zs-text-display-3-tracking: -0.022em;
+
   --zs-text-large-title-size: 2.125rem;        /* 34 */
   --zs-text-large-title-line: 2.5rem;          /* 40 */
   --zs-text-large-title-weight: 700;
@@ -131,6 +273,12 @@
   --zs-space-8: 2.5rem;                        /* 40 */
   --zs-space-9: 3rem;                          /* 48 */
   --zs-space-10: 4rem;                         /* 64 */
+
+  /* ─── Icon sizes — theme-invariant, aligned to the type/space scale.
+     Consumed by the Icon primitive's zs-icon--{size} classes. */
+  --zs-icon-sm: 1rem;                          /* 16 */
+  --zs-icon-md: 1.25rem;                       /* 20 */
+  --zs-icon-lg: 1.5rem;                        /* 24 */
 
   /* ─── Radii — circular border-radius approximating continuous corners.
      (True continuous-corner squircles aren't natively expressible on web;
@@ -292,6 +440,23 @@
 
   /* Modal z-stack token consumed by Dialog/AlertDialog backdrops. */
   --zs-z-modal: 50;
+
+  /* ─── Breakpoints — minimal responsive scale for layout primitives.
+     The system is fluid by default; these gate Grid `columns` objects and
+     Split `collapseBelow` only. CSS custom properties cannot be used inside
+     `@media` query conditions, so the layout CSS writes the literal rem
+     values in its media queries with a comment referencing the token name
+     (e.g. a 40rem min-width query annotated as the --zs-bp-sm breakpoint).
+     These tokens stay the single documented source of the values. */
+  --zs-bp-sm: 40rem;   /* 640 */
+  --zs-bp-md: 48rem;   /* 768 */
+  --zs-bp-lg: 64rem;   /* 1024 */
+
+  /* ─── Container max-widths — Container is the sole width authority. */
+  --zs-container-sm: 30rem;   /* 480 */
+  --zs-container-md: 48rem;   /* 768 */
+  --zs-container-lg: 64rem;   /* 1024 */
+  --zs-container-xl: 80rem;   /* 1280 */
 }
 
 @media (prefers-reduced-motion: reduce) {

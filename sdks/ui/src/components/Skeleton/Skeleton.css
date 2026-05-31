@@ -1,0 +1,133 @@
+/*
+ * Skeleton — loading placeholder.
+ *
+ * Anatomy:
+ *   .zs-skeleton                  — a single placeholder block
+ *     --text   : text-line bar (block-size keyed to a body line)
+ *     --rect   : rectangle, --zs-radius-2 corners
+ *     --circle : full-radius circle, square aspect
+ *   .zs-skeleton-lines            — container for multi-line text (N bars)
+ *
+ * Paint: a base fill (--zs-fill-tertiary) with a diagonal shimmer
+ * sweep painted in --zs-fill-quaternary via a moving gradient. The base
+ * fill is ALWAYS painted — the animation only moves the highlight, so
+ * disabling it (reduced motion / forced colors) leaves a visible
+ * placeholder.
+ *
+ * Motion discipline (mirrors Progress/Meter): the shimmer keyframe is
+ * gated behind the default media; `prefers-reduced-motion: reduce`
+ * sets `animation: none` and the static base fill remains.
+ */
+
+.zs-skeleton {
+  display: block;
+  /* Base placeholder fill — always visible, even with motion off. One
+     step lighter than secondary so the placeholder reads soft/warm
+     rather than a cold high-contrast block. */
+  background-color: var(--zs-fill-tertiary);
+  /* Shimmer highlight: a band of the lighter fill sweeping across the
+     base. background-size 200% lets the gradient translate fully. Kept
+     one step below the base so the sweep stays a subtle lift. */
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--zs-fill-quaternary) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  background-position: 0% 0;
+  border-radius: var(--zs-radius-2);
+  animation: zs-skeleton-shimmer 1.6s var(--zs-motion-ease) infinite;
+}
+
+/* ─── variants ─────────────────────────────────────────────────────── */
+.zs-skeleton--text {
+  /* A single line of body text. Default inline-size fills the column;
+     callers override via the `width` prop. */
+  inline-size: 100%;
+  block-size: var(--zs-text-body-line);
+  border-radius: var(--zs-radius-1);
+}
+
+.zs-skeleton--rect {
+  /* Defaults; consumers pass width/height. A floor keeps an unsized
+     rect visible. */
+  inline-size: 100%;
+  block-size: var(--zs-space-10);
+}
+
+.zs-skeleton--circle {
+  /* Square aspect forced to a circle. Default size keyed to a typical
+     avatar. A consumer can pass just `width` (or just `height`) and the
+     `aspect-ratio: 1` keeps it round — the unconstrained axis derives
+     from the constrained one rather than locking to the default and
+     producing an ellipse. `block-size: auto` lets the ratio drive height
+     off the inline-size; the default inline-size covers the unsized case. */
+  inline-size: var(--zs-space-10);
+  block-size: auto;
+  aspect-ratio: 1;
+  border-radius: var(--zs-radius-full);
+}
+
+/* ─── multi-line text ──────────────────────────────────────────────── */
+.zs-skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  inline-size: 100%;
+}
+
+/* The last bar is shortened so the block reads as a finished paragraph
+   rather than a solid rectangle. */
+.zs-skeleton-lines .zs-skeleton:last-child:not(:only-child) {
+  inline-size: 50%;
+}
+
+@keyframes zs-skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* RTL — sweep the highlight the opposite direction so the motion reads
+   with the writing direction. */
+.zs-skeleton:dir(rtl) {
+  animation-name: zs-skeleton-shimmer-rtl;
+}
+@keyframes zs-skeleton-shimmer-rtl {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+/* ─── reduced motion ───────────────────────────────────────────────── *
+ * Disable the shimmer; the static base fill remains painted so the
+ * placeholder is still visible (paint preserved — only motion stops).
+ * Mirror of Progress/Meter. Drop the gradient image too so no frozen
+ * half-swept highlight lingers. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-skeleton {
+    animation: none;
+    background-image: none;
+  }
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * Token fills collapse under forced-colors; paint a bordered Canvas box
+ * so the placeholder stays visible as a distinct region. */
+@media (forced-colors: active) {
+  .zs-skeleton {
+    animation: none;
+    background-image: none;
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+    forced-color-adjust: none;
+  }
+}

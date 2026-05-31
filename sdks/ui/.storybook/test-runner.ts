@@ -12,6 +12,24 @@ import { checkA11y, configureAxe, injectAxe } from "axe-playwright";
  * we never edit this file to silence a check. */
 const config: TestRunnerConfig = {
   async preVisit(page) {
+    // Raise this tab to the foreground before any play() runs. Headless
+    // Chromium backgrounds freshly-opened tabs; a backgrounded tab can
+    // throttle timers and the async focus moves that focus-trap /
+    // focus-return / roving-tabindex assertions depend on, so the
+    // settle-before-assert window becomes nondeterministic. `bringToFront`
+    // is cheap and keeps the tab active for the whole visit. (It is NOT
+    // sufficient on its own — the stories that assert post-interaction
+    // focus poll with `waitFor` so the assertion waits for the async focus
+    // move to commit rather than racing it.)
+    await page.bringToFront();
+    // Emulate `prefers-reduced-motion: reduce` for the whole run. Every
+    // component gates its enter/leave transitions behind a reduced-motion
+    // block, so without this a synchronous `toBeVisible()` in a play() races
+    // the entrance transition (popups go opacity 0 → 1 over --zs-motion-base)
+    // and fails deterministically. Reduced-motion is a real supported path
+    // the components are built for, so testing under it is faithful — and it
+    // makes overlay open-state assertions deterministic.
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await injectAxe(page);
   },
   async postVisit(page, context) {

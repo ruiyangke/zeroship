@@ -1,0 +1,188 @@
+/*
+ * Banner — inline page-level message.
+ *
+ * Anatomy:
+ *   .zs-banner                    opaque tinted shell (per intent)
+ *     └─ .zs-banner__row          row Stack: icon + text column + dismiss
+ *         ├─ .zs-banner__icon        intent glyph, tinted, aria-hidden
+ *         ├─ .zs-banner__text        Stack: title / description / parts
+ *         │   ├─ .zs-banner__title       headline
+ *         │   ├─ .zs-banner__description supporting copy
+ *         │   └─ .zs-banner__actions     action row
+ *         └─ .zs-banner__dismiss      real <button aria-label="Dismiss">
+ *
+ * Glass / axe-contrast invariant: the shell paints an OPAQUE tinted
+ * background — the intent color blended INTO the opaque `--zs-surface`
+ * token, never an alpha tint over the page mesh. Each intent resolves
+ * two locals consumed by the base rule:
+ *
+ *   --zs-banner-bg     opaque tinted background (intent mixed into surface)
+ *   --zs-banner-icon   icon tint (the intent's base system color)
+ *
+ * The title/description stay in the label hierarchy so the banner reads
+ * calm — the icon + tinted shell are the severity signal, not a fully
+ * saturated panel.
+ */
+
+.zs-banner {
+  /* intent locals — overridden per intent below. Default = info. */
+  --zs-banner-bg: color-mix(in oklch, var(--zs-accent) 12%, var(--zs-surface));
+  --zs-banner-icon: var(--zs-accent);
+
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+  border-radius: var(--zs-radius-4);
+  background-color: var(--zs-banner-bg);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+}
+
+/* ─── intent palettes ─────────────────────────────────────────────────
+ * Each blends the intent tint INTO --zs-surface so the base stays opaque
+ * for axe's contrast walk. */
+.zs-banner--info {
+  --zs-banner-bg: color-mix(in oklch, var(--zs-accent) 12%, var(--zs-surface));
+  --zs-banner-icon: var(--zs-accent);
+}
+
+.zs-banner--success {
+  --zs-banner-bg: color-mix(in oklch, var(--zs-system-green) 14%, var(--zs-surface));
+  --zs-banner-icon: color-mix(in oklab, var(--zs-system-green) 70%, var(--zs-label));
+}
+
+.zs-banner--warning {
+  --zs-banner-bg: color-mix(in oklch, var(--zs-system-orange) 16%, var(--zs-surface));
+  --zs-banner-icon: color-mix(in oklab, var(--zs-system-orange) 64%, var(--zs-label));
+}
+
+.zs-banner--danger {
+  --zs-banner-bg: color-mix(in oklch, var(--zs-system-red) 12%, var(--zs-surface));
+  --zs-banner-icon: var(--zs-system-red);
+}
+
+/* ─── layout ──────────────────────────────────────────────────────────
+ * The row Stack handles the gap; the text column flexes to fill so the
+ * dismiss button is pushed to the inline end. */
+.zs-banner__row {
+  inline-size: 100%;
+}
+
+.zs-banner__text {
+  /* Fill the row between the icon and the dismiss affordance. */
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+.zs-banner__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--zs-banner-icon);
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1;
+  /* Nudge the icon onto the title's optical baseline row. */
+  margin-block-start: var(--zs-space-half);
+}
+
+/* The glyph is a Lucide icon (rendered as an <svg> by the Icon primitive);
+   this descendant rule still matches and keeps the prior 1em footprint
+   (the .zs-icon--md size class loses on specificity to this class+element
+   selector). Lucide glyphs are fully stroked in currentColor — both the
+   circled check (success) and the circled alert (info/warning/danger) carry
+   their full mark as strokes, so no per-shape fill override is needed. */
+.zs-banner__icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.zs-banner__title {
+  color: var(--zs-label);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+}
+
+.zs-banner__description {
+  margin: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+.zs-banner__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-2);
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── dismiss button ──────────────────────────────────────────────────
+ * A real <button> — quiet by default, tinting on hover. */
+.zs-banner__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  inline-size: var(--zs-space-6);
+  block-size: var(--zs-space-6);
+  padding: 0;
+  /* No inline-start margin: the row Stack's own gap already separates the
+     dismiss button from the text column. A margin here would double that
+     gap. */
+  border: 0;
+  border-radius: var(--zs-radius-2);
+  background: transparent;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-banner__dismiss:hover {
+  /* Layer a translucent label tint — the shell base stays opaque. */
+  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  color: var(--zs-label);
+}
+
+.zs-banner__dismiss:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── prefers-reduced-motion ──────────────────────────────────────────
+ * The motion tokens already collapse to 1ms under reduce; pin the
+ * transition off entirely so no hover tween runs at all. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-banner__dismiss {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * No system color slots under HCM; defer the icon + dismiss to
+ * CanvasText. The glyph shapes + copy carry the meaning. */
+@media (forced-colors: active) {
+  .zs-banner {
+    border: var(--zs-selection-hairline) solid CanvasText;
+  }
+  .zs-banner__icon {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-banner__dismiss {
+    color: CanvasText;
+  }
+  .zs-banner__dismiss:hover {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+}

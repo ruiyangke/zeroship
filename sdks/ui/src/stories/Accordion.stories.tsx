@@ -297,6 +297,26 @@ export const WithDefaultValue: Story = {
     await expect(
       canvas.getByText(/all hardware ships with a one-year limited warranty/i),
     ).toBeVisible();
+
+    // Regression guard (RTL-correct open marker): the open-state accent is
+    // a `::before` overlay pinned to the LOGICAL inline-start edge — not a
+    // physical-left box-shadow. In this LTR story inline-start === left, so
+    // the marker's left edge aligns with the trigger's left edge, and it
+    // has a non-zero painted width. Fails pre-fix only conceptually (the
+    // box-shadow had no ::before to measure); here we assert the ::before
+    // exists, is painted, and hugs the inline-start edge.
+    const triggerBox = warranty.getBoundingClientRect();
+    const before = getComputedStyle(warranty, "::before");
+    await expect(before.content).not.toBe("none");
+    const markerWidth = parseFloat(before.inlineSize || before.width);
+    await expect(markerWidth).toBeGreaterThan(0);
+    // inset-inline-start: 0 → the marker is flush to the trigger's start
+    // (left in LTR). Resolves to a length the browser reports in px.
+    const insetStart = parseFloat(
+      before.insetInlineStart || before.left || "0",
+    );
+    await expect(insetStart).toBe(0);
+    void triggerBox;
   },
 };
 
@@ -325,7 +345,16 @@ export const Disabled: Story = {
       name: /shipping & delivery/i,
     });
 
-    await expect(shipping).toBeDisabled();
+    // Base UI's Accordion.Trigger is a heading-button (a `<button>`
+    // inside an `<h3>`), not a native form control. It marks the
+    // disabled state with `aria-disabled="true"` + `data-disabled`
+    // (NOT the native `disabled` attribute) so the trigger stays in
+    // the AT tree as a disabled heading-button. jest-dom's
+    // `toBeDisabled()` only recognizes native `disabled`; the faithful
+    // assertion is the aria/data contract plus the behavioral
+    // guarantee (clicking does not expand, no focus is taken).
+    await expect(shipping).toHaveAttribute("aria-disabled", "true");
+    await expect(shipping).toHaveAttribute("data-disabled");
     await expect(shipping).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(shipping);
     await expect(shipping).toHaveAttribute("aria-expanded", "false");

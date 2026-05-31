@@ -105,7 +105,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
                       {active && (
                         <Badge
                           data-testid="settings-plan-current"
-                          tone="info"
+                          intent="info"
                         >
                           current
                         </Badge>

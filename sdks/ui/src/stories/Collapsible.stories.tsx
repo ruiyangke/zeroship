@@ -163,7 +163,17 @@ export const Disabled: Story = {
       name: /disabled disclosure/i,
     });
 
-    await expect(trigger).toBeDisabled();
+    // Base UI's Collapsible.Trigger is a disclosure button, NOT a
+    // native form control. It marks the disabled state with
+    // `aria-disabled="true"` + `data-disabled` (NOT the native
+    // `disabled` attribute) so the trigger stays in the AT tree and
+    // exposes WHY it is inactive. jest-dom's `toBeDisabled()` only
+    // recognizes the native `disabled` attr on form controls, so the
+    // faithful assertion for this element type is the aria/data
+    // contract plus the behavioral guarantee (clicks are no-ops, no
+    // focus is taken).
+    await expect(trigger).toHaveAttribute("aria-disabled", "true");
+    await expect(trigger).toHaveAttribute("data-disabled");
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(trigger);
     await expect(trigger).toHaveAttribute("aria-expanded", "false");

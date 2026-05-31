@@ -1,0 +1,129 @@
+/*
+ * Cta — a focused call-to-action band.
+ *
+ * Anatomy:
+ *   .zs-cta              — the <section>; generous vertical padding, NO heavy
+ *                          background by default (composable — the consumer
+ *                          paints the page backdrop)
+ *   .zs-cta__panel       — the body Stack (eyebrow → h2 → description →
+ *                          actions); under data-variant="tinted" it becomes a
+ *                          rounded accent-tint card with its own padding
+ *   .zs-cta__eyebrow     — small label above the title (accent lead-in)
+ *   .zs-cta__title       — the section <h2>
+ *   .zs-cta__description  — muted supporting <p> on a reading measure
+ *   .zs-cta__actions      — the CTA Cluster (composed); aligns to the band
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm; the composed Container owns
+ *     the inline width + padding. The composed Stack / Cluster own the gaps
+ *     and the CTA wrapping.
+ *   - `data-align="center"` (default) centers the column on a readable
+ *     measure (`--zs-cta-measure`); `data-align="start"` start-aligns it.
+ *   - `data-variant="tinted"` paints the panel as a subtle accent-tint card
+ *     (the house `color-mix` idiom, cf. FeatureGrid's icon badge) with radius
+ *     + padding. `plain` paints nothing — the band is composable.
+ *   - Logical properties throughout (padding-block, padding-inline,
+ *     margin-inline) for RTL.
+ *
+ * Motion: none of its own (the composed Button / Cluster carry their own
+ * motion + reduced-motion handling), so there is nothing here to disable.
+ */
+
+.zs-cta {
+  /* Local single-knob custom property (the house idiom, cf. --zs-hero-measure
+     / --zs-feature-grid-header-measure): a named, tunable handle for the
+     centered column's readable measure + the tinted panel's tint percentage. */
+  --zs-cta-measure: 44rem;
+  --zs-cta-tint: 8%;
+
+  /* Band rhythm — generous vertical padding so the band reads distinct.
+     No background: composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  color: var(--zs-label);
+}
+
+/* ─── Panel — the body column ────────────────────────────────────────────── */
+.zs-cta__panel {
+  /* Cap the column to a readable measure so the headline + copy never run
+     edge-to-edge on wide viewports. Centered when the band is centered (the
+     composed Stack `align="center"` already centers the inline children);
+     start-aligned otherwise. */
+  max-inline-size: var(--zs-cta-measure);
+  inline-size: 100%;
+}
+
+.zs-cta[data-align="center"] .zs-cta__panel {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.zs-cta[data-align="start"] .zs-cta__panel {
+  text-align: start;
+}
+
+/* Tinted variant: a subtle accent-tint card with radius + padding. The tint
+   is the house `color-mix` idiom so it tracks the accent token and stays
+   token-pure. The plain variant adds nothing — the band stays composable. */
+.zs-cta__panel[data-variant="tinted"] {
+  padding-block: var(--zs-space-9);
+  padding-inline: var(--zs-space-9);
+  border-radius: var(--zs-radius-6);
+  background: color-mix(
+    in oklch,
+    var(--zs-accent) var(--zs-cta-tint),
+    var(--zs-surface)
+  );
+}
+
+/* ─── Eyebrow — the shared section eyebrow (accent pill) ──────────────────
+   The styling is `.zs-section-eyebrow` (defined once in _section-tone.css);
+   this BEM hook remains only as a stable consumer target. */
+
+/* ─── Title — the section headline ───────────────────────────────────────── */
+.zs-cta__title {
+  margin-block: 0;
+  /* Marketing display-3 — a confident closing headline, markedly bigger than
+     the former title-1. */
+  font-size: var(--zs-text-display-3-size);
+  line-height: var(--zs-text-display-3-line);
+  font-weight: var(--zs-text-display-3-weight);
+  letter-spacing: var(--zs-text-display-3-tracking);
+  color: var(--zs-label);
+  text-wrap: balance;
+}
+
+/* ─── Description — muted supporting copy ─────────────────────────────────── */
+.zs-cta__description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── Actions — the CTA row (composed Cluster) ───────────────────────────── */
+.zs-cta__actions {
+  /* Cluster owns the gap + wrap; the band only adds a touch of top rhythm
+     beyond the Stack gap so the CTAs read as a distinct action band. */
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── forced-colors — keep text legible + tinted panel edged ──────────────
+ *
+ * The authored label / accent / surface tokens drop out in a forced-colors
+ * pass. Reassert system colors so every text region resolves to CanvasText;
+ * give the tinted panel a visible system border since its tint background
+ * drops out. */
+@media (forced-colors: active) {
+  .zs-cta,
+  .zs-cta__eyebrow,
+  .zs-cta__title,
+  .zs-cta__description {
+    color: CanvasText;
+  }
+  .zs-cta__panel[data-variant="tinted"] {
+    border: var(--zs-selection-hairline) solid CanvasText;
+  }
+}

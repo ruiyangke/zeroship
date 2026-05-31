@@ -1,0 +1,105 @@
+/*
+ * EmptyState — "nothing here yet" panel.
+ *
+ * Anatomy:
+ *   .zs-empty-state                  — outer region (paints nothing itself)
+ *     └─ Center → Stack column        — both-axes centering + governed gap
+ *         ├─ .zs-empty-state__icon         — decorative glyph (aria-hidden)
+ *         ├─ .zs-empty-state__title        — heading (h2 by default)
+ *         ├─ .zs-empty-state__description  — muted supporting copy
+ *         └─ .zs-empty-state__actions      — action row (e.g. a Button)
+ *
+ * The centering + gap come from the composed Center/Stack primitives;
+ * this file only paints the parts and sets the generous padding.
+ *
+ * Motion: none.
+ */
+
+.zs-empty-state {
+  /* Generous breathing room so the panel reads as a deliberate "empty"
+     surface rather than a collapsed container. Logical padding so RTL /
+     vertical writing modes inset correctly. */
+  padding-block: var(--zs-space-8);
+  padding-inline: var(--zs-space-6);
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+.zs-empty-state__column {
+  /* Cap the measure so long descriptions wrap into a readable column
+     instead of stretching the full region width. */
+  max-inline-size: 28rem;
+  text-align: center;
+  /* Center the capped column within the (block-level) region. The merged
+     Center primitive centers this element's CHILDREN, but the column
+     itself is a block-level flex box at inline-start of the region, so
+     without this it hugs the inline-start edge on a wide surface (only
+     the centered text gives the illusion of centering). */
+  margin-inline: auto;
+}
+
+.zs-empty-state__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--zs-label-tertiary);
+  /* Icon size keyed off the title scale so it stays optically paired
+     with the heading. Slotted <svg> children inherit 1em. */
+  font-size: var(--zs-text-large-title-size);
+  line-height: 1;
+}
+
+.zs-empty-state__icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+
+.zs-empty-state__title {
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: 600;
+}
+
+.zs-empty-state__description {
+  margin: 0;
+  /* Softer than the title via SIZE (footnote), but kept at
+     --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
+     (below AA 4.5:1) and this copy composites on the opaque DataTable
+     surface, so the smaller size carries the hierarchy while secondary
+     keeps it AA-safe. */
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  /* Tighten the title↔description pairing: the Stack gap governs the
+     inter-part rhythm, but the description should sit a touch closer to
+     its title than to the action row. A small negative top margin pulls
+     it up by one space step. */
+  margin-block-start: calc(-1 * var(--zs-space-1));
+}
+
+.zs-empty-state__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-2);
+  /* A little extra separation above the action row so the button reads
+     as a distinct affordance below the copy. */
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ─── */
+@media (forced-colors: active) {
+  .zs-empty-state__title {
+    color: CanvasText;
+  }
+  .zs-empty-state__description {
+    color: CanvasText;
+  }
+  .zs-empty-state__icon {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+}

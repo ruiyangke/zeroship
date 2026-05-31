@@ -1,0 +1,133 @@
+/*
+ * StatCard — KPI / metric tile, built ON Card.
+ *
+ * The surface (opaque base, padding, radius, variant/size, hover) is
+ * Card's — StatCard adds NO surface paint of its own. These rules only
+ * style the three interior rows StatCard injects:
+ *
+ *   .zs-stat-card__head      label row (label + optional decorative icon)
+ *     ├─ .zs-stat-card__label    metric name — secondary label, small
+ *     └─ .zs-stat-card__icon     decorative glyph, aria-hidden
+ *   .zs-stat-card__value     the metric value — large title scale
+ *   .zs-stat-card__delta     the change row — glyph + value, tinted by
+ *                            [data-direction] (up/down/flat)
+ *
+ * Card's flex-column already governs the gap between these rows, so we
+ * lean on a tighter override only where the metric rhythm wants it.
+ *
+ * Delta color: direction → tint via [data-direction]. The tint is a
+ * REINFORCEMENT, not the sole signal — the glyph (a shape) and the
+ * visually-hidden direction word carry the meaning for color-blind and
+ * AT users (WCAG 1.4.1). See StatCard.tsx.
+ *
+ * Motion: none.
+ */
+
+.zs-stat-card {
+  /* Tighten the inter-row gap below Card's content rhythm so label →
+     value → delta read as one coherent metric unit rather than three
+     loosely-spaced blocks. */
+  gap: var(--zs-space-2);
+}
+
+.zs-stat-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--zs-space-2);
+}
+
+.zs-stat-card__label {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 500;
+}
+
+.zs-stat-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--zs-label-tertiary);
+  /* Sized to the subheadline label rhythm so the icon sits as a quiet
+     companion to the metric name, not a competing mark. */
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1;
+}
+
+.zs-stat-card__icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+
+.zs-stat-card__value {
+  color: var(--zs-label);
+  /* The hero number — title-1 scale so it dominates the tile. */
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  /* A long unbreakable value (a big number, a long currency string) must
+     wrap/shrink inside the card rather than blow out the tile width.
+     min-inline-size:0 releases the flex min-content floor (the value is a
+     child of Card's flex column); overflow-wrap breaks an unbreakable
+     run as a last resort. */
+  min-inline-size: 0;
+  overflow-wrap: break-word;
+}
+
+.zs-stat-card__delta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--zs-space-1);
+  inline-size: fit-content;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: 600;
+  /* Default (flat / no direction match) — neutral secondary label. */
+  color: var(--zs-label-secondary);
+}
+
+.zs-stat-card__delta-glyph {
+  /* The glyph rides the text size; it is the SHAPE signal that pairs
+     with the tint so direction never depends on color alone. */
+  font-size: 0.85em;
+  line-height: 1;
+}
+
+/* ─── direction tint ──────────────────────────────────────────────────
+ * Reinforces the glyph + visually-hidden word. up=green, down=red,
+ * flat=neutral.
+ *
+ * Contrast: system-green (L≈0.6) is too light to carry footnote text on
+ * the card surface at 4.5:1, so the up tint is DEEPENED toward --zs-label
+ * (rectangular oklab so the hue stays green rather than rotating to teal)
+ * — the same treatment Badge uses for its green/orange ink. system-red is
+ * already deep enough (the crystal red is L≈0.52); using the -active step
+ * gives a comfortable margin. */
+.zs-stat-card__delta[data-direction="up"] {
+  color: color-mix(in oklab, var(--zs-system-green) 60%, var(--zs-label));
+}
+
+.zs-stat-card__delta[data-direction="down"] {
+  color: var(--zs-system-red-active);
+}
+
+.zs-stat-card__delta[data-direction="flat"] {
+  color: var(--zs-label-secondary);
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * No system-green/red slot exists under HCM; defer the delta to
+ * CanvasText so it stays legible. The glyph shape + the (now-visible-to-
+ * AT) direction word carry the meaning, not the color. */
+@media (forced-colors: active) {
+  .zs-stat-card__delta {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-stat-card__icon {
+    color: CanvasText;
+  }
+}

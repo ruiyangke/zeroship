@@ -140,6 +140,13 @@ export interface CardProps extends ComponentPropsWithoutRef<"div"> {
    * true, this MUST be a single React element (the render-as target).
    */
   children?: ReactNode;
+
+  /**
+   * Root `data-slot` value. Defaults to `"card"`. A composing block
+   * (e.g. `StatCard`) can override it so consumers can target the outer
+   * element via the block's own slot vocabulary.
+   */
+  "data-slot"?: string;
 }
 
 /* ─── Card root ──────────────────────────────────────────────────────── */
@@ -154,6 +161,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     children,
     onClick,
     onKeyDown,
+    "data-slot": dataSlot = "card",
     ...rest
   },
   ref,
@@ -165,8 +173,12 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     className,
   );
 
+  // `data-slot` defaults to `"card"` but a composing block (e.g.
+  // StatCard) can override the root slot so consumers can target the
+  // outer element via its own slot vocabulary. Card's own stories pass
+  // no `data-slot`, so the default `"card"` is unchanged.
   const dataProps = {
-    "data-slot": "card",
+    "data-slot": dataSlot,
     "data-variant": variant,
     "data-size": size,
     "data-interactive": interactive ? "" : undefined,

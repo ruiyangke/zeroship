@@ -1,0 +1,29 @@
+/*
+ * Cluster — wrapping inline group.
+ *
+ * Anatomy:
+ *   .zs-cluster   — the wrapping flex row
+ *
+ * Driven by inline custom properties set from props:
+ *   --cluster-gap       --zs-space-*    (default --zs-space-2)
+ *   --cluster-align     align-items     (default center)
+ *   --cluster-justify   justify-content (default flex-start)
+ *
+ * Layout discipline:
+ *   - Arrange-only: no background, no border, no padding.
+ *   - `flex-wrap: wrap` is intrinsic to Cluster — it is the wrapping
+ *     primitive. The single `gap` shorthand applies on both the inline
+ *     and cross axes so wrapped lines breathe the same as inline items.
+ *   - RTL is automatic via `flex-direction: row`.
+ *
+ * Motion: none.
+ */
+
+.zs-cluster {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--cluster-gap, var(--zs-space-2));
+  align-items: var(--cluster-align, center);
+  justify-content: var(--cluster-justify, flex-start);
+}

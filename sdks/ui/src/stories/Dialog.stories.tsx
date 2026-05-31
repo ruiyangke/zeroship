@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, within } from "@storybook/test";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useMemo, useRef, useState } from "react";
 import { Button, createDialogHandle, Dialog, Field, Input } from "../components";
 
@@ -56,7 +56,12 @@ export const Default: Story = {
     await expect(dialog).toBeVisible();
 
     await userEvent.click(page.getByRole("button", { name: /^close$/i }));
-    await expect(trigger).toHaveFocus();
+    // Base UI returns focus to the trigger AFTER the close transition
+    // commits and the popup unmounts — that focus move is async, so a
+    // bare synchronous assertion races it (and flakes nondeterministically
+    // under headless). waitFor polls the SAME assertion until the
+    // focus-return lands. Mirrors the InitialFocus story's deflake.
+    await waitFor(() => expect(trigger).toHaveFocus());
   },
 };
 
@@ -130,6 +135,41 @@ export const PlacementTop: Story = {
       </Dialog>
     </div>
   ),
+  // Regression guard (#6): top placement is `top`-anchored — its steady
+  // transform has NO -50% vertical translate (only --zs-nested-offset,
+  // which is 0 for a non-nested dialog). The reduced-motion enter/leave
+  // override now MIRRORS this (it previously re-added a -50% it never had,
+  // causing a one-frame vertical jump). After open + transition settle,
+  // assert the rendered vertical translate is ~0, not -half the popup
+  // height (which a -50% translate would produce).
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByTestId("dialog-trigger"));
+
+    const popup = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(
+        '[data-testid="dialog-placement-top"]',
+      );
+      if (!el) throw new Error("popup not mounted");
+      return el;
+    });
+
+    // Let the enter transition settle so we read the steady transform, not
+    // the data-starting-style frame.
+    await waitFor(async () => {
+      await expect(popup).not.toHaveAttribute("data-starting-style");
+    });
+
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(popup).transform);
+    // matrix.f is the resolved vertical translate in px. Top placement is
+    // top-anchored: no -50% of the popup height. A -50% translate would put
+    // |f| ≈ height/2 (tens of px). Steady top translate is just the nested
+    // offset (0 here), so |f| must be small.
+    await expect(Math.abs(matrix.f)).toBeLessThan(2);
+    // Sanity: the popup actually has a meaningful height, so a -50% would
+    // have been large and this assertion is non-trivial.
+    await expect(popup.getBoundingClientRect().height).toBeGreaterThan(20);
+  },
 };
 
 /* ─── 4. Backdrop tints ──────────────────────────────────────────────── */
@@ -317,7 +357,15 @@ export const InitialFocus: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: /sign in/i }));
     await page.findByRole("dialog", { name: /sign in/i });
-    await expect(page.getByRole("textbox", { name: /username/i })).toHaveFocus();
+    // Base UI moves initial focus AFTER the open transition commits, so
+    // a bare synchronous assertion races the autofocus. waitFor polls
+    // until the username field actually holds focus — same assertion,
+    // just deflaked.
+    await waitFor(() =>
+      expect(
+        page.getByRole("textbox", { name: /username/i }),
+      ).toHaveFocus(),
+    );
   },
 };
 
@@ -590,7 +638,13 @@ function CreateDialogHandlePayloadStory() {
         }
       />
       <Dialog handle={handle}>
-        {({ payload }) => (
+        {/* payload is typed `{}` here: DialogProps extends the non-generic
+            BaseRootProps (see the "half-broken createDialogHandle" note in
+            Dialog.tsx), so the handle's type param doesn't flow to the
+            render-fn. Cast until Dialog.Root is made generic over payload. */}
+        {({ payload: rawPayload }) => {
+          const payload = rawPayload as ConfirmPayload | undefined;
+          return (
           <Dialog.Portal>
             <Dialog.Backdrop />
             <Dialog.Popup data-testid="dialog-handle-popup">
@@ -614,7 +668,8 @@ function CreateDialogHandlePayloadStory() {
               </Dialog.Footer>
             </Dialog.Popup>
           </Dialog.Portal>
-        )}
+          );
+        }}
       </Dialog>
     </div>
   );
@@ -720,7 +775,9 @@ export const CloseAsChildLink: Story = {
               <Dialog.Title>Link close target</Dialog.Title>
               <Dialog.Description>
                 Dialog.Close can route Base UI close behavior into a
-                non-button element.
+                non-button element. The element keeps its `&lt;a href&gt;`
+                tag, but Base UI assigns `role="button"` because a close
+                control IS a button semantically.
               </Dialog.Description>
             </Dialog.Header>
             <Dialog.Footer>
@@ -741,7 +798,14 @@ export const CloseAsChildLink: Story = {
       name: /open link close/i,
     }));
     await page.findByRole("dialog", { name: /link close target/i });
-    const link = page.getByRole("link", { name: /done as link/i });
+    // Base UI's Close primitive runs the asChild target through useButton
+    // with nativeButton={false}; useButton unconditionally assigns
+    // role="button" to non-native-button render targets (a close control
+    // is a button, not a link). So the accessible role is "button" even
+    // though the underlying element stays an <a href>. We query by the
+    // real role and assert the tag/href to prove asChild routed onto the
+    // anchor element.
+    const link = page.getByRole("button", { name: /done as link/i });
 
     await expect(link.tagName).toBe("A");
     await expect(link).toHaveAttribute("href", "#dialog-link-close");

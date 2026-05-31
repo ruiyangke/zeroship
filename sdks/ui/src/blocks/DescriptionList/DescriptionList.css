@@ -1,0 +1,111 @@
+/*
+ * DescriptionList — semantic key→value list.
+ *
+ * Anatomy:
+ *   .zs-description-list                  <dl> root (paints no surface)
+ *     └─ .zs-description-list__item       <div> grouping a term/detail pair
+ *         ├─ .zs-description-list__term     <dt> — the key, secondary label
+ *         └─ .zs-description-list__detail   <dd> — the value, primary label
+ *
+ * Layout:
+ *   --horizontal (default): each item is a two-column grid — term in a
+ *     fixed-ish first track (--zs-dl-term-w), detail fills the second.
+ *     This is the "label: value" details-panel arrangement.
+ *   --vertical: each item is a block; term stacks above detail.
+ *
+ *   --divided: a --zs-separator hairline (logical block-start border) on
+ *     every item after the first.
+ *
+ * The list paints nothing of its own — it sits inside whatever surface
+ * (a Card, a panel) the consumer provides. Logical properties throughout
+ * so it flips correctly under RTL.
+ */
+
+.zs-description-list {
+  /* Width of the term column in horizontal mode. A token so a consumer
+     can retune it per-list via inline `--zs-dl-term-w: …`. */
+  --zs-dl-term-w: 10rem;
+
+  margin: 0;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+/* ─── item ────────────────────────────────────────────────────────────── */
+.zs-description-list__item {
+  /* The block-axis gap between consecutive rows. */
+  padding-block: var(--zs-space-2);
+}
+
+.zs-description-list__item:first-child {
+  padding-block-start: 0;
+}
+
+.zs-description-list__item:last-child {
+  padding-block-end: 0;
+}
+
+/* ─── term / detail typography ─────────────────────────────────────────
+ * Term is the quieter secondary label; detail carries the primary label
+ * weight so the value reads as the answer. */
+.zs-description-list__term {
+  margin: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 500;
+}
+
+.zs-description-list__detail {
+  /* Reset the UA default <dd> indent (a ~2.5rem inline-start margin). */
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 400;
+  /* Let the detail shrink below its content width inside the grid track
+     (the track itself is minmax(0,1fr); this guards the dd flex/grid
+     min-content floor) and break a long unbreakable value rather than
+     overflowing a narrow container. */
+  min-inline-size: 0;
+  overflow-wrap: break-word;
+}
+
+/* ─── horizontal (default) ─────────────────────────────────────────────
+ * Two-column grid: a fixed-ish term track, then the detail filling the
+ * rest. align-items:baseline keeps the term/value sitting on one line. */
+.zs-description-list--horizontal .zs-description-list__item {
+  display: grid;
+  /* minmax(0, 1fr) instead of 1fr: a bare 1fr track has an implicit
+     min-width:auto, so a long unbreakable detail value forces the track
+     wider than the container and overflows. minmax(0, …) lets the track
+     shrink to zero so the detail wraps instead. */
+  grid-template-columns: var(--zs-dl-term-w) minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: var(--zs-space-4);
+}
+
+/* ─── vertical ─────────────────────────────────────────────────────────
+ * Term caption stacked above the detail value. */
+.zs-description-list--vertical .zs-description-list__term {
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  margin-block-end: var(--zs-space-half);
+}
+
+/* ─── divider ──────────────────────────────────────────────────────────
+ * Logical block-start hairline on every item after the first. */
+.zs-description-list--divided .zs-description-list__item + .zs-description-list__item {
+  border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * The separator color has no system slot; map the divider to CanvasText
+ * so the row delineation survives HCM. */
+@media (forced-colors: active) {
+  .zs-description-list--divided
+    .zs-description-list__item
+    + .zs-description-list__item {
+    border-block-start-color: CanvasText;
+  }
+}

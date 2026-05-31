@@ -1,0 +1,243 @@
+/*
+ * Hero — top-of-page marketing band.
+ *
+ * Anatomy:
+ *   .zs-hero                  — the <section>; generous vertical padding,
+ *                               NO heavy background by default (composable)
+ *   .zs-hero__body            — the band body inside the Container; single
+ *                               column or a two-column split (data-layout)
+ *   .zs-hero__text            — the text column (composed Stack):
+ *                               eyebrow → title → description → actions
+ *   .zs-hero__eyebrow         — small label region above the headline
+ *   .zs-hero__title           — the <h1> headline (relevelable via asChild)
+ *   .zs-hero__description      — muted supporting <p> on a reading measure
+ *   .zs-hero__actions          — CTA Cluster (composed); aligns to the band
+ *   .zs-hero__media-column     — the media grid track (holds every media
+ *                               source, stacked in document order)
+ *   .zs-hero__media            — each optional media source (decorative wrapper)
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm (block padding) and lets
+ *     the composed `Container` own the inline width + padding. The body is
+ *     a single column by default; with media it is a CSS grid of two
+ *     columns that collapses to one below the --zs-bp-md breakpoint.
+ *   - `data-align="center"` centers the text column on a readable measure
+ *     (`--zs-hero-measure`); `data-align="start"` start-aligns it. The
+ *     measure keeps headline + description from running edge-to-edge on
+ *     wide viewports (the classic over-long line-length readability trap).
+ *   - The composed Stack / Cluster own the intra-column gaps and the CTA
+ *     wrapping; this stylesheet only adds the band rhythm, the type scale
+ *     for headline / description, the measure, and the split grid.
+ *   - Logical properties throughout for RTL (padding-block, margin-inline,
+ *     inset-inline).
+ *
+ * Motion: none of its own.
+ */
+
+.zs-hero {
+  /* Band rhythm — generous vertical padding from the large space steps so
+     the hero reads as a distinct top-of-page band. No background: the hero
+     is composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  /* Inline padding is owned by the composed Container; the section itself
+     adds none so the Container's measure is the single inline authority. */
+  color: var(--zs-label);
+}
+
+/* ─── Optional accent backdrop — a subtle depth wash behind the hero ──────
+ *
+ * `backdrop` opts a hero into a soft accent radial centered above the band,
+ * fading to transparent — a token-pure depth cue (the house color-mix idiom,
+ * so it tracks the accent token) for a marketing top-of-page band. STATIC
+ * paint, so it is reduced-motion-safe by construction. It layers UNDER the
+ * tone background by sitting on the section's `background-image` (tone paints
+ * `background`/`background-color`), so a `tone="muted"` hero keeps its surface
+ * fill with the wash on top of it; on a `tone="accent"` hero the wash is
+ * redundant against the accent fill and reads as a no-op. */
+.zs-hero[data-backdrop] {
+  background-image: radial-gradient(
+    120% 80% at 50% 0%,
+    color-mix(in oklch, var(--zs-accent) 10%, transparent),
+    transparent 60%
+  );
+  background-repeat: no-repeat;
+}
+
+/* forced-colors: the color-mix wash drops out (it cannot resolve to a system
+   color); suppress it so no stray paint lingers under a forced palette. */
+@media (forced-colors: active) {
+  .zs-hero[data-backdrop] {
+    background-image: none;
+  }
+}
+
+/* ─── Body — single column or two-column split ───────────────────────────── */
+.zs-hero__body {
+  display: grid;
+  /* Single-column default: one track. The split layout overrides below. */
+  grid-template-columns: 1fr;
+  gap: var(--zs-space-9);
+  align-items: center;
+}
+
+/* Centered single column: pin the text column to a readable measure and
+   center it within the Container. `data-align` lives on the section, so we
+   reach the body via the descendant combinator. */
+.zs-hero[data-align="center"] .zs-hero__body[data-layout="single"] {
+  justify-items: center;
+  text-align: center;
+}
+
+/* Start single column: the text column hugs the inline-start edge. */
+.zs-hero[data-align="start"] .zs-hero__body[data-layout="single"] {
+  justify-items: start;
+  text-align: start;
+}
+
+/* ─── Split — text column + media column ─────────────────────────────────── */
+.zs-hero__body[data-layout="split"] {
+  /* Two balanced columns on wide viewports. `minmax(0, …)` lets long
+     headline words wrap instead of forcing the grid wider. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  text-align: start;
+}
+
+/* A split always reads start-aligned in its text column regardless of the
+   requested `align` (the two-column balance is the alignment). */
+.zs-hero__body[data-layout="split"] .zs-hero__text {
+  text-align: start;
+}
+
+/* Collapse the split to a single stacked column below the --zs-bp-md
+   breakpoint (48rem — see --zs-bp-md). The media drops below the text. The
+   literal rem is written here because custom properties cannot appear in
+   an @media condition; the token name is the documented source. */
+@media (max-width: 47.999rem) {
+  .zs-hero__body[data-layout="split"] {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Text column — the readable measure ─────────────────────────────────── */
+.zs-hero__text {
+  /* Reading-measure cap so headline + copy never run edge-to-edge on wide
+     viewports. Only applies to the single-column layouts; in a split each
+     grid track already constrains the column. */
+  --zs-hero-measure: 46rem;
+}
+
+.zs-hero__body[data-layout="single"] .zs-hero__text {
+  max-inline-size: var(--zs-hero-measure);
+  inline-size: 100%;
+}
+
+/* Center the single text column inside the body when the band is centered. */
+.zs-hero[data-align="center"] .zs-hero__body[data-layout="single"] .zs-hero__text {
+  margin-inline: auto;
+}
+
+/* ─── Eyebrow — small label above the headline ───────────────────────────── */
+/* The eyebrow's font, color, and pill chrome are owned by the shared
+   `.zs-section-eyebrow` treatment in `sections/_section-tone.css`, so every
+   section's lead-in label reads as ONE family. Hero adds no bespoke type or
+   color of its own; the `.zs-hero__eyebrow` hook is kept only as a stable
+   per-section target (and for any future Hero-specific rhythm). */
+
+/* ─── Title — the page headline ──────────────────────────────────────────── */
+.zs-hero__title {
+  margin-block: 0;
+  /* Marketing display-1 — the hero headline is the page's loudest type, so it
+     reads the top step of the marketing display scale (above large-title)
+     rather than the product large-title. Confident, dense, with tight
+     line-height + negative tracking. */
+  font-size: var(--zs-text-display-1-size);
+  line-height: var(--zs-text-display-1-line);
+  font-weight: var(--zs-text-display-1-weight);
+  letter-spacing: var(--zs-text-display-1-tracking);
+  color: var(--zs-label);
+  /* Balance the headline across its lines for a tidy ragged edge on the
+     short multi-line headlines heroes typically carry. */
+  text-wrap: balance;
+}
+
+/* ─── Description — muted supporting copy ─────────────────────────────────── */
+.zs-hero__description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  /* Pretty wrapping avoids orphans on the supporting paragraph. */
+  text-wrap: pretty;
+}
+
+/* ─── Actions — the CTA row (composed Cluster) ───────────────────────────── */
+.zs-hero__actions {
+  /* Cluster owns the gap + wrap; the band only adds a touch of top rhythm
+     beyond the Stack gap so the CTAs read as a distinct action band. */
+  margin-block-start: var(--zs-space-1);
+}
+
+/* ─── Media — optional image / illustration column ───────────────────────── */
+/* The media column is the grid track that holds every media source (the
+   `media` prop and each `<Hero.Media>` child). Multiple media stack within
+   it, gap-governed, each filling the column inline. */
+.zs-hero__media-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-5);
+  inline-size: 100%;
+}
+
+.zs-hero__media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  /* A FRAMED PRODUCT SURFACE (R2): the media wrapper reads as an intentional
+     product window — a rounded raised panel with a hairline border + real
+     house elevation — rather than a flat bare slot. Even the default
+     placeholder content then sits inside a deliberate frame. The wrapper
+     rounds + clips its content so consumer images / illustrations adopt the
+     band's corner rhythm without each caller re-specifying it. */
+  border-radius: var(--zs-radius-6);
+  overflow: hidden;
+  border: var(--zs-selection-hairline) solid var(--zs-separator);
+  background: var(--zs-surface-raised);
+  box-shadow: var(--zs-shadow-3);
+}
+
+/* Media content fills the column responsively without distorting. The
+   wrapper is decorative by default; these rules style whatever element the
+   consumer drops in (img / picture / svg / div). */
+.zs-hero__media > * {
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+.zs-hero__media :is(img, svg, picture, video) {
+  display: block;
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+/* ─── forced-colors — keep every text region legible ──────────────────────
+ *
+ * The authored label tokens drop out in a forced-colors pass; mirror the
+ * painted text so eyebrow / title / description resolve to system colors. */
+@media (forced-colors: active) {
+  .zs-hero,
+  .zs-hero__title,
+  .zs-hero__description,
+  .zs-hero__eyebrow {
+    color: CanvasText;
+  }
+  /* The framed media surface's authored border + elevation drop out under a
+     forced palette; re-pin the frame to a CanvasText edge so the product
+     window still reads as a deliberate framed panel. */
+  .zs-hero__media {
+    border-color: CanvasText;
+    background: Canvas;
+  }
+}

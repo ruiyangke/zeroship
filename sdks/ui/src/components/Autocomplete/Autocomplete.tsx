@@ -41,6 +41,8 @@ import {
   Autocomplete as BaseAutocomplete,
   type AutocompleteRootProps as BaseAutocompleteRootProps,
 } from "@base-ui/react/autocomplete";
+import { ChevronDown } from "lucide-react";
+import { Icon } from "../Icon";
 import { useFieldContext, type FieldSize } from "../Field";
 import { classnames, composeBaseClass } from "../_classnames";
 
@@ -221,7 +223,7 @@ function AutocompleteRoot<Value extends string = string>(
             className="zs-combobox-input-group__icon"
             aria-hidden="true"
           >
-            <ChevronDownGlyph />
+            <Icon as={ChevronDown} size="sm" />
           </BaseAutocomplete.Icon>
         </BaseAutocomplete.InputGroup>
         <BaseAutocomplete.Portal>
@@ -250,21 +252,6 @@ function AutocompleteRoot<Value extends string = string>(
   );
 }
 AutocompleteRoot.displayName = "Autocomplete";
-
-function ChevronDownGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M4 6l4 4 4-4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── Item ─────────────────────────────────────────────────────────── *
  *

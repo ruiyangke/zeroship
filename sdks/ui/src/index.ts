@@ -2,11 +2,8 @@
  * @zeroship/ui — public surface.
  *
  * Mid-rebuild. The exports below are intentionally narrow: theme primitives
- * plus the styled components that have landed so far, plus temporary
- * native-HTML placeholders for the names other packages still import.
- *
- * As styled components land they replace the corresponding placeholder
- * exports in this file.
+ * plus the styled components, layout primitives, and composed blocks that
+ * have landed so far.
  */
 import "./styles.css";
 
@@ -199,6 +196,21 @@ export {
   Progress,
   type ProgressProps,
   type ProgressSize,
+  Skeleton,
+  type SkeletonProps,
+  type SkeletonVariant,
+  Spinner,
+  type SpinnerProps,
+  type SpinnerSize,
+  Badge,
+  type BadgeProps,
+  type BadgeIntent,
+  type BadgeVariant,
+  type BadgeSize,
+  Tag,
+  type TagProps,
+  type TagSize,
+  type Intent,
   Avatar,
   AvatarRoot,
   AvatarImage,
@@ -215,6 +227,9 @@ export {
   type SeparatorProps,
   type SeparatorOrientation,
   type SeparatorVariant,
+  Icon,
+  type IconProps,
+  type IconSize,
   PreviewCard,
   createPreviewCardHandle,
   type PreviewCardProps,
@@ -352,10 +367,16 @@ export {
   type ScrollAreaScrollbarProps,
   type ScrollAreaThumbProps,
   type ScrollAreaCornerProps,
+  Breadcrumbs,
+  type BreadcrumbsProps,
+  type BreadcrumbItem,
+  type BreadcrumbsItemProps,
+  type BreadcrumbsLinkProps,
+  type BreadcrumbsPageProps,
+  type BreadcrumbsSeparatorProps,
 } from "./components";
 
-// Temporary placeholders — see ./placeholders.tsx for migration tracking.
-export {
-  Badge,
-  type BadgeProps,
-} from "./placeholders";
+// Layout primitives + compositions, composed blocks, and page sections.
+export * from "./layouts";
+export * from "./blocks";
+export * from "./sections";

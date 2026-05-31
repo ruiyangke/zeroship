@@ -61,12 +61,14 @@ import {
   type ReactNode,
 } from "react";
 import { Checkbox as BaseCheckbox } from "@base-ui/react/checkbox";
+import { Check, Minus } from "lucide-react";
 import {
   useFieldContext,
   useFieldDisabledContext,
   useFieldVisualSize,
 } from "../Field";
 import { useFieldsetDisabledContext } from "../Fieldset";
+import { Icon } from "../Icon/Icon";
 import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
@@ -105,54 +107,31 @@ export interface CheckboxProps
   fieldProps?: ComponentPropsWithRef<"label">;
 }
 
-/* ─── indicator glyphs — two distinct paths so shape ≠ color ────────
+/* ─── indicator glyphs — two distinct shapes so shape ≠ color ────────
  *
- * Both SVGs use `currentColor` so the parent chip's `color` token
- * paints them. The checkmark is the standard tick; the minus is a
- * single horizontal bar so the indeterminate state is unmistakable
- * even in monochrome.
+ * Both glyphs are Lucide icons rendered via the governed `Icon` primitive.
+ * They paint in `currentColor` so the parent chip's `color` token tints
+ * them. The checkmark is the standard tick; the minus is a single
+ * horizontal bar so the indeterminate state is unmistakable even in
+ * monochrome.
  *
- * Both glyphs render simultaneously inside the Indicator and CSS
- * swaps visibility off the chip's `data-checked` / `data-indeterminate`
+ * Both glyphs render simultaneously inside the Indicator and CSS swaps
+ * visibility off the chip's `data-checked` / `data-indeterminate`
  * attributes — that way the indeterminate state derives from Base UI's
- * COMPUTED state (the `CheckboxGroup` parent-of-children pattern
- * doesn't require the wrapper to set `indeterminate` explicitly).
+ * COMPUTED state (the `CheckboxGroup` parent-of-children pattern doesn't
+ * require the wrapper to set `indeterminate` explicitly).
+ *
+ * The `data-glyph="check"` / `"minus"` attribute is forwarded through
+ * `Icon` (it spreads `...rest` onto its <svg>), so Checkbox.css's
+ * `[data-glyph="check"]` / `[data-glyph="minus"]` toggle selectors keep
+ * matching the rendered svg exactly as before — only the inner per-path
+ * classes are gone (Lucide draws its own stroked paths in currentColor).
  */
 function IndicatorCheck() {
-  return (
-    <svg
-      data-glyph="check"
-      viewBox="0 0 16 16"
-      role="presentation"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <path
-        className="zs-checkbox__indicator-check"
-        d="M3.5 8.25l2.75 2.75L12.5 5"
-      />
-    </svg>
-  );
+  return <Icon as={Check} data-glyph="check" />;
 }
 function IndicatorMinus() {
-  return (
-    <svg
-      data-glyph="minus"
-      viewBox="0 0 16 16"
-      role="presentation"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <rect
-        className="zs-checkbox__indicator-minus"
-        x="3.5"
-        y="7.25"
-        width="9"
-        height="1.5"
-        rx="0.75"
-      />
-    </svg>
-  );
+  return <Icon as={Minus} data-glyph="minus" />;
 }
 
 // Base UI renders CheckboxRoot as a `<span>` with `tabIndex=0` (verified

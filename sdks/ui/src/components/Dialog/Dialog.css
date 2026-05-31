@@ -231,8 +231,47 @@
   .zs-dialog-popup[data-ending-style] {
     transition: none;
   }
+  /* Snap to the resting state, don't just kill the transition. The
+   * enter/leave rules pin `opacity: 0` plus a scaled/offset transform on
+   * `data-starting-style` / `data-ending-style`. With `transition: none`
+   * there is no transitionend, so Base UI clears those flags one frame
+   * after `data-open` rather than at animation end — and during that
+   * frame the popup is open and focus-trapped yet painted at opacity 0,
+   * i.e. fully invisible to a reduced-motion user (a real defect, not
+   * just a test artifact). Reset opacity to 1 and the transform to the
+   * steady centred value (mirrors the base `.zs-dialog-popup` rule;
+   * `--nested-*` custom props keep nested-dialog scaling intact). */
+  .zs-dialog-popup[data-starting-style],
+  .zs-dialog-popup[data-ending-style] {
+    opacity: 1;
+    transform: translate(-50%, calc(-50% + var(--zs-nested-offset)))
+      scale(var(--zs-nested-scale));
+  }
+  /* Top placement is `top`-anchored — its steady state has NO -50%
+     vertical (only `--zs-nested-offset`). Lumping it into the centered
+     rule above re-added a -50% the steady state never had, causing a
+     one-frame vertical jump on open/close under reduced motion. Mirror
+     the steady top transform here instead (see the [data-placement="top"]
+     rule near line 199). */
+  .zs-dialog-popup[data-placement="top"][data-starting-style],
+  .zs-dialog-popup[data-placement="top"][data-ending-style] {
+    opacity: 1;
+    transform: translate(-50%, calc(var(--zs-nested-offset)))
+      scale(var(--zs-nested-scale));
+  }
+  /* Full-takeover popups anchor to the viewport edges (transform: none);
+   * keep that, just restore opacity. */
+  .zs-dialog-popup[data-size="full"][data-starting-style],
+  .zs-dialog-popup[data-size="full"][data-ending-style] {
+    opacity: 1;
+    transform: none;
+  }
   .zs-dialog-backdrop {
     transition: none;
+  }
+  .zs-dialog-backdrop[data-starting-style],
+  .zs-dialog-backdrop[data-ending-style] {
+    opacity: 1;
   }
 }
 

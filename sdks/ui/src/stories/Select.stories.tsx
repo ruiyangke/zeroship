@@ -360,7 +360,7 @@ export const Required: Story = {
     return (
       <div className="zs-story-row" role="group" aria-label="Required">
         <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
-          <form
+          <Form
             onSubmit={(e) => {
               e.preventDefault();
             }}
@@ -387,7 +387,7 @@ export const Required: Story = {
                 Submit
               </Button>
             </div>
-          </form>
+          </Form>
         </div>
       </div>
     );
@@ -655,9 +655,18 @@ export const RTL: Story = {
     // Wave-8 a11y hygiene: close the popup before postVisit so axe
     // doesn't trip on Base UI's `data-base-ui-focus-guard` spans.
     await userEvent.keyboard("{Escape}");
+    // On close, Base UI's Select KEEPS the popup mounted but moves it
+    // into a `hidden` subtree (the option's ancestor `<div hidden>`),
+    // which drops it from the accessibility tree without removing the
+    // DOM node. So `queryByTestId(...).not.toBeInTheDocument()` is the
+    // wrong contract — the testid node persists. Assert the dismissal
+    // the way the a11y tree sees it (the option is no longer an
+    // exposed, visible `option`) — the same shape the Multiple story
+    // uses with `queryByRole(...).not.toBeInTheDocument()`. This proves
+    // the popup closed and the focus-guard spans are gone for axe.
     await waitFor(() =>
       expect(
-        body.queryByTestId("select-rtl-item-mango"),
+        body.queryByRole("option", { name: /מנגו/ }),
       ).not.toBeInTheDocument(),
     );
   },

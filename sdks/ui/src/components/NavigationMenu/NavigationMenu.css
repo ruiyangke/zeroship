@@ -94,7 +94,7 @@
 }
 
 .zs-navmenu-trigger:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
@@ -153,7 +153,7 @@
 }
 
 .zs-navmenu-link:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
@@ -281,6 +281,17 @@
   .zs-navmenu-popup[data-ending-style],
   .zs-navmenu-viewport {
     transition: none;
+  }
+  /* Snap the popup to its steady-open state. The non-reduced rule pins
+   * `opacity: 0; transform: scale(0.97)` on the enter/leave flags; with
+   * `transition: none` there is no transitionend, so Base UI clears those
+   * flags one frame after `data-open` rather than at animation end. In
+   * that frame the popup would paint at opacity 0 — open but invisible to
+   * a reduced-motion user. Reset to the visible resting state. */
+  .zs-navmenu-popup[data-starting-style],
+  .zs-navmenu-popup[data-ending-style] {
+    opacity: 1;
+    transform: none;
   }
 }
 

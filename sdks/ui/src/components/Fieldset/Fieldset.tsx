@@ -246,6 +246,26 @@ function FieldsetRoot(
         // the expected element type.
         ref={ref as React.Ref<HTMLElement>}
         disabled={effectiveDisabled}
+        // Base UI's FieldsetRoot consumes `disabled` purely as context
+        // + a `data-disabled` state attribute — it does NOT emit the
+        // native `disabled` attribute on the `<fieldset>`. Without the
+        // native attribute the browser-level cascade never fires, so a
+        // plain non-Base-UI descendant (e.g. our `<Button>`) inside a
+        // `<Fieldset disabled>` stays fully interactive — a real
+        // accessibility bug, and a contradiction of this file's own
+        // "native `<fieldset disabled>` cascade" contract. We use Base
+        // UI's `render` prop internally (still omitted from the public
+        // wrapper surface) to emit a native `<fieldset>` that carries
+        // the native `disabled` attribute when disabled, restoring the
+        // browser cascade to every interactive descendant — native
+        // controls AND non-native chrome alike. Base UI's own merged
+        // props (aria-labelledby, data-disabled, refs, className) are
+        // spread first so we never clobber the wired attrs. See the
+        // `DisabledCascade` story regression assertion (the Button
+        // toBeDisabled() check fails pre-fix).
+        render={(props, state) => (
+          <fieldset {...props} disabled={state.disabled || undefined} />
+        )}
         className={composeBaseClass(
           classnames(
             "zs-fieldset",

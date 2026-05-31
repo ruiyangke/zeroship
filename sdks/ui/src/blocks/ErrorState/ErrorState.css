@@ -1,0 +1,118 @@
+/*
+ * ErrorState — "something went wrong" panel.
+ *
+ * Anatomy:
+ *   .zs-error-state                  — outer region (paints nothing itself)
+ *     └─ Center → Stack column
+ *         ├─ .zs-error-state__icon         — alert glyph, tinted by intent
+ *         ├─ .zs-error-state__title        — heading (h2 by default)
+ *         ├─ .zs-error-state__description  — muted supporting copy
+ *         └─ .zs-error-state__actions      — action row (Retry Button)
+ *
+ * Modifier classes (intent):
+ *   --danger   → icon tinted system-red   (default)
+ *   --warning  → icon tinted system-orange
+ *
+ * Intent only colors the icon — title/description stay in the label
+ * hierarchy so the panel reads calm. The icon is the failure signal;
+ * a fully-red panel would over-shout.
+ *
+ * Motion: none.
+ */
+
+.zs-error-state {
+  padding-block: var(--zs-space-8);
+  padding-inline: var(--zs-space-6);
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  /* Per-intent icon color resolved here so the __icon rule below stays
+     a single declaration. Default is the error red. */
+  --zs-error-state-icon-color: var(--zs-system-red);
+}
+
+.zs-error-state--warning {
+  --zs-error-state-icon-color: var(--zs-system-orange);
+}
+
+.zs-error-state__column {
+  max-inline-size: 28rem;
+  text-align: center;
+  /* Center the capped column within the (block-level) region. The merged
+     Center primitive centers this element's CHILDREN, not the column
+     itself, so without this auto-margin the column hugs the inline-start
+     edge on a wide surface. */
+  margin-inline: auto;
+}
+
+.zs-error-state__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--zs-error-state-icon-color);
+  /* One step smaller than the large-title scale so the alert glyph sits
+     lighter against the type rather than dominating the panel. */
+  font-size: var(--zs-text-title-1-size);
+  line-height: 1;
+}
+
+/* The glyph is a Lucide CircleAlert (rendered as an <svg> by the Icon
+   primitive); this class+element rule still matches and keeps the prior 1em
+   footprint (it wins on specificity over the .zs-icon--md size class).
+   Lucide's mark is fully stroked in currentColor — the alert dot is a short
+   stroked line, not a filled circle, so no per-shape fill override remains. */
+.zs-error-state__icon svg {
+  inline-size: 1em;
+  block-size: 1em;
+  fill: none;
+  stroke: currentColor;
+  /* SVG attribute units (viewBox space), not CSS px. Thinned from 2 so
+     the glyph weight pairs with the type rather than reading heavy. */
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.zs-error-state__title {
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: 600;
+}
+
+.zs-error-state__description {
+  margin: 0;
+  /* Softer than the title via SIZE (footnote), but kept at
+     --zs-label-secondary for color: tertiary is ~4.46:1 on --zs-surface
+     (below AA 4.5:1) and this copy composites on the opaque DataTable
+     surface, so the smaller size carries the hierarchy while secondary
+     keeps it AA-safe. */
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  margin-block-start: calc(-1 * var(--zs-space-1));
+}
+
+.zs-error-state__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-2);
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── forced-colors ───────────────────────────────────────────────────
+ * No system-red/orange slot exists in forced-colors; defer the icon to
+ * CanvasText so it stays visible (the glyph shape carries the alert
+ * meaning under HCM, not the color). */
+@media (forced-colors: active) {
+  .zs-error-state__icon {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-error-state__title,
+  .zs-error-state__description {
+    color: CanvasText;
+  }
+}

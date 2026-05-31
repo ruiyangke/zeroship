@@ -296,18 +296,13 @@
   opacity: 1;
 }
 
-/* The checkmark and the indeterminate bar are two distinct paths so
-   the visual signal isn't carried by color alone — shape changes too. */
-.zs-checkbox__indicator-check {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;        /* SVG viewBox unit, not CSS px */
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.zs-checkbox__indicator-minus {
-  fill: currentColor;
-}
+/* The checkmark and the indeterminate bar are two distinct shapes so the
+   visual signal isn't carried by color alone — shape changes too. Both are
+   now Lucide glyphs rendered by the Icon primitive, which draw their own
+   stroked paths in `currentColor` (Lucide defaults `fill="none"` +
+   `stroke="currentColor"` on the svg), so no per-path fill/stroke override
+   is needed here — the chip's `color` token tints both, and the
+   `[data-glyph]` rules above own their sizing + visibility toggle. */
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

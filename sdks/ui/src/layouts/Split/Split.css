@@ -1,0 +1,97 @@
+/*
+ * Split — fixed rail + fluid main, compound primitive.
+ *
+ * Anatomy:
+ *   .zs-split          — the flex row (rail + main)
+ *   .zs-split__side    — the fixed-width rail
+ *   .zs-split__main    — the fluid main region
+ *
+ * Driven by inline custom properties / data-attributes set from props:
+ *   --split-side-width   length          (default 16rem)
+ *   --split-gap          --zs-space-*    (default --zs-space-0)
+ *   [data-side]          start | end     (end → row-reverse)
+ *   [data-collapse]      sm | md | lg    (stacks to column below bp)
+ *
+ * Layout discipline:
+ *   - Arrange-only: no background, no border, no padding, no roles.
+ *   - DOM order is always Side-then-Main; `data-side="end"` reverses the
+ *     VISUAL order with `flex-direction: row-reverse` (markup/reading
+ *     order unchanged). `row`/`row-reverse` are writing-direction-aware,
+ *     so start/end resolve to the correct inline edge under RTL.
+ *   - The Main gets `min-inline-size: 0` so long/overflowing content can
+ *     shrink or scroll instead of forcing the row wider than its parent.
+ *   - The rail is `flex: 0 1 min(--split-side-width, 100%)` — it holds its
+ *     configured width but may shrink and is capped at the container width
+ *     so an oversized `sideWidth` in a narrow container can't overflow the
+ *     row or starve Main to zero.
+ *   - The @media collapse conditions use literal rem values (custom
+ *     properties cannot appear in a media query condition); each literal
+ *     is commented with the --zs-bp-* token it mirrors.
+ *
+ * Motion: none.
+ */
+
+.zs-split {
+  display: flex;
+  flex-direction: row;
+  gap: var(--split-gap, var(--zs-space-0));
+}
+
+/* side="end" — rail on the trailing inline edge without reordering the
+ * DOM. row-reverse is writing-direction-aware so this is correct in RTL. */
+.zs-split[data-side="end"] {
+  flex-direction: row-reverse;
+}
+
+.zs-split__side {
+  /* Rail at its configured width, but allowed to shrink (flex-shrink 1)
+   * and floored at the container width via `min(…, 100%)`. A rigid
+   * `0 0 <width>` rail would overflow — and starve Main to zero — when
+   * `--split-side-width` exceeds a narrow container; the cap keeps the
+   * row contained. */
+  flex: 0 1 min(var(--split-side-width, 16rem), 100%);
+  min-inline-size: 0;
+}
+
+.zs-split__main {
+  flex: 1;
+  /* Logical min-size so overflowing content shrinks/scrolls instead of
+   * blowing out the row. `min-width: 0` is the classic fix; the logical
+   * form keeps RTL/vertical-writing-mode correct. */
+  min-inline-size: 0;
+}
+
+/* ─── Collapse — stack to a column below the named breakpoint ──────────
+ *
+ * Each @media uses the literal rem value of the matching --zs-bp-* token
+ * (custom properties cannot appear in @media conditions). Below the
+ * breakpoint the row becomes a column: the rail stacks ABOVE the main
+ * (column, not column-reverse, regardless of data-side, so the rail
+ * reads first when stacked) and the rail goes full-width since a fixed
+ * inline width no longer makes sense in a column. */
+@media (max-width: 39.999rem) { /* below --zs-bp-sm (40rem) */
+  .zs-split[data-collapse="sm"] {
+    flex-direction: column;
+  }
+  .zs-split[data-collapse="sm"] > .zs-split__side {
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 47.999rem) { /* below --zs-bp-md (48rem) */
+  .zs-split[data-collapse="md"] {
+    flex-direction: column;
+  }
+  .zs-split[data-collapse="md"] > .zs-split__side {
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 63.999rem) { /* below --zs-bp-lg (64rem) */
+  .zs-split[data-collapse="lg"] {
+    flex-direction: column;
+  }
+  .zs-split[data-collapse="lg"] > .zs-split__side {
+    flex: 0 0 auto;
+  }
+}

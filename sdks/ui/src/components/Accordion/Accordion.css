@@ -152,8 +152,47 @@
   background-color: color-mix(in oklch, var(--zs-fill) 80%, transparent);
 }
 
+/* Open-state — a CALM open treatment so the expanded row reads as "current"
+   without the loud rectangular ring that an `:focus-visible` outline alone
+   produced (it looked like a debug/focus box). A quiet accent-tinted surface
+   fill + a thicker accent rule on the inline-start edge flags the open row;
+   the trigger label firms to the full label ink. This is DISTINCT from the
+   focus-visible ring below (a 0.125rem outline), so a keyboard user can tell
+   "focused" from "open" — the two cues never collapse into one box.
+
+   The inline-start accent rule is painted with a `::before` overlay (not a
+   box-shadow or a border): box-shadow can only target a PHYSICAL edge
+   (`inset X 0 0 0` is always the left edge, wrong under RTL), and a
+   `border-inline-start` would reflow the padding box and shift the label.
+   The `::before` pins to `inset-inline-start` (logical → RTL-correct) and
+   sits as an overlay, so it adds no layout. */
+.zs-accordion-trigger[data-panel-open] {
+  background-color: color-mix(in oklch, var(--zs-accent) 7%, transparent);
+  color: var(--zs-label);
+}
+.zs-accordion-trigger[data-panel-open]::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 0.1875rem;
+  background-color: var(--zs-accent);
+  /* Overlay only — never reflows the trigger's padding box. */
+  pointer-events: none;
+}
+
+@media (hover: hover) {
+  .zs-accordion-trigger[data-panel-open]:not([data-disabled]):hover {
+    /* Keep the open tint reading on hover (a hair stronger) rather than
+       letting the base hover fill flatten the open cue. */
+    background-color: color-mix(in oklch, var(--zs-accent) 11%, transparent);
+  }
+}
+
 /* Focus ring uses outline so it escapes any clipped surfaces. Same rule
-   Tabs/Toggle use. */
+   Tabs/Toggle use. It stays VISUALLY DISTINCT from the open-state tint above:
+   the open row is a soft fill + an inline-start accent rule, the focus ring is
+   a crisp full-perimeter outline. */
 .zs-accordion-trigger:focus-visible {
   outline: 0.125rem solid var(--zs-button-focus-ring-color);
   outline-offset: calc(var(--zs-focus-ring-offset) * -1);
@@ -173,10 +212,17 @@
  * `data-panel-open` on the trigger when its Item is expanded; we read
  * that and flip the rotation. `prefers-reduced-motion` drops the
  * transition (the flip still happens, just instantly). */
-.zs-accordion-trigger-chevron {
-  flex: 0 0 auto;
+/* The chevron is the governed `Icon` (a Lucide chevron-down svg) carrying
+   `zs-icon` + `zs-icon--md` alongside this class. We scope the sizing
+   under the trigger so this rule (0,2,0) outranks `.zs-icon--md` (0,1,0)
+   regardless of stylesheet concat order — the chevron stays at the
+   accordion token size, not the default Icon md box. */
+.zs-accordion-trigger .zs-accordion-trigger-chevron {
   inline-size: var(--zs-accordion-chevron-size);
   block-size: var(--zs-accordion-chevron-size);
+}
+.zs-accordion-trigger-chevron {
+  flex: 0 0 auto;
   color: var(--zs-label-secondary);
   transform-origin: 50% 50%;
   transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
@@ -308,6 +354,12 @@
   .zs-accordion-trigger[data-panel-open] {
     color: HighlightText;
     background-color: Highlight;
+  }
+  /* The open marker `::before` paints `--zs-accent`, which collapses under
+     forced-colors; map it to HighlightText so the inline-start rule stays
+     visible against the Highlight fill. */
+  .zs-accordion-trigger[data-panel-open]::before {
+    background-color: HighlightText;
   }
   @media (hover: hover) {
     .zs-accordion-trigger[data-panel-open]:not([data-disabled]):hover {

@@ -265,6 +265,17 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
           const dataReadonly = state.readOnly ? "" : undefined;
           const dataInvalid = state.valid === false ? "" : undefined;
           const dataComplete = state.complete ? "" : undefined;
+          // Surface validity on the AT-focusable cells. Base UI stamps
+          // `aria-invalid` only on the hidden validation `<input>` and
+          // `data-invalid` on the Root group — neither of which a screen
+          // reader announces when a *cell* is focused. Forward
+          // `aria-invalid="true"` onto every cell whenever the field is
+          // invalid so AT users hear the error state on the element they
+          // are actually editing. `state.valid` is `false` (invalid),
+          // `true` (valid), or `null` (not yet validated); only the
+          // explicit-false case marks the cells invalid.
+          const cellAriaInvalid =
+            state.valid === false ? ("true" as const) : undefined;
           // Compose `aria-describedby` to forward onto each focusable
           // cell input. Base UI's Root merges the Field-auto-wired
           // description id with the consumer-provided one and stamps
@@ -350,6 +361,7 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
                       className="zs-otp-field__input"
                       aria-labelledby={cellLabelledBy}
                       aria-describedby={cellDescribedBy}
+                      aria-invalid={cellAriaInvalid}
                       data-testid={
                         dataTestId ? `${dataTestId}-cell-${index}` : undefined
                       }

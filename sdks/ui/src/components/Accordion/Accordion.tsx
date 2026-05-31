@@ -95,6 +95,8 @@ import {
   type ReactNode,
 } from "react";
 import { Accordion as BaseAccordion } from "@base-ui/react/accordion";
+import { ChevronDown } from "lucide-react";
+import { Icon } from "../Icon/Icon";
 import { classnames } from "../_classnames";
 
 export type AccordionOrientation = "vertical" | "horizontal";
@@ -472,34 +474,13 @@ const AccordionTrigger = forwardRef<HTMLButtonElement, AccordionTriggerProps>(
         data-orientation={orientation}
       >
         <span className="zs-accordion-trigger-label">{children}</span>
-        <ChevronGlyph />
+        <Icon as={ChevronDown} className="zs-accordion-trigger-chevron" />
       </BaseAccordion.Trigger>
     );
   },
 );
 (AccordionTrigger as { displayName?: string }).displayName =
   "Accordion.Trigger";
-
-/* ─── chevron glyph (inline so we don't pull a deps) ────────────────── */
-function ChevronGlyph() {
-  return (
-    <svg
-      className="zs-accordion-trigger-chevron"
-      viewBox="0 0 12 12"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M3 4.5l3 3 3-3"
-      />
-    </svg>
-  );
-}
 
 /* ─── Accordion.Panel ───────────────────────────────────────────────── */
 

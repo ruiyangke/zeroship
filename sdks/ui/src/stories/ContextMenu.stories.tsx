@@ -286,8 +286,15 @@ export const WithDisabledItem: Story = {
     });
 
     await expect(duplicate).toHaveAttribute("aria-disabled", "true");
+    // Clicking a disabled item must NOT activate it: the popup stays
+    // open and the item remains aria-disabled (no onSelect / close).
+    // Base UI 1.5.0 DOES highlight/focus a disabled item on pointer
+    // press — disabled menu rows stay focusable (aria-disabled, not the
+    // `disabled` attribute) so AT users can perceive them — so we assert
+    // the non-activation contract, not the absence of focus.
     await userEvent.click(duplicate);
-    await expect(duplicate).not.toHaveFocus();
+    await expect(duplicate).toHaveAttribute("aria-disabled", "true");
+    await expect(duplicate).toBeVisible();
     await userEvent.keyboard("{Escape}");
   },
 };

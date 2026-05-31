@@ -105,10 +105,17 @@
 }
 
 /* ─── chevron ───────────────────────────────────────────────────────── */
-.zs-collapsible-trigger-chevron {
-  flex: 0 0 auto;
+/* The chevron is the governed `Icon` (a Lucide chevron-down svg) carrying
+   `zs-icon` + `zs-icon--md` alongside this class. Scope the sizing under
+   the trigger so this rule (0,2,0) outranks `.zs-icon--md` (0,1,0)
+   regardless of stylesheet concat order — the chevron keeps the
+   collapsible token size, not the default Icon md box. */
+.zs-collapsible-trigger .zs-collapsible-trigger-chevron {
   inline-size: var(--zs-collapsible-chevron-size);
   block-size: var(--zs-collapsible-chevron-size);
+}
+.zs-collapsible-trigger-chevron {
+  flex: 0 0 auto;
   color: var(--zs-label-secondary);
   transform-origin: 50% 50%;
   transition: transform var(--zs-motion-fast) var(--zs-motion-ease);

@@ -1,0 +1,88 @@
+/*
+ * PageHeader — page title band composition.
+ *
+ * Anatomy:
+ *   .zs-page-header                    — wrapping row (text column ↔ actions)
+ *   .zs-page-header__text              — the start-side Stack column
+ *   .zs-page-header__breadcrumbs       — composed Breadcrumbs block
+ *                                        (<nav aria-label="Breadcrumb">);
+ *                                        the block owns the <ol> reset,
+ *                                        crumb colors, separators, and
+ *                                        forced-colors handling
+ *   .zs-page-header__title             — <h1> (or relevelled via asChild)
+ *   .zs-page-header__description       — muted <p>
+ *   .zs-page-header__actions           — end-aligned Cluster of controls
+ *
+ * Layout discipline:
+ *   - The root is a flex ROW that wraps (`flex-wrap: wrap`) with
+ *     `justify-content: space-between` and `align-items: flex-start`, so
+ *     the text column sits start and Actions sit end; on narrow widths
+ *     Actions wrap below the text column instead of crushing it. A
+ *     row-gap keeps the wrapped Actions clear of the text.
+ *   - The text column (`PageHeader.Text` → `Stack`) and Actions
+ *     (`PageHeader.Actions` → `Cluster`) compose Wave-1 primitives; this
+ *     stylesheet only adds the band's row behaviour + the type tokens for
+ *     Title / Description and the breadcrumb list reset.
+ *   - The Title reads the title type scale; the Description reads the
+ *     subheadline scale on the secondary label so it recedes under the
+ *     title. Logical properties throughout for RTL.
+ *
+ * Motion: none.
+ */
+
+.zs-page-header {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--zs-space-3);
+}
+
+/* The text column grows to take the row's free space so a long title +
+ * description don't get squeezed by the actions; `min-inline-size: 0`
+ * lets long words wrap instead of forcing the row wider. */
+.zs-page-header__text {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+/* The breadcrumb region is now the composed Breadcrumbs block — it owns
+ * the <ol> reset, crumb type/colors, separators, focus rings, and
+ * forced-colors handling. PageHeader only carries the
+ * `.zs-page-header__breadcrumbs` hook (no extra rules needed today). */
+
+/* ─── Title — page heading ────────────────────────────────────────────── */
+.zs-page-header__title {
+  margin-block: 0;
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  color: var(--zs-label);
+}
+
+/* ─── Description — muted supporting copy ─────────────────────────────── */
+.zs-page-header__description {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: var(--zs-text-subheadline-weight);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Actions — end-aligned; do not grow (the text column takes slack) ─── */
+.zs-page-header__actions {
+  flex: 0 0 auto;
+}
+
+/* ─── forced-colors — keep breadcrumb / title / description legible ───────
+ *
+ * The authored label tokens are dropped in a forced-colors pass; mirror
+ * the painted text so each region resolves to a system color. */
+@media (forced-colors: active) {
+  .zs-page-header__description,
+  .zs-page-header__title {
+    color: CanvasText;
+  }
+}

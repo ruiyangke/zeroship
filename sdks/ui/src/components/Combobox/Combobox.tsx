@@ -42,8 +42,10 @@ import {
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
+import { Check, ChevronDown, X } from "lucide-react";
 import { Combobox as BaseCombobox } from "@base-ui/react/combobox";
 import { useFieldContext, type FieldSize } from "../Field";
+import { Icon } from "../Icon";
 import { classnames, composeBaseClass } from "../_classnames";
 
 export type ComboboxSize = "sm" | "md" | "lg";
@@ -337,7 +339,7 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
             className="zs-combobox-input-group__icon"
             aria-hidden="true"
           >
-            <ChevronDownGlyph />
+            <Icon as={ChevronDown} size="sm" />
           </BaseCombobox.Icon>
         </BaseCombobox.InputGroup>
         <BaseCombobox.Portal>
@@ -367,50 +369,6 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
 }
 ComboboxRoot.displayName = "Combobox";
 
-function ChevronDownGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M4 6l4 4 4-4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function CheckGlyph() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M3.5 8.5l3 3 6-6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ChipRemoveGlyph() {
-  return (
-    <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
-      <path
-        d="M3 3l6 6M9 3l-6 6"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
 /* ─── Item ─────────────────────────────────────────────────────────── */
 
 type BaseItemProps = ComponentPropsWithoutRef<typeof BaseCombobox.Item>;
@@ -432,7 +390,7 @@ const ComboboxItem = forwardRef<HTMLDivElement, ComboboxItemProps>(
           className="zs-combobox-item__indicator"
           keepMounted
         >
-          <CheckGlyph />
+          <Icon as={Check} size="sm" />
         </BaseCombobox.ItemIndicator>
         <span className="zs-combobox-item__text">{children}</span>
       </BaseCombobox.Item>
@@ -498,7 +456,7 @@ const ComboboxChip = forwardRef<HTMLDivElement, ComboboxChipProps>(
           className="zs-combobox-chip__remove"
           aria-label={removeLabel}
         >
-          <ChipRemoveGlyph />
+          <Icon as={X} size="sm" />
         </BaseCombobox.ChipRemove>
       </BaseCombobox.Chip>
     );

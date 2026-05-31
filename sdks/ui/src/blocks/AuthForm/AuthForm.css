@@ -1,0 +1,192 @@
+/*
+ * AuthForm — centered sign-in / sign-up form.
+ *
+ * Anatomy:
+ *   .zs-auth-form-center                  <Center> root — centers the Card
+ *     └─ .zs-auth-form                     <Card variant="elevated">
+ *         └─ .zs-auth-form__form           <form> (Base UI Form), aria-labelledby title
+ *             ├─ header  (.zs-auth-form__title / __description)
+ *             ├─ .zs-auth-form__error      danger Banner (live region)
+ *             ├─ .zs-auth-form__fieldset   <fieldset> wrapping the Field rows
+ *             ├─ .zs-auth-form__submit     full-width submit Button
+ *             ├─ social  (.zs-auth-form__or + __social-actions)
+ *             └─ .zs-auth-form__footer     mode-switch prompt + link
+ *
+ * The block paints no surface of its own beyond what Card provides; the
+ * Center only arranges. Logical properties throughout so it flips under
+ * RTL. The width knob is a single token a consumer can retune.
+ */
+
+.zs-auth-form-center {
+  /* Give the Center room so vertical centering reads on a full-page auth
+     surface. `100%` only resolves against a definite-height ancestor —
+     without one the box collapses to its content height and the card
+     pins to the top. `100dvh` keys off the dynamic viewport so the
+     centering works on a bare page (the one legitimate viewport-unit use:
+     AuthForm is a full-page sign-in surface). A consumer placing AuthForm
+     in a constrained region can still override min-block-size via the
+     Center `minHeight` prop. */
+  min-block-size: 100dvh;
+  padding: var(--zs-space-6);
+  font-family: var(--zs-font-system);
+}
+
+.zs-auth-form {
+  /* Single width knob — retune per call site via inline custom property
+     without forking the CSS. A login card sits comfortably around 24rem;
+     wide enough for a 40-char email, narrow enough to read as a focused
+     task. */
+  --zs-auth-form-width: 24rem;
+
+  inline-size: 100%;
+  max-inline-size: var(--zs-auth-form-width);
+}
+
+/* The <form> is layout-only; the inner Stack owns the rhythm. Reset any
+   inherited form spacing so the Card padding governs the inset. */
+.zs-auth-form__form {
+  margin: 0;
+}
+
+/* ─── header ─────────────────────────────────────────────────────────── */
+.zs-auth-form__title {
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+  letter-spacing: var(--zs-text-title-2-tracking);
+  font-weight: var(--zs-text-title-2-weight);
+  /* Center the heading over the form — a login card reads as a centered
+     focal task, not a left-aligned settings row. */
+  text-align: center;
+}
+
+.zs-auth-form__description {
+  margin: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 400;
+  text-align: center;
+}
+
+/* ─── error Banner ───────────────────────────────────────────────────── */
+.zs-auth-form__error {
+  /* The Banner brings its own surface; no override needed beyond letting
+     it span the form width. */
+  inline-size: 100%;
+}
+
+/* ─── fieldset ───────────────────────────────────────────────────────── */
+/* Strip the legacy <fieldset> chrome (UA border + inline padding + the
+   intrinsic min-inline-size that prevents shrink-to-fit). The fieldset is
+   purely the disable-all-while-loading mechanism. */
+.zs-auth-form__fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  /* min-inline-size:0 overrides the fieldset's min-content default so a
+     wide control can shrink within the card. */
+  min-inline-size: 0;
+}
+
+/* ─── secondary action (e.g. "Forgot password?") ────────────────────── */
+.zs-auth-form__secondary {
+  display: flex;
+  /* Trailing inline edge — sits under the password field, aligned to the
+     end so it reads as an inline affordance, not a primary action. */
+  justify-content: flex-end;
+  /* Pull it up toward the password field so it reads as attached to that
+     field rather than floating midway to the submit button. The fields
+     Stack uses --zs-space-4 between rows; pulling back one step
+     (--zs-space-2) lands the affordance close to the password without
+     touching it. */
+  margin-block-start: calc(var(--zs-space-2) - var(--zs-space-4));
+}
+
+/* ─── submit ─────────────────────────────────────────────────────────── */
+/* Full-width primary action. The Button owns its own height + chrome; we
+   only stretch it to the form width.
+   Button pins `inline-size: max-content` on `[aria-busy="true"]` so a
+   loading button measures the same natural width as its idle counterpart
+   in side-by-side stories. That pin must NOT collapse our full-width
+   submit while loading — match the busy state at equal specificity (and
+   later in the cascade via the import order) so 100% wins. */
+.zs-auth-form__submit,
+.zs-auth-form__submit[aria-busy="true"] {
+  inline-size: 100%;
+}
+
+/* ─── social divider ("or") ──────────────────────────────────────────── */
+/* A labelled rule: hairline — "or" — hairline. The two Separators flex to
+   fill the space on either side of the centered label. Logical properties
+   keep it symmetric under RTL. */
+.zs-auth-form__or {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-3);
+}
+
+.zs-auth-form__or-line {
+  /* Each Separator grows to consume the free space beside the label. */
+  flex: 1 1 0;
+}
+
+.zs-auth-form__or-label {
+  /* label-secondary (not tertiary): at the small footnote size the
+     tertiary ink lands ~4.46:1 over the crystal surface — just under the
+     4.5:1 AA threshold axe enforces. Secondary clears it. */
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  /* The label is content, not interactive — keep it out of the tab/AT
+     flow's way but readable. */
+  text-transform: lowercase;
+}
+
+/* The social-actions slot lays its children in a column so stacked
+   provider buttons each span the card width when the consumer makes them
+   full-width; consumers wanting a row can wrap in their own Cluster. */
+.zs-auth-form__social-actions {
+  inline-size: 100%;
+}
+
+/* ─── footer ─────────────────────────────────────────────────────────── */
+.zs-auth-form__footer {
+  display: flex;
+  justify-content: center;
+}
+
+.zs-auth-form__footer-default {
+  /* The prompt + the plain mode-switch Button sit on one centered line,
+     wrapping on narrow widths. */
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+.zs-auth-form__footer-prompt {
+  color: var(--zs-label-secondary);
+}
+
+/* ─── forced-colors ──────────────────────────────────────────────────── */
+/* The Card / Banner / Separator / Button each carry their own HCM mapping;
+   assert the block's own text resolves to the system palette so the
+   heading, description, "or" label, and footer prompt stay legible. */
+@media (forced-colors: active) {
+  .zs-auth-form__title,
+  .zs-auth-form__description,
+  .zs-auth-form__or-label,
+  .zs-auth-form__footer-prompt {
+    color: CanvasText;
+  }
+}
+
+/* ─── reduced-motion ─────────────────────────────────────────────────── */
+/* No-op — AuthForm itself has no transitions (the composed Button spinner
+   and Card honor reduced-motion in their own CSS). The gate exists for
+   parity with the rest of the surface. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-auth-form {
+    /* nothing to disable; placeholder for surface parity */
+  }
+}

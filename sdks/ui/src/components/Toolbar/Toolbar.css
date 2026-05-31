@@ -82,7 +82,7 @@
 }
 
 .zs-toolbar-button:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
@@ -106,7 +106,7 @@
 }
 
 .zs-toolbar-input:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 

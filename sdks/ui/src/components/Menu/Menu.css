@@ -134,8 +134,25 @@
   .zs-menu-popup[data-ending-style] {
     transition: none;
   }
+  /* Neutralize the enter/leave keyframe START state, not just the
+   * transition. The non-reduced rule pins `opacity: 0; transform:
+   * scale(0.96)` on `data-starting-style` / `data-ending-style`. With
+   * `transition: none` there is no transitionend, so Base UI clears
+   * those flags a frame later rather than at animation end — and during
+   * that frame the popup is `data-open` and focus-trapped yet painted at
+   * opacity 0. A reduced-motion user would see an open-but-invisible
+   * menu. Snap it to the steady-open state so it appears instantly. */
+  .zs-menu-popup[data-starting-style],
+  .zs-menu-popup[data-ending-style] {
+    opacity: 1;
+    transform: none;
+  }
   .zs-menu-backdrop {
     transition: none;
+  }
+  .zs-menu-backdrop[data-starting-style],
+  .zs-menu-backdrop[data-ending-style] {
+    opacity: 1;
   }
   .zs-menu-item {
     transition: none;

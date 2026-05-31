@@ -389,7 +389,16 @@ export const Disabled: Story = {
     const cut = canvas.getByRole("button", { name: /cut/i });
     const copy = canvas.getByRole("button", { name: /copy/i });
 
-    await expect(cut).toBeDisabled();
+    // Base UI's Toolbar.Button is a composite toolbar item, not a
+    // native form control. As this story's doc note states, Base UI
+    // marks the disabled item with `aria-disabled="true"` +
+    // `data-disabled` (NOT the native `disabled` attribute) and skips
+    // it in roving-tabindex navigation. jest-dom's `toBeDisabled()`
+    // only recognizes the native attr, so the faithful assertion is
+    // the aria/data contract plus the behavioral guarantee (no focus,
+    // not a tab stop).
+    await expect(cut).toHaveAttribute("aria-disabled", "true");
+    await expect(cut).toHaveAttribute("data-disabled");
     await userEvent.click(cut);
     await expect(cut).not.toHaveFocus();
     await userEvent.tab();

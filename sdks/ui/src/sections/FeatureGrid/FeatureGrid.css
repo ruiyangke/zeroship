@@ -1,0 +1,213 @@
+/*
+ * FeatureGrid — the marketing "features" band.
+ *
+ * Anatomy:
+ *   .zs-feature-grid                  — the <section>; generous vertical
+ *                                       padding, NO heavy background
+ *                                       (composable — the consumer paints
+ *                                       the page backdrop)
+ *   .zs-feature-grid__header          — optional eyebrow + title + desc band
+ *   .zs-feature-grid__eyebrow         — small label above the title (muted)
+ *   .zs-feature-grid__title           — the optional section lead-in <h2>
+ *   .zs-feature-grid__description      — muted lead-in <p>
+ *   .zs-feature-grid__items            — the responsive Grid of items
+ *   .zs-feature-grid__item             — each feature cell (icon → h3 → desc)
+ *   .zs-feature-grid__item-icon        — the tinted icon badge
+ *   .zs-feature-grid__item-title       — the feature title <h3>
+ *   .zs-feature-grid__item-description — the muted supporting line
+ *
+ * Layout discipline:
+ *   - The section sets only its vertical rhythm; the composed Container
+ *     owns the inline width + padding. The composed Grid owns the column
+ *     tracks + gap.
+ *   - Responsive: N columns (2|3|4) at the --zs-bp-md breakpoint and up (the
+ *     Grid `columns={{ md: N }}` prop); below it the Grid primitive ITSELF
+ *     collapses to a single stacked column (its responsive base count is 1).
+ *     The collapse is owned by the Grid — this band carries no local
+ *     @media override.
+ *   - `data-align="center"` (default) centers the header + each item's icon
+ *     and text; `data-align="start"` start-aligns them. `align` lives on the
+ *     section, so we reach the items via the descendant combinator.
+ *   - Logical properties throughout (padding-block, margin-inline, inset,
+ *     gap) for RTL.
+ *
+ * Motion: none of its own (the composed Icon paints with currentColor and
+ * carries no motion), so there is nothing here to disable.
+ */
+
+.zs-feature-grid {
+  /* Local single-knob custom properties (the house idiom, cf.
+     --zs-pricing-lead-measure / --zs-hero-measure): named, tunable handles
+     for the band's calibrated literals so the intent is legible and a
+     consumer can retune in one place.
+       --zs-feature-grid-header-measure — the centered header's max measure
+       --zs-feature-grid-icon-size      — the tinted icon badge box size
+       --zs-feature-grid-icon-glyph     — the glyph size inside the badge
+       --zs-feature-grid-icon-tint      — the badge's accent-tint percentage
+  */
+  --zs-feature-grid-header-measure: 40rem;
+  /* Bigger badge box (R2 "more presence") — a confident 3.5rem square that
+     reads as a deliberate mark rather than a small chip. */
+  --zs-feature-grid-icon-size: 3.5rem;
+  /* The glyph is sized UP to 1.75rem inside the bigger badge (above the
+     Icon `lg` 1.5rem default) so the mark fills the box with presence. */
+  --zs-feature-grid-icon-glyph: 1.75rem;
+  --zs-feature-grid-icon-tint: 12%;
+
+  /* Band rhythm — generous vertical padding so the band reads distinct.
+     No background: composable, the consumer paints the page backdrop. */
+  display: block;
+  padding-block: var(--zs-space-10);
+  color: var(--zs-label);
+}
+
+/* ─── Header — optional eyebrow + title + description ─────────────────────── */
+.zs-feature-grid__header {
+  /* Cap the header to a readable measure above the grid. Centered when the
+     band is centered (the composed Stack `align="center"` already centers
+     the inline children); start-aligned otherwise. */
+  max-inline-size: var(--zs-feature-grid-header-measure);
+  margin-block-end: var(--zs-space-9);
+}
+
+.zs-feature-grid[data-align="center"] .zs-feature-grid__header {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.zs-feature-grid[data-align="start"] .zs-feature-grid__header {
+  text-align: start;
+}
+
+/* The eyebrow styling is the shared `.zs-section-eyebrow` (accent pill,
+   footnote, 600, 0.04em, uppercase) defined once in _section-tone.css; this
+   BEM hook remains only as a stable consumer target. */
+
+.zs-feature-grid__title {
+  margin-block: 0;
+  /* Marketing display-3 — a confident section <h2> so the band header
+     carries real weight. */
+  font-size: var(--zs-text-display-3-size);
+  line-height: var(--zs-text-display-3-line);
+  font-weight: var(--zs-text-display-3-weight);
+  letter-spacing: var(--zs-text-display-3-tracking);
+  color: var(--zs-label);
+  text-wrap: balance;
+}
+
+.zs-feature-grid__description {
+  margin-block: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-body-weight);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── Items — the responsive Grid of feature cells ───────────────────────── */
+/* The composed Grid owns the column tracks, gap AND the single-column
+   collapse: its responsive base column count is 1, and the `columns={{ md }}`
+   prop only PROMOTES to the multi-column row at ≥ --zs-bp-md. Below the
+   breakpoint the Grid is already a single stacked column, so this band adds
+   no local collapse override. */
+
+/* ─── Item — icon badge → title → description ────────────────────────────── */
+.zs-feature-grid__item {
+  display: flex;
+  flex-direction: column;
+  /* The title→description pair sits on a tight gap; the icon badge gets a
+     touch more separation below it (its own margin, set on the badge) so the
+     cell reads as a deliberate badge → title → copy rhythm rather than three
+     evenly-spaced rows. */
+  gap: var(--zs-space-2);
+}
+
+/* Centered band: center the icon badge + text within each cell. */
+.zs-feature-grid[data-align="center"] .zs-feature-grid__item {
+  align-items: center;
+  text-align: center;
+}
+
+/* Start band: hug the inline-start edge. */
+.zs-feature-grid[data-align="start"] .zs-feature-grid__item {
+  align-items: flex-start;
+  text-align: start;
+}
+
+/* The tinted icon badge: a soft accent-tinted square that the decorative
+   Icon sits centered within. The tint is the house `color-mix` idiom (cf.
+   Badge's soft variant) so it tracks the accent token and stays token-pure.
+   The Icon inside paints with currentColor → we set the badge ink to the
+   accent so the glyph reads as an accent-tinted mark. */
+.zs-feature-grid__item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  inline-size: var(--zs-feature-grid-icon-size);
+  block-size: var(--zs-feature-grid-icon-size);
+  /* A touch more breathing room beneath the bigger badge so it reads as a
+     distinct mark above the text group (the R2 "more structure per item"). */
+  margin-block-end: var(--zs-space-2);
+  /* radius-5 (12) sits in proportion with the larger 3.5rem box. */
+  border-radius: var(--zs-radius-5);
+  background: color-mix(
+    in oklch,
+    var(--zs-accent) var(--zs-feature-grid-icon-tint),
+    var(--zs-surface)
+  );
+  color: var(--zs-accent-active);
+}
+
+/* Size the glyph UP inside the bigger badge. The composed Icon sets its own
+   `--zs-icon-*` box via `.zs-icon--lg` (0,1,0); this descendant rule (0,2,0)
+   outranks it regardless of stylesheet concat order, so the badge owns the
+   glyph size — the same scoping idiom the Accordion chevron uses. The svg fills
+   to the badge's glyph token. */
+.zs-feature-grid__item-icon .zs-icon {
+  inline-size: var(--zs-feature-grid-icon-glyph);
+  block-size: var(--zs-feature-grid-icon-glyph);
+}
+
+.zs-feature-grid__item-title {
+  margin-block: 0;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  letter-spacing: var(--zs-text-headline-tracking);
+  color: var(--zs-label);
+  text-wrap: balance;
+}
+
+.zs-feature-grid__item-description {
+  margin-block: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+  text-wrap: pretty;
+}
+
+/* ─── forced-colors — keep text + icon badge legible ──────────────────────
+ *
+ * The authored surface / accent / label tokens drop out in a forced-colors
+ * pass. Reassert system colors so every text region resolves to CanvasText
+ * and the icon badge keeps a visible system edge (its accent-tint background
+ * drops out). The composed Icon paints with currentColor, so it follows the
+ * badge ink automatically — no extra rule needed. */
+@media (forced-colors: active) {
+  .zs-feature-grid,
+  .zs-feature-grid__eyebrow,
+  .zs-feature-grid__title,
+  .zs-feature-grid__description,
+  .zs-feature-grid__item-title,
+  .zs-feature-grid__item-description {
+    color: CanvasText;
+  }
+  /* The badge's tinted surface drops out; give it a system border so it
+     stays a visible mark, and resolve its ink to CanvasText so the glyph
+     stays legible. */
+  .zs-feature-grid__item-icon {
+    border: var(--zs-selection-hairline) solid CanvasText;
+    color: CanvasText;
+  }
+}
