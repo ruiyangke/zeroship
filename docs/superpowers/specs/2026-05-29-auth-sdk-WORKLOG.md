@@ -3,6 +3,29 @@
 `feat/auth-sdk-popup` autonomous pilot loop. **Pilot (user offline 2026-05-29): decided forks myself,
 no review gate, commit-only NEVER pushed.** Specs: `2026-05-29-auth-sdk-design.md` + `2026-05-29-relay-email-design.md`.
 
+## BFF RESHAPE (2026-05-30) — IN PROGRESS. NOT pushed.
+User-directed security-first pivot to a Backend-For-Frontend model: the browser holds HttpOnly
+cookies + an identity projection only — NO power token, NO client-held JWT. Power token stays
+server-side; authorization is enforced at the resource server per-operation; internal-first means
+grant-gated platform ops (no token minted). Design: `docs/superpowers/specs/2026-05-30-auth-bff-session-redesign.md`
+(+ signed-stateless-cookie addendum). Slice plan: R1 → R1b → R1c → R1d → R2 → IdP-prune → R5 → R4.
+- **R1 ✓** `3da799ee` browser path → identity + cookie, no power token. `d57c303d` /signout app-binding keyed by app UUID.
+- **R1b ✓** `c8de0cc6` signed STATELESS session cookie (new `session_token.rs`, local verify, no per-request store lookup);
+  merged `/token`→`/session`; SDK transport migrated to cookie-only.
+- **R1c ✓** `62663ce6` removed `/dpop-exchange` + `/jwks` + orphaned wrapper-token machinery (`wrapper_token.rs`,
+  Bearer-wrapper arm, DPoP-wrapper fast-path, dead helpers, `WRAPPER_TTL_SECS`). KEPT raw-Hydra Bearer +
+  DPoP-introspection arms (non-browser clients). Workflow `wrumlay3b` (critic 94, 0B/0M); I re-verified:
+  gateway 355/0 on live PG+Hydra, no dangling refs, no new broken doc links. Renamed `build_state_with_wrapper*`
+  → `build_state_with_session*`; annotated superseded Phase-8 plan pointer in `docs/reference/auth.md`.
+- **R1d** (next) revocation-marker short-TTL read-through cache → fully DB-free cookie hot path. The session
+  cookie verifies locally (sig); `is_family_revoked_since(client_id, pws_, iat)` is the ONLY remaining
+  per-request DB read (cookie arm `router/auth.rs:1218`; also Bearer :729 + DPoP-introspect :964). Security-sensitive.
+- **R2** SDK client rip-out (cacheLocation/InMemoryCache/LocalStorageCache/CacheManager/Web-Worker/navigator.locks/
+  getAccessToken — transport already migrated in R1b).
+- **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
+- **R5** console collapse (console = pseudo-app on gateway `/__zs/auth/*`; delete builder bespoke RP).
+- **R4** grant-gated platform capabilities (formalize primitive-side grant check).
+
 ## STATUS: ✅ FEATURE-COMPLETE + LIVE-E2E-VALIDATED + POLISH + ARCHITECTURAL-REVIEW-HARDENED. NOT pushed.
 
 ### Architectural review round (2026-05-30) — DONE, all findings discharged
