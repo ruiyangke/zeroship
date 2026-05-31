@@ -96,12 +96,17 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
   --bootstrap-console; builder.* Vite service retired; Dockerfile builds the console .zship. Workflow `wbvy2h7vj` (critic 96, all
   10 booleans). Re-verified: control builds+suite green on live PG (lib 69 + all integration), console builds dist/app.zship
   (1.22MB, 22 fns), no dangling refs, crates/auth 0 files, console_sessions table kept. **CONSOLE-AS-REGULAR-APP DONE (build-verified).**
-- **DEFERRED (full-stack functional phase — owner deferred via 'run-now-build-verified'):** (1) seed/compose must inject the
-  console's runtime app env (OPENAI_API_KEY, SANDBOX_URL/SANDBOX_TOKEN — they lived on the retired builder service) for it to
-  FUNCTION; (2) live docker-compose popup-login E2E (login→control read→deploy→SSE chat→sandbox round-trip; assert the control
-  credential never reaches the browser + a creator app cannot mint aud=control). Also optional: IdP-prune (merge consent endpoints,
-  remove magic/device), the dev-loop story for the console (vite-plugin dev runtime now builder.* is gone), full-R4 (the deferred
-  per-request power-token capability) — all in the design doc / earlier WORKLOG.
+- **R5 runtime-env ✓ (build-verified)** `ac19307a` the --bootstrap-console seed now forwards the console's FULL server-env set
+  (OPENAI_API_KEY+SANDBOX_TOKEN secrets; SANDBOX_URL+ZEROSHIP_CONTROL_URL vars; ZEROSHIP_SDK_REGISTRY optional) from the control
+  process env into the console app's server env store (server-only, never browser; unset-skip; idempotent) + compose wiring + a
+  faithful seed test. Workflow `wppsiy0r7` (critic 96, all 8 booleans). Re-verified on live PG. **ALL BUILD-VERIFIABLE FUNCTIONAL
+  WORK DONE.**
+- **REMAINING (owner-deferred / optional):** (1) LIVE docker-compose popup-login E2E (login→control read→deploy→SSE chat→sandbox;
+  assert control credential never reaches the browser + a creator app cannot mint aud=control) — heavy, needs the stack up + a
+  browser; the deliberate capstone. (2) cleanup: `bootstrap_builder` module is partially orphaned after the cutover
+  (bootstrap_builder_oauth_client uncalled; BUILDER_CLIENT_ID still referenced at lib.rs:49) — nuanced, low-value. (3) optional:
+  IdP-prune (merge consent endpoints, remove magic/device), console dev-loop (vite-plugin dev runtime now builder.* is gone),
+  full-R4 (per-request power-token capability — design doc "Future: full-R4").
 - ~~R5-CUTOVER (superseded by the entry above)~~ — historical sub-steps:
   1. `--bootstrap-console` seed (additive): INSERT console.apps row (platform-privileged flag) + app_oauth_clients public PKCE
      client (explicit sector_identifier) + ingest the prebuilt .zship blob + set deploy_hash; in-process at control boot, NEVER an
