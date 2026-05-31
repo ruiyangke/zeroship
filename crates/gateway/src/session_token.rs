@@ -6,18 +6,16 @@
 //! gateway-SIGNED, `HttpOnly`, short-lived (~15 min) **identity assertion**,
 //! verified LOCALLY on every request (no per-request DB/Redis read).
 //!
-//! ## Why a distinct token type from the wrapper
+//! ## A dedicated token type, stamped `typ: zs-sess+jwt`
 //!
-//! The cookie REUSES the gateway's ed25519 wrapper-signing key + the
-//! current/previous `kid` rotation/overlap ([`crate::wrapper_token`]), but it is
-//! a **different token type**, stamped `typ: zs-sess+jwt` (vs. the wrapper's RFC
-//! 9068 `typ: at+jwt`). That typ tag is load-bearing in two directions:
-//!
-//! - A session cookie presented on the Bearer/DPoP wrapper arms is rejected by
-//!   the wrapper [`Verifier`](crate::wrapper_token::Verifier)'s hard `at+jwt`
-//!   typ gate — a session cookie can never be replayed as a power token.
-//! - A wrapper presented to this verifier is rejected by the `zs-sess+jwt` typ
-//!   gate here — a power token can never re-establish a session.
+//! The cookie is signed with the gateway's ed25519 signing key + the
+//! current/previous `kid` rotation/overlap, and is stamped `typ: zs-sess+jwt`.
+//! That typ tag is load-bearing: this [`Verifier`] hard-rejects any token whose
+//! typ is not `zs-sess+jwt` (e.g. an RFC 9068 `at+jwt` access token), so a
+//! resource-server access token can never be replayed as a session cookie, and
+//! the cookie — which is inert identity, never a capability — can never be
+//! presented as authorization on the Bearer/DPoP arms (those recognize only a
+//! raw-Hydra `iss`, not this token).
 //!
 //! ## What the cookie carries — identity + scopes only, NOT a capability
 //!
@@ -33,7 +31,7 @@
 //!
 //! Identity verification is stateless (local signature + `kid` + `iss` + `exp`
 //! + `app` binding — no DB). The revocation gate is NOT: the cookie arm runs the
-//! SAME per-app family-marker check the wrapper arms use —
+//! SAME per-app family-marker check the Bearer/DPoP arms use —
 //! `is_family_revoked_since(client_id = app, sub = pws_, iat)`
 //! ([`zeroship_core::wrapper_revocation`]) — and that is a direct
 //! `SELECT EXISTS` against a pooled connection, with NO in-memory TTL cache in
@@ -117,8 +115,8 @@ pub struct SessionMint<'a> {
     pub scopes: &'a [String],
 }
 
-/// Signed-session-cookie issuer. Mirrors [`crate::wrapper_token::Issuer`]:
-/// caches the PKCS#8 DER form of the ed25519 key, stamps `kid`, signs `EdDSA`.
+/// Signed-session-cookie issuer. Caches the PKCS#8 DER form of the ed25519 key,
+/// stamps `kid`, signs `EdDSA`.
 pub struct Issuer {
     private_der: Vec<u8>,
     kid: String,

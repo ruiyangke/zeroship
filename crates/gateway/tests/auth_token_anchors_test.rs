@@ -29,7 +29,7 @@ use zeroship_gateway::{
     proxy::HashRing,
     session_token,
     sync::RouteCache,
-    wrapper_token, GateConfig, GateState,
+    GateConfig, GateState,
 };
 
 // ─── Mock Hydra ──────────────────────────────────────────────────────────
@@ -316,10 +316,6 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
 
     let signing_key = SigningKey::from_bytes(&[7u8; 32]);
-    let issuer = wrapper_token::Issuer::new(&signing_key, "https://api.zeroship.ai".into())
-        .expect("issuer");
-    let verifier =
-        wrapper_token::Verifier::new(&signing_key.verifying_key(), "https://api.zeroship.ai".into());
     let session_issuer =
         session_token::Issuer::new(&signing_key, "https://api.zeroship.ai".into())
             .expect("session issuer");
@@ -366,8 +362,6 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: Some(Arc::new(signing_key)),
         prev_signing_key: None,
-        wrapper_issuer: Some(Arc::new(issuer)),
-        wrapper_verifier: Some(Arc::new(verifier)),
         session_issuer: Some(Arc::new(session_issuer)),
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
@@ -627,8 +621,6 @@ async fn session_post_fails_fast_without_signing_key() {
         st.signing_key = None;
         st.session_issuer = None;
         st.session_verifier = None;
-        st.wrapper_issuer = None;
-        st.wrapper_verifier = None;
     }
     assert!(state.session_issuer.is_none());
     assert!(state.db.is_none());

@@ -907,8 +907,6 @@ mod tests {
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             signing_key: None,
             prev_signing_key: None,
-            wrapper_issuer: None,
-            wrapper_verifier: None,
             session_issuer: None,
             session_verifier: None,
             anchor_enc_key: [0u8; 32],

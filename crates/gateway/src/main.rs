@@ -14,8 +14,8 @@ use zeroship_core::config::{
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
-    auth_token, backchannel_logout, blob_cache, browser_auth, dpop_exchange, enforce, idempotency,
-    oidc_rp, proxy, router, session_token, signing, sync, wrapper_token, GateConfig, GateState,
+    auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
+    router, session_token, signing, sync, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -87,7 +87,7 @@ struct GateCli {
     #[arg(long = "db-pool-size", env = "DB_POOL_SIZE", default_value_t = 16)]
     db_pool_size: usize,
 
-    /// PEM/PKCS#8 signing key file for gateway-issued wrapper tokens.
+    /// PEM/PKCS#8 signing key file for the gateway-signed session cookie.
     #[arg(
         long = "signing-key-file",
         env = "GATEWAY_SIGNING_KEY_FILE",
@@ -95,11 +95,11 @@ struct GateCli {
     )]
     gateway_signing_key_file: String,
 
-    /// PEM/PKCS#8 PREVIOUS signing key file for the wrapper-token rotation
+    /// PEM/PKCS#8 PREVIOUS signing key file for the session-cookie rotation
     /// overlap (auth-sdk §8.5). Set ONLY during a key roll: the Verifier
-    /// then accepts wrappers signed by EITHER the current or this previous
-    /// key, and `/__zs/auth/jwks` publishes both. The Issuer always signs
-    /// with the current key only. Empty (default) ⇒ single-key Verifier.
+    /// then accepts session cookies signed by EITHER the current or this
+    /// previous key. The Issuer always signs with the current key only.
+    /// Empty (default) ⇒ single-key Verifier.
     #[arg(
         long = "prev-signing-key-file",
         env = "GATEWAY_PREV_SIGNING_KEY_FILE",
@@ -107,7 +107,7 @@ struct GateCli {
     )]
     gateway_prev_signing_key_file: String,
 
-    /// Public URL advertised as the gateway wrapper-token issuer.
+    /// Public URL advertised as the gateway session-cookie issuer.
     #[arg(
         long = "gateway-public-url",
         env = "GATEWAY_PUBLIC_URL",
@@ -410,13 +410,13 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Phase 8 U1 — load the gateway's wrapper-token signing key. The
-    // flag is optional: when empty, the boot succeeds but DPoP-exchange
-    // endpoints (added in U2/U3) will 503. We log a clear warning so
-    // operators don't get a surprise during DPoP rollout.
+    // Load the gateway's session-cookie signing key. The flag is optional:
+    // when empty, the boot succeeds but the signed session cookie cannot be
+    // issued/verified, so the cookie auth arm fails closed. We log a clear
+    // warning so operators don't get a surprise.
     let signing_key: Option<Arc<ed25519_dalek::SigningKey>> = if signing_key_path.is_empty() {
         tracing::warn!(
-            "GATEWAY_SIGNING_KEY_FILE not set — DPoP token-exchange endpoints will 503"
+            "GATEWAY_SIGNING_KEY_FILE not set — signed session cookies disabled (cookie auth fails closed)"
         );
         None
     } else {
@@ -431,21 +431,10 @@ fn main() -> std::io::Result<()> {
         Some(Arc::new(key))
     };
 
-    // Phase 8 U3 — wrapper-token issuer. One-to-one with `signing_key`:
-    // both Some, or both None. Built once at boot so the per-request
-    // /__zs/auth/dpop-exchange path doesn't pay for PKCS#8 encoding +
-    // thumbprinting on every request.
-    let wrapper_issuer: Option<Arc<wrapper_token::Issuer>> = signing_key.as_ref().map(|sk| {
-        let issuer = wrapper_token::Issuer::new(sk.as_ref(), public_url.clone())
-            .expect("wrapper_token::Issuer construction");
-        Arc::new(issuer)
-    });
-
-    // auth-sdk Slice 1b-browser — load the PREVIOUS wrapper signing key for
-    // the rotation overlap (§8.5). Set ONLY during a key roll. When present,
-    // the Verifier is built via `Verifier::with_previous` (accepts wrappers
-    // signed by EITHER key), and `/__zs/auth/jwks` publishes both — resolving
-    // the rotation TODO that 1c left. Ignored (with a warning) when no
+    // auth-sdk Slice 1b-browser — load the PREVIOUS session-cookie signing key
+    // for the rotation overlap (§8.5). Set ONLY during a key roll. When present,
+    // the session Verifier is built via `Verifier::with_previous` (accepts
+    // session cookies signed by EITHER key). Ignored (with a warning) when no
     // current key is configured, since there is nothing to overlap with.
     let prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>> =
         if prev_signing_key_path.is_empty() {
@@ -468,36 +457,9 @@ fn main() -> std::io::Result<()> {
             Some(Arc::new(key))
         };
 
-    // Phase 8 U4 — wrapper-token verifier. Built from the PUBLIC half
-    // of the same signing key in lockstep with `wrapper_issuer` (both
-    // Some, or both None). The dispatch path consults this to detect
-    // wrapper-bound DPoP requests; raw-hydra DPoP requests fall through
-    // to the P7-U5 introspection path. Cheap to construct (no PKCS#8
-    // encoding — `DecodingKey::from_ed_der` accepts the raw 32-byte
-    // public key), so we just build it eagerly at boot.
-    //
-    // ROTATION (auth-sdk Slice 1b-browser): when `--prev-signing-key-file`
-    // is set we build the verifier via `Verifier::with_previous` so a
-    // wrapper minted just before a key roll still verifies during the
-    // overlap window (≥ wrapper TTL + skew). In steady state (no previous
-    // key) it is a single-key `Verifier::new`. The Issuer always signs with
-    // the CURRENT key only. This resolves the rotation TODO 1c left.
-    let wrapper_verifier: Option<Arc<wrapper_token::Verifier>> = signing_key.as_ref().map(|sk| {
-        let current = sk.verifying_key();
-        let verifier = match prev_signing_key.as_ref() {
-            Some(prev) => wrapper_token::Verifier::with_previous(
-                &current,
-                &prev.verifying_key(),
-                public_url.clone(),
-            ),
-            None => wrapper_token::Verifier::new(&current, public_url.clone()),
-        };
-        Arc::new(verifier)
-    });
-
     // BFF redesign slice R1b — the SIGNED STATELESS session cookie. Built from
-    // the SAME ed25519 signing key (+ previous key for the rotation overlap) as
-    // the wrapper issuer/verifier, but stamping the distinct `zs-sess+jwt` typ.
+    // the ed25519 signing key (+ previous key for the rotation overlap),
+    // stamping the distinct `zs-sess+jwt` typ.
     // Both `Some`, or both `None` (one-to-one with `signing_key`): with no key
     // the gateway cannot sign/verify the session cookie, so the cookie arm fails
     // closed. The Issuer always signs with the CURRENT key; the Verifier folds
@@ -736,8 +698,6 @@ fn main() -> std::io::Result<()> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key,
         prev_signing_key,
-        wrapper_issuer,
-        wrapper_verifier,
         session_issuer,
         session_verifier,
         anchor_enc_key,
@@ -769,16 +729,6 @@ fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
-            // Phase 8 U3 — DPoP token exchange. Registered BEFORE
-            // the subdomain catch-all so the path lands on the
-            // dedicated handler rather than being dispatched as a
-            // creator-app route. `cache-control: no-store` is set on
-            // every response so intermediaries don't keep wrapper
-            // tokens around.
-            .service(
-                web::resource("/__zs/auth/dpop-exchange")
-                    .route(web::post().to(dpop_exchange::handle)),
-            )
             // auth-sdk BFF redesign slice R1b — the ONE identity-session
             // resource. `/token` is GONE (merged here); both methods live on
             // `/__zs/auth/session`:
@@ -786,9 +736,8 @@ fn main() -> std::io::Result<()> {
             //     session cookie + return `{ user, expires_at }`.
             //   - GET[?mint=1] = decode the live signed cookie, or (expired /
             //     `mint=1`) re-sign a fresh cookie from the server-held anchor.
-            // Same mounting discipline as dpop-exchange (registered BEFORE the
-            // subdomain catch-all). Same-origin-only (no CORS); `?mint=1` + POST
-            // additionally require `X-ZS-Auth`.
+            // Registered BEFORE the subdomain catch-all. Same-origin-only (no
+            // CORS); `?mint=1` + POST additionally require `X-ZS-Auth`.
             .service(
                 web::resource("/__zs/auth/session")
                     .route(web::post().to(auth_token::session_post))
@@ -798,8 +747,7 @@ fn main() -> std::io::Result<()> {
             // surface. Same mounting discipline (BEFORE the subdomain
             // catch-all). `/authorize` 302s to Hydra (the one cross-site
             // hop); `/popup-callback` serves the same-origin relay page;
-            // `/signout` revokes + clears (fixes the live bug);
-            // `/jwks` publishes the wrapper signing keys.
+            // `/signout` revokes + clears (fixes the live bug).
             .service(
                 web::resource("/__zs/auth/authorize")
                     .route(web::get().to(browser_auth::authorize)),
@@ -811,10 +759,6 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/__zs/auth/signout")
                     .route(web::post().to(browser_auth::signout)),
-            )
-            .service(
-                web::resource("/__zs/auth/jwks")
-                    .route(web::get().to(browser_auth::jwks)),
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the

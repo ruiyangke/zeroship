@@ -124,36 +124,3 @@ pub async fn lookup_relay_email(
     Ok(rows.first().and_then(|row| row.get("relay_email")))
 }
 
-/// Read the ACTIVE relay alias (`relay_email`) for `(app_client_id,
-/// pairwise_sub)`, or `None` when no live alias exists. The pairwise-keyed
-/// twin of [`lookup_relay_email`], used by the wrapper fast-paths (Batch A
-/// fix 5): a gateway-issued wrapper carries the per-app `pws_…` subject, NOT
-/// the global UUID, so the live re-resolution keys on `pairwise_sub` instead
-/// of `global_user_id`. The `(app_client_id, pairwise_sub)` pair is unique —
-/// `pairwise_sub` is a deterministic projection of one `(app, global_user)`
-/// — so this returns the same row [`lookup_relay_email`] would.
-///
-/// Same fail-closed gate (`relay_email IS NOT NULL AND revoked_at IS NULL`):
-/// a revoked grant's alias reads as `None`, so the caller emits an EMPTY email
-/// rather than the stale alias the wrapper still carries — the whole point of
-/// re-resolving live instead of trusting the (TTL-stale) wrapper claim.
-///
-/// # Errors
-/// [`GatewayError::Db`] on PG failure.
-pub async fn lookup_relay_email_by_pairwise(
-    conn: &Client,
-    app_client_id: &str,
-    pairwise_sub: &str,
-) -> Result<Option<String>> {
-    let rows = conn
-        .query(
-            "SELECT relay_email FROM auth.app_user_identities \
-             WHERE app_client_id = $1 AND pairwise_sub = $2 \
-               AND relay_email IS NOT NULL \
-               AND revoked_at IS NULL",
-            &[&app_client_id, &pairwise_sub],
-        )
-        .await
-        .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup by pairwise: {e}")))?;
-    Ok(rows.first().and_then(|row| row.get("relay_email")))
-}

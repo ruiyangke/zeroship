@@ -41,7 +41,7 @@ use zeroship_gateway::{
     proxy::HashRing,
     sessions::{create, revoke_all_for_user, validate, NewSession},
     sync::RouteCache,
-    wrapper_token, GateConfig, GateState,
+    GateConfig, GateState,
 };
 
 #[compio::test]
@@ -360,8 +360,6 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: None,
         prev_signing_key: None,
-        wrapper_issuer: None::<Arc<wrapper_token::Issuer>>,
-        wrapper_verifier: None::<Arc<wrapper_token::Verifier>>,
         session_issuer: None::<Arc<zeroship_gateway::session_token::Issuer>>,
         session_verifier: None::<Arc<zeroship_gateway::session_token::Verifier>>,
         anchor_enc_key: [0u8; 32],

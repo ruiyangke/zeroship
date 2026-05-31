@@ -71,7 +71,6 @@ The federation routes (`/oauth/google/*`, `/oauth/github/*`), magic-link redempt
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/__zs/auth/callback?code=…&state=…` | Receives the OIDC code, exchanges at hydra's `/oauth2/token`, sets `__Host-zs_app_session`, redirects to the original path |
-| POST | `/__zs/auth/dpop-exchange` | Exchanges a hydra access token + DPoP proof for a `cnf.jkt`-bound wrapper JWT. See [DPoP-bound wrapper tokens](#dpop-bound-wrapper-tokens). |
 | POST | `/oidc/backchannel-logout` | OIDC BCL 1.0 receiver — verifies a `logout_token` and revokes the subject's gateway sessions. |
 
 ### Owned by `crates/control` (`console.zeroship.ai`)
@@ -176,104 +175,32 @@ docker compose up -d hydra auth gateway control worker
 
 For local development against hydra, run `crates/auth` with `AUTH_BOOTSTRAP=1 AUTH_INSECURE_DEV=1` on first boot. Bootstrap is idempotent: it ensures hydra has EdDSA + RS256 keys in the `hydra.openid.id-token` set and EdDSA in the `hydra.jwt.access-token` set, then reconciles the client registry from the TOML.
 
-## DPoP-bound wrapper tokens
+## DPoP-bound access (non-browser clients)
 
-Phase 8 adds RFC 9449 token binding (`cnf.jkt`) without forking hydra. The gateway becomes a JWT issuer: DPoP-aware clients exchange a hydra access token for a gateway-signed *wrapper token* whose `cnf.jkt` claim binds it to a specific public key. Subsequent requests carrying `Authorization: DPoP <wrapper>` are verified locally — no per-request introspection — and the key in the inbound DPoP proof must match `cnf.jkt`.
-
-### `POST /__zs/auth/dpop-exchange`
-
-Mints a wrapper token from a hydra access token + a DPoP proof.
-
-```
-POST /__zs/auth/dpop-exchange
-Host: myapp.zeroship.ai
-Authorization: Bearer <hydra_access_token>
-DPoP: <RFC 9449 proof JWT, signed by the client's DPoP key>
-```
-
-The proof's `htu` must be `https://<host>/__zs/auth/dpop-exchange`, `htm` must be `POST`, and `ath` must be `base64url(SHA-256(hydra_access_token))`. The handler also enforces `iat` freshness and a per-`jti` replay cache (in-process, 120 s TTL).
-
-On success:
-
-```
-200 OK
-Cache-Control: no-store
-Content-Type: application/json
-
-{
-  "wrapper_token": "<JWT>",
-  "expires_in": 3600,
-  "token_type": "DPoP"
-}
-```
-
-Error responses (all include `Cache-Control: no-store`):
-
-| Status | `error` code | Meaning |
-|---|---|---|
-| 400 | `missing_bearer` | `Authorization: Bearer <hydra_token>` absent or malformed |
-| 400 | `missing_dpop` | `DPoP` header absent |
-| 401 | `invalid_dpop_proof` | Proof signature / `htu` / `htm` / `iat` / `ath` failed verification |
-| 401 | `dpop_jti_replay` | This `jti` was already accepted within the 120 s window |
-| 401 | `hydra_token_inactive` | Hydra introspection reports `active: false` |
-| 401 | `introspection_failed` | Introspection call failed (network / hydra error) |
-| 500 | `issuer_failed` | JWT signing failed (should not occur with a valid signing key) |
-| 503 | `dpop_binding_not_configured` | Gateway booted without `--signing-key-file`; no issuer is available |
-
-### Wrapper token shape
-
-Header:
-
-```json
-{ "alg": "EdDSA", "typ": "at+jwt", "kid": "<RFC 7638 thumbprint of gateway signing key>" }
-```
-
-`typ: at+jwt` follows RFC 9068. The signing algorithm is Ed25519 (`EdDSA`).
-
-Claims:
-
-| Claim | Source | Notes |
-|---|---|---|
-| `iss` | Gateway public URL | Verified on the inbound side |
-| `aud` | Request `Host` header | Per-app binding — wrapper minted for `myapp.zeroship.ai` won't be accepted at `other.zeroship.ai` |
-| `sub` | Hydra introspection | `usr_…` |
-| `exp` | `iat + 3600` | 1 h TTL, matches hydra access-token lifetime |
-| `iat` | Now | Unix seconds |
-| `jti` | Random UUID v4 | |
-| `cnf.jkt` | DPoP proof | RFC 7638 thumbprint of the client's DPoP public key — the binding |
-| `scope` | Hydra introspection | |
-| `client_id` | Hydra introspection | |
-| `email`, `name`, `email_verified` | Hydra introspection | Optional, only present if hydra returned them |
-| `wraps` | `base64url(SHA-256(hydra_access_token))` | Forensic link to the underlying hydra token. Not checked at verify time. |
+Non-browser OAuth clients (CLI, server-to-server) that hold a hydra access token MAY present it RFC 9449 sender-constrained as `Authorization: DPoP <hydra_access_token>` plus a `DPoP:` proof header. The browser SPA does NOT use this path — it rides the signed `__Host-zs_app_session` cookie.
 
 ### Dispatch enforcement
 
-When the gateway sees `Authorization: DPoP <token>` on an inbound request it tries to decode the token as a wrapper first. If the signature, `iss`, and `exp` check out:
+When the gateway sees `Authorization: DPoP <token>` on an inbound request:
 
-1. Verify the inbound `DPoP` proof normally (signature, `htu`, `htm`, `iat`, `ath = SHA-256(wrapper)`, `jti` replay).
-2. Enforce **`wrapper.cnf.jkt == thumbprint(proof.jwk)`** — mismatch ⇒ 401.
-3. Use the wrapper claims (`sub`/`email`/`name`/…) to build the `ZeroShip-User` header — no hydra round-trip.
+1. Verify the inbound `DPoP` proof (signature, `htu`, `htm`, `iat`, `ath = SHA-256(access_token)`, `jti` replay against an in-process 120 s cache).
+2. Introspect the access token at hydra's `/oauth2/introspect`; reject when `active: false`.
+3. Bind per-app: the introspected `client_id` MUST equal the route's `oauth_client_id` (closes cross-app token confusion — a token active for app A presented at app B's host is rejected). There is **no `cnf.jkt`** enforcement: hydra does not issue `cnf.jkt`-bound access tokens, so the binding is proof-of-possession (the proof's `ath` pins the proof to this specific token) plus the per-app `client_id` check.
+4. Project the introspected global UUID `sub` to the per-app pairwise `pws_…`, enforce the per-app family-marker revocation (`auth.token_revocations`), then build the `ZeroShip-User` header.
 
-If the token is *not* a wrapper (no valid gateway signature), the gateway falls back to the Phase 7 path: hydra introspection + DPoP proof verification, but **without** `cnf.jkt` enforcement. Raw hydra tokens are accepted because hydra doesn't issue `cnf.jkt`-bound access tokens; the fallback is what lets non-binding clients keep working.
+A plain `Authorization: Bearer <hydra_access_token>` (no proof) is also accepted for non-browser clients on the raw-Hydra Bearer arm: the gateway verifies the access JWT locally against hydra's JWKS, binds per-app on the `client_id` claim, and runs the same family-marker revocation.
 
 ### Security model
 
 | Token | Binding | Verifier | Notes |
 |---|---|---|---|
-| Hydra access token (`Authorization: Bearer`) | None | Hydra introspection | Compromise of the token alone is enough to impersonate the user |
-| Hydra access token + DPoP proof (`Authorization: DPoP <hydra>`) | DPoP proof verified, **no `cnf.jkt`** | Hydra introspection + `core::dpop` | Bearer-style — proof verification adds replay protection but the token is not pinned to a key |
-| Wrapper token (`Authorization: DPoP <wrapper>`) | **`cnf.jkt` enforced** at dispatch | Local Ed25519 verify + `core::dpop` + `cnf.jkt` match | Stolen wrapper without the DPoP private key is unusable |
-
-**DPoP-aware clients SHOULD exchange immediately:** call `/__zs/auth/dpop-exchange` right after the OIDC code exchange and use the wrapper for every subsequent request. Treat the hydra access token as a single-use credential that exists only to mint the wrapper.
-
-The raw-hydra-DPoP fallback is a known attenuation of the DPoP guarantee. A future `--strict-dpop` flag will disable the fallback (returning 401 instead of falling through to introspection); it is not implemented in Phase 8.
+| Hydra access token (`Authorization: Bearer`) | per-app `client_id` claim | Local JWKS verify + family-marker revocation | Compromise of the token alone is enough to impersonate the user |
+| Hydra access token + DPoP proof (`Authorization: DPoP <hydra>`) | DPoP proof verified + per-app `client_id` (no `cnf.jkt`) | Hydra introspection + `core::dpop` + family-marker revocation | Proof verification adds replay protection but the token is not pinned to a key |
 
 ### Operator notes
 
-- The gateway needs an Ed25519 signing key. Generate with `openssl genpkey -algorithm ed25519 -out gw.key` and pass via `--signing-key-file` (or `GATEWAY_SIGNING_KEY_FILE`). PKCS#8 PEM or DER both work.
-- Without a signing key, the gateway boots fine but `/__zs/auth/dpop-exchange` returns 503 and the wrapper-verifier path is disabled (the raw-hydra-DPoP fallback still works).
-- Key custody and rotation are operator responsibilities at v1; the planned Phase 9 KMS integration is not implemented here.
-- Wrapper tokens have a 1 h hard TTL. There is no refresh — when a wrapper expires, the client re-exchanges. (Cascade revocation from hydra back-channel logout to wrapper invalidation is deferred to a future phase.)
+- The gateway needs an Ed25519 signing key for the signed session cookie. Generate with `openssl genpkey -algorithm ed25519 -out gw.key` and pass via `--signing-key-file` (or `GATEWAY_SIGNING_KEY_FILE`). PKCS#8 PEM or DER both work. Without it, the session-cookie auth arm fails closed; the raw-Hydra Bearer / DPoP-introspection paths are unaffected (they do not use the gateway key).
+- Key custody and rotation are operator responsibilities at v1.
 
 ## See also
 
@@ -282,4 +209,4 @@ The raw-hydra-DPoP fallback is a known attenuation of the DPoP guarantee. A futu
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-2-password-login.md` — Phase 2 plan (password identity, login UI)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-3-oidc-rps.md` — Phase 3 plan (gateway + control plane as RPs)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-7-dpop-bcl.md` — Phase 7 plan (back-channel logout + DPoP-ready surface)
-- `docs/superpowers/plans/2026-05-27-auth-server-phase-8-dpop-binding.md` — Phase 8 plan (wrapper-token issuer + `cnf.jkt` enforcement)
+- `docs/superpowers/plans/2026-05-27-auth-server-phase-8-dpop-binding.md` — Phase 8 plan (wrapper-token issuer + `cnf.jkt` enforcement). **Superseded:** the gateway wrapper-token issuer was removed in the BFF session redesign — the browser now holds a signed session cookie (verified locally), not a wrapper token. See `docs/superpowers/specs/2026-05-30-auth-bff-session-redesign.md`. Non-browser DPoP binding survives via the introspection path described above.

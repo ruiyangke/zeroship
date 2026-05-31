@@ -3,7 +3,7 @@
 //! The gateway binary (`main.rs`) is a thin entry point: it parses
 //! flags, constructs [`GateState`], registers ntex routes, and starts
 //! the server. Everything else — routing, auth, proxy, blob cache,
-//! sessions, signing, wrapper-token issuance — lives in this library
+//! sessions, signing, session-cookie issuance — lives in this library
 //! so integration tests under `tests/` can drive the handlers without
 //! reaching through the binary.
 //!
@@ -19,7 +19,6 @@ pub mod browser_auth;
 pub mod compiled;
 pub mod db;
 pub mod dispatch;
-pub mod dpop_exchange;
 pub mod enforce;
 pub mod error;
 pub mod hydra_client;
@@ -32,7 +31,6 @@ pub mod session_token;
 pub mod sessions;
 pub mod signing;
 pub mod sync;
-pub mod wrapper_token;
 
 use std::sync::Arc;
 
@@ -145,43 +143,22 @@ pub struct GateState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
-    /// Gateway-issued wrapper-token signing key (Phase 8 U1). Loaded
-    /// from a PKCS#8 PEM/DER file at boot via `--signing-key-file`.
-    /// `None` when the operator runs without the flag — DPoP-exchange
-    /// endpoints return 503 in that mode, but every other gateway path
-    /// keeps working.
+    /// Gateway session-cookie signing key. Loaded from a PKCS#8 PEM/DER file
+    /// at boot via `--signing-key-file`. `None` when the operator runs without
+    /// the flag — the signed session cookie cannot be issued/verified, so the
+    /// cookie auth arm fails closed, but every other gateway path keeps working.
     pub signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// PREVIOUS wrapper-token signing key (auth-sdk Slice 1b-browser,
+    /// PREVIOUS session-cookie signing key (auth-sdk Slice 1b-browser,
     /// rotation overlap §8.5). Loaded from `--prev-signing-key-file` /
     /// `GATEWAY_PREV_SIGNING_KEY_FILE` when an operator is mid-roll. `Some`
     /// only during the overlap window; `None` in steady state. The Issuer
-    /// NEVER signs with this — it is for `Verifier::with_previous` (so a
-    /// wrapper minted just before the roll still verifies) and the
-    /// `/__zs/auth/jwks` endpoint (so external verifiers see both keys).
+    /// NEVER signs with this — it is for `session_token::Verifier::with_previous`
+    /// (so a session cookie minted just before the roll still verifies).
     pub prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// Wrapper-token issuer (Phase 8 U3). Materialised at boot from
-    /// `signing_key` + `config.public_url`; `None` exactly when
-    /// `signing_key` is `None`. The `/__zs/auth/dpop-exchange` handler
-    /// short-circuits to 503 when this is absent so the rest of the
-    /// gateway can keep serving traffic during the `DPoP` rollout.
-    pub wrapper_issuer: Option<Arc<wrapper_token::Issuer>>,
-    /// Wrapper-token verifier (Phase 8 U4). Built in lockstep with
-    /// `wrapper_issuer` from the public half of the same signing key.
-    /// The dispatch path (`router::auth::resolve_dpop_user_header`)
-    /// consults this BEFORE falling back to hydra introspection — a
-    /// `DPoP` request whose access token verifies as a wrapper gets
-    /// the strict `cnf.jkt ↔ proof jkt` binding check; a request whose
-    /// token is a raw hydra opaque token falls through to the P7-U5
-    /// introspection path (no binding). `None` means "wrapper-token
-    /// verification is disabled" — every DPoP request falls through
-    /// to introspection.
-    pub wrapper_verifier: Option<Arc<wrapper_token::Verifier>>,
     /// Signed-session-cookie issuer (BFF redesign slice R1b). Mints the
-    /// gateway-signed `zs-sess+jwt` written into `__Host-zs_app_session` —
-    /// reusing the SAME ed25519 `signing_key` + `kid` as the wrapper issuer, but
-    /// stamping the distinct `zs-sess+jwt` typ so a session cookie can never be
-    /// confused with a power token. `None` exactly when `signing_key` is `None`
-    /// (no signing key ⇒ no signed cookie ⇒ the cookie arm fails closed).
+    /// gateway-signed `zs-sess+jwt` written into `__Host-zs_app_session`,
+    /// stamping the `zs-sess+jwt` typ. `None` exactly when `signing_key` is
+    /// `None` (no signing key ⇒ no signed cookie ⇒ the cookie arm fails closed).
     pub session_issuer: Option<Arc<session_token::Issuer>>,
     /// Signed-session-cookie verifier (BFF redesign slice R1b). The cookie arm
     /// (`router::auth::resolve_app_session_user_header_inner`) verifies the

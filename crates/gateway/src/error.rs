@@ -25,11 +25,11 @@ pub enum GatewayError {
     },
     /// Runtime failure that shouldn't happen in a healthy gateway —
     /// JWT encode/decode error, system clock failure, etc. Used by
-    /// `wrapper_token::Issuer::issue` and `Verifier::verify` (Phase 8
-    /// U2) for both signing-side and verification-side failures
-    /// (signature mismatch, expired token, kid mismatch, …). The
-    /// dispatcher surfaces these as `500 Internal Server Error` on
-    /// the issue side and `401 invalid_token` on the verify side.
+    /// `session_token::Issuer::issue` and `Verifier::verify` for both
+    /// signing-side and verification-side failures (signature mismatch,
+    /// expired token, kid mismatch, …). The dispatcher surfaces these as
+    /// `500 Internal Server Error` on the issue side and "no valid session"
+    /// on the verify side.
     #[error("internal: {0}")]
     Internal(String),
 }

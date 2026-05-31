@@ -1,11 +1,10 @@
 //! Faithful integration tests for the auth-sdk Slice 1b-browser HTTP
 //! surface (`GET /__zs/auth/authorize`, `GET /__zs/auth/popup-callback`,
-//! `POST /__zs/auth/signout`, `GET /__zs/auth/jwks`).
+//! `POST /__zs/auth/signout`).
 //!
 //! These drive the REAL ntex handlers through `ntex::web::test`. The
 //! unconditional tests (authorize URL shape, 503 when un-provisioned,
-//! popup-callback page + CSP + no-reflection, jwks current/previous keys +
-//! previous-key wrapper verify) need NO database. The signout revocation
+//! popup-callback page + CSP + no-reflection) need NO database. The signout revocation
 //! test stands up a loopback MOCK Hydra (counting `/oauth2/revoke` hits)
 //! and is DB-gated on `GATEWAY_ANCHORS_DB_URL` (the established skip
 //! convention — no live PG in CI by default), but the same-origin guard +
@@ -24,9 +23,9 @@ use zeroship_gateway::{
     browser_auth, enforce, idempotency,
     oidc_rp::OidcRp,
     proxy::HashRing,
-    session_token, signing,
+    session_token,
     sync::RouteCache,
-    wrapper_token, GateConfig, GateState,
+    GateConfig, GateState,
 };
 
 const APP_HOST: &str = "myapp.zeroship.ai";
@@ -96,7 +95,7 @@ struct StateOpts {
     /// Hydra dial URL (loopback mock) for `OidcRp`.
     hydra_base: String,
     db: Option<zeroship_gateway::db::DbConfig>,
-    /// Optional previous signing key (rotation overlap + jwks).
+    /// Optional previous signing key (session-cookie rotation overlap).
     prev_signing: Option<SigningKey>,
 }
 
@@ -111,8 +110,8 @@ impl Default for StateOpts {
     }
 }
 
-/// The fixed gateway signing key every fixture uses (so wrappers minted in
-/// a test verify against the fixture's own verifier).
+/// The fixed gateway signing key every fixture uses (so session cookies
+/// minted in a test verify against the fixture's own verifier).
 fn gateway_signing() -> SigningKey {
     SigningKey::from_bytes(&[7u8; 32])
 }
@@ -123,16 +122,6 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
 
     let signing_key = gateway_signing();
-    let issuer =
-        wrapper_token::Issuer::new(&signing_key, GATEWAY_ISS.into()).expect("issuer");
-    let verifier = match opts.prev_signing.as_ref() {
-        Some(prev) => wrapper_token::Verifier::with_previous(
-            &signing_key.verifying_key(),
-            &prev.verifying_key(),
-            GATEWAY_ISS.into(),
-        ),
-        None => wrapper_token::Verifier::new(&signing_key.verifying_key(), GATEWAY_ISS.into()),
-    };
     let session_issuer =
         session_token::Issuer::new(&signing_key, GATEWAY_ISS.into()).expect("session issuer");
     let session_verifier = match opts.prev_signing.as_ref() {
@@ -181,8 +170,6 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: Some(Arc::new(signing_key)),
         prev_signing_key: opts.prev_signing.map(Arc::new),
-        wrapper_issuer: Some(Arc::new(issuer)),
-        wrapper_verifier: Some(Arc::new(verifier)),
         session_issuer: Some(Arc::new(session_issuer)),
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
@@ -224,7 +211,6 @@ macro_rules! browser_app {
                 web::resource("/__zs/auth/signout")
                     .route(web::post().to(browser_auth::signout)),
             )
-            .service(web::resource("/__zs/auth/jwks").route(web::get().to(browser_auth::jwks)))
     }};
 }
 
@@ -631,139 +617,6 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     );
     drop(mock);
     cleanup_user(&dsn, global_user_id).await;
-}
-
-// ─── GET /__zs/auth/jwks ─────────────────────────────────────────────────
-
-#[ntex::test]
-async fn jwks_serves_current_key_only_by_default() {
-    let state = build_state(StateOpts::default());
-    let app = test::init_service(browser_app!(state.clone())).await;
-
-    let req = test::TestRequest::get()
-        .uri("/__zs/auth/jwks")
-        .header(http::header::HOST, APP_HOST)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 200);
-
-    let body = read_text(resp).await;
-    let doc: serde_json::Value = serde_json::from_str(&body).expect("jwks json");
-    let keys = doc["keys"].as_array().expect("keys array");
-    assert_eq!(keys.len(), 1, "steady state: current key only");
-
-    // The kid matches the Issuer's stamped kid.
-    let expected_kid = signing::jwk_thumbprint(&gateway_signing());
-    assert_eq!(keys[0]["kid"], expected_kid);
-    assert_eq!(keys[0]["kty"], "OKP");
-    assert_eq!(keys[0]["crv"], "Ed25519");
-    assert_eq!(keys[0]["alg"], "EdDSA");
-}
-
-#[ntex::test]
-async fn jwks_serves_current_and_previous_and_prev_key_wrapper_verifies() {
-    // Build a verifier overlap: current = gateway key (B), previous = A.
-    // A wrapper signed by A must verify against the fixture verifier (built
-    // via with_previous), and /jwks must publish BOTH kids.
-    let prev = SigningKey::from_bytes(&[9u8; 32]); // previous key A
-    let state = build_state(StateOpts {
-        prev_signing: Some(prev.clone()),
-        ..Default::default()
-    });
-    let app = test::init_service(browser_app!(state.clone())).await;
-
-    // /jwks publishes both keys.
-    let req = test::TestRequest::get()
-        .uri("/__zs/auth/jwks")
-        .header(http::header::HOST, APP_HOST)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    let body = read_text(resp).await;
-    let doc: serde_json::Value = serde_json::from_str(&body).expect("jwks json");
-    let keys = doc["keys"].as_array().expect("keys");
-    assert_eq!(keys.len(), 2, "overlap: current + previous");
-
-    let current_kid = signing::jwk_thumbprint(&gateway_signing());
-    let prev_kid = signing::jwk_thumbprint(&prev);
-    let kids: Vec<&str> = keys.iter().filter_map(|k| k["kid"].as_str()).collect();
-    assert!(kids.contains(&current_kid.as_str()), "current kid present: {kids:?}");
-    assert!(kids.contains(&prev_kid.as_str()), "previous kid present: {kids:?}");
-
-    // A wrapper signed by the PREVIOUS key A verifies via the fixture's
-    // with_previous verifier (the rotation-overlap acceptance).
-    let issuer_prev = wrapper_token::Issuer::new(&prev, GATEWAY_ISS.into()).expect("issuer A");
-    let a_token = issuer_prev
-        .issue(&wrapper_token::WrapperMint {
-            aud: APP_HOST,
-            sub: "pws_test",
-            scope: "openid",
-            client_id: CLIENT_ID,
-            exp_secs: 600,
-            cnf: None,
-            wraps: None,
-            email: None,
-            email_verified: None,
-            name: None,
-        })
-        .expect("issue A");
-    let verifier = state.wrapper_verifier.as_ref().expect("verifier");
-    verifier
-        .verify(&a_token, APP_HOST, Some(CLIENT_ID))
-        .expect("previous-key wrapper must verify during overlap");
-}
-
-#[ntex::test]
-async fn jwks_503_when_no_signing_key() {
-    // Build a state with no signing key (verifier path disabled).
-    let mut tmp = std::env::temp_dir();
-    tmp.push(format!("zsgate-browser-nokey-{}", Uuid::new_v4().simple()));
-    let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
-    let oidc_rp = OidcRp::new("http://127.0.0.1:1", "gateway", "s", b"k".repeat(32));
-    let routes = RouteCache::new();
-    routes.update(build_route_map(true));
-    let state = Arc::new(GateState {
-        config: GateConfig {
-            control_url: String::new(),
-            control_key: String::new(),
-            worker_urls: vec![],
-            poll_interval_secs: 5,
-            worker_key: "wk".into(),
-            hydra_public_url: String::new(),
-            auth_ui_url: "http://127.0.0.1:1".into(),
-            insecure_dev: false,
-            trust_proxy: false,
-            public_url: GATEWAY_ISS.into(),
-        },
-        routes,
-        hash_ring: HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
-        rate_limiters: enforce::RateLimitRegistry::new(1, 1),
-        per_rule_rate_limits: enforce::PerRuleRateLimitRegistry::new(),
-        concurrency: enforce::ConcurrencyRegistry::new(1),
-        blob_store: Arc::new(StubBlobStore),
-        blob_cache: BlobCache::new(8 * 1024 * 1024),
-        disk_cache: disk,
-        idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
-        oidc_rp: Arc::new(oidc_rp),
-        db: None,
-        dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
-        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        signing_key: None,
-        prev_signing_key: None,
-        wrapper_issuer: None,
-        wrapper_verifier: None,
-        session_issuer: None,
-        session_verifier: None,
-        anchor_enc_key: [0u8; 32],
-        pairwise_salt: [0u8; 32],
-    });
-    let app = test::init_service(browser_app!(state)).await;
-
-    let req = test::TestRequest::get()
-        .uri("/__zs/auth/jwks")
-        .header(http::header::HOST, APP_HOST)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 503, "jwks must 503 without a signing key");
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────

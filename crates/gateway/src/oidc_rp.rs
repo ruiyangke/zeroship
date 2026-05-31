@@ -575,7 +575,7 @@ impl OidcRp {
     /// Bearer arm's raw-Hydra path (§1.3, slice 1c) for non-browser
     /// clients that hold a Hydra access token directly (CLI,
     /// server-to-server). The browser never takes this path — it holds a
-    /// gateway *wrapper*, verified by `wrapper_token::Verifier` instead.
+    /// gateway-signed session cookie, verified by `session_token::Verifier`.
     ///
     /// Validation covers: signature (against any cached JWK matching the
     /// token's `kid`/`alg`), `iss == self.issuer`, and `exp` (with the

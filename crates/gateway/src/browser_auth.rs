@@ -1,6 +1,6 @@
 //! Browser-facing auth HTTP surface (auth-sdk Slice 1b-browser, spec §1.2).
 //!
-//! Four same-origin gateway endpoints the `@zeroship/auth` SDK drives:
+//! Three same-origin gateway endpoints the `@zeroship/auth` SDK drives:
 //!
 //! - **`GET /__zs/auth/authorize`** — the ONE cross-site hop. Resolves the
 //!   app's per-app PUBLIC PKCE client from `Host`, then 302s to Hydra's
@@ -30,16 +30,11 @@
 //!   anchor row(s), (d) clears the anchor cookie + breadcrumb. `scope:
 //!   'local'` (default, this device) or `'global'` (this app, every device).
 //!   Returns `204` + no-store cookie clears.
-//!
-//! - **`GET /__zs/auth/jwks`** — serves the wrapper-token signing keys
-//!   (current + previous) as a JWKS (kid-keyed OKP/Ed25519 public keys) so
-//!   external verifiers can check gateway wrappers independently.
 
 use std::sync::Arc;
 
 use ntex::util::Bytes;
 use ntex::web::{types::State, HttpRequest, HttpResponse};
-use serde_json::json;
 
 use crate::auth_token::{
     db_error, error_response, resolve_route, same_origin_guard, CACHE_NO_STORE,
@@ -325,11 +320,12 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         return signout_cleared(&route.host, state.config.insecure_dev);
     }
 
-    // The per-app pairwise `pws_` subject the wrapper carries — the family
-    // marker is keyed on `(client_id, pws_sub)` to match the wrapper's `sub`
-    // (the Bearer arm checks the SAME (client_id, sub), §8.5). When the
-    // sector is missing we cannot derive the pws_; the family marker is then
-    // best-effort skipped (the anchor delete + cookie clear still happen).
+    // The per-app pairwise `pws_` subject the session cookie / access token
+    // carries — the family marker is keyed on `(client_id, pws_sub)` to match
+    // their `sub` (the cookie / Bearer / DPoP arms check the SAME
+    // (client_id, sub), §8.5). When the sector is missing we cannot derive the
+    // pws_; the family marker is then best-effort skipped (the anchor delete +
+    // cookie clear still happen).
     let pws_sub = route
         .sector_identifier
         .as_deref()
@@ -356,7 +352,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         };
 
         // (a) Per-app family marker — the PRIMARY cross-node revocation
-        //     (§8.5): an already-minted wrapper/access token for
+        //     (§8.5): an already-issued session cookie / access token for
         //     `(client_id, pws_sub)` is rejected from now on. Best-effort.
         if let Some(pws_sub) = pws_sub.as_deref() {
             if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(
@@ -474,56 +470,6 @@ fn anchor_aad(client_id: &str, sub: &str) -> Vec<u8> {
     format!("zs-anchor-refresh:{client_id}:{sub}").into_bytes()
 }
 
-// ─── GET /__zs/auth/jwks ─────────────────────────────────────────────────
-
-/// `GET /__zs/auth/jwks` — serve the wrapper-token signing keys (current +
-/// previous) as a JWKS so external verifiers can check gateway wrappers
-/// independently. Each key is the kid-keyed OKP/Ed25519 PUBLIC key (the
-/// `kid` is the RFC 7638 thumbprint the Issuer stamps). `503` when no
-/// signing key is configured.
-///
-/// Publishing the previous key as well lets a verifier validate a wrapper
-/// minted just before a key roll during the rotation overlap window (§8.5).
-#[allow(clippy::future_not_send)]
-pub async fn jwks(state: State<Arc<GateState>>) -> HttpResponse {
-    let Some(signing) = state.signing_key.as_ref() else {
-        return error_response(
-            HttpResponse::ServiceUnavailable(),
-            "signing_not_configured",
-            "wrapper signing key absent",
-        );
-    };
-
-    let mut keys = vec![jwk_for(&signing.verifying_key())];
-    if let Some(prev) = state.prev_signing_key.as_ref() {
-        keys.push(jwk_for(&prev.verifying_key()));
-    }
-
-    // JWKS is publicly cacheable (public keys), but keep it short so a key
-    // roll propagates quickly to verifiers.
-    HttpResponse::Ok()
-        .content_type("application/jwk-set+json")
-        .header("cache-control", "public, max-age=300")
-        .json(&json!({ "keys": keys }))
-}
-
-/// Build the JWKS entry for an Ed25519 public key: the RFC 8037 OKP JWK
-/// (`kty`/`crv`/`x`) plus the RFC 7638 thumbprint as `kid` (matching the
-/// `kid` the Issuer stamps into wrapper headers) and `use`/`alg` hints.
-fn jwk_for(public: &ed25519_dalek::VerifyingKey) -> serde_json::Value {
-    use base64::Engine as _;
-    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.to_bytes());
-    let kid = crate::signing::jwk_thumbprint_public(public);
-    json!({
-        "kty": "OKP",
-        "crv": "Ed25519",
-        "x": x,
-        "kid": kid,
-        "use": "sig",
-        "alg": "EdDSA",
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,20 +550,6 @@ mod tests {
         let req = TestRequest::default().to_http_request();
         let b = parse_signout_body(&req, b"");
         assert_eq!(b.scope, None);
-    }
-
-    #[test]
-    fn jwk_for_emits_okp_ed25519_with_thumbprint_kid() {
-        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let jwk = jwk_for(&signing.verifying_key());
-        assert_eq!(jwk["kty"], "OKP");
-        assert_eq!(jwk["crv"], "Ed25519");
-        assert_eq!(jwk["alg"], "EdDSA");
-        assert_eq!(jwk["use"], "sig");
-        // kid == the Issuer's stamped kid (same thumbprint helper).
-        let expected_kid = crate::signing::jwk_thumbprint(&signing);
-        assert_eq!(jwk["kid"], expected_kid);
-        assert!(jwk["x"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     #[test]

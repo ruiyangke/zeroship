@@ -48,12 +48,6 @@ pub const ANCHOR_ABS_DAYS: i64 = 30;
 /// `ANCHOR_ABS_DAYS` and the breadcrumb.
 pub const ANCHOR_COOKIE_MAX_AGE_SECS: i64 = ANCHOR_ABS_DAYS * 24 * 3600;
 
-/// Wrapper access-token lifetime in seconds (10 min, §8.5). Still the
-/// `exp` of the gateway wrappers minted on the surviving non-browser paths
-/// (`/dpop-exchange`); no longer handed to the SPA (BFF redesign §3.1 — the
-/// browser holds no wrapper).
-pub const WRAPPER_TTL_SECS: i64 = 600;
-
 /// Production anchor cookie name (`__Host-` prefix → Secure required).
 ///
 /// DISTINCT from the interactive OIDC `__Host-zs_app_session`

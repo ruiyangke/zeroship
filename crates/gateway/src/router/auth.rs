@@ -105,7 +105,7 @@ pub(crate) async fn resolve_auth(
     // is part of the app's PUBLIC surface (HTML/JS/CSS, SSR, public RPCs); it
     // can still resolve a `ZeroShip-User` when a session is present, but it
     // must NEVER scope-403 an authenticated visitor — otherwise a logged-in
-    // browser whose 10-min wrapper lacks a scope inherited from a broad `*`
+    // browser whose session lacks a scope inherited from a broad `*`
     // parent would get 403 on public pages a logged-OUT user loads fine. That
     // is the "logged-in is worse than anonymous on public routes" footgun the
     // round-3 Invalid-Bearer fix removed; scope gating must not re-introduce
@@ -218,21 +218,21 @@ async fn resolve_auth_inner(
     }
 
     // 1. Bearer arm (§1.3, slice 1c). Ordered AFTER the DPoP arm and
-    //    BEFORE the cookie arm. Discriminates two issuer-recognized
-    //    user-session token shapes (the gateway WRAPPER and a raw Hydra
-    //    access JWT) from the reserved API-key path:
+    //    BEFORE the cookie arm. Serves NON-BROWSER OAuth clients (CLI /
+    //    server-to-server) presenting a raw Hydra access JWT; the SPA uses
+    //    the signed session cookie, not Bearer. Discriminates the raw-Hydra
+    //    access JWT from the reserved API-key path:
     //
     //      - `Allowed(header)`     → short-circuit, fully authenticated.
-    //      - `Invalid`            → a recognized user-session token that
-    //        failed verify/binding/revocation. By policy: anonymous on an
-    //        `Anon` route (the SDK auto-attaches Bearer to EVERY request,
-    //        and the wrapper is only 10 min, so an expired-but-present
-    //        Bearer is the common case on public pages — round-3), 401 on
-    //        `User`/`Admin`.
-    //      - `NotUserSession`     → a Bearer that is neither a wrapper nor
-    //        a raw-Hydra JWT (e.g. a future `zsk_…` API key). Reserved
-    //        path → 401 on EVERY route, including `Anon` (it asserts a
-    //        DIFFERENT scheme, not an expired user session).
+    //      - `Invalid`            → a recognized raw-Hydra user-session token
+    //        that failed verify/binding/revocation. By policy: anonymous on
+    //        an `Anon` route (a non-browser client may auto-attach Bearer,
+    //        and an expired-but-present Bearer must not break public pages),
+    //        401 on `User`/`Admin`.
+    //      - `NotUserSession`     → a Bearer that is not a raw-Hydra JWT
+    //        (e.g. a future `zsk_…` API key). Reserved path → 401 on EVERY
+    //        route, including `Anon` (it asserts a DIFFERENT scheme, not an
+    //        expired user session).
     //      - `NotBearer`          → no `Authorization: Bearer`. Fall
     //        through to the cookie arm.
     match resolve_bearer_user_header(req, state, request_id, oauth_client_id, sector_identifier)
@@ -497,76 +497,6 @@ async fn project_pairwise(
     PairwiseProjection::Projected { pws, relay_email }
 }
 
-/// Re-resolve the LIVE relay alias for a wrapper's `(client_id, pws_sub)` on
-/// the wrapper fast-paths (Batch A fix 5), returning the `email` claim the
-/// worker header should carry — NEVER the (TTL-stale) email the wrapper itself
-/// embeds.
-///
-/// A wrapper is JS-readable and lives for its full TTL (10 min browser / 1 h
-/// DPoP), so the alias it was minted with can be revoked WHILE the wrapper is
-/// still cryptographically valid. The cookie / introspection / raw-Hydra arms
-/// already re-read the alias live via [`project_pairwise`]; this gives the two
-/// wrapper fast-paths the SAME posture: a single pooled read keyed on the
-/// per-app `pws_…` subject, with the same `revoked_at IS NULL` gate.
-///
-/// Fail-closed contract: returns an EMPTY string when the alias is revoked OR
-/// no live alias exists OR the DB read fails — the worker then sees no email
-/// rather than a dead/stale alias. It NEVER returns the wrapper's embedded
-/// claim and NEVER the real address. When the gateway has no DB at all
-/// (smoke mode) there is nothing to re-resolve, so the wrapper's own (already
-/// alias-only, never-real-email) `email` claim is passed through unchanged.
-#[allow(clippy::future_not_send)]
-async fn live_relay_email_for_wrapper(
-    state: &Arc<GateState>,
-    client_id: &str,
-    pws_sub: &str,
-) -> String {
-    let Some(db_cfg) = state.db.as_ref() else {
-        // Smoke mode (no DB): nothing to re-resolve against. Fail CLOSED to an
-        // empty email rather than trust the wrapper's embedded claim — this
-        // matches the raw-Hydra/introspection/cookie arms (which already emit
-        // empty when no alias is resolvable) and means the no-DB path can never
-        // surface an embedded email regardless of how the wrapper was minted
-        // (defense-in-depth: not an implicit dependency on the minter invariant).
-        return String::new();
-    };
-    match crate::db::checkout(db_cfg).await {
-        Ok(pool) => match pool.get().await {
-            Ok(conn) => {
-                match crate::identities::lookup_relay_email_by_pairwise(
-                    &conn, client_id, pws_sub,
-                )
-                .await
-                {
-                    Ok(alias) => alias.unwrap_or_default(),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            client_id = %client_id,
-                            "wrapper live relay_email re-resolve failed (failing closed on email)"
-                        );
-                        String::new()
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "wrapper live relay_email re-resolve: pg pool get failed (failing closed)"
-                );
-                String::new()
-            }
-        },
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "wrapper live relay_email re-resolve: pg pool checkout failed (failing closed)"
-            );
-            String::new()
-        }
-    }
-}
-
 /// Whether the request carries an `Authorization: DPoP <token>` header.
 /// We branch on this so a failed `DPoP` verification doesn't silently
 /// fall back to the cookie path.
@@ -577,43 +507,12 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
         .is_some_and(|s| s.starts_with("DPoP "))
 }
 
-/// Cheap JWT-header discriminator for gateway wrapper tokens.
-///
-/// This intentionally does not verify the signature; it only answers
-/// whether a token is shaped like a wrapper so the dispatch path can
-/// distinguish "raw hydra opaque token" from "malformed wrapper" before
-/// deciding whether introspection fallback is allowed.
-fn looks_like_wrapper(token: &str) -> bool {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-
-    let mut parts = token.split('.');
-    let (header_b64, payload_b64, sig_b64) =
-        match (parts.next(), parts.next(), parts.next(), parts.next()) {
-            (Some(h), Some(p), Some(s), None) => (h, p, s),
-            _ => return false,
-        };
-    if header_b64.is_empty() || payload_b64.is_empty() || sig_b64.is_empty() {
-        return false;
-    }
-
-    let Ok(header_bytes) = URL_SAFE_NO_PAD.decode(header_b64) else {
-        return false;
-    };
-    let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header_bytes) else {
-        return false;
-    };
-
-    header.get("typ").and_then(|v| v.as_str()) == Some("at+jwt")
-}
-
 /// Outcome of the DPoP arm ([`resolve_dpop_user_header`]).
 #[derive(Debug)]
 enum DpopOutcome {
-    /// A verified DPoP-bound user (wrapper fast-path or introspection
-    /// fallback). Carries the signed `ZeroShip-User` header. The wrapper
-    /// fast-path's `sub` is ALREADY the `pws_`; the introspection fallback
-    /// projects the global UUID to the per-app `pws_` (§6.2).
+    /// A verified DPoP-bound user (raw-Hydra introspection). Carries the
+    /// signed `ZeroShip-User` header. The introspected global UUID `sub` is
+    /// projected to the per-app `pws_` (§6.2).
     Allowed(String),
     /// A verified raw-Hydra-introspected user, but the route has no
     /// `sector_identifier` yet ⇒ no `pws_` derivation possible. Fail
@@ -627,21 +526,21 @@ enum DpopOutcome {
 
 /// Resolve the `ZeroShip-User` header from a DPoP-bound access token.
 ///
+/// This is the **non-browser** DPoP path (CLI / server-to-server): the
+/// access token is a RAW Hydra opaque token, introspected here. The SPA
+/// does not use DPoP — it rides the signed session cookie.
+///
 /// Returns `Some(header)` when:
 ///   1. `Authorization: DPoP <token>` is present, AND
 ///   2. The `DPoP:` proof header is present, AND
 ///   3. The proof verifies (signature, htm, htu, iat, ath), AND
 ///   4. The proof's `jti` has not been seen before in the freshness
 ///      window (replay defense), AND
-///   5. EITHER the access token verifies as a gateway-issued wrapper
-///      AND `wrapper.aud == Host` AND `wrapper.cnf.jkt == proof.jkt`
-///      (Phase 8 U4 fast path — self-contained, no introspection),
-///      OR the token does not look like a wrapper / no verifier is
-///      configured AND hydra's `/oauth2/introspect` returns
-///      `active: true` AND the introspected `client_id` equals the route's
-///      expected `oauth_client_id` (P7-U5 fallback; no `cnf.jkt` enforcement,
-///      but the per-app `client_id` binding closes the cross-app
-///      token-confusion gap the wrapper fast-path covers via `aud`/`cnf`).
+///   5. Hydra's `/oauth2/introspect` returns `active: true` AND the
+///      introspected `client_id` equals the route's expected
+///      `oauth_client_id` (no `cnf.jkt` enforcement — hydra doesn't surface
+///      it on access tokens — but the per-app `client_id` binding closes the
+///      cross-app token-confusion gap).
 ///
 /// Returns [`DpopOutcome::None`] for "no `DPoP` token in this request"
 /// AND for every failure mode above. The caller distinguishes the two
@@ -649,29 +548,11 @@ enum DpopOutcome {
 ///
 /// ## Pairwise projection (auth-sdk Slice 4, §6.2)
 ///
-/// The wrapper fast-path's `sub` is ALREADY the per-app `pws_` (minted
-/// that way at `/token` / `?mint=1`), so it forwards unchanged. The
-/// introspection fallback carries the GLOBAL Hydra UUID `sub`, so it
+/// The introspected token carries the GLOBAL Hydra UUID `sub`, so it
 /// projects to the per-app `pws_` via [`project_pairwise`] before
 /// encoding the header — and fails closed
 /// ([`DpopOutcome::ClientNotProvisioned`] → `503`) when the route has no
 /// `sector_identifier` yet, so the global UUID is never emitted.
-///
-/// ## Wrapper-vs-raw branching (Phase 8 U4)
-///
-/// We try the wrapper-verifier first. A successful verify means the
-/// gateway minted this token via `/__zs/auth/dpop-exchange` (U3) — it's
-/// already scoped to a specific request host in `aud` and bound to a
-/// specific `DPoP` key in its `cnf.jkt` claim. We require both the
-/// request Host and proof binding to match; mismatch is a hard reject
-/// (no fallback). On a wrapper hit we build the worker user from the
-/// embedded claims and skip the introspection round-trip entirely.
-///
-/// A token that does not look like a wrapper is treated as "raw hydra
-/// token, try introspection". A token that does look like a wrapper but
-/// fails wrapper verification is a hard reject. Falling through would
-/// let a forged or tampered wrapper dodge `cnf.jkt` enforcement by using
-/// the unbound introspection path.
 async fn resolve_dpop_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
@@ -744,191 +625,13 @@ async fn resolve_dpop_user_header(
         }
     }
 
-    // 6a. Wrapper-token fast path (Phase 8 U4). Try to verify the
-    //     access token as a gateway-issued wrapper. On success we
-    //     enforce `cnf.jkt == proof.jkt` and build the worker user
-    //     from the embedded claims — no hydra round-trip required.
-    let token_looks_like_wrapper = looks_like_wrapper(access_token);
-    if let Some(verifier) = state.wrapper_verifier.as_ref() {
-        // The DPoP fast-path passes `None` for the client_id binding:
-        // it enforces the DPoP key binding (`cnf.jkt == proof.jkt`)
-        // below instead. The per-app `client_id`-claim binding belongs
-        // to the Bearer arm (§1.3, slice 1c), which passes
-        // `Some(route.oauth_client_id)`.
-        match verifier.verify(access_token, host, None) {
-            Ok(claims) => {
-                // Strict binding: a wrapper minted for jkt_A cannot be
-                // presented with a proof signed by jkt_B. Mismatch is a
-                // hard reject — we deliberately do NOT fall through to
-                // introspection here, because falling through would let
-                // an attacker who stole a wrapper bypass its binding
-                // simply by also presenting a different valid DPoP
-                // proof for their own key.
-                //
-                // A wrapper with no `cnf` (the plain-Bearer browser
-                // mint) cannot satisfy a DPoP proof binding at all, so
-                // it is rejected on this DPoP path.
-                let Some(cnf) = claims.cnf.as_ref() else {
-                    tracing::warn!(
-                        "DPoP wrapper token has no cnf.jkt — rejecting on DPoP path"
-                    );
-                    return DpopOutcome::None;
-                };
-                if cnf.jkt != verified.jkt {
-                    tracing::warn!(
-                        expected = %cnf.jkt,
-                        actual = %verified.jkt,
-                        "DPoP proof jkt does not match wrapper cnf.jkt — rejecting"
-                    );
-                    return DpopOutcome::None;
-                }
-                if claims.sub.is_empty() {
-                    tracing::warn!("DPoP wrapper token missing sub — rejecting");
-                    return DpopOutcome::None;
-                }
-                // Self-describing-subject invariant (Batch A fix 2). A
-                // gateway-issued wrapper's `sub` is ALWAYS the per-app `pws_…`
-                // (the gateway minted it that way at /token / ?mint=1 /
-                // dpop-exchange, §6.2). A wrapper whose `sub` is the global
-                // Hydra UUID (or otherwise not `pws_`-shaped) means a mint path
-                // failed to project — defense-in-depth, hard-reject it so a
-                // non-projected wrapper can NEVER reach a worker (it would leak
-                // the global identity into the JS-readable token).
-                //
-                // The `debug_assert!` is a developer tripwire for a GATEWAY
-                // bug (a mint path that forgot to project). It is gated off
-                // under `cfg(test)` so the adversarial subject-invariant test
-                // can feed a hand-crafted UUID-sub wrapper and exercise the
-                // RUNTIME reject below (an attacker's forged-but-rejected token
-                // must surface as a clean reject, not a panic).
-                #[cfg(not(test))]
-                debug_assert!(
-                    zeroship_core::auth::is_pairwise_subject(&claims.sub),
-                    "wrapper sub must be a pws_ pairwise subject, got {}",
-                    claims.sub
-                );
-                if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
-                    tracing::warn!(
-                        sub = %claims.sub,
-                        "DPoP wrapper sub is not a pws_ pairwise subject — rejecting (self-describing-subject invariant)"
-                    );
-                    return DpopOutcome::None;
-                }
-                // Cross-node PER-APP family-marker revocation (spec §8.5), the
-                // SAME `(client_id, sub)` shape and writer the other arms use.
-                // The wrapper's `sub` IS the `pws_` (fix 1/2 above), so this
-                // keys on `(claims.client_id, claims.sub=pws_)` — exactly what
-                // /signout + control's disconnect-app cascade write. (Batch A
-                // fix 3: the old code keyed `is_subject_revoked_since` on a
-                // UUID parse of `sub`, which a `pws_` can never satisfy, so the
-                // check silently no-op'd for every wrapper.)
-                //
-                // KEY TRUST (Batch A minor): this fast-path called
-                // `verifier.verify(.., None)` above, so `claims.client_id` is
-                // NOT checked against the resolved route's client here — we key
-                // the marker on the gateway-SIGNED `claims.client_id`. That is
-                // safe because (a) the wrapper is gateway-signed, so
-                // `claims.client_id` is the value the gateway itself stamped at
-                // mint (= `route.client_id`), not attacker-controlled, and
-                // (b) `aud == host` was enforced by the verify above, pinning
-                // the wrapper to THIS app's host. The marker writers key on the
-                // same per-app client, so the key matches. The Bearer-wrapper
-                // arm passes the route client to verify explicitly; this arm
-                // relies on the signed claim + aud binding instead.
-                if let Some(db_cfg) = state.db.as_ref() {
-                    let pool = match crate::db::checkout(db_cfg).await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "DPoP wrapper revocation: pg pool checkout failed"
-                            );
-                            return DpopOutcome::None;
-                        }
-                    };
-                    let conn = match pool.get().await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "DPoP wrapper revocation: pg pool checkout failed"
-                            );
-                            return DpopOutcome::None;
-                        }
-                    };
-                    match zeroship_core::wrapper_revocation::is_family_revoked_since(
-                        &conn,
-                        &claims.client_id,
-                        &claims.sub,
-                        claims.iat,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            tracing::warn!(
-                                client_id = %claims.client_id,
-                                sub = %claims.sub,
-                                "DPoP wrapper family was revoked after wrapper issue"
-                            );
-                            return DpopOutcome::None;
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                sub = %claims.sub,
-                                "DPoP wrapper revocation check failed"
-                            );
-                            return DpopOutcome::None;
-                        }
-                    }
-                }
-                // DPoP wrapper fast-path: the wrapper's `sub` is ALREADY
-                // the per-app `pws_` (the gateway minted it that way at
-                // /token / ?mint=1, §6.2) — no pairwise re-derivation, the
-                // same consistent `pws_` the Bearer-wrapper arm reads.
-                let mut owned = build_worker_user_from_wrapper(&claims);
-                // Email-claim swap re-resolved LIVE (Batch A fix 5): the
-                // wrapper's embedded `email` is alias-only but TTL-stale, so a
-                // revoked alias would still forward for the wrapper's lifetime.
-                // Re-read the alias keyed on `(client_id, pws_)` and fail
-                // closed (empty) on revoke/miss — matching the cookie /
-                // introspection / raw-Hydra arms.
-                owned.email = live_relay_email_for_wrapper(
-                    state,
-                    &claims.client_id,
-                    &claims.sub,
-                )
-                .await;
-                let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-                return DpopOutcome::Allowed(oidc_rp::encode_user_header(
-                    &user,
-                    &state.config.worker_key,
-                    *request_id,
-                ));
-            }
-            Err(e) => {
-                if token_looks_like_wrapper {
-                    tracing::warn!(
-                        error = %e,
-                        "wrapper-shaped DPoP token failed verification — rejecting"
-                    );
-                    return DpopOutcome::None;
-                }
-                tracing::debug!(
-                    error = %e,
-                    "wrapper verify failed; falling back to hydra introspect"
-                );
-            }
-        }
-    }
-
-    // 6b. Fallback: introspect the access token as a raw hydra opaque
-    //     token. Hydra's response carries the user identity claims when
-    //     `active: true`. No `cnf.jkt` enforcement here — hydra doesn't
-    //     currently surface `cnf.jkt` on access tokens, so binding is
-    //     proof-of-possession only (the proof's `ath` claim already
-    //     binds the proof to this specific access token in step 4).
+    // 6. Introspect the access token as a raw hydra opaque token (the
+    //    non-browser DPoP path: CLI / server-to-server). Hydra's response
+    //    carries the user identity claims when `active: true`. No `cnf.jkt`
+    //    enforcement here — hydra doesn't currently surface `cnf.jkt` on
+    //    access tokens, so binding is proof-of-possession only (the proof's
+    //    `ath` claim already binds the proof to this specific access token in
+    //    step 4) plus the per-app `client_id` binding enforced below (6c).
     let info = match state.oidc_rp.introspect_token(access_token).await {
         Ok(i) if i.active => i,
         Ok(_) => {
@@ -1071,23 +774,23 @@ async fn resolve_dpop_user_header(
     ))
 }
 
-/// Outcome of the Bearer arm ([`resolve_bearer_user_header`]). The four
+/// Outcome of the Bearer arm ([`resolve_bearer_user_header`]). The five
 /// variants map directly onto the route-policy gate in [`resolve_auth`]:
 /// see the comment at the Bearer-arm call site for the policy table.
 #[derive(Debug)]
 enum BearerOutcome {
-    /// A valid user-session Bearer (wrapper or raw-Hydra) that verified,
-    /// bound to this app, and passed revocation. Carries the signed
-    /// `ZeroShip-User` header. Fully authenticated regardless of policy.
+    /// A valid raw-Hydra user-session Bearer that verified, bound to this
+    /// app, and passed revocation. Carries the signed `ZeroShip-User`
+    /// header. Fully authenticated regardless of policy.
     Allowed(String),
-    /// A recognized user-session token (gateway-wrapper or raw-Hydra
-    /// `iss`) that FAILED verification / per-app binding / revocation, OR
-    /// a wrapper presented while the route is un-provisioned
-    /// (`oauth_client_id == None`). Treated as no-identity: anonymous on
-    /// `Anon`, 401 on `User`/`Admin`.
+    /// A recognized raw-Hydra user-session token (`iss == oidc_rp.issuer`)
+    /// that FAILED verification / per-app binding / revocation, OR was
+    /// presented while the route is un-provisioned (`oauth_client_id ==
+    /// None`). Treated as no-identity: anonymous on `Anon`, 401 on
+    /// `User`/`Admin`.
     Invalid,
-    /// A Bearer token whose `iss` is neither the gateway nor Hydra — the
-    /// reserved API-key path (a future `zsk_…` shape). 401 on every route.
+    /// A Bearer token whose `iss` is not Hydra — the reserved API-key path
+    /// (a future `zsk_…` shape). 401 on every route.
     NotUserSession,
     /// A valid raw-Hydra Bearer user, but the route has no
     /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
@@ -1099,10 +802,10 @@ enum BearerOutcome {
 
 /// Peek the unverified `iss` claim out of a JWT payload. Mirrors
 /// [`jwt_subject_unverified`] but for `iss` — used ONLY to discriminate
-/// which verifier to run (wrapper vs raw-Hydra); the actual trust
-/// decision is the subsequent signature check, so reading `iss` before
-/// verification is safe. Returns `None` for any structural parse
-/// failure (e.g. an opaque/non-JWT API key).
+/// a raw-Hydra access JWT (`iss == oidc_rp.issuer`) from the reserved
+/// API-key path; the actual trust decision is the subsequent signature
+/// check, so reading `iss` before verification is safe. Returns `None`
+/// for any structural parse failure (e.g. an opaque/non-JWT API key).
 fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
     use base64::Engine as _;
     let mut parts = jwt.split('.');
@@ -1120,17 +823,11 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 }
 
 /// Resolve the `ZeroShip-User` header from an `Authorization: Bearer`
-/// access token (§1.3, slice 1c).
+/// access token (§1.3, slice 1c). This serves **non-browser** OAuth clients
+/// (CLI / server-to-server) that present a RAW Hydra access JWT; the SPA
+/// uses the signed session cookie, not Bearer.
 ///
 /// Discriminates by the **unverified** `iss` peek:
-///   - `iss == config.public_url` (the gateway) → WRAPPER path: verify
-///     via `state.wrapper_verifier.verify(token, host, Some(client_id))`
-///     (ed25519 sig + iss + aud==Host + the per-app `client_id`-claim
-///     binding). `sub` is ALREADY the `pws_` and `email` the alias — no
-///     pairwise re-derivation (the DPoP path's precedent). A wrapper with
-///     `cnf = Some(jkt)` (DPoP-bound) is REJECTED here: it is
-///     sender-constrained and MUST be presented as `Authorization: DPoP`
-///     with a proof, not as a plain Bearer (§1.3 c-wrap downgrade guard).
 ///   - `iss == state.oidc_rp.issuer` (Hydra) → RAW-HYDRA path: verify the
 ///     JWT signature locally via the gateway's JWKS cache
 ///     (`state.oidc_rp.verify_access_token`), then bind per-app on the
@@ -1140,27 +837,22 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// **Per-app binding** is the critical safety property: a token minted
 /// for app A must be rejected at app B's host. `oauth_client_id` is the
 /// matched route's expected client. When it is `None` (the app is not
-/// yet provisioned — 1d fills it), a wrapper cannot be bound to a
-/// missing client, so the wrapper path yields `Invalid` (never binds to
-/// a falsy value). A raw-Hydra token likewise cannot be bound and yields
-/// `Invalid`.
+/// yet provisioned — 1d fills it), a raw-Hydra token cannot be bound to a
+/// missing client and yields `Invalid`.
 ///
 /// **Revocation** is the spec §8.5 PER-APP family marker
 /// (`auth.token_revocations`, keyed on `(client_id, sub)` with `sub` as
-/// TEXT). Both arms reject a token when a row exists for its
-/// `(client_id, sub)` with `revoked_after > token.iat`; `sub` being TEXT
-/// is what lets the wrapper path's `pws_…` subject be matched (the
-/// UUID-only subject denylist could not). Per-app scoping means a
-/// revocation on app A leaves the same user's tokens on app B valid.
+/// TEXT). The arm rejects a token when a row exists for its
+/// `(client_id, pws_)` with `revoked_after > token.iat`; `sub` being TEXT
+/// is what lets the per-app `pws_…` subject be matched (the UUID-only
+/// subject denylist could not). Per-app scoping means a revocation on app A
+/// leaves the same user's tokens on app B valid.
 ///
-/// Pairwise projection (Slice 4, §6.2): the WRAPPER path's `sub` is
-/// ALREADY the per-app `pws_` (the gateway minted it that way), so it
-/// forwards unchanged — the same consistent `pws_` for a given
-/// `(user, app)`. The RAW-HYDRA path's `sub` is the GLOBAL Hydra UUID,
-/// so it is projected to the per-app `pws_` via [`project_pairwise`]
-/// before encoding the header (and the mapping row is upserted). The
-/// raw-Hydra arm fails closed ([`BearerOutcome::ClientNotProvisioned`] →
-/// `503`) when the route has no `sector_identifier` yet, so the global
+/// Pairwise projection (Slice 4, §6.2): the RAW-HYDRA path's `sub` is the
+/// GLOBAL Hydra UUID, so it is projected to the per-app `pws_` via
+/// [`project_pairwise`] before encoding the header (and the mapping row is
+/// upserted). The arm fails closed ([`BearerOutcome::ClientNotProvisioned`]
+/// → `503`) when the route has no `sector_identifier` yet, so the global
 /// UUID never reaches the worker header.
 async fn resolve_bearer_user_header(
     req: &HttpRequest,
@@ -1186,147 +878,6 @@ async fn resolve_bearer_user_header(
         // Not even a JWT (opaque API key) — reserved path.
         return BearerOutcome::NotUserSession;
     };
-
-    let host = req
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-
-    if iss == state.config.public_url {
-        // ── WRAPPER path ──────────────────────────────────────────────
-        // A wrapper binds per-app on its `client_id` claim. Without an
-        // expected client_id (un-provisioned app) we cannot bind, so we
-        // refuse rather than accept an unbound wrapper.
-        let Some(expected_client_id) = oauth_client_id else {
-            tracing::warn!(
-                "Bearer wrapper presented but route has no oauth_client_id — rejecting"
-            );
-            return BearerOutcome::Invalid;
-        };
-        let Some(verifier) = state.wrapper_verifier.as_ref() else {
-            // No verifier configured — cannot validate a wrapper.
-            return BearerOutcome::Invalid;
-        };
-        let claims = match verifier.verify(token, host, Some(expected_client_id)) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Bearer wrapper verification failed");
-                return BearerOutcome::Invalid;
-            }
-        };
-        // DPoP downgrade guard (§1.3 c-wrap). A wrapper minted with
-        // `cnf = Some(jkt)` is SENDER-CONSTRAINED: the client opted into
-        // RFC 9449 proof-of-possession, so it MUST be presented as
-        // `Authorization: DPoP <token>` with a matching proof and routed
-        // through the DPoP arm (which enforces `cnf.jkt == proof.jkt`).
-        // Accepting it here on the plain-`Bearer` scheme — where there is
-        // NO proof — would silently downgrade a sender-constrained token
-        // to a replayable bearer, defeating the binding the user opted
-        // into. A DPoP-bound wrapper is therefore NOT a valid plain
-        // bearer → Invalid. Only `cnf = None` (the browser plain-Bearer
-        // mint) is acceptable on this path.
-        if claims.cnf.is_some() {
-            tracing::warn!(
-                "DPoP-bound wrapper (cnf present) presented on plain Bearer — \
-                 rejecting (must use Authorization: DPoP with a proof)"
-            );
-            return BearerOutcome::Invalid;
-        }
-        if claims.sub.is_empty() {
-            tracing::warn!("Bearer wrapper token missing sub — rejecting");
-            return BearerOutcome::Invalid;
-        }
-        // Self-describing-subject invariant (Batch A fix 2). A gateway-issued
-        // wrapper's `sub` is ALWAYS the per-app `pws_…` (minted that way at
-        // /token / ?mint=1 / dpop-exchange, §6.2). A wrapper carrying the
-        // global Hydra UUID (or any non-`pws_` sub) means a mint path failed
-        // to project — defense-in-depth, hard-reject so a non-projected
-        // wrapper can never reach a worker and leak the global identity into
-        // the JS-readable token.
-        //
-        // `debug_assert!` is a developer tripwire for a GATEWAY mint bug; gated
-        // off under `cfg(test)` so the adversarial subject-invariant test can
-        // exercise the RUNTIME reject below (a forged-but-rejected token must
-        // surface as a clean reject, not a panic).
-        #[cfg(not(test))]
-        debug_assert!(
-            zeroship_core::auth::is_pairwise_subject(&claims.sub),
-            "wrapper sub must be a pws_ pairwise subject, got {}",
-            claims.sub
-        );
-        if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
-            tracing::warn!(
-                sub = %claims.sub,
-                "Bearer wrapper sub is not a pws_ pairwise subject — rejecting (self-describing-subject invariant)"
-            );
-            return BearerOutcome::Invalid;
-        }
-        // Cross-node PER-APP family-marker revocation (spec §8.5). Keyed on
-        // `(client_id, sub)` with `sub` as TEXT, so it covers the wrapper's
-        // `pws_…` pairwise subject — which the UUID-only subject denylist
-        // could never match. Per-app: a marker for this app's client_id
-        // does not affect the same user on a sibling app.
-        if let Some(db_cfg) = state.db.as_ref() {
-            // Check out a pooled connection for just this family-marker
-            // lookup and release it on drop.
-            let pool = match crate::db::checkout(db_cfg).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Bearer wrapper revocation: pg pool checkout failed");
-                    return BearerOutcome::Invalid;
-                }
-            };
-            let conn = match pool.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Bearer wrapper revocation: pg pool checkout failed");
-                    return BearerOutcome::Invalid;
-                }
-            };
-            match zeroship_core::wrapper_revocation::is_family_revoked_since(
-                &conn,
-                &claims.client_id,
-                &claims.sub,
-                claims.iat,
-            )
-            .await
-            {
-                Ok(true) => {
-                    tracing::warn!(
-                        client_id = %claims.client_id,
-                        sub = %claims.sub,
-                        "Bearer wrapper family was revoked after wrapper issue"
-                    );
-                    return BearerOutcome::Invalid;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, sub = %claims.sub, "Bearer wrapper revocation check failed");
-                    return BearerOutcome::Invalid;
-                }
-            }
-        }
-        let mut owned = build_worker_user_from_wrapper(&claims);
-        // Email-claim swap re-resolved LIVE (Batch A fix 5): the wrapper's
-        // embedded `email` is alias-only but TTL-stale (10-min browser
-        // wrapper), so a revoked alias would still surface for the wrapper's
-        // lifetime. Re-read the alias keyed on `(client_id, pws_)` and fail
-        // closed (empty) on revoke/miss — the same posture as the cookie /
-        // introspection / raw-Hydra arms.
-        owned.email = live_relay_email_for_wrapper(
-            state,
-            &claims.client_id,
-            &claims.sub,
-        )
-        .await;
-        let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-        return BearerOutcome::Allowed(oidc_rp::encode_user_header(
-            &user,
-            &state.config.worker_key,
-            *request_id,
-        ));
-    }
 
     if iss == state.oidc_rp.issuer {
         // ── RAW-HYDRA path (RFC 9068, non-browser clients) ────────────
@@ -1468,8 +1019,8 @@ async fn resolve_bearer_user_header(
         ));
     }
 
-    // Neither a gateway wrapper nor a raw-Hydra JWT — reserved API-key
-    // path (e.g. a future `zsk_…` shape). Stays 401.
+    // Not a raw-Hydra JWT — reserved API-key path (e.g. a future `zsk_…`
+    // shape). Stays 401.
     BearerOutcome::NotUserSession
 }
 
@@ -1491,31 +1042,10 @@ fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -
     }
 }
 
-/// Materialise a `WorkerUser` from a verified wrapper-token claim set.
-///
-/// The wrapper's claims are self-contained (the gateway populated them
-/// from the original hydra introspection at exchange time, U3), so this
-/// is purely a field rename — no network calls, no further validation.
-/// `OwnedWorkerUser` holds the strings on the stack so the
-/// `WorkerUser` borrow can survive the lifetime needed by
-/// `encode_user_header`.
-fn build_worker_user_from_wrapper(claims: &crate::wrapper_token::WrapperClaims) -> OwnedWorkerUser {
-    OwnedWorkerUser {
-        id: claims.sub.clone(),
-        email: claims.email.clone().unwrap_or_default(),
-        name: claims.name.clone().unwrap_or_default(),
-        email_verified: claims.email_verified.unwrap_or(false),
-        // Bearer-wrapper arm: scopes come from the wrapper's `scope` claim
-        // (the gateway populated it from the granted scope set at mint, U3).
-        scopes: split_scope_claim(&claims.scope),
-    }
-}
-
 /// Materialise a `WorkerUser` from a hydra introspection response.
 ///
 /// Caller MUST have already gated on `info.active == true`. Used by the
-/// P7-U5 fallback path — wrapper-verifier failed (or absent) and we
-/// fell through to introspection.
+/// DPoP introspection path (the raw-Hydra opaque token, introspected).
 fn build_worker_user_from_introspection(
     info: &crate::oidc_rp::IntrospectionResponse,
 ) -> OwnedWorkerUser {
@@ -1591,8 +1121,8 @@ enum CookieOutcome {
 ///     (current OR previous `kid`), `iss`, `exp`, and `app` == the resolved
 ///     route's `oauth_client_id` (audience binding). A tampered / expired /
 ///     wrong-app / wrong-/unknown-`kid` cookie fails here → [`CookieOutcome::None`].
-///     A `zs-sess+jwt` typ is required (a wrapper `at+jwt` is rejected; the
-///     wrapper Bearer arm symmetrically rejects this `zs-sess+jwt`).
+///     A `zs-sess+jwt` typ is required (an `at+jwt` access token is rejected by
+///     the session verifier's typ gate).
 ///  3. Defense-in-depth: the cookie `sub` MUST be a `pws_…` pairwise subject
 ///     (every minter projects it; a non-`pws_` cookie is a mint bug → reject).
 ///  4. Revocation gate — the SAME per-app family marker the Bearer/DPoP arms
@@ -1600,8 +1130,8 @@ enum CookieOutcome {
 ///     `SELECT EXISTS` (NOT cached): a revoked `(client_id, pws_)` family rejects
 ///     a still-valid signed cookie, at the cost of one revocation DB round-trip
 ///     per request. Skipped when no DB is configured (smoke mode), exactly like
-///     the wrapper arms — so a valid signed cookie authenticates with `db = None`
-///     and ZERO DB calls.
+///     the Bearer/DPoP arms — so a valid signed cookie authenticates with
+///     `db = None` and ZERO DB calls.
 ///  5. Emit `ZeroShip-User` DIRECTLY from the cookie claims (`id = pws_`, relay
 ///     alias `email`, `scopes`). The relay-alias swap + `pws_` projection
 ///     already happened at ISSUE time (`/session` / interactive callback); the
@@ -1631,7 +1161,7 @@ async fn resolve_app_session_user_header_inner(
 
     // A session cookie binds per-app on its `app` claim. Without an expected
     // client_id (un-provisioned app) we cannot bind, so refuse rather than
-    // accept an unbound cookie — mirrors the Bearer wrapper arm.
+    // accept an unbound cookie — mirrors the raw-Hydra Bearer arm.
     let Some(expected_client_id) = oauth_client_id else {
         tracing::warn!("signed session cookie presented but route has no oauth_client_id — rejecting");
         return CookieOutcome::None;
@@ -1651,10 +1181,10 @@ async fn resolve_app_session_user_header_inner(
         }
     };
 
-    // Self-describing-subject invariant (matches the wrapper arms): the cookie
-    // `sub` is ALWAYS a per-app `pws_…` (every minter projects it). A non-`pws_`
-    // sub means a mint path failed to project — hard-reject so the global
-    // identity can never leak through the session cookie.
+    // Self-describing-subject invariant (matches the Bearer/DPoP arms): the
+    // cookie `sub` is ALWAYS a per-app `pws_…` (every minter projects it). A
+    // non-`pws_` sub means a mint path failed to project — hard-reject so the
+    // global identity can never leak through the session cookie.
     if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
         tracing::warn!(
             sub = %claims.sub,
@@ -1858,62 +1388,32 @@ mod tests {
         assert!(!has_dpop_authorization(&req));
     }
 
-    // ─── Wrapper-token worker-user builders (Phase 8 U4) ──────────────
+    // ─── Worker-user builders (raw-Hydra / introspection) ─────────────
     //
-    // The wrapper-token fast path skips hydra introspection by mapping
-    // the wrapper's embedded claims straight onto a `WorkerUser`. A
-    // regression in the field mapping (e.g. losing `email_verified`,
-    // dropping `name`) would silently degrade the worker's view of the
-    // authenticated user — covered here.
+    // The surviving arms map their verified claims straight onto a
+    // `WorkerUser`. A regression in the field mapping (e.g. losing
+    // `email_verified`, dropping `name`, mangling `scopes`) would silently
+    // degrade the worker's view of the authenticated user — covered here.
 
-    #[test]
-    fn build_worker_user_from_wrapper_maps_all_fields() {
-        use crate::wrapper_token::{Cnf, WrapperClaims};
-        let claims = WrapperClaims {
-            iss: "https://api.zeroship.ai".into(),
-            aud: "myapp.zeroship.ai".into(),
-            sub: "usr_abc".into(),
-            exp: 0,
-            iat: 0,
-            jti: "j".into(),
-            cnf: Some(Cnf { jkt: "k".into() }),
-            scope: "openid".into(),
-            client_id: "gateway".into(),
-            email: Some("a@b.test".into()),
-            email_verified: Some(true),
-            name: Some("Alice".into()),
-            wraps: Some("w".into()),
-        };
-        let owned = build_worker_user_from_wrapper(&claims);
-        assert_eq!(owned.id, "usr_abc");
-        assert_eq!(owned.email, "a@b.test");
-        assert_eq!(owned.name, "Alice");
-        assert!(owned.email_verified);
-        assert_eq!(owned.scopes, vec!["openid".to_string()]);
-    }
-
-    /// The Bearer-wrapper arm carries the app's granted scopes from the
-    /// wrapper `scope` claim onto `WorkerUser.scopes` (Slice 3, §1.4), and they
-    /// survive the encode → verify → JSON-parse round-trip the worker performs.
+    /// The raw-Hydra Bearer arm carries the app's granted scopes from the
+    /// access-token `scope` claim onto `WorkerUser.scopes` (Slice 3, §1.4), and
+    /// they survive the encode → verify → JSON-parse round-trip the worker
+    /// performs.
     #[test]
     fn worker_user_scopes_round_trip_through_header() {
-        use crate::wrapper_token::{Cnf, WrapperClaims};
-        let claims = WrapperClaims {
-            iss: "https://api.zeroship.ai".into(),
-            aud: "myapp.zeroship.ai".into(),
-            sub: "pws_abc".into(),
-            exp: 0,
+        let claims = crate::oidc_rp::AccessClaims {
+            sub: "usr_global".into(),
+            client_id: Some("oac_app".into()),
+            aud: vec!["oac_app".into()],
             iat: 0,
-            jti: "j".into(),
-            cnf: Some(Cnf { jkt: "k".into() }),
-            scope: "openid read:billing write:projects".into(),
-            client_id: "oac_app".into(),
             email: Some("a@b.test".into()),
             email_verified: Some(true),
             name: Some("Alice".into()),
-            wraps: None,
+            scope: Some("openid read:billing write:projects".into()),
+            auth_time: None,
+            amr: None,
         };
-        let owned = build_worker_user_from_wrapper(&claims);
+        let owned = build_worker_user_from_access_claims(&claims);
         assert_eq!(
             owned.scopes,
             vec!["openid", "read:billing", "write:projects"]
@@ -1935,66 +1435,11 @@ mod tests {
         );
     }
 
-    /// No granted scopes (e.g. client-credentials) ⇒ `WorkerUser.scopes` is an
-    /// empty vec, never a `[""]`.
-    #[test]
-    fn worker_user_scopes_empty_when_no_scope_claim() {
-        use crate::wrapper_token::{Cnf, WrapperClaims};
-        let claims = WrapperClaims {
-            iss: "https://api.zeroship.ai".into(),
-            aud: "myapp.zeroship.ai".into(),
-            sub: "usr_x".into(),
-            exp: 0,
-            iat: 0,
-            jti: "j".into(),
-            cnf: Some(Cnf { jkt: "k".into() }),
-            scope: "   ".into(),
-            client_id: "oac_app".into(),
-            email: None,
-            email_verified: None,
-            name: None,
-            wraps: None,
-        };
-        let owned = build_worker_user_from_wrapper(&claims);
-        assert!(owned.scopes.is_empty(), "whitespace-only scope ⇒ empty vec");
-    }
-
-    #[test]
-    fn build_worker_user_from_wrapper_defaults_missing_optionals() {
-        // hydra omits `email`/`name`/`email_verified` for client-credentials
-        // grants (or when the scope wasn't granted). The wrapper claims
-        // mirror that with `Option`; the worker-user struct doesn't —
-        // we materialise defaults so the worker never sees a serde error
-        // on a token issued for a non-user identity.
-        use crate::wrapper_token::{Cnf, WrapperClaims};
-        let claims = WrapperClaims {
-            iss: "https://api.zeroship.ai".into(),
-            aud: "myapp.zeroship.ai".into(),
-            sub: "usr_test".into(),
-            exp: 0,
-            iat: 0,
-            jti: "j".into(),
-            cnf: Some(Cnf { jkt: "k".into() }),
-            scope: String::new(),
-            client_id: "gateway".into(),
-            email: None,
-            email_verified: None,
-            name: None,
-            wraps: Some("w".into()),
-        };
-        let owned = build_worker_user_from_wrapper(&claims);
-        assert_eq!(owned.id, "usr_test");
-        assert_eq!(owned.email, "");
-        assert_eq!(owned.name, "");
-        assert!(!owned.email_verified);
-    }
-
     #[test]
     fn build_worker_user_from_introspection_maps_all_fields() {
-        // The introspection fallback path (P7-U5) builds the WorkerUser
-        // from the hydra `/oauth2/introspect` response. Same regression
-        // surface as the wrapper helper — a field-rename break here
-        // would silently corrupt the worker's authenticated-user view.
+        // The DPoP introspection path builds the WorkerUser from the hydra
+        // `/oauth2/introspect` response. A field-rename break here would
+        // silently corrupt the worker's authenticated-user view.
         let info = crate::oidc_rp::IntrospectionResponse {
             active: true,
             sub: Some("usr_xyz".into()),
@@ -2035,53 +1480,12 @@ mod tests {
         assert_eq!(owned.scopes, vec!["openid".to_string(), "read:billing".to_string()]);
     }
 
-    // ─── cnf.jkt enforcement (Phase 8 U4) ──────────────────────────────
+    // ─── DPoP / Bearer / cookie GateState fixtures ────────────────────
     //
-    // The whole point of the wrapper-token branch is the binding check:
-    // a wrapper minted for jkt_A presented with a DPoP proof signed by
-    // jkt_B must be rejected. The wrapper-token round-trip itself is
-    // covered in `wrapper_token::tests`; the integration with a real
-    // DPoP proof + GateState lives in U5. Here we cover the
-    // binding-comparison call sites directly — same `cnf.jkt` shape
-    // the dispatch path consumes.
-
-    #[test]
-    fn cnf_jkt_match_compares_strings_exactly() {
-        use crate::wrapper_token::Cnf;
-        // Two thumbprints with the same logical value but different
-        // string content MUST NOT match — DPoP thumbprints are
-        // base64url-encoded SHA-256 outputs, so any visual difference
-        // is a real key difference.
-        let a = Cnf {
-            jkt: "abcDEF123".into(),
-        };
-        let b = Cnf {
-            jkt: "abcDEF123".into(),
-        };
-        let c = Cnf {
-            jkt: "abcDEF124".into(),
-        };
-        assert_eq!(a.jkt, b.jkt);
-        assert_ne!(a.jkt, c.jkt);
-    }
-
-    // ─── End-to-end wrapper-token binding (Phase 8 U4) ────────────────
-    //
-    // The integration test below builds a real DPoP proof, a real
-    // wrapper token, and a real `GateState` (sans live PG / hydra) and
-    // drives `resolve_dpop_user_header` directly. This exercises:
-    //
-    //   1. Wrapper-verify SUCCESS + matching `cnf.jkt` → returns Some
-    //      (the worker-user header). No hydra call required (the
-    //      OidcRp in the fixture points at a dead URL — a successful
-    //      return PROVES the wrapper path short-circuited).
-    //
-    //   2. Wrapper-verify SUCCESS + mismatched `cnf.jkt` → returns
-    //      None (binding rejected; no fallthrough to introspection).
-    //      Same OidcRp pointing at a dead URL — a fallthrough would
-    //      surface as a network error in tracing but still return
-    //      None; the assertion is that we never reach the network at
-    //      all (the test passes in <100 ms regardless of the dead URL).
+    // The integration tests below build a real DPoP proof, a real raw-Hydra
+    // access token / signed session cookie, and a real `GateState` (sans live
+    // PG / hydra) and drive `resolve_dpop_user_header` / `resolve_bearer_user_
+    // header` / the cookie arm directly.
 
     /// `BlobStore` stub for the test fixture — `GateState` requires
     /// one, but the auth path never reaches it.
@@ -2134,25 +1538,23 @@ mod tests {
         }
     }
 
-    /// Build a Gateway state with wrapper-token issuer + verifier
-    /// configured against the supplied signing key. `OidcRp` points at
-    /// a dead URL — a successful return from `resolve_dpop_user_header`
-    /// PROVES the wrapper short-circuit fired, since the fallback
-    /// would have failed on the network call.
-    fn build_state_with_wrapper(
+    /// Build a Gateway state with the signed-session-cookie issuer + verifier
+    /// configured against the supplied signing key, and `OidcRp` pointed at a
+    /// dead URL (the cookie-arm and policy tests never make a network call).
+    fn build_state_with_session(
         signing: ed25519_dalek::SigningKey,
     ) -> std::sync::Arc<crate::GateState> {
-        build_state_with_wrapper_and_auth_ui_url(signing, "http://127.0.0.1:1")
+        build_state_with_session_and_auth_ui_url(signing, "http://127.0.0.1:1")
     }
 
-    fn build_state_with_wrapper_and_auth_ui_url(
+    fn build_state_with_session_and_auth_ui_url(
         signing: ed25519_dalek::SigningKey,
         auth_ui_url: &str,
     ) -> std::sync::Arc<crate::GateState> {
-        build_state_with_wrapper_and_auth_ui_url_and_db(signing, auth_ui_url, None)
+        build_state_with_session_and_auth_ui_url_and_db(signing, auth_ui_url, None)
     }
 
-    fn build_state_with_wrapper_and_auth_ui_url_and_db(
+    fn build_state_with_session_and_auth_ui_url_and_db(
         signing: ed25519_dalek::SigningKey,
         auth_ui_url: &str,
         db: Option<crate::db::DbConfig>,
@@ -2165,15 +1567,15 @@ mod tests {
             "test-secret",
             b"test-stash-key-32-bytes-long----".to_vec(),
         );
-        build_state_with_wrapper_and_oidc_and_db(signing, oidc_rp, db)
+        build_state_with_session_and_oidc_and_db(signing, oidc_rp, db)
     }
 
     /// Most general state builder: inject a custom [`OidcRp`] so the
     /// raw-Hydra Bearer tests can point its JWKS cache at a live test
-    /// server and pin a known `issuer`. The wrapper issuer/verifier are
-    /// still built from `signing` (the gateway's own key); `public_url`
-    /// stays `https://api.zeroship.ai` (the wrapper `iss`).
-    fn build_state_with_wrapper_and_oidc_and_db(
+    /// server and pin a known `issuer`. The signed-session-cookie
+    /// issuer/verifier are built from `signing` (the gateway's own key);
+    /// `public_url` stays `https://api.zeroship.ai` (the session `iss`).
+    fn build_state_with_session_and_oidc_and_db(
         signing: ed25519_dalek::SigningKey,
         oidc_rp: crate::oidc_rp::OidcRp,
         db: Option<crate::db::DbConfig>,
@@ -2188,14 +1590,7 @@ mod tests {
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024)
             .expect("disk cache");
 
-        let issuer =
-            crate::wrapper_token::Issuer::new(&signing, "https://api.zeroship.ai".into())
-                .expect("issuer");
-        let verifier = crate::wrapper_token::Verifier::new(
-            &signing.verifying_key(),
-            "https://api.zeroship.ai".into(),
-        );
-        // BFF R1b — the signed session-cookie issuer/verifier from the SAME key.
+        // BFF R1b — the signed session-cookie issuer/verifier from the key.
         let session_issuer =
             crate::session_token::Issuer::new(&signing, "https://api.zeroship.ai".into())
                 .expect("session issuer");
@@ -2236,8 +1631,6 @@ mod tests {
             ),
             signing_key: Some(StdArc::new(signing)),
             prev_signing_key: None,
-            wrapper_issuer: Some(StdArc::new(issuer)),
-            wrapper_verifier: Some(StdArc::new(verifier)),
             session_issuer: Some(StdArc::new(session_issuer)),
             session_verifier: Some(StdArc::new(session_verifier)),
             anchor_enc_key: [0u8; 32],
@@ -2290,502 +1683,19 @@ mod tests {
         format!("{signing_input}.{sig_b64}")
     }
 
-    /// Compute the RFC 7638 JWK thumbprint of an Ed25519 client key —
-    /// used to bind the wrapper token to a specific `DPoP` key on the
-    /// issue side.
-    fn client_jkt(client_key: &ed25519_dalek::SigningKey) -> String {
-        crate::signing::jwk_thumbprint(client_key)
-    }
-
-    /// Mint a wrapper token via the issuer, bound to `proof_jkt`.
-    fn issue_wrapper(
-        state: &crate::GateState,
-        proof_jkt: &str,
-        aud: &str,
-    ) -> String {
-        // A `pws_…`-shaped default sub: a gateway-issued wrapper's `sub` is
-        // ALWAYS a per-app pairwise pseudonym (the self-describing-subject
-        // invariant, Batch A fix 2), so the test fixtures mint one too.
-        issue_wrapper_for_sub(state, "pws_testsubject0000000", proof_jkt, aud)
-    }
-
-    /// Build a DPoP-style [`WrapperMint`] (cnf + wraps present) for the
-    /// dispatch tests. Mirrors what `dpop_exchange.rs` builds from an
-    /// introspection response.
-    fn dpop_test_mint<'a>(sub: &'a str, proof_jkt: &'a str, aud: &'a str) -> crate::wrapper_token::WrapperMint<'a> {
-        crate::wrapper_token::WrapperMint {
-            aud,
-            sub,
-            scope: "openid",
-            client_id: "gateway",
-            exp_secs: 3600,
-            cnf: Some(proof_jkt),
-            wraps: Some("aGVsbG8"),
-            email: Some("test@example.com"),
-            email_verified: Some(true),
-            name: Some("Test"),
-        }
-    }
-
-    fn issue_wrapper_for_sub(
-        state: &crate::GateState,
-        sub: &str,
-        proof_jkt: &str,
-        aud: &str,
-    ) -> String {
-        state
-            .wrapper_issuer
-            .as_ref()
-            .expect("issuer configured")
-            .issue(&dpop_test_mint(sub, proof_jkt, aud))
-            .expect("issue wrapper")
-    }
-
-    fn issue_wrapper_with_signing_key(
-        signing: &ed25519_dalek::SigningKey,
-        proof_jkt: &str,
-        aud: &str,
-    ) -> String {
-        let issuer =
-            crate::wrapper_token::Issuer::new(signing, "https://api.zeroship.ai".into())
-                .expect("issuer");
-        issuer
-            .issue(&dpop_test_mint("usr_test", proof_jkt, aud))
-            .expect("issue wrapper")
-    }
-
-    fn sign_wrapper_claims(
-        signing: &ed25519_dalek::SigningKey,
-        mut claims: crate::wrapper_token::WrapperClaims,
-    ) -> String {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-
-        claims.iss = "https://api.zeroship.ai".into();
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.typ = Some("at+jwt".into());
-        header.kid = Some(crate::signing::jwk_thumbprint(signing));
-        let der = signing.to_pkcs8_der().expect("pkcs8");
-        let key = EncodingKey::from_ed_der(der.as_bytes());
-        encode(&header, &claims, &key).expect("sign wrapper claims")
-    }
-
-    fn wrapper_claims(
-        sub: impl Into<String>,
-        proof_jkt: &str,
-        aud: &str,
-    ) -> crate::wrapper_token::WrapperClaims {
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        crate::wrapper_token::WrapperClaims {
-            iss: "https://api.zeroship.ai".into(),
-            aud: aud.into(),
-            sub: sub.into(),
-            exp: now + 3600,
-            iat: now,
-            jti: Uuid::new_v4().to_string(),
-            cnf: Some(crate::wrapper_token::Cnf {
-                jkt: proof_jkt.into(),
-            }),
-            scope: "openid".into(),
-            client_id: "gateway".into(),
-            email: Some("test@example.com".into()),
-            email_verified: Some(true),
-            name: Some("Test".into()),
-            wraps: Some("hydra-token-shadow".into()),
-        }
-    }
-
-    #[compio::test]
-    async fn resolve_dpop_accepts_wrapper_when_jkt_matches() {
-        // Happy path: client signs the DPoP proof with key A, wrapper
-        // is bound to key A's thumbprint, dispatch verifies → Some.
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-
-        let jkt = client_jkt(&client_key);
-        let aud = "myapp.zeroship.ai";
-        let wrapper = issue_wrapper(&state, &jkt, aud);
-
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-
-        let req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-
-        let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(matches!(header, DpopOutcome::Allowed(_)), "wrapper path must accept matched jkt");
-    }
-
-    #[compio::test]
-    async fn resolve_dpop_rejects_plain_bearer_wrapper_without_cnf() {
-        // A plain-Bearer wrapper (cnf: None — the browser mint) has no
-        // DPoP key binding, so it can never satisfy the DPoP path's
-        // `cnf.jkt == proof.jkt` check. The DPoP fast-path must reject
-        // it rather than treat a missing cnf as a wildcard match.
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-
-        let aud = "myapp.zeroship.ai";
-        // Mint a cnf-less wrapper directly via the issuer.
-        let wrapper = state
-            .wrapper_issuer
-            .as_ref()
-            .expect("issuer")
-            .issue(&crate::wrapper_token::WrapperMint {
-                aud,
-                sub: "pws_browser",
-                scope: "openid",
-                client_id: "gateway",
-                exp_secs: 600,
-                cnf: None,
-                wraps: None,
-                email: None,
-                email_verified: None,
-                name: None,
-            })
-            .expect("issue plain wrapper");
-
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-
-        let req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-
-        let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(matches!(header, DpopOutcome::None), "DPoP path must reject a cnf-less plain-Bearer wrapper");
-    }
-
-    /// Batch A fix 3: the DPoP wrapper fast-path keys revocation on the per-app
-    /// FAMILY marker `(client_id, pws_)` — the SAME mechanism (and the SAME
-    /// writer) the Bearer-wrapper / raw-Hydra / introspection arms use. (This
-    /// replaced a legacy UUID-only subject denylist that a `pws_` sub could
-    /// never match — now deleted, Batch A M2.) Mint a `pws_`-sub DPoP wrapper,
-    /// prove it resolves, `revoke_family(client_id, pws_)` the way /signout
-    /// does, and prove the SAME wrapper is then rejected. PG-gated.
-    #[compio::test]
-    async fn resolve_dpop_rejects_wrapper_revoked_by_family_marker() {
-        let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
-        let db_cfg = crate::db::DbConfig::new(dsn.clone(), 4);
-
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
-            gateway_signing,
-            "http://127.0.0.1:1",
-            Some(db_cfg.clone()),
-        );
-
-        let jkt = client_jkt(&client_key);
-        let aud = "myapp.zeroship.ai";
-        // The wrapper's client_id is the `dpop_test_mint` default ("gateway");
-        // the family marker keys on that + the wrapper's pws_ sub.
-        let marker_client_id = "gateway";
-        let pws_sub = format!("pws_{}", Uuid::new_v4().simple());
-        let wrapper = issue_wrapper_for_sub(&state, &pws_sub, &jkt, aud);
-        let htu = format!("http://{aud}/api/me");
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-
-        let first_proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-        let first_req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", first_proof)
-            .to_http_request();
-        let request_id = Uuid::new_v4();
-        assert!(
-            matches!(
-                resolve_dpop_user_header(&first_req, &state, &request_id, None, None).await,
-                DpopOutcome::Allowed(_)
-            ),
-            "wrapper should resolve before family revocation"
-        );
-
-        {
-            let pool = crate::db::checkout(&db_cfg).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, marker_client_id, &pws_sub)
-                .await
-                .expect("revoke family (client_id, pws_)");
-        }
-
-        let second_proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-        let second_req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", second_proof)
-            .to_http_request();
-        assert!(
-            matches!(
-                resolve_dpop_user_header(&second_req, &state, &request_id, None, None).await,
-                DpopOutcome::None
-            ),
-            "revoked (client_id, pws_) family must reject the DPoP wrapper"
-        );
-
-        let pool = crate::db::checkout(&db_cfg).await.expect("pool checkout");
-        let conn = pool.get().await.expect("pool checkout");
-        conn.execute(
-            "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
-            &[&marker_client_id, &pws_sub],
-        )
-        .await
-        .ok();
-    }
-
-    #[compio::test]
-    async fn resolve_dpop_rejects_wrapper_with_empty_sub() {
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing.clone());
-
-        let jkt = client_jkt(&client_key);
-        let aud = "myapp.zeroship.ai";
-        let wrapper = sign_wrapper_claims(&gateway_signing, wrapper_claims("", &jkt, aud));
-
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-
-        let req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-
-        let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(matches!(header, DpopOutcome::None), "wrapper path must reject tokens with an empty sub");
-    }
-
-    #[compio::test]
-    async fn resolve_dpop_rejects_wrapper_when_jkt_mismatches() {
-        // cnf.jkt mismatch: wrapper bound to key A's thumbprint, but
-        // the client signs the proof with key B. Must return None
-        // (binding rejected). Critically, this MUST NOT silently fall
-        // through to introspection — that would defeat the whole
-        // point of the binding.
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key_a = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let client_key_b = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-
-        let jkt_a = client_jkt(&client_key_a);
-        let aud = "myapp.zeroship.ai";
-        // Wrapper bound to A.
-        let wrapper = issue_wrapper(&state, &jkt_a, aud);
-
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        // Proof signed by B.
-        let proof = sign_dpop_proof(&client_key_b, "GET", &htu, &wrapper, now);
-
-        let req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-
-        let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(matches!(header, DpopOutcome::None), "wrapper path must reject when cnf.jkt does not match proof jkt");
-    }
-
-    #[ntex::test]
-    async fn e2e_rejects_malformed_wrapper_no_downgrade() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc as StdArc;
-
-        async fn active_introspection(
-            hits: ntex::web::types::State<StdArc<AtomicUsize>>,
-        ) -> ntex::web::HttpResponse {
-            hits.fetch_add(1, Ordering::SeqCst);
-            ntex::web::HttpResponse::Ok().json(&serde_json::json!({
-                "active": true,
-                "sub": "usr_from_introspection",
-                "client_id": "gateway",
-                "email": "fallback@example.com",
-                "email_verified": true,
-                "name": "Fallback User",
-                "scope": "openid"
-            }))
-        }
-
-        let hits = StdArc::new(AtomicUsize::new(0));
-        let hits_for_server = hits.clone();
-        let srv = ntex::web::test::server(move || {
-            let hits = hits_for_server.clone();
-            async move {
-                ntex::web::App::new().state(hits).service(
-                    ntex::web::resource("/oauth2/introspect")
-                        .route(ntex::web::post().to(active_introspection)),
-                )
-            }
-        })
-        .await;
-        let auth_ui_url = srv.url("").trim_end_matches('/').to_string();
-
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let forged_signing = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state =
-            build_state_with_wrapper_and_auth_ui_url(gateway_signing, &auth_ui_url);
-
-        let aud = "myapp.zeroship.ai";
-        let jkt = client_jkt(&client_key);
-        let malformed_wrapper = issue_wrapper_with_signing_key(&forged_signing, &jkt, aud);
-        assert!(
-            looks_like_wrapper(&malformed_wrapper),
-            "fixture must be wrapper-shaped"
-        );
-
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &malformed_wrapper, now);
-
-        let req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(
-                http::header::AUTHORIZATION,
-                format!("DPoP {malformed_wrapper}"),
-            )
-            .header("dpop", proof)
-            .to_http_request();
-
-        let request_id = Uuid::new_v4();
-        let header = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(matches!(header, DpopOutcome::None), "malformed wrapper must hard-reject instead of downgrading to introspection");
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            0,
-            "malformed wrapper must not call hydra introspection"
-        );
-
-        drop(srv);
-    }
-
     // ─── Bearer arm (slice 1c) ────────────────────────────────────────
     //
     // The Bearer arm sits between the DPoP arm and the cookie arm. It
-    // recognizes two issuer-discriminated user-session shapes — the
-    // gateway WRAPPER (verified by `wrapper_verifier`) and a raw Hydra
-    // access JWT (verified locally via the gateway JWKS) — plus the
+    // recognizes a raw Hydra access JWT (`iss == oidc_rp.issuer`, verified
+    // locally via the gateway JWKS) for non-browser clients — plus the
     // reserved API-key path (any other `iss`). These tests exercise
-    // `resolve_bearer_user_header` directly with the REAL `Verifier` and
-    // `JwksCache` (no stubs), and the `Anon`/`User` policy gate through
-    // `resolve_auth`.
+    // `resolve_bearer_user_header` directly with the REAL `JwksCache` (no
+    // stubs), and the `Anon`/`User` policy gate through `resolve_auth`.
 
-    /// The gateway's public URL — the `iss` of every wrapper token. The
-    /// Bearer arm's wrapper discriminator matches `config.public_url`.
-    const GATEWAY_ISS: &str = "https://api.zeroship.ai";
     /// The logical Hydra issuer the raw-Hydra path pins. The test JWKS
     /// server dials loopback, but `OidcRp::with_issuer` decouples the
     /// dial URL from the `iss` the access JWT actually carries.
     const HYDRA_ISS: &str = "https://auth.zeroship.ai/";
-
-    /// Mint a plain-Bearer wrapper (cnf = None — the browser shape) for
-    /// `sub`/`client_id`, bound to `aud` (the request Host). This is the
-    /// default browser-session token shape the Bearer arm sees.
-    fn issue_plain_wrapper(
-        state: &crate::GateState,
-        sub: &str,
-        client_id: &str,
-        aud: &str,
-    ) -> String {
-        issue_plain_wrapper_with_scope(state, sub, client_id, aud, "openid email")
-    }
-
-    /// Same as [`issue_plain_wrapper`] but with a caller-chosen `scope`
-    /// claim, so the route-level scope-enforcement tests (Slice 3c) can
-    /// mint a principal with / without a specific granted scope.
-    fn issue_plain_wrapper_with_scope(
-        state: &crate::GateState,
-        sub: &str,
-        client_id: &str,
-        aud: &str,
-        scope: &str,
-    ) -> String {
-        state
-            .wrapper_issuer
-            .as_ref()
-            .expect("issuer configured")
-            .issue(&crate::wrapper_token::WrapperMint {
-                aud,
-                sub,
-                scope,
-                client_id,
-                exp_secs: 600,
-                cnf: None,
-                wraps: None,
-                email: Some("relay-alias@zeroship.ai"),
-                email_verified: Some(true),
-                name: Some("Plain Bearer User"),
-            })
-            .expect("issue plain wrapper")
-    }
 
     /// Sign a raw Hydra-style access JWT (RFC 9068) with `signing`
     /// (EdDSA). `client_id`/`aud` are stamped so the Bearer arm's per-app
@@ -2880,7 +1790,7 @@ mod tests {
 
     /// Build a state whose `OidcRp` JWKS dials `jwks_base` and whose
     /// `issuer` is the canonical Hydra `iss`. `gateway_signing` is the
-    /// gateway's own wrapper key (distinct from Hydra's JWKS key).
+    /// gateway's own session-cookie signing key (distinct from Hydra's JWKS key).
     fn build_state_for_hydra(
         gateway_signing: ed25519_dalek::SigningKey,
         jwks_base: &str,
@@ -2892,7 +1802,7 @@ mod tests {
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
         .with_issuer(HYDRA_ISS);
-        build_state_with_wrapper_and_oidc_and_db(gateway_signing, oidc_rp, None)
+        build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None)
     }
 
     fn bearer_req(token: &str, host: &str) -> ntex::web::HttpRequest {
@@ -3056,86 +1966,12 @@ mod tests {
     }
 
     #[compio::test]
-    async fn bearer_valid_wrapper_emits_zeroship_user() {
-        // Happy path (wrapper): a plain-Bearer wrapper for the route's
-        // client_id verifies and the ZeroShip-User header carries the
-        // wrapper's pws_ sub. The email is re-resolved LIVE (Batch A fix 5):
-        // this state has no DB (smoke), so the live re-resolve fails CLOSED to
-        // an empty email rather than trusting the wrapper's embedded claim —
-        // a real gateway always has a DB and re-reads the alias by (client_id,
-        // pws_). (See bearer_wrapper_reresolves_relay_email_live_and_blanks_on_revoke
-        // for the with-DB live re-resolve + blank-on-revoke path.)
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-        let aud = "myapp.zeroship.ai";
-        let token = issue_plain_wrapper(&state, "pws_alice", "oac_myapp", aud);
-
-        let req = bearer_req(&token, aud);
-        let request_id = Uuid::new_v4();
-        let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
-        let BearerOutcome::Allowed(header) = outcome else {
-            panic!("expected Allowed, got {outcome:?}");
-        };
-        // The emitted header MAC-verifies and decodes to the wrapper user.
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
-        .expect("ZeroShip-User MAC verifies");
-        let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        assert_eq!(user["id"], "pws_alice");
-        // Smoke mode (no DB) ⇒ live email re-resolve fails closed to empty.
-        assert_eq!(user["email"], "", "no-DB wrapper arm fails closed to empty email");
-        assert_eq!(user["email_verified"], true);
-    }
-
-    #[compio::test]
-    async fn bearer_wrapper_client_id_mismatch_rejected() {
-        // A wrapper minted for app A's client_id must be rejected at app
-        // B's host (per-app binding — the critical safety property).
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-        let aud = "myapp.zeroship.ai";
-        let token = issue_plain_wrapper(&state, "pws_alice", "oac_app_a", aud);
-
-        let req = bearer_req(&token, aud);
-        let request_id = Uuid::new_v4();
-        // Route expects app B's client_id.
-        let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("oac_app_b"), None).await;
-        assert!(
-            matches!(outcome, BearerOutcome::Invalid),
-            "client_id mismatch must be Invalid, got {outcome:?}"
-        );
-    }
-
-    #[compio::test]
-    async fn bearer_wrapper_none_client_id_rejected() {
-        // When the route is un-provisioned (oauth_client_id == None) a
-        // wrapper cannot be bound to a missing client → Invalid (never
-        // binds to a falsy value). §1.5 round-2.
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-        let aud = "myapp.zeroship.ai";
-        let token = issue_plain_wrapper(&state, "pws_alice", "oac_myapp", aud);
-
-        let req = bearer_req(&token, aud);
-        let request_id = Uuid::new_v4();
-        let outcome = resolve_bearer_user_header(&req, &state, &request_id, None, None).await;
-        assert!(
-            matches!(outcome, BearerOutcome::Invalid),
-            "wrapper with None client_id must be Invalid, got {outcome:?}"
-        );
-    }
-
-    #[compio::test]
     async fn bearer_non_jwt_token_is_not_user_session() {
         // An opaque, non-JWT Bearer (e.g. a future `zsk_…` API key) is the
         // reserved path → NotUserSession (401 on every route, including
         // Anon).
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let req = bearer_req("zsk_opaque_api_key_value", "myapp.zeroship.ai");
         let request_id = Uuid::new_v4();
         let outcome =
@@ -3151,7 +1987,7 @@ mod tests {
         // A well-formed JWT whose `iss` is neither the gateway nor Hydra
         // is still the reserved path → NotUserSession.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         // Craft an unsigned-but-structurally-valid JWT with a foreign iss.
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
@@ -3168,106 +2004,110 @@ mod tests {
         );
     }
 
-    #[compio::test]
-    async fn resolve_auth_expired_wrapper_on_anon_route_serves_anonymously() {
-        // A present-but-expired user-session Bearer on an `Anon` route
-        // must NOT 401 — it falls through to anonymous (the SDK
-        // auto-attaches Bearer to every request; the 10-min wrapper is
-        // often stale on idle public pages). round-3.
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-
+    #[ntex::test]
+    async fn resolve_auth_invalid_raw_hydra_on_anon_route_serves_anonymously() {
+        // A present-but-INVALID raw-Hydra user-session Bearer on an `Anon`
+        // route must NOT 401 — it falls through to anonymous (a client may
+        // auto-attach a Bearer to every request; a stale/invalid one must not
+        // break public pages). round-3. The same invalid Bearer on a `User`
+        // route is Unauthenticated (401).
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing.clone());
+        // JWKS server serves a DIFFERENT key than the token is signed with, so
+        // the raw-Hydra Bearer fails signature verification → Invalid.
+        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let oidc_rp = crate::oidc_rp::OidcRp::new(
+            &base,
+            "gateway",
+            "test-secret",
+            b"test-stash-key-32-bytes-long----".to_vec(),
+        )
+        .with_issuer(HYDRA_ISS);
+        let state = build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None);
         let aud = "myapp.zeroship.ai";
 
-        // Hand-sign an EXPIRED wrapper (exp 100s in the past, beyond the
-        // 60s default leeway) — the issuer always stamps a future exp.
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let claims = crate::wrapper_token::WrapperClaims {
-            iss: GATEWAY_ISS.into(),
-            aud: aud.into(),
-            sub: "pws_alice".into(),
-            exp: now - 100,
-            iat: now - 700,
-            jti: Uuid::new_v4().to_string(),
-            cnf: None,
-            scope: "openid".into(),
-            client_id: "oac_myapp".into(),
-            email: Some("relay-alias@zeroship.ai".into()),
-            email_verified: Some(true),
-            name: None,
-            wraps: None,
-        };
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.typ = Some("at+jwt".into());
-        header.kid = Some(crate::signing::jwk_thumbprint(&gateway_signing));
-        let der = gateway_signing.to_pkcs8_der().unwrap();
-        let key = EncodingKey::from_ed_der(der.as_bytes());
-        let token = encode(&header, &claims, &key).unwrap();
+        let bad_key = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
+        let token = sign_hydra_access_jwt(
+            &bad_key,
+            "0192f1aa-bbbb-7ccc-8ddd-eeeeffff00aa",
+            Some("oac_myapp"),
+            serde_json::json!(["oac_myapp"]),
+            "user@example.com",
+            "Hydra User",
+            3600,
+        );
 
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
 
-        // Anon route: expired Bearer → Allowed with NO user header.
+        // Anon route: invalid Bearer → Allowed with NO user header.
         let anon = resolve_auth(
             &req,
             &state,
             &anon_policy(),
             &request_id,
             Some("oac_myapp"),
-            None,
+            Some("https://myapp.zeroship.ai"),
         )
         .await;
         assert!(
             matches!(anon, AuthOutcome::Allowed { user_header: None }),
-            "expired Bearer on Anon route must serve anonymously, got {anon:?}"
+            "invalid Bearer on Anon route must serve anonymously, got {anon:?}"
         );
 
-        // User route: same expired Bearer → Unauthenticated (401).
+        // User route: same invalid Bearer → Unauthenticated (401).
         let gated = resolve_auth(
             &req,
             &state,
             &user_policy(),
             &request_id,
             Some("oac_myapp"),
-            None,
+            Some("https://myapp.zeroship.ai"),
         )
         .await;
         assert!(
             matches!(gated, AuthOutcome::Unauthenticated),
-            "expired Bearer on User route must be Unauthenticated, got {gated:?}"
+            "invalid Bearer on User route must be Unauthenticated, got {gated:?}"
         );
+        drop(srv);
     }
 
     // ─── Route-level required-scope enforcement (auth-sdk Slice 3c, §5.3) ──
     //
-    // After a principal authenticates (here via a real plain-Bearer
-    // wrapper), the matched route's `required_scopes` gate the GRANT:
+    // After a principal authenticates (here via a real signed session
+    // cookie), the matched route's `required_scopes` gate the GRANT:
     // a superset passes, a miss is `403 insufficient_scope` (NOT 401 —
     // identity is fine), and an empty `required_scopes` is unchanged.
-    // These drive the REAL `resolve_auth` with a REAL minted wrapper +
-    // verifier (no shim), exercising the same path dispatch uses.
+    // These drive the REAL `resolve_auth` with a REAL signed cookie +
+    // verifier (no shim), exercising the same path dispatch uses. (The scope
+    // gate is arm-agnostic — it reads the just-resolved ZeroShip-User header's
+    // scopes regardless of which arm authenticated.)
 
-    #[compio::test]
+    /// Build a GET request carrying a signed session cookie for the cookie arm.
+    fn scope_cookie_req(state: &crate::GateState, client_id: &str, scopes: &[&str], aud: &str) -> ntex::web::HttpRequest {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let token =
+            issue_signed_session_cookie(state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
+        let cookie_name = oidc_rp::app_session_cookie_name(true); // insecure_dev fixture
+        ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request()
+    }
+
+    #[ntex::test]
     async fn resolve_auth_authenticated_without_required_scope_403s() {
         // Authenticated principal whose granted scopes do NOT include the
         // route's `required_scopes` → InsufficientScope (the dispatch 403),
         // NOT Allowed and NOT Unauthenticated.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let aud = "myapp.zeroship.ai";
         // Granted: openid email — does NOT include read:billing.
-        let token =
-            issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid email");
-
-        let req = bearer_req(&token, aud);
+        let req = scope_cookie_req(&state, "oac_myapp", &["openid", "email"], aud);
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
@@ -3287,23 +2127,15 @@ mod tests {
         }
     }
 
-    #[compio::test]
+    #[ntex::test]
     async fn resolve_auth_authenticated_with_required_scope_allowed() {
-        // Same principal + route, but the wrapper WAS granted read:billing
+        // Same principal + route, but the cookie WAS granted read:billing
         // → Allowed (the scope gate is a superset check). The emitted
         // ZeroShip-User header carries the granted scopes through.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let aud = "myapp.zeroship.ai";
-        let token = issue_plain_wrapper_with_scope(
-            &state,
-            "pws_alice",
-            "oac_myapp",
-            aud,
-            "openid email read:billing",
-        );
-
-        let req = bearer_req(&token, aud);
+        let req = scope_cookie_req(&state, "oac_myapp", &["openid", "email", "read:billing"], aud);
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
@@ -3338,17 +2170,14 @@ mod tests {
         );
     }
 
-    #[compio::test]
+    #[ntex::test]
     async fn resolve_auth_empty_required_scopes_unchanged() {
         // A route with NO required_scopes is unchanged: the authenticated
         // principal is Allowed regardless of which scopes it carries.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let aud = "myapp.zeroship.ai";
-        let token =
-            issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid");
-
-        let req = bearer_req(&token, aud);
+        let req = scope_cookie_req(&state, "oac_myapp", &["openid"], aud);
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
@@ -3366,22 +2195,19 @@ mod tests {
         );
     }
 
-    #[compio::test]
+    #[ntex::test]
     async fn resolve_auth_required_scope_superset_passes() {
         // The gate is a SUPERSET check: a principal granted MORE than the
         // route demands still passes (it has everything required).
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let aud = "myapp.zeroship.ai";
-        let token = issue_plain_wrapper_with_scope(
+        let req = scope_cookie_req(
             &state,
-            "pws_alice",
             "oac_myapp",
+            &["openid", "email", "read:billing", "write:projects"],
             aud,
-            "openid email read:billing write:projects",
         );
-
-        let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
@@ -3405,7 +2231,7 @@ mod tests {
         // gated by the User policy FIRST (401), never by the scope gate
         // (403) — required_scopes only gates an authenticated principal.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         // No Authorization header, no cookie → unauthenticated.
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/billing")
@@ -3428,23 +2254,20 @@ mod tests {
         );
     }
 
-    #[compio::test]
+    #[ntex::test]
     async fn resolve_auth_underscoped_authenticated_on_anon_route_is_allowed() {
         // REGRESSION (Slice 3c review finding 2): the scope gate must NOT fire
-        // on an `Anon` (public) route. A logged-in browser whose wrapper lacks
+        // on an `Anon` (public) route. A logged-in browser whose session lacks
         // a scope that a broad `*` parent put into `required_scopes` would
         // otherwise get 403 on the app's own HTML/JS/CSS while a logged-OUT
         // visitor loads it fine — the "logged-in is worse than anonymous on
         // public routes" footgun. The authenticated principal must be Allowed
         // (with its user_header) on the public route regardless of scope.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let aud = "myapp.zeroship.ai";
         // Granted only `openid` — does NOT include the route's required scope.
-        let token =
-            issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid");
-
-        let req = bearer_req(&token, aud);
+        let req = scope_cookie_req(&state, "oac_myapp", &["openid"], aud);
         let request_id = Uuid::new_v4();
 
         // `Anon` route that nonetheless carries `required_scopes` (e.g.
@@ -3489,9 +2312,9 @@ mod tests {
     async fn resolve_auth_non_user_session_bearer_401s_even_on_anon() {
         // The reserved API-key path asserts a DIFFERENT scheme, not an
         // expired user session — so it 401s even on an `Anon` route
-        // (unlike an expired wrapper, which falls through to anonymous).
+        // (unlike an invalid raw-Hydra Bearer, which falls through to anonymous).
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let req = bearer_req("zsk_opaque_api_key", "myapp.zeroship.ai");
         let request_id = Uuid::new_v4();
         let outcome = resolve_auth(
@@ -3657,24 +2480,21 @@ mod tests {
         drop(srv);
     }
 
-    // ─── DPoP introspection-fallback per-app binding (Slice 4 token-confusion
+    // ─── DPoP introspection per-app binding (Slice 4 token-confusion
     //     fix) ──────────────────────────────────────────────────────────────
     //
-    // The DPoP wrapper fast-path binds via `aud == Host` + `cnf.jkt`. The
-    // raw-opaque introspection fallback (6b) has neither, so it now binds the
-    // introspected `client_id` to the route's expected `oauth_client_id` —
-    // mirroring the raw-Hydra Bearer arm. These tests drive the REAL
-    // `resolve_dpop_user_header` against a loopback `/oauth2/introspect` mock
-    // (same harness shape as `start_jwks_server` / the dpop_exchange tests):
+    // The raw-opaque DPoP introspection path (the non-browser DPoP arm) binds
+    // the introspected `client_id` to the route's expected `oauth_client_id` —
+    // mirroring the raw-Hydra Bearer arm — since it has no `aud`/`cnf.jkt` to
+    // bind on. These tests drive the REAL `resolve_dpop_user_header` against a
+    // loopback `/oauth2/introspect` mock (same harness shape as
+    // `start_jwks_server`):
     //
     //   - client_id mismatch (token issued to app A, presented at app B) →
     //     rejected (`DpopOutcome::None`), no global UUID projected.
     //   - client_id match → `Allowed`, sub projected to the per-app `pws_`.
     //   - route un-provisioned (`oauth_client_id == None`) → rejected,
     //     consistent with the Bearer arm refusing to bind an unbound token.
-    //
-    // An opaque (non-JWT) access token + `wrapper_verifier: None` guarantees
-    // the wrapper fast-path is skipped and the introspection arm runs.
 
     /// Spin up a loopback Hydra `/oauth2/introspect` mock returning `body`
     /// verbatim. `OidcRp::introspect_token` POSTs to `{auth_ui_url}/oauth2/
@@ -3705,9 +2525,8 @@ mod tests {
     }
 
     /// Build a state whose `OidcRp` introspection endpoint dials
-    /// `introspect_base` and whose `wrapper_verifier` is `None` — so a DPoP
-    /// access token that is NOT a wrapper falls straight through to the
-    /// introspection fallback (6b). `db: None` keeps the pairwise projection
+    /// `introspect_base` — a DPoP access token routes through the introspection
+    /// path (the non-browser DPoP arm). `db: None` keeps the pairwise projection
     /// a pure HMAC (no PG round-trip) while still exercising the real
     /// `project_pairwise`.
     fn build_state_for_introspection(
@@ -3720,8 +2539,10 @@ mod tests {
     /// Same as [`build_state_for_introspection`] but with a `db` so the
     /// introspection arm's per-app family-marker revocation check runs
     /// against a live `auth.token_revocations` (mirrors the Bearer arm's
-    /// `build_state_with_wrapper_and_oidc_and_db`). PG-gated tests pass
-    /// `Some(db)`; the others keep `None` (pairwise stays a pure HMAC).
+    /// `build_state_with_session_and_oidc_and_db`). PG-gated tests pass
+    /// `Some(db)`; the others keep `None` (pairwise stays a pure HMAC). The
+    /// session-cookie issuer/verifier are built from the gateway key; the DPoP
+    /// path here always routes through introspection.
     fn build_state_for_introspection_with_db(
         gateway_signing: ed25519_dalek::SigningKey,
         introspect_base: &str,
@@ -3740,9 +2561,8 @@ mod tests {
         tmp.push(format!("zsgate-dpop-introspect-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
 
-        // BFF R1b — session-cookie issuer/verifier from the gateway key (the
-        // wrapper issuer/verifier stay None here on purpose, to force the DPoP
-        // introspection fallback; the session cookie is independent of that).
+        // BFF R1b — session-cookie issuer/verifier from the gateway key; the
+        // DPoP path here always routes through introspection.
         let session_issuer =
             crate::session_token::Issuer::new(&gateway_signing, "https://api.zeroship.ai".into())
                 .expect("session issuer");
@@ -3779,10 +2599,6 @@ mod tests {
             logout_jti_cache: StdArc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             signing_key: Some(StdArc::new(gateway_signing)),
             prev_signing_key: None,
-            // No wrapper verifier ⇒ the wrapper fast-path is skipped and an
-            // opaque DPoP token routes to the introspection fallback.
-            wrapper_issuer: None,
-            wrapper_verifier: None,
             session_issuer: Some(StdArc::new(session_issuer)),
             session_verifier: Some(StdArc::new(session_verifier)),
             anchor_enc_key: [0u8; 32],
@@ -3940,46 +2756,6 @@ mod tests {
         );
 
         drop(srv);
-    }
-
-    #[compio::test]
-    async fn resolve_dpop_wrapper_fast_path_unaffected_by_introspection_binding() {
-        // Guard: the new introspection-arm binding must NOT touch the wrapper
-        // fast-path, which binds via aud + cnf.jkt and is reached even when the
-        // route has no oauth_client_id (it passes None to the wrapper verifier).
-        // A matching-jkt wrapper with oauth_client_id == None still Allows.
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-
-        let jkt = client_jkt(&client_key);
-        let aud = "myapp.zeroship.ai";
-        let wrapper = issue_wrapper(&state, &jkt, aud);
-
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-        let req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-
-        let request_id = Uuid::new_v4();
-        // oauth_client_id == None — the wrapper fast-path must still accept
-        // (binding is via cnf.jkt, not the route client).
-        let outcome = resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(
-            matches!(outcome, DpopOutcome::Allowed(_)),
-            "wrapper fast-path must remain unaffected by the introspection binding, got {outcome:?}"
-        );
     }
 
     #[ntex::test]
@@ -4225,7 +3001,7 @@ mod tests {
         // (which, with no DB and no cookie, resolves to None). On an Anon
         // route that is Allowed{None}; on a User route, Unauthenticated.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
+        let state = build_state_with_session(gateway_signing);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, "myapp.zeroship.ai")
@@ -4253,159 +3029,18 @@ mod tests {
         assert!(matches!(gated, AuthOutcome::Unauthenticated));
     }
 
-    // ─── DPoP-downgrade guard (§1.3 c-wrap, blocker regression) ───────────
-    //
-    // A DPoP-bound wrapper (`cnf = Some(jkt)`) is sender-constrained. If it
-    // is presented on the plain `Authorization: Bearer` scheme there is NO
-    // proof-of-possession, so accepting it would downgrade a
-    // sender-constrained token to a replayable bearer. The Bearer arm MUST
-    // reject `cnf.is_some()`; the same wrapper MUST still authenticate via
-    // the DPoP arm with a matching proof.
-
-    #[compio::test]
-    async fn bearer_dpop_bound_wrapper_rejected_on_plain_bearer() {
-        // cnf=Some wrapper on plain Bearer → Invalid (no proof present).
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-
-        let jkt = client_jkt(&client_key);
-        let aud = "myapp.zeroship.ai";
-        // `issue_wrapper` mints a DPoP-style wrapper: cnf = Some(jkt),
-        // client_id = "gateway".
-        let wrapper = issue_wrapper(&state, &jkt, aud);
-
-        let req = bearer_req(&wrapper, aud);
-        let request_id = Uuid::new_v4();
-        let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some("gateway"), None).await;
-        assert!(
-            matches!(outcome, BearerOutcome::Invalid),
-            "DPoP-bound wrapper on plain Bearer must be Invalid (no PoP), got {outcome:?}"
-        );
-    }
-
-    #[compio::test]
-    async fn bearer_dpop_bound_wrapper_still_works_via_dpop_arm() {
-        // The SAME cnf=Some wrapper the Bearer arm rejects MUST still
-        // authenticate via the DPoP arm with a matching proof — the
-        // downgrade guard rejects the *scheme*, not the token.
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-
-        let jkt = client_jkt(&client_key);
-        let aud = "myapp.zeroship.ai";
-        let wrapper = issue_wrapper(&state, &jkt, aud);
-
-        // Plain Bearer: rejected.
-        let bearer = bearer_req(&wrapper, aud);
-        let request_id = Uuid::new_v4();
-        assert!(
-            matches!(
-                resolve_bearer_user_header(&bearer, &state, &request_id, Some("gateway"), None).await,
-                BearerOutcome::Invalid
-            ),
-            "plain Bearer leg must reject the DPoP-bound wrapper"
-        );
-
-        // DPoP arm with a matching proof: accepted.
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
-        let dpop_req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-        assert!(
-            matches!(
-                resolve_dpop_user_header(&dpop_req, &state, &request_id, None, None).await,
-                DpopOutcome::Allowed(_)
-            ),
-            "DPoP arm must accept the same wrapper with a valid proof"
-        );
-    }
-
     // ─── Per-app family-marker revocation (§8.5, major regressions) ───────
     //
     // PG-gated: these need a live `auth` schema with `auth.token_revocations`
     // (skip when AUTH_DB_URL is unset, mirroring the DPoP revocation test).
-    // They cover the two MAJOR findings: (1) the wrapper path's `pws_…`
-    // subject IS matched by the TEXT-keyed family marker (the old UUID-only
-    // denylist silently no-op'd it); (2) revocation is PER-APP — revoking a
-    // user on app A does NOT revoke the same sub on app B.
+    // They cover the MAJOR finding that revocation is PER-APP — revoking a
+    // user on app A does NOT revoke the same sub on app B — keyed on the
+    // TEXT `(client_id, pws_)` family marker (the old UUID-only denylist
+    // could never match the `pws_…` subject).
 
     async fn connect_auth_db() -> Option<crate::db::DbConfig> {
         let dsn = std::env::var("AUTH_DB_URL").ok()?;
         Some(crate::db::DbConfig::new(dsn, 4))
-    }
-
-    #[compio::test]
-    async fn bearer_wrapper_pws_subject_revoked_by_family_marker() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
-            gateway_signing,
-            "http://127.0.0.1:1",
-            Some(db.clone()),
-        );
-
-        let aud = "myapp.zeroship.ai";
-        let client_id = "oac_myapp";
-        // A `pws_…` subject — the exact shape the UUID-only denylist could
-        // never parse, so the old code silently skipped the revocation
-        // check. The TEXT family marker matches it.
-        let pws_sub = format!("pws_{}", Uuid::new_v4().simple());
-        let token = issue_plain_wrapper(&state, &pws_sub, client_id, aud);
-        let req = bearer_req(&token, aud);
-        let request_id = Uuid::new_v4();
-
-        // Before revocation: Allowed.
-        assert!(
-            matches!(
-                resolve_bearer_user_header(&req, &state, &request_id, Some(client_id), None).await,
-                BearerOutcome::Allowed(_)
-            ),
-            "pre-revocation wrapper must be Allowed"
-        );
-
-        // Revoke the (client_id, pws_sub) family AFTER the token's iat.
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws_sub)
-                .await
-                .expect("revoke_family");
-        }
-
-        // After revocation: Invalid (the dead branch is now alive for pws_).
-        assert!(
-            matches!(
-                resolve_bearer_user_header(&req, &state, &request_id, Some(client_id), None).await,
-                BearerOutcome::Invalid
-            ),
-            "revoked pws_ family must be Invalid on the wrapper path"
-        );
-
-        let pool = crate::db::checkout(&db).await.expect("pool checkout");
-        let conn = pool.get().await.expect("pool checkout");
-        conn.execute(
-            "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
-            &[&client_id, &pws_sub],
-        )
-        .await
-        .ok();
     }
 
     #[ntex::test]
@@ -4428,7 +3063,7 @@ mod tests {
         )
         .with_issuer(HYDRA_ISS);
         let state =
-            build_state_with_wrapper_and_oidc_and_db(gateway_signing, oidc_rp, Some(db.clone()));
+            build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, Some(db.clone()));
 
         let aud = "myapp.zeroship.ai";
         let sub = format!("usr_{}", Uuid::new_v4().simple());
@@ -4523,39 +3158,6 @@ mod tests {
     // drive the FULL resolve_auth on a User route and assert the line-110
     // short-circuit (BearerOutcome::Allowed → AuthOutcome::Allowed{Some}).
 
-    #[compio::test]
-    async fn resolve_auth_valid_wrapper_on_user_route_allows_with_header() {
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-        let aud = "myapp.zeroship.ai";
-        let token = issue_plain_wrapper(&state, "pws_alice", "oac_myapp", aud);
-        let req = bearer_req(&token, aud);
-        let request_id = Uuid::new_v4();
-
-        let outcome = resolve_auth(
-            &req,
-            &state,
-            &user_policy(),
-            &request_id,
-            Some("oac_myapp"),
-            None,
-        )
-        .await;
-        let AuthOutcome::Allowed {
-            user_header: Some(header),
-        } = outcome
-        else {
-            panic!("expected Allowed{{Some}}, got {outcome:?}");
-        };
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
-        .expect("MAC verifies");
-        let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        assert_eq!(user["id"], "pws_alice");
-    }
-
     #[ntex::test]
     async fn resolve_auth_valid_raw_hydra_on_user_route_allows_with_header() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
@@ -4614,21 +3216,28 @@ mod tests {
     // ─── Invalid-Bearer does NOT fall back to a valid cookie (minor) ──────
     //
     // Documents the round-3 decision (mirroring the DPoP precedent): on a
-    // User/Admin route an Invalid Bearer 401s and is NOT silently rescued by
-    // a valid cookie session. DB-free under R1b — the cookie is a SIGNED
-    // `zs-sess+jwt` verified locally, so the test mints a real signed cookie
-    // (genuinely valid) and proves the Bearer still wins the 401.
+    // User/Admin route an Invalid raw-Hydra Bearer 401s and is NOT silently
+    // rescued by a valid cookie session. DB-free under R1b — the cookie is a
+    // SIGNED `zs-sess+jwt` verified locally, so the test mints a real signed
+    // cookie (genuinely valid) and proves the Bearer still wins the 401.
     #[ntex::test]
     async fn resolve_auth_invalid_bearer_on_user_route_does_not_use_cookie() {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
-            gateway_signing.clone(),
-            "http://127.0.0.1:1",
-            None,
-        );
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
+        // Stand up a JWKS server that serves a DIFFERENT key than the token is
+        // signed with, so the raw-Hydra Bearer fails signature verification →
+        // BearerOutcome::Invalid (the "recognized user-session token that
+        // failed verify" case). The OidcRp issuer is pinned to HYDRA_ISS.
+        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let oidc_rp = crate::oidc_rp::OidcRp::new(
+            &base,
+            "gateway",
+            "test-secret",
+            b"test-stash-key-32-bytes-long----".to_vec(),
+        )
+        .with_issuer(HYDRA_ISS);
+        let state = build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", Uuid::new_v4().simple());
@@ -4662,42 +3271,25 @@ mod tests {
             "the signed cookie alone must authenticate (test fixture sanity)"
         );
 
-        // Now attach an EXPIRED wrapper Bearer alongside the SAME valid
-        // cookie. The Bearer arm yields Invalid; on a User route that 401s
-        // and MUST NOT fall through to the (valid) cookie.
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let claims = crate::wrapper_token::WrapperClaims {
-            iss: GATEWAY_ISS.into(),
-            aud: aud.into(),
-            sub: "pws_alice".into(),
-            exp: now - 100, // expired beyond the 60s leeway
-            iat: now - 700,
-            jti: Uuid::new_v4().to_string(),
-            cnf: None,
-            scope: "openid".into(),
-            client_id: client_id.into(),
-            email: Some("relay-alias@zeroship.ai".into()),
-            email_verified: Some(true),
-            name: None,
-            wraps: None,
-        };
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.typ = Some("at+jwt".into());
-        header.kid = Some(crate::signing::jwk_thumbprint(&gateway_signing));
-        let der = gateway_signing.to_pkcs8_der().unwrap();
-        let key = EncodingKey::from_ed_der(der.as_bytes());
-        let expired_bearer = encode(&header, &claims, &key).unwrap();
+        // Now attach a raw-Hydra Bearer signed with the WRONG key (so it fails
+        // verification) alongside the SAME valid cookie. The Bearer arm yields
+        // Invalid; on a User route that 401s and MUST NOT fall through to the
+        // (valid) cookie.
+        let bad_key = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
+        let unverifiable_bearer = sign_hydra_access_jwt(
+            &bad_key,
+            "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
+            Some(client_id),
+            serde_json::json!([client_id]),
+            "user@example.com",
+            "Hydra User",
+            3600,
+        );
 
         let shadowed_req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("Bearer {expired_bearer}"))
+            .header(http::header::AUTHORIZATION, format!("Bearer {unverifiable_bearer}"))
             .header("cookie", format!("{cookie_name}={signed}"))
             .to_http_request();
         let outcome = resolve_auth(
@@ -4706,13 +3298,14 @@ mod tests {
             &user_policy(),
             &request_id,
             Some(client_id),
-            None,
+            Some("https://myapp.zeroship.ai"),
         )
         .await;
         assert!(
             matches!(outcome, AuthOutcome::Unauthenticated),
             "Invalid Bearer on User route must 401, NOT fall back to the valid cookie, got {outcome:?}"
         );
+        drop(srv);
     }
 
     // ─── Cookie-arm required-scope enforcement (Slice 3c review finding 6) ──
@@ -4728,7 +3321,7 @@ mod tests {
     #[ntex::test]
     async fn resolve_auth_cookie_arm_with_required_scope_allowed() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+        let state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
             None,
@@ -4767,7 +3360,7 @@ mod tests {
     #[ntex::test]
     async fn resolve_auth_cookie_arm_without_required_scope_403s() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+        let state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
             None,
@@ -4812,7 +3405,7 @@ mod tests {
     //
     // These cover the four properties of the consistent `pws_` projection:
     // (1) cross-app divergence (same user, two apps → different pws_);
-    // (2) cross-arm + re-login consistency (cookie vs raw-Hydra vs wrapper →
+    // (2) cross-arm + re-login consistency (cookie vs raw-Hydra vs DPoP →
     //     the SAME pws_ for the same (user, app));
     // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
     // (4) fail-closed 503 when the route has no sector yet.
@@ -4932,16 +3525,16 @@ mod tests {
         };
         let arm_id = decode_header_id(&state, &header);
 
-        // The cookie arm and the browser-wrapper mint use the SAME
-        // derivation on the SAME (global UUID, sector). Re-login (a second
-        // fresh token) re-derives the identical value.
+        // The cookie arm and the raw-Hydra arm use the SAME derivation on the
+        // SAME (global UUID, sector). Re-login (a second fresh token)
+        // re-derives the identical value.
         let direct = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         let relogin =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
 
         assert_eq!(
             arm_id, direct,
-            "raw-Hydra arm must project the same pws_ the cookie/wrapper arms derive"
+            "raw-Hydra arm must project the same pws_ the cookie arm derives"
         );
         assert_eq!(direct, relogin, "re-login must re-derive the SAME pws_");
         assert!(arm_id.starts_with("pws_"));
@@ -4998,35 +3591,6 @@ mod tests {
         drop(srv);
     }
 
-    /// The browser-wrapper Bearer arm carries a `pws_` `sub` straight from
-    /// the minted wrapper (no re-derivation) and the global UUID is absent.
-    /// Confirms cross-arm CONSISTENCY: a wrapper minted with the same `pws_`
-    /// the raw-Hydra arm derives projects the SAME id.
-    #[compio::test]
-    async fn wrapper_arm_carries_pws_and_omits_global_uuid() {
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0077";
-        let sector = "https://myapp.zeroship.ai";
-        let aud = "myapp.zeroship.ai";
-        // The /token mint derives this exact pws_ for the wrapper sub.
-        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
-        let token = issue_plain_wrapper(&state, &pws, "oac_myapp", aud);
-
-        let req = bearer_req(&token, aud);
-        let rid = Uuid::new_v4();
-        // The wrapper arm reads the pws_ straight from the wrapper; sector is
-        // irrelevant to it (it never re-derives), so even None sector works.
-        let BearerOutcome::Allowed(header) =
-            resolve_bearer_user_header(&req, &state, &rid, Some("oac_myapp"), None).await
-        else {
-            panic!("wrapper must Allow");
-        };
-        let id = decode_header_id(&state, &header);
-        assert_eq!(id, pws, "wrapper arm forwards the minted pws_ unchanged");
-        assert!(!id.contains(global_sub), "global UUID must not appear: {id}");
-    }
-
     /// Decode the signed `ZeroShip-User` header and pull `.id` out.
     fn decode_header_id(state: &crate::GateState, header: &str) -> String {
         let json = zeroship_core::auth::verify_zeroship_user_header(
@@ -5078,7 +3642,7 @@ mod tests {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         // db = None ⇒ the family-marker (the only DB touch) is SKIPPED, so a
         // successful Allow proves the identity path made zero DB calls.
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+        let state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
             None,
@@ -5133,7 +3697,7 @@ mod tests {
     async fn cookie_arm_rejects_tampered_expired_wrong_app_wrong_kid() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state =
-            build_state_with_wrapper_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
+            build_state_with_session_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", Uuid::new_v4().simple());
@@ -5260,38 +3824,68 @@ mod tests {
         encode(&header, &claims, &key).unwrap()
     }
 
-    /// A signed SESSION cookie presented as a Bearer wrapper is REJECTED by the
-    /// wrapper Bearer arm (the `zs-sess+jwt` typ fails the wrapper's `at+jwt`
-    /// typ gate) — and a wrapper presented to the session-cookie arm is rejected
-    /// by the session verifier's typ gate. Typ separation, both directions.
-    /// DB-free.
+    /// Hand-sign an RFC-9068 `at+jwt`-typ token with the gateway key. Used to
+    /// prove the session-cookie arm's `zs-sess+jwt` typ gate rejects a non-
+    /// session token type, even when it is gateway-signed with a valid kid.
+    fn sign_at_jwt_typ_token(signing: &ed25519_dalek::SigningKey, sub: &str, aud: &str) -> String {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let body = serde_json::json!({
+            "iss": "https://api.zeroship.ai",
+            "aud": aud,
+            "sub": sub,
+            "iat": now,
+            "exp": now + 600,
+        });
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("at+jwt".into());
+        header.kid = Some(crate::signing::jwk_thumbprint(signing));
+        let der = signing.to_pkcs8_der().unwrap();
+        let key = EncodingKey::from_ed_der(der.as_bytes());
+        encode(&header, &body, &key).unwrap()
+    }
+
+    /// Typ separation, both directions. A signed SESSION cookie (`zs-sess+jwt`)
+    /// presented on the Bearer arm is REJECTED (the Bearer arm only recognizes a
+    /// raw-Hydra `iss`, never the gateway-signed session token) — and a gateway-
+    /// signed `at+jwt` token presented to the session-cookie arm is rejected by
+    /// the session verifier's `zs-sess+jwt` typ gate. DB-free.
     #[ntex::test]
-    async fn typ_separation_session_cookie_vs_wrapper_both_ways() {
+    async fn typ_separation_session_cookie_vs_at_jwt_both_ways() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state =
-            build_state_with_wrapper_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
+            build_state_with_session_and_auth_ui_url_and_db(gateway_signing.clone(), "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", Uuid::new_v4().simple());
         let rid = Uuid::new_v4();
 
-        // (1) Session cookie presented on the Bearer wrapper arm → Invalid.
+        // (1) Session cookie presented on the Bearer arm → not a user session
+        //     (its `iss` is the gateway, not Hydra, so it is the reserved path).
         let session_token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let bearer = bearer_req(&session_token, aud);
         let bearer_outcome =
             resolve_bearer_user_header(&bearer, &state, &rid, Some(client_id), None).await;
         assert!(
-            matches!(bearer_outcome, BearerOutcome::Invalid),
-            "a zs-sess+jwt session cookie must be rejected by the wrapper Bearer arm, got {bearer_outcome:?}"
+            matches!(bearer_outcome, BearerOutcome::NotUserSession),
+            "a zs-sess+jwt session cookie must not authenticate on the Bearer arm, got {bearer_outcome:?}"
         );
 
-        // (2) A wrapper (at+jwt) presented to the session-cookie arm → None.
-        let wrapper = issue_plain_wrapper(&state, &pws, client_id, aud);
+        // (2) An at+jwt-typ token presented to the session-cookie arm → None
+        //     (the session verifier hard-rejects a non-`zs-sess+jwt` typ).
+        let at_jwt = sign_at_jwt_typ_token(&gateway_signing, &pws, aud);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={wrapper}"))
+            .header("cookie", format!("{cookie_name}={at_jwt}"))
             .to_http_request();
         let cookie_outcome = resolve_app_session_user_header_inner(
             &req,
@@ -5302,7 +3896,7 @@ mod tests {
         .await;
         assert!(
             matches!(cookie_outcome, CookieOutcome::None),
-            "a wrapper at+jwt must be rejected by the session-cookie arm, got {cookie_outcome:?}"
+            "an at+jwt typ token must be rejected by the session-cookie arm, got {cookie_outcome:?}"
         );
     }
 
@@ -5313,7 +3907,7 @@ mod tests {
         // current = B (seed 7); previous = A (seed 9).
         let current = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let prev = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        let mut state = build_state_with_wrapper_and_auth_ui_url_and_db(
+        let mut state = build_state_with_session_and_auth_ui_url_and_db(
             current.clone(),
             "http://127.0.0.1:1",
             None,
@@ -5379,7 +3973,7 @@ mod tests {
             return;
         };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+        let state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
             Some(db.clone()),
@@ -5451,7 +4045,7 @@ mod tests {
     async fn resolve_auth_cookie_arm_authenticates_signed_cookie_and_enforces_csrf() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state =
-            build_state_with_wrapper_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
+            build_state_with_session_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", Uuid::new_v4().simple());
@@ -5526,86 +4120,6 @@ mod tests {
         );
     }
 
-    // ─── Batch A fix 2: self-describing-subject invariant ─────────────────
-
-    /// Decode the signed `ZeroShip-User` header and pull `.email` out.
-    fn decode_header_email(state: &crate::GateState, header: &str) -> String {
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            header,
-        )
-        .expect("ZeroShip-User MAC verifies");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        v["email"].as_str().unwrap_or("").to_string()
-    }
-
-    /// A hand-crafted wrapper whose `sub` is a GLOBAL UUID (not a `pws_`) must
-    /// be HARD-REJECTED by BOTH wrapper fast-paths — defense in depth: even if
-    /// some future mint path forgot to project, a non-projected wrapper can
-    /// never reach a worker and leak the global identity into the JS-readable
-    /// token. No PG needed (the invariant check precedes any DB touch). The
-    /// `debug_assert!` is `cfg(not(test))`-gated so this exercises the runtime
-    /// reject, the production defense against a forged token.
-    #[ntex::test]
-    async fn wrapper_with_uuid_sub_is_rejected_by_both_fast_paths() {
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper(gateway_signing);
-        let request_id = Uuid::new_v4();
-
-        let aud = "myapp.zeroship.ai";
-        let client_id = "oac_myapp";
-        // A global UUID sub — exactly what an un-projected wrapper would carry.
-        let uuid_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
-
-        // (a) Bearer wrapper path (cnf = None).
-        let plain = issue_plain_wrapper(&state, uuid_sub, client_id, aud);
-        let bearer = bearer_req(&plain, aud);
-        let outcome =
-            resolve_bearer_user_header(&bearer, &state, &request_id, Some(client_id), None).await;
-        assert!(
-            matches!(outcome, BearerOutcome::Invalid),
-            "Bearer wrapper with a UUID sub must be Invalid (subject invariant), got {outcome:?}"
-        );
-
-        // (b) DPoP wrapper fast-path (cnf = Some(jkt)).
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let jkt = client_jkt(&client_key);
-        let dpop_wrapper = issue_wrapper_for_sub(&state, uuid_sub, &jkt, aud);
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{aud}/api/me");
-        let proof = sign_dpop_proof(&client_key, "GET", &htu, &dpop_wrapper, now);
-        let dpop_req = ntex::web::test::TestRequest::default()
-            .uri("/api/me")
-            .header(http::header::HOST, aud)
-            .header(http::header::AUTHORIZATION, format!("DPoP {dpop_wrapper}"))
-            .header("dpop", proof)
-            .to_http_request();
-        let outcome =
-            resolve_dpop_user_header(&dpop_req, &state, &request_id, None, None).await;
-        assert!(
-            matches!(outcome, DpopOutcome::None),
-            "DPoP wrapper with a UUID sub must be rejected (subject invariant), got {outcome:?}"
-        );
-
-        // Sanity: the SAME wrappers with a real pws_ sub ARE accepted, so the
-        // reject above is the invariant firing — not a broken fixture.
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
-        let plain_ok = issue_plain_wrapper(&state, &pws, client_id, aud);
-        assert!(
-            matches!(
-                resolve_bearer_user_header(&bearer_req(&plain_ok, aud), &state, &request_id, Some(client_id), None).await,
-                BearerOutcome::Allowed(_)
-            ),
-            "a pws_-sub Bearer wrapper must still Allow"
-        );
-    }
-
     // ─── Batch A fix 3: revocation cross-arm parity ───────────────────────
 
     /// Write the family marker the EXACT way `/signout` does — keyed on
@@ -5650,7 +4164,7 @@ mod tests {
         )
         .with_issuer(HYDRA_ISS);
         let bearer_state =
-            build_state_with_wrapper_and_oidc_and_db(gateway_signing.clone(), oidc_rp, Some(db.clone()));
+            build_state_with_session_and_oidc_and_db(gateway_signing.clone(), oidc_rp, Some(db.clone()));
 
         // The pws_ the WRITER (/signout) keys on — derive_pairwise under the
         // route's sector with the SAME salt the arm uses (read off the state).
@@ -5744,110 +4258,5 @@ mod tests {
         .ok();
         drop(srv);
         drop(srv_i);
-    }
-
-    // ─── Batch A fix 5: live relay_email re-resolve on wrapper fast-path ──
-
-    /// A wrapper carries an alias-only email at mint, but the alias can be
-    /// revoked WHILE the wrapper is still valid. The Bearer wrapper fast-path
-    /// must re-resolve the alias LIVE keyed on `(client_id, pws_)` and emit an
-    /// EMPTY email once it is revoked — never the stale alias the wrapper still
-    /// embeds. PG-gated.
-    #[compio::test]
-    async fn bearer_wrapper_reresolves_relay_email_live_and_blanks_on_revoke() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
-            gateway_signing,
-            "http://127.0.0.1:1",
-            Some(db.clone()),
-        );
-
-        let aud = "myapp.zeroship.ai";
-        let client_id = format!("oac_livemail_{}", Uuid::new_v4().simple());
-        let global_user_id = Uuid::new_v4();
-        let pws_sub = format!("pws_live_{}", Uuid::new_v4().simple());
-        let active_alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-
-        // Seed the user + an ACTIVE alias row keyed on (client_id, pws_).
-        let dsn = std::env::var("AUTH_DB_URL").unwrap();
-        let (seed, conn) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
-            .await
-            .expect("seed connect");
-        compio::runtime::spawn(async move {
-            let _ = conn.run().await;
-        })
-        .detach();
-        seed.execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
-             VALUES ($1, $2::citext, $3, NOW())",
-            &[&global_user_id, &format!("real-{}@example.com", global_user_id.simple()), &"Live User"],
-        )
-        .await
-        .expect("seed user");
-        seed.execute(
-            "INSERT INTO auth.app_user_identities \
-                (app_client_id, global_user_id, pairwise_sub, relay_email) \
-             VALUES ($1, $2, $3, $4)",
-            &[&client_id, &global_user_id, &pws_sub, &active_alias],
-        )
-        .await
-        .expect("seed alias");
-
-        // The wrapper is minted carrying the helper's default alias claim
-        // (`relay-alias@zeroship.ai`). The LIVE re-resolve must OVERRIDE that
-        // with the DB value: pre-revoke the header email must be the seeded
-        // ACTIVE alias (not the mint-time claim), proving the arm reads live.
-        let token = issue_plain_wrapper_with_scope(&state, &pws_sub, &client_id, aud, "openid email");
-        let req = bearer_req(&token, aud);
-        let request_id = Uuid::new_v4();
-
-        // Pre-revoke: the live alias is projected.
-        let BearerOutcome::Allowed(header) =
-            resolve_bearer_user_header(&req, &state, &request_id, Some(&client_id), None).await
-        else {
-            panic!("pre-revoke wrapper must Allow");
-        };
-        assert_eq!(
-            decode_header_email(&state, &header),
-            active_alias,
-            "wrapper fast-path must project the LIVE active alias"
-        );
-
-        // Revoke the alias (the 5c cascade write).
-        seed.execute(
-            "UPDATE auth.app_user_identities SET revoked_at = now() \
-             WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&client_id, &global_user_id],
-        )
-        .await
-        .expect("revoke alias");
-
-        // Post-revoke: the SAME still-valid wrapper now projects an EMPTY email
-        // (fail closed) — the stale alias must NOT survive.
-        let BearerOutcome::Allowed(header2) =
-            resolve_bearer_user_header(&req, &state, &request_id, Some(&client_id), None).await
-        else {
-            panic!("wrapper still cryptographically valid post alias-revoke");
-        };
-        assert_eq!(
-            decode_header_email(&state, &header2),
-            "",
-            "a revoked alias must blank the wrapper fast-path email (fail closed)"
-        );
-
-        // Cleanup.
-        seed.execute(
-            "DELETE FROM auth.app_user_identities WHERE app_client_id = $1",
-            &[&client_id],
-        )
-        .await
-        .ok();
-        seed.execute("DELETE FROM auth.users WHERE id = $1", &[&global_user_id])
-            .await
-            .ok();
     }
 }

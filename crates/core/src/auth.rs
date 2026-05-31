@@ -178,12 +178,12 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// ## Input canonicalization (Batch A M1)
 ///
 /// The `global_user_id` argument reaches this function from two shapes across
-/// the writers/readers: the RAW Hydra `sub` string (`/token`, dpop-exchange,
-/// the raw-Hydra Bearer + DPoP-introspection readers) and `Uuid::to_string()`
-/// (`/session?mint=1`, `/signout`, the control disconnect-app cascade). Those
-/// are byte-identical only WHILE Hydra emits a canonical hyphenated-lowercase
+/// the writers/readers: the RAW Hydra `sub` string (the raw-Hydra Bearer +
+/// DPoP-introspection readers) and `Uuid::to_string()` (`/session` exchange +
+/// `?mint=1`, `/signout`, the control disconnect-app cascade). Those are
+/// byte-identical only WHILE Hydra emits a canonical hyphenated-lowercase
 /// UUID. If Hydra ever emits a non-canonical form (uppercase / braces /
-/// no-dash), a `/token`-minted wrapper's `pws_` would diverge from the
+/// no-dash), a session cookie's `pws_` would diverge from the
 /// `/signout`-written family marker's `pws_`, silently breaking cross-arm
 /// revocation. To make the `pws_` independent of the inbound spelling, we
 /// canonicalize HERE in the ONE place every writer and reader funnels through:
