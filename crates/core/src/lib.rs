@@ -2,6 +2,7 @@
 
 pub mod types;
 pub mod auth;
+pub mod power_token;
 pub mod typed_id;
 pub mod crypto;
 pub mod config;

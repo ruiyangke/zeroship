@@ -22,9 +22,19 @@ struct AppCache {
 thread_local! {
     static CACHE: RefCell<Option<AppCache>> = const { RefCell::new(None) };
     static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Worker→control mint reach for the runtime-mediated power-token op (R4):
+    /// `(control_url, control_key)`. Held per-thread (the `control_key` never
+    /// crosses into JS — the runtime attaches it Rust-side). Set by
+    /// `init_cache` from the worker's `WorkerConfig`.
+    static CONTROL_REACH: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
-pub fn init_cache(max_size: usize, db_url: Option<String>) {
+pub fn init_cache(
+    max_size: usize,
+    db_url: Option<String>,
+    control_url: String,
+    control_key: String,
+) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
             isolates: HashMap::new(),
@@ -34,6 +44,7 @@ pub fn init_cache(max_size: usize, db_url: Option<String>) {
     if let Some(url) = db_url {
         DB_URL.with(|u| *u.borrow_mut() = Some(url));
     }
+    CONTROL_REACH.with(|r| *r.borrow_mut() = Some((control_url, control_key)));
 }
 
 /// Create plugins for a new Runtime.
@@ -114,13 +125,20 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         // every in-flight `AbortController` with `crate::rpc::abort`,
         // keyed by `(app_id, request_id)`. `evict_lru` walks that
         // registry on eviction.
-        let runtime = Runtime::builder()
+        let mut builder = Runtime::builder()
             .modules(modules)
             .env_vars(env_vars)
             .limits(limits)
             .plugins(plugins)
-            .app_id(app_id)
-            .build();
+            .app_id(app_id);
+        // Surface the worker→control mint reach (R4) so `env.auth.getAccessToken`
+        // can POST the control mint endpoint. `control_key` stays Rust-side.
+        if let Some((control_url, control_key)) =
+            CONTROL_REACH.with(|r| r.borrow().clone())
+        {
+            builder = builder.power_token_config(control_url, control_key);
+        }
+        let runtime = builder.build();
 
         // Exit isolate so other isolates can be created/entered on this thread.
         // The handler will enter/exit around each call_fetch_handler call.

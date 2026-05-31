@@ -162,6 +162,11 @@ pub struct NewAnchor<'a> {
     pub refresh_token_enc: &'a [u8],
     pub refresh_family_id: &'a str,
     pub granted_scopes: &'a [String],
+    /// The authenticating event time (from the validated id_token's
+    /// `auth_time`). Carried onto the anchor so the server-side power-token
+    /// mint can gate step-up scopes on freshness (R4). `None` → step-up
+    /// scopes fail closed.
+    pub auth_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Insert a new anchor row. `abs_expires_at` is computed as
@@ -177,9 +182,9 @@ pub async fn create(conn: &Client, params: &NewAnchor<'_>) -> Result<Anchor> {
         .query(
             "INSERT INTO auth.app_session_anchors \
                 (app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, \
-                 granted_scopes, abs_expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, \
-                     NOW() + ($7::text || ' days')::interval) \
+                 granted_scopes, auth_time, abs_expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, \
+                     NOW() + ($8::text || ' days')::interval) \
              RETURNING id, app_id, client_id, global_user_id, refresh_token_enc, \
                        refresh_family_id, granted_scopes, created_at, abs_expires_at",
             &[
@@ -189,6 +194,7 @@ pub async fn create(conn: &Client, params: &NewAnchor<'_>) -> Result<Anchor> {
                 &refresh_enc,
                 &params.refresh_family_id,
                 &scopes,
+                &params.auth_time,
                 &ANCHOR_ABS_DAYS.to_string(),
             ],
         )

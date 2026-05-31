@@ -41,6 +41,7 @@ fn claims_for(user_id: &str, email: &str) -> TokenClaims {
         picture: None,
         acr: None,
         amr: None,
+        auth_time: None,
         other: Default::default(),
     }
 }

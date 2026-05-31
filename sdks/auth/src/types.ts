@@ -50,6 +50,41 @@ export interface Session {
 }
 
 /**
+ * The shared logical audience an app's SERVER code requests when it needs to
+ * act on the control plane. Stable wire constant matching
+ * `zeroship_core::power_token::CONTROL_PLANE_AUDIENCE`. Pass it to
+ * {@link getAccessToken} / {@link fetchAs}.
+ */
+export const CONTROL_PLANE_AUDIENCE = "zeroship:control";
+
+/** Options for {@link getAccessToken} / {@link fetchAs}. */
+export interface GetAccessTokenOptions {
+  /**
+   * The resource server this token is FOR. Required — there is no broad,
+   * audience-less token. v1 supports {@link CONTROL_PLANE_AUDIENCE}.
+   */
+  audience: string;
+  /**
+   * Least-privilege scope subset. MUST be ⊆ the scopes granted to this app for
+   * the current user, or the call FAILS (it does not silently broaden).
+   */
+  scopes: string[];
+}
+
+/**
+ * A minted server-side power token. The `accessToken` is used SERVER-SIDE only
+ * (inject it as a Bearer on an outbound call, or use {@link fetchAs}); it MUST
+ * NOT be serialized anywhere the browser can read.
+ */
+export interface AccessToken {
+  accessToken: string;
+  /** Unix seconds at which the token expires. */
+  expiresAt: number;
+  /** The capped scopes actually granted on the token. */
+  scopes: string[];
+}
+
+/**
  * Auth state transitions delivered to `onAuthStateChange` subscribers.
  *
  * Under the BFF model there is no client-held token, so the post-sign-in
@@ -79,6 +114,19 @@ export type AuthErrorCode =
   | "popup_blocked"
   | "timeout"
   | "scope_required"
+  /**
+   * `403` from the server-side power-token mint when an elevated
+   * (deploy/secret/billing/delete-class) scope was requested but the
+   * authenticating event is too old. Re-authenticate (a fresh `max_age=0`
+   * popup) and retry (R4 §5.3).
+   */
+  | "step_up_required"
+  /**
+   * `403` from the power-token mint when this app is not platform-privileged
+   * and asked for a control-audience token. An ordinary creator app can never
+   * obtain control-plane authority (R4 — the headline boundary).
+   */
+  | "forbidden_audience"
   | "invalid_state"
   | "network_error"
   | "server_error"

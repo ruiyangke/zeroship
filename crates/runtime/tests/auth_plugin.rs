@@ -16,10 +16,11 @@ mod common;
 use common::*;
 
 use std::sync::Arc;
+use std::time::Duration;
 use zeroship_runtime::auth::AuthPlugin;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch};
 
 /// The `WorkerUser` projection the gateway forwards as the `ZeroShip-User`
 /// header body: `{ id, email, name, avatar?, email_verified, scopes }`. The
@@ -46,6 +47,7 @@ fn dispatch_with_user(runtime: &Runtime, user_json: Option<String>) -> (u16, Str
         &env,
         ctx,
         user_json,
+        None,
     );
     match outcome {
         FetchOutcome::Response { status, body, .. } => (status, body),
@@ -268,4 +270,172 @@ fn env_auth_namespace_is_exposed() {
     assert!(body.contains(r#""getUserIsFn":true"#), "body: {body}");
     assert!(body.contains(r#""requireUserIsFn":true"#), "body: {body}");
     assert!(body.contains(r#""sameRef":true"#), "body: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// R4 — env.auth.getAccessToken (the runtime-mediated power-token op)
+// ---------------------------------------------------------------------------
+
+/// Drive a (possibly async) dispatch carrying both the decoded user JSON and
+/// the raw signed `ZeroShip-User` header, returning `(status, body)`. The
+/// `getAccessToken` op returns a Promise, so the handler resolves via the pump
+/// (the `Pending` arm).
+fn dispatch_async_with_user_header(
+    runtime: Runtime,
+    user_json: Option<String>,
+    user_header: Option<String>,
+) -> (u16, String) {
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler_with_user(
+        "GET",
+        "http://localhost/",
+        &[],
+        "",
+        &env,
+        ctx,
+        user_json,
+        user_header,
+    );
+    if let FetchOutcome::Response { status, body, .. } = &outcome {
+        return (*status, body.clone());
+    }
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        match outcome {
+            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Pending { rx, cancel: _ } => {
+                let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("getAccessToken pending timed out")
+                    .expect("getAccessToken pending delivered DispatchError");
+                match settled {
+                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Stream { .. } => panic!("unexpected Stream settled variant"),
+                    SettledFetch::WebSocketUpgrade { .. } => {
+                        panic!("unexpected WebSocketUpgrade settled variant")
+                    }
+                }
+            }
+            other => {
+                let name = match other {
+                    FetchOutcome::Stream { .. } => "Stream",
+                    FetchOutcome::WebSocketUpgrade { .. } => "WebSocketUpgrade",
+                    _ => "?",
+                };
+                panic!("expected Response/Pending, got {name}");
+            }
+        }
+    })
+}
+
+/// `env.auth.getAccessToken` is registered as an async function. App JS calls
+/// it with ONLY `{ audience, scopes }` — it never names a user or a key. This
+/// proves the op exists on the live `env.auth` namespace and is callable.
+#[test]
+fn get_access_token_is_a_registered_async_fn() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            async fetch(request, env, ctx) {
+                const isFn = typeof env.auth.getAccessToken === "function";
+                let returnsPromise = false;
+                try {
+                    const p = env.auth.getAccessToken({ audience: "zeroship:control", scopes: ["apps:read"] });
+                    returnsPromise = p instanceof Promise;
+                    await p.catch(() => {});  // swallow the (expected) rejection
+                } catch (_e) { /* sync throw — still a function */ }
+                return Response.json({ isFn, returnsPromise });
+            }
+        };
+    "#,
+    );
+    let (status, body) =
+        dispatch_async_with_user_header(runtime, Some(USER_JSON.to_string()), Some("hdr".into()));
+    assert_eq!(status, 200, "body: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["isFn"], true, "getAccessToken must be a function: {body}");
+    assert_eq!(v["returnsPromise"], true, "getAccessToken must return a Promise: {body}");
+}
+
+/// When the runtime has NO control-plane mint configured (e.g. `zeroship
+/// serve`, or any runtime built without `power_token_config`), the op FAILS
+/// CLOSED with a coded `not_configured` error. App JS supplied only
+/// `{ audience, scopes }`; it never touched a `control_key`. This is the
+/// fail-closed half of the boundary at the runtime layer.
+#[test]
+fn get_access_token_fails_closed_without_control_config() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            async fetch(request, env, ctx) {
+                try {
+                    await env.auth.getAccessToken({ audience: "zeroship:control", scopes: ["apps:read"] });
+                    return Response.json({ rejected: false });
+                } catch (e) {
+                    return Response.json({ rejected: true, code: e?.code ?? null, message: e?.message ?? String(e) });
+                }
+            }
+        };
+    "#,
+    );
+    let (status, body) =
+        dispatch_async_with_user_header(runtime, Some(USER_JSON.to_string()), Some("signed-hdr".into()));
+    assert_eq!(status, 200, "body: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["rejected"], true, "op must reject when no control mint configured: {body}");
+    assert_eq!(v["code"], "not_configured", "coded error surfaced to JS: {body}");
+}
+
+/// CONTROL_KEY IS NOT JS-REACHABLE. The op is configured with a control_key
+/// here, but app JS cannot read it anywhere: not on `env`, not on `env.auth`,
+/// not via any getAccessToken return shape (the op fails closed before any
+/// network call because there is no authenticated identity, and even on
+/// success only `{ accessToken, ... }` is returned — never the control_key).
+/// We assert the control_key string literally does not appear in ANY
+/// JS-serializable surface the handler can reach.
+#[test]
+fn control_key_is_never_js_reachable() {
+    const SECRET_CONTROL_KEY: &str = "SUPER-SECRET-CONTROL-KEY-zzz";
+    init_v8();
+    let runtime = Runtime::builder()
+        .modules(m(r#"
+        import { env as moduleEnv } from "zeroship";
+        export default {
+            async fetch(request, env, ctx) {
+                // Walk every JS-reachable auth surface and serialize it.
+                const surfaces = {
+                    env: safeStringify(env),
+                    auth: safeStringify(env.auth),
+                    authKeys: Object.keys(env.auth ?? {}),
+                    moduleAuth: safeStringify(moduleEnv.auth),
+                };
+                // Also attempt the op and capture whatever it throws/returns.
+                let opResult = null;
+                try {
+                    opResult = await env.auth.getAccessToken({ audience: "zeroship:control", scopes: ["apps:read"] });
+                } catch (e) {
+                    opResult = { error: e?.code ?? null, message: e?.message ?? String(e) };
+                }
+                return Response.json({ surfaces, opResult: safeJson(opResult) });
+                function safeStringify(o) {
+                    try { return JSON.stringify(o, Object.keys(o ?? {})); } catch { return String(o); }
+                }
+                function safeJson(o) { try { return JSON.parse(JSON.stringify(o)); } catch { return String(o); } }
+            }
+        };
+        "#))
+        .plugins(vec![Arc::new(AuthPlugin) as Arc<dyn NativePlugin>])
+        .power_token_config("http://127.0.0.1:1", SECRET_CONTROL_KEY)
+        .build();
+
+    let (status, body) =
+        dispatch_async_with_user_header(runtime, Some(USER_JSON.to_string()), Some("signed-hdr".into()));
+    assert_eq!(status, 200, "body: {body}");
+    // The headline assertion: the control_key never appears in anything JS
+    // could read or serialize.
+    assert!(
+        !body.contains(SECRET_CONTROL_KEY),
+        "control_key leaked into a JS-reachable surface! body: {body}"
+    );
 }

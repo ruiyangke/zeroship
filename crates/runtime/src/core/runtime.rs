@@ -303,11 +303,17 @@ impl Runtime {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
-        self.call_fetch_handler_with_user(method, url, headers, body, env, ctx, None)
+        self.call_fetch_handler_with_user(method, url, headers, body, env, ctx, None, None)
     }
 
     /// Variant of [`Runtime::call_fetch_handler`] used by the worker once it
     /// has verified the gateway-issued `ZeroShip-User` envelope.
+    ///
+    /// `user_json` is the DECODED identity (what `env.auth.getUser()` returns).
+    /// `user_header` is the RAW, still-signed `ZeroShip-User` header value the
+    /// gateway minted for this request; the runtime stashes it Rust-side so the
+    /// power-token op (`env.auth.getAccessToken`) can echo it to control for
+    /// stateless re-verification (R4). App JS never sees `user_header`.
     pub fn call_fetch_handler_with_user(
         &self,
         method: &str,
@@ -317,6 +323,7 @@ impl Runtime {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
         user_json: Option<String>,
+        user_header: Option<String>,
     ) -> crate::FetchOutcome {
         self.inner.borrow_mut().call_fetch_handler(
             self.modules.as_slice(),
@@ -327,6 +334,7 @@ impl Runtime {
             env,
             ctx,
             user_json,
+            user_header,
         )
     }
 
@@ -392,6 +400,10 @@ pub struct RuntimeBuilder {
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
     idle_gc_after_ms: Option<u64>,
+    /// Worker→control mint config for the runtime-mediated power-token op
+    /// (R4). `(control_url, control_key)`. The worker sets this from its
+    /// `WorkerConfig`; `zeroship serve` leaves it empty (the op then rejects).
+    power_token_config: Option<(String, String)>,
 }
 
 impl RuntimeBuilder {
@@ -474,6 +486,20 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Configure the worker→control power-token mint endpoint (R4). The
+    /// runtime-mediated `env.auth.getAccessToken` op uses `control_url` +
+    /// `control_key` to reach the control mint endpoint. `control_key` is
+    /// attached Rust-side and is NEVER exposed to app JS. When unset (e.g.
+    /// `zeroship serve`), `getAccessToken` rejects with a configuration error.
+    pub fn power_token_config(
+        mut self,
+        control_url: impl Into<String>,
+        control_key: impl Into<String>,
+    ) -> Self {
+        self.power_token_config = Some((control_url.into(), control_key.into()));
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -493,6 +519,13 @@ impl RuntimeBuilder {
             app_id,
             idle_gc_after,
         );
+        // Seed the power-token mint config (R4) onto RuntimeState. Held
+        // Rust-side; the `control_key` half is never exposed to app JS.
+        if let Some((control_url, control_key)) = self.power_token_config {
+            let mut s = inner.state.borrow_mut();
+            s.power_control_url = control_url;
+            s.power_control_key = control_key;
+        }
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
             limits,
@@ -1412,6 +1445,7 @@ impl RuntimeInner {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
         user_json: Option<String>,
+        user_header: Option<String>,
     ) -> crate::FetchOutcome {
         // Reset the idle-GC clock — every request entry is "activity".
         self.last_request_ts.set(Instant::now());
@@ -1469,6 +1503,9 @@ impl RuntimeInner {
 
         if user_json.is_some() {
             crate::auth::set_request_user(&self.state, request_id, user_json);
+        }
+        if user_header.is_some() {
+            crate::auth::set_request_user_header(&self.state, request_id, user_header);
         }
 
         let wall_start = Instant::now();
@@ -2448,6 +2485,9 @@ impl RuntimeInner {
         if !s.per_request_user.is_empty() {
             s.per_request_user.remove(&request_id);
         }
+        if !s.per_request_user_header.is_empty() {
+            s.per_request_user_header.remove(&request_id);
+        }
         if !s.request_ctx_by_id.is_empty() {
             s.request_ctx_by_id.remove(&request_id);
         }
@@ -2476,6 +2516,7 @@ impl RuntimeInner {
     fn discard_request_state(&self, request_id: u64) {
         let mut s = self.state.borrow_mut();
         s.per_request_user.remove(&request_id);
+        s.per_request_user_header.remove(&request_id);
         s.request_ctx_by_id.remove(&request_id);
         s.request_by_id.remove(&request_id);
         s.per_request_logs.remove(&request_id);

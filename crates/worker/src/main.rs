@@ -354,7 +354,12 @@ fn main() -> std::io::Result<()> {
         let shared = shared_versions.clone();
         let envs = shared_envs.clone();
         let logs = shared_logs.clone();
-        cache::init_cache(config.max_isolates, config.db_url.clone());
+        cache::init_cache(
+            config.max_isolates,
+            config.db_url.clone(),
+            config.control_url.clone(),
+            config.control_key.clone(),
+        );
         // Per-thread reconcile loop — reads from the shared version map,
         // writes env into the process-wide env cache.
         sync::start_sync(config.clone(), shared, envs.clone());

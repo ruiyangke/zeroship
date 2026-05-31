@@ -14,8 +14,8 @@ use zeroship_core::config::{
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
-    oauth_grants_handlers, oauth_handlers, oidc_rp, stripe_handlers, token_handlers, AppState,
-    EnvStore, Quota, RateLimiter, Registry, StripeStore,
+    oauth_grants_handlers, oauth_handlers, oidc_rp, power_token, stripe_handlers, token_handlers,
+    AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -717,9 +717,18 @@ fn main() -> std::io::Result<()> {
     let _ = std::fs::remove_file(&probe);
     tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
 
-    let pat_issuer = if signing_key_file.is_empty() {
-        tracing::warn!("control: using dev-only PAT signing key");
-        Arc::new(token_handlers::PatIssuer::dev_insecure())
+    // PAT issuer + power-token issuer (R4) share ONE ed25519 key (loaded once);
+    // distinct `typ`/`iss`/`aud` keep the two token classes apart. The
+    // power-token `aud` is the same `expected_oauth_audience` AuthzGuard checks
+    // so the minted token rides the existing audience gate.
+    let (pat_issuer, power_token_issuer) = if signing_key_file.is_empty() {
+        tracing::warn!("control: using dev-only PAT + power-token signing key");
+        (
+            Arc::new(token_handlers::PatIssuer::dev_insecure()),
+            Arc::new(power_token::PowerTokenIssuer::dev_insecure(
+                expected_oauth_audience.clone(),
+            )),
+        )
     } else {
         let signing_key = token_handlers::load_signing_key_from_path(
             std::path::Path::new(&signing_key_file),
@@ -728,10 +737,18 @@ fn main() -> std::io::Result<()> {
             tracing::error!(error = %err, "control: failed to load PAT signing key");
             std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
         })?;
-        Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
+        let pat = Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
             tracing::error!(error = %err, "control: failed to initialize PAT issuer");
             std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-        })?)
+        })?);
+        let power = Arc::new(
+            power_token::PowerTokenIssuer::new(&signing_key, expected_oauth_audience.clone())
+                .map_err(|err| {
+                    tracing::error!(error = %err, "control: failed to initialize power-token issuer");
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+                })?,
+        );
+        (pat, power)
     };
 
     ntex::rt::System::build()
@@ -885,6 +902,7 @@ fn main() -> std::io::Result<()> {
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
         pat_issuer,
+        power_token_issuer,
         hydra_introspector,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         pairwise_salt,
@@ -1025,6 +1043,15 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/usage")
                     .route(web::post().to(internal::report_usage)),
+            )
+            // R4 — worker→control power-token mint. control_key-gated (the
+            // handler re-affirms check_internal_auth); identity re-derived
+            // from the gateway-signed ZeroShip-User header; grant-ceiling +
+            // step-up enforced; control-audience gated on the trusted-client
+            // allowlist (ordinary creator apps cannot mint).
+            .service(
+                web::resource("/internal/power-token")
+                    .route(web::post().to(power_token::mint_power_token)),
             )
             .service(
                 web::resource("/internal/webhooks/stripe")

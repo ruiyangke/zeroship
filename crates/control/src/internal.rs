@@ -13,6 +13,13 @@ use crate::AppState;
 // Auth helper
 // ---------------------------------------------------------------------------
 
+/// Public alias for the worker→control `control_key` channel check. The
+/// power-token mint handler re-affirms this gate (defense-in-depth) on top of
+/// the router-level wiring.
+pub fn check_internal_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    check_auth(req, state)
+}
+
 fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
     if state.insecure_dev {
         return None;

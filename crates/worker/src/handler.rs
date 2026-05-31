@@ -45,7 +45,17 @@ pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<H
     }
 }
 
-fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<String>, HttpResponse> {
+/// Verify the gateway-signed `ZeroShip-User` header. On success returns
+/// `(decoded_json, raw_signed_header)`:
+///   - `decoded_json` is what `env.auth.getUser()` returns;
+///   - `raw_signed_header` is the VERBATIM `base64(JSON).<rid>.<iat>.<hmac>`
+///     string. The runtime stashes it Rust-side so the power-token op
+///     (`env.auth.getAccessToken`) can echo it to control for stateless
+///     re-verification (R4). It is never exposed to app JS.
+fn verified_user_json(
+    req: &HttpRequest,
+    worker_key: &str,
+) -> Result<Option<(String, String)>, HttpResponse> {
     let Some(value) = req.headers().get("zeroship-user") else {
         return Ok(None);
     };
@@ -67,7 +77,7 @@ fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<Stri
         header,
         expected_request_id,
     ) {
-        Some(json) => Ok(Some(json)),
+        Some(json) => Ok(Some((json, header.to_string()))),
         None => {
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
             Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#))
@@ -148,8 +158,9 @@ pub async fn dispatch(
     if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
         return resp;
     }
-    let user_json = match verified_user_json(&req, &config.worker_key) {
-        Ok(user_json) => user_json,
+    let (user_json, user_header) = match verified_user_json(&req, &config.worker_key) {
+        Ok(Some((json, header))) => (Some(json), Some(header)),
+        Ok(None) => (None, None),
         Err(resp) => return resp,
     };
 
@@ -232,6 +243,7 @@ pub async fn dispatch(
             &env,
             ctx,
             user_json,
+            user_header,
         );
         runtime.exit_isolate();
         o
@@ -421,7 +433,7 @@ mod tests {
                   }
                 }
             "#;
-            crate::cache::init_cache(10, None);
+            crate::cache::init_cache(10, None, String::new(), String::new());
             assert!(crate::cache::load_app(
                 app_id,
                 source,
