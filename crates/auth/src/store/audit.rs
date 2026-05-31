@@ -1,11 +1,11 @@
-//! Audit event insert into `auth.audit_events`.
+//! Audit event insert into `zeroship.audit_events`.
 
 use compio_postgres::GenericClient;
 use serde_json::Value;
 
 use crate::error::{AuthError, Result};
 
-/// Insert one row into `auth.audit_events`.
+/// Insert one row into `zeroship.audit_events`.
 ///
 /// # Errors
 ///
@@ -24,7 +24,7 @@ pub async fn insert(
     detail: &Value,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO auth.audit_events \
+        "INSERT INTO zeroship.audit_events \
             (event_type, outcome, user_id, client_id, request_id, ip, user_agent, auth_method, detail) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         &[

@@ -272,7 +272,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     let rows = pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
-             FROM auth.audit_events \
+             FROM zeroship.audit_events \
              WHERE user_id = $1 AND event_type = 'device_grant'",
             &[&user.id],
         )
@@ -282,10 +282,10 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
 
     let _ = admin.delete_client(&client_id).await;
     let _ = pg
-        .execute("DELETE FROM auth.sessions WHERE id = $1", &[&session.id])
+        .execute("DELETE FROM zeroship.sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await;
     drop(srv);
 }

@@ -41,7 +41,7 @@ pub const WRAPPER_REVOCATION_RETENTION_HOURS: i32 = 24;
 /// NOT affect app B.
 pub async fn revoke_family(db: &Client, client_id: &str, sub: &str) -> Result<u64, Error> {
     db.execute(
-        "INSERT INTO auth.token_revocations (client_id, sub, revoked_after) \
+        "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
          VALUES ($1, $2, NOW()) \
          ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
         &[&client_id, &sub],
@@ -75,7 +75,7 @@ pub async fn revoked_after_for(
     let row = db
         .query_one(
             "SELECT EXTRACT(EPOCH FROM MAX(revoked_after))::double precision AS ra \
-             FROM auth.token_revocations \
+             FROM zeroship.token_revocations \
              WHERE client_id = $1 AND sub = $2",
             &[&client_id, &sub],
         )
@@ -116,7 +116,7 @@ pub fn family_revoked_at(revoked_after: Option<i64>, iat: i64) -> bool {
 /// TTLs.
 pub async fn sweep_expired_families(db: &Client) -> Result<u64, Error> {
     db.execute(
-        "DELETE FROM auth.token_revocations \
+        "DELETE FROM zeroship.token_revocations \
          WHERE revoked_after < NOW() - make_interval(hours => $1)",
         &[&WRAPPER_REVOCATION_RETENTION_HOURS],
     )

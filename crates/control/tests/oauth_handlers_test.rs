@@ -119,7 +119,7 @@ impl Fixture {
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM control.oauth_clients WHERE client_id = ANY($1)", &[&ids])
+            .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = ANY($1)", &[&ids])
             .await;
     }
 }
@@ -271,20 +271,20 @@ impl NonAdminPat {
         let _ = state
             .auth_pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE token_id = $1 OR user_id = $2",
+                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
         let _ = state
             .auth_pg
             .execute(
-                "DELETE FROM control.permission_tokens WHERE id = $1",
+                "DELETE FROM zeroship.permission_tokens WHERE id = $1",
                 &[&self.token_id],
             )
             .await;
         let _ = state
             .auth_pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
@@ -295,7 +295,7 @@ async fn non_admin_pat(state: &AppState) -> NonAdminPat {
     state
         .auth_pg
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'Non Admin OAuth Test User', NOW())",
             &[&user_id, &email],
         )
@@ -313,7 +313,7 @@ async fn non_admin_pat(state: &AppState) -> NonAdminPat {
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
              VALUES ($1, $2, 'pat', 'integration non-admin PAT', $3, $4, $5)",
             &[&token_id, &user_id, &policies, &hash, &expires_at],
@@ -358,7 +358,7 @@ async fn count_client(state: &AppState, client_id: &str) -> i64 {
     let rows = state
         .auth_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -376,7 +376,7 @@ async fn audit_event_count(
         .auth_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
-             FROM auth.audit_events \
+             FROM zeroship.audit_events \
              WHERE user_id = $1 AND event_type = $2 AND client_id = $3",
             &[&user_id, &event_type, &client_id],
         )
@@ -389,7 +389,7 @@ async fn persisted_skip_consent(state: &AppState, client_id: &str) -> bool {
     let rows = state
         .auth_pg
         .query(
-            "SELECT skip_consent FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT skip_consent FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -646,7 +646,7 @@ async fn list_returns_registered_clients() {
     fx.state
         .auth_pg
         .execute(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                  skip_consent, created_by, hydra_client_id) \
              VALUES ($1, 'List Client', NULL, NULL, $2, $3, true, $4, $1)",

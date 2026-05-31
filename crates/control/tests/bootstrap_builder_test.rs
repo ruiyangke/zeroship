@@ -57,7 +57,7 @@ async fn pg(db_url: &str) -> Client {
 
 async fn cleanup_builder_client(pg: &Client) {
     pg.execute(
-        "DELETE FROM control.oauth_clients WHERE client_id = $1",
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&BUILDER_CLIENT_ID],
     )
     .await
@@ -227,7 +227,7 @@ async fn mock_update_client(
 async fn count_builder_rows(pg: &Client) -> i64 {
     let rows = pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&BUILDER_CLIENT_ID],
         )
         .await
@@ -261,7 +261,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
     let rows = pg
         .query(
             "SELECT client_name, redirect_uris, scopes, skip_consent, created_by, hydra_client_id \
-             FROM control.oauth_clients WHERE client_id = $1",
+             FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&BUILDER_CLIENT_ID],
         )
         .await

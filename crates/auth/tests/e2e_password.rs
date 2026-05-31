@@ -150,15 +150,15 @@ async fn e2e_password_flow() {
         .expect("create test client");
 
     // In production the control plane creates an OAuth RP in BOTH hydra and
-    // `control.oauth_clients`; the consent flow records the granted scopes in
-    // `control.oauth_grants`, whose `client_id` FK references
-    // `control.oauth_clients`. This test registers the client only with hydra
+    // `zeroship.oauth_clients`; the consent flow records the granted scopes in
+    // `zeroship.oauth_grants`, whose `client_id` FK references
+    // `zeroship.oauth_clients`. This test registers the client only with hydra
     // (above), so we must mirror the control-plane row here — otherwise the
     // skip-consent silent-accept upsert fails the FK and the consent handler
     // renders an error page (200) instead of redirecting (302).
     pg_client
         .execute(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                  (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
              VALUES ($1, $2, $3, $4, TRUE, $1) \
              ON CONFLICT (client_id) DO NOTHING",
@@ -170,7 +170,7 @@ async fn e2e_password_flow() {
             ],
         )
         .await
-        .expect("seed control.oauth_clients for consent grant FK");
+        .expect("seed zeroship.oauth_clients for consent grant FK");
 
     // Cleanup guard via scope-exit: hydra client + user row removal at end.
     // We do this inline (after the assertions) rather than via a Drop guard
@@ -449,8 +449,8 @@ async fn e2e_password_flow() {
     );
 
     // 15. Cleanup — delete client + delete user row + revoke session.
-    //     Deleting the user cascades to control.oauth_grants (user_id FK);
-    //     we then drop the seeded control.oauth_clients row.
+    //     Deleting the user cascades to zeroship.oauth_grants (user_id FK);
+    //     we then drop the seeded zeroship.oauth_clients row.
     admin
         .delete_client(&test_client_id)
         .await
@@ -458,7 +458,7 @@ async fn e2e_password_flow() {
     cleanup_user(&pg_client, &email).await;
     let _ = pg_client
         .execute(
-            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&test_client_id],
         )
         .await;

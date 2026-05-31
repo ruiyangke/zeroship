@@ -158,7 +158,7 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -168,25 +168,25 @@ impl Fixture {
                 .state
                 .auth_pg
                 .execute(
-                    "DELETE FROM control.app_members WHERE app_id = $1 OR user_id = $2",
+                    "DELETE FROM zeroship.app_members WHERE app_id = $1 OR user_id = $2",
                     &[&app_id_text, &self.user_id],
                 )
                 .await;
             let _ = self
                 .state
                 .auth_pg
-                .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
                 .await;
         }
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
@@ -265,7 +265,7 @@ async fn insert_user(state: &AppState, user_id: Uuid, label: &str) {
     state
         .auth_pg
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
             &[&user_id, &email, &label],
         )
@@ -277,7 +277,7 @@ async fn grant_platform_role(state: &AppState, user_id: Uuid, role: &str) {
     state
         .auth_pg
         .execute(
-            "INSERT INTO platform.roles (user_id, role, granted_by) VALUES ($1, $2, $1)",
+            "INSERT INTO zeroship.roles (user_id, role, granted_by) VALUES ($1, $2, $1)",
             &[&user_id, &role],
         )
         .await
@@ -301,7 +301,7 @@ async fn grant_app_member(state: &AppState, app_id: Uuid, user_id: Uuid, role: &
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
             &[&app_id, &user_id, &role],
         )
         .await
@@ -382,7 +382,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         .auth_pg
         .query(
             "SELECT request_id \
-             FROM control.authz_decisions \
+             FROM zeroship.authz_decisions \
              WHERE user_id = $1 AND action = 'apps:read' \
              ORDER BY occurred_at DESC \
              LIMIT 1",

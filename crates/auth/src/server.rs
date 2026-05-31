@@ -113,14 +113,14 @@ pub fn configure(
             )
             // Email verification (P5-U5). Token issued at /signup lands on
             // GET /verify, then POST /verify/redeem consumes it and sets
-            // auth.users.email_verified_at = NOW().
+            // zeroship.users.email_verified_at = NOW().
             .service(web::resource("/verify").route(web::get().to(ui::verify::get)))
             .service(
                 web::resource("/verify/redeem").route(web::post().to(ui::verify::post_redeem)),
             )
             // Password reset (P5-U6). /forgot issues a 1h reset token
             // (enumeration-resistant); /reset redeems it and updates
-            // auth.users.password_hash.
+            // zeroship.users.password_hash.
             .service(
                 web::resource("/forgot")
                     .route(web::get().to(ui::forgot::get))

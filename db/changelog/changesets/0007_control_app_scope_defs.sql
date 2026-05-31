@@ -1,6 +1,6 @@
 --liquibase formatted sql
 
--- control.app_scope_defs — declared-scope registry (auth-sdk Slice 3, spec
+-- zeroship.app_scope_defs — declared-scope registry (auth-sdk Slice 3, spec
 -- §5.1 / §8.1).
 --
 -- Each hosted creator app declares its CUSTOM end-user OAuth scopes in its
@@ -15,15 +15,15 @@
 -- platform-delegated). The consent screen renders each declared scope with its
 -- label + description from this table.
 --
--- FK order: control.apps already exists (0004_control.sql), so this 0007
+-- FK order: zeroship.apps already exists (0004_control.sql), so this 0007
 -- runs cleanly after it.
 
 --changeset zeroship:control-app-scope-defs splitStatements:true
-CREATE TABLE control.app_scope_defs (
-    app_id       UUID NOT NULL REFERENCES control.apps(id) ON DELETE CASCADE,
+CREATE TABLE zeroship.app_scope_defs (
+    app_id       UUID NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
     scope_id     TEXT NOT NULL,
     label        TEXT NOT NULL,
     description  TEXT,
     PRIMARY KEY (app_id, scope_id)
 );
---rollback DROP TABLE control.app_scope_defs;
+--rollback DROP TABLE zeroship.app_scope_defs;

@@ -516,7 +516,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     let app = test::init_service(browser_app!(state.clone())).await;
 
     // Seed the GLOBAL user first — app_session_anchors.global_user_id has a
-    // FK to auth.users(id) (ON DELETE CASCADE).
+    // FK to zeroship.users(id) (ON DELETE CASCADE).
     let global_user_id = Uuid::new_v4();
     seed_user(&dsn, global_user_id).await;
 
@@ -603,7 +603,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
 
         // cleanup the marker.
         conn.execute(
-            "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
             &[&CLIENT_ID, &pws_sub],
         )
         .await
@@ -622,7 +622,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
-/// Seed the GLOBAL user row the anchor FK requires (`auth.users(id)`).
+/// Seed the GLOBAL user row the anchor FK requires (`zeroship.users(id)`).
 async fn seed_user(dsn: &str, user_id: Uuid) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
@@ -634,7 +634,7 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
     let email = format!("signout-{}@zeroship.test", user_id.simple());
     client
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
             &[&user_id, &email, &"Signout Test"],
         )
@@ -653,12 +653,12 @@ async fn cleanup_user(dsn: &str, user_id: Uuid) {
     .detach();
     let _ = client
         .execute(
-            "DELETE FROM auth.app_session_anchors WHERE global_user_id = $1",
+            "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
 }
 

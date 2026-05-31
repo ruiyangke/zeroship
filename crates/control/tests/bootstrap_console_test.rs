@@ -296,11 +296,11 @@ async fn cleanup(control: &Client, host: &str) {
     // Deleting the apps row cascades app_oauth_clients / app_secrets /
     // app_env_expose / app_scope_defs.
     let _ = control
-        .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
         .await;
     let _ = control
         .execute(
-            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await;
@@ -386,7 +386,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     // (1) control.apps row on the enterprise plan, with deploy_hash + manifest.
     let apps = control_pg
         .query(
-            "SELECT name, plan_id, deploy_hash, manifest_json FROM control.apps WHERE id = $1",
+            "SELECT name, plan_id, deploy_hash, manifest_json FROM zeroship.apps WHERE id = $1",
             &[&app_id],
         )
         .await
@@ -407,7 +407,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     //     console host (NOT a derived {name}.{base}).
     let ext = control_pg
         .query(
-            "SELECT client_id, sector_identifier FROM control.app_oauth_clients WHERE app_id = $1",
+            "SELECT client_id, sector_identifier FROM zeroship.app_oauth_clients WHERE app_id = $1",
             &[&app_id],
         )
         .await
@@ -423,7 +423,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     // skip), and the redirect_uris anchor on the console host.
     let oc = control_pg
         .query(
-            "SELECT skip_consent, redirect_uris FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT skip_consent, redirect_uris FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -474,20 +474,20 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     let console_user_email = format!("console-service@{host}");
     let svc_users = auth_pg
         .query(
-            "SELECT id FROM auth.users WHERE email = $1",
+            "SELECT id FROM zeroship.users WHERE email = $1",
             &[&console_user_email],
         )
         .await
         .expect("query service users");
     assert!(
         svc_users.is_empty(),
-        "pure creator console seeds NO service principal (auth.users) — found {} row(s)",
+        "pure creator console seeds NO service principal (zeroship.users) — found {} row(s)",
         svc_users.len()
     );
     let n_pat: i64 = auth_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.permission_tokens pt \
-             JOIN auth.users u ON u.id = pt.owner_id \
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.permission_tokens pt \
+             JOIN zeroship.users u ON u.id = pt.owner_id \
              WHERE u.email = $1",
             &[&console_user_email],
         )
@@ -638,14 +638,14 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
 
     // Exactly one of each row — no duplicates.
     let n_apps: i64 = control_pg
-        .query("SELECT COUNT(*)::BIGINT AS n FROM control.apps WHERE id = $1", &[&app_id])
+        .query("SELECT COUNT(*)::BIGINT AS n FROM zeroship.apps WHERE id = $1", &[&app_id])
         .await
         .expect("count apps")[0]
         .get("n");
     assert_eq!(n_apps, 1, "no duplicate apps row");
     let n_ext: i64 = control_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.app_oauth_clients WHERE app_id = $1",
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_oauth_clients WHERE app_id = $1",
             &[&app_id],
         )
         .await
@@ -655,8 +655,8 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     // Still no PAT and no service-token secret after the re-run.
     let n_pat: i64 = auth_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.permission_tokens pt \
-             JOIN auth.users u ON u.id = pt.owner_id \
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.permission_tokens pt \
+             JOIN zeroship.users u ON u.id = pt.owner_id \
              WHERE u.email = $1",
             &[&console_user_email],
         )
@@ -666,7 +666,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     assert_eq!(n_pat, 0, "still no console PAT row after re-run");
     let n_secret: i64 = control_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_secrets WHERE app_id = $1 AND key_name = $2",
             &[&app_id, &SERVICE_TOKEN_ENV_KEY],
         )
         .await
@@ -681,7 +681,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     for key in ["OPENAI_API_KEY", "SANDBOX_TOKEN"] {
         let n: i64 = control_pg
             .query(
-                "SELECT COUNT(*)::BIGINT AS n FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
+                "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_secrets WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key],
             )
             .await

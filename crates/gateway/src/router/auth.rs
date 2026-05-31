@@ -503,7 +503,7 @@ enum PairwiseProjection {
 
 /// Derive the per-app pairwise `pws_…` for `global_user_id` under the
 /// route's `sector_identifier`, and idempotently UPSERT the mapping into
-/// `auth.app_user_identities` so support tooling / the relay handler /
+/// `zeroship.app_user_identities` so support tooling / the relay handler /
 /// revocation can reverse `pws_ → (app, global_user)` (§6.2/§6.3).
 ///
 /// Fail-closed contract: returns [`PairwiseProjection::Unprovisioned`]
@@ -773,7 +773,7 @@ async fn resolve_dpop_user_header(
 
     // 6d. Cross-node PER-APP family-marker revocation (spec §8.5), the SAME
     //     check the raw-Hydra Bearer arm runs. Hydra `active: true` (step 6b)
-    //     only reflects GLOBAL revocation; the per-app `auth.token_revocations`
+    //     only reflects GLOBAL revocation; the per-app `zeroship.token_revocations`
     //     marker is keyed on `(client_id, pws_)` — the SAME key the WRITERS
     //     (/signout + control's disconnect-app cascade) use — so revoking a
     //     user on app A must also reject their DPoP-bound opaque token on app
@@ -910,7 +910,7 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// missing client and yields `Invalid`.
 ///
 /// **Revocation** is the spec §8.5 PER-APP family marker
-/// (`auth.token_revocations`, keyed on `(client_id, sub)` with `sub` as
+/// (`zeroship.token_revocations`, keyed on `(client_id, sub)` with `sub` as
 /// TEXT). The arm rejects a token when a row exists for its
 /// `(client_id, pws_)` with `revoked_after > token.iat`; `sub` being TEXT
 /// is what lets the per-app `pws_…` subject be matched (the UUID-only
@@ -986,7 +986,7 @@ async fn resolve_bearer_user_header(
         }
         // Project the per-app pairwise `pws_` FIRST (§6.2), then key the
         // revocation check on it — the marker WRITERS (/signout + control's
-        // disconnect-app cascade) key `auth.token_revocations` on
+        // disconnect-app cascade) key `zeroship.token_revocations` on
         // `(client_id, pws_)`, NOT the global Hydra UUID, so the reader MUST
         // agree (Batch A fix 3). Pre-fix this arm keyed the lookup on the
         // global `claims.sub` while the writer keyed on `pws_`, so a real
@@ -2579,7 +2579,7 @@ mod tests {
 
     /// Same as [`build_state_for_introspection`] but with a `db` so the
     /// introspection arm's per-app family-marker revocation check runs
-    /// against a live `auth.token_revocations` (mirrors the Bearer arm's
+    /// against a live `zeroship.token_revocations` (mirrors the Bearer arm's
     /// `build_state_with_session_and_oidc_and_db`). PG-gated tests pass
     /// `Some(db)`; the others keep `None` (pairwise stays a pure HMAC). The
     /// session-cookie issuer/verifier are built from the gateway key; the DPoP
@@ -2817,7 +2817,7 @@ mod tests {
         //      regression that dropped the client_id (made 6d global) would
         //      let arm 2 fail (app B wrongly rejected).
         //
-        // PG-gated: needs a live `auth.token_revocations` (skip when
+        // PG-gated: needs a live `zeroship.token_revocations` (skip when
         // AUTH_DB_URL is unset), exactly like the Bearer revocation tests.
         let Some(db) = connect_auth_db().await else {
             eprintln!("skipping (no AUTH_DB_URL)");
@@ -2948,7 +2948,7 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool checkout");
         conn.execute(
-            "DELETE FROM auth.token_revocations WHERE sub = ANY($1)",
+            "DELETE FROM zeroship.token_revocations WHERE sub = ANY($1)",
             &[&vec![pws_a, pws_b]],
         )
         .await
@@ -3078,7 +3078,7 @@ mod tests {
 
     // ─── Per-app family-marker revocation (§8.5, major regressions) ───────
     //
-    // PG-gated: these need a live `auth` schema with `auth.token_revocations`
+    // PG-gated: these need a live `auth` schema with `zeroship.token_revocations`
     // (skip when AUTH_DB_URL is unset, mirroring the DPoP revocation test).
     // They cover the MAJOR finding that revocation is PER-APP — revoking a
     // user on app A does NOT revoke the same sub on app B — keyed on the
@@ -3194,7 +3194,7 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool checkout");
         conn.execute(
-            "DELETE FROM auth.token_revocations WHERE sub = ANY($1)",
+            "DELETE FROM zeroship.token_revocations WHERE sub = ANY($1)",
             &[&vec![pws_a, pws_b]],
         )
         .await
@@ -4083,7 +4083,7 @@ mod tests {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
             conn.execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
             )
             .await
@@ -4188,7 +4188,7 @@ mod tests {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
             conn.execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
             )
             .await
@@ -4231,7 +4231,7 @@ mod tests {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
             conn.execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
             )
             .await
@@ -4296,7 +4296,7 @@ mod tests {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
             conn.execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
             )
             .await
@@ -4370,7 +4370,7 @@ mod tests {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
             conn.execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
             )
             .await
@@ -4637,7 +4637,7 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool get");
         conn.execute(
-            "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
             &[&client_id, &pws_sub],
         )
         .await

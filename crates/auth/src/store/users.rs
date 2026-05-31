@@ -1,4 +1,4 @@
-//! `auth.users` CRUD.
+//! `zeroship.users` CRUD.
 
 use compio_postgres::{Client, GenericClient};
 
@@ -27,7 +27,7 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
         .query(
             "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
                     credential_version, locked_until, disabled_at \
-             FROM auth.users WHERE email = $1",
+             FROM zeroship.users WHERE email = $1",
             &[&email],
         )
         .await
@@ -35,7 +35,7 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
     Ok(rows.first().map(row_to_user))
 }
 
-/// Look up a user by their primary key (`auth.users.id`).
+/// Look up a user by their primary key (`zeroship.users.id`).
 ///
 /// The argument is the UUID rendered as a hyphenated string — that's the
 /// shape `accept_login` stamps into the hydra session as `subject`, and
@@ -57,7 +57,7 @@ pub async fn find_by_id(conn: &Client, id: &str) -> Result<Option<UserRow>> {
         .query(
             "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
                     credential_version, locked_until, disabled_at \
-             FROM auth.users WHERE id = $1",
+             FROM zeroship.users WHERE id = $1",
             &[&uuid],
         )
         .await
@@ -78,7 +78,7 @@ pub async fn create(
 ) -> Result<UserRow> {
     let rows = conn
         .query(
-            "INSERT INTO auth.users (email, name, password_hash) \
+            "INSERT INTO zeroship.users (email, name, password_hash) \
              VALUES ($1, $2, $3) \
              RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, \
                        credential_version, locked_until, disabled_at",
@@ -99,7 +99,7 @@ pub async fn create(
     Ok(row_to_user(row))
 }
 
-/// Replace `auth.users.password_hash` with a fresh PHC string (Argon2id).
+/// Replace `zeroship.users.password_hash` with a fresh PHC string (Argon2id).
 /// Used by the password-reset flow (P5-U6) to set a new credential after
 /// a valid reset-token redeem.
 ///
@@ -112,7 +112,7 @@ pub async fn update_password_hash(
     phc: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE auth.users \
+        "UPDATE zeroship.users \
          SET password_hash = $1, \
              credential_version = credential_version + 1, \
              updated_at = NOW() \
@@ -131,7 +131,7 @@ pub async fn update_password_hash(
 /// Returns `AuthError::Db` on PG failure.
 pub async fn touch_last_login(conn: &Client, id: uuid::Uuid) -> Result<()> {
     conn.execute(
-        "UPDATE auth.users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
+        "UPDATE zeroship.users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
         &[&id],
     )
     .await

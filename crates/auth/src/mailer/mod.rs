@@ -4,7 +4,7 @@
 //!
 //! Every `Mailer::send` MUST call [`check_suppression`] before transport and
 //! return [`MailerError::Suppressed`] if the recipient is in
-//! `auth.email_suppressions`. This is enforced by every driver in this module
+//! `zeroship.email_suppressions`. This is enforced by every driver in this module
 //! (stdout/smtp/resend) — never call the underlying transport directly.
 //!
 //! The `db: &Client` argument on `send` is what makes that contract
@@ -51,7 +51,7 @@ impl std::fmt::Debug for RelayForwardMailer {
 }
 
 /// Outbound email transport. Implementations MUST check
-/// `auth.email_suppressions` before transport (via [`check_suppression`]) and
+/// `zeroship.email_suppressions` before transport (via [`check_suppression`]) and
 /// return [`MailerError::Suppressed`] for suppressed recipients.
 #[async_trait]
 pub trait Mailer: Send + Sync + std::fmt::Debug {
@@ -62,7 +62,7 @@ pub trait Mailer: Send + Sync + std::fmt::Debug {
 ///
 /// # Errors
 ///
-/// - [`MailerError::Suppressed`] if `email` is in `auth.email_suppressions`.
+/// - [`MailerError::Suppressed`] if `email` is in `zeroship.email_suppressions`.
 /// - [`MailerError::Transport`] if the suppression query itself fails (DB
 ///   error). We wrap as `Transport` because suppression-check failure is a
 ///   transport-layer fault from the caller's point of view — the message

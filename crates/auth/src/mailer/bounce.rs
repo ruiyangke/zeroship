@@ -63,7 +63,7 @@ pub struct ComplaintEvent {
 /// Soft bounces (`SoftBounce`, `Transient`, `DnsError`, etc.) are
 /// recoverable — we log them but do NOT suppress. Permanent bounces
 /// (hard bounce, bad address, blocked, manual unsubscribe) are added to
-/// `auth.email_suppressions`.
+/// `zeroship.email_suppressions`.
 ///
 /// Reference: <https://postmarkapp.com/developer/api/bounce-api#bounce-types>
 #[must_use]

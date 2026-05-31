@@ -97,7 +97,7 @@ async fn auth_login_throughput() {
     for i in 0..N {
         let email = format!("loadtest-{i}-{}@zeroship.test", Uuid::new_v4().simple());
         pg.execute(
-            "INSERT INTO auth.users (email, name, password_hash, email_verified_at) \
+            "INSERT INTO zeroship.users (email, name, password_hash, email_verified_at) \
              VALUES ($1::citext, $2, $3, NOW())",
             &[&email.as_str(), &"Load Test", &phc.as_str()],
         )
@@ -110,7 +110,7 @@ async fn auth_login_throughput() {
     //    don't bleed in. Best-effort — the schema is pre-applied by
     //    Liquibase before the test connects, so the table exists.
     pg.execute(
-        "DELETE FROM auth.rate_limits WHERE bucket_key LIKE 'login:%'",
+        "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE 'login:%'",
         &[],
     )
     .await
@@ -215,21 +215,21 @@ async fn auth_login_throughput() {
     for email in &emails {
         let _ = pg
             .execute(
-                "DELETE FROM auth.sessions WHERE user_id IN \
-                 (SELECT id FROM auth.users WHERE email = $1::citext)",
+                "DELETE FROM zeroship.sessions WHERE user_id IN \
+                 (SELECT id FROM zeroship.users WHERE email = $1::citext)",
                 &[&email.as_str()],
             )
             .await;
         let _ = pg
             .execute(
-                "DELETE FROM auth.users WHERE email = $1::citext",
+                "DELETE FROM zeroship.users WHERE email = $1::citext",
                 &[&email.as_str()],
             )
             .await;
     }
     let _ = pg
         .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE 'login:%'",
+            "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE 'login:%'",
             &[],
         )
         .await;

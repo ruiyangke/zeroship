@@ -637,7 +637,7 @@ fn main() -> std::io::Result<()> {
     let stash_signing_key_bytes = stash_signing_key.into_bytes();
 
     // auth-sdk Slice 1b-anchors — AES-256-GCM key for the server-held refresh
-    // family at rest in `auth.app_session_anchors.refresh_token_enc` (§8.1).
+    // family at rest in `zeroship.app_session_anchors.refresh_token_enc` (§8.1).
     // Derived from the (server-only) stash signing key via
     // `core::crypto::derive_key` so no new CLI flag is needed and the
     // refresh family never sits in PG in plaintext. Domain-separated by the

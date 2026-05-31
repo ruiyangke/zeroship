@@ -7,10 +7,10 @@
 //! retired (deleted from JWKS).
 //!
 //! Single source of truth for "when did we last rotate set X" is the
-//! `auth.cron_state` row keyed by the set name. Per-key retirement age
-//! lives in `auth.jwk_key_state`, keyed by `(set_name, kid)`.
+//! `zeroship.cron_state` row keyed by the set name. Per-key retirement age
+//! lives in `zeroship.jwk_key_state`, keyed by `(set_name, kid)`.
 //!
-//! Companion: [`super::audit_retention`] sweeps `auth.audit_events` on a
+//! Companion: [`super::audit_retention`] sweeps `zeroship.audit_events` on a
 //! separate ticker (different cadence, different table — kept in their
 //! own modules so a JWK-rotation incident never blocks log retention
 //! and vice versa).
@@ -120,12 +120,12 @@ async fn process_set(
 }
 
 /// Returns the days since the set was last rotated, or `None` if we
-/// have no `auth.cron_state` record for it.
+/// have no `zeroship.cron_state` record for it.
 async fn days_since_rotation(db: &Client, set: &str) -> Result<Option<i64>> {
     let rows = db
         .query(
             "SELECT EXTRACT(EPOCH FROM (NOW() - last_rotated_at))::DOUBLE PRECISION AS secs \
-             FROM auth.cron_state WHERE key = $1",
+             FROM zeroship.cron_state WHERE key = $1",
             &[&set],
         )
         .await
@@ -138,13 +138,13 @@ async fn days_since_rotation(db: &Client, set: &str) -> Result<Option<i64>> {
     }))
 }
 
-/// Upsert `auth.cron_state[set] = NOW()`. Called when we rotate (so the
+/// Upsert `zeroship.cron_state[set] = NOW()`. Called when we rotate (so the
 /// next rotation is one interval out) and when we first observe a set
 /// (to plant a baseline so we don't immediately rotate freshly-bootstrapped
 /// keys).
 async fn record_rotated_now(db: &Client, set: &str) -> Result<()> {
     db.execute(
-        "INSERT INTO auth.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
+        "INSERT INTO zeroship.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
          ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW()",
         &[&set],
     )
@@ -155,7 +155,7 @@ async fn record_rotated_now(db: &Client, set: &str) -> Result<()> {
 
 async fn record_key_created_now(db: &Client, set: &str, kid: &str) -> Result<()> {
     db.execute(
-        "INSERT INTO auth.jwk_key_state (set_name, kid, created_at)
+        "INSERT INTO zeroship.jwk_key_state (set_name, kid, created_at)
          VALUES ($1, $2, NOW())
          ON CONFLICT (set_name, kid) DO UPDATE SET created_at = NOW()",
         &[&set, &kid],
@@ -168,7 +168,7 @@ async fn record_key_created_now(db: &Client, set: &str, kid: &str) -> Result<()>
 async fn sync_tracked_keys(admin: &HydraAdmin, db: &Client, set: &str) -> Result<()> {
     let Some(jwks) = admin.get_jwks(set).await? else {
         db.execute(
-            "DELETE FROM auth.jwk_key_state WHERE set_name = $1",
+            "DELETE FROM zeroship.jwk_key_state WHERE set_name = $1",
             &[&set],
         )
         .await
@@ -185,12 +185,12 @@ async fn sync_tracked_keys(admin: &HydraAdmin, db: &Client, set: &str) -> Result
 
     for kid in &kids {
         db.execute(
-            "INSERT INTO auth.jwk_key_state (set_name, kid, created_at)
+            "INSERT INTO zeroship.jwk_key_state (set_name, kid, created_at)
              VALUES (
                 $1,
                 $2,
                 COALESCE(
-                    (SELECT last_rotated_at FROM auth.cron_state WHERE key = $1),
+                    (SELECT last_rotated_at FROM zeroship.cron_state WHERE key = $1),
                     NOW()
                 )
              )
@@ -203,7 +203,7 @@ async fn sync_tracked_keys(admin: &HydraAdmin, db: &Client, set: &str) -> Result
 
     if kids.is_empty() {
         db.execute(
-            "DELETE FROM auth.jwk_key_state WHERE set_name = $1",
+            "DELETE FROM zeroship.jwk_key_state WHERE set_name = $1",
             &[&set],
         )
         .await
@@ -211,7 +211,7 @@ async fn sync_tracked_keys(admin: &HydraAdmin, db: &Client, set: &str) -> Result
     } else {
         let kid_refs: Vec<&str> = kids.iter().map(String::as_str).collect();
         db.execute(
-            "DELETE FROM auth.jwk_key_state
+            "DELETE FROM zeroship.jwk_key_state
              WHERE set_name = $1 AND NOT (kid = ANY($2))",
             &[&set, &kid_refs],
         )
@@ -295,7 +295,7 @@ async fn retire_stale_keys(
     let rows = db
         .query(
             "SELECT kid
-             FROM auth.jwk_key_state
+             FROM zeroship.jwk_key_state
              WHERE set_name = $1
                AND created_at <= NOW() - ($2::text || ' days')::interval
              ORDER BY created_at ASC
@@ -310,7 +310,7 @@ async fn retire_stale_keys(
         match admin.delete_jwk(set, &kid).await {
             Ok(()) => {
                 db.execute(
-                    "DELETE FROM auth.jwk_key_state WHERE set_name = $1 AND kid = $2",
+                    "DELETE FROM zeroship.jwk_key_state WHERE set_name = $1 AND kid = $2",
                     &[&set, &kid],
                 )
                 .await

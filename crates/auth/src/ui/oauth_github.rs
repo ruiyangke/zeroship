@@ -488,7 +488,7 @@ mod tests {
     fn name_falls_back_to_login_when_absent() {
         // GitHub `/user` returns `name: null` when the user hasn't set
         // a display name. We carry the login as a sensible default so
-        // `auth.users.name` never lands as an empty string.
+        // `zeroship.users.name` never lands as an empty string.
         let g = id("alice@example.com", None);
         let p = build_resolved_profile(&g, None);
         assert_eq!(p.name, Some("alice"));

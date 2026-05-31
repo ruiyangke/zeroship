@@ -43,8 +43,8 @@ pub async fn list_grants(
         .query(
             "SELECT g.client_id, c.client_name, c.client_uri, c.logo_uri, \
                     g.granted_scopes, g.granted_at, g.last_used_at \
-             FROM control.oauth_grants g \
-             JOIN control.oauth_clients c ON c.client_id = g.client_id \
+             FROM zeroship.oauth_grants g \
+             JOIN zeroship.oauth_clients c ON c.client_id = g.client_id \
              WHERE g.user_id = $1 \
              ORDER BY g.granted_at DESC",
             &[&authz.principal_id],

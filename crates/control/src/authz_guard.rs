@@ -123,7 +123,7 @@ async fn guard_from_bearer(
     let rows = state
         .auth_pg
         .query(
-            "SELECT owner_id FROM control.permission_tokens \
+            "SELECT owner_id FROM zeroship.permission_tokens \
              WHERE id = $1 \
                AND owner_id = $2 \
                AND policy_hash = $3 \
@@ -145,7 +145,7 @@ async fn guard_from_bearer(
     if let Err(err) = state
         .auth_pg
         .execute(
-            "UPDATE control.permission_tokens SET last_used_at = NOW() WHERE id = $1",
+            "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
             &[&token_id],
         )
         .await

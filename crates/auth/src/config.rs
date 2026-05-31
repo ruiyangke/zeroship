@@ -370,7 +370,7 @@ pub struct AuthConfig {
     pub postmark_webhook_password: Option<String>,
 
     // ─── Cron (P6-U1: jwk_rotation; future units add audit retention) ───
-    /// Days between JWK rotations. Once a set's `auth.cron_state` row is
+    /// Days between JWK rotations. Once a set's `zeroship.cron_state` row is
     /// older than this, the next cron tick prepends fresh keys and they
     /// become the active signers (hydra signs with the head of the
     /// list). 90 days mirrors the OIDC operator handbook default.

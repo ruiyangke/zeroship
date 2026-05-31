@@ -3,7 +3,7 @@
 //! Per proposal §8.3 (Phase 5):
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
-//!   in `auth.magic_links` keyed by `(email, purpose='reset')`. Returns
+//!   in `zeroship.magic_links` keyed by `(email, purpose='reset')`. Returns
 //!   the raw token to the caller, which embeds it in the `/reset?token=`
 //!   email link.
 //!
@@ -28,7 +28,7 @@
 //!   magic-link primitive enforces its own per-email superseding for
 //!   `'login'` rows).
 //!
-//! Reuses [`auth.magic_links`] with `purpose='reset'` rather than
+//! Reuses [`zeroship.magic_links`] with `purpose='reset'` rather than
 //! introducing yet another single-use-token table — the shape is
 //! identical (`token_hash`, email, purpose, expiry, `consumed_at`). The
 //! `csrf_nonce` column is required by the table schema but unused for
@@ -47,7 +47,7 @@ pub const TTL_MINUTES: i64 = 60;
 /// Number of CSPRNG bytes in the raw token. 256 bits.
 const TOKEN_LEN_BYTES: usize = 32;
 
-/// Distinguishing `purpose` written into `auth.magic_links.purpose`.
+/// Distinguishing `purpose` written into `zeroship.magic_links.purpose`.
 const PURPOSE: &str = "reset";
 
 /// Result of [`issue`] — the raw token the HTTP layer embeds in the
@@ -113,7 +113,7 @@ pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
         //    email. Scoped to `purpose = 'reset'` so a pending magic-link
         //    login on the same address is left alone.
         db.execute(
-            "UPDATE auth.magic_links SET consumed_at = NOW() \
+            "UPDATE zeroship.magic_links SET consumed_at = NOW() \
              WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
             &[&email, &PURPOSE],
         )
@@ -122,7 +122,7 @@ pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
 
         // 3. Insert the new row.
         db.execute(
-            "INSERT INTO auth.magic_links \
+            "INSERT INTO zeroship.magic_links \
                 (token_hash, email, csrf_nonce, purpose, expires_at) \
              VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
             &[
@@ -167,7 +167,7 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
     let token_hash = sha256(raw_token);
     let rows = db
         .query(
-            "UPDATE auth.magic_links SET consumed_at = NOW() \
+            "UPDATE zeroship.magic_links SET consumed_at = NOW() \
              WHERE token_hash = $1 \
                AND purpose = $2 \
                AND consumed_at IS NULL \
@@ -203,20 +203,20 @@ pub async fn complete(
         .query(
             "WITH candidate AS ( \
                  SELECT u.id AS user_id, u.email::text AS email \
-                 FROM auth.magic_links ml \
-                 JOIN auth.users u ON u.email = ml.email \
+                 FROM zeroship.magic_links ml \
+                 JOIN zeroship.users u ON u.email = ml.email \
                  WHERE ml.token_hash = $1 \
                    AND ml.purpose = $2 \
                    AND ml.consumed_at IS NULL \
                    AND ml.expires_at > NOW() \
              ), updated_user AS ( \
-                 UPDATE auth.users u \
+                 UPDATE zeroship.users u \
                  SET password_hash = $3, updated_at = NOW() \
                  FROM candidate c \
                  WHERE u.id = c.user_id \
                  RETURNING u.id, c.email \
              ), consumed AS ( \
-                 UPDATE auth.magic_links ml \
+                 UPDATE zeroship.magic_links ml \
                  SET consumed_at = NOW() \
                  FROM updated_user u \
                  WHERE ml.token_hash = $1 \

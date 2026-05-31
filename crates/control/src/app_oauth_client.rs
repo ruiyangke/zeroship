@@ -665,7 +665,7 @@ async fn upsert_db_rows(
     // == client_id == oac_<base62>. `scopes` mirrors the Hydra allowlist
     // (baseline + declared).
     tx.execute(
-        "INSERT INTO control.oauth_clients \
+        "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id) \
          VALUES ($1, $2, NULL, NULL, $3, $4, FALSE, $5, $1) \
@@ -680,7 +680,7 @@ async fn upsert_db_rows(
 
     // control.app_oauth_clients — the per-app extension (app link + sector).
     tx.execute(
-        "INSERT INTO control.app_oauth_clients \
+        "INSERT INTO zeroship.app_oauth_clients \
             (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3) \
          ON CONFLICT (app_id) DO UPDATE SET \
@@ -696,14 +696,14 @@ async fn upsert_db_rows(
     // scope must remove its row, so the registry exactly tracks the current
     // manifest. Same transaction ⇒ atomic with the allowlist mirror above.
     tx.execute(
-        "DELETE FROM control.app_scope_defs WHERE app_id = $1",
+        "DELETE FROM zeroship.app_scope_defs WHERE app_id = $1",
         &[app_id],
     )
     .await
     .map_err(|e| AppOauthClientError::Db(e.to_string()))?;
     for scope in declared_scopes {
         tx.execute(
-            "INSERT INTO control.app_scope_defs (app_id, scope_id, label, description) \
+            "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
              VALUES ($1, $2, $3, $4)",
             &[app_id, &scope.id, &scope.label, &scope.description],
         )
@@ -727,7 +727,7 @@ async fn update_redirect_uri_mirror(
 ) -> Result<()> {
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
     pg.execute(
-        "UPDATE control.oauth_clients SET redirect_uris = $2 WHERE client_id = $1",
+        "UPDATE zeroship.oauth_clients SET redirect_uris = $2 WHERE client_id = $1",
         &[&client_id, &redirect_uris],
     )
     .await

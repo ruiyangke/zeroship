@@ -18,24 +18,24 @@ impl AdminPat {
         let _ = state
             .auth_pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE token_id = $1 OR user_id = $2",
+                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
         let _ = state
             .auth_pg
             .execute(
-                "DELETE FROM control.permission_tokens WHERE id = $1",
+                "DELETE FROM zeroship.permission_tokens WHERE id = $1",
                 &[&self.token_id],
             )
             .await;
         let _ = state
             .auth_pg
-            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = state
             .auth_pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
@@ -63,7 +63,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
     state
         .auth_pg
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'PAT Test User', NOW())",
             &[&user_id, &email],
         )
@@ -73,7 +73,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
         state
             .auth_pg
             .execute(
-                "INSERT INTO platform.roles (user_id, role, granted_by) \
+                "INSERT INTO zeroship.roles (user_id, role, granted_by) \
                  VALUES ($1, 'admin', $1)",
                 &[&user_id],
             )
@@ -93,7 +93,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
              VALUES ($1, $2, 'pat', 'integration PAT', $3, $4, $5)",
             &[&token_id, &user_id, &policies, &hash, &expires_at],

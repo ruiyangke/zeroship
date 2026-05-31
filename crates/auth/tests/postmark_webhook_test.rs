@@ -134,7 +134,7 @@ async fn postmark_webhook_handles_hard_bounce() {
 
     // Cleanup so the test is re-runnable.
     pg.execute(
-        "DELETE FROM auth.email_suppressions WHERE email = $1::citext",
+        "DELETE FROM zeroship.email_suppressions WHERE email = $1::citext",
         &[&email],
     )
     .await
@@ -299,7 +299,7 @@ async fn postmark_webhook_handles_spam_complaint() {
 
     // Cleanup.
     pg.execute(
-        "DELETE FROM auth.email_suppressions WHERE email = $1::citext",
+        "DELETE FROM zeroship.email_suppressions WHERE email = $1::citext",
         &[&email],
     )
     .await

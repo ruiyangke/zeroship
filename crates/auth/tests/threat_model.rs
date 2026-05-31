@@ -377,7 +377,7 @@ async fn session_id_rotates_post_login_success() {
     .expect("hash ok");
     fx.pg
         .execute(
-            "INSERT INTO auth.users (email, name, password_hash) VALUES ($1::citext, $2, $3)",
+            "INSERT INTO zeroship.users (email, name, password_hash) VALUES ($1::citext, $2, $3)",
             &[&email.as_str(), &"Rotate User", &phc.as_str()],
         )
         .await

@@ -107,7 +107,7 @@ async fn stdout_mailer_refuses_suppressed() {
     // Cleanup so the test is re-runnable.
     client
         .execute(
-            "DELETE FROM auth.email_suppressions WHERE email = $1::citext",
+            "DELETE FROM zeroship.email_suppressions WHERE email = $1::citext",
             &[&suppressed_email],
         )
         .await

@@ -129,7 +129,7 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM control.oauth_grants WHERE client_id = ANY($1)",
+                "DELETE FROM zeroship.oauth_grants WHERE client_id = ANY($1)",
                 &[&ids],
             )
             .await;
@@ -137,7 +137,7 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM control.oauth_clients WHERE client_id = ANY($1)",
+                "DELETE FROM zeroship.oauth_clients WHERE client_id = ANY($1)",
                 &[&ids],
             )
             .await;
@@ -274,7 +274,7 @@ async fn account_pat(state: &AppState, label: &str) -> AccountPat {
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
              VALUES ($1, $2, 'pat', 'integration account PAT', $3, $4, $5)",
             &[&token_id, &user_id, &policies, &hash, &expires_at],
@@ -306,7 +306,7 @@ async fn insert_user(state: &AppState, label: &str) -> Uuid {
     state
         .auth_pg
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
             &[&user_id, &email, &label],
         )
@@ -319,31 +319,31 @@ async fn cleanup_user(state: &AppState, user_id: Uuid) {
     let _ = state
         .auth_pg
         .execute(
-            "DELETE FROM control.authz_decisions WHERE user_id = $1",
+            "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = state
         .auth_pg
         .execute(
-            "DELETE FROM control.permission_tokens WHERE owner_id = $1",
+            "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
             &[&user_id],
         )
         .await;
     let _ = state
         .auth_pg
         .execute(
-            "DELETE FROM control.oauth_grants WHERE user_id = $1",
+            "DELETE FROM zeroship.oauth_grants WHERE user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = state
         .auth_pg
-        .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&user_id])
         .await;
     let _ = state
         .auth_pg
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
 }
 
@@ -354,7 +354,7 @@ async fn insert_client(state: &AppState, client_id: &str, created_by: Uuid) {
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                  skip_consent, created_by, hydra_client_id) \
              VALUES ($1, $2, $3, $4, $5, $6, false, $7, $1)",
@@ -377,7 +377,7 @@ async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: 
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.oauth_grants \
+            "INSERT INTO zeroship.oauth_grants \
                 (user_id, client_id, granted_scopes, granted_at, last_used_at) \
              VALUES ($1, $2, $3, NOW(), NOW())",
             &[&user_id, &client_id, &granted_scopes],
@@ -399,7 +399,7 @@ async fn insert_identity_with_alias(
     state
         .auth_pg
         .execute(
-            "INSERT INTO auth.app_user_identities \
+            "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub, relay_email) \
              VALUES ($1, $2, $3, $4)",
             &[&client_id, &user_id, &pairwise_sub, &relay_email],
@@ -423,7 +423,7 @@ async fn identity_revoked_at_is_set(state: &AppState, client_id: &str, user_id: 
     let rows = state
         .auth_pg
         .query(
-            "SELECT revoked_at FROM auth.app_user_identities \
+            "SELECT revoked_at FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
             &[&client_id, &user_id],
         )
@@ -438,7 +438,7 @@ async fn cleanup_identities(state: &AppState, client_id: &str) {
     let _ = state
         .auth_pg
         .execute(
-            "DELETE FROM auth.app_user_identities WHERE app_client_id = $1",
+            "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
             &[&client_id],
         )
         .await;
@@ -449,7 +449,7 @@ async fn count_grant(state: &AppState, user_id: Uuid, client_id: &str) -> i64 {
         .auth_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
-             FROM control.oauth_grants \
+             FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2",
             &[&user_id, &client_id],
         )
@@ -468,7 +468,7 @@ async fn audit_event_count(
         .auth_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
-             FROM auth.audit_events \
+             FROM zeroship.audit_events \
              WHERE user_id = $1 AND event_type = $2 AND client_id = $3",
             &[&user_id, &event_type, &client_id],
         )
@@ -767,7 +767,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
             &[
                 &app_id,
                 &format!("app-{}", app_id.simple()),
@@ -779,7 +779,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
     state
         .auth_pg
         .execute(
-            "INSERT INTO control.app_oauth_clients (app_id, client_id, sector_identifier) \
+            "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
              VALUES ($1, $2, $3)",
             &[&app_id, &client_id, &sector],
         )
@@ -857,7 +857,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
         .state
         .auth_pg
         .query(
-            "SELECT 1 FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+            "SELECT 1 FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
             &[&client_id, &pws],
         )
         .await
@@ -887,7 +887,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     fx.state
         .auth_pg
         .execute(
-            "DELETE FROM auth.token_revocations WHERE client_id = $1",
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -895,7 +895,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     fx.state
         .auth_pg
         .execute(
-            "DELETE FROM control.app_oauth_clients WHERE client_id = $1",
+            "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -905,7 +905,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // The apps row FKs app_oauth_clients (deleted above) — drop it last.
     fx.state
         .auth_pg
-        .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
         .await
         .ok();
     pat.cleanup(&fx.state).await;
@@ -1021,7 +1021,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         state
             .auth_pg
             .execute(
-                "INSERT INTO control.oauth_grants \
+                "INSERT INTO zeroship.oauth_grants \
                     (user_id, client_id, granted_scopes, granted_at, updated_at) \
                  VALUES ($1, $2, $3, NOW(), NOW()) \
                  ON CONFLICT (user_id, client_id) DO UPDATE \
@@ -1093,7 +1093,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         fx.state
             .auth_pg
             .execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
                 &[&client_id],
             )
             .await
@@ -1103,14 +1103,14 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         fx.state
             .auth_pg
             .execute(
-                "DELETE FROM control.app_oauth_clients WHERE client_id = $1",
+                "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
                 &[&client_id],
             )
             .await
             .ok();
         fx.state
             .auth_pg
-            .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
             .await
             .ok();
     }
@@ -1173,7 +1173,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         fx.state
             .auth_pg
             .execute(
-                "DELETE FROM auth.token_revocations WHERE client_id = $1",
+                "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
                 &[&client_id],
             )
             .await
@@ -1183,14 +1183,14 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         fx.state
             .auth_pg
             .execute(
-                "DELETE FROM control.app_oauth_clients WHERE client_id = $1",
+                "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
                 &[&client_id],
             )
             .await
             .ok();
         fx.state
             .auth_pg
-            .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
+            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
             .await
             .ok();
     }
@@ -1324,7 +1324,7 @@ async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
     locker.execute("BEGIN", &[]).await.expect("locker begin");
     locker
         .execute(
-            "SELECT 1 FROM control.oauth_grants \
+            "SELECT 1 FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2 FOR UPDATE",
             &[&user, &client_id],
         )
@@ -1355,7 +1355,7 @@ async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
     let bystander = compio::time::timeout(
         std::time::Duration::from_secs(5),
         fx.state.auth_pg.execute(
-            "UPDATE auth.app_user_identities SET revoked_at = now() \
+            "UPDATE zeroship.app_user_identities SET revoked_at = now() \
              WHERE app_client_id = $1 AND global_user_id = $2",
             &[&bystander_client, &bystander_user],
         ),

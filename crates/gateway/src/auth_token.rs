@@ -12,10 +12,10 @@
 //! the BFF custody store; the platform is the resource server.
 //!
 //! - **`POST /__zeroship/auth/session`** runs the PKCE code→token exchange on the
-//!   browser's behalf, then: (a) writes a `auth.gateway_sessions` ROW — KEPT as
+//!   browser's behalf, then: (a) writes a `zeroship.gateway_sessions` ROW — KEPT as
 //!   the revocation/audit record + `auth_time`/`amr` source, NO LONGER read on
 //!   the per-request path — AND keeps creating the encrypted server-held
-//!   refresh-family anchor (`auth.app_session_anchors`); (b) ISSUES the signed
+//!   refresh-family anchor (`zeroship.app_session_anchors`); (b) ISSUES the signed
 //!   `__Host-zeroship_app_session` cookie (`zeroship-sess+jwt`, Lax, ~15m) + the
 //!   `__Host-zeroship_app_anchor` cookie (Strict, 30d, reload-recovery) + the
 //!   `zs.<host>.is.authenticated` breadcrumb; (c) returns ONLY
@@ -68,7 +68,7 @@ pub(crate) struct RouteCtx {
     pub(crate) app_name: String,
     /// The app's stable UUID (the `RouteMap` key from `lookup_by_name`). This —
     /// NOT the subdomain slug `app_name` — is the CANONICAL key for the
-    /// `auth.gateway_sessions` + `auth.app_session_anchors` rows, matching the
+    /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows, matching the
     /// live per-request dispatch arm (`router/auth.rs` keys sessions by
     /// `app_id.to_string()`). Keying on the immutable UUID (the slug can be
     /// renamed) is what lets a `/token`-minted cookie validate on the real

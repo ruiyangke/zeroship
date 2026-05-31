@@ -1,14 +1,14 @@
 --liquibase formatted sql
 
--- auth.gateway_sessions.auth_time + amr — the authentication-event recency
+-- zeroship.gateway_sessions.auth_time + amr — the authentication-event recency
 -- (auth_time) and the authentication-methods array (amr) carried on the
 -- per-origin cookie session (auth-bff-session-redesign §2.2 step 5b / §5.3).
 --
 -- The BFF redesign holds NO JWT in the browser: the SPA learns identity via
 -- the { user, expires_at, auth_time, amr } projection from
 -- GET /__zs/auth/session, and the step-up gate needs a fresh auth_time. Both
--- live on auth.users/auth.sessions today (0002_auth.sql) but the gateway
--- cookie path never reads those tables — it reads auth.gateway_sessions. So
+-- live on zeroship.users/zeroship.sessions today (0002_auth.sql) but the gateway
+-- cookie path never reads those tables — it reads zeroship.gateway_sessions. So
 -- the two values must live on the row the gateway path actually loads.
 --
 -- Populated by gateway::sessions::create from the validated id_token claims
@@ -20,7 +20,7 @@
 -- columns.
 
 --changeset zeroship:auth-gateway-sessions-auth-time-amr splitStatements:true
-ALTER TABLE auth.gateway_sessions ADD COLUMN auth_time TIMESTAMPTZ;
-ALTER TABLE auth.gateway_sessions ADD COLUMN amr TEXT[] NOT NULL DEFAULT '{}';
---rollback ALTER TABLE auth.gateway_sessions DROP COLUMN amr;
---rollback ALTER TABLE auth.gateway_sessions DROP COLUMN auth_time;
+ALTER TABLE zeroship.gateway_sessions ADD COLUMN auth_time TIMESTAMPTZ;
+ALTER TABLE zeroship.gateway_sessions ADD COLUMN amr TEXT[] NOT NULL DEFAULT '{}';
+--rollback ALTER TABLE zeroship.gateway_sessions DROP COLUMN amr;
+--rollback ALTER TABLE zeroship.gateway_sessions DROP COLUMN auth_time;

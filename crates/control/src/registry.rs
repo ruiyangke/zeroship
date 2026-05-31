@@ -144,7 +144,7 @@ impl Registry {
         let conn = self.conn().await?;
 
         conn.execute(
-            "INSERT INTO control.apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
             &[&name, &plan_id, &api_key, &key_hash],
         )
         .await?;
@@ -152,7 +152,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps WHERE name = $1",
+                 FROM zeroship.apps WHERE name = $1",
                 &[&name],
             )
             .await?;
@@ -168,7 +168,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps WHERE id = $1",
+                 FROM zeroship.apps WHERE id = $1",
                 &[id],
             )
             .await?;
@@ -181,7 +181,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps WHERE name = $1",
+                 FROM zeroship.apps WHERE name = $1",
                 &[&name],
             )
             .await?;
@@ -194,7 +194,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps ORDER BY name",
+                 FROM zeroship.apps ORDER BY name",
                 &[],
             )
             .await?;
@@ -205,7 +205,7 @@ impl Registry {
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
         let n = conn
-            .execute("DELETE FROM control.apps WHERE id = $1", &[id])
+            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
             .await?;
         Ok(n > 0)
     }
@@ -215,7 +215,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE control.apps SET deploy_hash = $1, \
+                "UPDATE zeroship.apps SET deploy_hash = $1, \
                  updated_at = NOW() WHERE id = $2",
                 &[&hash, id],
             )
@@ -235,7 +235,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE control.apps SET deploy_hash = $1, manifest_json = $2, \
+                "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
                  updated_at = NOW() WHERE id = $3",
                 &[&deploy_hash, &manifest_json, id],
             )
@@ -250,7 +250,7 @@ impl Registry {
     pub async fn get_manifest_json(&self, id: &Uuid) -> Result<Option<String>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT manifest_json FROM control.apps WHERE id = $1", &[id])
+            .query("SELECT manifest_json FROM zeroship.apps WHERE id = $1", &[id])
             .await?;
         Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("manifest_json")))
     }
@@ -260,7 +260,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE control.apps SET plan_id = $1, \
+                "UPDATE zeroship.apps SET plan_id = $1, \
                  updated_at = NOW() WHERE id = $2",
                 &[&plan_id, id],
             )
@@ -282,7 +282,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM control.apps",
+                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM zeroship.apps",
                 &[],
             )
             .await?;
@@ -324,7 +324,7 @@ impl Registry {
     pub(crate) async fn bump_env_version(&self, app_id: Uuid) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "UPDATE control.apps SET env_version = env_version + 1 WHERE id = $1",
+            "UPDATE zeroship.apps SET env_version = env_version + 1 WHERE id = $1",
             &[&app_id],
         )
         .await?;
@@ -347,8 +347,8 @@ impl Registry {
                 "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
                         c.sector_identifier \
-                 FROM control.apps a \
-                 LEFT JOIN control.app_oauth_clients c ON c.app_id = a.id",
+                 FROM zeroship.apps a \
+                 LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id",
                 &[],
             )
             .await?;
@@ -406,7 +406,7 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "INSERT INTO control.usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
              ON CONFLICT (app_id, resource) DO UPDATE SET value = u.value + EXCLUDED.value",
             &[app_id, &resource, &delta],
         )
@@ -422,7 +422,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT resource, value FROM control.usage WHERE app_id = $1",
+                "SELECT resource, value FROM zeroship.usage WHERE app_id = $1",
                 &[app_id],
             )
             .await?;

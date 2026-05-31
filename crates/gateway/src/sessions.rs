@@ -1,5 +1,5 @@
 //! Per-origin app session store. The gateway maintains one row in
-//! `auth.gateway_sessions` per authenticated browser session per hosted app.
+//! `zeroship.gateway_sessions` per authenticated browser session per hosted app.
 //!
 //! Lifecycle:
 //!   - `create(...)` after successful OIDC callback exchange
@@ -28,7 +28,7 @@ pub struct AppSession {
     pub email_verified: bool,
     /// OAuth scopes granted to this app for this user at consent (Slice 3,
     /// §1.4). Read off the same row the cookie path already loads, so the
-    /// per-request `ZeroShip-User.scopes` needs no `control.oauth_grants` join.
+    /// per-request `ZeroShip-User.scopes` needs no `zeroship.oauth_grants` join.
     pub granted_scopes: Vec<String>,
     /// The OIDC `auth_time` claim (the authenticating-event instant) carried
     /// onto the cookie session at create (BFF redesign §2.2 step 5b). Surfaced
@@ -56,7 +56,7 @@ pub struct NewSession<'a> {
     pub granted_scopes: &'a [String],
     /// The validated id_token's `auth_time` claim (unix seconds), if present.
     /// Persisted so the SPA projection + step-up gate read it off the gateway
-    /// session row (the gateway path never touches `auth.users`).
+    /// session row (the gateway path never touches `zeroship.users`).
     pub auth_time: Option<i64>,
     /// The validated id_token's `amr` claim (e.g. `["pwd"]`), if present.
     pub amr: &'a [String],
@@ -83,7 +83,7 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
     let amr: Vec<String> = params.amr.to_vec();
     let rows = conn
         .query(
-            "INSERT INTO auth.gateway_sessions \
+            "INSERT INTO zeroship.gateway_sessions \
                 (user_id, app_id, email, name, avatar_url, email_verified, \
                  granted_scopes, auth_time, amr, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, $5, $6, $9, \
@@ -133,7 +133,7 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
 pub async fn validate(conn: &Client, id: Uuid, app_id: &str) -> Result<Option<AppSession>> {
     let rows = conn
         .query(
-            "UPDATE auth.gateway_sessions \
+            "UPDATE zeroship.gateway_sessions \
              SET idle_expires_at = NOW() + ($3::text || ' minutes')::interval \
              WHERE id = $1 \
                AND app_id = $2 \
@@ -159,7 +159,7 @@ pub async fn validate(conn: &Client, id: Uuid, app_id: &str) -> Result<Option<Ap
 /// [`GatewayError::Db`] on PG failure.
 pub async fn revoke(conn: &Client, id: Uuid) -> Result<()> {
     conn.execute(
-        "UPDATE auth.gateway_sessions SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL",
+        "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL",
         &[&id],
     )
     .await
@@ -192,7 +192,7 @@ pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
     })?;
     let affected = conn
         .execute(
-            "UPDATE auth.gateway_sessions SET revoked_at = NOW() \
+            "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() \
              WHERE user_id = $1 AND revoked_at IS NULL",
             &[&user_id],
         )
@@ -228,7 +228,7 @@ pub async fn revoke_app_sessions_for_user(
     })?;
     let affected = conn
         .execute(
-            "UPDATE auth.gateway_sessions SET revoked_at = NOW() \
+            "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() \
              WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL",
             &[&user_id, &app_id],
         )

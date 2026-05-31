@@ -1,6 +1,6 @@
 //! Structured audit-event emission.
 //!
-//! Every event lands in both: PG `auth.audit_events` (for query/retention)
+//! Every event lands in both: PG `zeroship.audit_events` (for query/retention)
 //! and stdout JSON (for SIEM ingestion, per proposal §15).
 
 use compio_postgres::{Client, GenericClient};

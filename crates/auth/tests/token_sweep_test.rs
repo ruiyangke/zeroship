@@ -47,7 +47,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
 
     client
         .execute(
-            "INSERT INTO auth.magic_links \
+            "INSERT INTO zeroship.magic_links \
                 (token_hash, email, csrf_nonce, purpose, expires_at, consumed_at) \
              VALUES \
                 ($1, $2::citext, $3, 'login', NOW() - INTERVAL '10 days', NOW() - INTERVAL '10 days'), \
@@ -72,7 +72,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
 
     client
         .execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES \
                 ($1, '123456', $2::citext, $3, NOW() - INTERVAL '10 days'), \
@@ -90,7 +90,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
 
     client
         .execute(
-            "INSERT INTO auth.email_verifications \
+            "INSERT INTO zeroship.email_verifications \
                 (token_hash, user_id, email, expires_at, consumed_at) \
              VALUES \
                 ($1, $2, $3::citext, NOW() - INTERVAL '10 days', NOW() - INTERVAL '10 days'), \
@@ -143,7 +143,7 @@ fn token_hash(tag: &str, label: &str) -> Vec<u8> {
 async fn count_magic_links(client: &compio_postgres::Client, email: &str) -> i64 {
     client
         .query_one(
-            "SELECT COUNT(*)::bigint AS count FROM auth.magic_links WHERE email = $1::citext",
+            "SELECT COUNT(*)::bigint AS count FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -156,7 +156,7 @@ async fn count_magic_completions(client: &compio_postgres::Client, tag: &str) ->
     client
         .query_one(
             "SELECT COUNT(*)::bigint AS count \
-             FROM auth.magic_completions \
+             FROM zeroship.magic_completions \
              WHERE csrf_nonce LIKE $1",
             &[&pattern],
         )
@@ -169,7 +169,7 @@ async fn count_email_verifications(client: &compio_postgres::Client, user_id: uu
     client
         .query_one(
             "SELECT COUNT(*)::bigint AS count \
-             FROM auth.email_verifications \
+             FROM zeroship.email_verifications \
              WHERE user_id = $1",
             &[&user_id],
         )
@@ -187,27 +187,27 @@ async fn cleanup(
 ) {
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext OR email = $2::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext OR email = $2::citext",
             &[&login_email, &reset_email],
         )
         .await
         .ok();
     client
         .execute(
-            "DELETE FROM auth.magic_completions WHERE csrf_nonce LIKE $1",
+            "DELETE FROM zeroship.magic_completions WHERE csrf_nonce LIKE $1",
             &[&format!("token-sweep-%-{tag}")],
         )
         .await
         .ok();
     client
         .execute(
-            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
             &[&user_id],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await
         .ok();
 }

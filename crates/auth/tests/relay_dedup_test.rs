@@ -79,7 +79,7 @@ async fn transient_503_then_retry_is_not_deduped_away() {
     // cleanup
     let key = format!("relay_seen:{message_id}");
     client
-        .execute("DELETE FROM auth.rate_limits WHERE bucket_key = $1", &[&key])
+        .execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
         .await
         .expect("cleanup");
 }
@@ -103,7 +103,7 @@ async fn commit_is_idempotent_and_probe_tracks_it() {
 
     let key = format!("relay_seen:{message_id}");
     client
-        .execute("DELETE FROM auth.rate_limits WHERE bucket_key = $1", &[&key])
+        .execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
         .await
         .expect("cleanup");
 }

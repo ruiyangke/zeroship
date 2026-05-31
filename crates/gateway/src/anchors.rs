@@ -1,8 +1,8 @@
-//! `auth.app_session_anchors` store + the SDK reload-recovery cookies.
+//! `zeroship.app_session_anchors` store + the SDK reload-recovery cookies.
 //!
 //! The anchor is the DEDICATED, durable reload-recovery credential for the
 //! `@zeroship/auth` browser SDK (Slice 1b-anchors, spec §8.1) — a SEPARATE
-//! store from the 12h/30-min interactive `auth.gateway_sessions`
+//! store from the 12h/30-min interactive `zeroship.gateway_sessions`
 //! (`crate::sessions`). Anchor-specific lifetime semantics:
 //!
 //!   - **No idle window.** A reload-recovery anchor exists precisely to
@@ -53,8 +53,8 @@ pub const ANCHOR_COOKIE_MAX_AGE_SECS: i64 = ANCHOR_ABS_DAYS * 24 * 3600;
 /// DISTINCT from the interactive OIDC `__Host-zeroship_app_session`
 /// (`oidc_rp::APP_SESSION_COOKIE_PROD`). These are TWO different storage
 /// models on the same origin: the interactive flow's cookie is a
-/// `auth.gateway_sessions.id` (SameSite=Lax, 12h); the SDK reload-recovery
-/// anchor is a `auth.app_session_anchors.id` (SameSite=Strict, 30d). Sharing
+/// `zeroship.gateway_sessions.id` (SameSite=Lax, 12h); the SDK reload-recovery
+/// anchor is a `zeroship.app_session_anchors.id` (SameSite=Strict, 30d). Sharing
 /// one name would let a request carrying one be validated against the WRONG
 /// table (MAJOR fix). One cookie name ⇒ exactly one table.
 pub const ANCHOR_COOKIE_PROD: &str = "__Host-zeroship_app_anchor";
@@ -175,7 +175,7 @@ pub async fn create(conn: &Client, params: &NewAnchor<'_>) -> Result<Anchor> {
     let refresh_enc = params.refresh_token_enc.to_vec();
     let rows = conn
         .query(
-            "INSERT INTO auth.app_session_anchors \
+            "INSERT INTO zeroship.app_session_anchors \
                 (app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, \
                  granted_scopes, abs_expires_at) \
              VALUES ($1, $2, $3, $4, $5, $6, \
@@ -215,7 +215,7 @@ pub async fn read_live(conn: &Client, id: Uuid) -> Result<Option<Anchor>> {
         .query(
             "SELECT id, app_id, client_id, global_user_id, refresh_token_enc, \
                     refresh_family_id, granted_scopes, created_at, abs_expires_at \
-             FROM auth.app_session_anchors \
+             FROM zeroship.app_session_anchors \
              WHERE id = $1 AND revoked_at IS NULL AND abs_expires_at > NOW()",
             &[&id],
         )
@@ -240,7 +240,7 @@ pub async fn update_rotated_family(
 ) -> Result<()> {
     let refresh_enc = refresh_token_enc.to_vec();
     conn.execute(
-        "UPDATE auth.app_session_anchors SET \
+        "UPDATE zeroship.app_session_anchors SET \
             refresh_token_enc = $2, \
             refresh_family_id = $3 \
          WHERE id = $1 AND revoked_at IS NULL",
@@ -258,7 +258,7 @@ pub async fn update_rotated_family(
 /// [`GatewayError::Db`] on PG failure.
 pub async fn delete(conn: &Client, id: Uuid) -> Result<()> {
     conn.execute(
-        "DELETE FROM auth.app_session_anchors WHERE id = $1",
+        "DELETE FROM zeroship.app_session_anchors WHERE id = $1",
         &[&id],
     )
     .await
@@ -284,7 +284,7 @@ pub async fn delete_all_for_user(
 ) -> Result<Vec<DeletedFamily>> {
     let rows = conn
         .query(
-            "DELETE FROM auth.app_session_anchors \
+            "DELETE FROM zeroship.app_session_anchors \
              WHERE app_id = $1 AND global_user_id = $2 \
              RETURNING refresh_token_enc, client_id",
             &[&app_id, &global_user_id],

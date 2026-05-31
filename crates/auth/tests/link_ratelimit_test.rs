@@ -186,13 +186,13 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
     }
 
     let like = format!("link_attempt:{}:%", user.id);
-    pg.execute("DELETE FROM auth.rate_limits WHERE bucket_key LIKE $1", &[&like])
+    pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE $1", &[&like])
         .await
         .ok();
-    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
         .await
         .ok();
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

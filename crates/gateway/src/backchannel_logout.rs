@@ -164,7 +164,7 @@ pub async fn handle(
                     // apps.
                     Some(app_name) => {
                         // PER-APP token-family marker (Batch A fix 4): write
-                        // `auth.token_revocations` on the SAME `(client_id,
+                        // `zeroship.token_revocations` on the SAME `(client_id,
                         // pws_)` key the gateway arms read, so the user's live
                         // wrapper / raw-Hydra access token for THIS app dies on
                         // the next request — not just their gateway sessions.
@@ -301,7 +301,7 @@ async fn emit_revocation_audit(
     });
     if let Err(e) = db
         .execute(
-            "INSERT INTO auth.audit_events \
+            "INSERT INTO zeroship.audit_events \
                 (event_type, outcome, client_id, auth_method, detail) \
              VALUES ($1, $2, $3, $4, $5)",
             &[

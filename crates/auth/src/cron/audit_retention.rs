@@ -1,4 +1,4 @@
-//! Hot-retention sweeper for `auth.audit_events`. Drops rows past their
+//! Hot-retention sweeper for `zeroship.audit_events`. Drops rows past their
 //! event-class TTL. Cold-tiering to S3/etc. is post-launch.
 //!
 //! Buckets per proposal §15:
@@ -101,12 +101,12 @@ pub async fn run(db: Arc<Client>, cfg: Arc<AuthConfig>) {
 /// deterministically without sitting on the cron sleep.
 #[doc(hidden)]
 pub async fn tick(db: &Client) -> Result<()> {
-    // `auth.audit_events` is append-only — a BEFORE DELETE trigger rejects any
+    // `zeroship.audit_events` is append-only — a BEFORE DELETE trigger rejects any
     // tampering. This retention sweep is the single sanctioned deleter, so it
     // flags the connection (`zeroship.audit_retention = 'on'`); the trigger
     // permits DELETEs only while that GUC is set. The flag is cleared afterward
     // (in all paths) so nothing else on this connection can delete. See the
-    // `auth.audit_events_block_tamper()` trigger in db/changelog/0002_auth.sql.
+    // `zeroship.audit_events_block_tamper()` trigger in db/changelog/0002_auth.sql.
     db.batch_execute("SET zeroship.audit_retention = 'on'")
         .await
         .map_err(|e| AuthError::Db(format!("audit retention: enable sweep: {e}")))?;
@@ -138,7 +138,7 @@ async fn sweep_all(db: &Client) -> Result<(u64, u64, u64)> {
     Ok((security_deleted, pii_deleted, debug_deleted))
 }
 
-/// Delete `auth.audit_events` rows whose `event_type` is in `event_types`
+/// Delete `zeroship.audit_events` rows whose `event_type` is in `event_types`
 /// and whose `occurred_at` is older than `days` days. Returns the row
 /// count.
 ///
@@ -155,7 +155,7 @@ async fn delete_older_than(db: &Client, event_types: &[&str], days: i64) -> Resu
     let days_str = days.to_string();
     let affected = db
         .execute(
-            "DELETE FROM auth.audit_events \
+            "DELETE FROM zeroship.audit_events \
              WHERE event_type = ANY($1) \
                AND occurred_at < NOW() - ($2::text || ' days')::interval",
             &[&types_owned, &days_str],

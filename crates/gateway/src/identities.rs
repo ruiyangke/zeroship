@@ -1,4 +1,4 @@
-//! `auth.app_user_identities` — the per-app pairwise + relay identity
+//! `zeroship.app_user_identities` — the per-app pairwise + relay identity
 //! mapping (auth-sdk Slice 4, spec §6.2/§6.3/§8.1).
 //!
 //! The gateway derives the per-app pairwise subject
@@ -55,7 +55,7 @@ pub async fn upsert(
     pairwise_sub: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO auth.app_user_identities \
+        "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3) \
          ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET \
@@ -81,7 +81,7 @@ pub async fn lookup_pairwise_sub(
 ) -> Result<Option<String>> {
     let rows = conn
         .query(
-            "SELECT pairwise_sub FROM auth.app_user_identities \
+            "SELECT pairwise_sub FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
             &[&app_client_id, &global_user_id],
         )
@@ -113,7 +113,7 @@ pub async fn lookup_relay_email(
 ) -> Result<Option<String>> {
     let rows = conn
         .query(
-            "SELECT relay_email FROM auth.app_user_identities \
+            "SELECT relay_email FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2 \
                AND relay_email IS NOT NULL \
                AND revoked_at IS NULL",

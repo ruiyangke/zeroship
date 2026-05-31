@@ -345,7 +345,7 @@ async fn logout_post_revokes_local_session_cookie() {
 
     let revoked: bool = pg
         .query_one(
-            "SELECT revoked_at IS NOT NULL AS revoked FROM auth.sessions WHERE id = $1",
+            "SELECT revoked_at IS NOT NULL AS revoked FROM zeroship.sessions WHERE id = $1",
             &[&session.id],
         )
         .await
@@ -358,13 +358,13 @@ async fn logout_post_revokes_local_session_cookie() {
         "logout should still accept the Hydra logout challenge"
     );
 
-    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
         .await
         .ok();
-    pg.execute("DELETE FROM auth.sessions WHERE id = $1", &[&session.id])
+    pg.execute("DELETE FROM zeroship.sessions WHERE id = $1", &[&session.id])
         .await
         .ok();
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

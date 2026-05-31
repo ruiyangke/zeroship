@@ -12,7 +12,7 @@
 //! 2. Deserialize the body into [`PostmarkEvent`] — anything we don't
 //!    recognise (Delivery, Open, Click, …) gets a 200 and is dropped.
 //! 3. Hard bounces and spam complaints add the recipient to
-//!    `auth.email_suppressions` (the same table the mailer's
+//!    `zeroship.email_suppressions` (the same table the mailer's
 //!    pre-send check consults) and emit a structured audit event.
 //! 4. Soft bounces are logged at INFO level but NOT suppressed —
 //!    they're transient (mailbox full, server down).
@@ -33,7 +33,7 @@
 //!    `SubscribeURL` (ONLY after the signature verifies).
 //! 5. On `Notification` — parses the inner SES event (a JSON-encoded
 //!    STRING in `Message`) and adds Permanent bounces + Complaints to
-//!    `auth.email_suppressions`. Transient bounces log only.
+//!    `zeroship.email_suppressions`. Transient bounces log only.
 //!
 //! Reference: <https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html>
 
@@ -66,7 +66,7 @@ const RELAY_APP_CAPACITY: f64 = 200.0;
 const RELAY_APP_REFILL_PER_SEC: f64 = 0.333;
 /// Consecutive over-limit windows on one alias before auto-revoke is requested
 /// (sub-spec §7 — the second-tier signal that distinguishes a transient spike
-/// from sustained abuse). The streak counter rides its own `auth.rate_limits`
+/// from sustained abuse). The streak counter rides its own `zeroship.rate_limits`
 /// bucket and is reset on any successful forward.
 const RELAY_ABUSE_STREAK: f64 = 5.0;
 /// Retry-After (seconds) returned on a transient over-limit 503 so Postmark
@@ -388,7 +388,7 @@ fn email_domain(email: &str) -> &str {
 
 /// The relay-forward app display name. v1 has no per-app name lookup wired into
 /// this path, so forwards are branded with a neutral platform label; the
-/// per-app name is a v2 enhancement (it would JOIN control.oauth_clients).
+/// per-app name is a v2 enhancement (it would JOIN zeroship.oauth_clients).
 const RELAY_APP_DISPLAY: &str = "App";
 
 /// `POST /webhooks/relay-inbound`. Extracts the shared `Arc<Client>` (like
@@ -760,7 +760,7 @@ async fn audit_relay(
 }
 
 /// Increment the per-alias consecutive-over-limit counter (§7) and return the
-/// new streak. Stored as a counter in `auth.rate_limits` with a huge capacity
+/// new streak. Stored as a counter in `zeroship.rate_limits` with a huge capacity
 /// (so it never blocks) and zero refill (so it only goes up until reset). The
 /// returned `tokens` is the consumed count ⇒ streak = capacity - tokens.
 #[allow(clippy::future_not_send)]
@@ -785,7 +785,7 @@ async fn reset_abuse_streak(db: &compio_postgres::Client, alias: &str) {
     let key = format!("relay:abuse:{alias}");
     if let Err(e) = db
         .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key = $1",
+            "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
             &[&key],
         )
         .await
@@ -858,7 +858,7 @@ fn auto_revoke_audit_detail(outcome: AutoRevokeOutcome) -> serde_json::Value {
 ///      protection that stops THIS service's forwarding right away
 ///      (`resolve_active_alias` then returns `None`).
 ///   2. **Cross-service grant revoke (NOT done — no endpoint yet).** Deleting
-///      the `control.oauth_grants` row requires an admin-authenticated control
+///      the `zeroship.oauth_grants` row requires an admin-authenticated control
 ///      endpoint that does not exist. We do NOT claim it happened; we log it as
 ///      PENDING at WARN so the gap is observable and operators can revoke
 ///      out-of-band.

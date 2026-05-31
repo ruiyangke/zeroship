@@ -359,7 +359,7 @@ async fn upsert_console_app_row(
     // deployment on a shared DB, so the `apps.name` UNIQUE constraint never
     // collides.
     pg.execute(
-        "INSERT INTO control.apps (id, name, plan_id, api_key, api_key_hash) \
+        "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (id) DO UPDATE SET \
             name = EXCLUDED.name, \

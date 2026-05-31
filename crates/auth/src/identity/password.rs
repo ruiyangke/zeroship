@@ -18,7 +18,7 @@ fn argon2() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
-/// Hash a password, returning a PHC string suitable for `auth.users.password_hash`.
+/// Hash a password, returning a PHC string suitable for `zeroship.users.password_hash`.
 ///
 /// # Errors
 ///

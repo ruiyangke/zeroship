@@ -115,7 +115,7 @@ pub struct GateState {
     /// only thing that changes per request.
     pub oidc_rp: Arc<oidc_rp::OidcRp>,
     /// Postgres connection-**pool** handle for the gateway's per-origin
-    /// session store (`auth.gateway_sessions`) and the anchor/revocation
+    /// session store (`zeroship.gateway_sessions`) and the anchor/revocation
     /// read/write paths.
     ///
     /// The compio-postgres [`Pool`](compio_postgres::Pool) is `!Send`
@@ -181,7 +181,7 @@ pub struct GateState {
     /// `Verifier::with_previous` during a rotation overlap.
     pub session_verifier: Option<Arc<session_token::Verifier>>,
     /// AES-256-GCM key encrypting the server-held refresh family at rest in
-    /// `auth.app_session_anchors.refresh_token_enc` (auth-sdk Slice
+    /// `zeroship.app_session_anchors.refresh_token_enc` (auth-sdk Slice
     /// 1b-anchors, §8.1/§8.5). A `[u8; 32]` (so `Send + Sync`, unlike the
     /// `!Send` pool / single-flight), derived once at boot from a stable
     /// server secret via `zeroship_core::crypto::derive_key`. The refresh

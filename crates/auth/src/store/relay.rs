@@ -1,4 +1,4 @@
-//! Relay alias persistence on `auth.app_user_identities` (Slice 5b).
+//! Relay alias persistence on `zeroship.app_user_identities` (Slice 5b).
 //!
 //! Four things live here, all keyed on the row the gateway (Slice 4) writes:
 //!
@@ -8,7 +8,7 @@
 //!    reused on re-grant, never rotated — Apple Hide-My-Email model).
 //! 2. [`resolve_active_alias`] — the inbound handler's alias→real-inbox JOIN
 //!    with TWO ANDed liveness gates: the local `revoked_at IS NULL` flag
-//!    (sub-spec §4.5) AND a structural `EXISTS (control.oauth_grants …)` on the
+//!    (sub-spec §4.5) AND a structural `EXISTS (zeroship.oauth_grants …)` on the
 //!    grant ledger (sub-spec §6, "STRUCTURAL gate, NOT a shared lock" — the
 //!    load-bearing guard that closes the cross-service revoke↔re-consent race
 //!    without the writers sharing a lock). A revoked/unknown alias, or one whose
@@ -44,7 +44,7 @@ const MAX_ALIAS_MINT_RETRIES: usize = 8;
 /// Resolved active-alias mapping row (sub-spec §4.5).
 #[derive(Debug, Clone)]
 pub struct AliasTarget {
-    /// The user's REAL inbox (`auth.users.email`). Used ONLY as the SMTP
+    /// The user's REAL inbox (`zeroship.users.email`). Used ONLY as the SMTP
     /// envelope recipient — never written into any forwarded header.
     pub real_inbox: String,
     /// The per-app OAuth client_id (`oac_<base62>`) — the per-app rate-limit
@@ -88,7 +88,7 @@ pub async fn mint_alias_at_consent(
     let existing = conn
         .query(
             "SELECT relay_email, revoked_at IS NULL AS active \
-             FROM auth.app_user_identities \
+             FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
             &[&app_client_id, &global_user_id],
         )
@@ -103,7 +103,7 @@ pub async fn mint_alias_at_consent(
     if let Some(email) = row.get::<_, Option<String>>("relay_email") {
         if !row.get::<_, bool>("active") {
             conn.execute(
-                "UPDATE auth.app_user_identities SET revoked_at = NULL \
+                "UPDATE zeroship.app_user_identities SET revoked_at = NULL \
                  WHERE app_client_id = $1 AND global_user_id = $2",
                 &[&app_client_id, &global_user_id],
             )
@@ -118,7 +118,7 @@ pub async fn mint_alias_at_consent(
         let alias = format!("{}@{relay_domain}", gen_token());
         let affected = conn
             .execute(
-                "UPDATE auth.app_user_identities \
+                "UPDATE zeroship.app_user_identities \
                      SET relay_email = $3, revoked_at = NULL \
                  WHERE app_client_id = $1 AND global_user_id = $2 \
                    AND relay_email IS NULL",
@@ -131,7 +131,7 @@ pub async fn mint_alias_at_consent(
             Ok(_) => {
                 let row = conn
                     .query_one(
-                        "SELECT relay_email FROM auth.app_user_identities \
+                        "SELECT relay_email FROM zeroship.app_user_identities \
                          WHERE app_client_id = $1 AND global_user_id = $2",
                         &[&app_client_id, &global_user_id],
                     )
@@ -168,7 +168,7 @@ fn gen_token() -> String {
 /// Forwarding is gated on **TWO** conditions, ANDed:
 ///
 /// 1. the alias's own `revoked_at IS NULL` (the auth-side revocation flag), AND
-/// 2. an active grant STILL EXISTS in `control.oauth_grants` for the SAME
+/// 2. an active grant STILL EXISTS in `zeroship.oauth_grants` for the SAME
 ///    `(client_id, user_id)` — `EXISTS (SELECT 1 …)`.
 ///
 /// Condition (2) is the load-bearing structural guard. Auth's `accept_consent`
@@ -185,7 +185,7 @@ fn gen_token() -> String {
 /// inbound read derives liveness from the grant ledger (the single source of
 /// truth, spec §5.2/§5.4). Cross-schema read on one PG instance is fine
 /// (AGENTS.md: one database, separate schemas) — the existing
-/// `control.oauth_grants`/`control.app_scope_defs` reads in
+/// `zeroship.oauth_grants`/`zeroship.app_scope_defs` reads in
 /// `ui/consent.rs` already do exactly this from the auth service.
 ///
 /// # Errors
@@ -195,12 +195,12 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
     let rows = conn
         .query(
             "SELECT u.email::text AS real_inbox, i.app_client_id, i.global_user_id \
-             FROM auth.app_user_identities i \
-             JOIN auth.users u ON u.id = i.global_user_id \
+             FROM zeroship.app_user_identities i \
+             JOIN zeroship.users u ON u.id = i.global_user_id \
              WHERE i.relay_email = $1 \
                AND i.revoked_at IS NULL \
                AND EXISTS ( \
-                 SELECT 1 FROM control.oauth_grants g \
+                 SELECT 1 FROM zeroship.oauth_grants g \
                  WHERE g.client_id = i.app_client_id \
                    AND g.user_id = i.global_user_id \
                )",
@@ -216,14 +216,14 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
 }
 
 /// Locally disable (revoke) the relay alias for `(app_client_id, global_user_id)`
-/// by stamping `revoked_at = now()` on the auth-owned `auth.app_user_identities`
+/// by stamping `revoked_at = now()` on the auth-owned `zeroship.app_user_identities`
 /// row — the IMMEDIATE protection the auth service can apply on its OWN
 /// connection without a cross-service call (abuse auto-revoke, sub-spec §7).
 ///
 /// This is the honest, in-scope half of the abuse auto-revoke: the auth service
 /// owns `app_user_identities.relay_email`, so it can stop its OWN forwarding
 /// right now (`resolve_active_alias`'s `revoked_at IS NULL` gate then fails).
-/// It does NOT touch `control.oauth_grants` (the full cross-service revoke is a
+/// It does NOT touch `zeroship.oauth_grants` (the full cross-service revoke is a
 /// separate, admin-authenticated control endpoint that does not exist yet) — so
 /// it must NEVER be reported as a completed cross-service revoke. Returns the
 /// number of rows newly revoked (0 ⇒ already revoked / row absent), so the
@@ -238,7 +238,7 @@ pub async fn revoke_local_alias(
     global_user_id: Uuid,
 ) -> Result<u64> {
     conn.execute(
-        "UPDATE auth.app_user_identities \
+        "UPDATE zeroship.app_user_identities \
             SET revoked_at = now() \
           WHERE app_client_id = $1 \
             AND global_user_id = $2 \
@@ -249,7 +249,7 @@ pub async fn revoke_local_alias(
     .map_err(|e| AuthError::Db(format!("relay local alias revoke: {e}")))
 }
 
-/// The `MessageID` dedup sentinel key in `auth.rate_limits` (used as a generic
+/// The `MessageID` dedup sentinel key in `zeroship.rate_limits` (used as a generic
 /// short-TTL KV: `tokens` is unused, `updated_at` carries the seen-time).
 fn seen_key(message_id: &str) -> String {
     format!("relay_seen:{message_id}")
@@ -278,7 +278,7 @@ pub async fn already_seen(conn: &Client, message_id: &str) -> Result<bool> {
     let key = seen_key(message_id);
     let rows = conn
         .query(
-            "SELECT 1 FROM auth.rate_limits \
+            "SELECT 1 FROM zeroship.rate_limits \
              WHERE bucket_key = $1 \
                AND updated_at >= NOW() - INTERVAL '24 hours'",
             &[&key],
@@ -310,7 +310,7 @@ pub async fn commit_seen(conn: &Client, message_id: &str) -> Result<()> {
     // Insert the sentinel, refreshing the TTL on an existing (possibly expired)
     // row. `tokens` is unused (0); `updated_at` carries the seen-time.
     conn.execute(
-        "INSERT INTO auth.rate_limits (bucket_key, tokens, updated_at) \
+        "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
          VALUES ($1, 0, NOW()) \
          ON CONFLICT (bucket_key) DO UPDATE SET updated_at = NOW()",
         &[&key],

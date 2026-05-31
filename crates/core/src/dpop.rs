@@ -924,7 +924,7 @@ impl PgJtiCache {
         let inserted = self
             .db
             .query_opt(
-                "INSERT INTO auth.dpop_jti (jti) \
+                "INSERT INTO zeroship.dpop_jti (jti) \
                  VALUES ($1) \
                  ON CONFLICT DO NOTHING \
                  RETURNING jti",
@@ -956,7 +956,7 @@ impl PgJtiCache {
         let ttl_secs = ttl_secs as f64;
         self.db
             .execute(
-                "DELETE FROM auth.dpop_jti \
+                "DELETE FROM zeroship.dpop_jti \
                  WHERE inserted_at < NOW() - make_interval(secs => $1::double precision)",
                 &[&ttl_secs],
             )
@@ -1166,7 +1166,7 @@ mod jti_cache_tests {
                 .expect("create auth schema");
             client
                 .execute(
-                    "CREATE TABLE IF NOT EXISTS auth.dpop_jti ( \
+                    "CREATE TABLE IF NOT EXISTS zeroship.dpop_jti ( \
                          jti TEXT PRIMARY KEY, \
                          inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW() \
                      )",
@@ -1177,13 +1177,13 @@ mod jti_cache_tests {
             client
                 .execute(
                     "CREATE INDEX IF NOT EXISTS auth_dpop_jti_inserted_idx \
-                     ON auth.dpop_jti (inserted_at)",
+                     ON zeroship.dpop_jti (inserted_at)",
                     &[],
                 )
                 .await
                 .expect("create inserted_at index");
             client
-                .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"abc"])
+                .execute("DELETE FROM zeroship.dpop_jti WHERE jti = $1", &[&"abc"])
                 .await
                 .expect("cleanup before");
 
@@ -1198,7 +1198,7 @@ mod jti_cache_tests {
             );
 
             client
-                .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"abc"])
+                .execute("DELETE FROM zeroship.dpop_jti WHERE jti = $1", &[&"abc"])
                 .await
                 .expect("cleanup after");
         });
@@ -1233,7 +1233,7 @@ mod jti_cache_tests {
                 .expect("create auth schema");
             client
                 .execute(
-                    "CREATE TABLE IF NOT EXISTS auth.dpop_jti ( \
+                    "CREATE TABLE IF NOT EXISTS zeroship.dpop_jti ( \
                          jti TEXT PRIMARY KEY, \
                          inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW() \
                      )",
@@ -1242,12 +1242,12 @@ mod jti_cache_tests {
                 .await
                 .expect("create dpop_jti");
             client
-                .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"stale-m3"])
+                .execute("DELETE FROM zeroship.dpop_jti WHERE jti = $1", &[&"stale-m3"])
                 .await
                 .expect("cleanup before");
             client
                 .execute(
-                    "INSERT INTO auth.dpop_jti (jti, inserted_at) \
+                    "INSERT INTO zeroship.dpop_jti (jti, inserted_at) \
                      VALUES ($1, NOW() - INTERVAL '2 seconds')",
                     &[&"stale-m3"],
                 )
@@ -1260,7 +1260,7 @@ mod jti_cache_tests {
             assert_eq!(deleted, 1, "1s TTL must delete a 2s-old row");
 
             let still_there = client
-                .query_opt("SELECT 1 FROM auth.dpop_jti WHERE jti = $1", &[&"stale-m3"])
+                .query_opt("SELECT 1 FROM zeroship.dpop_jti WHERE jti = $1", &[&"stale-m3"])
                 .await
                 .expect("lookup stale")
                 .is_some();

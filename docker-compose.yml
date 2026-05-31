@@ -59,8 +59,8 @@ services:
     environment:
       POSTGRES_PASSWORD: zeroship
       POSTGRES_DB: zeroship
-    # Sets the role default search_path so control's migrations resolve their
-    # unqualified `control.*` references in the shared multi-schema DB.
+    # Sets the role default search_path to `zeroship` so unqualified table
+    # references resolve in the single-schema platform DB.
     volumes:
       - ./ops/postgres-init.sql:/docker-entrypoint-initdb.d/00-search-path.sql:ro
     ports:

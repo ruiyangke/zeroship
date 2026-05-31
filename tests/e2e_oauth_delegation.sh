@@ -27,7 +27,7 @@
 #   AUTH_URL          (default: http://localhost:8080)
 #   AUTH_DB_URL       (default: postgres://postgres:zeroship@localhost:5441/zeroship)
 #   ADMIN_PAT         (required: a platform-admin PAT — mint via /me/tokens after logging in,
-#                      or via direct DB insert into control.permission_tokens for an admin user)
+#                      or via direct DB insert into zeroship.permission_tokens for an admin user)
 
 set -euo pipefail
 
@@ -110,11 +110,11 @@ LOGIN_CHALLENGE=$(echo "$LOGIN_REDIRECT" | grep -oP 'login_challenge=\K[^&]+' ||
 [[ -n "$LOGIN_CHALLENGE" ]] || fail "no login_challenge in redirect: $LOGIN_REDIRECT"
 ok "got login_challenge"
 
-# Accept login as a test user (subject = a known UUID present in auth.users)
+# Accept login as a test user (subject = a known UUID present in zeroship.users)
 TEST_USER_ID="${TEST_USER_ID:-$(uuidgen | tr A-Z a-z)}"
 step "Accept login for test user $TEST_USER_ID (via hydra-admin)"
-# Note: the test user must already exist in auth.users. In CI, seed it via:
-#   psql "$AUTH_DB_URL" -c "INSERT INTO auth.users (id, email, ...) VALUES ('$TEST_USER_ID', 'e2e@test.local', ...)"
+# Note: the test user must already exist in zeroship.users. In CI, seed it via:
+#   psql "$AUTH_DB_URL" -c "INSERT INTO zeroship.users (id, email, ...) VALUES ('$TEST_USER_ID', 'e2e@test.local', ...)"
 # Skipping that here — assumes test fixture seeded the user.
 
 LOGIN_ACCEPT=$(curl -fsS -X PUT \

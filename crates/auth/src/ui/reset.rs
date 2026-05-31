@@ -4,7 +4,7 @@
 //! field. POST validates CSRF + password length, atomically redeems the
 //! reset token (single-use), Argon2-hashes the new password on a
 //! `spawn_blocking` worker (the event loop stays free), updates
-//! `auth.users.password_hash`, emits a `password_changed` audit event,
+//! `zeroship.users.password_hash`, emits a `password_changed` audit event,
 //! revokes every existing session, consumes outstanding email tokens,
 //! clears cross-device magic completions, and redirects to `/login`.
 //!
@@ -246,15 +246,15 @@ async fn complete_password_reset_tx(
 
     let idp_sessions = conn
         .execute(
-            "DELETE FROM auth.sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.sessions WHERE user_id = $1",
             &[&completed.user_id],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("password_reset delete auth.sessions: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("password_reset delete zeroship.sessions: {e}")))?;
 
     let gateway_sessions = conn
         .execute(
-            "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
             &[&completed.user_id],
         )
         .await
@@ -262,7 +262,7 @@ async fn complete_password_reset_tx(
 
     let console_sessions = conn
         .execute(
-            "DELETE FROM auth.console_sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.console_sessions WHERE user_id = $1",
             &[&completed.user_id],
         )
         .await
@@ -270,7 +270,7 @@ async fn complete_password_reset_tx(
 
     let magic_tokens = conn
         .execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_at = NOW() \
              WHERE email = $1::citext \
                AND consumed_at IS NULL",
@@ -281,7 +281,7 @@ async fn complete_password_reset_tx(
 
     let magic_completions = conn
         .execute(
-            "DELETE FROM auth.magic_completions WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_completions WHERE email = $1::citext",
             &[&completed.email],
         )
         .await

@@ -1,6 +1,6 @@
 --liquibase formatted sql
 
--- auth.app_user_identities — the per-app pairwise + relay identity mapping
+-- zeroship.app_user_identities — the per-app pairwise + relay identity mapping
 -- (auth-sdk Slice 4, spec §6.2/§6.3/§8.1). The gateway derives the per-app
 -- pairwise subject `pws_… = derive_pairwise(pairwise_salt, global_user_id,
 -- route.sector_identifier)` at the ZeroShip-User header boundary (F4-B) and
@@ -22,7 +22,7 @@
 --     It is a column rather than the PK because the natural key is
 --     (app_client_id, global_user_id): re-grant UPSERTS that one row (clears
 --     revoked_at), and the pairwise_sub index serves the relay reverse-lookup.
---   - global_user_id is UUID (FK to auth.users.id), the GLOBAL Hydra subject.
+--   - global_user_id is UUID (FK to zeroship.users.id), the GLOBAL Hydra subject.
 --     The pws_ is NEVER stored next to the UUID in the cookie/anchor tables;
 --     it lives here as the persisted projection.
 --   - relay_email stays NULL until Slice 5 populates it on first email-scope
@@ -30,9 +30,9 @@
 --     alias's slot for a recycled token; created here so Slice 5 needs no DDL.
 
 --changeset zeroship:auth-app-user-identities splitStatements:true
-CREATE TABLE auth.app_user_identities (
+CREATE TABLE zeroship.app_user_identities (
     app_client_id   TEXT        NOT NULL,            -- per-app OAuth client_id (oac_<base62>); see header
-    global_user_id  UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,  -- GLOBAL Hydra subject
+    global_user_id  UUID        NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,  -- GLOBAL Hydra subject
     pairwise_sub    TEXT        NOT NULL,            -- pws_… == derive_pairwise(salt, global_user_id, sector); DETERMINISTIC
     relay_email     TEXT,                            -- {token}@{relay_domain}; NULL until email scope granted (Slice 5)
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -41,9 +41,9 @@ CREATE TABLE auth.app_user_identities (
 );
 -- Relay reverse-lookup (Slice 5: pws_ / alias → (app, global_user)).
 CREATE INDEX app_user_identities_pairwise_sub_idx
-    ON auth.app_user_identities (pairwise_sub);
+    ON zeroship.app_user_identities (pairwise_sub);
 -- Relay alias unique only among ACTIVE aliases → a revoked alias frees its slot
 -- for a recycled token (Slice 5 generate-and-retry-on-conflict).
 CREATE UNIQUE INDEX app_user_identities_relay_active_idx
-    ON auth.app_user_identities (relay_email) WHERE relay_email IS NOT NULL AND revoked_at IS NULL;
---rollback DROP TABLE auth.app_user_identities;
+    ON zeroship.app_user_identities (relay_email) WHERE relay_email IS NOT NULL AND revoked_at IS NULL;
+--rollback DROP TABLE zeroship.app_user_identities;

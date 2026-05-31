@@ -111,13 +111,13 @@ async fn create_validate_revoke_roundtrip() {
     // Cleanup (best effort — failure here doesn't fail the test).
     client
         .execute(
-            "DELETE FROM auth.gateway_sessions WHERE id = $1",
+            "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
             &[&session.id],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await
         .ok();
 }
@@ -126,7 +126,7 @@ async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
     let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
     let rows = client
         .query(
-            "INSERT INTO auth.users (email, name, email_verified_at)
+            "INSERT INTO zeroship.users (email, name, email_verified_at)
              VALUES ($1, $2, NOW())
              RETURNING id",
             &[&email, &label],

@@ -163,7 +163,7 @@ pub async fn revoke_grant_cascade(
     // the relay sub-spec §6 "STRUCTURAL gate, NOT a shared lock".
     let deleted = tx
         .execute(
-            "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
+            "DELETE FROM zeroship.oauth_grants WHERE user_id = $1 AND client_id = $2",
             &[user_id, &client_id],
         )
         .await?;
@@ -172,7 +172,7 @@ pub async fn revoke_grant_cascade(
     // on the same value the explicit-revoke path already holds. Only an ACTIVE
     // alias is touched (revoked_at IS NULL) so a re-revoke is idempotent.
     tx.execute(
-        "UPDATE auth.app_user_identities \
+        "UPDATE zeroship.app_user_identities \
             SET revoked_at = now() \
           WHERE app_client_id = $2 \
             AND global_user_id = $1 \
@@ -195,7 +195,7 @@ pub async fn revoke_grant_cascade(
     // so the marker write is skipped — the alias revoke above still applies.
     let sector: Option<String> = tx
         .query_opt(
-            "SELECT sector_identifier FROM control.app_oauth_clients WHERE client_id = $1",
+            "SELECT sector_identifier FROM zeroship.app_oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await?
@@ -210,7 +210,7 @@ pub async fn revoke_grant_cascade(
         // inline here so it runs inside this cascade's transaction on the
         // dedicated client rather than on the shared `auth_pg`.
         tx.execute(
-            "INSERT INTO auth.token_revocations (client_id, sub, revoked_after) \
+            "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
              VALUES ($1, $2, NOW()) \
              ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
             &[&client_id, &pws],
@@ -253,7 +253,7 @@ pub async fn revoke_all_aliases_for_client(
     let conn = dedicated_client(auth_db_url).await?;
     let revoked = conn
         .execute(
-            "UPDATE auth.app_user_identities \
+            "UPDATE zeroship.app_user_identities \
                 SET revoked_at = now() \
               WHERE app_client_id = $1 \
                 AND revoked_at IS NULL",

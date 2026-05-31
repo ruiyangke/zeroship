@@ -82,7 +82,7 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
     };
     let result = conn
         .execute(
-            "INSERT INTO control.app_audit(app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail)
+            "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail)
              VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
                 &entry.app_id,
@@ -113,7 +113,7 @@ pub async fn recent_for_app(
         .query(
             "SELECT id, actor_user_id, actor_token_id, action, resource, source_ip,
                     to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at_text
-             FROM control.app_audit
+             FROM zeroship.app_audit
              WHERE app_id = $1
              ORDER BY at DESC
              LIMIT $2",

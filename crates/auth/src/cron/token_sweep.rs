@@ -74,16 +74,16 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
     let magic_links_deleted = delete_magic_links(db, None).await?;
     let magic_completions_deleted = delete_table(
         db,
-        "auth.magic_completions",
-        "DELETE FROM auth.magic_completions \
+        "zeroship.magic_completions",
+        "DELETE FROM zeroship.magic_completions \
          WHERE expires_at < NOW() - INTERVAL '7 days' \
             OR consumed_at < NOW() - INTERVAL '7 days'",
     )
     .await?;
     let email_verifications_deleted = delete_table(
         db,
-        "auth.email_verifications",
-        "DELETE FROM auth.email_verifications \
+        "zeroship.email_verifications",
+        "DELETE FROM zeroship.email_verifications \
          WHERE expires_at < NOW() - INTERVAL '7 days' \
             OR consumed_at < NOW() - INTERVAL '7 days'",
     )
@@ -91,7 +91,7 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
     let token_revocations_deleted =
         zeroship_core::wrapper_revocation::sweep_expired_families(db)
             .await
-            .map_err(|e| AuthError::Db(format!("token_sweep auth.token_revocations: {e}")))?;
+            .map_err(|e| AuthError::Db(format!("token_sweep zeroship.token_revocations: {e}")))?;
 
     Ok(TokenSweepReport {
         magic_links_deleted,
@@ -106,25 +106,25 @@ async fn delete_magic_links(db: &Client, purpose: Option<&str>) -> Result<u64> {
     match purpose {
         Some(purpose) => {
             db.execute(
-                "DELETE FROM auth.magic_links \
+                "DELETE FROM zeroship.magic_links \
                  WHERE purpose = $1 \
                    AND (expires_at < NOW() - INTERVAL '7 days' \
                         OR consumed_at < NOW() - INTERVAL '7 days')",
                 &[&purpose],
             )
             .await
-            .map_err(|e| AuthError::Db(format!("token_sweep auth.magic_links[{purpose}]: {e}")))
+            .map_err(|e| AuthError::Db(format!("token_sweep zeroship.magic_links[{purpose}]: {e}")))
         }
         None => {
             db.execute(
-                "DELETE FROM auth.magic_links \
+                "DELETE FROM zeroship.magic_links \
                  WHERE purpose <> 'reset' \
                    AND (expires_at < NOW() - INTERVAL '7 days' \
                         OR consumed_at < NOW() - INTERVAL '7 days')",
                 &[],
             )
             .await
-            .map_err(|e| AuthError::Db(format!("token_sweep auth.magic_links: {e}")))
+            .map_err(|e| AuthError::Db(format!("token_sweep zeroship.magic_links: {e}")))
         }
     }
 }

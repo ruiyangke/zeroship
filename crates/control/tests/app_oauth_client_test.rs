@@ -127,7 +127,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     // 4. Assert the control-plane DB rows.
     let oc = raw
         .query(
-            "SELECT skip_consent, hydra_client_id FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT skip_consent, hydra_client_id FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -138,7 +138,7 @@ async fn provision_asserts_hydra_db_and_routes() {
 
     let ext = raw
         .query(
-            "SELECT client_id, sector_identifier FROM control.app_oauth_clients WHERE app_id = $1",
+            "SELECT client_id, sector_identifier FROM zeroship.app_oauth_clients WHERE app_id = $1",
             &[&app_id],
         )
         .await
@@ -153,7 +153,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     // Slice 3: control.app_scope_defs holds the declared scope (same txn).
     let defs = raw
         .query(
-            "SELECT scope_id, label, description FROM control.app_scope_defs WHERE app_id = $1",
+            "SELECT scope_id, label, description FROM zeroship.app_scope_defs WHERE app_id = $1",
             &[&app_id],
         )
         .await
@@ -170,7 +170,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     // declared), so the two sources of truth never drift.
     let mirror = raw
         .query(
-            "SELECT scopes FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT scopes FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -217,7 +217,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     .expect("re-ensure with no scopes");
     let defs_after = raw
         .query(
-            "SELECT scope_id FROM control.app_scope_defs WHERE app_id = $1",
+            "SELECT scope_id FROM zeroship.app_scope_defs WHERE app_id = $1",
             &[&app_id],
         )
         .await

@@ -21,7 +21,7 @@
 //!      - if the user is OAuth-only and the provider is trusted for this
 //!        email, auto-link silently and return `Existing`.
 //!   3. Else if the provider is trusted for this email → create
-//!      a fresh `auth.users` row and link the identity (`Created`).
+//!      a fresh `zeroship.users` row and link the identity (`Created`).
 //!   4. Otherwise refuse — we won't auto-create an account on an untrusted
 //!      provider email, even when the provider says it verified the address.
 //!
@@ -245,7 +245,7 @@ pub async fn resolve_or_link(
     // email. Raw provider `email_verified` is not enough.
     if profile.provider_trusted_for_email {
         db.execute(
-            "UPDATE auth.users SET email_verified_at = NOW() WHERE id = $1",
+            "UPDATE zeroship.users SET email_verified_at = NOW() WHERE id = $1",
             &[&user.id],
         )
         .await
@@ -256,7 +256,7 @@ pub async fn resolve_or_link(
     // overwrite a user-set avatar (we deliberately don't UPDATE here later).
     if let Some(avatar) = profile.avatar_url {
         db.execute(
-            "UPDATE auth.users SET avatar_url = $1 WHERE id = $2 AND avatar_url IS NULL",
+            "UPDATE zeroship.users SET avatar_url = $1 WHERE id = $2 AND avatar_url IS NULL",
             &[&avatar, &user.id],
         )
         .await
@@ -408,7 +408,7 @@ mod tests {
         let phc = crate::identity::password::hash("hunter2").expect("hash");
         let row = client
             .query_one(
-                "INSERT INTO auth.users (email, name, password_hash) \
+                "INSERT INTO zeroship.users (email, name, password_hash) \
                  VALUES ($1::citext, $2, $3) RETURNING id",
                 &[&email, &"Ada", &phc],
             )
@@ -460,7 +460,7 @@ mod tests {
 
         // Cleanup.
         client
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
             .await
             .ok();
     }
@@ -476,7 +476,7 @@ mod tests {
         let email = format!("linker-oauth-{}@example.test", Uuid::new_v4().simple());
         let row = client
             .query_one(
-                "INSERT INTO auth.users (email, name, password_hash) \
+                "INSERT INTO zeroship.users (email, name, password_hash) \
                  VALUES ($1::citext, $2, NULL) RETURNING id",
                 &[&email, &"Linus"],
             )
@@ -513,9 +513,9 @@ mod tests {
         let found = found.expect("identity should exist");
         assert_eq!(found.user_id, user_id);
 
-        // Cleanup — FK cascade on auth.identities.user_id catches the link.
+        // Cleanup — FK cascade on zeroship.identities.user_id catches the link.
         client
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
             .await
             .ok();
     }
@@ -530,7 +530,7 @@ mod tests {
         let email = format!("linker-untrusted-{}@example.test", Uuid::new_v4().simple());
         let row = client
             .query_one(
-                "INSERT INTO auth.users (email, name, password_hash) \
+                "INSERT INTO zeroship.users (email, name, password_hash) \
                  VALUES ($1::citext, $2, NULL) RETURNING id",
                 &[&email, &"Untrusted"],
             )
@@ -581,7 +581,7 @@ mod tests {
         );
 
         client
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
             .await
             .ok();
     }
@@ -616,7 +616,7 @@ mod tests {
 
         let user_rows = client
             .query(
-                "SELECT id FROM auth.users WHERE email = $1::citext",
+                "SELECT id FROM zeroship.users WHERE email = $1::citext",
                 &[&email],
             )
             .await
@@ -625,7 +625,7 @@ mod tests {
 
         let identity_rows = client
             .query(
-                "SELECT id FROM auth.identities WHERE provider = $1 AND subject = $2",
+                "SELECT id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
                 &[&"google", &subject.as_str()],
             )
             .await

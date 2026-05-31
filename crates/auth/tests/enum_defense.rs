@@ -179,7 +179,7 @@ async fn login_failure_responses_are_indistinguishable() {
     .expect("hash ok");
     pg_client
         .execute(
-            "INSERT INTO auth.users (email, name, password_hash) VALUES ($1::citext, $2, $3)",
+            "INSERT INTO zeroship.users (email, name, password_hash) VALUES ($1::citext, $2, $3)",
             &[&real_email.as_str(), &"Real User", &phc.as_str()],
         )
         .await
@@ -196,7 +196,7 @@ async fn login_failure_responses_are_indistinguishable() {
     //    wrong-pw iterations.
     pg_client
         .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE 'login:%@zeroship.test%' \
+            "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE 'login:%@zeroship.test%' \
               OR bucket_key LIKE 'login:%real-%' \
               OR bucket_key LIKE 'login:%ghost-%'",
             &[],
@@ -285,14 +285,14 @@ async fn login_failure_responses_are_indistinguishable() {
         .expect("delete test client");
     pg_client
         .execute(
-            "DELETE FROM auth.users WHERE email = $1::citext",
+            "DELETE FROM zeroship.users WHERE email = $1::citext",
             &[&real_email.as_str()],
         )
         .await
         .ok();
     pg_client
         .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE 'login:%@zeroship.test%' \
+            "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE 'login:%@zeroship.test%' \
               OR bucket_key LIKE 'login:%real-%' \
               OR bucket_key LIKE 'login:%ghost-%'",
             &[],

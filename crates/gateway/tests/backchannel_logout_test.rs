@@ -175,13 +175,13 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     // Cleanup (best effort).
     for id in [s_a.id, s_b.id, s_other.id] {
         client
-            .execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&id])
+            .execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&id])
             .await
             .ok();
     }
     for id in [target_user_id, other_user_id] {
         client
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&id])
             .await
             .ok();
     }
@@ -191,7 +191,7 @@ async fn insert_user(client: &Client, label: &str) -> Uuid {
     let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
     let rows = client
         .query(
-            "INSERT INTO auth.users (email, name, email_verified_at)
+            "INSERT INTO zeroship.users (email, name, email_verified_at)
              VALUES ($1, $2, NOW())
              RETURNING id",
             &[&email, &label],
@@ -372,7 +372,7 @@ async fn audit_count(client: &Client, jti: &str) -> i64 {
     let row = client
         .query_one(
             "SELECT COUNT(*)::BIGINT AS count \
-             FROM auth.audit_events \
+             FROM zeroship.audit_events \
              WHERE event_type = $1 AND detail->>'jti' = $2",
             &[&"backchannel_logout_revoke", &jti],
         )
@@ -493,15 +493,15 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     assert_eq!(state.logout_jti_cache.len(), 1);
 
     db.execute(
-        "DELETE FROM auth.audit_events WHERE detail->>'jti' = $1",
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
         &[&jti],
     )
     .await
     .ok();
-    db.execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&session.id])
+    db.execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&session.id])
         .await
         .ok();
-    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user])
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
         .await
         .ok();
 }
@@ -697,24 +697,24 @@ async fn per_app_bcl_writes_token_family_marker() {
 
     // Cleanup.
     db.execute(
-        "DELETE FROM auth.token_revocations WHERE client_id = $1",
+        "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
         &[&oauth_client_id],
     )
     .await
     .ok();
     db.execute(
-        "DELETE FROM auth.audit_events WHERE detail->>'jti' = $1",
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
         &[&jti],
     )
     .await
     .ok();
     db.execute(
-        "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
+        "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
         &[&target_user_string],
     )
     .await
     .ok();
-    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user])
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
         .await
         .ok();
 }
@@ -849,24 +849,24 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     );
 
     db.execute(
-        "DELETE FROM auth.token_revocations WHERE client_id = $1",
+        "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
         &[&oauth_client_id],
     )
     .await
     .ok();
     db.execute(
-        "DELETE FROM auth.audit_events WHERE detail->>'jti' = $1",
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
         &[&jti],
     )
     .await
     .ok();
     db.execute(
-        "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
+        "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
         &[&canonical_sub],
     )
     .await
     .ok();
-    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user])
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
         .await
         .ok();
 }

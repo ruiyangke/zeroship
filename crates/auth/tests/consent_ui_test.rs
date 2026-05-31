@@ -18,7 +18,7 @@ const ACCEPT_REDIRECT: &str = "https://client.example/callback?code=accept";
 const DENY_REDIRECT: &str = "https://client.example/callback?error=access_denied";
 
 /// Mirror of control plane `client_id_for_app` (`oac_<base62-app-id>`). The
-/// consent classifier decodes this prefix to resolve `control.app_scope_defs`.
+/// consent classifier decodes this prefix to resolve `zeroship.app_scope_defs`.
 /// Reproduced here (not imported from `zeroship-control`) to avoid pulling the
 /// control crate into auth's test graph.
 fn client_id_for_app(app_id: &Uuid) -> String {
@@ -44,7 +44,7 @@ struct ConsentChallengeQuery {
     consent_challenge: String,
 }
 
-/// An app-declared end-user scope (mirrors `control.app_scope_defs`), seeded by
+/// An app-declared end-user scope (mirrors `zeroship.app_scope_defs`), seeded by
 /// the per-app `boot_app_client` harness for the Slice-3b classifier tests.
 #[derive(Clone, Copy)]
 struct AppScope {
@@ -63,7 +63,7 @@ struct ConsentTestApp {
     user_id: Uuid,
     app_id: String,
     client_id: String,
-    /// Real `control.apps.id` UUID for a per-app (`oac_`) client; `None` for the
+    /// Real `zeroship.apps.id` UUID for a per-app (`oac_`) client; `None` for the
     /// builder/console clients booted via `boot`.
     app_uuid: Option<Uuid>,
 }
@@ -81,7 +81,7 @@ impl ConsentTestApp {
     }
 
     /// Boot a per-app end-user OAuth client (`oac_<base62-app-id>`) — the Slice
-    /// 1d/3b client identity. Seeds a real `control.apps` row (the FK target for
+    /// 1d/3b client identity. Seeds a real `zeroship.apps` row (the FK target for
     /// `app_scope_defs`) and the app's declared scopes, so the consent
     /// classifier resolves `client_id → app_id → app_scope_defs`. `skip_consent`
     /// is FALSE (per-app clients never auto-accept — spec §5.2 round-3).
@@ -121,7 +121,7 @@ impl ConsentTestApp {
         let app_id = format!("app-{}", Uuid::new_v4().simple());
         let email = format!("consent-{user_id}@zeroship.test");
         pg.execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'Consent Test User', NOW())",
             &[&user_id, &email],
         )
@@ -129,7 +129,7 @@ impl ConsentTestApp {
         .expect("insert consent test user");
         if let Some(role) = platform_role {
             pg.execute(
-                "INSERT INTO platform.roles (user_id, role, granted_by) \
+                "INSERT INTO zeroship.roles (user_id, role, granted_by) \
                  VALUES ($1, $2, $1)",
                 &[&user_id, &role],
             )
@@ -138,29 +138,29 @@ impl ConsentTestApp {
         }
         if let Some(role) = app_role {
             pg.execute(
-                "INSERT INTO control.app_members (app_id, user_id, role, added_by) \
+                "INSERT INTO zeroship.app_members (app_id, user_id, role, added_by) \
                  VALUES ($1, $2, $3, $2)",
                 &[&app_id, &user_id, &role],
             )
             .await
             .expect("insert app member");
         }
-        // Per-app client: seed control.apps (FK target) + app_scope_defs so the
+        // Per-app client: seed zeroship.apps (FK target) + app_scope_defs so the
         // consent classifier's `client_id → app_id → app_scope_defs` resolution
         // is exercised against the real tables, not a stub.
         if let Some(app_uuid) = app_uuid {
             let app_name = format!("scope-app-{}", app_uuid.simple());
             pg.execute(
-                "INSERT INTO control.apps (id, name, api_key, api_key_hash) \
+                "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
                  VALUES ($1, $2, 'test-key', 'test-key-hash')",
                 &[&app_uuid, &app_name],
             )
             .await
-            .expect("insert control.apps");
+            .expect("insert zeroship.apps");
             for s in declared {
                 let desc: Option<String> = s.description.map(ToOwned::to_owned);
                 pg.execute(
-                    "INSERT INTO control.app_scope_defs (app_id, scope_id, label, description) \
+                    "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
                      VALUES ($1, $2, $3, $4)",
                     &[&app_uuid, &s.id, &s.label, &desc],
                 )
@@ -174,7 +174,7 @@ impl ConsentTestApp {
             .map(|scope| (*scope).to_owned())
             .collect::<Vec<_>>();
         pg.execute(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                  (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
              VALUES ($1, 'zeroship builder', $2, $3, $4, $1)",
             &[&client_id, &redirect_uris, &client_scopes, &skip],
@@ -251,45 +251,45 @@ impl ConsentTestApp {
         let _ = self
             .pg
             .execute(
-                "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
+                "DELETE FROM zeroship.oauth_grants WHERE user_id = $1 AND client_id = $2",
                 &[&self.user_id, &self.client_id],
             )
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
                 &[&self.user_id],
             )
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM control.app_members WHERE app_id = $1 AND user_id = $2",
+                "DELETE FROM zeroship.app_members WHERE app_id = $1 AND user_id = $2",
                 &[&self.app_id, &self.user_id],
             )
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM control.oauth_clients WHERE client_id = $1",
+                "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
                 &[&self.client_id],
             )
             .await;
-        // control.app_scope_defs rows cascade via the apps FK (ON DELETE CASCADE).
+        // zeroship.app_scope_defs rows cascade via the apps FK (ON DELETE CASCADE).
         if let Some(app_uuid) = self.app_uuid {
             let _ = self
                 .pg
-                .execute("DELETE FROM control.apps WHERE id = $1", &[&app_uuid])
+                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid])
                 .await;
         }
         let _ = self
             .pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
         drop(self.auth_srv);
         drop(self.hydra_srv);
@@ -358,7 +358,7 @@ impl ConsentTestApp {
         let scopes = sorted_scopes(scopes);
         self.pg
             .execute(
-                "INSERT INTO control.oauth_grants \
+                "INSERT INTO zeroship.oauth_grants \
                      (user_id, client_id, granted_scopes, granted_at, updated_at) \
                  VALUES ($1, $2, $3, NOW(), NOW()) \
                  ON CONFLICT (user_id, client_id) DO UPDATE \
@@ -377,7 +377,7 @@ impl ConsentTestApp {
             .pg
             .query(
                 "SELECT granted_scopes, granted_at, last_used_at \
-                 FROM control.oauth_grants \
+                 FROM zeroship.oauth_grants \
                  WHERE user_id = $1 AND client_id = $2",
                 &[&self.user_id, &self.client_id],
             )
@@ -396,7 +396,7 @@ impl ConsentTestApp {
         self.pg
             .query_one(
                 "SELECT COUNT(*)::BIGINT AS n \
-                 FROM control.oauth_grants \
+                 FROM zeroship.oauth_grants \
                  WHERE user_id = $1 AND client_id = $2",
                 &[&self.user_id, &self.client_id],
             )
@@ -410,7 +410,7 @@ impl ConsentTestApp {
         self.pg
             .query_one(
                 "SELECT COUNT(*)::BIGINT AS n \
-                 FROM auth.audit_events \
+                 FROM zeroship.audit_events \
                  WHERE user_id = $1 AND event_type = $2",
                 &[&self.user_id, &event_type],
             )
@@ -717,11 +717,11 @@ async fn allow_button_extends_existing_oauth_grants_row() {
 // ─── Slice 3b — declared-scope two-namespace consent classifier ──────────
 //
 // The load-bearing regression: a normal end user (NO platform policy) MUST be
-// able to self-grant an app-declared scope present in control.app_scope_defs.
+// able to self-grant an app-declared scope present in zeroship.app_scope_defs.
 // Pre-fix the handler ran is_authorized_anywhere on EVERY scope, so the POST
 // accept path re-rendered CANNOT_GRANT and the grant never reached Hydra. These
 // drive the REAL consent handler (get_consent / post_consent_accept) against
-// the real control.app_scope_defs lookup + mock-Hydra accept_consent.
+// the real zeroship.app_scope_defs lookup + mock-Hydra accept_consent.
 
 const BILLING_SCOPE: AppScope = AppScope {
     id: "read:billing",
@@ -736,7 +736,7 @@ const PROJECTS_SCOPE: AppScope = AppScope {
 
 /// THE authorization-inversion regression. An ordinary end user with no
 /// platform policy POSTs consent for an app-declared `read:billing` and the
-/// grant SUCCEEDS: accept_consent is called, control.oauth_grants records the
+/// grant SUCCEEDS: accept_consent is called, zeroship.oauth_grants records the
 /// scope, and the audit row lands. FAILS pre-fix (POST re-rendered CANNOT_GRANT
 /// because read:billing hit is_authorized_anywhere with an empty policy set).
 #[ntex::test]
@@ -780,7 +780,7 @@ async fn end_user_self_grants_app_declared_scope_via_post_accept() {
         json!(["openid", "read:billing"])
     );
 
-    // The single ledger (control.oauth_grants) records the scope.
+    // The single ledger (zeroship.oauth_grants) records the scope.
     let grant = app.oauth_grant().await;
     assert_eq!(grant.granted_scopes, vec!["openid", "read:billing"]);
     assert_eq!(app.audit_event_count("consent_accept").await, 1);
@@ -797,7 +797,7 @@ async fn per_app_client_is_not_skip_consent() {
     let skip: bool = app
         .pg
         .query_one(
-            "SELECT skip_consent FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT skip_consent FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&app.client_id],
         )
         .await
@@ -936,7 +936,7 @@ async fn grant_delta_new_scope_prompts_and_unions_into_ledger() {
     assert_eq!(
         grant.granted_scopes,
         vec!["read:billing", "write:projects"],
-        "accept must union the delta into control.oauth_grants"
+        "accept must union the delta into zeroship.oauth_grants"
     );
 
     app.cleanup().await;
@@ -975,7 +975,7 @@ async fn subset_step_up_unions_into_ledger_not_replaces() {
     assert_eq!(
         grant.granted_scopes,
         vec!["read:billing", "write:projects"],
-        "accept must UNION the step-up into control.oauth_grants, not replace it"
+        "accept must UNION the step-up into zeroship.oauth_grants, not replace it"
     );
 
     app.cleanup().await;

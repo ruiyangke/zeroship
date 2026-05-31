@@ -309,9 +309,9 @@ async fn gateway_oidc_rp_full_dance() {
         .await
         .expect("create test client");
 
-    // 3b. Seed the matching `control.oauth_clients` row. The Slice-3
-    //     skip-consent fast path upserts `control.oauth_grants`, whose
-    //     `client_id` FK targets `control.oauth_clients(client_id)`. Without
+    // 3b. Seed the matching `zeroship.oauth_clients` row. The Slice-3
+    //     skip-consent fast path upserts `zeroship.oauth_grants`, whose
+    //     `client_id` FK targets `zeroship.oauth_clients(client_id)`. Without
     //     this row the upsert fails its FK and `/consent` renders a
     //     ContactSupport 200 instead of the skip 302 — so the test only ever
     //     passed against a DB where some other run had seeded the client.
@@ -325,7 +325,7 @@ async fn gateway_oidc_rp_full_dance() {
     ];
     pg_client
         .execute(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                  (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
              VALUES ($1, $2, $3, $4, TRUE, $1) \
              ON CONFLICT (client_id) DO NOTHING",
@@ -337,9 +337,9 @@ async fn gateway_oidc_rp_full_dance() {
             ],
         )
         .await
-        .expect("seed control.oauth_clients");
+        .expect("seed zeroship.oauth_clients");
 
-    // 4. Seed a user directly into auth.users (avoids the signup HTTP
+    // 4. Seed a user directly into zeroship.users (avoids the signup HTTP
     //    flow — the e2e_password test already covers that, and we want
     //    a deterministic `sub` to assert against).
     let email = format!("gw-{}@zeroship.test", Uuid::new_v4().simple());
@@ -348,7 +348,7 @@ async fn gateway_oidc_rp_full_dance() {
     let user_id = Uuid::new_v4();
     pg_client
         .execute(
-            "INSERT INTO auth.users (id, email, name, password_hash, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, password_hash, email_verified_at) \
              VALUES ($1, $2::citext, $3, $4, NOW())",
             &[&user_id, &email, &"Gateway Test", &phc],
         )
@@ -526,7 +526,7 @@ async fn gateway_oidc_rp_full_dance() {
     assert_eq!(
         claims.sub,
         user_id.to_string(),
-        "id-token sub must match the seeded auth.users.id"
+        "id-token sub must match the seeded zeroship.users.id"
     );
 
     // 14. Mint a per-origin gateway session against those claims and
@@ -558,7 +558,7 @@ async fn gateway_oidc_rp_full_dance() {
     assert_eq!(validated.user_id, claims.sub);
     assert_eq!(validated.app_id, app_id);
     // Slice 3: granted_scopes round-trips through create → validate on the same
-    // row (the cookie path's scope source — no control.oauth_grants join).
+    // row (the cookie path's scope source — no zeroship.oauth_grants join).
     assert_eq!(
         validated.granted_scopes, granted_scopes,
         "validate() must return the granted_scopes written at create"
@@ -577,27 +577,27 @@ async fn gateway_oidc_rp_full_dance() {
     let _ = admin.delete_client(&test_client_id).await;
     let _ = pg_client
         .execute(
-            "DELETE FROM auth.gateway_sessions WHERE id = $1",
+            "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
             &[&session.id],
         )
         .await;
     let _ = pg_client
         .execute(
-            "DELETE FROM auth.sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.sessions WHERE user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = pg_client
         .execute(
-            "DELETE FROM auth.users WHERE id = $1",
+            "DELETE FROM zeroship.users WHERE id = $1",
             &[&user_id],
         )
         .await;
-    // Remove the seeded client (cascades any control.oauth_grants rows minted
+    // Remove the seeded client (cascades any zeroship.oauth_grants rows minted
     // by the skip-consent path), keeping the test re-runnable.
     let _ = pg_client
         .execute(
-            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&test_client_id],
         )
         .await;

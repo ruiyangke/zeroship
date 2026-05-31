@@ -126,7 +126,7 @@ async fn skip_login_rejects_disabled_user_subject() {
         .expect("seed user");
     pg_client
         .execute(
-            "UPDATE auth.users SET disabled_at = NOW() WHERE id = $1",
+            "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
             &[&user.id],
         )
         .await
@@ -191,7 +191,7 @@ async fn skip_login_rejects_disabled_user_subject() {
     );
     drop(state);
 
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -222,7 +222,7 @@ async fn password_login_rejects_locked_user_without_session() {
         .expect("seed user");
     pg_client
         .execute(
-            "UPDATE auth.users SET locked_until = NOW() + INTERVAL '1 hour' WHERE id = $1",
+            "UPDATE zeroship.users SET locked_until = NOW() + INTERVAL '1 hour' WHERE id = $1",
             &[&user.id],
         )
         .await
@@ -307,7 +307,7 @@ async fn password_login_rejects_locked_user_without_session() {
 
     let session_count: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.sessions WHERE user_id = $1",
+            "SELECT COUNT(*) FROM zeroship.sessions WHERE user_id = $1",
             &[&user.id],
         )
         .await
@@ -315,10 +315,10 @@ async fn password_login_rejects_locked_user_without_session() {
         .get(0);
     assert_eq!(session_count, 0, "locked password login must not create a session");
 
-    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
         .await
         .ok();
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

@@ -21,10 +21,10 @@ use zeroship_auth::bootstrap::keys::ensure_signing_keys;
 use zeroship_auth::cron::jwk_rotation;
 use zeroship_auth::hydra_client::HydraAdmin;
 
-// The hydra-backed tests in this file mutate the same `auth.cron_state` rows
+// The hydra-backed tests in this file mutate the same `zeroship.cron_state` rows
 // (`hydra.openid.id-token`, `hydra.jwt.access-token`) and the same
 // live hydra JWKS sets. When cargo's test runner schedules them in
-// parallel, one test's `DELETE FROM auth.cron_state` clobbers the
+// parallel, one test's `DELETE FROM zeroship.cron_state` clobbers the
 // other's setup — flaky.
 //
 // We serialize the two via a file-local mutex. `#[serial_test::serial]`
@@ -64,14 +64,14 @@ async fn ensure_bootstrap_keys(admin: &HydraAdmin, client: &Client) {
 async fn clear_jwk_state(client: &Client) {
     client
         .execute(
-            "DELETE FROM auth.jwk_key_state WHERE set_name LIKE 'hydra.%'",
+            "DELETE FROM zeroship.jwk_key_state WHERE set_name LIKE 'hydra.%'",
             &[],
         )
         .await
         .ok();
     client
         .execute(
-            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
+            "DELETE FROM zeroship.cron_state WHERE key LIKE 'hydra.%'",
             &[],
         )
         .await
@@ -118,7 +118,7 @@ async fn rotation_first_tick_records_baseline_no_action() {
     // Verify cron_state row exists for the id-token set.
     let row = client
         .query_one(
-            "SELECT key FROM auth.cron_state WHERE key = $1",
+            "SELECT key FROM zeroship.cron_state WHERE key = $1",
             &[&"hydra.openid.id-token"],
         )
         .await
@@ -165,7 +165,7 @@ async fn rotation_due_prepends_new_keys() {
     // so this tick treats it as overdue.
     client
         .execute(
-            "INSERT INTO auth.cron_state (key, last_rotated_at) \
+            "INSERT INTO zeroship.cron_state (key, last_rotated_at) \
              VALUES ($1, NOW() - INTERVAL '100 days') \
              ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW() - INTERVAL '100 days'",
             &[&"hydra.openid.id-token"],
@@ -177,7 +177,7 @@ async fn rotation_due_prepends_new_keys() {
     // id-token rotation behaviour.
     client
         .execute(
-            "INSERT INTO auth.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
+            "INSERT INTO zeroship.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
              ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW()",
             &[&"hydra.jwt.access-token"],
         )
@@ -241,7 +241,7 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
 
     client
         .execute(
-            "INSERT INTO auth.cron_state (key, last_rotated_at) \
+            "INSERT INTO zeroship.cron_state (key, last_rotated_at) \
              VALUES ($1, NOW() - INTERVAL '100 days') \
              ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW() - INTERVAL '100 days'",
             &[&id_token_set],
@@ -250,7 +250,7 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
         .expect("seed due id-token set");
     client
         .execute(
-            "INSERT INTO auth.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
+            "INSERT INTO zeroship.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
              ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW()",
             &[&access_set],
         )
@@ -321,7 +321,7 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
     // prepend one rotated key.
     client
         .execute(
-            "INSERT INTO auth.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
+            "INSERT INTO zeroship.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
              ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW()",
             &[&id_token_set],
         )
@@ -349,7 +349,7 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
 
     client
         .execute(
-            "INSERT INTO auth.cron_state (key, last_rotated_at) \
+            "INSERT INTO zeroship.cron_state (key, last_rotated_at) \
              VALUES ($1, NOW() - (($2::INT + $3::INT + 1) * INTERVAL '1 day')) \
              ON CONFLICT (key) DO UPDATE \
              SET last_rotated_at = NOW() - (($2::INT + $3::INT + 1) * INTERVAL '1 day')",
@@ -377,7 +377,7 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
 
     client
         .execute(
-            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
+            "DELETE FROM zeroship.cron_state WHERE key LIKE 'hydra.%'",
             &[],
         )
         .await

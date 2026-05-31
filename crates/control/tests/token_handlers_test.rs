@@ -192,7 +192,7 @@ impl Fixture {
         let email = format!("{label}-{user_id}@zeroship.test");
         auth_pg
             .execute(
-                "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+                "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
                 &[&user_id, &email, &label],
             )
             .await
@@ -200,7 +200,7 @@ impl Fixture {
         if let Some(role) = platform_role {
             auth_pg
                 .execute(
-                    "INSERT INTO platform.roles (user_id, role) VALUES ($1, $2)",
+                    "INSERT INTO zeroship.roles (user_id, role) VALUES ($1, $2)",
                     &[&user_id, &role],
                 )
                 .await
@@ -255,7 +255,7 @@ impl Fixture {
             .state
             .auth_pg
             .query(
-                "SELECT id FROM control.permission_tokens WHERE owner_id = $1",
+                "SELECT id FROM zeroship.permission_tokens WHERE owner_id = $1",
                 &[&self.user_id],
             )
             .await
@@ -265,14 +265,14 @@ impl Fixture {
             let _ = self
                 .state
                 .auth_pg
-                .execute("DELETE FROM control.authz_decisions WHERE token_id = $1", &[&id])
+                .execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&id])
                 .await;
         }
         let _ = self
             .state
             .auth_pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -280,7 +280,7 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM control.permission_tokens WHERE owner_id = $1",
+                "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -288,19 +288,19 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM control.app_members WHERE user_id = $1",
+                "DELETE FROM zeroship.app_members WHERE user_id = $1",
                 &[&self.user_id],
             )
             .await;
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
@@ -328,7 +328,7 @@ async fn audit_event_count(state: &AppState, user_id: Uuid, event_type: &str) ->
         .auth_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
-             FROM auth.audit_events \
+             FROM zeroship.audit_events \
              WHERE user_id = $1 AND event_type = $2",
             &[&user_id, &event_type],
         )
@@ -439,7 +439,7 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
     fx.state
         .auth_pg
         .execute(
-            "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
             &[&app_id, &fx.user_id],
         )
         .await
@@ -710,7 +710,7 @@ async fn using_revoked_pat_returns_401() {
     fx.state
         .auth_pg
         .execute(
-            "UPDATE control.permission_tokens SET revoked_at = NOW() WHERE id = $1",
+            "UPDATE zeroship.permission_tokens SET revoked_at = NOW() WHERE id = $1",
             &[&pat.token_id],
         )
         .await

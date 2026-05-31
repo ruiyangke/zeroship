@@ -1,6 +1,6 @@
 //! Faithful integration tests for the auth-sdk Slice 1b-anchors
 //! browser-token CORE (`POST /__zeroship/auth/token`, `GET /__zeroship/auth/session`,
-//! the per-node mint single-flight, the `auth.app_session_anchors` store).
+//! the per-node mint single-flight, the `zeroship.app_session_anchors` store).
 //!
 //! A loopback MOCK Hydra (in-process ntex test server) serves
 //! `/.well-known/jwks.json` and `/oauth2/token` so the REAL code path runs
@@ -931,7 +931,7 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
     let email = format!("anchor-{}@zeroship.test", user_id.simple());
     client
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
             &[&user_id, &email, &"Anchor Test"],
         )
@@ -958,7 +958,7 @@ async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
     let pairwise_sub = format!("pws_seed_{}", user_id.simple());
     client
         .execute(
-            "INSERT INTO auth.app_user_identities \
+            "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub, relay_email) \
              VALUES ($1, $2, $3, $4) \
              ON CONFLICT (app_client_id, global_user_id) \
@@ -979,7 +979,7 @@ async fn cleanup_identities(dsn: &str, user_id: Uuid) {
     .detach();
     let _ = client
         .execute(
-            "DELETE FROM auth.app_user_identities WHERE global_user_id = $1",
+            "DELETE FROM zeroship.app_user_identities WHERE global_user_id = $1",
             &[&user_id],
         )
         .await;
@@ -995,12 +995,12 @@ async fn cleanup(dsn: &str, user_id: Uuid) {
     .detach();
     let _ = client
         .execute(
-            "DELETE FROM auth.app_session_anchors WHERE global_user_id = $1",
+            "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
 }
 
@@ -1131,7 +1131,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         let conn = pool.get().await.expect("conn");
         let rows = conn
             .query(
-                "SELECT user_id, app_id FROM auth.gateway_sessions \
+                "SELECT user_id, app_id FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2",
                 &[&user_id, &APP_UUID.to_string()],
             )
@@ -1334,7 +1334,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
         let conn = pool.get().await.unwrap();
         conn.execute(
-            "UPDATE auth.gateway_sessions SET revoked_at = NOW() WHERE user_id = $1",
+            "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE user_id = $1",
             &[&user_id],
         )
         .await
@@ -1423,7 +1423,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         let conn = pool.get().await.unwrap();
         let rows = conn
             .query(
-                "SELECT name, avatar_url FROM auth.gateway_sessions \
+                "SELECT name, avatar_url FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
                 &[&user_id, &APP_UUID.to_string()],

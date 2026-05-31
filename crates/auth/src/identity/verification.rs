@@ -3,7 +3,7 @@
 //! Per proposal §8.3 (Phase 5):
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
-//!   in `auth.email_verifications` keyed to `(user_id, email)`. Return
+//!   in `zeroship.email_verifications` keyed to `(user_id, email)`. Return
 //!   the raw token to the caller (embedded in the `/verify?token=` link).
 //!
 //! - **Redeem**: SHA-256 the raw token, atomically mark the user verified
@@ -19,7 +19,7 @@
 //!   fresh request supersedes any prior outstanding token.
 //!
 //! Distinct from [`crate::identity::magic_link`] (different TTL, different
-//! purpose, distinct `auth.email_verifications` table). The schema for the
+//! purpose, distinct `zeroship.email_verifications` table). The schema for the
 //! table is owned by Liquibase (`db/changelog/`).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -85,7 +85,7 @@ pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToke
         // 2. Invalidate any previously unconsumed tokens for this user
         //    so only the most recent token can be redeemed.
         db.execute(
-            "UPDATE auth.email_verifications SET consumed_at = NOW() \
+            "UPDATE zeroship.email_verifications SET consumed_at = NOW() \
              WHERE user_id = $1 AND consumed_at IS NULL",
             &[&user_id],
         )
@@ -94,7 +94,7 @@ pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToke
 
         // 3. Insert the new row. `email` is CITEXT — cast at the bind site.
         db.execute(
-            "INSERT INTO auth.email_verifications \
+            "INSERT INTO zeroship.email_verifications \
                 (token_hash, user_id, email, expires_at) \
              VALUES ($1, $2, $3::citext, NOW() + ($4::text || ' hours')::interval)",
             &[
@@ -134,7 +134,7 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
     let token_hash = sha256(raw_token);
     let rows = db
         .query(
-            "UPDATE auth.email_verifications SET consumed_at = NOW() \
+            "UPDATE zeroship.email_verifications SET consumed_at = NOW() \
              WHERE token_hash = $1 \
                AND consumed_at IS NULL \
                AND expires_at > NOW() \
@@ -169,20 +169,20 @@ pub async fn redeem_and_mark_verified(
         .query(
             "WITH candidate AS ( \
                  SELECT ev.user_id, ev.email::text AS email \
-                 FROM auth.email_verifications ev \
-                 JOIN auth.users u ON u.id = ev.user_id \
+                 FROM zeroship.email_verifications ev \
+                 JOIN zeroship.users u ON u.id = ev.user_id \
                  WHERE ev.token_hash = $1 \
                    AND ev.consumed_at IS NULL \
                    AND ev.expires_at > NOW() \
              ), updated_user AS ( \
-                 UPDATE auth.users u \
+                 UPDATE zeroship.users u \
                  SET email_verified_at = COALESCE(u.email_verified_at, NOW()), \
                      updated_at = NOW() \
                  FROM candidate c \
                  WHERE u.id = c.user_id \
                  RETURNING u.id, c.email \
              ), consumed AS ( \
-                 UPDATE auth.email_verifications ev \
+                 UPDATE zeroship.email_verifications ev \
                  SET consumed_at = NOW() \
                  FROM updated_user u \
                  WHERE ev.token_hash = $1 \

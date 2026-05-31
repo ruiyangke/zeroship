@@ -3,8 +3,8 @@
 //! Two paths share this file:
 //!
 //! - **First-party fast path**: `client.skip_consent` clients accept silently
-//!   only for first use or scopes already recorded in `control.oauth_grants`.
-//!   Only this path consults the `control.oauth_grants` subset/delta logic.
+//!   only for first use or scopes already recorded in `zeroship.oauth_grants`.
+//!   Only this path consults the `zeroship.oauth_grants` subset/delta logic.
 //! - **Third-party / per-app UI** (`skip_consent = false`): render Allow/Deny
 //!   forms with human-readable Phase 10 scope labels and CSRF protection, then
 //!   PUT the decision to hydra-admin. These clients render the **full requested
@@ -12,7 +12,7 @@
 //!   grant. No-reprompt is delegated entirely to Hydra's opt-in `remember`
 //!   checkbox: a remembered grant makes Hydra skip the consent challenge before
 //!   this handler ever runs. On accept the request is UNIONed into the
-//!   `control.oauth_grants` ledger (the single source of truth), never replacing
+//!   `zeroship.oauth_grants` ledger (the single source of truth), never replacing
 //!   the prior grant (spec §5.2/§5.4).
 
 use askama::Template;
@@ -455,7 +455,7 @@ fn scopes_are_subset(requested: &[String], previously_granted: &[String]) -> boo
 
 /// Sorted-deduped union of two scope sets. Used on the accept path to fold the
 /// freshly-requested scopes into the prior grant so the single source-of-truth
-/// ledger (`control.oauth_grants`) accumulates rather than being overwritten by
+/// ledger (`zeroship.oauth_grants`) accumulates rather than being overwritten by
 /// an incremental (subset) step-up request (spec §5.2/§5.4).
 fn union_scopes(a: &[String], b: &[String]) -> Vec<String> {
     let mut out = a.to_vec();
@@ -473,12 +473,12 @@ async fn load_oauth_grant(
     let rows = db
         .query(
             "SELECT granted_scopes \
-             FROM control.oauth_grants \
+             FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2",
             &[&user_id, &client_id],
         )
         .await
-        .map_err(|e| format!("select control.oauth_grants: {e}"))?;
+        .map_err(|e| format!("select zeroship.oauth_grants: {e}"))?;
 
     Ok(rows
         .first()
@@ -493,7 +493,7 @@ async fn upsert_oauth_grant(
 ) -> Result<(), String> {
     let granted_scopes = sort_dedup_scopes(granted_scopes);
     db.execute(
-        "INSERT INTO control.oauth_grants \
+        "INSERT INTO zeroship.oauth_grants \
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW()) \
          ON CONFLICT (user_id, client_id) DO UPDATE \
@@ -502,7 +502,7 @@ async fn upsert_oauth_grant(
         &[&user_id, &client_id, &granted_scopes],
     )
     .await
-    .map_err(|e| format!("upsert control.oauth_grants: {e}"))?;
+    .map_err(|e| format!("upsert zeroship.oauth_grants: {e}"))?;
     Ok(())
 }
 
@@ -512,12 +512,12 @@ async fn touch_oauth_grant(
     client_id: &str,
 ) -> Result<(), String> {
     db.execute(
-        "UPDATE control.oauth_grants SET last_used_at = NOW() \
+        "UPDATE zeroship.oauth_grants SET last_used_at = NOW() \
          WHERE user_id = $1 AND client_id = $2",
         &[&user_id, &client_id],
     )
     .await
-    .map_err(|e| format!("touch control.oauth_grants: {e}"))?;
+    .map_err(|e| format!("touch zeroship.oauth_grants: {e}"))?;
     Ok(())
 }
 
@@ -660,7 +660,7 @@ async fn render_consent_page(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScopeClass {
     /// Namespace (b): reserved OIDC identity scope or an app-declared scope
-    /// found in `control.app_scope_defs`. Self-grantable by the authenticated
+    /// found in `zeroship.app_scope_defs`. Self-grantable by the authenticated
     /// end user — bypasses `is_authorized_anywhere` entirely.
     SelfGrant,
     /// Namespace (a): the closed `Scope::parse` platform vocabulary or a
@@ -701,7 +701,7 @@ fn classify_scope(scope: &str, app_scope_defs: &HashMap<String, ScopeDef>) -> Sc
 }
 
 /// Label + description for one app-declared scope, loaded from
-/// `control.app_scope_defs`.
+/// `zeroship.app_scope_defs`.
 #[derive(Clone, Debug)]
 struct ScopeDef {
     label: String,
@@ -720,11 +720,11 @@ fn app_id_from_client_id(client_id: &str) -> Option<Uuid> {
     app_id_from_oauth_client_id(client_id)
 }
 
-/// Load the app's declared end-user scopes from `control.app_scope_defs`,
+/// Load the app's declared end-user scopes from `zeroship.app_scope_defs`,
 /// keyed by `scope_id`. Empty for non-per-app clients (no `oac_` prefix) or an
 /// app that declared none. The auth PG client shares the database with the
-/// control schema, exactly like the existing `control.oauth_grants` /
-/// `control.oauth_clients` reads in this file.
+/// control schema, exactly like the existing `zeroship.oauth_grants` /
+/// `zeroship.oauth_clients` reads in this file.
 async fn load_app_scope_defs(
     db: &compio_postgres::Client,
     client_id: &str,
@@ -735,7 +735,7 @@ async fn load_app_scope_defs(
     let rows = match db
         .query(
             "SELECT scope_id, label, description \
-             FROM control.app_scope_defs \
+             FROM zeroship.app_scope_defs \
              WHERE app_id = $1",
             &[&app_id],
         )
@@ -746,7 +746,7 @@ async fn load_app_scope_defs(
         // the table) must not brick consent for identity/platform scopes — the
         // classifier simply sees no app-declared scopes.
         Err(err) if missing_relation_or_column(&err) => return Ok(HashMap::new()),
-        Err(err) => return Err(format!("select control.app_scope_defs: {err}")),
+        Err(err) => return Err(format!("select zeroship.app_scope_defs: {err}")),
     };
 
     let mut defs = HashMap::with_capacity(rows.len());
@@ -914,7 +914,7 @@ async fn load_client_display(
     let rows = match db
         .query(
             "SELECT client_name, logo_uri \
-             FROM control.oauth_clients \
+             FROM zeroship.oauth_clients \
              WHERE client_id = $1",
             &[&info.client.client_id],
         )

@@ -113,7 +113,7 @@ async fn load_principal_app_resources(
 ) -> Result<Vec<Resource>, AuthzError> {
     let rows = pg
         .query(
-            "SELECT DISTINCT app_id FROM control.app_members WHERE user_id = $1",
+            "SELECT DISTINCT app_id FROM zeroship.app_members WHERE user_id = $1",
             &[&principal_id],
         )
         .await
@@ -139,7 +139,7 @@ fn policy_set_from_policy(policy: &Policy) -> Result<PolicySet, AuthzError> {
 async fn load_token_policies(pg: &Client, token_id: Uuid) -> Result<PolicySet, AuthzError> {
     let rows = pg
         .query(
-            "SELECT policies FROM control.permission_tokens \
+            "SELECT policies FROM zeroship.permission_tokens \
              WHERE id = $1 \
                AND revoked_at IS NULL \
                AND (expires_at IS NULL OR expires_at > NOW())",
@@ -233,7 +233,7 @@ async fn audit_decision(
     let request_ip = ctx.request_ip;
     if let Err(err) = pg
         .execute(
-            "INSERT INTO control.authz_decisions \
+            "INSERT INTO zeroship.authz_decisions \
                 (user_id, token_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             &[

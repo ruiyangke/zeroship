@@ -1,4 +1,4 @@
-//! Rate-limit bucket persistence in `auth.rate_limits`.
+//! Rate-limit bucket persistence in `zeroship.rate_limits`.
 //!
 //! One row per bucket key. State is `(tokens, updated_at)`. Consumption is a
 //! single `INSERT ... ON CONFLICT DO UPDATE` statement so concurrent requests
@@ -43,7 +43,7 @@ pub async fn consume(
                         $3::DOUBLE PRECISION AS refill_per_sec, \
                         NOW() AS now_at \
              ), upserted AS ( \
-                 INSERT INTO auth.rate_limits (bucket_key, tokens, updated_at) \
+                 INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
                  SELECT bucket_key, \
                         CASE WHEN capacity >= 1.0 \
                              THEN (capacity - 1.0)::REAL \
@@ -55,10 +55,10 @@ pub async fn consume(
                  SET tokens = ( \
                          LEAST( \
                              $2::DOUBLE PRECISION, \
-                             auth.rate_limits.tokens::DOUBLE PRECISION \
+                             zeroship.rate_limits.tokens::DOUBLE PRECISION \
                                  + GREATEST( \
                                      0.0, \
-                                     EXTRACT(EPOCH FROM (EXCLUDED.updated_at - auth.rate_limits.updated_at)) \
+                                     EXTRACT(EPOCH FROM (EXCLUDED.updated_at - zeroship.rate_limits.updated_at)) \
                                          * $3::DOUBLE PRECISION \
                                  ) \
                          ) - 1.0 \
@@ -66,10 +66,10 @@ pub async fn consume(
                      updated_at = EXCLUDED.updated_at \
                  WHERE LEAST( \
                          $2::DOUBLE PRECISION, \
-                         auth.rate_limits.tokens::DOUBLE PRECISION \
+                         zeroship.rate_limits.tokens::DOUBLE PRECISION \
                              + GREATEST( \
                                  0.0, \
-                                 EXTRACT(EPOCH FROM (EXCLUDED.updated_at - auth.rate_limits.updated_at)) \
+                                 EXTRACT(EPOCH FROM (EXCLUDED.updated_at - zeroship.rate_limits.updated_at)) \
                                      * $3::DOUBLE PRECISION \
                              ) \
                      ) >= 1.0 \
@@ -81,17 +81,17 @@ pub async fn consume(
              UNION ALL \
              SELECT LEAST( \
                         input.capacity, \
-                        auth.rate_limits.tokens::DOUBLE PRECISION \
+                        zeroship.rate_limits.tokens::DOUBLE PRECISION \
                             + GREATEST( \
                                 0.0, \
-                                EXTRACT(EPOCH FROM (input.now_at - auth.rate_limits.updated_at)) \
+                                EXTRACT(EPOCH FROM (input.now_at - zeroship.rate_limits.updated_at)) \
                                     * input.refill_per_sec \
                             ) \
                     ) AS tokens, \
                     EXTRACT(EPOCH FROM input.now_at)::DOUBLE PRECISION AS updated_secs, \
                     FALSE AS consumed \
              FROM input \
-             JOIN auth.rate_limits ON auth.rate_limits.bucket_key = input.bucket_key \
+             JOIN zeroship.rate_limits ON zeroship.rate_limits.bucket_key = input.bucket_key \
              WHERE NOT EXISTS (SELECT 1 FROM upserted)",
             &[&key, &capacity, &refill_per_sec],
         )

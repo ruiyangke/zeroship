@@ -97,7 +97,7 @@ async fn pg_connect(dsn: &str) -> Client {
 async fn install_magic_links_insert_delay(client: &Client) {
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_magic_link_insert() \
+            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_link_insert() \
              RETURNS trigger LANGUAGE plpgsql AS $$ \
              BEGIN \
                  PERFORM pg_sleep(0.2); \
@@ -110,7 +110,7 @@ async fn install_magic_links_insert_delay(client: &Client) {
         .expect("create insert delay function");
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
             &[],
         )
         .await
@@ -118,8 +118,8 @@ async fn install_magic_links_insert_delay(client: &Client) {
     client
         .execute(
             "CREATE TRIGGER test_sleep_before_magic_link_insert \
-             BEFORE INSERT ON auth.magic_links \
-             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_magic_link_insert()",
+             BEFORE INSERT ON zeroship.magic_links \
+             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_link_insert()",
             &[],
         )
         .await
@@ -129,7 +129,7 @@ async fn install_magic_links_insert_delay(client: &Client) {
 async fn drop_magic_links_insert_delay(client: &Client) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
             &[],
         )
         .await
@@ -183,7 +183,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 
     client
         .execute(
-            "INSERT INTO auth.gateway_sessions \
+            "INSERT INTO zeroship.gateway_sessions \
                 (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
             &[&user.id, &"app_reset_revoke_test", &email, &"Test"],
@@ -192,7 +192,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .expect("seed gateway session");
     client
         .execute(
-            "INSERT INTO auth.console_sessions \
+            "INSERT INTO zeroship.console_sessions \
                 (user_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2::citext, $3, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
             &[&user.id, &email, &"Test"],
@@ -266,7 +266,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 
     let idp_count: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.sessions WHERE user_id = $1",
+            "SELECT COUNT(*) FROM zeroship.sessions WHERE user_id = $1",
             &[&user.id],
         )
         .await
@@ -274,7 +274,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .get(0);
     let gateway_count: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.gateway_sessions WHERE user_id = $1",
+            "SELECT COUNT(*) FROM zeroship.gateway_sessions WHERE user_id = $1",
             &[&user.id],
         )
         .await
@@ -282,7 +282,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .get(0);
     let console_count: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.console_sessions WHERE user_id = $1",
+            "SELECT COUNT(*) FROM zeroship.console_sessions WHERE user_id = $1",
             &[&user.id],
         )
         .await
@@ -294,7 +294,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 
     let password_changed: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.audit_events \
+            "SELECT COUNT(*) FROM zeroship.audit_events \
              WHERE user_id = $1 AND event_type = 'password_changed' AND outcome = 'success'",
             &[&user.id],
         )
@@ -303,7 +303,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .get(0);
     let sessions_revoked: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.audit_events \
+            "SELECT COUNT(*) FROM zeroship.audit_events \
              WHERE user_id = $1 AND event_type = 'sessions_revoked_after_password_reset' \
                AND outcome = 'success'",
             &[&user.id],
@@ -314,16 +314,16 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     assert_eq!(password_changed, 1);
     assert_eq!(sessions_revoked, 1);
 
-    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
         .await
         .ok();
     pg.execute(
-        "DELETE FROM auth.magic_links WHERE email = $1::citext",
+        "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
         &[&email],
     )
     .await
     .ok();
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -361,7 +361,7 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
     let csrf_nonce = format!("reset-clears-completion-{}", Uuid::new_v4().simple());
     client
         .execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
             &[&csrf_nonce, &"123456", &email, &"lc-reset-clears-completion"],
@@ -429,7 +429,7 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
 
     let completions_left: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.magic_completions WHERE email = $1::citext",
+            "SELECT COUNT(*) FROM zeroship.magic_completions WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -440,16 +440,16 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
         "password reset must clear cross-device magic completions for the email"
     );
 
-    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
         .await
         .ok();
     pg.execute(
-        "DELETE FROM auth.magic_links WHERE email = $1::citext",
+        "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
         &[&email],
     )
     .await
     .ok();
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -493,7 +493,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 
     let active_count: i64 = client
         .query_one(
-            "SELECT COUNT(*) FROM auth.magic_links \
+            "SELECT COUNT(*) FROM zeroship.magic_links \
              WHERE email = $1::citext AND purpose = 'reset' AND consumed_at IS NULL",
             &[&email],
         )
@@ -507,13 +507,13 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -556,13 +556,13 @@ async fn issue_then_redeem_roundtrip() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -604,8 +604,8 @@ async fn complete_rolls_back_token_consume_with_transaction() {
         .query_one(
             "SELECT ml.consumed_at IS NULL AS token_unconsumed, \
                     u.password_hash = $2 AS password_unchanged \
-             FROM auth.magic_links ml \
-             JOIN auth.users u ON u.email = ml.email \
+             FROM zeroship.magic_links ml \
+             JOIN zeroship.users u ON u.email = ml.email \
              WHERE ml.email = $1::citext AND ml.purpose = 'reset'",
             &[&email, &old_hash],
         )
@@ -624,13 +624,13 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -675,13 +675,13 @@ async fn new_issue_supersedes_previous_reset_token() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

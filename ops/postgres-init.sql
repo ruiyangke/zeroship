@@ -1,15 +1,15 @@
 -- ops/postgres-init.sql — runs ONCE on a fresh postgres data dir
 -- (mounted into /docker-entrypoint-initdb.d/).
 --
--- The whole platform shares ONE database with per-service schemas
--- (control, auth, platform, …; hydra_* live in public). The control plane's
--- migrations create their objects in the `control` schema but reference some
--- of them UNQUALIFIED, so every connection needs `control` on its search_path.
--- Postgres's default role search_path ("$user", public) omits it, which makes
--- control's migration fail with `relation "apps" does not exist`.
+-- The whole platform shares ONE database with a single `zeroship` schema for
+-- all system tables (hydra_* live in public). Most queries are fully qualified
+-- (`zeroship.apps`), but a few reference objects UNQUALIFIED (e.g.
+-- `crates/control/src/admin_handlers.rs` `UPDATE apps …`), so every connection
+-- needs `zeroship` on its search_path. Postgres's default role search_path
+-- ("$user", public) omits it, which makes those queries fail with
+-- `relation "apps" does not exist`.
 --
--- Setting the role default here (it's allowed to list schemas that don't exist
--- yet — they're created by the service migrations on first boot) gives every
--- connection the right resolution order. auth/hydra qualify or set their own,
--- so leading with `control` is safe for them.
-ALTER ROLE postgres SET search_path = control, auth, platform, public;
+-- Setting the role default here (it's allowed to list a schema that doesn't
+-- exist yet — it's created by the Liquibase migration on first boot) gives
+-- every connection the right resolution order.
+ALTER ROLE postgres SET search_path = zeroship, public;

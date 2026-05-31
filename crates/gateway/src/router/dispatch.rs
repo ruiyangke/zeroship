@@ -1303,7 +1303,7 @@ fn insufficient_scope_response(required: &[String]) -> HttpResponse {
 /// Handle `/__zeroship/auth/callback` on any `{app}.zeroship.ai` host. Reads
 /// the signed stash cookie + `code`/`state` query, exchanges with
 /// hydra via `OidcRp::finish_callback`, persists a row in
-/// `auth.gateway_sessions`, sets the per-origin
+/// `zeroship.gateway_sessions`, sets the per-origin
 /// `__Host-zeroship_app_session` cookie, clears the stash cookie, and 302s
 /// back to the original path the user was trying to reach when the
 /// dance started.

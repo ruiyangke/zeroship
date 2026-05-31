@@ -35,7 +35,7 @@ async fn seed_user(client: &Client, label: &str) -> Uuid {
     let email = format!("{label}-{}@zeroship.test", user_id.simple());
     client
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
             &[&user_id, &email, &label],
         )
@@ -47,12 +47,12 @@ async fn seed_user(client: &Client, label: &str) -> Uuid {
 async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
     let _ = client
         .execute(
-            "DELETE FROM auth.app_user_identities WHERE app_client_id = $1",
+            "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
             &[&client_id],
         )
         .await;
     let _ = client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
 }
 
@@ -70,7 +70,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     // Active alias row (relay_email set, revoked_at NULL).
     client
         .execute(
-            "INSERT INTO auth.app_user_identities \
+            "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub, relay_email) \
              VALUES ($1, $2, $3, $4)",
             &[&client_id, &user_id, &pairwise_sub, &relay_email],
@@ -91,7 +91,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     // emits an EMPTY email (fail closed), NEVER the real address.
     client
         .execute(
-            "UPDATE auth.app_user_identities SET revoked_at = now() \
+            "UPDATE zeroship.app_user_identities SET revoked_at = now() \
              WHERE app_client_id = $1 AND global_user_id = $2",
             &[&client_id, &user_id],
         )
@@ -122,7 +122,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
     // minted yet — relay_email NULL (consent ran before, or no email scope).
     client
         .execute(
-            "INSERT INTO auth.app_user_identities \
+            "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub) \
              VALUES ($1, $2, $3)",
             &[&client_id, &user_id, &pairwise_sub],
