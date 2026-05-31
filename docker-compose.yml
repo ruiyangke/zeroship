@@ -219,11 +219,20 @@ services:
         --control http://control:9090
         --control-key platform-key
         --blob-store /data/bundles
+        --db postgres://postgres:zeroship@postgres:5432/zeroship
+        --kv-url redis://redis:6379
+        --storage-root /data/app-storage
         --max-isolates 200
         --poll-interval 3
     volumes:
       # Same content-addressed blob store control writes to (deploy blobs).
       - bundles:/data/bundles
+      # SHARED app object store for env.storage. Every worker replica mounts
+      # the SAME named volume at the same path, so a `storage.put` on one
+      # replica is readable by another — the multi-node-consistent LocalFs
+      # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
+      # replaces this in prod behind the same Backend trait.
+      - app-storage:/data/app-storage
       # Mounted at the well-known path => auto-discovered, so the worker
       # picks up the shared [observability] defaults with no --config.
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
@@ -232,7 +241,36 @@ services:
     security_opt:
       - seccomp:unconfined
     depends_on:
-      - control
+      # --db now points at the shared Postgres, so wait for the schema to
+      # exist (postgres healthy + the one-shot migrate completed) the same
+      # way control/gateway do — otherwise the first env.db op races the
+      # migration.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      control:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  # redis — the SHARED key-value store backing the deployed-app `env.kv`
+  # namespace. The worker's `--kv-url redis://redis:6379` points every
+  # worker replica at this ONE instance, so a `kv.set` on one replica is
+  # visible to another (multi-node consistency). The bespoke compio-redis
+  # driver speaks to it; zero tokio. Single-node here in dev; the
+  # `Redis` backend's URL transparently upgrades to cluster mode
+  # (`?cluster=true&seeds=...`) for a sharded prod fleet.
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
 
   # zeroship-auth — OIDC IdP UI + RP in front of the hydra kernel. The gateway
   # redirects unauthenticated end users to it (gateway's
@@ -457,5 +495,10 @@ networks:
 
 volumes:
   bundles:
+  # Shared object store for deployed-app env.storage (LocalFs). One volume,
+  # mounted at the same path on every worker replica → cross-node-consistent.
+  app-storage:
+  # Persisted redis dataset for the deployed-app env.kv store.
+  redis-data:
   verdaccio_storage:
   builder-pnpm-store:

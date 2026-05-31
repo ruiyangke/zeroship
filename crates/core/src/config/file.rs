@@ -100,6 +100,11 @@ pub struct SecretSection {
     pub database_url: Option<String>,
     /// Auth database URL reference.
     pub auth_db_url: Option<String>,
+    /// App-runtime KV (Redis) connection URL reference. Back-fills the
+    /// worker's `--kv-url` / `ZEROSHIP_KV_URL` when those are empty; powers
+    /// the deployed app `env.kv` namespace. May carry credentials, so it is
+    /// a reference here (never a plaintext URL).
+    pub kv_url: Option<String>,
     /// Legacy master keys (for key rotation) reference.
     pub legacy_master_keys: Option<String>,
     /// Google OAuth client secret reference.
