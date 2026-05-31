@@ -9,6 +9,10 @@ export default defineApp({
     "/auth/*": {
       auth: "anon",
       publiclyAccessible: true,
+      // Redeclares auth + publiclyAccessible from the "/auth" ancestor with the
+      // SAME values; override confirms the intentional (redundant) shadow so the
+      // manifest validator (crates/bundle Manifest::validate) accepts it.
+      override: ["auth", "publicly_accessible"],
     },
     "/api/preview": {
       auth: "user",
@@ -17,6 +21,10 @@ export default defineApp({
     "/api/preview/*": {
       auth: "user",
       rateLimit: { rpm: 600, per: "user" },
+      // Redeclares auth + rateLimit from the "/api/preview" ancestor with the
+      // SAME values; override confirms the intentional (redundant) shadow so the
+      // manifest validator (crates/bundle Manifest::validate) accepts it.
+      override: ["auth", "rate_limit"],
     },
     "rpc:apps": {
       auth: "user",
