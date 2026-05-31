@@ -234,3 +234,6 @@ gateway HMAC pairwise · mint single-flight+Pool · wrapper key rotation · anch
 scope:global signout=this-app-all-devices · app_user_identities(app_client_id=oac_, pairwise_sub) ·
 email_verified describes the real inbox · 403=scope_required(SDK)/insufficient_scope(WWW-Authenticate).
 ## LESSON: integration-heavy slices SOLO; parallelize only provably-disjoint (sdks vs gateway, doc vs code).
+
+## FINAL SWEEP (2026-05-31) — whole branch green
+Workspace builds; auth-stack suites on live PG/Hydra/Redis: core 274 · bundle 44 · control 179 · worker 21 · gateway 352 · runtime lib+auth_plugin 234 · @zeroship/auth 73 — ~1177 tests, 0 failed. Console-as-regular-app: build-verified + integration-tested + LIVE-stack-validated (stack up, real .zship seeded+served at console.zeroship.localhost, BFF authorize→Hydra, control-credential not in browser). ~25 auth commits, NOT pushed.
