@@ -431,9 +431,16 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     assert_eq!(oc.len(), 1, "oauth_clients identity row exists");
     assert!(!oc[0].get::<_, bool>("skip_consent"));
     let uris: Vec<String> = oc[0].get("redirect_uris");
+    // The popup OAuth flow needs BOTH the popup-callback and the full-page
+    // callback registered on the console public client (the `@zeroship/auth`
+    // SDK posts the relay code through `/__zs/auth/popup-callback`).
+    assert!(
+        uris.iter().any(|u| u == &format!("http://{host}/__zs/auth/popup-callback")),
+        "popup-callback redirect_uri registered on the console host: {uris:?}"
+    );
     assert!(
         uris.iter().any(|u| u == &format!("http://{host}/__zs/auth/callback")),
-        "redirect_uris anchor on the console host: {uris:?}"
+        "callback redirect_uri anchors on the console host: {uris:?}"
     );
     // The Hydra-side client is a public PKCE client (token_endpoint_auth_method
     // none) — asserted via the mock's recorded body.

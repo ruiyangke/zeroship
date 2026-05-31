@@ -9,12 +9,12 @@ use ntex::web;
 use zeroship_core::config::{
     bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, require_unless_dev,
     resolve_overlay_string, validate_master_key_material, CheckConfigReport, CheckFormat,
-    CheckValue, DEV_STASH_SIGNING_KEY,
+    CheckValue,
 };
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    admin_handlers, api, backchannel_logout, bootstrap_builder, bootstrap_console, env_handlers,
-    internal, oauth_grants_handlers, oauth_handlers, oidc_rp, stripe_handlers, token_handlers,
+    admin_handlers, api, bootstrap_console, env_handlers,
+    internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -23,7 +23,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const DEV_HYDRA_PUBLIC_URL: &str = "http://localhost:4444";
 const DEV_HYDRA_ADMIN_URL: &str = "http://localhost:4445";
-const DEV_CONSOLE_OIDC_SECRET: &str = "dev-console-oidc-secret";
 
 /// zeroship control-plane startup configuration.
 #[derive(Parser)]
@@ -111,29 +110,11 @@ struct ControlCli {
     )]
     trust_proxy: Option<bool>,
 
-    /// Bootstrap the first-party builder OAuth client at startup.
-    #[arg(long = "bootstrap-builder-client", action = clap::ArgAction::SetTrue)]
-    bootstrap_builder_client: bool,
-
-    /// Environment half of `--bootstrap-builder-client`; `1`/`true` are truthy.
-    #[arg(skip = env_is_truthy("BOOTSTRAP_BUILDER_OAUTH_CLIENT"))]
-    bootstrap_builder_client_env: bool,
-
-    /// Redirect URI for the bootstrapped builder OAuth client.
-    #[arg(
-        long = "builder-redirect-uri",
-        env = "BUILDER_REDIRECT_URI",
-        default_value = bootstrap_builder::DEFAULT_BUILDER_REDIRECT_URI
-    )]
-    builder_redirect_uri: String,
-
-    /// File path used to persist the bootstrapped builder client secret.
-    #[arg(
-        long = "builder-client-secret-file",
-        env = "BUILDER_CLIENT_SECRET_FILE",
-        default_value = bootstrap_builder::DEFAULT_BUILDER_CLIENT_SECRET_PATH
-    )]
-    builder_client_secret_file: PathBuf,
+    // NOTE: the `--bootstrap-builder-client` / `--builder-redirect-uri` /
+    // `--builder-client-secret-file` flags were retired in the R5 cutover. The
+    // separate `zeroship-builder` Vite service (and its confidential OAuth
+    // client) is gone — the AI app-builder IS the console, seeded by
+    // `--bootstrap-console` as a public-PKCE gateway-fronted app.
 
     /// Seed the console (`apps/zeroship-builder`) as a platform-owned regular
     /// app at startup: upsert its `control.apps` row (enterprise plan), its
@@ -206,15 +187,6 @@ struct ControlCli {
     #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
     hydra_public_url: Option<String>,
 
-    /// Console OIDC client secret.
-    #[arg(
-        long = "console-oidc-secret",
-        env = "CONSOLE_OIDC_SECRET",
-        default_value = "",
-        hide_env_values = true
-    )]
-    console_oidc_secret: String,
-
     /// HMAC key for short-lived OIDC stash cookies.
     #[arg(
         long = "stash-signing-key",
@@ -260,10 +232,6 @@ struct ControlCli {
 }
 
 impl ControlCli {
-    fn bootstrap_builder_client(&self) -> bool {
-        self.bootstrap_builder_client || self.bootstrap_builder_client_env
-    }
-
     fn bootstrap_console(&self) -> bool {
         self.bootstrap_console || self.bootstrap_console_env
     }
@@ -289,10 +257,6 @@ impl std::fmt::Debug for ControlCli {
             .field("legacy_master_keys", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("trust_proxy", &self.trust_proxy)
-            .field("bootstrap_builder_client", &self.bootstrap_builder_client)
-            .field("bootstrap_builder_client_env", &self.bootstrap_builder_client_env)
-            .field("builder_redirect_uri", &self.builder_redirect_uri)
-            .field("builder_client_secret_file", &self.builder_client_secret_file)
             .field("bootstrap_console", &self.bootstrap_console)
             .field("bootstrap_console_env", &self.bootstrap_console_env)
             .field("console_zship", &self.console_zship)
@@ -306,7 +270,6 @@ impl std::fmt::Debug for ControlCli {
             .field("hydra_admin_url", &self.hydra_admin_url)
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("hydra_public_url", &self.hydra_public_url)
-            .field("console_oidc_secret", &"<redacted>")
             .field("stash_signing_key", &"<redacted>")
             .field("pairwise_salt", &"<redacted>")
             .field("pairwise_salt_file", &self.pairwise_salt_file)
@@ -367,7 +330,6 @@ fn main() -> std::io::Result<()> {
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
     let allow_remote_hydra_admin = cli.allow_remote_hydra_admin.unwrap_or(false);
-    let bootstrap_builder_client = cli.bootstrap_builder_client();
     let bootstrap_console = cli.bootstrap_console();
 
     let hydra_admin_url = resolve_overlay_string(
@@ -490,8 +452,6 @@ fn main() -> std::io::Result<()> {
             })
             .collect()
     };
-    let builder_redirect_uri = cli.builder_redirect_uri;
-    let builder_client_secret_path = cli.builder_client_secret_file;
     let console_zship = cli.console_zship;
     // The console host is the explicit OAuth sector_identifier. Default to the
     // dev host under --dev-insecure (compose / *.zeroship.localhost) and the
@@ -504,12 +464,6 @@ fn main() -> std::io::Result<()> {
         }
     });
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
-    let console_oidc_secret = zeroship_core::config::obtain_secret(
-        "CONSOLE_OIDC_SECRET / --console-oidc-secret",
-        &cli.console_oidc_secret,
-        file_secrets.console_oidc_secret.as_deref(),
-        cli.check_config,
-    );
     let stash_signing_key = zeroship_core::config::obtain_secret(
         "STASH_SIGNING_KEY / --stash-signing-key",
         &cli.stash_signing_key,
@@ -628,19 +582,17 @@ fn main() -> std::io::Result<()> {
         tracing::warn!("control: --dev-insecure set; admin + internal auth disabled");
     }
 
-    // Phase 3 U7/U8 — control plane OIDC RP for `console.zeroship.ai`.
-    // Mandatory post-U8: the legacy `auth_handlers` / `auth_service`
-    // chain has been retired, so the OIDC RP is the only console-auth
-    // surface. Control also needs hydra-admin for OAuth bearer
-    // introspection. Refuses to boot unless these pieces are configured
+    // Control plane resource-server prerequisites. The console is now a
+    // gateway-fronted regular app authenticated via `@zeroship/auth` (BFF) —
+    // control has NO OIDC RP of its own anymore. It still needs: the stash
+    // signing key (shared OIDC stash MAC), the auth DB (the `AuthzGuard`
+    // bearer path + audit), and the hydra public/admin URLs (OAuth bearer
+    // introspection + issuer). Refuses to boot unless these are configured
     // (`--dev-insecure` permits localhost defaults only).
     if !insecure_dev {
         let mut missing = Vec::new();
         if hydra_public_url.is_empty() {
             missing.push("--hydra-public-url / HYDRA_PUBLIC_URL");
-        }
-        if console_oidc_secret.is_empty() {
-            missing.push("--console-oidc-secret / CONSOLE_OIDC_SECRET");
         }
         if stash_signing_key.is_empty() {
             missing.push("--stash-signing-key / STASH_SIGNING_KEY");
@@ -654,7 +606,7 @@ fn main() -> std::io::Result<()> {
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
-                "control: refusing to start; OIDC RP and OAuth introspection require these flags. \
+                "control: refusing to start; the resource-server auth path and OAuth introspection require these flags. \
                  Pass --dev-insecure to run with localhost defaults."
             );
             std::process::exit(1);
@@ -708,10 +660,6 @@ fn main() -> std::io::Result<()> {
         report.field("log_format", CheckValue::Plain(log_format_str));
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
-        report.field(
-            "bootstrap_builder_client",
-            CheckValue::Flag(bootstrap_builder_client),
-        );
         report.field("bootstrap_console", CheckValue::Flag(bootstrap_console));
         if bootstrap_console {
             report.field("console_host", CheckValue::Plain(console_host.clone()));
@@ -828,14 +776,11 @@ fn main() -> std::io::Result<()> {
     .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
-    let stash_key_bytes = if stash_signing_key.is_empty() {
-        // Dev-only fallback. Ephemeral keys are fine for the 10-minute
-        // stash window during local development; in prod the guard
-        // above already exited.
-        DEV_STASH_SIGNING_KEY.as_bytes().to_vec()
-    } else {
-        stash_signing_key.into_bytes()
-    };
+    // `stash_signing_key` is validated above for shared-secret hygiene (it is
+    // the same STASH_SIGNING_KEY the gateway uses); control no longer consumes
+    // it directly now that the bespoke console OIDC RP (and its stash cookie)
+    // is gone, so it is not threaded any further.
+    let _ = &stash_signing_key;
     // Platform-wide pairwise salt (auth-sdk §6.2) — derived from the DEDICATED
     // `PAIRWISE_SALT` secret (NOT the stash key), via the SHARED helper, so
     // control's disconnect-app revocation writes the family marker on the SAME
@@ -849,29 +794,18 @@ fn main() -> std::io::Result<()> {
     };
     let pairwise_salt =
         zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
-    let console_oidc_secret_value = if console_oidc_secret.is_empty() {
-        DEV_CONSOLE_OIDC_SECRET.to_string()
-    } else {
-        console_oidc_secret
-    };
-    tracing::info!(
-        hydra_public_url = %hydra_public_url,
-        "control: console OIDC RP enabled"
-    );
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        &hydra_public_url,
-        "console.zeroship.ai",
-        console_oidc_secret_value,
-        stash_key_bytes,
-    ));
+    // Control plane is a pure API resource server: no console OIDC RP. The
+    // hydra introspector is still needed for the OAuth-bearer arm of the
+    // `AuthzGuard` (third-party access tokens introspected against hydra-admin).
     let hydra_introspector = Arc::new(zeroship_core::hydra::HydraIntrospector::new(
         &hydra_admin_url,
     ));
 
     let auth_db_url_resolved = if auth_db_url.is_empty() {
-        // Dev fallback: reuse the control DB URL so /auth/callback
-        // works against a single local Postgres without operator
-        // ceremony. Production refused to start without --auth-db
+        // Dev fallback: reuse the control DB URL so the auth-schema
+        // bearer path (permission_tokens lookup + Cedar enforcement in
+        // AuthzGuard) works against a single local Postgres without
+        // operator ceremony. Production refused to start without --auth-db
         // above.
         db_url.clone()
     } else {
@@ -890,44 +824,19 @@ fn main() -> std::io::Result<()> {
         Arc::new(pg_client)
     };
 
-    if bootstrap_builder_client {
-        // Schema (incl. the control.* authz/oauth tables) is owned by Liquibase
-        // (db/changelog), applied out of band before boot — not here.
-        let cfg = bootstrap_builder::BuilderClientBootstrapConfig {
-            enabled: true,
-            hydra_admin_url: hydra_admin_url.clone(),
-            redirect_uri: builder_redirect_uri,
-            client_secret_path: builder_client_secret_path,
-            skip_consent: trusted_oauth_clients
-                .contains(bootstrap_builder::BUILDER_CLIENT_ID),
-        };
-        bootstrap_builder::bootstrap_builder_oauth_client(&auth_pg, &cfg)
-            .await
-            .map_err(|err| {
-                tracing::error!(error = %err, "control: builder OAuth client bootstrap failed");
-                std::io::Error::other(err.to_string())
-            })?;
-    }
-
-    // Console seed (R5a): make the console deployable as a platform-owned
+    // Console seed (R5): make the console deployable + served as a platform-owned
     // regular app. In-process + idempotent + trusted; NEVER an HTTP route.
     // Runs AFTER migrate (Liquibase, out of band), AFTER the registry / env
     // store / blob store / PAT issuer / auth-pg are up, and BEFORE AppState is
-    // constructed (registry + env_store are moved into it below). Mirrors the
-    // `bootstrap_builder` invocation above.
+    // constructed (registry + env_store are moved into it below).
     //
-    // COMPOSE PLUMBING NOTE (next, non-destructive slice — NOT done here):
-    //   * Build the console `.zship` in the frontend image (`apps/zeroship-
-    //     builder` → `dist/app.zship`, R5a `pnpm build`) and make it readable by
-    //     the control container at `--console-zship` (default
-    //     `apps/zeroship-builder/dist/app.zship`).
-    //   * Pass `--bootstrap-console` (or `BOOTSTRAP_CONSOLE=1`) +
-    //     `--console-zship <path>` to the control service, ordered AFTER the
-    //     `migrate` service is healthy (same dependency as the rest of control
-    //     boot).
-    //   * Do NOT flip `ops/Caddyfile` / compose `console.*` ROUTING here — that
-    //     is the later, destructive cutover slice (R5b). This seed is ADDITIVE:
-    //     the Vite-served console keeps working untouched until routing flips.
+    // Compose wiring (R5 cutover — DONE): the console `.zship` is built in the
+    // Docker `sdks` stage and COPYed to `/opt/zeroship/console/app.zship`; the
+    // control service runs with `--bootstrap-console --console-host
+    // console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship`,
+    // ordered after the `migrate` service. `ops/Caddyfile` routes
+    // `console.zeroship.localhost` → the gateway (the console is a gateway-fronted
+    // app); the separate Vite builder service is retired.
     if bootstrap_console {
         let console_scheme = if insecure_dev { "http" } else { "https" };
         let cfg = bootstrap_console::ConsoleBootstrapConfig {
@@ -991,7 +900,6 @@ fn main() -> std::io::Result<()> {
         insecure_dev,
         trust_proxy,
         deploy_tmp_dir,
-        oidc_rp,
         auth_pg,
         auth_db_url: auth_db_url_resolved,
         hydra_admin_url,
@@ -1088,22 +996,15 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )
-            // --- Auth (creator console) ---
-            // OIDC RP callback for the `console.zeroship.ai` client.
-            // The legacy `/auth/{login,register,logout,userinfo,consent,
-            // authorize,google/*}` handlers were retired in P3-U8 along
-            // with `auth_service` / `auth_handlers`; this is now the
-            // only console-auth surface.
-            .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
+            // --- Auth (resource server) ---
+            // No console OIDC RP and no console back-channel-logout endpoint:
+            // the console is now a gateway-fronted regular app authenticated
+            // via `@zeroship/auth` (BFF). Per-app back-channel logout for the
+            // console is handled by the GATEWAY's own per-app BCL endpoint (it
+            // is a gateway app like any other). Control exposes only the PAT /
+            // OAuth-grant management surfaces below.
             .configure(token_handlers::configure)
             .configure(oauth_grants_handlers::configure)
-            // OIDC Back-Channel Logout 1.0 RP endpoint. Hydra POSTs
-            // here on user sign-out; we verify the logout_token and
-            // revoke the user's console sessions. The URI must match
-            // `backchannel_logout_uri` on the `console.zeroship.ai`
-            // client in `ops/auth-clients.example.toml`. Mounted via
-            // `.configure(...)` to mirror the gateway pattern.
-            .configure(backchannel_logout::configure)
             // --- Stripe Connect ---
             .service(
                 web::resource("/api/creators/{id}/stripe/onboard")

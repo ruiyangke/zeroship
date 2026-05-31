@@ -16,8 +16,8 @@ zeroship-authz = { workspace = true }
 # `control.oauth_clients` in dev-mode startup.
 zeroship-auth = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-# `with-chrono-0_4` so the console_sessions store can pull
-# `TIMESTAMPTZ` columns into `chrono::DateTime<Utc>` directly.
+# `with-chrono-0_4` so PAT issuance / the console seed can map
+# `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.
 compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
 compio = { workspace = true }
 memmap2 = { workspace = true }

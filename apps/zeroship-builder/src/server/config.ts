@@ -2,18 +2,11 @@ import { defineApp } from "@zeroship/server";
 
 export default defineApp({
   resources: {
-    "/auth": {
-      auth: "anon",
-      publiclyAccessible: true,
-    },
-    "/auth/*": {
-      auth: "anon",
-      publiclyAccessible: true,
-      // Redeclares auth + publiclyAccessible from the "/auth" ancestor with the
-      // SAME values; override confirms the intentional (redundant) shadow so the
-      // manifest validator (crates/bundle Manifest::validate) accepts it.
-      override: ["auth", "publicly_accessible"],
-    },
+    // No `/auth/*` resource: the console no longer serves a bespoke OAuth
+    // RP. End-user auth runs through the platform BFF — the gateway's
+    // same-origin `/__zs/auth/*` endpoints (served by the gateway, not the
+    // app) + the `@zeroship/auth` SDK. Identity reaches app code via the
+    // gateway-forwarded `ZeroShip-User` header (`currentUser()`).
     "/api/preview": {
       auth: "user",
       rateLimit: { rpm: 600, per: "user" },

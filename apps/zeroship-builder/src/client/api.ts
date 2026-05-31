@@ -12,17 +12,6 @@ import { createRpcClient } from "@zeroship/rpc/client";
 import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
 
-// Compatibility shim for the orphan tree (auth pages, admin, old
-// project workspace). Vite resolves bare `from "../api"` to api.ts
-// rather than api/index.ts, so the old api/index.ts is dead code.
-// TopBar / AuthContext / Account / Login / Signup still reference
-// `isDevAutoAuth` via that import path; export the same shim here
-// so the module chain loads. A later cleanup can delete this once the
-// orphaned surfaces are removed.
-export function isDevAutoAuth(): boolean {
-  return import.meta.env.DEV;
-}
-
 // ─── Project Lifecycle Procedures ─────────────────────────────────
 // Re-export server functions as plain async functions. The vite-plugin
 // transforms each server-module export into an RPC stub on the client

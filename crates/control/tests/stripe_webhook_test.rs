@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    oidc_rp, stripe_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    stripe_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
 
@@ -49,12 +49,6 @@ impl Fixture {
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
         let vfs: Arc<dyn BundleStore + Send + Sync> =
             Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-        let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-            "http://localhost:4444",
-            "console.zeroship.ai",
-            "test-oidc-secret".to_string(),
-            b"test-stash-key".to_vec(),
-        ));
         let (auth_pg_client, auth_pg_conn) =
             compio_postgres::connect(db_url, compio_postgres::NoTls)
                 .await
@@ -80,7 +74,6 @@ impl Fixture {
             insecure_dev: true,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp,
             auth_pg: Arc::new(auth_pg_client),
             auth_db_url: db_url.to_string(),
             hydra_admin_url: "http://127.0.0.1:4445".to_string(),

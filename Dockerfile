@@ -38,6 +38,12 @@ RUN pnpm build
 # Sanity: the two files the runtime crate include_str!s MUST exist.
 RUN test -f sdks/bootstrap/dist/runtime-entry.js \
  && test -f sdks/bootstrap/dist/dispatcher.js
+# Build the CONSOLE (apps/zeroship-builder) to a .zship. The console is now a
+# regular gateway-fronted zeroship app; control's `--bootstrap-console` ingests
+# this artifact at boot. The root `pnpm build` only builds sdks/*, so build the
+# console app explicitly (its `build` = `tsc -b && vite build` → dist/app.zship).
+RUN pnpm --filter zeroship-builder build \
+ && test -f apps/zeroship-builder/dist/app.zship
 
 # ---------------------------------------------------------------------------
 # Stage 2 — native (Rust) build of all six binaries.
@@ -85,6 +91,10 @@ COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-sandbox /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
+# The prebuilt console .zship (built in the `sdks` node stage). Control's
+# `--bootstrap-console --console-zship /opt/zeroship/console/app.zship` ingests
+# it at boot to seed the gateway-fronted console app.
+COPY --from=sdks /build/apps/zeroship-builder/dist/app.zship /opt/zeroship/console/app.zship
 
 # ---------------------------------------------------------------------------
 # Stage 4 — frontend dev image: the runtime image (so it has the `zeroship`

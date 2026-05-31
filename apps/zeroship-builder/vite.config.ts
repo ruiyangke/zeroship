@@ -14,21 +14,18 @@ import tailwindcss from "@tailwindcss/vite";
 import { zeroship } from "@zeroship/vite-plugin";
 
 const devServerPort = Number(process.env.ZEROSHIP_BUILDER_API_PORT ?? "3002");
-const controlUrl = process.env.CONTROL_URL ?? "http://localhost:9090";
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), zeroship({ devServerPort })],
   server: {
-    // The docker-compose stack serves the builder behind Caddy at
-    // builder.zeroship.localhost. Vite's dev server rejects requests whose
+    // The docker-compose stack serves the console behind Caddy at
+    // console.zeroship.localhost. Vite's dev server rejects requests whose
     // Host header isn't allowlisted (DNS-rebinding protection), so permit the
     // dev domain (leading "." matches the host and any subdomain).
+    //
+    // No `/auth` proxy: the bespoke OAuth RP is gone. End-user auth runs
+    // through the platform BFF — the gateway's same-origin `/__zs/auth/*`
+    // endpoints + the `@zeroship/auth` SDK — not an app-served `/auth/*`.
     allowedHosts: [".zeroship.localhost"],
-    proxy: {
-      "/auth": {
-        target: controlUrl,
-        changeOrigin: true,
-      },
-    },
   },
 });

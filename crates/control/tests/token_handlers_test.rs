@@ -1,26 +1,145 @@
 //! HTTP regression tests for creator-console PAT handlers.
+//!
+//! Under the R5 cutover the bespoke console-session principal path is gone:
+//! the control plane authenticates every request through the `AuthzGuard`
+//! bearer path. PAT minting still requires an INTERACTIVE (non-PAT) principal,
+//! which is now an OAuth/BFF session access token (the `oauth_guard_from_bearer`
+//! arm: `token_id == None`). So these tests drive the handlers with an OAuth
+//! Bearer introspected against a mock hydra (the SAME harness shape
+//! `authz_guard_oauth_test` uses) rather than a console-session cookie.
 
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ntex::http::StatusCode;
-use ntex::web::{self, test};
+use ntex::web::{self, test, HttpResponse};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    console_sessions, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
-use zeroship_core::oidc_verify::TokenClaims;
 
 mod common;
+
+const OAUTH_TOKEN: &str = "fake-console-session-token";
 
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+}
+
+fn unix_now_secs() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs(),
+    )
+    .expect("clock fits i64")
+}
+
+// ── mock hydra introspection server (mirrors authz_guard_oauth_test) ────────
+//
+// The OAuth-bearer arm of `AuthzGuard` introspects the token against
+// hydra-admin. The mock returns the fixture user as `sub` with a broad scope —
+// the OAuth scope does NOT gate PAT minting (the grant-subset check uses the
+// principal's DB-side platform role / app membership, with `token_policy =
+// None`), it only needs to resolve to a valid non-PAT principal.
+#[derive(Debug)]
+struct MockState {
+    body: Value,
+}
+
+struct MockHydra {
+    base: String,
+    shutdown: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl MockHydra {
+    fn active(sub: impl ToString) -> Self {
+        // Scope must be the authz platform vocabulary only (`parse_scope_string`
+        // rejects bare OIDC identity scopes like `openid`). The OAuth scope does
+        // NOT gate PAT minting — `validate_grant_subset` checks the principal's
+        // DB-side platform role with `token_policy = None` — so any valid
+        // platform scope suffices to resolve the non-PAT principal.
+        let body = json!({
+            "active": true,
+            "sub": sub.to_string(),
+            "scope": "apps:read apps:deploy",
+            "aud": ["control.zeroship.ai"],
+            "client_id": "oac_console_test",
+            "exp": unix_now_secs() + 3600,
+        });
+        let state = Arc::new(MockState { body });
+        let factory_state = state.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            ntex::rt::System::build()
+                .name("control-token-handlers-oauth-mock")
+                .testing()
+                .build(ntex::rt::DefaultRuntime)
+                .block_on(async move {
+                    let server = web::test::server(move || {
+                        let state = factory_state.clone();
+                        async move {
+                            web::App::new().state(state).service(
+                                web::resource("/admin/oauth2/introspect")
+                                    .route(web::post().to(introspect_handler)),
+                            )
+                        }
+                    })
+                    .await;
+                    let addr = server.addr();
+                    started_tx.send(addr).expect("send mock server addr");
+                    let _ = shutdown_rx.recv();
+                    drop(server);
+                });
+        });
+        let addr = started_rx.recv().expect("mock server starts");
+        Self {
+            base: format!("http://{addr}"),
+            shutdown: Some(shutdown_tx),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for MockHydra {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct IntrospectForm {
+    token: String,
+}
+
+async fn introspect_handler(
+    state: web::types::State<Arc<MockState>>,
+    form: web::types::Form<IntrospectForm>,
+) -> HttpResponse {
+    assert_eq!(form.token, OAUTH_TOKEN);
+    HttpResponse::Ok().json(&state.body)
+}
+
+fn bearer() -> String {
+    format!("Bearer {OAUTH_TOKEN}")
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -35,10 +154,10 @@ fn tmpdir(label: &str) -> PathBuf {
 struct Fixture {
     state: Arc<AppState>,
     user_id: Uuid,
-    session_id: Uuid,
-    cookie: String,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
+    // Keep the mock introspection server alive for the test's lifetime.
+    _hydra: MockHydra,
 }
 
 impl Fixture {
@@ -57,12 +176,6 @@ impl Fixture {
             LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
         );
 
-        let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-            "http://localhost:4444",
-            "console.zeroship.ai",
-            "test-oidc-secret".to_string(),
-            b"test-stash-key".to_vec(),
-        ));
         let (auth_pg_client, auth_pg_conn) =
             compio_postgres::connect(db_url, compio_postgres::NoTls)
                 .await
@@ -72,6 +185,29 @@ impl Fixture {
         })
         .detach();
         let auth_pg = Arc::new(auth_pg_client);
+
+        // The acting creator. Created BEFORE the mock introspector so its `sub`
+        // resolves to this user; its platform role drives the grant ceiling.
+        let user_id = Uuid::new_v4();
+        let email = format!("{label}-{user_id}@zeroship.test");
+        auth_pg
+            .execute(
+                "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+                &[&user_id, &email, &label],
+            )
+            .await
+            .expect("insert user");
+        if let Some(role) = platform_role {
+            auth_pg
+                .execute(
+                    "INSERT INTO platform.roles (user_id, role) VALUES ($1, $2)",
+                    &[&user_id, &role],
+                )
+                .await
+                .expect("insert platform role");
+        }
+
+        let hydra = MockHydra::active(user_id);
 
         let state = Arc::new(AppState {
             registry,
@@ -89,10 +225,9 @@ impl Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp,
             auth_pg,
             auth_db_url: db_url.to_string(),
-            hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+            hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
@@ -100,50 +235,18 @@ impl Fixture {
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
             hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-                "http://127.0.0.1:9",
+                &hydra.base,
             )),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             pairwise_salt: [0u8; 32],
         });
 
-        let user_id = Uuid::new_v4();
-        let email = format!("{label}-{user_id}@zeroship.test");
-        state
-            .auth_pg
-            .execute(
-                "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
-                &[&user_id, &email, &label],
-            )
-            .await
-            .expect("insert user");
-        if let Some(role) = platform_role {
-            state
-                .auth_pg
-                .execute(
-                    "INSERT INTO platform.roles (user_id, role) VALUES ($1, $2)",
-                    &[&user_id, &role],
-                )
-                .await
-                .expect("insert platform role");
-        }
-
-        let claims = claims_for(user_id, &email);
-        let session = console_sessions::create(&state.auth_pg, &claims)
-            .await
-            .expect("create console session");
-        let cookie = format!(
-            "{}={}",
-            oidc_rp::console_session_cookie_name(state.insecure_dev),
-            session.id
-        );
-
         Self {
             state,
             user_id,
-            session_id: session.id,
-            cookie,
             blob_root,
             deploy_tmp_dir,
+            _hydra: hydra,
         }
     }
 
@@ -197,11 +300,6 @@ impl Fixture {
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM auth.console_sessions WHERE id = $1", &[&self.session_id])
-            .await;
-        let _ = self
-            .state
-            .auth_pg
             .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
             .await;
     }
@@ -211,28 +309,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.blob_root);
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
-    }
-}
-
-fn claims_for(user_id: Uuid, email: &str) -> TokenClaims {
-    TokenClaims {
-        sub: user_id.to_string(),
-        iss: "https://auth.zeroship.test/".to_string(),
-        aud: Value::String("console.zeroship.ai".to_string()),
-        exp: 9_999_999_999,
-        iat: 0,
-        nbf: None,
-        nonce: None,
-        at_hash: None,
-        c_hash: None,
-        email: Some(email.to_string()),
-        email_verified: Some(true),
-        name: Some("Token Test User".to_string()),
-        picture: None,
-        acr: None,
-        amr: None,
-        auth_time: None,
-        other: Default::default(),
     }
 }
 
@@ -262,7 +338,7 @@ async fn audit_event_count(state: &AppState, user_id: Uuid, event_type: &str) ->
 }
 
 macro_rules! create_pat {
-    ($app:expr, $cookie:expr, $name:expr) => {{
+    ($app:expr, $name:expr) => {{
         let body = json!({
             "name": $name,
             "policies": deploy_policy(),
@@ -271,7 +347,7 @@ macro_rules! create_pat {
         let req = test::TestRequest::post()
             .uri("/me/tokens")
             .header("accept", "application/json")
-            .header("cookie", $cookie)
+            .header("authorization", bearer())
             .set_json(&body)
             .to_request();
         let resp = test::call_service(&$app, req).await;
@@ -301,7 +377,7 @@ async fn create_pat_with_valid_policy_returns_jwt() {
     let fx = Fixture::new(&db_url, "valid", Some("admin")).await;
     let app = init_control!(fx);
 
-    let json = create_pat!(app, &fx.cookie, "CI deploy");
+    let json = create_pat!(app, "CI deploy");
     let id = json.get("id").and_then(Value::as_str).expect("id");
     let token = json
         .get("token")
@@ -336,7 +412,7 @@ async fn create_pat_with_policy_exceeding_user_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .set_json(&json!({
             "name": "too broad",
             "policies": deploy_policy(),
@@ -370,7 +446,7 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
         .expect("insert owner app member");
     let app = init_control!(fx);
 
-    let created = create_pat!(app, &fx.cookie, "owner deploy");
+    let created = create_pat!(app, "owner deploy");
     assert!(created.get("token").and_then(Value::as_str).is_some());
 
     fx.cleanup().await;
@@ -388,7 +464,7 @@ async fn create_pat_with_invalid_resource_id_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .set_json(&json!({
             "name": "bad resource",
             "policies": {
@@ -429,7 +505,7 @@ async fn create_pat_with_empty_statement_actions_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .set_json(&json!({
             "name": "empty actions",
             "policies": {
@@ -467,7 +543,7 @@ async fn create_pat_with_empty_statement_resources_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .set_json(&json!({
             "name": "empty resources",
             "policies": {
@@ -505,7 +581,7 @@ async fn create_pat_with_mfa_condition_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .set_json(&json!({
             "name": "mfa condition",
             "policies": {
@@ -541,13 +617,13 @@ async fn list_pats_returns_user_tokens_without_secret() {
     let fx = Fixture::new(&db_url, "list", Some("admin")).await;
     let app = init_control!(fx);
 
-    create_pat!(app, &fx.cookie, "CI deploy A");
-    create_pat!(app, &fx.cookie, "CI deploy B");
+    create_pat!(app, "CI deploy A");
+    create_pat!(app, "CI deploy B");
 
     let req = test::TestRequest::get()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -570,12 +646,12 @@ async fn delete_pat_marks_revoked() {
     let fx = Fixture::new(&db_url, "delete", Some("admin")).await;
     let app = init_control!(fx);
 
-    let created = create_pat!(app, &fx.cookie, "CI deploy");
+    let created = create_pat!(app, "CI deploy");
     let id = created.get("id").and_then(Value::as_str).expect("id");
     let req = test::TestRequest::delete()
         .uri(&format!("/me/tokens/{id}"))
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -586,7 +662,7 @@ async fn delete_pat_marks_revoked() {
     let req = test::TestRequest::get()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
+        .header("authorization", bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
     let bytes = test::read_body(resp).await;

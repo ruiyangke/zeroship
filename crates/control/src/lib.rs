@@ -10,17 +10,14 @@ pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;
 pub mod authz_guard;
-pub mod backchannel_logout;
 pub mod bootstrap_builder;
 pub mod bootstrap_console;
-pub mod console_sessions;
 pub mod deploy;
 pub mod env_handlers;
 pub mod env_store;
 pub mod http_util;
 pub mod internal;
 pub mod metering;
-pub mod oidc_rp;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod rate_limit;
@@ -150,17 +147,17 @@ pub struct AppState {
     /// type. Files are unlinked immediately after ingest (success or
     /// failure).
     pub deploy_tmp_dir: std::path::PathBuf,
-    /// OIDC relying-party for `console.zeroship.ai`. Drives the
-    /// authorize-redirect → callback → session-mint flow on the
-    /// creator dashboard (proposal §2.3). Mandatory now that U8 has
-    /// retired the legacy `auth_service` / `auth_handlers` chain —
-    /// the OIDC RP is the only console-auth surface.
-    pub oidc_rp: Arc<oidc_rp::ConsoleOidcRp>,
-    /// Postgres client pointed at the `auth` schema, used by
-    /// `console_sessions::{create,validate,revoke}`. Distinct from the
-    /// `registry` PG client (which talks to the control schema)
-    /// because in multi-DB deployments the auth tables may live in a
-    /// separate cluster. Mandatory post-U8.
+    /// Postgres client pointed at the `auth` schema, used by the
+    /// `AuthzGuard` bearer path (`control.permission_tokens` lookup +
+    /// Cedar enforcement against `auth.*`) and the audit emitter.
+    /// Distinct from the `registry` PG client (which talks to the
+    /// control schema) because in multi-DB deployments the auth tables
+    /// may live in a separate cluster.
+    ///
+    /// The console is now a regular gateway-fronted app authenticated via
+    /// `@zeroship/auth` (BFF); the control plane is a pure API resource
+    /// server with NO OIDC RP of its own — the bespoke `ConsoleOidcRp` +
+    /// `console_sessions` surface was removed in the R5 cutover.
     pub auth_pg: Arc<compio_postgres::Client>,
     /// Connection URL for the auth/control auth schema, used to open
     /// short-lived DEDICATED sessions for work that must not run on the shared

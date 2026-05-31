@@ -15,12 +15,13 @@
 #   docker compose down -v                        # stop + WIPE volumes (slow next boot)
 #
 # Once up, browse (any *.localhost auto-resolves to 127.0.0.1):
-#   http://builder.zeroship.localhost   — AI builder (needs OPENAI_API_KEY)
-#   http://console.zeroship.localhost   — creator dashboard / control plane
+#   http://console.zeroship.localhost   — the creator console / AI app-builder
+#                                         (a gateway-fronted zeroship app; needs
+#                                          OPENAI_API_KEY on the console app env)
 #   http://auth.zeroship.localhost      — login / OIDC
 #   http://<app>.zeroship.localhost     — a deployed creator app (via gateway)
 #
-# Caddy also carries network ALIASES for the auth/console/api/builder hosts so
+# Caddy also carries network ALIASES for the auth/console/api hosts so
 # CONTAINERS resolve those same names to Caddy — required for server-side OIDC
 # token exchange / JWKS fetch to hit the same issuer the browser sees.
 
@@ -112,12 +113,10 @@ services:
         --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
         --app-base-domain zeroship.localhost
-        --bootstrap-builder-client
-        --builder-client-secret-file /data/builder-client-secret
+        --bootstrap-console
+        --console-host console.zeroship.localhost
+        --console-zship /opt/zeroship/console/app.zship
     environment:
-      # The bootstrapped zeroship-builder OAuth client is registered with this
-      # redirect URI so the builder's localhost OIDC callback is accepted.
-      BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
       # byte-identical on control + gateway — both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
@@ -384,83 +383,20 @@ services:
     security_opt:
       - seccomp:unconfined
 
-  builder:
-    # Frontend dev image = the runtime image (carries the `zeroship` CLI built
-    # for this glibc) + Node 22. vite dev's dev-bootstrap spawns `zeroship`.
-    build:
-      context: .
-      target: frontend
-    image: zeroship-frontend:dev
-    # Self-heal: builder waits for control to write /data/builder-client-secret;
-    # if control is still bootstrapping, retry rather than exit.
-    restart: on-failure
-    # vite dev spawns the `zeroship` runtime (io_uring/compio); the default
-    # seccomp profile blocks io_uring_setup → PermissionDenied. Same opt-in the
-    # other runtime-bearing services use.
-    security_opt:
-      - seccomp:unconfined
-    working_dir: /workspace
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        corepack enable
-        pnpm config set store-dir /pnpm/store
-        for i in $$(seq 1 60); do
-          [ -s /data/builder-client-secret ] && break
-          sleep 1
-        done
-        if [ ! -s /data/builder-client-secret ]; then
-          echo "[builder] missing /data/builder-client-secret" >&2
-          exit 1
-        fi
-        export BUILDER_CLIENT_SECRET="$$(cat /data/builder-client-secret)"
-        pnpm install --frozen-lockfile
-        # Build the workspace SDK packages so their dist/ exists — the builder's
-        # vite.config.ts imports @zeroship/vite-plugin, which vite resolves via
-        # its package.json "exports" → dist. Without this, `vite dev` fails with
-        # "Failed to resolve entry for package @zeroship/vite-plugin". dist is
-        # written into the mounted repo, so a restart reuses it (build once).
-        pnpm build
-        exec pnpm --dir apps/zeroship-builder dev --host 0.0.0.0 --port 3001 --strictPort
-    environment:
-      CONTROL_URL: http://control:9090
-      CONTROL_KEY: platform-key
-      # All four OIDC endpoints use the Caddy-fronted issuer host. The
-      # authorize URL is browser-facing; token / revoke / JWKS run server-side
-      # inside this container — both resolve auth.zeroship.localhost to Caddy
-      # (browser → 127.0.0.1; container → Caddy network alias), so the issuer
-      # the browser sees matches the one the server verifies against.
-      HYDRA_AUTHORIZE_URL: http://auth.zeroship.localhost/oauth2/auth
-      HYDRA_TOKEN_URL: http://auth.zeroship.localhost/oauth2/token
-      HYDRA_REVOKE_URL: http://auth.zeroship.localhost/oauth2/revoke
-      HYDRA_JWKS_URL: http://auth.zeroship.localhost/.well-known/jwks.json
-      BUILDER_CLIENT_ID: zeroship-builder
-      BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
-      BUILDER_INSTANCE_ID: docker-compose
-      BUILDER_TOKEN_ENCRYPTION_KEY: ${BUILDER_TOKEN_ENCRYPTION_KEY:-dev-builder-token-encryption-key-change}
-      SANDBOX_URL: http://sandbox:9091
-      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    ports:
-      - "3001:3001"
-    volumes:
-      - .:/workspace
-      - ./data:/data:ro
-      - builder-pnpm-store:/pnpm/store
-    depends_on:
-      control:
-        condition: service_started
-      hydra:
-        condition: service_started
-      sandbox:
-        condition: service_started
+  # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
+  # The AI app-builder IS the console now: a regular zeroship app built to a
+  # `.zship`, seeded by control's `--bootstrap-console`, served by the gateway
+  # at console.zeroship.localhost. Its OPENAI_API_KEY / sandbox creds are
+  # injected as server-side app env on the seeded console app (control env
+  # store), not via a standalone Vite container. The builder's confidential
+  # OIDC client + BUILDER_*/TOKEN_ENCRYPTION_KEY env are gone with it.
 
   # caddy — dev reverse proxy on :80 for the *.zeroship.localhost domain.
-  # Routes auth/console/api/builder + the {app}.zeroship.localhost catch-all
-  # to the right upstream (see ops/Caddyfile). The network ALIASES make those
+  # Routes auth/console/api + the {app}.zeroship.localhost catch-all to the
+  # right upstream (see ops/Caddyfile). console.* now proxies to the GATEWAY
+  # (the console is a gateway-fronted app). The network ALIASES make those
   # public hostnames ALSO resolve to Caddy from INSIDE the compose network, so
-  # server-side OIDC (control/gateway/builder verifying tokens, fetching JWKS,
+  # server-side OIDC (control/gateway verifying tokens, fetching JWKS,
   # exchanging codes against http://auth.zeroship.localhost) hits the same
   # issuer the browser does.
   caddy:
@@ -475,7 +411,6 @@ services:
           - auth.zeroship.localhost
           - console.zeroship.localhost
           - api.zeroship.localhost
-          - builder.zeroship.localhost
     depends_on:
       control:
         condition: service_started
@@ -484,8 +419,6 @@ services:
       auth:
         condition: service_started
       hydra:
-        condition: service_started
-      builder:
         condition: service_started
 
 networks:
@@ -501,4 +434,3 @@ volumes:
   # Persisted redis dataset for the deployed-app env.kv store.
   redis-data:
   verdaccio_storage:
-  builder-pnpm-store:

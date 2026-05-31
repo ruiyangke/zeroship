@@ -92,8 +92,6 @@ pub struct SecretSection {
     pub pairwise_salt: Option<String>,
     /// Gateway OIDC relying-party client secret reference.
     pub gateway_oidc_secret: Option<String>,
-    /// Console OIDC relying-party client secret reference.
-    pub console_oidc_secret: Option<String>,
     /// Stripe webhook signing secret reference.
     pub stripe_webhook_secret: Option<String>,
     /// Primary database URL reference.

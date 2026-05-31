@@ -75,25 +75,23 @@ pub const PROD_CONSOLE_HOST: &str = "console.zeroship.ai";
 /// (`pnpm build` → `dist/app.zship`, R5a).
 pub const DEFAULT_CONSOLE_ZSHIP: &str = "apps/zeroship-builder/dist/app.zship";
 
-/// The platform-owned app **name** stem for the console row. NOT the host — the
-/// host is reserved / 2-label and is carried explicitly as the sector. The full
-/// name is `{stem}-{12-hex-of-host-hash}` ([`console_app_name`]) so it is
-/// globally unique per console host (`control.apps.name` is UNIQUE; dev vs prod
-/// — and any co-resident console seeds — must not collide), while staying
-/// deterministic and within `Registry::create_app`'s alphanumeric/hyphen/
-/// underscore rule (≤64 chars). We never derive the apex host from it.
-pub const CONSOLE_APP_NAME_STEM: &str = "zeroship-console";
-
-/// The deterministic, host-unique console app name: `zeroship-console-<hex12>`,
-/// where the suffix is the first 12 hex chars of SHA-256(host). Distinct hosts
-/// (dev/prod/test) get distinct names, so the `control.apps.name` UNIQUE
-/// constraint never blocks a second console seed on a shared DB. The name is NOT
-/// used to derive the apex host — that is the explicit `console_host`.
+/// The console app **name** is the SUBDOMAIN LABEL of the console host (the
+/// first DNS label) — NOT a hex-suffixed stem. This is the load-bearing routing
+/// fix: the gateway resolves `console.*` by `lookup_by_name(label)` where
+/// `label` is the first label of the request `Host` (see
+/// `crates/gateway/src/router/dispatch.rs` `subdomain_of` → `lookup_by_name`),
+/// and the name index is keyed on `control.apps.name`. So the seeded row's
+/// `name` MUST equal that label or the gateway 503s the console.
+///
+/// For `console.zeroship.localhost` (dev) and `console.zeroship.ai` (prod) the
+/// label is `console` in both — and compose uses ONE database with a SINGLE
+/// console per deployment, so the `control.apps.name` UNIQUE constraint that
+/// drove the old hex suffix does not apply. The full host stays explicit as the
+/// OAuth `sector_identifier` (see [`bootstrap_console`]); the name is never used
+/// to DERIVE the apex host.
 #[must_use]
 pub fn console_app_name(host: &str) -> String {
-    let digest = Sha256::digest(host.as_bytes());
-    let suffix = hex::encode(&digest[..6]); // 12 hex chars
-    format!("{CONSOLE_APP_NAME_STEM}-{suffix}")
+    host.split('.').next().unwrap_or(host).to_owned()
 }
 
 /// The console app's enterprise plan id — unlimited CPU/wall via
@@ -382,8 +380,10 @@ async fn upsert_console_app_row(
     // name/plan/key stable (so a re-run is a true no-op on these columns) while
     // leaving deploy_hash / manifest_json / env_version to the deploy-commit +
     // env steps. NOT touching updated_at here keeps the row quiet on no-op runs.
-    // `name` is host-derived (globally unique), so the `apps.name` UNIQUE
-    // constraint cannot block a re-seed or a co-resident console seed.
+    // `name` is the console host's subdomain label (`console`) — what the
+    // gateway's `lookup_by_name` resolves `console.*` to. One console per
+    // deployment on a shared DB, so the `apps.name` UNIQUE constraint never
+    // collides.
     pg.execute(
         "INSERT INTO control.apps (id, name, plan_id, api_key, api_key_hash) \
          VALUES ($1, $2, $3, $4, $5) \
@@ -648,15 +648,19 @@ mod tests {
     }
 
     #[test]
-    fn console_name_is_host_unique_and_satisfies_registry_rule() {
-        let dev = console_app_name(DEV_CONSOLE_HOST);
-        let prod = console_app_name(PROD_CONSOLE_HOST);
-        // Deterministic + distinct per host (so apps.name UNIQUE never collides).
-        assert_eq!(dev, console_app_name(DEV_CONSOLE_HOST));
-        assert_ne!(dev, prod);
-        assert!(dev.starts_with(CONSOLE_APP_NAME_STEM));
+    fn console_name_is_the_subdomain_label_so_the_gateway_routes_it() {
+        // The load-bearing routing invariant: the seeded `apps.name` MUST be the
+        // console host's first DNS label, because the gateway resolves
+        // `console.*` via `lookup_by_name(<first-label>)` keyed on
+        // `control.apps.name`. Dev + prod both label `console`.
+        assert_eq!(console_app_name(DEV_CONSOLE_HOST), "console");
+        assert_eq!(console_app_name(PROD_CONSOLE_HOST), "console");
+        // A custom console host still yields its first label.
+        assert_eq!(console_app_name("dash.example.com"), "dash");
+        // A bare host with no dot is its own label (defensive).
+        assert_eq!(console_app_name("console"), "console");
         // Registry name rule: ≤64, alphanumeric/hyphen/underscore.
-        for name in [&dev, &prod] {
+        for name in [console_app_name(DEV_CONSOLE_HOST), console_app_name(PROD_CONSOLE_HOST)] {
             assert!(name.len() <= 64, "{name}");
             assert!(name
                 .chars()

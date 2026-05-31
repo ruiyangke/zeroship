@@ -32,13 +32,15 @@ impl FromRequest<web::DefaultError> for AuthzGuard {
             .and_then(|ip| ip.parse::<IpAddr>().ok());
         let request_id = request_id(req);
 
-        if let Some(guard) =
-            guard_from_bearer(req, state, request_ip, request_id.clone()).await?
-        {
-            return Ok(guard);
+        // Bearer is the ONLY principal path. The console now authenticates to
+        // the control plane with a server-only control PAT (or an OAuth bearer)
+        // through `@zeroship/control`; the bespoke OIDC-RP console-session path
+        // was removed in the R5 cutover (control is a pure API resource server).
+        // No bearer ⇒ unauthenticated.
+        match guard_from_bearer(req, state, request_ip, request_id).await? {
+            Some(guard) => Ok(guard),
+            None => Err(web::error::ErrorUnauthorized("unauthenticated").into()),
         }
-
-        guard_from_session(req, state, request_ip, request_id).await
     }
 }
 
@@ -87,29 +89,6 @@ impl AuthzGuard {
                 .json(&json!({"error": "authz_error", "detail": err.to_string()}))),
         }
     }
-}
-
-async fn guard_from_session(
-    req: &HttpRequest,
-    state: &AppState,
-    request_ip: Option<IpAddr>,
-    request_id: String,
-) -> Result<AuthzGuard, web::Error> {
-    let session = crate::api::require_console_session(req, state)
-        .await
-        .map_err(|_| web::error::ErrorUnauthorized("unauthorized"))?;
-    let principal_id = Uuid::parse_str(&session.user_id)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid session subject"))?;
-
-    Ok(AuthzGuard {
-        principal_id,
-        token_id: None,
-        token_policy: None,
-        mfa_verified: false,
-        mfa_age_seconds: None,
-        request_ip,
-        request_id,
-    })
 }
 
 async fn guard_from_bearer(

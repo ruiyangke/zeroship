@@ -41,51 +41,78 @@ impl AdminPat {
 }
 
 pub async fn admin_pat(state: &AppState) -> AdminPat {
+    issue_pat(state, true, admin_policy()).await
+}
+
+/// A PAT owned by a NON-admin user with an empty wrapper policy. Used to
+/// assert that the bearer principal path rejects an unauthorized actor — e.g.
+/// a creator who is not a platform admin cannot grant platform roles. (Under
+/// the R5 cutover the bespoke console-session principal path is gone; bearer is
+/// the only principal, so the "non-admin actor" case is a non-admin PAT.)
+///
+/// `#[allow(dead_code)]`: `common` is shared across every control test crate;
+/// only `admin_handlers_test` uses this, so the others would warn.
+#[allow(dead_code)]
+pub async fn non_admin_pat(state: &AppState) -> AdminPat {
+    issue_pat(state, false, empty_policy()).await
+}
+
+async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
     let user_id = Uuid::new_v4();
-    let email = format!("admin-pat-{user_id}@zeroship.test");
+    let email = format!("pat-{user_id}@zeroship.test");
     state
         .auth_pg
         .execute(
             "INSERT INTO auth.users (id, email, name, email_verified_at) \
-             VALUES ($1, $2::citext, 'Admin PAT Test User', NOW())",
+             VALUES ($1, $2::citext, 'PAT Test User', NOW())",
             &[&user_id, &email],
         )
         .await
-        .expect("insert admin PAT user");
-    state
-        .auth_pg
-        .execute(
-            "INSERT INTO platform.roles (user_id, role, granted_by) \
-             VALUES ($1, 'admin', $1)",
-            &[&user_id],
-        )
-        .await
-        .expect("insert admin PAT role");
+        .expect("insert PAT user");
+    if admin {
+        state
+            .auth_pg
+            .execute(
+                "INSERT INTO platform.roles (user_id, role, granted_by) \
+                 VALUES ($1, 'admin', $1)",
+                &[&user_id],
+            )
+            .await
+            .expect("insert admin PAT role");
+    }
 
     let token_id = Uuid::new_v4();
-    let policies = admin_policy().to_json_value();
+    let policies = policy.to_json_value();
     let hash = policy_hash(&policies);
     let expires_at = Utc::now() + Duration::days(1);
     let token = state
         .pat_issuer
         .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue admin PAT");
+        .expect("issue PAT");
 
     state
         .auth_pg
         .execute(
             "INSERT INTO control.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'integration admin PAT', $3, $4, $5)",
+             VALUES ($1, $2, 'pat', 'integration PAT', $3, $4, $5)",
             &[&token_id, &user_id, &policies, &hash, &expires_at],
         )
         .await
-        .expect("insert admin PAT row");
+        .expect("insert PAT row");
 
     AdminPat {
         user_id,
         token_id,
         token,
+    }
+}
+
+#[allow(dead_code)]
+fn empty_policy() -> Policy {
+    Policy {
+        name: "integration non-admin".to_owned(),
+        statements: Vec::new(),
     }
 }
 

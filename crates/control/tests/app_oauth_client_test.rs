@@ -23,7 +23,7 @@ use zeroship_control::app_oauth_client::{
     self, client_id_for_app, redirect_uris_for_hosts,
 };
 use zeroship_control::{
-    oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
 fn db_url() -> Option<String> {
@@ -298,12 +298,6 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> =
         Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
     let auth_pg = Arc::new(pg(db_url).await);
 
     Arc::new(AppState {
@@ -322,7 +316,6 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
         insecure_dev: true,
         trust_proxy: false,
         deploy_tmp_dir: blob_root.clone(),
-        oidc_rp,
         auth_pg,
         auth_db_url: db_url.to_string(),
         hydra_admin_url: hydra_admin_url.to_string(),

@@ -1,6 +1,8 @@
 //! Admin API for per-app vars + secret names.
 //!
-//! Mutations require master key (same auth as the rest of the admin API).
+//! Every operation is authorized through the [`crate::authz_guard::AuthzGuard`]
+//! (bearer principal — a control PAT or an OAuth access token — gated per-op by
+//! Cedar `Action`/`Resource`), the same model as the rest of the admin API.
 //! Secrets are write-only over this surface — GET returns names and
 //! `updated_at` timestamps, never values. Rotation = PUT a fresh value.
 

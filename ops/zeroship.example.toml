@@ -81,8 +81,6 @@ worker_key = "urn:zeroship:env:WORKER_KEY"
 stash_signing_key = "urn:zeroship:file:/etc/zeroship/secrets/stash_signing_key"
 # Gateway OIDC relying-party client secret.
 gateway_oidc_secret = "urn:zeroship:file:/etc/zeroship/secrets/gateway_oidc_secret"
-# Console OIDC relying-party client secret.
-console_oidc_secret = "urn:zeroship:vault:secret/data/zeroship/console#oidc_secret"
 # Stripe webhook signing secret.
 stripe_webhook_secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:zeroship/stripe_webhook-AbCdEf"
 # Primary database URL.

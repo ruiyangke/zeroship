@@ -5,26 +5,14 @@
 # auth service reconciles this against hydra's admin API at every boot
 # (upsert; never deletes). Mounted at /etc/zeroship/auth-clients.toml.
 #
-# NOTE: the `zeroship-builder` client is NOT declared here — control's
-# --bootstrap-builder-client registers it dynamically with the redirect URI
-# from BUILDER_REDIRECT_URI (http://builder.zeroship.localhost/auth/callback)
-# and writes its generated secret to /data/builder-client-secret.
-
-[[client]]
-client_id = "console.zeroship.localhost"
-client_name = "zeroship Console"
-client_secret = "dev-secret-rotate-me"
-redirect_uris = ["http://console.zeroship.localhost/auth/callback", "http://localhost:5173/auth/callback"]
-post_logout_redirect_uris = ["http://console.zeroship.localhost/", "http://localhost:5173/"]
-# OIDC Back-Channel Logout 1.0 — hydra POSTs here when a console user
-# signs out; the control plane verifies the logout_token and revokes
-# the user's console sessions (Phase 7 U2).
-backchannel_logout_uri = "http://console.zeroship.localhost/oidc/backchannel-logout"
-scope = "openid offline_access email profile"
-access_token_strategy = "jwt"
-id_token_signed_response_alg = "EdDSA"
-audience = ["http://api.zeroship.localhost"]
-first_party = true
+# NOTE: the console client is NOT declared here. The console is now a
+# gateway-fronted regular app; its OAuth client is a PUBLIC PKCE client created
+# by control's `--bootstrap-console` seed (`ensure_app_client`, client_id
+# `oac_<base62>`, redirect_uris `http://console.zeroship.localhost/__zs/auth/*`),
+# NOT a confidential RP client. The bespoke control-side OIDC RP that consumed a
+# confidential `console.zeroship.localhost` client was removed in the R5 cutover.
+# The separate `zeroship-builder` Vite service was retired in the same change —
+# it WAS the console.
 
 [[client]]
 client_id = "zeroship-cli"

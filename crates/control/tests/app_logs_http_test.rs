@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
 
@@ -63,12 +63,6 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
     let (auth_pg_client, auth_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
@@ -96,7 +90,6 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp,
             auth_pg,
             auth_db_url: db_url.to_string(),
             hydra_admin_url: "http://127.0.0.1:4445".to_string(),

@@ -29,14 +29,12 @@ http://auth.zeroship.localhost {
 	}
 }
 
-# console.zeroship.localhost — creator dashboard / control plane.
+# console.zeroship.localhost — the creator console / AI app-builder. It is now
+# a regular gateway-fronted zeroship app (the seeded `console` app), served via
+# the gateway exactly like any creator app. The bespoke control-served console
+# dashboard and the separate builder Vite service were retired in the R5 cutover.
 http://console.zeroship.localhost {
-	reverse_proxy control:9090
-}
-
-# builder.zeroship.localhost — AI builder Vite dev server.
-http://builder.zeroship.localhost {
-	reverse_proxy builder:3001
+	reverse_proxy gateway:8000
 }
 
 # api.zeroship.localhost — gateway (explicit API host).

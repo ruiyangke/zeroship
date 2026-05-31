@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, authz_guard::AuthzGuard, oidc_rp, token_handlers, AppState, EnvStore, Quota,
+    api, authz_guard::AuthzGuard, token_handlers, AppState, EnvStore, Quota,
     RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_authz::{Action, Resource};
@@ -219,12 +219,6 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> =
         Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
 
     let state = Arc::new(AppState {
         registry,
@@ -242,7 +236,6 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
-        oidc_rp,
         auth_pg: Arc::new(auth_pg_client),
         auth_db_url: db_url.to_string(),
         hydra_admin_url: hydra.base.clone(),

@@ -215,10 +215,15 @@ pub async fn create_token(
     state: State<Arc<AppState>>,
     body: Json<CreateTokenBody>,
 ) -> web::HttpResponse {
+    // A PAT may NOT mint another PAT (no token-chaining): the acting principal
+    // must be an interactive OAuth/BFF session bearer (`token_id == None`,
+    // `token_policy == Some`), not a PAT (`token_id == Some`). Under the R5
+    // cutover the bespoke console-session principal is gone; the non-PAT
+    // principal is now the OAuth access token the BFF session carries.
     if guard.token_id.is_some() {
         return web::HttpResponse::Unauthorized().json(&json!({
-            "error": "session_required",
-            "message": "PATs can only be minted from a console session",
+            "error": "interactive_session_required",
+            "message": "PATs can only be minted from an interactive session bearer, not from another PAT",
         }));
     }
 

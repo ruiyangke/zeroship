@@ -21,7 +21,7 @@ use uuid::Uuid;
 use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    oauth_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    oauth_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
 
@@ -70,12 +70,6 @@ impl Fixture {
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
         let vfs: Arc<dyn BundleStore + Send + Sync> =
             Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-        let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-            "http://localhost:4444",
-            "console.zeroship.ai",
-            "test-oidc-secret".to_string(),
-            b"test-stash-key".to_vec(),
-        ));
 
         let state = Arc::new(AppState {
             registry,
@@ -93,7 +87,6 @@ impl Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp,
             auth_pg: Arc::new(auth_pg_client),
             auth_db_url: db_url.to_string(),
             hydra_admin_url: hydra.base.clone(),

@@ -1,8 +1,8 @@
 //! Live-PG regression tests for platform admin handlers.
 //!
 //! Skips when no test Postgres URL is set. The handlers use AuthzGuard,
-//! so the tests create real `auth.users`, `auth.console_sessions`,
-//! `platform.roles`, permission tokens, and policy rows.
+//! so the tests create real `auth.users`, `platform.roles`, permission
+//! tokens (the bearer principal path), and policy rows.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,10 +13,9 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    admin_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    admin_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
-use zeroship_core::oidc_verify::TokenClaims;
 
 mod common;
 
@@ -68,12 +67,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> =
         Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
 
     let state = Arc::new(AppState {
         registry,
@@ -91,7 +84,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
-        oidc_rp,
         auth_pg: Arc::new(auth_pg_client),
         auth_db_url: db_url.to_string(),
         hydra_admin_url: "http://127.0.0.1:4445".to_string(),
@@ -130,35 +122,6 @@ async fn insert_user(pg: &Client, label: &str) -> Uuid {
         .await
         .expect("insert user");
     rows[0].get("id")
-}
-
-fn claims_for(user_id: Uuid) -> TokenClaims {
-    TokenClaims {
-        sub: user_id.to_string(),
-        iss: "https://auth.zeroship.test/".to_string(),
-        aud: serde_json::Value::String("console.zeroship.ai".to_string()),
-        exp: 9_999_999_999,
-        iat: 0,
-        nbf: None,
-        nonce: None,
-        at_hash: None,
-        c_hash: None,
-        email: Some(format!("{user_id}@zeroship.test")),
-        email_verified: Some(true),
-        name: Some("Admin Handler User".to_string()),
-        picture: None,
-        acr: None,
-        amr: None,
-        auth_time: None,
-        other: Default::default(),
-    }
-}
-
-async fn session_cookie(pg: &Client, user_id: Uuid) -> String {
-    let session = zeroship_control::console_sessions::create(pg, &claims_for(user_id))
-        .await
-        .expect("create console session");
-    oidc_rp::set_console_session_cookie(&session.id, false)
 }
 
 async fn count_role(pg: &Client, user_id: Uuid, role: &str) -> i64 {
@@ -209,9 +172,6 @@ async fn cleanup_user(pg: &Client, user_id: Uuid) {
         .execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user_id])
         .await;
     let _ = pg
-        .execute("DELETE FROM auth.console_sessions WHERE user_id = $1", &[&user_id])
-        .await;
-    let _ = pg
         .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
         .await;
 }
@@ -231,9 +191,10 @@ async fn non_admin_cannot_grant_platform_role() {
         return;
     };
     let fx = build_test_state(&db_url, "non-admin").await;
-    let actor = insert_user(&fx.state.auth_pg, "non-admin-actor").await;
+    // A NON-admin actor (a creator who is not a platform admin) — bearer is the
+    // only principal path now, so the actor is a non-admin PAT.
+    let actor = common::authz_fixture::non_admin_pat(&fx.state).await;
     let target = insert_user(&fx.state.auth_pg, "non-admin-target").await;
-    let cookie = session_cookie(&fx.state.auth_pg, actor).await;
 
     let app = test::init_service(
         web::App::new()
@@ -242,6 +203,7 @@ async fn non_admin_cannot_grant_platform_role() {
     )
     .await;
 
+    // (1) No bearer at all → rejected (401/403).
     let req = test::TestRequest::post()
         .uri(&format!("/admin/users/{target}/role"))
         .set_json(&serde_json::json!({"role": "admin"}))
@@ -252,9 +214,10 @@ async fn non_admin_cannot_grant_platform_role() {
         "unauthenticated admin role grant should be rejected"
     );
 
+    // (2) Authenticated as a non-admin → 403 forbidden, no role written.
     let req = test::TestRequest::post()
         .uri(&format!("/admin/users/{target}/role"))
-        .header("cookie", cookie)
+        .header("authorization", actor.bearer())
         .set_json(&serde_json::json!({"role": "admin"}))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -262,7 +225,7 @@ async fn non_admin_cannot_grant_platform_role() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(count_role(&fx.state.auth_pg, target, "admin").await, 0);
 
-    cleanup_user(&fx.state.auth_pg, actor).await;
+    actor.cleanup(&fx.state).await;
     cleanup_user(&fx.state.auth_pg, target).await;
 }
 
