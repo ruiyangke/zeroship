@@ -84,8 +84,25 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
 - **R5 ingest-fix ✓** `93c53a9b` builder config override markers (/auth/* → ["auth","publicly_accessible"]; /api/preview/* →
   ["auth","rate_limit"]) so the console .zship passes Manifest::validate. **The REAL console .zship now BUILDS + INGESTS
   end-to-end** (seed test trial-ingests the real artifact, no fallback). Console is a DEPLOYABLE regular app.
-- **R5-CUTOVER (NEXT — DESTRUCTIVE, CHECKPOINT BEFORE PROCEEDING)** the interdependent coordinated flip, paused for owner
-  go-ahead (irreversible RP deletion + deployment routing + split-brain window):
+- **R5-CUTOVER ✓ (build-verified)** `74dfcb44` ONE atomic patch (50 files, 11 deletions). Owner decisions: UNIFY (console =
+  apps/zeroship-builder, the whole creator surface — marketing+dashboard+AI-builder) + run-now-build-verified. Console is now a
+  gateway-fronted @zeroship/auth app at console.*, REPLACING the control-served dashboard, RETIRING builder.*. Step1 console
+  client→@zeroship/auth (deleted bespoke oauth/session/oauth-store + dev-bypass + api/auth.ts; http.ts previewFetch+RPC only;
+  config drops /auth). Step2 seed names app the first DNS label "console" (gateway routes by subdomain label). Step3 DELETED
+  control oidc_rp.rs/console_sessions.rs/backchannel_logout.rs (+tests); authz_guard bearer-only; removed auth_callback/
+  require_console_session/ConsoleOidcRp/--console-oidc-secret/the confidential console client in both auth-clients tomls; control
+  BCL deleted (gateway per-app BCL covers it); ~10 fixtures migrated (admin→non_admin PAT, token_handlers→OAuth-bearer/mock-Hydra).
+  KEPT: auth.console_sessions TABLE + all crates/auth (reset.rs); gateway BCL. Step4 Caddy console.*→gateway:8000; compose
+  --bootstrap-console; builder.* Vite service retired; Dockerfile builds the console .zship. Workflow `wbvy2h7vj` (critic 96, all
+  10 booleans). Re-verified: control builds+suite green on live PG (lib 69 + all integration), console builds dist/app.zship
+  (1.22MB, 22 fns), no dangling refs, crates/auth 0 files, console_sessions table kept. **CONSOLE-AS-REGULAR-APP DONE (build-verified).**
+- **DEFERRED (full-stack functional phase — owner deferred via 'run-now-build-verified'):** (1) seed/compose must inject the
+  console's runtime app env (OPENAI_API_KEY, SANDBOX_URL/SANDBOX_TOKEN — they lived on the retired builder service) for it to
+  FUNCTION; (2) live docker-compose popup-login E2E (login→control read→deploy→SSE chat→sandbox round-trip; assert the control
+  credential never reaches the browser + a creator app cannot mint aud=control). Also optional: IdP-prune (merge consent endpoints,
+  remove magic/device), the dev-loop story for the console (vite-plugin dev runtime now builder.* is gone), full-R4 (the deferred
+  per-request power-token capability) — all in the design doc / earlier WORKLOG.
+- ~~R5-CUTOVER (superseded by the entry above)~~ — historical sub-steps:
   1. `--bootstrap-console` seed (additive): INSERT console.apps row (platform-privileged flag) + app_oauth_clients public PKCE
      client (explicit sector_identifier) + ingest the prebuilt .zship blob + set deploy_hash; in-process at control boot, NEVER an
      HTTP route. Mirror bootstrap_builder.rs. Also seed/inject the `ZS_CONTROL_SERVICE_TOKEN` (a control PAT) as the console app's
