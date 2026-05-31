@@ -60,8 +60,20 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
   security booleans, RED-TEAM boundary_holds=true / no escalation across 7 vectors). Re-verified on live PG: power_token_test 10/10,
   control_key_is_never_js_reachable, full control + runtime 227 + worker 18 + gateway 27 + SDK 77. Step-up decision: env:write/apps:write
   NOT step-up (env:* config vs secrets:* split); deferred minors: split-DB doc note, bounded-60s header replay (v1-ok).
-- **Phase 2 / kernel convergence** (next) wire KvPlugin+StoragePlugin into multi-node worker create_plugins() + config plumbing +
-  faithful regression (all 4 env.* namespaces resolve through the REAL worker path). Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
+- **Phase 2 / kernel convergence ✓** `a3de8399` KvPlugin(Redis, shared not redb) + StoragePlugin(LocalFs shared volume)
+  into multi-node worker create_plugins(); --kv-url/--storage-root config + compose redis service; faithful kernel test
+  (real dispatch path, proven non-vacuous). Workflow `wpso8dogz` (critic 96, all 7 booleans). Re-verified: worker 21/21.
+- **R4 SIMPLIFIED** `d4898dd0` (owner directive: power-token mint too complex → ENV-var control key, defer env.auth). Forward-
+  removed all R4 machinery (env.auth.getAccessToken op, control /internal/power-token + PowerTokenIssuer, AuthzGuard arm,
+  anchor auth_time + changeset 0011, SDK getAccessToken/fetchAs) preserving Phase 2 + pre-R4 + the env.auth NAMESPACE.
+  Full-R4 preserved in design doc under "Future: full-R4". Workflow `wi7fogn7f` (critic 96, all 7 booleans). Re-verified on
+  live PG/Redis: control all green (power_token_test gone), runtime 227 + auth_plugin 7, worker 21 (Phase 2 faithful test
+  intact), gateway 27, SDK 73; dropped orphaned dev-DB auth_time column. **MVP control mechanism = env-var key + @zeroship/control.**
+- **R5 (next) console cutover** — install-time `--bootstrap-console` seed (apps row + public PKCE client + ingest prebuilt
+  .zship + deploy_hash); repoint Caddy console → gateway; collapse bespoke RP (builder oauth.ts/session.ts/oauth-store.ts/
+  control-client.ts + control oidc_rp.rs/require_console_session) → @zeroship/auth client + env-var control credential via
+  @zeroship/control; enterprise plan + shared pool. Interdependent cutover — sequence to avoid split-brain auth. PREREQ: confirm
+  the console builds to a valid .zship. Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
 never an HTTP route. Cutover DELETES the bespoke RP (builder oauth.ts/session.ts/oauth-store.ts/control-client.ts) + control
 oidc_rp.rs + require_console_session — same patch; control becomes a pure API resource server. Repoint Caddy console → gateway.
 - **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
