@@ -6,7 +6,7 @@
  * (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`):
  *
  *   signInWithOAuth → openPopup (sync) → GET /__zs/auth/authorize →
- *     relay postMessage → exchangeCodeForSession (POST /__zs/auth/token)
+ *     relay postMessage → exchangeCodeForSession (POST /__zs/auth/session)
  *   getSession   — cache only, no network
  *   getUser      — GET /__zs/auth/session (always probes)
  *   refreshSession / silent renewal — GET /__zs/auth/session?mint=1 under navigator.locks

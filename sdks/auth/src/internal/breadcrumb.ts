@@ -2,7 +2,7 @@
  * Session-presence breadcrumb (`zs.<host>.is.authenticated`, gateway §4.3).
  *
  * The gateway WRITES this non-HttpOnly cookie server-side on every
- * `/__zs/auth/token` and `/__zs/auth/session` success and clears it on
+ * `/__zs/auth/session` (POST exchange + GET `?mint=1`) success and clears it on
  * `/__zs/auth/signout` — it is the source of truth. The SDK only READS it (to
  * decide whether to skip a repeat network probe) and writes/clears it as a
  * fast-path mirror. It is an OPTIMIZATION ONLY, never a security boundary: the

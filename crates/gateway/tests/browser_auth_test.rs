@@ -24,7 +24,7 @@ use zeroship_gateway::{
     browser_auth, enforce, idempotency,
     oidc_rp::OidcRp,
     proxy::HashRing,
-    signing,
+    session_token, signing,
     sync::RouteCache,
     wrapper_token, GateConfig, GateState,
 };
@@ -133,6 +133,16 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         ),
         None => wrapper_token::Verifier::new(&signing_key.verifying_key(), GATEWAY_ISS.into()),
     };
+    let session_issuer =
+        session_token::Issuer::new(&signing_key, GATEWAY_ISS.into()).expect("session issuer");
+    let session_verifier = match opts.prev_signing.as_ref() {
+        Some(prev) => session_token::Verifier::with_previous(
+            &signing_key.verifying_key(),
+            &prev.verifying_key(),
+            GATEWAY_ISS.into(),
+        ),
+        None => session_token::Verifier::new(&signing_key.verifying_key(), GATEWAY_ISS.into()),
+    };
 
     // OidcRp dials the loopback mock for /oauth2/{auth,token,revoke}.
     let oidc_rp = OidcRp::new(&opts.hydra_base, "gateway", "test-secret", b"k".repeat(32))
@@ -173,6 +183,8 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         prev_signing_key: opts.prev_signing.map(Arc::new),
         wrapper_issuer: Some(Arc::new(issuer)),
         wrapper_verifier: Some(Arc::new(verifier)),
+        session_issuer: Some(Arc::new(session_issuer)),
+        session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
         pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
     })
@@ -739,6 +751,8 @@ async fn jwks_503_when_no_signing_key() {
         prev_signing_key: None,
         wrapper_issuer: None,
         wrapper_verifier: None,
+        session_issuer: None,
+        session_verifier: None,
         anchor_enc_key: [0u8; 32],
         pairwise_salt: [0u8; 32],
     });

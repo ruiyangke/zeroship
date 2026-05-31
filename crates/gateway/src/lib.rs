@@ -28,6 +28,7 @@ pub mod idempotency;
 pub mod oidc_rp;
 pub mod proxy;
 pub mod router;
+pub mod session_token;
 pub mod sessions;
 pub mod signing;
 pub mod sync;
@@ -175,6 +176,20 @@ pub struct GateState {
     /// verification is disabled" — every DPoP request falls through
     /// to introspection.
     pub wrapper_verifier: Option<Arc<wrapper_token::Verifier>>,
+    /// Signed-session-cookie issuer (BFF redesign slice R1b). Mints the
+    /// gateway-signed `zs-sess+jwt` written into `__Host-zs_app_session` —
+    /// reusing the SAME ed25519 `signing_key` + `kid` as the wrapper issuer, but
+    /// stamping the distinct `zs-sess+jwt` typ so a session cookie can never be
+    /// confused with a power token. `None` exactly when `signing_key` is `None`
+    /// (no signing key ⇒ no signed cookie ⇒ the cookie arm fails closed).
+    pub session_issuer: Option<Arc<session_token::Issuer>>,
+    /// Signed-session-cookie verifier (BFF redesign slice R1b). The cookie arm
+    /// (`router::auth::resolve_app_session_user_header_inner`) verifies the
+    /// `__Host-zs_app_session` token with this LOCALLY on every request — no
+    /// per-request DB/session-store read. Built in lockstep with
+    /// `session_issuer` from the same key, with the previous key folded in via
+    /// `Verifier::with_previous` during a rotation overlap.
+    pub session_verifier: Option<Arc<session_token::Verifier>>,
     /// AES-256-GCM key encrypting the server-held refresh family at rest in
     /// `auth.app_session_anchors.refresh_token_enc` (auth-sdk Slice
     /// 1b-anchors, §8.1/§8.5). A `[u8; 32]` (so `Send + Sync`, unlike the

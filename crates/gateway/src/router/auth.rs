@@ -11,7 +11,6 @@ use ntex::web::HttpRequest;
 use uuid::Uuid;
 
 use crate::oidc_rp;
-use crate::sessions;
 use crate::GateState;
 
 /// Outcome of the per-request auth gate. The dispatch handler consumes
@@ -74,7 +73,6 @@ pub(crate) async fn resolve_auth(
     req: &HttpRequest,
     state: &Arc<GateState>,
     policy: &crate::compiled::EffectivePolicy,
-    app_id: &Uuid,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
     sector_identifier: Option<&str>,
@@ -84,7 +82,6 @@ pub(crate) async fn resolve_auth(
         req,
         state,
         policy,
-        app_id,
         request_id,
         oauth_client_id,
         sector_identifier,
@@ -177,7 +174,6 @@ async fn resolve_auth_inner(
     req: &HttpRequest,
     state: &Arc<GateState>,
     policy: &crate::compiled::EffectivePolicy,
-    app_id: &Uuid,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
     sector_identifier: Option<&str>,
@@ -278,22 +274,14 @@ async fn resolve_auth_inner(
         BearerOutcome::NotBearer => {}
     }
 
-    let app_id_str = app_id.to_string();
     let session_user_header = resolve_app_session_user_header_inner(
         req,
         state,
-        &app_id_str,
         request_id,
         oauth_client_id,
-        sector_identifier,
     )
     .await;
     let session_user_header = match session_user_header {
-        // A cookie session resolved a real user but the route has no
-        // sector_identifier yet ⇒ cannot derive the per-app pws_. Fail
-        // closed (§6.2) on EVERY policy, including Anon — an authenticated
-        // request must never have its global UUID projected outward.
-        CookieOutcome::ClientNotProvisioned => return AuthOutcome::ClientNotProvisioned,
         CookieOutcome::Allowed(header) => {
             // BFF anti-CSRF gate (spec §1.2/§2.3, P3). The SameSite=Lax
             // `__Host-zs_app_session` cookie is the SPA's LIVE credential, so a
@@ -1579,107 +1567,158 @@ fn split_scope_claim(scope: &str) -> Vec<String> {
 /// Outcome of the cookie arm ([`resolve_app_session_user_header_inner`]).
 #[derive(Debug)]
 enum CookieOutcome {
-    /// A valid cookie session resolved a real user and the per-app `pws_`
-    /// projected cleanly. Carries the signed `ZeroShip-User` header.
+    /// A valid SIGNED session cookie verified LOCALLY (signature + `kid` + `exp`
+    /// + `app` == route client) and its `(client_id, pws_)` family is not
+    /// revoked. Carries the signed `ZeroShip-User` header built directly from
+    /// the cookie claims (NO DB read for identity).
     Allowed(String),
-    /// A valid cookie session resolved a real user, but the route has no
-    /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
-    /// Fail closed (`503`) rather than project the global UUID (§6.2).
-    ClientNotProvisioned,
-    /// No cookie, no DB configured, validate miss, or a DB error
-    /// (fail-closed-as-unauthenticated). The caller treats this as
-    /// no-identity.
+    /// No cookie, no signing key configured, a verification failure
+    /// (tampered/expired/wrong-app/wrong-kid), a revoked family marker, or a
+    /// non-`pws_` subject. The caller treats this as no-identity
+    /// (fail-closed-as-unauthenticated).
     None,
 }
 
-/// Resolve the `ZeroShip-User` header value from the per-origin app
-/// session cookie. Returns [`CookieOutcome::None`] if no cookie, validate
-/// fails, or no DB is configured. Logs DB errors at warn — never panics.
+/// Resolve the `ZeroShip-User` header value from the SIGNED STATELESS session
+/// cookie (BFF redesign **slice R1b** — the addendum). The `__Host-zs_app_session`
+/// cookie is a gateway-signed `zs-sess+jwt` identity assertion, verified LOCALLY
+/// here on every request — **no `sessions::validate`, no per-request DB read for
+/// identity**.
 ///
-/// Pairwise projection (Slice 4, §6.2): `auth.gateway_sessions.user_id`
-/// is the GLOBAL user UUID (internal storage stays global). The cookie
-/// arm derives the per-app `pws_` from it via [`project_pairwise`] (and
-/// upserts the mapping) and writes THAT into `ZeroShip-User.id`, so the
-/// worker never sees the global UUID. Fails closed
-/// ([`CookieOutcome::ClientNotProvisioned`] → `503`) when the route has
-/// no `sector_identifier` yet.
+/// Steps (identity verify is stateless; the revocation gate is one DB read):
+///  1. Parse the signed cookie token (opaque to the parser).
+///  2. Verify it LOCALLY via [`crate::session_token::Verifier`]: signature
+///     (current OR previous `kid`), `iss`, `exp`, and `app` == the resolved
+///     route's `oauth_client_id` (audience binding). A tampered / expired /
+///     wrong-app / wrong-/unknown-`kid` cookie fails here → [`CookieOutcome::None`].
+///     A `zs-sess+jwt` typ is required (a wrapper `at+jwt` is rejected; the
+///     wrapper Bearer arm symmetrically rejects this `zs-sess+jwt`).
+///  3. Defense-in-depth: the cookie `sub` MUST be a `pws_…` pairwise subject
+///     (every minter projects it; a non-`pws_` cookie is a mint bug → reject).
+///  4. Revocation gate — the SAME per-app family marker the Bearer/DPoP arms
+///     use: `is_family_revoked_since(client_id, pws_, iat)`. This is a direct
+///     `SELECT EXISTS` (NOT cached): a revoked `(client_id, pws_)` family rejects
+///     a still-valid signed cookie, at the cost of one revocation DB round-trip
+///     per request. Skipped when no DB is configured (smoke mode), exactly like
+///     the wrapper arms — so a valid signed cookie authenticates with `db = None`
+///     and ZERO DB calls.
+///  5. Emit `ZeroShip-User` DIRECTLY from the cookie claims (`id = pws_`, relay
+///     alias `email`, `scopes`). The relay-alias swap + `pws_` projection
+///     already happened at ISSUE time (`/session` / interactive callback); the
+///     hot path does not re-derive them.
+///
+/// `gateway_sessions` is NO LONGER read here (the cookie is self-contained; the
+/// revocation truth is the family marker). The binding key is the cookie's `app`
+/// claim — so this arm takes NO `app_id`/`sector_identifier`: the cookie carries
+/// its own per-app `pws_` subject and `app` (client_id) binding, and neither the
+/// route UUID nor the sector is consulted on the stateless path.
 async fn resolve_app_session_user_header_inner(
     req: &HttpRequest,
     state: &Arc<GateState>,
-    app_id_str: &str,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
-    sector_identifier: Option<&str>,
 ) -> CookieOutcome {
     let cookie_header = req
         .headers()
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(session_id) =
+    let Some(token) =
         oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)
     else {
         return CookieOutcome::None;
     };
-    // Check out a pooled connection for just this validate (which slides
-    // the idle window) and release it on drop.
-    let Some(db_cfg) = state.db.as_ref() else {
+
+    // A session cookie binds per-app on its `app` claim. Without an expected
+    // client_id (un-provisioned app) we cannot bind, so refuse rather than
+    // accept an unbound cookie — mirrors the Bearer wrapper arm.
+    let Some(expected_client_id) = oauth_client_id else {
+        tracing::warn!("signed session cookie presented but route has no oauth_client_id — rejecting");
         return CookieOutcome::None;
     };
-    let pool = match crate::db::checkout(db_cfg).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "gateway: pg pool checkout failed (session validate)");
-            return CookieOutcome::None;
-        }
+    let Some(verifier) = state.session_verifier.as_ref() else {
+        // No signing key ⇒ cannot verify a signed cookie. Fail closed.
+        return CookieOutcome::None;
     };
-    let conn = match pool.get().await {
+
+    // LOCAL verify: signature (current/prev kid) + iss + exp + app == route.
+    // NO DB, NO network. This is the hot-path stateless check.
+    let claims = match verifier.verify(&token, expected_client_id) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "gateway: pg pool checkout failed (session validate)");
+            tracing::warn!(error = %e, "signed session cookie verification failed");
             return CookieOutcome::None;
         }
     };
-    let session = match sessions::validate(&conn, session_id, app_id_str).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return CookieOutcome::None,
-        Err(e) => {
-            // Fail-closed on DB errors. Returning None forces the auth
-            // gate to treat the request as unauthenticated; the caller
-            // either 401s (API) or redirects to login (HTML).
-            tracing::warn!(error = %e, "gateway: session validate failed");
-            return CookieOutcome::None;
+
+    // Self-describing-subject invariant (matches the wrapper arms): the cookie
+    // `sub` is ALWAYS a per-app `pws_…` (every minter projects it). A non-`pws_`
+    // sub means a mint path failed to project — hard-reject so the global
+    // identity can never leak through the session cookie.
+    if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
+        tracing::warn!(
+            sub = %claims.sub,
+            "signed session cookie sub is not a pws_ pairwise subject — rejecting"
+        );
+        return CookieOutcome::None;
+    }
+
+    // Revocation gate — the per-app family marker (spec §8.5), keyed on
+    // `(client_id, pws_)` with `iat` as the binding instant. The SAME mechanism
+    // the Bearer/DPoP arms use: a revoked family rejects a still-valid signed
+    // cookie. This is a direct `SELECT EXISTS` (NOT cached), so it costs one
+    // revocation DB round-trip per request. Skipped when no DB is configured
+    // (smoke mode) — proving the verify path itself is DB-free for a valid
+    // cookie.
+    if let Some(db_cfg) = state.db.as_ref() {
+        let pool = match crate::db::checkout(db_cfg).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "session cookie revocation: pg pool checkout failed");
+                return CookieOutcome::None;
+            }
+        };
+        let conn = match pool.get().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "session cookie revocation: pg pool checkout failed");
+                return CookieOutcome::None;
+            }
+        };
+        match zeroship_core::wrapper_revocation::is_family_revoked_since(
+            &conn,
+            &claims.app,
+            &claims.sub,
+            claims.iat,
+        )
+        .await
+        {
+            Ok(true) => {
+                tracing::warn!(
+                    client_id = %claims.app,
+                    sub = %claims.sub,
+                    "signed session cookie family was revoked after iat — rejecting"
+                );
+                return CookieOutcome::None;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, sub = %claims.sub, "session cookie revocation check failed");
+                return CookieOutcome::None;
+            }
         }
-    };
-    drop(conn);
+    }
 
-    // Project the GLOBAL session user_id to the per-app `pws_` (§6.2) and
-    // upsert the mapping. Fail closed when the route has no sector yet. The
-    // SAME call reads the active relay alias (§7) — the app-facing email.
-    let (pws, relay_email) = match project_pairwise(
-        state,
-        oauth_client_id,
-        sector_identifier,
-        &session.user_id,
-    )
-    .await
-    {
-        PairwiseProjection::Projected { pws, relay_email } => (pws, relay_email),
-        PairwiseProjection::Unprovisioned => return CookieOutcome::ClientNotProvisioned,
-    };
-
-    // Email-claim swap (§7): the app sees the relay alias, NEVER the real
-    // `session.email`. No active alias ⇒ empty email (fail closed).
-    let email = relay_email.as_deref().unwrap_or("");
+    // Emit ZeroShip-User DIRECTLY from the cookie claims — identity + scopes are
+    // self-contained (the relay-alias swap + pws_ projection happened at issue
+    // time). NO per-request projection, NO DB.
     let user = oidc_rp::WorkerUser {
-        id: &pws,
-        email,
-        name: session.name.as_deref().unwrap_or(""),
-        avatar: session.avatar_url.as_deref(),
-        email_verified: session.email_verified,
-        // Cookie arm: scopes come from the session row's granted_scopes column
-        // (Slice 3, §1.4) — no control.oauth_grants hot-path join.
-        scopes: session.granted_scopes.iter().map(String::as_str).collect(),
+        id: &claims.sub,
+        email: &claims.email,
+        name: &claims.name,
+        avatar: claims.avatar.as_deref(),
+        email_verified: claims.email_verified,
+        scopes: claims.scopes.iter().map(String::as_str).collect(),
     };
     CookieOutcome::Allowed(oidc_rp::encode_user_header(
         &user,
@@ -2156,6 +2195,14 @@ mod tests {
             &signing.verifying_key(),
             "https://api.zeroship.ai".into(),
         );
+        // BFF R1b — the signed session-cookie issuer/verifier from the SAME key.
+        let session_issuer =
+            crate::session_token::Issuer::new(&signing, "https://api.zeroship.ai".into())
+                .expect("session issuer");
+        let session_verifier = crate::session_token::Verifier::new(
+            &signing.verifying_key(),
+            "https://api.zeroship.ai".into(),
+        );
 
         StdArc::new(crate::GateState {
             config: crate::GateConfig {
@@ -2191,6 +2238,8 @@ mod tests {
             prev_signing_key: None,
             wrapper_issuer: Some(StdArc::new(issuer)),
             wrapper_verifier: Some(StdArc::new(verifier)),
+            session_issuer: Some(StdArc::new(session_issuer)),
+            session_verifier: Some(StdArc::new(session_verifier)),
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
         })
@@ -3164,7 +3213,6 @@ mod tests {
         let token = encode(&header, &claims, &key).unwrap();
 
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         // Anon route: expired Bearer → Allowed with NO user header.
@@ -3172,7 +3220,6 @@ mod tests {
             &req,
             &state,
             &anon_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3188,7 +3235,6 @@ mod tests {
             &req,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3222,14 +3268,12 @@ mod tests {
             issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid email");
 
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy_requiring(&["read:billing"]),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3260,14 +3304,12 @@ mod tests {
         );
 
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy_requiring(&["read:billing"]),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3307,14 +3349,12 @@ mod tests {
             issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid");
 
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy(), // required_scopes == []
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3342,14 +3382,12 @@ mod tests {
         );
 
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy_requiring(&["read:billing"]),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3373,14 +3411,12 @@ mod tests {
             .uri("/api/billing")
             .header(http::header::HOST, "myapp.zeroship.ai")
             .to_http_request();
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy_requiring(&["read:billing"]),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3409,7 +3445,6 @@ mod tests {
             issue_plain_wrapper_with_scope(&state, "pws_alice", "oac_myapp", aud, "openid");
 
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         // `Anon` route that nonetheless carries `required_scopes` (e.g.
@@ -3421,7 +3456,6 @@ mod tests {
             &req,
             &state,
             &anon_with_scope,
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3459,13 +3493,11 @@ mod tests {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_wrapper(gateway_signing);
         let req = bearer_req("zsk_opaque_api_key", "myapp.zeroship.ai");
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
         let outcome = resolve_auth(
             &req,
             &state,
             &anon_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -3708,6 +3740,17 @@ mod tests {
         tmp.push(format!("zsgate-dpop-introspect-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
 
+        // BFF R1b — session-cookie issuer/verifier from the gateway key (the
+        // wrapper issuer/verifier stay None here on purpose, to force the DPoP
+        // introspection fallback; the session cookie is independent of that).
+        let session_issuer =
+            crate::session_token::Issuer::new(&gateway_signing, "https://api.zeroship.ai".into())
+                .expect("session issuer");
+        let session_verifier = crate::session_token::Verifier::new(
+            &gateway_signing.verifying_key(),
+            "https://api.zeroship.ai".into(),
+        );
+
         StdArc::new(crate::GateState {
             config: crate::GateConfig {
                 control_url: String::new(),
@@ -3740,6 +3783,8 @@ mod tests {
             // opaque DPoP token routes to the introspection fallback.
             wrapper_issuer: None,
             wrapper_verifier: None,
+            session_issuer: Some(StdArc::new(session_issuer)),
+            session_verifier: Some(StdArc::new(session_verifier)),
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
         })
@@ -4185,13 +4230,11 @@ mod tests {
             .uri("/api/me")
             .header(http::header::HOST, "myapp.zeroship.ai")
             .to_http_request();
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
         let anon = resolve_auth(
             &req,
             &state,
             &anon_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -4202,7 +4245,6 @@ mod tests {
             &req,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -4488,14 +4530,12 @@ mod tests {
         let aud = "myapp.zeroship.ai";
         let token = issue_plain_wrapper(&state, "pws_alice", "oac_myapp", aud);
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -4537,14 +4577,12 @@ mod tests {
             3600,
         );
         let req = bearer_req(&token, aud);
-        let app_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some("oac_myapp"),
             Some(sector),
@@ -4577,57 +4615,33 @@ mod tests {
     //
     // Documents the round-3 decision (mirroring the DPoP precedent): on a
     // User/Admin route an Invalid Bearer 401s and is NOT silently rescued by
-    // a valid cookie session. PG-gated (needs auth.gateway_sessions to mint a
-    // REAL validated cookie session, so the test is faithful — the cookie
-    // genuinely validates, yet the Bearer still wins the 401).
-    #[compio::test]
+    // a valid cookie session. DB-free under R1b — the cookie is a SIGNED
+    // `zs-sess+jwt` verified locally, so the test mints a real signed cookie
+    // (genuinely valid) and proves the Bearer still wins the 401.
+    #[ntex::test]
     async fn resolve_auth_invalid_bearer_on_user_route_does_not_use_cookie() {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_wrapper_and_auth_ui_url_and_db(
             gateway_signing.clone(),
             "http://127.0.0.1:1",
-            Some(db.clone()),
+            None,
         );
         let aud = "myapp.zeroship.ai";
-        let app_id = Uuid::new_v4();
-        let app_id_str = app_id.to_string();
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
 
-        // Mint a REAL, currently-valid cookie session for a user.
-        let user_id = Uuid::new_v4();
-        let session = {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            crate::sessions::create(
-                &conn,
-                &crate::sessions::NewSession {
-                    user_id: &user_id.to_string(),
-                    app_id: &app_id_str,
-                    email: Some("cookie-user@example.com"),
-                    name: Some("Cookie User"),
-                    avatar_url: None,
-                    email_verified: true,
-                    granted_scopes: &[],
-                    auth_time: None,
-                    amr: &[],
-                },
-            )
-            .await
-            .expect("create cookie session")
-        };
+        // Mint a REAL, currently-valid SIGNED cookie for a user.
+        let signed = issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
 
         // Sanity: that cookie ALONE (no Bearer) authenticates the User route.
         let cookie_name = oidc_rp::app_session_cookie_name(true); // insecure_dev
         let cookie_only_req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={signed}"))
             .to_http_request();
         let request_id = Uuid::new_v4();
         assert!(
@@ -4636,9 +4650,8 @@ mod tests {
                     &cookie_only_req,
                     &state,
                     &user_policy(),
-                    &app_id,
                     &request_id,
-                    Some("oac_myapp"),
+                    Some(client_id),
                     Some("https://myapp.zeroship.ai"),
                 )
                 .await,
@@ -4646,7 +4659,7 @@ mod tests {
                     user_header: Some(_)
                 }
             ),
-            "the cookie session alone must authenticate (test fixture sanity)"
+            "the signed cookie alone must authenticate (test fixture sanity)"
         );
 
         // Now attach an EXPIRED wrapper Bearer alongside the SAME valid
@@ -4668,7 +4681,7 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             cnf: None,
             scope: "openid".into(),
-            client_id: "oac_myapp".into(),
+            client_id: client_id.into(),
             email: Some("relay-alias@zeroship.ai".into()),
             email_verified: Some(true),
             name: None,
@@ -4685,15 +4698,14 @@ mod tests {
             .uri("/api/me")
             .header(http::header::HOST, aud)
             .header(http::header::AUTHORIZATION, format!("Bearer {expired_bearer}"))
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={signed}"))
             .to_http_request();
         let outcome = resolve_auth(
             &shadowed_req,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
-            Some("oac_myapp"),
+            Some(client_id),
             None,
         )
         .await;
@@ -4701,162 +4713,97 @@ mod tests {
             matches!(outcome, AuthOutcome::Unauthenticated),
             "Invalid Bearer on User route must 401, NOT fall back to the valid cookie, got {outcome:?}"
         );
-
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            crate::sessions::revoke(&conn, session.id).await.ok();
-        }
     }
 
     // ─── Cookie-arm required-scope enforcement (Slice 3c review finding 6) ──
     //
     // The single enforcement point in `resolve_auth` is arm-agnostic, but the
     // plain-Bearer scope tests above only verify ONE arm. This pair drives the
-    // COOKIE arm — whose scopes come from the new Slice-3a
-    // `auth.gateway_sessions.granted_scopes` column — through the REAL
-    // `resolve_auth`, minting a REAL validated session (PG-gated). A cookie
-    // whose granted_scopes cover the route's `required_scopes` is Allowed; one
+    // COOKIE arm — whose scopes now come from the SIGNED cookie's `scopes`
+    // claim (BFF R1b; no DB row) — through the REAL `resolve_auth`. A signed
+    // cookie whose scopes cover the route's `required_scopes` is Allowed; one
     // that does not is InsufficientScope (403), proving the gate is not
-    // Bearer-only.
+    // Bearer-only. DB-free (the cookie arm is stateless).
 
-    #[compio::test]
+    #[ntex::test]
     async fn resolve_auth_cookie_arm_with_required_scope_allowed() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_wrapper_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
-            Some(db.clone()),
+            None,
         );
         let aud = "myapp.zeroship.ai";
-        let app_id = Uuid::new_v4();
-        let app_id_str = app_id.to_string();
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
 
-        // Session whose granted_scopes INCLUDE the route's required scope.
-        let session = {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            crate::sessions::create(
-                &conn,
-                &crate::sessions::NewSession {
-                    user_id: &Uuid::new_v4().to_string(),
-                    app_id: &app_id_str,
-                    email: Some("cookie-user@example.com"),
-                    name: Some("Cookie User"),
-                    avatar_url: None,
-                    email_verified: true,
-                    granted_scopes: &["openid".to_string(), "read:billing".to_string()],
-                    auth_time: None,
-                    amr: &[],
-                },
-            )
-            .await
-            .expect("create cookie session")
-        };
+        // Signed cookie whose scopes INCLUDE the route's required scope.
+        let scopes = vec!["openid".to_string(), "read:billing".to_string()];
+        let signed = issue_signed_session_cookie(&state, client_id, &pws, "", &scopes);
 
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/billing")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={signed}"))
             .to_http_request();
         let request_id = Uuid::new_v4();
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy_requiring(&["read:billing"]),
-            &app_id,
             &request_id,
-            Some("oac_myapp"),
+            Some(client_id),
             Some("https://myapp.zeroship.ai"),
         )
         .await;
-
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            crate::sessions::revoke(&conn, session.id).await.ok();
-        }
 
         assert!(
             matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
-            "cookie session granting read:billing must pass the scope gate, got {outcome:?}"
+            "signed cookie granting read:billing must pass the scope gate, got {outcome:?}"
         );
     }
 
-    #[compio::test]
+    #[ntex::test]
     async fn resolve_auth_cookie_arm_without_required_scope_403s() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_wrapper_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
-            Some(db.clone()),
+            None,
         );
         let aud = "myapp.zeroship.ai";
-        let app_id = Uuid::new_v4();
-        let app_id_str = app_id.to_string();
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
 
-        // Session whose granted_scopes do NOT include the route's required
-        // scope — identity is fine, the grant is too narrow → 403, not 401.
-        let session = {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            crate::sessions::create(
-                &conn,
-                &crate::sessions::NewSession {
-                    user_id: &Uuid::new_v4().to_string(),
-                    app_id: &app_id_str,
-                    email: Some("cookie-user@example.com"),
-                    name: Some("Cookie User"),
-                    avatar_url: None,
-                    email_verified: true,
-                    granted_scopes: &["openid".to_string(), "email".to_string()],
-                    auth_time: None,
-                    amr: &[],
-                },
-            )
-            .await
-            .expect("create cookie session")
-        };
+        // Signed cookie whose scopes do NOT include the route's required scope —
+        // identity is fine, the grant is too narrow → 403, not 401.
+        let scopes = vec!["openid".to_string(), "email".to_string()];
+        let signed = issue_signed_session_cookie(&state, client_id, &pws, "", &scopes);
 
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/billing")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={signed}"))
             .to_http_request();
         let request_id = Uuid::new_v4();
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy_requiring(&["read:billing"]),
-            &app_id,
             &request_id,
-            Some("oac_myapp"),
+            Some(client_id),
             Some("https://myapp.zeroship.ai"),
         )
         .await;
-
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            crate::sessions::revoke(&conn, session.id).await.ok();
-        }
 
         match outcome {
             AuthOutcome::InsufficientScope { required } => {
                 assert_eq!(required, vec!["read:billing".to_string()]);
             }
             other => panic!(
-                "cookie session lacking read:billing must be InsufficientScope (403), got {other:?}"
+                "signed cookie lacking read:billing must be InsufficientScope (403), got {other:?}"
             ),
         }
     }
@@ -5034,12 +4981,10 @@ mod tests {
         );
 
         // And end-to-end through resolve_auth → AuthOutcome::ClientNotProvisioned.
-        let app_id = Uuid::new_v4();
         let outcome = resolve_auth(
             &req,
             &state,
             &user_policy(),
-            &app_id,
             &rid,
             Some("oac_myapp"),
             None,
@@ -5093,254 +5038,342 @@ mod tests {
         v["id"].as_str().expect("id is a string").to_string()
     }
 
-    // ─── PG-gated: the cookie arm + the app_user_identities upsert ────────
+    // ─── R1b: signed stateless session cookie — local-verify cookie arm ────
 
-    /// The cookie arm projects the GLOBAL session user_id to the per-app
-    /// `pws_`, emits THAT in `ZeroShip-User.id` (never the UUID), and
-    /// UPSERTS the `(app_client_id, global_user_id) → pws_` mapping. A
-    /// second resolution is idempotent (one row, same pws_). PG-gated.
-    #[compio::test]
-    async fn cookie_arm_projects_pws_and_upserts_mapping_idempotently() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
+    /// Mint a gateway-SIGNED `zs-sess+jwt` session cookie via the state's
+    /// session issuer, for the given app (`client_id`) + per-app `pws_` subject.
+    /// This is exactly the token `POST /__zs/auth/session` writes into
+    /// `__Host-zs_app_session`.
+    fn issue_signed_session_cookie(
+        state: &crate::GateState,
+        client_id: &str,
+        pws_sub: &str,
+        email: &str,
+        scopes: &[String],
+    ) -> String {
+        state
+            .session_issuer
+            .as_ref()
+            .expect("session issuer configured")
+            .issue(&crate::session_token::SessionMint {
+                app: client_id,
+                sub: pws_sub,
+                auth_time: Some(1_700_000_000),
+                amr: &["pwd".to_string()],
+                email,
+                email_verified: true,
+                name: "Cookie User",
+                avatar: None,
+                scopes,
+            })
+            .expect("issue signed session cookie")
+    }
+
+    /// The cookie arm verifies a gateway-signed session cookie LOCALLY and emits
+    /// the correct `ZeroShip-User` (pws_ id + scopes + relay-alias email) with
+    /// **NO DB read** — proven by running it with `db = None` for a valid signed
+    /// cookie. No PG needed: the verify path is entirely stateless.
+    #[ntex::test]
+    async fn cookie_arm_local_verifies_signed_cookie_with_no_db() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        // db = None ⇒ the family-marker (the only DB touch) is SKIPPED, so a
+        // successful Allow proves the identity path made zero DB calls.
         let state = build_state_with_wrapper_and_auth_ui_url_and_db(
             gateway_signing,
             "http://127.0.0.1:1",
-            Some(db.clone()),
+            None,
         );
-        let aud = "myapp.zeroship.ai";
-        let app_id = Uuid::new_v4();
-        let app_id_str = app_id.to_string();
-        let client_id = "oac_myapp";
-        let sector = "https://myapp.zeroship.ai";
+        assert!(state.db.is_none(), "fixture must have no DB for this proof");
 
-        // Mint a REAL cookie session for a global user. The user row must
-        // exist first: `app_user_identities.global_user_id` FK-references
-        // `auth.users(id)`, so the gateway's mapping upsert silently no-ops
-        // (best-effort) without it — which the persistence assertion below
-        // would then fail. Seed it so the upsert actually lands.
-        let user_id = Uuid::new_v4();
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            conn.execute(
-                "INSERT INTO auth.users (id, email, name, email_verified_at) \
-                 VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
-                &[&user_id, &"cookie-user@example.com", &"Cookie User"],
-            )
-            .await
-            .expect("seed user");
-        }
-        let session = {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            crate::sessions::create(
-                &conn,
-                &crate::sessions::NewSession {
-                    user_id: &user_id.to_string(),
-                    app_id: &app_id_str,
-                    email: Some("cookie-user@example.com"),
-                    name: Some("Cookie User"),
-                    avatar_url: None,
-                    email_verified: true,
-                    granted_scopes: &[],
-                    auth_time: None,
-                    amr: &[],
-                },
-            )
-            .await
-            .expect("create session")
-        };
+        let aud = "myapp.zeroship.ai";
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let scopes = vec!["openid".to_string(), "email".to_string()];
+        let token =
+            issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
 
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={token}"))
             .to_http_request();
         let rid = Uuid::new_v4();
 
         let outcome = resolve_app_session_user_header_inner(
             &req,
             &state,
-            &app_id_str,
             &rid,
             Some(client_id),
-            Some(sector),
         )
         .await;
         let CookieOutcome::Allowed(header) = outcome else {
-            panic!("cookie must Allow, got {outcome:?}");
+            panic!("a valid signed cookie must Allow with db=None, got {outcome:?}");
         };
-        let emitted_id = decode_header_id(&state, &header);
-        let expected_pws = zeroship_core::auth::derive_pairwise(
-            &state.pairwise_salt,
-            &user_id.to_string(),
-            sector,
-        );
-        assert_eq!(emitted_id, expected_pws, "cookie arm must emit the pws_");
-        assert!(
-            !header.contains(&user_id.to_string()),
-            "global UUID must not appear in the cookie-arm header"
-        );
-        // Slice 5c §7 — email-claim swap: no relay alias minted for this
-        // (app, user), so the cookie arm fails closed → empty email. The
-        // session's real `cookie-user@example.com` must NEVER reach the worker.
-        {
-            let json = zeroship_core::auth::verify_zeroship_user_header(
-                state.config.worker_key.as_bytes(),
-                &header,
-            )
-            .expect("MAC verifies");
-            let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-            assert_eq!(user["email"], "", "no alias ⇒ empty email (fail closed)");
-            assert!(
-                !json.contains("cookie-user@example.com"),
-                "real email leaked into cookie-arm ZeroShip-User: {json}"
-            );
-        }
-
-        // The mapping row exists with the right (app_client_id, global, pws_).
-        let stored = {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            crate::identities::lookup_pairwise_sub(&conn, client_id, user_id)
-                .await
-                .expect("lookup")
-        };
-        assert_eq!(
-            stored.as_deref(),
-            Some(expected_pws.as_str()),
-            "app_user_identities must hold the projected pws_"
-        );
-
-        // Idempotent: a SECOND resolution leaves exactly ONE row, same pws_.
-        let _ = resolve_app_session_user_header_inner(
-            &req,
-            &state,
-            &app_id_str,
-            &rid,
-            Some(client_id),
-            Some(sector),
+        // Emits the pws_ id + relay alias + scopes, straight from the claims.
+        let id = decode_header_id(&state, &header);
+        assert_eq!(id, pws, "cookie arm emits the cookie's pws_ subject");
+        let json = zeroship_core::auth::verify_zeroship_user_header(
+            state.config.worker_key.as_bytes(),
+            &header,
         )
-        .await;
-        let (count, again) = {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            let rows = conn
-                .query(
-                    "SELECT pairwise_sub FROM auth.app_user_identities \
-                     WHERE app_client_id = $1 AND global_user_id = $2",
-                    &[&client_id, &user_id],
-                )
-                .await
-                .expect("count query");
-            let again: Option<String> = rows.first().map(|r| r.get("pairwise_sub"));
-            (rows.len(), again)
-        };
-        assert_eq!(count, 1, "upsert must be idempotent (exactly one row)");
-        assert_eq!(again.as_deref(), Some(expected_pws.as_str()));
-
-        // Cleanup.
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            conn.execute(
-                "DELETE FROM auth.app_user_identities WHERE app_client_id = $1 AND global_user_id = $2",
-                &[&client_id, &user_id],
-            )
-            .await
-            .ok();
-            crate::sessions::revoke(&conn, session.id).await.ok();
-            // Drop the seeded user row last (FK from app_user_identities cleared above).
-            conn.execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
-                .await
-                .ok();
-        }
+        .expect("MAC verifies");
+        let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
+        assert_eq!(user["email"], "relay-alias@zeroship.ai", "relay alias from claim");
+        assert_eq!(
+            user["scopes"],
+            serde_json::json!(["openid", "email"]),
+            "scopes from the signed cookie claim"
+        );
     }
 
-    /// The cookie arm fails closed (no `pws_`) when the route has no
-    /// `sector_identifier` — even for a fully-valid cookie session, the
-    /// global UUID is never projected. PG-gated.
-    #[compio::test]
-    async fn cookie_arm_unprovisioned_sector_fails_closed() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
+    /// A tampered, expired, wrong-app, and wrong-kid signed cookie are each
+    /// rejected by the local-verify cookie arm (→ no identity). DB-free.
+    #[ntex::test]
+    async fn cookie_arm_rejects_tampered_expired_wrong_app_wrong_kid() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
-            gateway_signing,
-            "http://127.0.0.1:1",
-            Some(db.clone()),
-        );
+        let state =
+            build_state_with_wrapper_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
-        let app_id = Uuid::new_v4();
-        let app_id_str = app_id.to_string();
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let rid = Uuid::new_v4();
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
 
-        let user_id = Uuid::new_v4();
-        let session = {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            crate::sessions::create(
-                &conn,
-                &crate::sessions::NewSession {
-                    user_id: &user_id.to_string(),
-                    app_id: &app_id_str,
-                    email: Some("cookie-user@example.com"),
-                    name: Some("Cookie User"),
-                    avatar_url: None,
-                    email_verified: true,
-                    granted_scopes: &[],
-                    auth_time: None,
-                    amr: &[],
-                },
-            )
-            .await
-            .expect("create session")
+        let arm = |token: String, client: &str| {
+            let req = ntex::web::test::TestRequest::default()
+                .uri("/api/me")
+                .header(http::header::HOST, aud)
+                .header("cookie", format!("{cookie_name}={token}"))
+                .to_http_request();
+            (req, client.to_string())
         };
+
+        let valid = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+
+        // (a) tampered: flip the last signature char.
+        let mut chars: Vec<char> = valid.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+        let (req, c) = arm(tampered, client_id);
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(&c)).await,
+                CookieOutcome::None
+            ),
+            "tampered cookie must be rejected"
+        );
+
+        // (b) wrong app: cookie minted for client_id, presented on a different
+        //     route client. The verifier's `app` binding rejects it.
+        let (req, c) = arm(valid.clone(), "oac_other");
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(&c)).await,
+                CookieOutcome::None
+            ),
+            "wrong-app cookie must be rejected"
+        );
+
+        // (c) wrong kid: sign with a DIFFERENT key (unknown kid) — the verifier
+        //     holds only the gateway key.
+        let other_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let other_issuer =
+            crate::session_token::Issuer::new(&other_key, "https://api.zeroship.ai".into())
+                .expect("issuer");
+        let wrong_kid = other_issuer
+            .issue(&crate::session_token::SessionMint {
+                app: client_id,
+                sub: &pws,
+                auth_time: None,
+                amr: &[],
+                email: "",
+                email_verified: false,
+                name: "",
+                avatar: None,
+                scopes: &[],
+            })
+            .expect("issue");
+        let (req, c) = arm(wrong_kid, client_id);
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(&c)).await,
+                CookieOutcome::None
+            ),
+            "wrong-kid cookie must be rejected"
+        );
+
+        // (d) expired: hand-sign with exp in the past.
+        let expired = sign_expired_session_cookie(&gateway_signing_key_of(&state), client_id, &pws);
+        let (req, c) = arm(expired, client_id);
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(&c)).await,
+                CookieOutcome::None
+            ),
+            "expired cookie must be rejected"
+        );
+    }
+
+    /// The signing key behind the fixture (seed [7u8;32]) — for hand-crafting
+    /// edge-case tokens (expired) the issuer won't mint.
+    fn gateway_signing_key_of(_state: &crate::GateState) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    /// Hand-sign a `zs-sess+jwt` whose `exp` is 100s in the past (beyond the 60s
+    /// verify leeway).
+    fn sign_expired_session_cookie(
+        signing: &ed25519_dalek::SigningKey,
+        client_id: &str,
+        pws_sub: &str,
+    ) -> String {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let claims = crate::session_token::SessionClaims {
+            iss: "https://api.zeroship.ai".into(),
+            app: client_id.into(),
+            sub: pws_sub.into(),
+            iat: now - 2000,
+            exp: now - 100,
+            auth_time: None,
+            amr: vec![],
+            email: String::new(),
+            email_verified: false,
+            name: String::new(),
+            avatar: None,
+            scopes: vec![],
+        };
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some(crate::session_token::SESSION_TOKEN_TYP.into());
+        header.kid = Some(crate::signing::jwk_thumbprint(signing));
+        let der = signing.to_pkcs8_der().unwrap();
+        let key = EncodingKey::from_ed_der(der.as_bytes());
+        encode(&header, &claims, &key).unwrap()
+    }
+
+    /// A signed SESSION cookie presented as a Bearer wrapper is REJECTED by the
+    /// wrapper Bearer arm (the `zs-sess+jwt` typ fails the wrapper's `at+jwt`
+    /// typ gate) — and a wrapper presented to the session-cookie arm is rejected
+    /// by the session verifier's typ gate. Typ separation, both directions.
+    /// DB-free.
+    #[ntex::test]
+    async fn typ_separation_session_cookie_vs_wrapper_both_ways() {
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state =
+            build_state_with_wrapper_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
+        let aud = "myapp.zeroship.ai";
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let rid = Uuid::new_v4();
+
+        // (1) Session cookie presented on the Bearer wrapper arm → Invalid.
+        let session_token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let bearer = bearer_req(&session_token, aud);
+        let bearer_outcome =
+            resolve_bearer_user_header(&bearer, &state, &rid, Some(client_id), None).await;
+        assert!(
+            matches!(bearer_outcome, BearerOutcome::Invalid),
+            "a zs-sess+jwt session cookie must be rejected by the wrapper Bearer arm, got {bearer_outcome:?}"
+        );
+
+        // (2) A wrapper (at+jwt) presented to the session-cookie arm → None.
+        let wrapper = issue_plain_wrapper(&state, &pws, client_id, aud);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={wrapper}"))
             .to_http_request();
-        let rid = Uuid::new_v4();
-
-        let outcome = resolve_app_session_user_header_inner(
+        let cookie_outcome = resolve_app_session_user_header_inner(
             &req,
             &state,
-            &app_id_str,
             &rid,
-            Some("oac_myapp"),
-            None, // no sector → fail closed
+            Some(client_id),
         )
         .await;
         assert!(
-            matches!(outcome, CookieOutcome::ClientNotProvisioned),
-            "cookie arm must fail closed without a sector, got {outcome:?}"
+            matches!(cookie_outcome, CookieOutcome::None),
+            "a wrapper at+jwt must be rejected by the session-cookie arm, got {cookie_outcome:?}"
         );
-
-        let pool = crate::db::checkout(&db).await.expect("pool");
-        let conn = pool.get().await.expect("pool");
-        crate::sessions::revoke(&conn, session.id).await.ok();
     }
 
-    /// REGRESSION (BFF key-normalization BLOCKER + faithful-e2e gap): a session
-    /// row keyed by the app UUID — EXACTLY what the fixed `/token` handler
-    /// writes (`route.app_id.to_string()`) — must authenticate on the LIVE
-    /// per-request dispatch gate `resolve_auth` and yield a signed
-    /// `ZeroShip-User` for the `pws_` subject. This is the real credential the
-    /// SPA's fetch('/api/...') rides; before the fix `/token` keyed the row by
-    /// the SLUG, so this arm (which passes `app_id.to_string()`) returned None
-    /// and every SPA request was silently unauthenticated. The anchors suite
-    /// only wired /token+/session (both slug), so it was blind to this — this
-    /// test drives the actual dispatch arm with a UUID-keyed session. PG-gated.
+    /// A previous-kid signed cookie still verifies during the rotation overlap
+    /// (the verifier holds [current, previous]). DB-free.
+    #[ntex::test]
+    async fn cookie_arm_accepts_previous_kid_during_overlap() {
+        // current = B (seed 7); previous = A (seed 9).
+        let current = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let prev = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let mut state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            current.clone(),
+            "http://127.0.0.1:1",
+            None,
+        );
+        // Rebuild the session verifier as [current, previous] (overlap window).
+        {
+            let s = std::sync::Arc::get_mut(&mut state).expect("unique");
+            s.session_verifier = Some(std::sync::Arc::new(
+                crate::session_token::Verifier::with_previous(
+                    &current.verifying_key(),
+                    &prev.verifying_key(),
+                    "https://api.zeroship.ai".into(),
+                ),
+            ));
+        }
+        let aud = "myapp.zeroship.ai";
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+
+        // Mint under the PREVIOUS key A.
+        let prev_issuer =
+            crate::session_token::Issuer::new(&prev, "https://api.zeroship.ai".into()).expect("issuer");
+        let token = prev_issuer
+            .issue(&crate::session_token::SessionMint {
+                app: client_id,
+                sub: &pws,
+                auth_time: None,
+                amr: &[],
+                email: "",
+                email_verified: false,
+                name: "",
+                avatar: None,
+                scopes: &[],
+            })
+            .expect("issue under prev key");
+
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request();
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &Uuid::new_v4(),
+            Some(client_id),
+        )
+        .await;
+        assert!(
+            matches!(outcome, CookieOutcome::Allowed(_)),
+            "a previous-kid cookie must verify during the overlap, got {outcome:?}"
+        );
+    }
+
+    /// A revoked `(client_id, pws_)` family marker makes the cookie arm reject a
+    /// still-valid signed cookie — revocation works STATELESSLY (the same cached
+    /// per-app marker the Bearer/DPoP arms use). PG-gated.
     #[compio::test]
-    async fn resolve_auth_cookie_arm_validates_token_minted_uuid_keyed_session() {
+    async fn cookie_arm_rejects_revoked_family_statelessly() {
         let Some(db) = connect_auth_db().await else {
             eprintln!("skipping (no AUTH_DB_URL)");
             return;
@@ -5353,144 +5386,144 @@ mod tests {
         );
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let sector = "https://myapp.zeroship.ai";
-        // The dispatch arm passes the app UUID; the fixed /token keys the row by
-        // the SAME UUID. Use a UUID here to faithfully mirror that contract.
-        let app_id = Uuid::new_v4();
-        let app_id_str = app_id.to_string();
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={token}"))
+            .to_http_request();
+        let rid = Uuid::new_v4();
 
-        let user_id = Uuid::new_v4();
+        // Before revocation: Allowed.
+        assert!(
+            matches!(
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id))
+                    .await,
+                CookieOutcome::Allowed(_)
+            ),
+            "valid signed cookie must Allow before revocation"
+        );
+
+        // Revoke the (client_id, pws_) family the way /signout does.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            zeroship_core::wrapper_revocation::revoke_family(&conn, client_id, &pws)
+                .await
+                .expect("revoke_family");
+        }
+
+        // After revocation: the SAME valid cookie is rejected (stateless verify
+        // succeeds, the family-marker gate fails it).
+        let after = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &rid,
+            Some(client_id),
+        )
+        .await;
+        assert!(
+            matches!(after, CookieOutcome::None),
+            "a revoked family must reject the still-valid signed cookie, got {after:?}"
+        );
+
+        // Cleanup the marker.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
             let conn = pool.get().await.expect("pool");
             conn.execute(
-                "INSERT INTO auth.users (id, email, name, email_verified_at) \
-                 VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
-                &[&user_id, &"live-arm-user@example.com", &"Live Arm User"],
+                "DELETE FROM auth.token_revocations WHERE client_id = $1 AND sub = $2",
+                &[&client_id, &pws],
             )
             .await
-            .expect("seed user");
+            .ok();
         }
-        // Create the row the way the FIXED /token does: keyed by the app UUID.
-        let session = {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            crate::sessions::create(
-                &conn,
-                &crate::sessions::NewSession {
-                    user_id: &user_id.to_string(),
-                    app_id: &app_id_str, // UUID — the canonical key
-                    email: Some("live-arm-user@example.com"),
-                    name: Some("Live Arm User"),
-                    avatar_url: None,
-                    email_verified: true,
-                    granted_scopes: &[],
-                    auth_time: None,
-                    amr: &[],
-                },
-            )
-            .await
-            .expect("create session")
-        };
+    }
 
+    /// The LIVE per-request dispatch gate `resolve_auth` authenticates a signed
+    /// session cookie and yields a `pws_` `ZeroShip-User`; the BFF P3 anti-CSRF
+    /// gate still drops a cross-origin state-changing POST riding the Lax cookie
+    /// (→ 401 on a `User` route), while a same-origin POST authenticates. DB-free
+    /// (the signed cookie verify is stateless; no marker means no revocation).
+    #[ntex::test]
+    async fn resolve_auth_cookie_arm_authenticates_signed_cookie_and_enforces_csrf() {
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state =
+            build_state_with_wrapper_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
+        let aud = "myapp.zeroship.ai";
+        let client_id = "oac_myapp";
+        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let token =
+            issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let request_id = Uuid::new_v4();
 
-        // A safe GET (the SPA's read path) with the session cookie: the live
-        // arm validates by `app_id.to_string()` and Allows with a pws_ header.
+        // Safe GET with the signed cookie: Allow with the pws_ header.
         let get_req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={token}"))
             .to_http_request();
         let outcome = resolve_auth(
             &get_req,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some(client_id),
-            Some(sector),
+            None,
         )
         .await;
         let AuthOutcome::Allowed { user_header: Some(header) } = outcome else {
-            panic!(
-                "the /token-minted UUID-keyed session MUST authenticate on the LIVE \
-                 dispatch arm (resolve_auth keys by app_id.to_string()), got {outcome:?}"
-            );
+            panic!("signed cookie must authenticate on the live dispatch arm, got {outcome:?}");
         };
-        let id = decode_header_id(&state, &header);
-        let expected_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), sector);
-        assert_eq!(id, expected_pws, "live arm emits the pws_, never the global UUID");
-        assert!(!header.contains(&user_id.to_string()), "global UUID must not appear");
+        assert_eq!(decode_header_id(&state, &header), pws);
 
-        // BFF P3 anti-CSRF: a state-changing POST carrying the SAME cookie but a
-        // FOREIGN Origin must NOT authenticate — the cookie credential is
-        // dropped, so a `User` route 401s rather than executing a cross-site
-        // mutation ridden by the SameSite=Lax cookie.
+        // Cross-origin state-changing POST riding the Lax cookie → Unauthenticated.
         let csrf_post = ntex::web::test::TestRequest::default()
             .method(ntex::http::Method::POST)
             .uri("/api/transfer")
             .header(http::header::HOST, aud)
             .header(http::header::ORIGIN, "https://evil.example")
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={token}"))
             .to_http_request();
         let csrf_outcome = resolve_auth(
             &csrf_post,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some(client_id),
-            Some(sector),
+            None,
         )
         .await;
         assert!(
             matches!(csrf_outcome, AuthOutcome::Unauthenticated),
-            "a cross-origin state-changing POST riding the Lax session cookie MUST be \
-             rejected (P3 anti-CSRF), got {csrf_outcome:?}"
+            "cross-origin POST riding the Lax session cookie MUST be rejected (P3), got {csrf_outcome:?}"
         );
 
-        // Same POST with the app's OWN Origin authenticates (the legit SPA path).
+        // Same-origin POST authenticates (the legit SPA mutation path).
         let same_origin_post = ntex::web::test::TestRequest::default()
             .method(ntex::http::Method::POST)
             .uri("/api/transfer")
             .header(http::header::HOST, aud)
             .header(http::header::ORIGIN, "http://myapp.zeroship.ai") // dev ⇒ http
             .header("sec-fetch-site", "same-origin")
-            .header("cookie", format!("{cookie_name}={}", session.id))
+            .header("cookie", format!("{cookie_name}={token}"))
             .to_http_request();
         let ok_outcome = resolve_auth(
             &same_origin_post,
             &state,
             &user_policy(),
-            &app_id,
             &request_id,
             Some(client_id),
-            Some(sector),
+            None,
         )
         .await;
         assert!(
             matches!(ok_outcome, AuthOutcome::Allowed { user_header: Some(_) }),
             "a same-origin state-changing POST MUST authenticate, got {ok_outcome:?}"
         );
-
-        // Cleanup.
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
-            conn.execute(
-                "DELETE FROM auth.app_user_identities WHERE global_user_id = $1",
-                &[&user_id],
-            )
-            .await
-            .ok();
-            crate::sessions::revoke(&conn, session.id).await.ok();
-            conn.execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
-                .await
-                .ok();
-        }
     }
 
     // ─── Batch A fix 2: self-describing-subject invariant ─────────────────

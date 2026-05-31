@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { createAuthClient } from "../src/client";
 import { AuthError, type AuthChangeEvent, type Session } from "../src/types";
-import { APP_ORIGIN, jsonResponse, makeHarness, tokenSuccessBody } from "./harness";
+import { APP_ORIGIN, jsonResponse, makeHarness, tokenSuccessBody, SESSION_EXCHANGE } from "./harness";
 
 /** Wait until the SDK has persisted a PKCE transaction, then return its state. */
 async function awaitTxnState(session: { map: Map<string, string> }): Promise<string> {
@@ -53,7 +53,7 @@ async function awaitReadyN(
 describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)", () => {
   test("opens the popup SYNCHRONOUSLY before the async URL build", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     // Do not await yet — assert the popup exists synchronously after the call.
     const p = client.signInWithOAuth();
@@ -92,7 +92,7 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
 
   test("a spurious early popup.closed does NOT cancel a flow whose code already arrived (COOP)", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     const p = client.signInWithOAuth();
     const state = await awaitReady(h);
@@ -104,7 +104,10 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     // …and only THEN does the COOP-severed popup read as closed.
     h.window.lastOpened!.close();
     const session = await p;
-    assert.equal(session.access_token, "wrap.access.token", "relay wins the race over a late close");
+    // BFF: no client-held token (the cookie is the credential). The exchange
+    // still resolves a Session — assert the identity projection.
+    assert.equal(session.access_token, "", "BFF model: no browser-held token");
+    assert.equal(session.user.id, "pws_alice", "relay wins the race over a late close");
   });
 
   test("popup_blocked when window.open returns null", async () => {
@@ -118,9 +121,9 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     });
   });
 
-  test("full handshake: authorize URL, postMessage code, /token exchange, SIGNED_IN", async () => {
+  test("full handshake: authorize URL, postMessage code, POST /session exchange, SIGNED_IN", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
 
     const events: AuthChangeEvent[] = [];
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
@@ -153,13 +156,15 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     });
 
     const session = await signIn;
-    assert.equal(session.access_token, "wrap.access.token");
+    assert.equal(session.access_token, "", "BFF model: no browser-held token");
     assert.equal(session.user.id, "pws_alice");
     assert.equal(session.user.emailVerified, true);
     assert.deepEqual(session.scopes, ["openid", "profile", "email"]);
 
-    // /token was posted with X-ZS-Auth + the PKCE verifier + grant_type.
-    const tokenReq = h.fetch.requests.find((r) => r.url.includes("/__zs/auth/token"))!;
+    // POST /__zs/auth/session was posted with X-ZS-Auth + the PKCE verifier + grant_type.
+    const tokenReq = h.fetch.requests.find(
+      (r) => r.method === "POST" && r.url.includes("/__zs/auth/session"),
+    )!;
     assert.equal(tokenReq.method, "POST");
     assert.equal(tokenReq.headers["x-zs-auth"], "1");
     const body = tokenReq.body as Record<string, string>;
@@ -233,9 +238,25 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await signIn.catch(() => {});
   });
 
-  test("getAccessTokenWithPopup runs an interactive consent step-up and returns the minted token", async () => {
+  test("getAccessTokenWithPopup runs an interactive consent step-up and resolves", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody({ scope: "openid profile email payments:write" })));
+    h.fetch.on(
+      SESSION_EXCHANGE,
+      () =>
+        jsonResponse(
+          200,
+          tokenSuccessBody({
+            user: {
+              id: "pws_alice",
+              email: "alice@relay.zeroship.ai",
+              email_verified: true,
+              name: "Alice",
+              avatar: null,
+              scopes: ["openid", "profile", "email", "payments:write"],
+            },
+          }),
+        ),
+    );
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
     const tokenP = client.getAccessTokenWithPopup({ scopes: ["payments:write"] });
@@ -253,7 +274,10 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     });
 
     const token = await tokenP;
-    assert.equal(token, "wrap.access.token", "resolves the freshly-minted access token, not a Session");
+    // BFF model: there is no browser-held token, so getAccessTokenWithPopup
+    // resolves the inert empty sentinel. The step-up's real effect is the
+    // re-signed session cookie (set by the gateway on the exchange response).
+    assert.equal(token, "", "BFF model: no browser-held token to return");
   });
 
   test("a relay message for a DIFFERENT flow's state is IGNORED (no cross-flow delivery)", async () => {
@@ -262,10 +286,10 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     // IGNORED (the flow keeps waiting), NOT delivered to this flow's exchange.
     // Here the foreign-state message is dropped and the flow then ends via the
     // popup-close hint (popup_closed) — proving the stray code never reached
-    // /token and never settled this flow with the wrong code.
+    // POST /session and never settled this flow with the wrong code.
     const h = makeHarness();
     let tokenCalls = 0;
-    h.fetch.on("/__zs/auth/token", () => {
+    h.fetch.on(SESSION_EXCHANGE, () => {
       tokenCalls++;
       return jsonResponse(200, tokenSuccessBody());
     });
@@ -284,15 +308,29 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
       assert.equal((e as AuthError).code, "popup_closed");
       return true;
     });
-    assert.equal(tokenCalls, 0, "a foreign-state code must never reach /token");
+    assert.equal(tokenCalls, 0, "a foreign-state code must never reach POST /session");
   });
 
   test("concurrent flows: each completes with its OWN code (relay state filtering)", async () => {
     // Two interleaved sign-ins on the same origin. Each flow's popup relays a
     // code tagged with ITS state; the SDK must route each code to its own flow.
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", (req) =>
-      jsonResponse(200, tokenSuccessBody({ access_token: `tok-${(req.body as { code: string }).code}` })),
+    // BFF: the response carries no token, so tag each flow's identity by code
+    // (a distinct user.id) to prove each code routed to its own flow.
+    h.fetch.on(SESSION_EXCHANGE, (req) =>
+      jsonResponse(
+        200,
+        tokenSuccessBody({
+          user: {
+            id: `pws_${(req.body as { code: string }).code}`,
+            email: "alice@relay.zeroship.ai",
+            email_verified: true,
+            name: "Alice",
+            avatar: null,
+            scopes: ["openid", "profile", "email"],
+          },
+        }),
+      ),
     );
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
@@ -316,8 +354,8 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     });
 
     const [a, b] = await Promise.all([signInA, signInB]);
-    assert.equal(a.access_token, "tok-code-A", "flow A resolved with A's code");
-    assert.equal(b.access_token, "tok-code-B", "flow B resolved with B's code");
+    assert.equal(a.user.id, "pws_code-A", "flow A resolved with A's code");
+    assert.equal(b.user.id, "pws_code-B", "flow B resolved with B's code");
   });
 
   test("a relay error response maps to a typed AuthError", async () => {
@@ -340,9 +378,9 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
 });
 
 describe("exchangeCodeForSession", () => {
-  test("recovers the verifier from sessionStorage and posts the gateway /token shape", async () => {
+  test("recovers the verifier from sessionStorage and posts the gateway /session shape", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
     // Begin a flow to seed a transaction, but resolve it via the redirect-style
@@ -351,8 +389,11 @@ describe("exchangeCodeForSession", () => {
     const state = await awaitReady(h);
 
     const session = await client.exchangeCodeForSession("redirect-code", state);
-    assert.equal(session.access_token, "wrap.access.token");
-    const req = h.fetch.requests.find((r) => r.url.includes("/__zs/auth/token"))!;
+    assert.equal(session.access_token, "", "BFF model: no browser-held token");
+    assert.equal(session.user.id, "pws_alice");
+    const req = h.fetch.requests.find(
+      (r) => r.method === "POST" && r.url.includes("/__zs/auth/session"),
+    )!;
     assert.equal((req.body as Record<string, string>).code, "redirect-code");
 
     // The original popup promise loses the race; close the popup to settle it.
@@ -373,7 +414,7 @@ describe("exchangeCodeForSession", () => {
 describe("getSession / getUser / isAuthenticated / hasScope", () => {
   async function signedInClient() {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     const signIn = client.signInWithOAuth();
     const state = await awaitReady(h);
@@ -389,7 +430,8 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
     const { h, client } = await signedInClient();
     const before = h.fetch.requests.length;
     const s = await client.getSession();
-    assert.equal(s?.access_token, "wrap.access.token");
+    assert.equal(s?.access_token, "", "BFF model: no browser-held token");
+    assert.equal(s?.user.id, "pws_alice");
     assert.equal(h.fetch.requests.length, before, "getSession must not hit the network");
     assert.equal(client.isAuthenticated(), true);
     assert.equal(client.hasScope("profile"), true);
@@ -442,7 +484,7 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
 describe("signOut", () => {
   test("POSTs /__zs/auth/signout with X-ZS-Auth + scope, clears cache + breadcrumb, emits SIGNED_OUT", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     h.fetch.on("/__zs/auth/signout", () => jsonResponse(204, null));
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
@@ -469,7 +511,7 @@ describe("signOut", () => {
 
   test("clears local state even when the network leg fails (idempotent intent)", async () => {
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/token", () => jsonResponse(200, tokenSuccessBody()));
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     h.fetch.on("/__zs/auth/signout", () => {
       throw new Error("network down");
     });

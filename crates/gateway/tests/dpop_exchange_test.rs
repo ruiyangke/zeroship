@@ -179,6 +179,9 @@ fn build_state_full(
         prev_signing_key: None,
         wrapper_issuer,
         wrapper_verifier,
+        // The dpop-exchange handler does not use the signed session cookie.
+        session_issuer: None::<Arc<zeroship_gateway::session_token::Issuer>>,
+        session_verifier: None::<Arc<zeroship_gateway::session_token::Verifier>>,
         anchor_enc_key: [0u8; 32],
         pairwise_salt,
     })

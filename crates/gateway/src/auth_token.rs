@@ -1,28 +1,31 @@
-//! `POST /__zs/auth/token` + `GET /__zs/auth/session` — the browser-login
-//! CORE of the `@zeroship/auth` SDK, **BFF redesign**
-//! (`2026-05-30-auth-bff-session-redesign` §2.2).
+//! `/__zs/auth/session` (POST + GET) — the ONE identity-session resource of the
+//! `@zeroship/auth` SDK, **BFF redesign slice R1b**
+//! (`2026-05-30-auth-bff-session-redesign` §2.2 + the signed-cookie addendum).
+//!
+//! **`POST /__zs/auth/token` is GONE — merged into `POST /__zs/auth/session`.**
 //!
 //! The browser receives **only an identity projection + HttpOnly cookies** —
 //! NO power/wrapper access token, NO scopes, NO JWT in any response body. The
-//! server-held refresh family (the anchor) stays as the BFF custody store; the
-//! platform is the resource server.
+//! `__Host-zs_app_session` cookie is a gateway-SIGNED, short-lived (~15 min)
+//! `zs-sess+jwt` identity assertion verified LOCALLY on every request (no
+//! per-request DB read). The server-held refresh family (the anchor) stays as
+//! the BFF custody store; the platform is the resource server.
 //!
-//! - **`POST /__zs/auth/token`** runs the PKCE code→token exchange on the
-//!   browser's behalf, then: (a) creates a `auth.gateway_sessions` row (the
-//!   store the live cookie arm reads) carrying the global user UUID, the
-//!   consent scopes, and the id-token `auth_time`/`amr`, AND keeps creating the
-//!   encrypted server-held refresh-family anchor (`auth.app_session_anchors`);
-//!   (b) sets the HttpOnly `__Host-zs_app_session` cookie (Lax, 12h) + the
+//! - **`POST /__zs/auth/session`** runs the PKCE code→token exchange on the
+//!   browser's behalf, then: (a) writes a `auth.gateway_sessions` ROW — KEPT as
+//!   the revocation/audit record + `auth_time`/`amr` source, NO LONGER read on
+//!   the per-request path — AND keeps creating the encrypted server-held
+//!   refresh-family anchor (`auth.app_session_anchors`); (b) ISSUES the signed
+//!   `__Host-zs_app_session` cookie (`zs-sess+jwt`, Lax, ~15m) + the
 //!   `__Host-zs_app_anchor` cookie (Strict, 30d, reload-recovery) + the
 //!   `zs.<host>.is.authenticated` breadcrumb; (c) returns ONLY
 //!   `{ user: { id: pws_, email: relay-alias, … }, expires_at }`. No
 //!   `access_token`, no `scope`, no `id_token`, no `token_type`.
-//! - **`GET /__zs/auth/session[?mint=1]`** returns the identity projection
-//!   `{ user, expires_at }` (relay-swapped email, `pws_` id) read from the live
-//!   `gateway_sessions` row. When the gateway session has lapsed but the anchor
-//!   is valid (reload-recovery), `?mint=1` rotates the server-held refresh
-//!   family, re-creates the `gateway_sessions` row + re-sets
-//!   `__Host-zs_app_session`, and returns the projection. **No JWT in any
+//! - **`GET /__zs/auth/session[?mint=1]`** DECODES the live signed cookie
+//!   LOCALLY (no DB) and returns `{ user, expires_at }`. When the cookie has
+//!   lapsed/`?mint=1` but the anchor is valid (reload-recovery), it rotates the
+//!   server-held refresh family, re-writes the audit row, RE-SIGNS a fresh
+//!   `__Host-zs_app_session` cookie, and returns the projection. **No JWT in any
 //!   body; the real email never appears.**
 //!
 //! ## Same-origin-only (CORS is NOT the boundary)
@@ -260,7 +263,8 @@ pub(crate) fn same_origin_guard(
     Ok(())
 }
 
-/// Form/JSON body the SDK posts to `/__zs/auth/token`.
+/// Form/JSON body the SDK posts to `POST /__zs/auth/session` (the merged
+/// code→session exchange; the old `/token` route is gone).
 #[derive(serde::Deserialize, Default)]
 struct TokenRequest {
     grant_type: Option<String>,
@@ -270,15 +274,17 @@ struct TokenRequest {
     refresh_token: Option<String>,
 }
 
-/// `POST /__zs/auth/token` — code→token exchange, then identity-only response
-/// (BFF redesign §2.2). See module docs.
+/// `POST /__zs/auth/session` — code→token exchange, then identity-only response
+/// (BFF redesign §2.2 + slice R1b). This is the POST method of the MERGED
+/// identity-session resource (the old `POST /__zs/auth/token` is gone).
 ///
 /// The browser receives ONLY `{ user, expires_at }` (relay-swapped email,
-/// `pws_` id) + two HttpOnly cookies (`__Host-zs_app_session` live credential,
-/// `__Host-zs_app_anchor` reload-recovery). No `access_token`, no `scope`, no
+/// `pws_` id) + two HttpOnly cookies: the SIGNED `__Host-zs_app_session`
+/// (`zs-sess+jwt`, the live credential, verified locally on the hot path) and
+/// `__Host-zs_app_anchor` (reload-recovery). No `access_token`, no `scope`, no
 /// `id_token`, no `token_type` — and the real email never appears.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
-pub async fn token(
+pub async fn session_post(
     req: HttpRequest,
     body: Bytes,
     state: State<Arc<GateState>>,
@@ -292,6 +298,23 @@ pub async fn token(
     // Origin (state-changing).
     if let Err(resp) = same_origin_guard(&req, &route.host, state.config.insecure_dev, true, true) {
         return resp;
+    }
+
+    // FAIL FAST on the missing session signing key. The end of this handler
+    // MUST `sign_session_cookie`, which 503s (`session_signing_unavailable`)
+    // when `state.session_issuer` is `None`. Without this early gate that 503
+    // fires only AFTER the full Hydra code exchange + gateway-session + anchor
+    // write — wasted work and a confusing late failure. `session_issuer` is
+    // `Some` exactly when the gateway has a signing key (one-to-one in
+    // `main.rs`), so checking it here is the same condition the late arm would
+    // hit, surfaced before any outbound call or DB write.
+    if state.session_issuer.is_none() {
+        tracing::error!("/session: no session signing key configured — cannot mint session cookie");
+        return error_response(
+            HttpResponse::ServiceUnavailable(),
+            "session_signing_unavailable",
+            "gateway has no session signing key",
+        );
     }
 
     let Some(db_cfg) = state.db.as_ref() else {
@@ -312,7 +335,7 @@ pub async fn token(
         return error_response(
             HttpResponse::BadRequest(),
             "unsupported_grant_type",
-            "only authorization_code is supported on /token in this slice",
+            "only authorization_code is supported on POST /__zs/auth/session",
         );
     }
     let (Some(code), Some(verifier)) = (parsed.code.as_deref(), parsed.code_verifier.as_deref())
@@ -433,20 +456,17 @@ pub async fn token(
     let scopes: Vec<String> = scope.split_whitespace().map(str::to_string).collect();
     let amr = claims.amr.clone().unwrap_or_default();
 
-    // 6. Create the gateway session (the SPA's live request credential — the
-    //    store the cookie arm already reads) AND the reload-recovery anchor,
-    //    on one pooled connection. The gateway session carries the GLOBAL UUID
+    // 6. Write the gateway_sessions ROW (the revocation/audit record + the
+    //    auth_time/amr source — BFF R1b: NO LONGER read on the per-request path;
+    //    the signed cookie is the live credential) AND the reload-recovery
+    //    anchor, on one pooled connection. The row carries the GLOBAL UUID
     //    (internal), the consent scopes, and the id-token auth_time/amr; the
     //    anchor carries the encrypted refresh family. NO connection is held
     //    across any outbound call (the Hydra exchange already completed).
     let family_id = zeroship_core::typed_id::generate("rfam");
-    // CANONICAL session/anchor key: the app UUID, NOT the subdomain slug. The
-    // live per-request dispatch arm (`router/auth.rs`) validates the cookie
-    // session with `app_id.to_string()`; keying these rows by the same UUID is
-    // what lets the /token-minted cookie authenticate the SPA's real
-    // fetch('/api/...') requests.
+    // CANONICAL session/anchor key: the app UUID, NOT the subdomain slug.
     let app_key = route.app_id.to_string();
-    let (session_id, anchor_id) = {
+    let anchor_id = {
         let pool = match crate::db::checkout(db_cfg).await {
             Ok(p) => p,
             Err(e) => return db_error(e),
@@ -456,7 +476,9 @@ pub async fn token(
             Err(e) => return db_error(e),
         };
 
-        // 6a. The gateway session — the SPA's live cookie credential.
+        // 6a. The gateway session — KEPT as the revocation/audit record (+
+        //     auth_time/amr source). NO LONGER read per request; the signed
+        //     cookie is the live credential.
         let session = match crate::sessions::create(
             &conn,
             &crate::sessions::NewSession {
@@ -514,23 +536,41 @@ pub async fn token(
                 );
             }
         };
-        (session.id, anchor.id)
+        // `session.id` (the gateway_sessions row) is KEPT as the
+        // revocation/audit record + the auth_time/amr source — it is NO LONGER
+        // read on the per-request path (the signed cookie is self-contained;
+        // revocation is the per-app family marker). `_session_id` documents that.
+        let _session_id = session.id;
+        anchor.id
         // `conn`/`pool` drop here — released before we build the response.
     };
 
-    // 7. Identity-only response: set BOTH HttpOnly cookies (live session +
-    //    reload-recovery anchor) + the breadcrumb, and return `{ user,
+    // 7. Identity-only response: set the SIGNED session cookie (the SPA's live
+    //    request credential — verified locally on the hot path, no DB) + the
+    //    reload-recovery anchor + the breadcrumb, and return `{ user,
     //    expires_at }` with the relay-swapped email and the `pws_` id. NO
     //    `access_token`, NO `scope`, NO `id_token`, NO `token_type`.
+    let session_cookie = match sign_session_cookie(
+        &state,
+        &route.client_id,
+        &pws_sub,
+        relay_email.as_deref(),
+        claims.name.as_deref(),
+        claims.picture.as_deref(),
+        claims.email_verified,
+        claims.auth_time,
+        &amr,
+        &scopes,
+    ) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     let user = user_projection(&pws_sub, relay_email.as_deref(), claims.name.as_deref(), claims.email_verified);
     let expires_at = now_secs() + crate::oidc_rp::APP_SESSION_MAX_AGE_SECS;
 
     HttpResponse::Ok()
         .header("cache-control", CACHE_NO_STORE)
-        .header(
-            "set-cookie",
-            crate::oidc_rp::set_app_session_cookie(&session_id, state.config.insecure_dev),
-        )
+        .header("set-cookie", session_cookie)
         .header(
             "set-cookie",
             anchors::set_anchor_cookie(&anchor_id, state.config.insecure_dev),
@@ -580,6 +620,65 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         return resp;
     }
 
+    let cookie_header = req
+        .headers()
+        .get(http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // 1. Fast path (no `?mint=1`): DECODE the LIVE signed session cookie LOCALLY
+    //    (signature + kid + iss + exp + app binding, no Hydra) and return the
+    //    identity projection straight from its claims. This is the steady state —
+    //    a present, non-expired signed cookie needs no anchor read and no network
+    //    round-trip for IDENTITY. It MUST stay coherent with the per-request
+    //    dispatch arm (`router/auth.rs::resolve_app_session_user_header_inner`):
+    //    that arm runs a `pws_` sanity check + the per-app family-revocation gate
+    //    before honoring the cookie, so this read does the SAME — otherwise
+    //    `/session` would keep reporting a revoked user as logged-in for up to the
+    //    cookie's ~15 min life (a stale logged-in signal). The revocation gate is
+    //    one `SELECT EXISTS` when a DB is configured (skipped in smoke mode); a
+    //    revoked family / non-`pws_` sub does NOT return the projection — it falls
+    //    through to anchor reload-recovery below, which re-checks the family via
+    //    Hydra and ends in `login_required` for a revoked family.
+    if !want_mint {
+        if let (Some(token), Some(verifier)) = (
+            crate::oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev),
+            state.session_verifier.as_ref(),
+        ) {
+            if let Ok(claims) = verifier.verify(&token, &route.client_id) {
+                // Defense in depth (same as the dispatch arm): the cookie `sub`
+                // MUST be a `pws_…` pairwise subject. A non-`pws_` cookie is a
+                // mint bug — never project it, fall through.
+                if zeroship_core::auth::is_pairwise_subject(&claims.sub)
+                    && !session_cookie_family_revoked(&state, &claims).await
+                {
+                    // The cookie already carries the relay-swapped email + pws_ id
+                    // (set at issue time). Project them verbatim — no further DB.
+                    let user = user_projection(
+                        &claims.sub,
+                        Some(&claims.email),
+                        Some(&claims.name),
+                        Some(claims.email_verified),
+                    );
+                    return identity_projection_ok(
+                        &route,
+                        state.config.insecure_dev,
+                        user,
+                        claims.exp,
+                        None,
+                    );
+                }
+                // Revoked family / non-`pws_` sub → fall through to anchor
+                // reload-recovery (which will end in login_required for a revoked
+                // family). Never return the stale logged-in projection.
+            }
+            // Cookie present but stale/invalid → fall through to anchor
+            // reload-recovery below (re-sign a fresh cookie).
+        }
+    }
+
+    // From here on (reload-recovery / `?mint=1`) we need the DB (the anchor
+    // store + the relay-alias read).
     let Some(db_cfg) = state.db.as_ref() else {
         return error_response(
             HttpResponse::ServiceUnavailable(),
@@ -588,56 +687,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         );
     };
 
-    let cookie_header = req
-        .headers()
-        .get(http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    // 1. Fast path (no `?mint=1`): the live gateway_sessions row IS the
-    //    identity. Read it and project. This is the steady state — a present,
-    //    non-expired session needs no anchor read and no Hydra round-trip.
-    if !want_mint {
-        if let Some(session_id) =
-            crate::oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)
-        {
-            let validated = {
-                let pool = match crate::db::checkout(db_cfg).await {
-                    Ok(p) => p,
-                    Err(e) => return db_error(e),
-                };
-                let conn = match pool.get().await {
-                    Ok(c) => c,
-                    Err(e) => return db_error(e),
-                };
-                match crate::sessions::validate(&conn, session_id, &route.app_id.to_string())
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "/session: gateway_sessions validate failed");
-                        None
-                    }
-                }
-            };
-            if let Some(s) = validated {
-                return match build_identity_projection(&state, &route, db_cfg, &s).await {
-                    Ok(user) => identity_projection_ok(
-                        &route,
-                        state.config.insecure_dev,
-                        user,
-                        s.abs_expires_at.timestamp(),
-                        None,
-                    ),
-                    Err(resp) => resp,
-                };
-            }
-            // Session cookie present but stale/invalid → fall through to
-            // anchor reload-recovery below.
-        }
-    }
-
-    // 2. Reload-recovery (gateway session gone/expired, or `?mint=1`): read the
+    // 2. Reload-recovery (signed cookie gone/expired, or `?mint=1`): read the
     //    anchor, rotate the server-held family, re-create the gateway session,
     //    re-set the session cookie, return the projection. Released
     //    immediately (NO conn held across the Hydra refresh).
@@ -695,9 +745,10 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             let relay_email =
                 relay_alias_for(db_cfg, &route.client_id, rotated.global_user_id).await;
 
-            // Re-create the gateway session from the rotated facts so the SPA
-            // regains a live cookie credential. Carry auth_time/amr forward.
-            let new_session_id = {
+            // Re-write the gateway_sessions ROW from the rotated facts — KEPT as
+            // the revocation/audit record (+ auth_time/amr source), NOT read on
+            // the per-request path. Carry auth_time/amr forward.
+            {
                 let pool = match crate::db::checkout(db_cfg).await {
                     Ok(p) => p,
                     Err(e) => return db_error(e),
@@ -706,23 +757,16 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     Ok(c) => c,
                     Err(e) => return db_error(e),
                 };
-                match crate::sessions::create(
+                if let Err(e) = crate::sessions::create(
                     &conn,
                     &crate::sessions::NewSession {
                         user_id: &rotated.global_user_id.to_string(),
-                        // Canonical key: the app UUID (matches the live dispatch
-                        // arm + the /token create above), NOT the subdomain slug.
                         app_id: &route.app_id.to_string(),
-                        // Real email stored on the row; relay-swapped on read.
-                        // The rotated raw access JWT does not always carry the
-                        // email — leave it `None` when absent (the session row
-                        // is identity-by-pws_; the projection reads the relay
-                        // alias regardless).
+                        // Real email stored on the audit row; never read back to
+                        // the browser. The rotated raw access JWT does not always
+                        // carry the email — leave it `None` when absent.
                         email: None,
                         name: rotated.name.as_deref(),
-                        // name/avatar are sourced from the rotated id_token in
-                        // do_refresh (BFF minor fix) so they no longer degrade
-                        // across a reload-recovery vs the original /token row.
                         avatar_url: rotated.avatar_url.as_deref(),
                         email_verified: rotated.email_verified.unwrap_or(false),
                         granted_scopes: &rotated.granted_scopes,
@@ -732,16 +776,31 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 )
                 .await
                 {
-                    Ok(s) => s.id,
-                    Err(e) => {
-                        tracing::error!(error = %e, "/session: gateway_sessions re-create failed");
-                        return error_response(
-                            HttpResponse::InternalServerError(),
-                            "internal",
-                            "session re-create failed",
-                        );
-                    }
+                    tracing::error!(error = %e, "/session: gateway_sessions audit re-write failed");
+                    return error_response(
+                        HttpResponse::InternalServerError(),
+                        "internal",
+                        "session re-write failed",
+                    );
                 }
+            }
+
+            // Re-SIGN a fresh short-lived signed cookie from the rotated facts —
+            // the SPA's live credential, verified locally on the hot path.
+            let new_session_cookie = match sign_session_cookie(
+                &state,
+                &route.client_id,
+                &pws_sub,
+                relay_email.as_deref(),
+                rotated.name.as_deref(),
+                rotated.avatar_url.as_deref(),
+                rotated.email_verified,
+                rotated.auth_time,
+                &rotated.amr,
+                &rotated.granted_scopes,
+            ) {
+                Ok(c) => c,
+                Err(resp) => return resp,
             };
 
             let user = user_projection(
@@ -756,7 +815,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 state.config.insecure_dev,
                 user,
                 expires_at,
-                Some(new_session_id),
+                Some(new_session_cookie),
             )
         }
         Err(RotationError::LoginRequired) => {
@@ -780,63 +839,22 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     }
 }
 
-/// Build the `{ user }` projection from a live gateway session row, with the
-/// MANDATORY relay-email swap (§2.3): the `gateway_sessions.email` column holds
-/// the REAL inbox (CITEXT) — it must NEVER reach the browser. The relay alias
-/// (or empty string, fail-closed) is emitted instead. The `pws_` id is derived
-/// from the session's GLOBAL `user_id`; a missing sector fails closed (503).
-#[allow(clippy::future_not_send)]
-async fn build_identity_projection(
-    state: &Arc<GateState>,
-    route: &RouteCtx,
-    db_cfg: &crate::db::DbConfig,
-    s: &crate::sessions::AppSession,
-) -> Result<serde_json::Value, HttpResponse> {
-    let Some(pws_sub) = pairwise_sub(state, route, &s.user_id) else {
-        return Err(error_response(
-            HttpResponse::ServiceUnavailable(),
-            "client_not_provisioned",
-            "app has no sector_identifier yet",
-        ));
-    };
-    let global_user_id = match Uuid::parse_str(&s.user_id) {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!(error = %e, "/session: gateway session user_id is not a UUID");
-            return Err(error_response(
-                HttpResponse::InternalServerError(),
-                "internal",
-                "invalid session user id",
-            ));
-        }
-    };
-    // Relay-swap: emit the ALIAS, never `s.email` (the real inbox). None ⇒ "".
-    let relay_email = relay_alias_for(db_cfg, &route.client_id, global_user_id).await;
-    Ok(user_projection(
-        &pws_sub,
-        relay_email.as_deref(),
-        s.name.as_deref(),
-        Some(s.email_verified),
-    ))
-}
-
 /// Emit the identity-only `{ user, expires_at }` response, refreshing the
-/// breadcrumb and (when reload-recovery re-created the session) re-setting the
-/// `__Host-zs_app_session` cookie. NO JWT in the body.
+/// breadcrumb and (when reload-recovery re-signed a fresh cookie) re-setting the
+/// `__Host-zs_app_session` cookie. NO JWT in the body — the SPA-facing body
+/// carries only `{ user, expires_at }`; the signed cookie travels in the
+/// `Set-Cookie` header (HttpOnly, never JS-readable).
 fn identity_projection_ok(
     route: &RouteCtx,
     insecure_dev: bool,
     user: serde_json::Value,
     expires_at: i64,
-    new_session_id: Option<Uuid>,
+    new_session_cookie: Option<String>,
 ) -> HttpResponse {
     let mut builder = HttpResponse::Ok();
     builder.header("cache-control", CACHE_NO_STORE);
-    if let Some(sid) = new_session_id {
-        builder.header(
-            "set-cookie",
-            crate::oidc_rp::set_app_session_cookie(&sid, insecure_dev),
-        );
+    if let Some(cookie) = new_session_cookie {
+        builder.header("set-cookie", cookie);
     }
     builder.header(
         "set-cookie",
@@ -1048,6 +1066,58 @@ async fn do_refresh(
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
+/// Whether the signed session cookie's `(app, pws_)` family was revoked after
+/// the cookie's `iat` — the SAME per-app family-marker gate the per-request
+/// dispatch cookie arm runs ([`crate::router`]'s
+/// `resolve_app_session_user_header_inner`). Keeps `GET /__zs/auth/session`'s
+/// fast path coherent with dispatch so a revoked user is not reported
+/// logged-in for the cookie's residual ~15 min life.
+///
+/// Returns `false` (NOT revoked) when no DB is configured (smoke mode — exactly
+/// like the dispatch arm, which skips the gate and authenticates a valid cookie
+/// DB-free). Returns `true` (revoked → reject) on a DB checkout/read failure
+/// too: the identity read fails CLOSED rather than emit a stale logged-in
+/// signal on a blip.
+#[allow(clippy::future_not_send)]
+async fn session_cookie_family_revoked(
+    state: &GateState,
+    claims: &crate::session_token::SessionClaims,
+) -> bool {
+    let Some(db_cfg) = state.db.as_ref() else {
+        // No DB ⇒ no revocation store to consult; honor the locally-verified
+        // cookie (matches the dispatch arm's smoke-mode behavior).
+        return false;
+    };
+    let pool = match crate::db::checkout(db_cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "/session: revocation pool checkout failed (failing closed)");
+            return true;
+        }
+    };
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "/session: revocation pool get failed (failing closed)");
+            return true;
+        }
+    };
+    match zeroship_core::wrapper_revocation::is_family_revoked_since(
+        &conn,
+        &claims.app,
+        &claims.sub,
+        claims.iat,
+    )
+    .await
+    {
+        Ok(revoked) => revoked,
+        Err(e) => {
+            tracing::warn!(error = %e, sub = %claims.sub, "/session: revocation check failed (failing closed)");
+            true
+        }
+    }
+}
+
 /// AAD binding the encrypted refresh family to its `(client_id, sub)` row
 /// context, so a ciphertext copied to another row/app cannot be decrypted.
 fn anchor_aad(client_id: &str, sub: &str) -> Vec<u8> {
@@ -1059,6 +1129,113 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
         .unwrap_or(0)
+}
+
+/// Mint the gateway-SIGNED `zs-sess+jwt` session cookie (BFF slice R1b) from the
+/// resolved identity facts, and return the `Set-Cookie` value. The cookie is
+/// self-contained: it carries the per-app `pws_` subject, the relay-alias email
+/// (or empty — fail closed), `name`/`avatar`/`email_verified`, the granted
+/// `scopes`, the route `app` binding (`client_id`), and `auth_time`/`amr`. The
+/// per-request cookie arm verifies it LOCALLY and emits `ZeroShip-User` straight
+/// from these claims — no DB.
+///
+/// Returns `Err(response)` (`503`) when the gateway has no signing key (so it
+/// cannot sign a session cookie); the SDK treats `503` as retryable.
+#[allow(clippy::too_many_arguments)]
+fn sign_session_cookie(
+    state: &GateState,
+    client_id: &str,
+    pws_sub: &str,
+    relay_email: Option<&str>,
+    name: Option<&str>,
+    avatar: Option<&str>,
+    email_verified: Option<bool>,
+    auth_time: Option<i64>,
+    amr: &[String],
+    scopes: &[String],
+) -> Result<String, HttpResponse> {
+    let Some(issuer) = state.session_issuer.as_ref() else {
+        tracing::error!("/session: no session signing key configured — cannot mint session cookie");
+        return Err(error_response(
+            HttpResponse::ServiceUnavailable(),
+            "session_signing_unavailable",
+            "gateway has no session signing key",
+        ));
+    };
+    let token = issuer
+        .issue(&crate::session_token::SessionMint {
+            app: client_id,
+            sub: pws_sub,
+            auth_time,
+            amr,
+            // Relay alias only (fail closed to empty) — NEVER the real inbox.
+            email: relay_email.unwrap_or(""),
+            email_verified: email_verified.unwrap_or(false),
+            name: name.unwrap_or(""),
+            avatar,
+            scopes,
+        })
+        .map_err(|e| {
+            tracing::error!(error = %e, "/session: session cookie mint failed");
+            error_response(
+                HttpResponse::InternalServerError(),
+                "internal",
+                "session cookie mint failed",
+            )
+        })?;
+    Ok(crate::oidc_rp::set_app_session_cookie(&token, state.config.insecure_dev))
+}
+
+/// Issue the signed `__Host-zs_app_session` cookie for the INTERACTIVE
+/// server-rendered OIDC callback (`router::dispatch::handle_auth_callback`), so
+/// BOTH the SDK popup flow and the interactive redirect flow produce the SAME
+/// signed-cookie shape and the per-request cookie arm has exactly ONE
+/// (local-verify) path (no opaque-UUID + `sessions::validate` arm to fork on).
+///
+/// Derives the per-app `pws_` from the validated id-token `sub` (the global
+/// UUID) under the route's `sector`, reads the live relay alias (fail closed to
+/// empty), and signs the `zs-sess+jwt`. Returns the `Set-Cookie` value, or
+/// `Err(msg)` when the route has no `sector` yet / no signing key (the caller
+/// renders the callback error page).
+///
+/// `pub(crate)` so the dispatch callback reuses the SAME mint path as the SDK
+/// `POST /session` — one cookie shape, one verifier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn issue_interactive_session_cookie(
+    state: &GateState,
+    db_cfg: &crate::db::DbConfig,
+    client_id: &str,
+    sector: Option<&str>,
+    global_user_id: Uuid,
+    name: Option<&str>,
+    avatar: Option<&str>,
+    email_verified: Option<bool>,
+    auth_time: Option<i64>,
+    amr: &[String],
+    scopes: &[String],
+) -> Result<String, String> {
+    let Some(sector) = sector else {
+        return Err("app has no sector_identifier yet".to_string());
+    };
+    let pws_sub = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &global_user_id.to_string(),
+        sector,
+    );
+    let relay_email = relay_alias_for(db_cfg, client_id, global_user_id).await;
+    sign_session_cookie(
+        state,
+        client_id,
+        &pws_sub,
+        relay_email.as_deref(),
+        name,
+        avatar,
+        email_verified,
+        auth_time,
+        amr,
+        scopes,
+    )
+    .map_err(|_| "session cookie mint failed".to_string())
 }
 
 /// The browser-facing identity projection (BFF redesign §2.2). Carries ONLY

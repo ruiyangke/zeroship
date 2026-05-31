@@ -5,6 +5,9 @@ import { createAuthClient } from "../src/client";
 import { AuthError, type AuthChangeEvent } from "../src/types";
 import { APP_ORIGIN, jsonResponse, makeHarness } from "./harness";
 
+// BFF slice R1b — `GET /session?mint=1` returns an identity projection ONLY
+// (`{user, expires_at}`); the re-signed `__Host-zs_app_session` cookie is the
+// credential, never a token in the body.
 function mintBody(over?: Record<string, unknown>) {
   return {
     user: {
@@ -15,9 +18,6 @@ function mintBody(over?: Record<string, unknown>) {
       avatar: null,
       scopes: ["openid", "profile", "email"],
     },
-    access_token: "minted.wrapper",
-    token_type: "Bearer",
-    expires_in: 600,
     expires_at: Math.floor(Date.now() / 1000) + 600,
     ...over,
   };
@@ -32,7 +32,8 @@ describe("refreshSession / silent renewal (GET /session?mint=1 under navigator.l
     client.onAuthStateChange((e) => events.push(e));
 
     const session = await client.refreshSession();
-    assert.equal(session.access_token, "minted.wrapper");
+    assert.equal(session.access_token, "", "BFF model: no browser-held token");
+    assert.equal(session.user.id, "pws_alice");
     // Slice 3: the granted scopes flow through the /session?mint=1 response
     // onto Session.scopes (the gateway includes them in the user projection).
     assert.deepEqual(session.scopes, ["openid", "profile", "email"]);
@@ -56,28 +57,36 @@ describe("refreshSession / silent renewal (GET /session?mint=1 under navigator.l
       client.refreshSession(),
       client.refreshSession(),
     ]);
-    assert.equal(a.access_token, "minted.wrapper");
-    assert.equal(b.access_token, "minted.wrapper");
-    assert.equal(c.access_token, "minted.wrapper");
+    assert.equal(a.access_token, "");
+    assert.equal(b.access_token, "");
+    assert.equal(c.access_token, "");
     // The in-flight single-flight coalesces concurrent callers → one mint.
     assert.equal(mintCalls, 1, "concurrent refreshes must coalesce to a single mint");
     // The lock was actually acquired (serialization observable).
     assert.ok(h.locks.order.includes(`acquire:zs.refresh.${APP_ORIGIN}`));
   });
 
-  test("getAccessToken returns the cached token within skew, mints when stale", async () => {
+  test("getAccessToken mints when stale, then serves from cache within skew", async () => {
     const h = makeHarness();
-    h.fetch.on((u) => u.includes("mint=1"), () => jsonResponse(200, mintBody()));
+    let mintCalls = 0;
+    h.fetch.on((u) => u.includes("mint=1"), () => {
+      mintCalls++;
+      return jsonResponse(200, mintBody());
+    });
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
-    // No cached session yet → must mint.
+    // BFF model: there is no browser-held token, so getAccessToken resolves the
+    // inert empty sentinel. What matters is the MINT behavior: a first stale
+    // call mints (cookie re-signed server-side), a second within skew does not.
     const t1 = await client.getAccessToken();
-    assert.equal(t1, "minted.wrapper");
+    assert.equal(t1, "", "BFF model: no browser-held token");
+    assert.equal(mintCalls, 1, "no cached session ⇒ first call mints");
     const after = h.fetch.requests.length;
-    // Fresh token now cached well beyond skew → no second mint.
+    // Fresh session now cached well beyond skew → no second mint.
     const t2 = await client.getAccessToken();
-    assert.equal(t2, "minted.wrapper");
-    assert.equal(h.fetch.requests.length, after, "cached token within skew skips the network");
+    assert.equal(t2, "");
+    assert.equal(mintCalls, 1, "cached session within skew skips the mint");
+    assert.equal(h.fetch.requests.length, after, "cached session within skew skips the network");
   });
 
   test("login_required during refresh clears the breadcrumb and signs out", async () => {
@@ -117,8 +126,8 @@ describe("refreshSession / silent renewal (GET /session?mint=1 under navigator.l
     });
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     const [a, b] = await Promise.all([client.refreshSession(), client.refreshSession()]);
-    assert.equal(a.access_token, "minted.wrapper");
-    assert.equal(b.access_token, "minted.wrapper");
+    assert.equal(a.access_token, "");
+    assert.equal(b.access_token, "");
     assert.equal(mintCalls, 1, "coalesced even without navigator.locks");
   });
 });
@@ -133,7 +142,8 @@ describe("checkSession — breadcrumb-gated rehydration (gateway §4.3)", () => 
     client.onAuthStateChange((e) => events.push(e));
 
     const session = await client.checkSession();
-    assert.equal(session?.access_token, "minted.wrapper");
+    assert.equal(session?.access_token, "", "BFF model: no browser-held token");
+    assert.equal(session?.user.id, "pws_alice");
     assert.deepEqual(events, ["SIGNED_IN"]);
     assert.ok(
       h.fetch.requests.some((r) => r.url.includes("mint=1")),
@@ -155,7 +165,8 @@ describe("checkSession — breadcrumb-gated rehydration (gateway §4.3)", () => 
     client.onAuthStateChange((e) => events.push(e));
 
     const s = await client.checkSession();
-    assert.equal(s?.access_token, "minted.wrapper");
+    assert.equal(s?.access_token, "", "BFF model: no browser-held token");
+    assert.equal(s?.user.id, "pws_alice");
     assert.equal(
       h.fetch.requests.length,
       afterRefresh,
@@ -208,7 +219,8 @@ describe("checkSession — breadcrumb-gated rehydration (gateway §4.3)", () => 
     client.onAuthStateChange((e) => events.push(e));
 
     const session = await client.checkSession();
-    assert.equal(session?.access_token, "minted.wrapper");
+    assert.equal(session?.access_token, "", "BFF model: no browser-held token");
+    assert.equal(session?.user.id, "pws_alice");
     assert.equal(call, 2, "503 then 200 — retried once");
     assert.deepEqual(events, ["RECOVERING", "SIGNED_IN"]);
     assert.ok(events.indexOf("SIGNED_OUT") === -1, "no SIGNED_OUT on a 503 recovery");

@@ -4,11 +4,12 @@
  * (`./react`). This module is pure type/`AuthError` surface with no runtime
  * dependency on `zeroship` or the DOM, so it loads in any environment.
  *
- * The shapes mirror the gateway contract exactly:
- *   - `POST /__zs/auth/token`    → `{ access_token, token_type, expires_in, scope, user }`
- *   - `GET  /__zs/auth/session`  → `{ user }` or (with `?mint=1`)
- *                                   `{ user, access_token, token_type, expires_in, expires_at }`
- *   - error envelope             → `{ error, error_description? }`
+ * The shapes mirror the gateway contract exactly (BFF slice R1b — the browser
+ * receives an identity projection + an HttpOnly signed session cookie, never a
+ * token in the body):
+ *   - `POST /__zs/auth/session`         → `{ user, expires_at }`
+ *   - `GET  /__zs/auth/session[?mint=1]` → `{ user, expires_at }`
+ *   - error envelope                    → `{ error, error_description? }`
  * (see `crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`).
  */
 
@@ -32,12 +33,19 @@ export interface User {
 }
 
 /**
- * A live session: the gateway per-app WRAPPER access token plus the
- * server-validated user. The wrapper `sub` is the `pws_`, never the global
- * UUID, so decoding `access_token` cannot correlate the user across apps.
+ * A live session: the server-validated user plus its expiry. Under the BFF
+ * model (slice R1b) the gateway holds the power token server-side and hands the
+ * browser an HttpOnly, signed `__Host-zs_app_session` cookie — the live request
+ * credential, sent automatically on every same-origin request. There is NO
+ * client-held bearer token, so {@link Session.access_token} is an inert empty
+ * string (kept for cache/shape stability); the cookie is the credential.
  */
 export interface Session {
-  /** Gateway wrapper access token. Sent as `Authorization: Bearer <token>`. */
+  /**
+   * BFF model: empty. The credential is the HttpOnly `__Host-zs_app_session`
+   * cookie that rides every same-origin request automatically — the browser
+   * never holds a bearer token. Present as `""` for cache/shape stability.
+   */
   access_token: string;
   /**
    * Present only with `useRefreshTokens` and when NOT held in the Web Worker.

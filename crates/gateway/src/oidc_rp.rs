@@ -1000,8 +1000,13 @@ pub const APP_SESSION_COOKIE_PROD: &str = "__Host-zs_app_session";
 /// Dev app session cookie name (no `__Host-` prefix).
 pub const APP_SESSION_COOKIE_DEV: &str = "zs_app_session";
 
-/// 12-hour absolute lifetime for the app session cookie.
-pub const APP_SESSION_MAX_AGE_SECS: i64 = 12 * 3600;
+/// Cookie `Max-Age` for the SIGNED STATELESS session cookie (BFF redesign slice
+/// R1b). The cookie is a gateway-signed `zs-sess+jwt` identity assertion with a
+/// short ~15 min lifetime ([`crate::session_token::SESSION_TOKEN_TTL_SECS`]) —
+/// NOT a 12h opaque session id. The browser holds it only as long as its `exp`;
+/// the durable credential is the 30-day server-held anchor, which silently
+/// re-signs a fresh cookie via `GET /__zs/auth/session` when this one lapses.
+pub const APP_SESSION_MAX_AGE_SECS: i64 = crate::session_token::SESSION_TOKEN_TTL_SECS;
 
 /// Resolve the app session cookie name for the current environment.
 #[must_use]
@@ -1011,14 +1016,17 @@ pub fn app_session_cookie_name(insecure_dev: bool) -> &'static str {
 
 /// Build the `Set-Cookie` header value for the per-app session.
 ///
-/// `insecure_dev = true` drops the `Secure` flag AND the `__Host-`
-/// prefix (RFC 6265bis §4.1.3.2 — `__Host-` requires Secure).
+/// The value is the gateway-SIGNED `zs-sess+jwt` token (BFF slice R1b), NOT an
+/// opaque session id. `insecure_dev = true` drops the `Secure` flag AND the
+/// `__Host-` prefix (RFC 6265bis §4.1.3.2 — `__Host-` requires Secure). The
+/// cookie stays HttpOnly + SameSite=Lax (XSS cannot read it; the signed token
+/// is an identity assertion, never a power token).
 #[must_use]
-pub fn set_app_session_cookie(session_id: &uuid::Uuid, insecure_dev: bool) -> String {
+pub fn set_app_session_cookie(token: &str, insecure_dev: bool) -> String {
     let name = app_session_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
     format!(
-        "{name}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={APP_SESSION_MAX_AGE_SECS}"
+        "{name}={token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={APP_SESSION_MAX_AGE_SECS}"
     )
 }
 
@@ -1030,15 +1038,21 @@ pub fn clear_app_session_cookie(insecure_dev: bool) -> String {
     format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
 }
 
-/// Parse the app session UUID from a `Cookie` header value.
+/// Parse the raw signed session token out of a `Cookie` header value (BFF slice
+/// R1b — the cookie now carries a `zs-sess+jwt`, not a UUID). Returns the token
+/// string for the cookie arm to verify LOCALLY via
+/// [`crate::session_token::Verifier`] — no DB round-trip.
 #[must_use]
-pub fn parse_app_session_cookie(cookie_header: &str, insecure_dev: bool) -> Option<uuid::Uuid> {
+pub fn parse_app_session_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
     let name = app_session_cookie_name(insecure_dev);
     let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&prefix) {
-            return uuid::Uuid::parse_str(rest).ok();
+            if rest.is_empty() {
+                return None;
+            }
+            return Some(rest.to_string());
         }
     }
     None
@@ -1402,15 +1416,17 @@ mod tests {
 
     #[test]
     fn app_session_set_cookie_has_secure_in_prod() {
-        let id = uuid::Uuid::new_v4();
-        let c = set_app_session_cookie(&id, false);
+        // The cookie now carries a signed zs-sess+jwt token, not a UUID.
+        let token = "eyJ.signed.token";
+        let c = set_app_session_cookie(token, false);
         assert!(c.starts_with("__Host-zs_app_session="));
-        assert!(c.contains(&id.to_string()));
+        assert!(c.contains(token));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
         assert!(c.contains("SameSite=Lax"));
         assert!(c.contains("Secure"));
-        assert!(c.contains("Max-Age=43200")); // 12h
+        // Short-lived signed cookie (~15 min), NOT the old 12h opaque id.
+        assert!(c.contains("Max-Age=900"));
     }
 
     #[test]
@@ -1419,8 +1435,7 @@ mod tests {
         // runs over plain HTTP without Secure, so the prefix MUST be
         // dropped too — otherwise compliant clients silently reject
         // the cookie.
-        let id = uuid::Uuid::new_v4();
-        let c = set_app_session_cookie(&id, true);
+        let c = set_app_session_cookie("eyJ.signed.token", true);
         assert!(!c.starts_with("__Host-"), "dev cookie must NOT use __Host- prefix: {c}");
         assert!(c.starts_with("zs_app_session="), "dev cookie name: {c}");
         assert!(!c.contains("Secure"), "dev cookie must NOT have Secure: {c}");
@@ -1440,15 +1455,18 @@ mod tests {
 
     #[test]
     fn app_session_parse_cookie_roundtrips() {
-        let id = uuid::Uuid::new_v4();
-        let header = format!("foo=bar; __Host-zs_app_session={id}; baz=qux");
-        assert_eq!(parse_app_session_cookie(&header, false), Some(id));
+        // The value is now a signed token string (opaque to the parser).
+        let token = "eyJhbGc.eyJzdWI.sig";
+        let header = format!("foo=bar; __Host-zs_app_session={token}; baz=qux");
+        assert_eq!(parse_app_session_cookie(&header, false).as_deref(), Some(token));
         assert_eq!(parse_app_session_cookie("nothing-here", false), None);
-        assert_eq!(parse_app_session_cookie("__Host-zs_app_session=not-a-uuid", false), None);
+        // Empty value ⇒ None (no token to verify).
+        assert_eq!(parse_app_session_cookie("__Host-zs_app_session=", false), None);
 
         // Dev mode reads the bare-name cookie.
-        let dev_header = format!("zs_app_session={id}");
-        assert_eq!(parse_app_session_cookie(&dev_header, true), Some(id));
+        let dev_header = format!("zs_app_session={token}");
+        assert_eq!(parse_app_session_cookie(&dev_header, true).as_deref(), Some(token));
+        // Prod-prefixed cookie is ignored in dev mode (looks for bare name).
         assert_eq!(parse_app_session_cookie(&header, true), None);
     }
 

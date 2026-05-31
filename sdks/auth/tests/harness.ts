@@ -218,10 +218,19 @@ export interface RecordedRequest {
 /** Programmable fetch: a queue of responders matched by `url` substring. */
 export class FakeFetch {
   readonly requests: RecordedRequest[] = [];
-  private routes: Array<{ match: (url: string) => boolean; handler: (req: RecordedRequest) => Response | Promise<Response> }> = [];
+  private routes: Array<{
+    match: (url: string, method: string) => boolean;
+    handler: (req: RecordedRequest) => Response | Promise<Response>;
+  }> = [];
 
+  /**
+   * Register a responder. `match` is either a URL substring or a predicate
+   * `(url, method) => boolean`. The `method` arg lets a test disambiguate the
+   * merged `/__zs/auth/session` resource (POST exchange vs GET probe) on the
+   * SAME path — first-match-wins by registration order.
+   */
   on(
-    match: string | ((url: string) => boolean),
+    match: string | ((url: string, method: string) => boolean),
     handler: (req: RecordedRequest) => Response | Promise<Response>,
   ): this {
     const m = typeof match === "string" ? (u: string) => u.includes(match) : match;
@@ -231,6 +240,7 @@ export class FakeFetch {
 
   readonly fetch: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
     const headers: Record<string, string> = {};
     const h = init?.headers as Record<string, string> | undefined;
     if (h) for (const [k, v] of Object.entries(h)) headers[k.toLowerCase()] = v as string;
@@ -242,13 +252,21 @@ export class FakeFetch {
         /* keep raw */
       }
     }
-    const rec: RecordedRequest = { url, method: init?.method ?? "GET", headers, body };
+    const rec: RecordedRequest = { url, method, headers, body };
     this.requests.push(rec);
-    const route = this.routes.find((r) => r.match(url));
+    const route = this.routes.find((r) => r.match(url, method));
     if (!route) throw new Error(`FakeFetch: no route for ${rec.method} ${url}`);
     return route.handler(rec);
   };
 }
+
+/**
+ * Matcher for the BFF code→session exchange: `POST /__zs/auth/session` (NOT the
+ * GET probe / `?mint=1`). Use this where a test registers both the exchange and
+ * a GET `/session` responder on the merged resource.
+ */
+export const SESSION_EXCHANGE = (u: string, method: string): boolean =>
+  method === "POST" && u.includes("/__zs/auth/session");
 
 /** Build a JSON `Response`. */
 export function jsonResponse(status: number, body: unknown, headers?: Record<string, string>): Response {
@@ -319,13 +337,14 @@ export function makeHarness(opts?: { hasWorker?: boolean; withLocks?: boolean })
   };
 }
 
-/** Standard `/token` success body the gateway returns. */
+/**
+ * Standard `POST /__zs/auth/session` success body the gateway returns (BFF slice
+ * R1b — identity projection ONLY; NO `access_token`/`token_type`/`scope` in the
+ * body, the credential is the HttpOnly signed cookie). The `scopes` ride inside
+ * the `user` projection.
+ */
 export function tokenSuccessBody(over?: Partial<Record<string, unknown>>) {
   return {
-    access_token: "wrap.access.token",
-    token_type: "Bearer",
-    expires_in: 600,
-    scope: "openid profile email",
     user: {
       id: "pws_alice",
       email: "alice@relay.zeroship.ai",
@@ -334,6 +353,7 @@ export function tokenSuccessBody(over?: Partial<Record<string, unknown>>) {
       avatar: null,
       scopes: ["openid", "profile", "email"],
     },
+    expires_at: Math.floor(Date.now() / 1000) + 600,
     ...over,
   };
 }

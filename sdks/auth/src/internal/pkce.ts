@@ -3,7 +3,7 @@
  *
  * The browser holds the verifier; only the S256 challenge is sent to the
  * gateway's `GET /__zs/auth/authorize`. The verifier travels to
- * `POST /__zs/auth/token` (same-origin proxy) at exchange time and never
+ * `POST /__zs/auth/session` (same-origin proxy) at exchange time and never
  * leaves first-party storage otherwise (gateway §1.2).
  */
 

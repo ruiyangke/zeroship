@@ -513,7 +513,6 @@ async fn execute_resource_tree(
             &req,
             &state,
             policy,
-            app_id,
             &request_id,
             compiled_route.entry.oauth_client_id.as_deref(),
             compiled_route.entry.sector_identifier.as_deref(),
@@ -1295,13 +1294,26 @@ async fn handle_auth_callback(
             "host header missing or unparseable",
         );
     };
-    let Some((app_uuid, _route)) = state.routes.lookup_by_name(&app_name) else {
+    let Some((app_uuid, route)) = state.routes.lookup_by_name(&app_name) else {
         return render_callback_error(
             state.config.insecure_dev,
             "app not found for this host",
         );
     };
     let app_id = app_uuid.to_string();
+    // The interactive flow now issues the SAME signed `zs-sess+jwt` cookie the
+    // SDK popup flow does (BFF slice R1b) — so the cookie arm has ONE
+    // local-verify path. We need the route's per-app `oauth_client_id` (the
+    // signed cookie's `app` binding) + `sector_identifier` (the `pws_`
+    // derivation). An app with no OAuth client provisioned can't have a signed
+    // cookie minted, so fail the callback closed.
+    let Some(client_id) = route.entry.oauth_client_id.clone() else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "app has no oauth_client_id yet",
+        );
+    };
+    let sector_identifier = route.entry.sector_identifier.clone();
 
     // 1. Parse query (code + state). Hydra may also send `error=...`
     //    for user-denied consent; surface it directly.
@@ -1400,18 +1412,44 @@ async fn handle_auth_callback(
         }
     };
     // Release the pooled connection before building the response — no
-    // further DB work happens on this path.
+    // further DB work happens on this path. `session.id` is the audit row id;
+    // it is no longer used as the cookie value (BFF R1b: the cookie is signed).
+    let _ = session.id;
     drop(conn);
 
-    // 5. 302 back to the original path, set app-session cookie, clear
+    // 5. Mint the SIGNED `zs-sess+jwt` session cookie from the validated claims
+    //    (the SAME mint path the SDK popup flow uses — one cookie shape, one
+    //    verifier). `claims.sub` is the global UUID; the helper derives the
+    //    per-app `pws_` + relay alias before signing.
+    let Ok(global_user_id) = uuid::Uuid::parse_str(&claims.sub) else {
+        return render_callback_error(state.config.insecure_dev, "id_token sub is not a global user id");
+    };
+    let amr = claims.amr.clone().unwrap_or_default();
+    let session_cookie = match crate::auth_token::issue_interactive_session_cookie(
+        &state,
+        db_cfg,
+        &client_id,
+        sector_identifier.as_deref(),
+        global_user_id,
+        claims.name.as_deref(),
+        claims.picture.as_deref(),
+        claims.email_verified,
+        claims.auth_time,
+        &amr,
+        &granted_scopes,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(msg) => return render_callback_error(state.config.insecure_dev, &msg),
+    };
+
+    // 6. 302 back to the original path, set the signed session cookie, clear
     //    the stash cookie. Two `Set-Cookie` headers on one response is
     //    valid per RFC 6265 §3 (and is how hydra emits its own cookies).
     let mut builder = HttpResponse::Found();
     builder.header("location", sanitize_oidc_original_path(&original_path));
-    builder.header(
-        "set-cookie",
-        oidc_rp::set_app_session_cookie(&session.id, state.config.insecure_dev),
-    );
+    builder.header("set-cookie", session_cookie);
     builder.header(
         "set-cookie",
         oidc_rp::clear_stash_cookie(state.config.insecure_dev),
@@ -1658,6 +1696,8 @@ mod tests {
             prev_signing_key: None,
             wrapper_issuer: None,
             wrapper_verifier: None,
+            session_issuer: None,
+            session_verifier: None,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
         })

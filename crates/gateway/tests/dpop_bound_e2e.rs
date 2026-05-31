@@ -74,7 +74,7 @@ use zeroship_gateway::{
     dpop_exchange, enforce, idempotency,
     oidc_rp::{encode_user_header, OidcRp, WorkerUser},
     proxy::HashRing,
-    signing,
+    session_token, signing,
     sync::RouteCache,
     wrapper_token, GateConfig, GateState,
 };
@@ -227,6 +227,10 @@ fn build_state(
     let issuer = wrapper_token::Issuer::new(&signing, GATEWAY_PUBLIC_URL.into()).expect("issuer");
     let verifier =
         wrapper_token::Verifier::new(&signing.verifying_key(), GATEWAY_PUBLIC_URL.into());
+    let session_issuer =
+        session_token::Issuer::new(&signing, GATEWAY_PUBLIC_URL.into()).expect("session issuer");
+    let session_verifier =
+        session_token::Verifier::new(&signing.verifying_key(), GATEWAY_PUBLIC_URL.into());
 
     let state = Arc::new(GateState {
         config: GateConfig {
@@ -272,6 +276,8 @@ fn build_state(
         prev_signing_key: None,
         wrapper_issuer: Some(Arc::new(issuer)),
         wrapper_verifier: Some(Arc::new(verifier)),
+        session_issuer: Some(Arc::new(session_issuer)),
+        session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
     });

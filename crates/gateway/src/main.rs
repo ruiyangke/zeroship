@@ -15,7 +15,7 @@ use zeroship_core::config::{
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
     auth_token, backchannel_logout, blob_cache, browser_auth, dpop_exchange, enforce, idempotency,
-    oidc_rp, proxy, router, signing, sync, wrapper_token, GateConfig, GateState,
+    oidc_rp, proxy, router, session_token, signing, sync, wrapper_token, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -495,6 +495,32 @@ fn main() -> std::io::Result<()> {
         Arc::new(verifier)
     });
 
+    // BFF redesign slice R1b — the SIGNED STATELESS session cookie. Built from
+    // the SAME ed25519 signing key (+ previous key for the rotation overlap) as
+    // the wrapper issuer/verifier, but stamping the distinct `zs-sess+jwt` typ.
+    // Both `Some`, or both `None` (one-to-one with `signing_key`): with no key
+    // the gateway cannot sign/verify the session cookie, so the cookie arm fails
+    // closed. The Issuer always signs with the CURRENT key; the Verifier folds
+    // in the previous key during an overlap so a cookie minted just before a
+    // roll still verifies for its ~15 min life.
+    let session_issuer: Option<Arc<session_token::Issuer>> = signing_key.as_ref().map(|sk| {
+        let issuer = session_token::Issuer::new(sk.as_ref(), public_url.clone())
+            .expect("session_token::Issuer construction");
+        Arc::new(issuer)
+    });
+    let session_verifier: Option<Arc<session_token::Verifier>> = signing_key.as_ref().map(|sk| {
+        let current = sk.verifying_key();
+        let verifier = match prev_signing_key.as_ref() {
+            Some(prev) => session_token::Verifier::with_previous(
+                &current,
+                &prev.verifying_key(),
+                public_url.clone(),
+            ),
+            None => session_token::Verifier::new(&current, public_url.clone()),
+        };
+        Arc::new(verifier)
+    });
+
     if cli.check_config {
         let log_format = boot
             .log_format
@@ -712,6 +738,8 @@ fn main() -> std::io::Result<()> {
         prev_signing_key,
         wrapper_issuer,
         wrapper_verifier,
+        session_issuer,
+        session_verifier,
         anchor_enc_key,
         pairwise_salt,
     });
@@ -751,18 +779,19 @@ fn main() -> std::io::Result<()> {
                 web::resource("/__zs/auth/dpop-exchange")
                     .route(web::post().to(dpop_exchange::handle)),
             )
-            // auth-sdk Slice 1b-anchors — the browser-token CORE. Same
-            // mounting discipline as dpop-exchange: registered BEFORE the
-            // subdomain catch-all so the path lands on the dedicated
-            // handler. `/token` runs the PKCE code→token exchange + sets the
-            // anchor; `/session?mint=1` is reload-recovery (mint via the
-            // per-node single-flight). Both same-origin-only (no CORS).
-            .service(
-                web::resource("/__zs/auth/token")
-                    .route(web::post().to(auth_token::token)),
-            )
+            // auth-sdk BFF redesign slice R1b — the ONE identity-session
+            // resource. `/token` is GONE (merged here); both methods live on
+            // `/__zs/auth/session`:
+            //   - POST = code→token exchange + create anchor + ISSUE the signed
+            //     session cookie + return `{ user, expires_at }`.
+            //   - GET[?mint=1] = decode the live signed cookie, or (expired /
+            //     `mint=1`) re-sign a fresh cookie from the server-held anchor.
+            // Same mounting discipline as dpop-exchange (registered BEFORE the
+            // subdomain catch-all). Same-origin-only (no CORS); `?mint=1` + POST
+            // additionally require `X-ZS-Auth`.
             .service(
                 web::resource("/__zs/auth/session")
+                    .route(web::post().to(auth_token::session_post))
                     .route(web::get().to(auth_token::session)),
             )
             // auth-sdk Slice 1b-browser — the browser-facing auth HTTP
