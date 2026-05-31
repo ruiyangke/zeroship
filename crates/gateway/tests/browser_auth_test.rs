@@ -31,6 +31,10 @@ use zeroship_gateway::{
 
 const APP_HOST: &str = "myapp.zeroship.ai";
 const APP_NAME: &str = "myapp";
+// The app's stable UUID — the CANONICAL key for gateway_sessions/anchors (NOT
+// the subdomain slug). Anchors/sessions are keyed by this, matching /token,
+// /session, /signout, and the live dispatch arm (RouteCtx.app_id).
+const APP_UUID: &str = "0192b3c4-d5e6-7f80-9a1b-2c3d4e5f6071";
 const CLIENT_ID: &str = "oac_myapp";
 const GATEWAY_ISS: &str = "https://api.zeroship.ai";
 const HYDRA_ISS: &str = "https://auth.zeroship.ai/";
@@ -178,7 +182,7 @@ fn build_route_map(provisioned: bool) -> zeroship_core::types::RouteMap {
     use zeroship_core::types::RouteEntry;
     let mut m = std::collections::HashMap::new();
     m.insert(
-        Uuid::new_v4(),
+        Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
         RouteEntry {
             name: APP_NAME.into(),
             plan_id: "free".into(),
@@ -531,7 +535,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
         let a = anchors::create(
             &conn,
             &anchors::NewAnchor {
-                app_id: APP_NAME,
+                app_id: APP_UUID,
                 client_id: CLIENT_ID,
                 global_user_id,
                 refresh_token_enc: &refresh_enc,
