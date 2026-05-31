@@ -54,7 +54,7 @@ export const Stacked: Story = {
           description="This information is shown on your public profile."
           footer={
             <>
-              <Button variant="ghost">Cancel</Button>
+              <Button variant="plain">Cancel</Button>
               <Button data-testid="fs-save" onClick={onSave}>
                 Save
               </Button>
@@ -128,7 +128,7 @@ export const Aside: Story = {
           description="Choose how and when we contact you."
           footer={
             <>
-              <Button variant="ghost">Discard</Button>
+              <Button variant="plain">Discard</Button>
               <Button data-testid="fs-aside-save" onClick={onSave}>
                 Save changes
               </Button>
@@ -206,7 +206,7 @@ export const Compound: Story = {
             </Field>
           </FormSection.Body>
           <FormSection.Footer align="between">
-            <Button variant="ghost" data-testid="fs-compound-reset">
+            <Button variant="plain" data-testid="fs-compound-reset">
               Reset
             </Button>
             <Button data-testid="fs-compound-save" onClick={onSave}>
@@ -234,7 +234,86 @@ export const Compound: Story = {
   },
 };
 
-/* ─── 4. NoFooter ──────────────────────────────────────────────────────
+/* ─── 4. CompoundPartsInFragment (regression) ─────────────────────────
+ * Compound parts wrapped in a React Fragment (`<>…</>`) as children must
+ * still be detected as compound, so the implicit Body wrapper is NOT
+ * applied. Pre-fix the displayName scan used
+ * `Array.isArray(children) ? children : [children]`, which does not
+ * flatten a Fragment — so `usingCompound` was false and the whole
+ * Fragment got wrapped in an implicit <FormSectionBody>, nesting the
+ * Header inside the body region and breaking the grid-area layout. */
+export const CompoundPartsInFragment: Story = {
+  name: "Compound parts inside a Fragment (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Compound parts wrapped in a React Fragment as `children`. The " +
+          "Fragment is flattened (via `React.Children.toArray`) so the " +
+          "Header/Body/Footer are detected as the compound surface: the " +
+          "Header renders in the header region and is NOT nested inside the " +
+          "implicit body slot.",
+      },
+    },
+  },
+  render: () => (
+    <Shell>
+      <FormSection data-testid="fs-fragment">
+        <>
+          <FormSection.Header>
+            {/* Releveled to <h2> (like the Security story) so this isolated
+                story is heading-order-clean; the Fragment-flattening behavior
+                under test is unaffected by the heading level. */}
+            <FormSection.Title asChild>
+              <h2>Billing</h2>
+            </FormSection.Title>
+            <FormSection.Description>
+              Manage your plan and payment method.
+            </FormSection.Description>
+          </FormSection.Header>
+          <FormSection.Body>
+            <Field>
+              <Field.Label>Card number</Field.Label>
+              <Input defaultValue="•••• •••• •••• 4242" readOnly />
+            </Field>
+          </FormSection.Body>
+          <FormSection.Footer>
+            <Button>Update plan</Button>
+          </FormSection.Footer>
+        </>
+      </FormSection>
+    </Shell>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    const region = canvas.getByRole("region", { name: "Billing" });
+
+    // The Header region exists and is NOT a descendant of the body slot
+    // (pre-fix the Fragment was double-wrapped in the implicit body).
+    const header = region.querySelector<HTMLElement>(
+      '[data-slot="form-section-header"]',
+    );
+    const body = region.querySelector<HTMLElement>(
+      '[data-slot="form-section-body"]',
+    );
+    await expect(header).not.toBeNull();
+    await expect(body).not.toBeNull();
+    await expect(body!.contains(header)).toBe(false);
+
+    // Exactly one body slot (no implicit Body wrapping the explicit one).
+    await expect(
+      region.querySelectorAll('[data-slot="form-section-body"]'),
+    ).toHaveLength(1);
+
+    // The heading still resolves the labelledby relationship.
+    const labelledby = region.getAttribute("aria-labelledby");
+    const heading = canvas.getByRole("heading", { name: "Billing" });
+    await expect(heading.id).toBe(labelledby);
+  },
+};
+
+/* ─── 5. NoFooter ──────────────────────────────────────────────────────
  * A footerless section — just header + body. */
 export const NoFooter: Story = {
   name: "No footer (header + body only)",

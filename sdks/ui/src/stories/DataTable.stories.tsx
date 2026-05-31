@@ -929,3 +929,105 @@ export const GlobalSearchNonString: Story = {
     await waitFor(() => expect(rowCount()).toBe(1));
   },
 };
+
+/* ─── 16. FractionalPageSize (🟡 pageSize NaN/fractional guard) ─────────
+ * Regression for the `safePageSize` finite-positive-integer guard. A
+ * loose caller passes a FRACTIONAL `pageSize` (12.5). Pre-fix
+ * `Math.max(1, pageSize)` let 12.5 through, and a NaN pageSize would make
+ * pageCount === Math.ceil(total / NaN) === NaN and poison the body slice
+ * (`.slice(NaN, NaN)` → empty / wrong render). Post-fix pageSize floors to
+ * a finite integer (12), so the page renders exactly 12 rows over 25 (page
+ * count = ceil(25/12) = 3) and the math/slice stay sane. */
+export const FractionalPageSize: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: a fractional `pageSize` (12.5) is coerced to a " +
+          "finite positive integer (floor → 12) before it feeds the page " +
+          "math or the body slice, mirroring <Pagination>'s `intOr` guard. " +
+          "Page 1 of 25 rows renders exactly 12 rows and the footer shows 3 " +
+          "pages. Pre-fix a fractional/NaN pageSize poisoned `pageCount` " +
+          "(ceil(total/NaN)=NaN) and the slice, rendering the wrong row " +
+          "count or an empty body.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <DataTable<Person>
+        data-testid="dt-fractional-pagesize"
+        caption="25 members — fractional pageSize (12.5)"
+        columns={COLUMNS}
+        data={MANY}
+        rowKey={(p) => p.id}
+        // Deliberately bad: a fractional page size from a loose caller.
+        pageSize={12.5}
+        onPageSizeChange={fn()}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const rowCount = () =>
+      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+
+    // 12.5 floors to 12 → page 1 shows exactly 12 rows (NOT 13, NOT NaN/0).
+    expect(rowCount()).toBe(12);
+
+    // pageCount = ceil(25 / 12) = 3 → a "Go to page 3" button exists, and
+    // there is NO page 4 (a NaN pageCount pre-fix would have broken this).
+    const pagination = canvas.getByTestId("data-table-pagination");
+    expect(
+      within(pagination).getByRole("button", { name: /go to page 3/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(pagination).queryByRole("button", { name: /go to page 4/i }),
+    ).toBeNull();
+  },
+};
+
+/* ─── 17. ManualFilteringWithoutPagination (🟠 dev-warn) ────────────────
+ * Regression for the dev-only warning when `manualFiltering` is set
+ * WITHOUT `manualPagination`. In that combination TanStack does not filter
+ * `data` locally, so the footer's page count (from `total`) and the body
+ * (the unfiltered local rows) disagree. The block emits a dev-only
+ * `console.warn` to steer the caller to couple the two flags — that warn is
+ * compiled out of the production Storybook build, so it cannot be asserted
+ * via the test-runner gate; this story is a smoke guard that the unsupported
+ * combo still renders without crashing and stays axe-clean. */
+export const ManualFilteringWithoutPagination: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`manualFiltering` without `manualPagination` is an unsupported " +
+          "combination (server-filtered count vs. unfiltered local body). " +
+          "The block emits a dev-only `console.warn` (not observable in the " +
+          "prod build) telling the caller to couple the flags. The table " +
+          "still renders.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "48rem" }}>
+      <DataTable<Person>
+        data-testid="dt-manualfilter-nopag"
+        caption="manualFiltering without manualPagination"
+        columns={COLUMNS}
+        data={PEOPLE}
+        rowKey={(p) => p.id}
+        manualFiltering
+        // manualPagination intentionally omitted → the unsupported combo.
+        total={42}
+        onColumnFiltersChange={fn()}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // The table still renders the unsupported combo (the warn is advisory,
+    // not fatal). Smoke + axe coverage of the degenerate flag combination.
+    await expect(canvas.getByText("Ada Lovelace")).toBeInTheDocument();
+  },
+};

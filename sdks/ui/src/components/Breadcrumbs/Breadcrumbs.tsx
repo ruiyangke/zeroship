@@ -419,6 +419,24 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
       );
     }
 
+    if (process.env.NODE_ENV !== "production" && hasItems) {
+      // Only the FIRST crumb flagged `current` is honored (findIndex);
+      // any later flagged crumbs silently render as their href/text
+      // shape. Warn so the ambiguity is diagnosable. DCEs in production.
+      const flaggedCount = (items as BreadcrumbItem[]).filter(
+        (it) => it.current === true,
+      ).length;
+      if (flaggedCount > 1) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "Breadcrumbs received " +
+            flaggedCount +
+            " crumbs flagged `current`. Only the first is honored — the " +
+            "rest render as links. Flag exactly one crumb `current`.",
+        );
+      }
+    }
+
     let body: ReactNode;
 
     if (hasItems) {

@@ -12,7 +12,9 @@
  *   .zs-hero__title           — the <h1> headline (relevelable via asChild)
  *   .zs-hero__description      — muted supporting <p> on a reading measure
  *   .zs-hero__actions          — CTA Cluster (composed); aligns to the band
- *   .zs-hero__media            — optional media column (decorative wrapper)
+ *   .zs-hero__media-column     — the media grid track (holds every media
+ *                               source, stacked in document order)
+ *   .zs-hero__media            — each optional media source (decorative wrapper)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm (block padding) and lets
@@ -136,15 +138,11 @@
 }
 
 /* ─── Eyebrow — small label above the headline ───────────────────────────── */
-.zs-hero__eyebrow {
-  display: flex;
-  align-items: center;
-  /* The eyebrow content is the consumer's Badge / Tag / text; this region
-     adds no chrome of its own — just a baseline rhythm hook. */
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-label-secondary);
-}
+/* The eyebrow's font, color, and pill chrome are owned by the shared
+   `.zs-section-eyebrow` treatment in `sections/_section-tone.css`, so every
+   section's lead-in label reads as ONE family. Hero adds no bespoke type or
+   color of its own; the `.zs-hero__eyebrow` hook is kept only as a stable
+   per-section target (and for any future Hero-specific rhythm). */
 
 /* ─── Title — the page headline ──────────────────────────────────────────── */
 .zs-hero__title {

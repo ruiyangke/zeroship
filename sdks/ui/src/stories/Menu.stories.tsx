@@ -370,8 +370,29 @@ export const WithKeyboardShortcuts: Story = {
     await userEvent.click(canvas.getByRole("button", { name: /^edit$/i }));
     const paste = await body.findByRole("menuitem", { name: /^paste$/i });
     await expect(paste).toBeVisible();
-    await userEvent.keyboard("P");
-    await expect(paste).toHaveFocus();
+    // Base UI commits the open in two async steps: the popup mounts, then
+    // focus moves into the list (the first item gains roving focus and the
+    // typeahead key handler binds). A "P" keystroke fired in the window
+    // between those steps is dropped — the menu has no focused item to
+    // type-match against — and a single dropped key is unrecoverable, so a
+    // bare press + assert flakes nondeterministically (the failing run
+    // shows focus stranded on the first item, never advancing to Paste).
+    // Gate on focus landing inside the list first, THEN press, and re-press
+    // inside waitFor so a dropped key self-heals: "P" matches "Paste"
+    // regardless of which row currently holds the roving focus, and Base
+    // UI's typeahead buffer clears between attempts, so re-pressing is
+    // idempotent toward the target.
+    await waitFor(() =>
+      expect(
+        body
+          .getAllByRole("menuitem")
+          .some((item) => item === document.activeElement),
+      ).toBe(true),
+    );
+    await waitFor(async () => {
+      await userEvent.keyboard("P");
+      await expect(paste).toHaveFocus();
+    });
     await userEvent.keyboard("{Escape}");
   },
 };

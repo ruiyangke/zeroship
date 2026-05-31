@@ -16,7 +16,7 @@
  * - `default` — transparent; the band inherits the page backdrop (the legacy
  *   behavior). This is the default for every section.
  * - `muted` — a subtle full-bleed surface fill so the band reads as its own
- *   panel, giving light/▢ alternation against `default` bands.
+ *   panel, giving light/dark alternation against `default` bands.
  * - `accent` — an `--zs-accent` fill with the inner ink remapped to
  *   `--zs-accent-ink` (the bold contrast band — best for a closing CTA).
  *

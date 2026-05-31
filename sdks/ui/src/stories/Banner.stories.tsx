@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, fn, userEvent, within } from "@storybook/test";
 import { Banner, type BannerIntent } from "../blocks";
@@ -172,5 +173,65 @@ export const LiveAlert: Story = {
     const canvas = within(canvasElement);
     const alert = canvas.getByRole("alert");
     await expect(alert).toHaveAttribute("data-testid", "banner-live-alert");
+  },
+};
+
+/* ─── 6. Dismiss restores focus (play: unmount → focus survives) ──────── */
+export const DismissRestoresFocus: Story = {
+  name: "Dismiss restores focus (unmount harness)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Dismissing typically unmounts the Banner, which destroys the " +
+          "focused dismiss button. The Banner relocates focus to a " +
+          "surviving target BEFORE firing `onDismiss` — here its parent " +
+          "container (no preceding focusable sibling), made focusable via " +
+          "a transient `tabindex=-1`. The play() focuses + activates the " +
+          "dismiss button, then asserts focus landed on the container, " +
+          "NOT `document.body`.",
+      },
+    },
+  },
+  render: () => {
+    // Consumer-owned unmount: dismissing flips state and removes the
+    // Banner from the tree — the realistic case the focus fix targets.
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <div data-testid="banner-host" style={{ padding: "var(--zs-space-3)" }}>
+          {open ? (
+            <Banner
+              intent="info"
+              dismissible
+              onDismiss={() => setOpen(false)}
+              title="Heads up"
+              description="Dismissing me unmounts the banner."
+            />
+          ) : (
+            <p data-testid="banner-gone">Banner dismissed.</p>
+          )}
+        </div>
+      );
+    }
+    return <Harness />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const host = canvas.getByTestId("banner-host");
+    const dismiss = canvas.getByRole("button", { name: /dismiss/i });
+
+    // Keyboard-style activation: focus the button, then click it. The
+    // component only relocates focus when the dismiss button held it.
+    dismiss.focus();
+    await expect(dismiss).toHaveFocus();
+    await userEvent.click(dismiss);
+
+    // Banner is actually gone (consumer unmounted it)…
+    await expect(canvas.getByTestId("banner-gone")).toBeInTheDocument();
+    // …and focus did NOT fall back to <body>: it landed on the container,
+    // the documented fallback target.
+    await expect(document.body).not.toHaveFocus();
+    await expect(host).toHaveFocus();
   },
 };

@@ -48,8 +48,7 @@
 
 .zs-faq__title {
   margin-block: 0;
-  /* Marketing display-3 — a confident section <h2>, markedly bigger than the
-     former title-1. */
+  /* Marketing display-3 — a confident section <h2>. */
   font-size: var(--zs-text-display-3-size);
   line-height: var(--zs-text-display-3-line);
   font-weight: var(--zs-text-display-3-weight);

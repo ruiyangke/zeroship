@@ -177,6 +177,78 @@ export const Accent: Story = {
   },
 };
 
+/* ─── 6. ToneScopedToBands — the [data-tone] full-bleed rule must NOT leak ──
+ *
+ * Regression for the global `[data-tone]` CSS leak: the shared full-bleed
+ * band rule (`inline-size: 100%`) is scoped to the section-band marker
+ * (`[data-section-band]`), so a BARE `data-tone` element elsewhere in the
+ * package (e.g. AlertDialog's Action/Cancel buttons, which stamp
+ * `data-tone` for their own intent styling) is content-sized, NOT stretched
+ * to its container. A real section band still IS full-bleed.
+ *
+ * Before the fix the bare `[data-tone]` rule forced ANY `data-tone` element
+ * to `inline-size: 100%`; this `play()` fails in that state (the bare button
+ * would fill its 600px container) and passes once the rule is band-scoped. */
+export const ToneScopedToBands: Story = {
+  name: "ToneScopedToBands (regression: [data-tone] full-bleed must not leak)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression guard: the shared full-bleed band rule is scoped to " +
+          "the `[data-section-band]` marker, so a bare `data-tone` element " +
+          "outside any section stays content-sized while a real section band " +
+          "spans its container.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      data-testid="tone-leak-probe"
+      style={{ inlineSize: 600, display: "block" }}
+    >
+      {/* A bare data-tone element OUTSIDE any section band. Mirrors what
+          AlertDialog stamps on its Action/Cancel buttons. It must size to
+          its content, NOT stretch to the 600px wrapper. */}
+      <button type="button" data-tone="accent" data-testid="bare-tone-button">
+        Btn
+      </button>
+      {/* A real section band — full-bleed, spans the 600px wrapper. */}
+      <Cta
+        data-testid="cta-band"
+        title="Real band"
+        actions={<Button>Go</Button>}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const wrapper = canvas.getByTestId("tone-leak-probe");
+    const bareButton = canvas.getByTestId("bare-tone-button");
+    const band = canvas.getByTestId("cta-band");
+
+    const wrapperWidth = wrapper.getBoundingClientRect().width;
+
+    // The bare [data-tone] button must be CONTENT-sized — far narrower than
+    // its 600px container. Before the fix the global rule forced it to 100%.
+    const bareWidth = bareButton.getBoundingClientRect().width;
+    await expect(bareWidth).toBeLessThan(wrapperWidth / 2);
+    // Its computed inline-size is NOT the full container width (no stretch).
+    const bareInline = parseFloat(getComputedStyle(bareButton).inlineSize);
+    await expect(bareInline).toBeLessThan(wrapperWidth / 2);
+
+    // The real section band IS full-bleed — its used inline-size spans the
+    // whole container (the `inline-size: 100%` rule still applies to bands).
+    await expect(band).toHaveAttribute("data-section-band");
+    const bandWidth = band.getBoundingClientRect().width;
+    await expect(Math.round(bandWidth)).toBe(Math.round(wrapperWidth));
+    const bandInline = Math.round(
+      parseFloat(getComputedStyle(band).inlineSize),
+    );
+    await expect(bandInline).toBe(Math.round(wrapperWidth));
+  },
+};
+
 /* ─── 4. Minimal — title + 1 Button ──────────────────────────────────────── */
 export const Minimal: Story = {
   name: "Minimal (title + 1 button)",

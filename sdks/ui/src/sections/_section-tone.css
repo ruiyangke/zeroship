@@ -4,9 +4,15 @@
  *
  * ONE source of truth for the full-bleed band treatment that gives a page
  * its rhythm. Every section root (Hero / PricingTable / FeatureGrid / Cta /
- * StatsBand / Faq / Footer) stamps `data-tone={tone}` on its root element;
- * this sheet keys off `[data-tone="…"]` so the three tones are defined ONCE
- * and every section inherits them — no per-section duplication. The shared
+ * StatsBand / Faq / Footer) stamps a dedicated marker attribute
+ * `data-section-band` (alongside `data-tone={tone}`) on its root element;
+ * this sheet keys off `[data-section-band][data-tone="…"]` so the three tones
+ * are defined ONCE and every section inherits them — no per-section
+ * duplication. The `data-section-band` marker is what scopes these rules to
+ * the seven section roots: a bare `[data-tone]` user elsewhere in the package
+ * (e.g. AlertDialog's Action/Cancel buttons, which stamp `data-tone` for
+ * their own intent styling) is NEVER matched — only true section bands are.
+ * The shared
  * `.zs-section-eyebrow` class (defined at the foot of this sheet) is the
  * single cohesive eyebrow style applied across every section's lead-in
  * label, so the eyebrows read as ONE confident family rather than seven
@@ -22,7 +28,7 @@
  *             behavior; every section defaults to "default" so nothing
  *             changes unless a tone is opted into).
  *   muted   — a subtle full-bleed surface fill so the band reads as its own
- *             panel. Gives light/▢ alternation against default bands.
+ *             panel. Gives light/dark alternation against default bands.
  *   accent  — `--zs-accent` fill with ALL inner ink remapped to
  *             `--zs-accent-ink` (the near-white text-on-accent token, the
  *             same pairing Button.filled already ships axe-clean). Secondary
@@ -31,8 +37,8 @@
  *             bold contrast band — best for the closing CTA.
  *
  * The remap targets the section ink hooks via a SHARED selector list so the
- * accent treatment is keyed off `[data-tone="accent"]` once rather than
- * re-declared inside each section sheet. The shared eyebrow class
+ * accent treatment is keyed off `[data-section-band][data-tone="accent"]`
+ * once rather than re-declared inside each section sheet. The shared eyebrow class
  * `.zs-section-eyebrow` (see the per-section sheets) is one of those hooks.
  *
  * forced-colors: an accent band cannot rely on the painted accent fill (it
@@ -52,7 +58,7 @@
  * stays on the readable measure — exactly the band-rhythm goal. */
 
 /* Full-bleed width — the single most important band rule, shared by every
- * section (all seven stamp `data-tone`). A section root is `display:block`, so
+ * section (all seven stamp `data-section-band`). A section root is `display:block`, so
  * in normal flow it already fills its container; but when a section is laid out
  * by a CENTERING parent (a grid/flex column with place-items/justify-items:
  * center — the Storybook canvas does exactly this, and real page shells often
@@ -62,17 +68,17 @@
  * were centered blocks rather than true full-bleed bands. Claiming the full
  * inline size makes the band span its container; the composed Container's
  * max-width + margin-inline:auto still own the inner readable measure. */
-[data-tone] {
+[data-section-band] {
   inline-size: 100%;
 }
 
 /* muted — a subtle surface fill so the band reads as its own panel. */
-[data-tone="muted"] {
+[data-section-band][data-tone="muted"] {
   background: var(--zs-surface);
 }
 
 /* accent — the bold contrast band. */
-[data-tone="accent"] {
+[data-section-band][data-tone="accent"] {
   background: var(--zs-accent);
   /* A translucent accent-ink for secondary text inside the band, so the
      description / muted chrome recede WITHOUT dropping below contrast. The
@@ -102,36 +108,35 @@
  * single place the per-section BEM classes are coupled to the tone system. */
 
 /* Primary ink — titles, eyebrows, headings, billboard values. */
-[data-tone="accent"] .zs-section-eyebrow,
-[data-tone="accent"] .zs-hero__title,
-[data-tone="accent"] .zs-pricing__title,
-[data-tone="accent"] .zs-feature-grid__title,
-[data-tone="accent"] .zs-feature-grid__item-title,
-[data-tone="accent"] .zs-cta__title,
-[data-tone="accent"] .zs-stats-band__title,
-[data-tone="accent"] .zs-stats-band__stat-value,
-[data-tone="accent"] .zs-faq__title,
-[data-tone="accent"] .zs-footer__brand,
-[data-tone="accent"] .zs-footer__link,
-[data-tone="accent"] .zs-footer__link:hover,
-[data-tone="accent"] .zs-footer__link:focus-visible {
+[data-section-band][data-tone="accent"] .zs-section-eyebrow,
+[data-section-band][data-tone="accent"] .zs-hero__title,
+[data-section-band][data-tone="accent"] .zs-pricing__title,
+[data-section-band][data-tone="accent"] .zs-feature-grid__title,
+[data-section-band][data-tone="accent"] .zs-feature-grid__item-title,
+[data-section-band][data-tone="accent"] .zs-cta__title,
+[data-section-band][data-tone="accent"] .zs-stats-band__title,
+[data-section-band][data-tone="accent"] .zs-stats-band__stat-value,
+[data-section-band][data-tone="accent"] .zs-faq__title,
+[data-section-band][data-tone="accent"] .zs-footer__brand,
+[data-section-band][data-tone="accent"] .zs-footer__link,
+[data-section-band][data-tone="accent"] .zs-footer__link:hover,
+[data-section-band][data-tone="accent"] .zs-footer__link:focus-visible {
   color: var(--zs-section-ink);
 }
 
 /* Secondary ink — descriptions, supporting lines, the muted chrome. */
-[data-tone="accent"] .zs-hero__description,
-[data-tone="accent"] .zs-hero__eyebrow,
-[data-tone="accent"] .zs-pricing__lead-description,
-[data-tone="accent"] .zs-feature-grid__description,
-[data-tone="accent"] .zs-feature-grid__item-description,
-[data-tone="accent"] .zs-cta__description,
-[data-tone="accent"] .zs-stats-band__description,
-[data-tone="accent"] .zs-stats-band__stat-label,
-[data-tone="accent"] .zs-stats-band__stat-description,
-[data-tone="accent"] .zs-faq__description,
-[data-tone="accent"] .zs-footer__description,
-[data-tone="accent"] .zs-footer__column-title,
-[data-tone="accent"] .zs-footer__copyright {
+[data-section-band][data-tone="accent"] .zs-hero__description,
+[data-section-band][data-tone="accent"] .zs-pricing__lead-description,
+[data-section-band][data-tone="accent"] .zs-feature-grid__description,
+[data-section-band][data-tone="accent"] .zs-feature-grid__item-description,
+[data-section-band][data-tone="accent"] .zs-cta__description,
+[data-section-band][data-tone="accent"] .zs-stats-band__description,
+[data-section-band][data-tone="accent"] .zs-stats-band__stat-label,
+[data-section-band][data-tone="accent"] .zs-stats-band__stat-description,
+[data-section-band][data-tone="accent"] .zs-faq__description,
+[data-section-band][data-tone="accent"] .zs-footer__description,
+[data-section-band][data-tone="accent"] .zs-footer__column-title,
+[data-section-band][data-tone="accent"] .zs-footer__copyright {
   color: var(--zs-section-ink-secondary);
 }
 
@@ -143,14 +148,14 @@
  * invisible or low-contrast field. The muted band's surface fill likewise
  * drops to Canvas. */
 @media (forced-colors: active) {
-  [data-tone="muted"],
-  [data-tone="accent"] {
+  [data-section-band][data-tone="muted"],
+  [data-section-band][data-tone="accent"] {
     background: Canvas;
     color: CanvasText;
   }
   /* The accent ink remap resolves back to CanvasText so every remapped
      region stays legible on Canvas. */
-  [data-tone="accent"] {
+  [data-section-band][data-tone="accent"] {
     --zs-section-ink: CanvasText;
     --zs-section-ink-secondary: CanvasText;
   }
@@ -166,25 +171,25 @@
  * inherits the button color, so the single `color` swap carries the inversion.
  * This keeps the contract simple: the consumer drops the default `<Button>`
  * (filled) into an accent CTA and it reads as the bold inverse button. */
-[data-tone="accent"] .zs-button--filled {
+[data-section-band][data-tone="accent"] .zs-button--filled {
   background: var(--zs-accent-ink);
   color: var(--zs-accent);
 }
 @media (hover: hover) {
-  [data-tone="accent"] .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-section-band][data-tone="accent"] .zs-button--filled:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     /* Slightly recede the inverse chip on hover (a touch of accent mixed into
        the ink) while keeping the accent text well clear of AA. */
     background: color-mix(in oklch, var(--zs-accent-ink) 88%, var(--zs-accent));
   }
 }
-[data-tone="accent"] .zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-section-band][data-tone="accent"] .zs-button--filled:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-accent-ink) 80%, var(--zs-accent));
 }
 
 /* forced-colors: the inverse chip's painted ink/accent both drop out — pin it
    to a ButtonFace/ButtonText pair so the inverse button stays a real button. */
 @media (forced-colors: active) {
-  [data-tone="accent"] .zs-button--filled {
+  [data-section-band][data-tone="accent"] .zs-button--filled {
     background: ButtonFace;
     color: ButtonText;
     border: var(--zs-selection-hairline) solid ButtonText;
@@ -237,7 +242,7 @@
    on the accent fill (the primary-ink remap above), which is the same
    accent-ink-on-accent pairing Button.filled ships axe-clean. The padding is
    removed so the label sits flush as a lead-in rather than an empty chip. */
-[data-tone="accent"] .zs-section-eyebrow {
+[data-section-band][data-tone="accent"] .zs-section-eyebrow {
   background: transparent;
   padding-block: 0;
   padding-inline: 0;
@@ -258,7 +263,7 @@
  * No-op — tone is paint-only. The gate exists for parity with the rest of
  * the surface. */
 @media (prefers-reduced-motion: reduce) {
-  [data-tone] {
+  [data-section-band] {
     /* nothing to disable; placeholder for surface parity */
   }
 }

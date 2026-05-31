@@ -125,3 +125,46 @@ export const Compound: Story = {
     ).toBeInTheDocument();
   },
 };
+
+/* ─── DoubleHeading (dev-warn guard) ────────────────────────────────────
+ * Regression for the dev-only warning when BOTH the ergonomic `title` prop
+ * AND a compound `<EmptyState.Title>` child are supplied. They are additive,
+ * so two same-level headings land in the document outline — a real a11y
+ * outline defect. The block emits a `console.warn` telling the author to use
+ * one or the other. We install a console.warn spy in beforeEach (the warn
+ * renders two same-level headings. The dev-only `console.warn` telling the
+ * author to use one or the other is compiled out of the production build, so
+ * it cannot be asserted via the test-runner gate; this is a behavioral guard
+ * that the dual-mode footgun produces two headings. Tagged `!autodocs`; the
+ * heading-order axe rule is disabled because the duplicate outline is the
+ * very defect this story demonstrates. */
+export const DoubleHeading: Story = {
+  tags: ["!autodocs"],
+  parameters: {
+    a11y: {
+      // The double heading is the intentionally-invalid state under test.
+      config: { rules: [{ id: "heading-order", enabled: false }] },
+    },
+    docs: {
+      description: {
+        story:
+          "Regression: both a `title` prop AND an <EmptyState.Title> child " +
+          "are supplied, rendering two same-level headings. The block emits " +
+          "a dev-only `console.warn` (not observable in the prod build) " +
+          "telling the author to use one or the other.",
+      },
+    },
+  },
+  render: () => (
+    <EmptyState data-testid="empty-state-double-heading" title="Prop title">
+      <EmptyState.Title>Compound title</EmptyState.Title>
+    </EmptyState>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Both headings render — prop content first, then the compound child.
+    // This documents the dual-mode double-heading footgun the dev-warn flags.
+    const names = canvas.getAllByRole("heading").map((h) => h.textContent);
+    await expect(names).toEqual(["Prop title", "Compound title"]);
+  },
+};

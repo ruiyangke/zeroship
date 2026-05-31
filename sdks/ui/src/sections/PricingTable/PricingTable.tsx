@@ -576,6 +576,7 @@ const PricingTableRoot = forwardRef<HTMLElement, PricingTableProps>(
         {...rest}
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
+        data-section-band=""
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}

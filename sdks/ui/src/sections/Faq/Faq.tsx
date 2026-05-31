@@ -308,6 +308,7 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
       {...rest}
       ref={ref as Ref<HTMLElement>}
       data-slot={dataSlot}
+      data-section-band=""
       data-tone={tone}
       aria-labelledby={titleRenders ? titleId : undefined}
       className={composedClassName}
@@ -321,7 +322,12 @@ const FaqRoot = forwardRef<HTMLElement, FaqProps>(function FaqRoot(
             className="zs-faq__header"
           >
             {eyebrow != null ? (
-              <p className="zs-section-eyebrow zs-faq__eyebrow">{eyebrow}</p>
+              <p
+                data-slot="faq-eyebrow"
+                className="zs-section-eyebrow zs-faq__eyebrow"
+              >
+                {eyebrow}
+              </p>
             ) : null}
             {titleRenders ? (
               <h2

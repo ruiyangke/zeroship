@@ -353,6 +353,7 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
         ref={ref as Ref<HTMLElement>}
         data-slot={dataSlot}
         data-align={align}
+        data-section-band=""
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}
@@ -366,7 +367,10 @@ const FeatureGridRoot = forwardRef<HTMLElement, FeatureGridProps>(
               className="zs-feature-grid__header"
             >
               {eyebrow != null ? (
-                <p className="zs-section-eyebrow zs-feature-grid__eyebrow">
+                <p
+                  data-slot="feature-grid-eyebrow"
+                  className="zs-section-eyebrow zs-feature-grid__eyebrow"
+                >
                   {eyebrow}
                 </p>
               ) : null}

@@ -52,6 +52,7 @@
  * in CSS without leaning on the internal BEM class names.
  */
 import {
+  Children,
   forwardRef,
   isValidElement,
   type ComponentPropsWithoutRef,
@@ -102,6 +103,33 @@ const EmptyStateRoot = forwardRef<HTMLDivElement, EmptyStateProps>(
     { icon, title, description, action, className, children, ...rest },
     ref,
   ) {
+    // Dev-mode a11y guard: the ergonomic `title` prop and a compound
+    // `<EmptyState.Title>` child are additive (prop content renders
+    // first, then children), so supplying BOTH paints two same-level
+    // headings into the document outline. Walk the children for the
+    // Title displayName (matching the Tag / FormSection detection
+    // pattern). DCEs out of production builds.
+    if (process.env.NODE_ENV !== "production" && title != null) {
+      let hasCompoundTitle = false;
+      for (const child of Children.toArray(children)) {
+        if (!isValidElement(child)) continue;
+        const t = child.type as { displayName?: string } | undefined;
+        if (t?.displayName === "EmptyState.Title") {
+          hasCompoundTitle = true;
+          break;
+        }
+      }
+      if (hasCompoundTitle) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "EmptyState received both a `title` prop AND an " +
+            "<EmptyState.Title> child. They are additive — you will get " +
+            "two same-level headings in the document outline. Use one or " +
+            "the other.",
+        );
+      }
+    }
+
     const composedClassName = classnames("zs-empty-state", className);
 
     // The centered column. `Center` handles both-axes centering; the

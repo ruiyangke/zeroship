@@ -300,6 +300,7 @@ const FooterRoot = forwardRef<HTMLElement, FooterProps>(function FooterRoot(
       {...rest}
       ref={ref as Ref<HTMLElement>}
       data-slot={dataSlot}
+      data-section-band=""
       data-tone={tone}
       className={composedClassName}
     >

@@ -25,8 +25,8 @@
  *     we reach the stats via the descendant combinator.
  *   - Logical properties throughout for RTL.
  *
- * Type: the stat VALUE reads at the title-1 display scale (the metric is the
- * loudest element); the label + description read muted/small. These are plain
+ * Type: the stat VALUE reads at the display-2 marketing scale (the metric is
+ * the loudest element); the label + description read muted/small. These are plain
  * `<p>` text, NOT headings — a stats row is not part of the heading outline.
  *
  * Motion: none of its own; the gate below exists for surface parity.
@@ -69,8 +69,7 @@
 
 .zs-stats-band__title {
   margin-block: 0;
-  /* Marketing display-3 — a confident section <h2>, markedly bigger than the
-     former title-1. */
+  /* Marketing display-3 — a confident section <h2>. */
   font-size: var(--zs-text-display-3-size);
   line-height: var(--zs-text-display-3-line);
   font-weight: var(--zs-text-display-3-weight);
@@ -143,10 +142,9 @@
 }
 
 /* The headline metric — the BILLBOARD figure of merit. Reads the display-2
-   marketing scale (~2.75rem) so the number is the loudest element on the band,
-   markedly bigger than the former large-title. A hero-stat variant
-   (data-hero) bumps a single headline metric to the top display-1 step. The
-   accent ink keeps the number reading as the proof figure. */
+   marketing scale (~2.75rem) so the number is the loudest element on the band.
+   A hero-stat variant (data-hero) bumps a single headline metric to the top
+   display-1 step. The accent ink keeps the number reading as the proof figure. */
 .zs-stats-band__stat-value {
   margin-block: 0;
   font-size: var(--zs-text-display-2-size);

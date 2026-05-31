@@ -349,3 +349,43 @@ export const Empty: Story = {
     await expect(canvas.getByText("No members yet")).toBeInTheDocument();
   },
 };
+
+/* ─── DuplicateIds (dev-warn guard) ─────────────────────────────────────
+ * Regression for the dev-only warning when two `items` share an `id`.
+ * `item.id` is the documented stable React key; duplicates silently break
+ * row reconciliation. The block emits a dev-only `console.warn` naming the
+ * offending id — that warn is compiled out of the production Storybook build,
+ * so it cannot be asserted via the test-runner gate; this story is a smoke
+ * guard that duplicate ids still render without crashing and stay axe-clean.
+ * Tagged `!autodocs` so the intentionally-broken state stays out of docs. */
+export const DuplicateIds: Story = {
+  tags: ["!autodocs"],
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Two `items` share `id=\"dup\"`. Ids are the stable React keys and " +
+          "must be unique; the block emits a dev-only `console.warn` (not " +
+          "observable in the prod build) naming the offending id. The list " +
+          "still renders both rows.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-cell" style={{ padding: "1rem", maxInlineSize: "32rem" }}>
+      <ListView
+        items={[
+          { id: "dup", title: "Ada Lovelace" },
+          { id: "dup", title: "Alan Turing" },
+        ]}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Both rows still render despite the duplicate id (the warn is advisory,
+    // not fatal). Smoke + axe coverage of the degenerate input.
+    await expect(canvas.getByText("Ada Lovelace")).toBeInTheDocument();
+    await expect(canvas.getByText("Alan Turing")).toBeInTheDocument();
+  },
+};

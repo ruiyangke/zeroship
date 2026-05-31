@@ -420,6 +420,7 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
         data-slot={dataSlot}
         data-align={align}
         data-layout={dataLayout}
+        data-section-band=""
         data-tone={tone}
         data-backdrop={backdrop ? "" : undefined}
         aria-labelledby={hasHeadline ? titleId : undefined}
@@ -447,7 +448,11 @@ const HeroEyebrow = forwardRef<HTMLDivElement, HeroEyebrowProps>(
         {...rest}
         ref={ref}
         data-slot="hero-eyebrow"
-        className={classnames("zs-hero__eyebrow", className)}
+        className={classnames(
+          "zs-section-eyebrow",
+          "zs-hero__eyebrow",
+          className,
+        )}
       />
     );
   },

@@ -376,3 +376,48 @@ export const RouterLinkStory: Story = {
     await expect(home.getAttribute("data-slot")).toBe("breadcrumbs-link");
   },
 };
+
+/* ─── MultipleCurrent (dev-warn guard) ──────────────────────────────────
+ * Regression for the dev-only warning when MORE THAN ONE crumb is flagged
+ * `current`. `findIndex` honors only the FIRST flagged crumb; later flagged
+ * crumbs silently render as links. The block emits a `console.warn` saying
+ * only the first is honored. The dev-only console.warn that names this case
+ * is compiled out of the production Storybook build, so we cannot assert it
+ * via the test-runner gate; instead this story is a behavioral guard for the
+ * observable "first current wins" contract. Tagged `!autodocs` so the
+ * intentionally-ambiguous state stays out of docs. */
+export const MultipleCurrent: Story = {
+  tags: ["!autodocs"],
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression: two crumbs flagged `current`. `findIndex` honors only " +
+          "the first; the rest render as plain crumbs. Exactly one crumb " +
+          "carries `aria-current=\"page\"` (the first flagged). A dev-only " +
+          "`console.warn` (not observable in the prod build) names the case.",
+      },
+    },
+  },
+  render: () => (
+    <Breadcrumbs
+      data-testid="breadcrumbs-multiple-current"
+      items={[
+        { label: "Home", href: "#home" },
+        { label: "Projects", href: "#projects", current: true },
+        { label: "Acme", current: true },
+      ]}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    // Behavioral guard for "first current wins": exactly one crumb carries
+    // aria-current="page", and it is the FIRST flagged one ("Projects").
+    const nav = canvas.getByRole("navigation", { name: /breadcrumb/i });
+    const current = nav.querySelectorAll('[aria-current="page"]');
+    await expect(current).toHaveLength(1);
+    await expect(current[0]).toHaveTextContent("Projects");
+    // The later flagged crumb still renders, but is not marked current.
+    await expect(canvas.getByText("Acme")).toBeInTheDocument();
+  },
+};

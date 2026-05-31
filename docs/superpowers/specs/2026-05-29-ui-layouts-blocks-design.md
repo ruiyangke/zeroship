@@ -123,7 +123,7 @@ Closed shared unions (defined once, reused): `Gap`/`Pad` = `0 | "half" | 1 …
 | Piece | Purpose / generalizes | API sketch | Test focus |
 |---|---|---|---|
 | **EmptyState** | zero-data surface; generalizes local `EmptyState` | parts: `.Icon`, `.Title`, `.Description`, `.Actions`; or ergonomic `title`/`description`/`action` props | renders, axe; role/heading semantics |
-| **ErrorState** | error/failure surface; generalizes `ErrorState` | `intent "error"\|"warning"`, `.Title`/`.Description`/`.Actions`, optional `onRetry` | retry `play()`; `role="alert"` only when live |
+| **ErrorState** | error/failure surface; generalizes `ErrorState` | `intent "danger"\|"warning"` (uses the shared `Intent` vocabulary — `danger`, not `error`), `.Title`/`.Description`/`.Actions`, optional `onRetry` | retry `play()`; `role="alert"` only when live |
 | **Skeleton** | loading placeholder; generalizes `Skeleton` | `variant "text"\|"rect"\|"circle"`, `lines?`, `width/height` | `aria-hidden`; reduced-motion disables shimmer |
 | **Spinner** | indeterminate busy; generalizes `Spinner` | `size`, `label` (visually-hidden) | reduced-motion; `role="status"` + label |
 | **Badge** | status/count token; **promotes the placeholder to real** | `intent`, `variant "solid"\|"soft"\|"outline"`, `size` | replaces `placeholders.tsx` Badge; remove placeholder export |
@@ -132,6 +132,24 @@ Closed shared unions (defined once, reused): `Gap`/`Pad` = `0 | "half" | 1 …
 | **Banner** / **Callout** | inline page-level message; generalizes `LiveBanner` | `intent`, `dismissible?`, `onDismiss`, `.Title`/`.Description`/`.Actions` | dismiss `play()`; `role` per intent |
 | **DescriptionList** | key→value rows; generalizes `LedgerRow`/`Receipt` | `<DescriptionList>` + `.Item`/`.Term`/`.Detail`; `orientation`, `divider?` | semantic `<dl>/<dt>/<dd>` |
 | **DataTable** | the long-promised `Table` (presentational) | `columns: Column<T>[]`, `data: T[]`, `sort?`, `onSortChange`, `selection?`, `rowKey`, `stickyHeader?`, `density`, render slots for empty/loading | **own long pole** — see §5 wave 3 |
+
+### 4d · Sections (added beyond original scope)
+
+This round also shipped a `src/sections/` marketing-composition layer that the
+original catalog above did **not** plan: **Hero**, **Cta**, **Faq**,
+**FeatureGrid**, **Footer**, **PricingTable**, **StatsBand**. The expansion was
+made during implementation because the same primitives (`Container`/`Stack`/
+`Grid`/`Cluster`) that the catalog establishes make page-level marketing bands
+nearly free to compose, and the builder's generated landing surfaces need them.
+
+Sections hold the **same** §3 contract as everything else: own subtree
+(`src/sections/<Name>/`), `forwardRef` + `asChild` (where a heading relevels) +
+`data-slot` subparts + dev-warns + token-only CSS, `export *` through
+`src/index.ts`, and the same story/axe quality gate. A shared `_section-tone.css`
+defines a `data-tone` band system (`default`/`muted`/`accent`) once; `Faq`
+composes `Accordion`, `Footer` is a native `<footer>`, `PricingTable` is a
+div-grid of `Card`s (not a `<table>` — these are marketing cards, not tabular
+data). Sections compose, never re-roll, the Wave-1 primitives.
 
 ---
 

@@ -56,7 +56,12 @@ export const Default: Story = {
     await expect(dialog).toBeVisible();
 
     await userEvent.click(page.getByRole("button", { name: /^close$/i }));
-    await expect(trigger).toHaveFocus();
+    // Base UI returns focus to the trigger AFTER the close transition
+    // commits and the popup unmounts — that focus move is async, so a
+    // bare synchronous assertion races it (and flakes nondeterministically
+    // under headless). waitFor polls the SAME assertion until the
+    // focus-return lands. Mirrors the InitialFocus story's deflake.
+    await waitFor(() => expect(trigger).toHaveFocus());
   },
 };
 
@@ -598,7 +603,13 @@ function CreateDialogHandlePayloadStory() {
         }
       />
       <Dialog handle={handle}>
-        {({ payload }) => (
+        {/* payload is typed `{}` here: DialogProps extends the non-generic
+            BaseRootProps (see the "half-broken createDialogHandle" note in
+            Dialog.tsx), so the handle's type param doesn't flow to the
+            render-fn. Cast until Dialog.Root is made generic over payload. */}
+        {({ payload: rawPayload }) => {
+          const payload = rawPayload as ConfirmPayload | undefined;
+          return (
           <Dialog.Portal>
             <Dialog.Backdrop />
             <Dialog.Popup data-testid="dialog-handle-popup">
@@ -622,7 +633,8 @@ function CreateDialogHandlePayloadStory() {
               </Dialog.Footer>
             </Dialog.Popup>
           </Dialog.Portal>
-        )}
+          );
+        }}
       </Dialog>
     </div>
   );

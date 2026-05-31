@@ -759,6 +759,18 @@ function DataTableInner<T>(
           "the size of the current page and will under-count the pages.",
       );
     }
+    if (manualFiltering && !manualPagination) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "DataTable: `manualFiltering` without `manualPagination` is " +
+          "unsupported — couple them. With manual filtering on, TanStack " +
+          "does NOT filter `data` locally, so the footer's page count " +
+          "derives from the server `total` (or `data.length`) while the " +
+          "body slices the UNFILTERED local rows; the two disagree. If you " +
+          "filter on the server, paginate on the server too (set " +
+          "`manualPagination` and pass `total`).",
+      );
+    }
   }
 
   /* ─── axis state (controlled-or-internal, OUR public contract) ─────
@@ -868,7 +880,15 @@ function DataTableInner<T>(
         .map(([id, value]) => ({ id, value })),
     [columnFilters, columnByKey],
   );
-  const safePageSize = Math.max(1, pageSize);
+  // Mirror <Pagination>'s `intOr` guard: a `pageSize` prop can arrive
+  // fractional (12.5) or non-finite (NaN / Infinity) from a loose caller.
+  // Coerce to a finite positive integer (floor, min 1) BEFORE it feeds
+  // pageCount (Math.ceil(total/NaN) === NaN) or the body slice (a NaN/
+  // fractional length poisons the render). Matches Pagination.tsx ~L218.
+  const safePageSize = Math.max(
+    1,
+    Math.floor(Number.isFinite(pageSize) ? pageSize : 1),
+  );
   const paginationState = useMemo<PaginationState>(
     () => ({ pageIndex: Math.max(0, page - 1), pageSize: safePageSize }),
     [page, safePageSize],

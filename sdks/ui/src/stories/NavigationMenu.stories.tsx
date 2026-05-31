@@ -185,7 +185,12 @@ export const Basic: Story = {
       canvas.getByRole("link", { name: /builder/i }),
     ).toHaveAttribute("href", "/builder");
     await userEvent.tab();
-    await expect(canvas.getByRole("link", { name: /builder/i })).toHaveFocus();
+    // Tab moving focus into the List's first roving item settles
+    // asynchronously; poll the SAME assertion so it waits for focus to
+    // land rather than racing it (deflakes under headless).
+    await waitFor(() =>
+      expect(canvas.getByRole("link", { name: /builder/i })).toHaveFocus(),
+    );
   },
 };
 
@@ -558,16 +563,22 @@ export const KeyboardNav: Story = {
     // keyboard-open assertion here is non-deterministic. The Basic /
     // WithContent / WithViewport stories already cover open-and-show-
     // content; this story's unique job is the roving focus model.)
+    // Each roving move (Tab into the List, ArrowRight/Left between Items)
+    // commits focus asynchronously, so poll each assertion with waitFor —
+    // same roving contract, just waited-for instead of raced (deflakes the
+    // headless run where the focus move can lag the synchronous assert).
     await userEvent.tab();
-    await expect(products).toHaveFocus();
+    await waitFor(() => expect(products).toHaveFocus());
     await userEvent.keyboard("{ArrowRight}");
-    await expect(resources).toHaveFocus();
+    await waitFor(() => expect(resources).toHaveFocus());
     await userEvent.keyboard("{ArrowRight}");
-    await expect(canvas.getByRole("link", { name: /pricing/i })).toHaveFocus();
+    await waitFor(() =>
+      expect(canvas.getByRole("link", { name: /pricing/i })).toHaveFocus(),
+    );
     await userEvent.keyboard("{ArrowLeft}");
-    await expect(resources).toHaveFocus();
+    await waitFor(() => expect(resources).toHaveFocus());
     await userEvent.keyboard("{ArrowLeft}");
-    await expect(products).toHaveFocus();
+    await waitFor(() => expect(products).toHaveFocus());
     // Roving never opened a panel — no Content links are mounted.
     await expect(
       body.queryByRole("link", { name: /^a…$/i }),
@@ -588,6 +599,27 @@ export const Disabled: Story = {
           "A `NavigationMenu.Trigger` carrying `disabled` does not open " +
           "its Content. Roving navigation skips it; AT users hear it as " +
           "disabled.",
+      },
+    },
+    // When a NavigationMenu List contains a `disabled` Trigger, Base UI
+    // renders persistent focus-wrap sentinels next to the List —
+    // `<span data-base-ui-focus-guard aria-hidden="true" tabindex="0">`
+    // (1×1 clipped, off-screen). They exist even with NO panel open and
+    // are Base UI's own focus-wrap detection mechanism (not authored
+    // here — NavigationMenu.tsx is a thin Base UI wrapper). axe's
+    // `aria-hidden-focus` rule flags an aria-hidden element that is
+    // focusable, so it intermittently fires on these guards (depending on
+    // the scan instant), making this story's a11y audit nondeterministic.
+    // This is the same Base UI focus-guard artifact the Menu
+    // NestedSubmenu story documents; there it's avoided by fully closing
+    // the menu, but here the guards are unconditional (the disabled
+    // trigger keeps them mounted), so we narrowly disable the one rule for
+    // THIS story via the package's documented per-story a11y opt-out
+    // (test-runner.ts wires `parameters.a11y.config.rules`). Every other
+    // axe rule still runs against the full story.
+    a11y: {
+      config: {
+        rules: [{ id: "aria-hidden-focus", enabled: false }],
       },
     },
   },

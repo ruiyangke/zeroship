@@ -62,12 +62,13 @@
  * shared between the root and the Title:
  *   - Ergonomic mode: FormSection owns the id and stamps it on both the
  *     root's `aria-labelledby` and the heading it renders.
- *   - Compound mode: the id flows through context. `FormSection.Header`
- *     re-establishes a fresh id (its own `useId`) and publishes it so the
- *     root picks it up — but because the root is rendered BEFORE the
- *     child mounts, compound mode resolves the labelledby relationship by
- *     having BOTH the root and the Title read the SAME context id minted
- *     at the root. The Title stamps that id onto its heading element.
+ *   - Compound mode: the SAME root-minted id flows through context. The
+ *     root stamps it on its `aria-labelledby`, and `FormSection.Title`
+ *     (rendered inside the consumer's `FormSection.Header`) reads that id
+ *     from context and stamps it onto its own heading element. There is no
+ *     second `useId` — both ends read one context value, so the
+ *     labelledby relationship always resolves to a present element even
+ *     though the root renders before its children mount.
  *
  * Body and Footer are layout-only — plain `<div>`s with NO role. The
  * fields inside carry their own labels/aria (they're the consumer's
@@ -75,8 +76,10 @@
  * footer Separator and header text resolve to system colors (see CSS).
  */
 import {
+  Children,
   createContext,
   forwardRef,
+  Fragment,
   isValidElement,
   useContext,
   useId,
@@ -89,6 +92,27 @@ import { classnames } from "../../components/_classnames";
 import { Separator } from "../../components/Separator";
 
 export type FormSectionOrientation = "stacked" | "aside";
+
+/* Flatten children for compound-part detection, descending into React
+ * Fragments. `React.Children.toArray` flattens nested arrays but treats a
+ * `<>…</>` element as a single opaque child (its `type` is the Fragment
+ * symbol, no `displayName`), so compound parts wrapped in a Fragment would
+ * go undetected and get double-wrapped in the implicit Body. We recurse
+ * into Fragment children so `<FormSection><>…</></FormSection>` is detected
+ * the same as bare children. */
+function flattenChildren(children: ReactNode): ReactNode[] {
+  const out: ReactNode[] = [];
+  Children.forEach(children, (child) => {
+    if (isValidElement(child) && child.type === Fragment) {
+      out.push(
+        ...flattenChildren((child.props as { children?: ReactNode }).children),
+      );
+    } else {
+      out.push(child);
+    }
+  });
+  return out;
+}
 
 /* ─── shared title-id context ─────────────────────────────────────────
  * The root mints one id (useId) and provides it. The Title (whether
@@ -168,7 +192,12 @@ const FormSectionRoot = forwardRef<HTMLElement, FormSectionProps>(
     let hasCompoundHeader = false;
     let hasCompoundFooter = false;
     let hasCompoundBody = false;
-    const childArray = Array.isArray(children) ? children : [children];
+    // `flattenChildren` descends into React Fragments so compound parts
+    // placed inside a `<>…</>` wrapper are still detected — both the old
+    // `Array.isArray(children) ? children : [children]` AND a plain
+    // `Children.toArray` miss them (toArray flattens arrays but not the
+    // Fragment element), double-wrapping the Body.
+    const childArray = flattenChildren(children);
     for (const child of childArray) {
       if (!isValidElement(child)) continue;
       const t = child.type as { displayName?: string } | undefined;

@@ -39,6 +39,18 @@
  * carry the meaning. Dismiss is a real `<button aria-label="Dismiss">`
  * with an aria-hidden × glyph, rendered only when `onDismiss` is wired.
  *
+ * Dismiss focus management — the consumer owns the unmount (the block
+ * just fires `onDismiss`), so the Banner can't move focus AFTER it's
+ * gone: by then the dismiss button is destroyed and focus has already
+ * fallen back to `<body>`, dropping a keyboard/SR user out of context.
+ * To avoid that, when the dismiss button is activated WHILE focused, the
+ * Banner shifts focus to a sensible still-present target BEFORE invoking
+ * `onDismiss`: the Banner root's nearest preceding focusable sibling, or
+ * else the root's parent (momentarily made focusable via `tabindex=-1`).
+ * If the consumer keeps the Banner mounted, this is a harmless no-op
+ * (focus simply moves off the dismiss button). SSR-safe (no `document`
+ * access during render).
+ *
  * This block has no root `asChild` — its value is the composed body
  * (icon + text column + actions + dismiss); routing the root through a
  * Slot would render only the consumer's child and discard that body.
@@ -46,11 +58,15 @@
  */
 import {
   forwardRef,
+  useCallback,
+  useRef,
   type ComponentPropsWithoutRef,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import { CircleAlert, CircleCheck } from "lucide-react";
 import { classnames } from "../../components/_classnames";
+import { composeRefs } from "../../components/_slot";
 import { Icon } from "../../components/Icon/Icon";
 import { Stack } from "../../layouts/Stack";
 import type { Intent } from "../../components/_intent";
@@ -82,7 +98,15 @@ export interface BannerProps
 
   /** Called when the dismiss button is activated. Banner is
    *  uncontrolled-visibility-agnostic — it does not hide itself; the
-   *  consumer removes it from the tree in response. */
+   *  consumer removes it from the tree in response.
+   *
+   *  Focus contract: because dismissing typically unmounts the Banner
+   *  (destroying the focused dismiss button), the Banner moves focus to a
+   *  surviving target — its nearest preceding focusable sibling, else its
+   *  parent (via a transient `tabindex=-1`) — BEFORE this handler runs, so
+   *  a keyboard/SR user isn't dropped onto `<body>`. Only fires when the
+   *  dismiss button held focus; pointer-driven dismiss with focus
+   *  elsewhere is left untouched. */
   onDismiss?: () => void;
 
   /**
@@ -110,6 +134,57 @@ export interface BannerProps
   children?: ReactNode;
 }
 
+/* ─── focus restoration ──────────────────────────────────────────────── */
+
+/**
+ * Whether `el` can hold keyboard focus right now. We treat a non-negative
+ * `tabIndex` as the signal: it covers natively-focusable controls (which
+ * report `0`) and authored `tabindex` targets, while excluding `-1`
+ * (programmatic-only) and disabled controls (which report `-1`).
+ */
+function isFocusable(el: HTMLElement): boolean {
+  return !el.hasAttribute("disabled") && el.tabIndex >= 0;
+}
+
+/**
+ * Move focus off the (about-to-unmount) Banner onto a surviving target so
+ * a keyboard/SR user is never dropped onto `<body>`. Preference order:
+ *
+ *   1. The Banner root's nearest PRECEDING focusable sibling — the most
+ *      natural "back up one stop" landing spot.
+ *   2. The root's parent element, made focusable with a transient
+ *      `tabindex=-1` that we strip again on the next `blur`, so we don't
+ *      leave a lingering programmatic tab-stop on the consumer's DOM.
+ *
+ * Called only from a browser event handler, so `document` is always
+ * present here; the caller still guards `typeof document` for safety.
+ */
+function restoreFocusOnDismiss(root: HTMLElement): void {
+  let sibling = root.previousElementSibling;
+  while (sibling) {
+    if (sibling instanceof HTMLElement && isFocusable(sibling)) {
+      sibling.focus();
+      return;
+    }
+    sibling = sibling.previousElementSibling;
+  }
+
+  const parent = root.parentElement;
+  if (!parent) return;
+
+  if (parent.tabIndex < 0 && !parent.hasAttribute("tabindex")) {
+    parent.setAttribute("tabindex", "-1");
+    // Strip the synthetic tab-stop once focus leaves, so we don't mutate
+    // the consumer's DOM beyond the moment we needed it.
+    const cleanup = () => {
+      parent.removeAttribute("tabindex");
+      parent.removeEventListener("blur", cleanup);
+    };
+    parent.addEventListener("blur", cleanup);
+  }
+  parent.focus();
+}
+
 /* ─── Banner root ────────────────────────────────────────────────────── */
 
 const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
@@ -130,6 +205,36 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
   // control (a keyboard tab-stop that does nothing). Render it only when
   // a handler is wired; warn in dev so the consumer sees the gap.
   const showDismiss = dismissible && typeof onDismiss === "function";
+
+  // Internal handle on the root so the dismiss path can relocate focus to
+  // a surviving element BEFORE the consumer unmounts the Banner. Composed
+  // with the forwarded ref so the consumer's ref still fans through.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const composedRef = composeRefs<HTMLDivElement>(rootRef, ref);
+
+  // Dismiss handler: move focus off the (about-to-be-destroyed) dismiss
+  // button onto a still-present target, THEN fire onDismiss. Guarded so it
+  // is a harmless no-op when the consumer keeps the Banner mounted.
+  const handleDismiss = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      const button = event.currentTarget;
+      const root = rootRef.current;
+
+      // Only relocate focus when the dismiss button actually holds it
+      // (keyboard / SR activation). A pointer click with focus elsewhere
+      // leaves the page's focus untouched.
+      if (
+        root &&
+        typeof document !== "undefined" &&
+        document.activeElement === button
+      ) {
+        restoreFocusOnDismiss(root);
+      }
+
+      onDismiss?.();
+    },
+    [onDismiss],
+  );
 
   if (process.env.NODE_ENV !== "production") {
     if (dismissible && typeof onDismiss !== "function") {
@@ -185,7 +290,7 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
           aria-label="Dismiss"
           data-slot="banner-dismiss"
           className="zs-banner__dismiss"
-          onClick={onDismiss}
+          onClick={handleDismiss}
         >
           <span aria-hidden="true">×</span>
         </button>
@@ -198,7 +303,7 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
       {...rest}
       {...liveProps}
       {...dataProps}
-      ref={ref}
+      ref={composedRef}
       className={composedClassName}
     >
       {body}

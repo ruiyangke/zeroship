@@ -238,6 +238,7 @@ export const Cta = forwardRef<HTMLElement, CtaProps>(function Cta(
       data-slot={dataSlot}
       data-align={align}
       data-variant={variant}
+      data-section-band=""
       data-tone={tone}
       aria-labelledby={titleRenders ? titleId : undefined}
       className={composedClassName}

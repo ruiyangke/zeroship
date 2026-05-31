@@ -53,7 +53,7 @@ async function findToastByTitle(
   role: "status" | "alert" = "status",
 ) {
   const body = getDocument(canvasElement);
-  let toast: HTMLElement | null = null;
+  let toast: HTMLElement | undefined;
 
   // Wait for BOTH the element to be in the DOM AND its enter transition
   // to land. Base UI's Toast.Root carries `data-starting-style` during
@@ -74,10 +74,13 @@ async function findToastByTitle(
     expect(match?.hasAttribute("data-starting-style")).toBeFalsy();
     const opacity = match ? Number(getComputedStyle(match).opacity) : 0;
     expect(opacity).toBeGreaterThan(0.99);
-    toast = match ?? null;
+    toast = match;
   });
 
-  return toast as HTMLElement;
+  if (!toast) {
+    throw new Error(`Toast titled ${String(title)} never resolved`);
+  }
+  return toast;
 }
 
 /* Assert a toast surface is rendered. We can't use `.toBeVisible()` on

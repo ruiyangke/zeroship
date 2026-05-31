@@ -85,8 +85,8 @@
 
 .zs-feature-grid__title {
   margin-block: 0;
-  /* Marketing display-3 — a confident section <h2>, markedly bigger than the
-     former title-1 so the band header carries real weight. */
+  /* Marketing display-3 — a confident section <h2> so the band header
+     carries real weight. */
   font-size: var(--zs-text-display-3-size);
   line-height: var(--zs-text-display-3-line);
   font-weight: var(--zs-text-display-3-weight);

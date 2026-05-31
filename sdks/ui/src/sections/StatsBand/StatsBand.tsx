@@ -344,6 +344,7 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
         data-slot={dataSlot}
         data-align={align}
         data-hero={hero ? "" : undefined}
+        data-section-band=""
         data-tone={tone}
         aria-labelledby={titleRenders ? titleId : undefined}
         className={composedClassName}
@@ -357,7 +358,10 @@ const StatsBandRoot = forwardRef<HTMLElement, StatsBandProps>(
               className="zs-stats-band__header"
             >
               {eyebrow != null ? (
-                <p className="zs-section-eyebrow zs-stats-band__eyebrow">
+                <p
+                  data-slot="stats-band-eyebrow"
+                  className="zs-section-eyebrow zs-stats-band__eyebrow"
+                >
                   {eyebrow}
                 </p>
               ) : null}

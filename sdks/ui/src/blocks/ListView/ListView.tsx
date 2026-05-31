@@ -272,6 +272,26 @@ const ListViewRoot = forwardRef<HTMLUListElement, ListViewProps>(
             "exclusive. Rendering `items` and ignoring `children`.",
         );
       }
+      // `item.id` is the documented stable React key. Duplicate ids
+      // silently break reconciliation (rows reuse the wrong DOM / state),
+      // so warn — once per render — naming each offending id. DCEs out of
+      // production builds.
+      if (items != null) {
+        const seen = new Set<string>();
+        for (const item of items) {
+          if (seen.has(item.id)) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "ListView received duplicate `item.id` " +
+                JSON.stringify(item.id) +
+                ". Ids are the stable React keys and must be unique; " +
+                "duplicates break row reconciliation.",
+            );
+          } else {
+            seen.add(item.id);
+          }
+        }
+      }
     }
 
     const composedClassName = classnames("zs-list-view", className);
