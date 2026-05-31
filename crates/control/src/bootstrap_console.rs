@@ -115,6 +115,87 @@ const CONSOLE_PAT_NAME: &str = "zeroship console service token";
 /// reaches the browser.
 pub const SERVICE_TOKEN_ENV_KEY: &str = "ZS_CONTROL_SERVICE_TOKEN";
 
+/// How a console runtime env var lands in the per-app env store.
+///
+/// Both classes reach the worker's **server-side** `process.env` (V8 worker
+/// only — the browser/client bundle never receives `process.env`; see
+/// `crates/runtime/src/core/init.rs` `setup_globals`). They differ only in
+/// at-rest handling:
+///   - [`EnvClass::Secret`] → AES-256-GCM encrypted in `control.app_secrets` and
+///     added to the per-app `expose` list (the opt-in that surfaces an exposed
+///     secret in `process.env`). The browser never sees it.
+///   - [`EnvClass::Var`]    → plaintext in `control.app_vars`. Vars are always in
+///     `process.env`, so no `expose` entry is needed. Used for non-sensitive
+///     config (URLs), never for credentials.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnvClass {
+    /// Encrypted at rest + expose entry (credentials).
+    Secret,
+    /// Plaintext (non-sensitive config — URLs, registry endpoints).
+    Var,
+}
+
+/// One console runtime env var, forwarded from the **control process env**.
+struct RuntimeEnvSpec {
+    /// The env-store key on the console app (what the console reads via
+    /// `process.env.<key>` server-side). MUST satisfy `EnvStore`'s key regex
+    /// (`/^[A-Z][A-Z0-9_]{0,63}$/`).
+    app_key: &'static str,
+    /// The env var to read at seed time from the **control** process env
+    /// (`std::env::var`). Usually identical to `app_key`; kept distinct so the
+    /// source name can diverge from the app-facing name if it ever needs to.
+    source_env: &'static str,
+    /// Secret (encrypt + expose) vs. plaintext var.
+    class: EnvClass,
+}
+
+/// The FULL server-side runtime env the **deployed console** needs to FUNCTION,
+/// beyond the already-seeded [`SERVICE_TOKEN_ENV_KEY`]. Each is forwarded from
+/// the control process env at seed time; an unset source var is SKIPPED with a
+/// warning (the console degrades for that one feature rather than failing the
+/// whole seed). Sourced from the console's server reads
+/// (`apps/zeroship-builder/src/server/internal/env.ts` + direct `process.env`):
+///   - `OPENAI_API_KEY`        — AI codegen/chat/pm/sre/wizard (credential).
+///   - `SANDBOX_TOKEN`         — sandbox controller bearer token (credential).
+///   - `SANDBOX_URL`           — sandbox/preview backend URL (non-secret config).
+///   - `ZEROSHIP_CONTROL_URL`  — in-cluster control-plane base URL the console's
+///                               control-client talks to (non-secret config). The
+///                               console reads `ZEROSHIP_CONTROL_URL` first, then
+///                               `CONTROL_URL`; we forward the canonical name.
+///   - `ZEROSHIP_SDK_REGISTRY` — private npm registry URL for generated apps
+///                               (non-secret config; optional).
+/// Mirrors what the now-retired `builder.*` compose service used to inject
+/// (`SANDBOX_URL`, `SANDBOX_TOKEN`, `OPENAI_API_KEY`, `CONTROL_URL`); the AI
+/// model is hard-coded in the console (`gpt-5.4-mini`) with no base-URL override,
+/// so there is no model/base-URL env var to forward.
+const CONSOLE_RUNTIME_ENV: &[RuntimeEnvSpec] = &[
+    RuntimeEnvSpec {
+        app_key: "OPENAI_API_KEY",
+        source_env: "OPENAI_API_KEY",
+        class: EnvClass::Secret,
+    },
+    RuntimeEnvSpec {
+        app_key: "SANDBOX_TOKEN",
+        source_env: "SANDBOX_TOKEN",
+        class: EnvClass::Secret,
+    },
+    RuntimeEnvSpec {
+        app_key: "SANDBOX_URL",
+        source_env: "SANDBOX_URL",
+        class: EnvClass::Var,
+    },
+    RuntimeEnvSpec {
+        app_key: "ZEROSHIP_CONTROL_URL",
+        source_env: "ZEROSHIP_CONTROL_URL",
+        class: EnvClass::Var,
+    },
+    RuntimeEnvSpec {
+        app_key: "ZEROSHIP_SDK_REGISTRY",
+        source_env: "ZEROSHIP_SDK_REGISTRY",
+        class: EnvClass::Var,
+    },
+];
+
 /// Lifetime of the minted service PAT. Long-lived (the console is a standing
 /// service); rotate-or-reuse keeps a single live row, so this only bounds how
 /// long a leaked token stays valid before the next absent-row re-mint.
@@ -341,6 +422,12 @@ pub async fn bootstrap_console(
     let minted_new_pat =
         ensure_service_pat_env(cfg, env_store, pat_issuer, auth_pg, &app_id).await?;
 
+    // 5. Forward the console's FULL server-side runtime env (OPENAI_API_KEY,
+    //    SANDBOX_URL/SANDBOX_TOKEN, control URL, SDK registry) from the control
+    //    process env into the same server-only env store. Unset source vars are
+    //    skipped with a warning so the seed never fails or writes an empty value.
+    ensure_runtime_env(env_store, &app_id).await?;
+
     tracing::info!(
         app_id = %app_id,
         client_id = %client_id,
@@ -539,6 +626,94 @@ async fn ensure_service_pat_env(
         "control: minted console service PAT + set ZS_CONTROL_SERVICE_TOKEN"
     );
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Step 5 — full server-side runtime env (forwarded from the control process)
+// ---------------------------------------------------------------------------
+
+/// Forward each [`CONSOLE_RUNTIME_ENV`] entry from the **control process env**
+/// (`std::env::var`) into the console app's server-only env store, using the
+/// SAME paths the service token uses:
+///   - [`EnvClass::Secret`] → `env_store.set_secret` + add to the `expose` list.
+///   - [`EnvClass::Var`]    → `env_store.set_var` (plaintext; always in
+///     `process.env`, so no expose entry).
+///
+/// Behaviour contract:
+///   - **Unset source var ⇒ SKIP** with a logged warning. The seed does NOT
+///     fail and does NOT write an empty secret/var — the console degrades for
+///     that one feature instead of breaking the whole boot.
+///   - **Idempotent.** Both `set_secret` and `set_var` are upserts, and the
+///     `expose` list is read-modify-write (only appends a missing key). A re-run
+///     with unchanged process env reproduces the same rows. (Re-running with a
+///     changed value re-encrypts/overwrites in place, which is the intended
+///     refresh path — same as the rest of the env store.)
+///
+/// Never logs the value of a secret; only its key name and presence.
+async fn ensure_runtime_env(
+    env_store: &EnvStore,
+    app_id: &Uuid,
+) -> Result<(), ConsoleBootstrapError> {
+    // Read the current expose list once; append any newly-set secret keys and
+    // write it back a single time so we don't churn the row per secret.
+    let mut expose = env_store
+        .list_expose(*app_id)
+        .await
+        .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
+    let mut expose_dirty = false;
+
+    for spec in CONSOLE_RUNTIME_ENV {
+        // Source the value from the CONTROL process env at seed time.
+        let value = match std::env::var(spec.source_env) {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) | Err(_) => {
+                // Unset (or empty) ⇒ skip with a warning; never write an empty
+                // value. The console degrades for this one feature.
+                tracing::warn!(
+                    app_key = spec.app_key,
+                    source_env = spec.source_env,
+                    "control: console runtime env var unset in the control process — \
+                     skipping (the deployed console degrades for this feature)"
+                );
+                continue;
+            }
+        };
+
+        match spec.class {
+            EnvClass::Secret => {
+                env_store
+                    .set_secret(*app_id, spec.app_key, &value)
+                    .await
+                    .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
+                if !expose.iter().any(|k| k == spec.app_key) {
+                    expose.push(spec.app_key.to_owned());
+                    expose_dirty = true;
+                }
+                tracing::info!(
+                    app_key = spec.app_key,
+                    "control: set console runtime env (secret + expose, server-only)"
+                );
+            }
+            EnvClass::Var => {
+                env_store
+                    .set_var(*app_id, spec.app_key, &value)
+                    .await
+                    .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
+                tracing::info!(
+                    app_key = spec.app_key,
+                    "control: set console runtime env (plaintext var, server-side process.env)"
+                );
+            }
+        }
+    }
+
+    if expose_dirty {
+        env_store
+            .set_expose(*app_id, &expose)
+            .await
+            .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
+    }
+    Ok(())
 }
 
 async fn ensure_service_user(

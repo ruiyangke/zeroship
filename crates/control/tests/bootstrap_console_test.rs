@@ -358,6 +358,25 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         std::env::temp_dir().join(format!("console-seed-probe-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&probe_root).expect("mkdir probe root");
     let zship = console_zship_path(&probe_root).await;
+
+    // ---- Source the console runtime env from the CONTROL process env. ----
+    // The seed reads each `CONSOLE_RUNTIME_ENV` source var via `std::env::var`.
+    // Set a representative mix (two credentials + two non-secret URLs) and
+    // DELIBERATELY leave `ZEROSHIP_SDK_REGISTRY` UNSET so we can assert the
+    // skip-unset behaviour (it must NOT be written, and the seed must still
+    // succeed). Values are unique per run so parallel binaries can't collide.
+    // This binary's single test runs under `--test-threads=1`, so the
+    // process-global `set_var` is safe here.
+    let openai_val = format!("sk-test-{}", Uuid::new_v4().simple());
+    let sandbox_token_val = format!("sbx-{}", Uuid::new_v4().simple());
+    let sandbox_url_val = "http://sandbox.test.local:9091".to_string();
+    let control_url_val = "http://control.test.local:9090".to_string();
+    std::env::set_var("OPENAI_API_KEY", &openai_val);
+    std::env::set_var("SANDBOX_TOKEN", &sandbox_token_val);
+    std::env::set_var("SANDBOX_URL", &sandbox_url_val);
+    std::env::set_var("ZEROSHIP_CONTROL_URL", &control_url_val);
+    std::env::remove_var("ZEROSHIP_SDK_REGISTRY"); // the unset-skip case
+
     let cfg = ConsoleBootstrapConfig {
         enabled: true,
         console_host: host.clone(),
@@ -511,6 +530,90 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .expect("token present in merged secrets");
     assert_eq!(token_val.split('.').count(), 3, "looks like a JWT");
 
+    // (5) FULL server-side runtime env forwarded from the control process env.
+    //     Re-read the live env-store surfaces (they were populated alongside the
+    //     service token above).
+    let secret_names = env_store.list_secret_names(app_id).await.expect("list secrets");
+    let vars = env_store.list_vars(app_id).await.expect("list vars");
+    let expose = env_store.list_expose(app_id).await.expect("list expose");
+    let worker_env = env_store
+        .merged_env_for_worker(app_id)
+        .await
+        .expect("merged worker env");
+
+    // (5a) Credentials → encrypted SECRET + expose entry, retrievable
+    //      server-side, and NOT a plaintext browser-exposed var.
+    for (key, expected) in [
+        ("OPENAI_API_KEY", &openai_val),
+        ("SANDBOX_TOKEN", &sandbox_token_val),
+    ] {
+        assert!(
+            secret_names.iter().any(|n| n == key),
+            "{key} stored as an encrypted secret: {secret_names:?}"
+        );
+        assert!(
+            !vars.iter().any(|(k, _)| k == key),
+            "{key} must NOT be a plaintext (browser-exposed) var"
+        );
+        assert!(
+            expose.iter().any(|k| k == key),
+            "{key} opted into expose so the worker surfaces it in process.env: {expose:?}"
+        );
+        // The encrypted value is NOT readable as a plaintext var/merged-var, but
+        // IS retrievable server-side via the worker's `secrets` map (decrypted).
+        assert_eq!(
+            worker_env["secrets"][key].as_str(),
+            Some(expected.as_str()),
+            "{key} decrypts to the forwarded value in the server-side worker env"
+        );
+        // Defense-in-depth: it must NOT appear in the `vars` half of the
+        // worker payload (that's the always-public plaintext surface).
+        assert!(
+            worker_env["vars"].get(key).is_none(),
+            "{key} must not leak into the plaintext vars surface"
+        );
+    }
+
+    // (5b) Non-secret config → plaintext VAR (always in process.env; no expose
+    //      entry needed), retrievable server-side, NOT stored as a secret.
+    for (key, expected) in [
+        ("SANDBOX_URL", &sandbox_url_val),
+        ("ZEROSHIP_CONTROL_URL", &control_url_val),
+    ] {
+        assert!(
+            vars.iter().any(|(k, v)| k == key && v == expected),
+            "{key} stored as a plaintext var with the forwarded value: {vars:?}"
+        );
+        assert!(
+            !secret_names.iter().any(|n| n == key),
+            "{key} is non-secret config — must NOT be encrypted as a secret"
+        );
+        assert!(
+            !expose.iter().any(|k| k == key),
+            "{key} is a var (always in process.env) — no expose entry expected: {expose:?}"
+        );
+        assert_eq!(
+            worker_env["vars"][key].as_str(),
+            Some(expected.as_str()),
+            "{key} surfaces in the server-side worker vars"
+        );
+    }
+
+    // (5c) UNSET source var is SKIPPED — not written as a secret, var, or
+    //      expose entry — and the seed still succeeded (asserted above).
+    assert!(
+        !secret_names.iter().any(|n| n == "ZEROSHIP_SDK_REGISTRY"),
+        "unset ZEROSHIP_SDK_REGISTRY must not be written as a secret"
+    );
+    assert!(
+        !vars.iter().any(|(k, _)| k == "ZEROSHIP_SDK_REGISTRY"),
+        "unset ZEROSHIP_SDK_REGISTRY must not be written as a var (no empty value)"
+    );
+    assert!(
+        !expose.iter().any(|k| k == "ZEROSHIP_SDK_REGISTRY"),
+        "unset ZEROSHIP_SDK_REGISTRY must not be exposed"
+    );
+
     // ---- Second run: idempotent. No error, no duplicate, no PAT re-mint. ----
     let second = bootstrap_console(
         &cfg,
@@ -565,6 +668,60 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .get("n");
     assert_eq!(n_secret, 1, "no duplicate service-token secret");
 
+    // (5d) Runtime-env idempotency: each forwarded secret has exactly ONE row
+    //      after the re-run (upsert, not insert), and the decrypted value is
+    //      unchanged. Plaintext vars are likewise still present with the same
+    //      value, and the unset var is still absent.
+    for key in ["OPENAI_API_KEY", "SANDBOX_TOKEN"] {
+        let n: i64 = control_pg
+            .query(
+                "SELECT COUNT(*)::BIGINT AS n FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
+                &[&app_id, &key],
+            )
+            .await
+            .expect("count runtime secret")[0]
+            .get("n");
+        assert_eq!(n, 1, "no duplicate {key} secret after re-run");
+    }
+    let worker_env2 = env_store
+        .merged_env_for_worker(app_id)
+        .await
+        .expect("merged worker env (second run)");
+    assert_eq!(
+        worker_env2["secrets"]["OPENAI_API_KEY"].as_str(),
+        Some(openai_val.as_str()),
+        "OPENAI_API_KEY value stable across idempotent re-run"
+    );
+    assert_eq!(
+        worker_env2["secrets"]["SANDBOX_TOKEN"].as_str(),
+        Some(sandbox_token_val.as_str())
+    );
+    assert_eq!(
+        worker_env2["vars"]["SANDBOX_URL"].as_str(),
+        Some(sandbox_url_val.as_str())
+    );
+    assert_eq!(
+        worker_env2["vars"]["ZEROSHIP_CONTROL_URL"].as_str(),
+        Some(control_url_val.as_str())
+    );
+    assert!(
+        worker_env2["secrets"].get("ZEROSHIP_SDK_REGISTRY").is_none()
+            && worker_env2["vars"].get("ZEROSHIP_SDK_REGISTRY").is_none(),
+        "unset ZEROSHIP_SDK_REGISTRY stays absent across re-run"
+    );
+    // The expose list carries exactly the three server-only secrets (the
+    // service token + the two forwarded credentials) and no var keys.
+    let expose2 = env_store.list_expose(app_id).await.expect("list expose 2");
+    for k in [SERVICE_TOKEN_ENV_KEY, "OPENAI_API_KEY", "SANDBOX_TOKEN"] {
+        assert!(expose2.iter().any(|e| e == k), "{k} exposed: {expose2:?}");
+    }
+    for k in ["SANDBOX_URL", "ZEROSHIP_CONTROL_URL", "ZEROSHIP_SDK_REGISTRY"] {
+        assert!(
+            !expose2.iter().any(|e| e == k),
+            "{k} (var/unset) must not be in the expose list: {expose2:?}"
+        );
+    }
+
     // ---- Disabled config is a no-op. ----
     let disabled_cfg = ConsoleBootstrapConfig {
         enabled: false,
@@ -584,6 +741,15 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     assert_eq!(disabled.status, ConsoleBootstrapStatus::Disabled);
 
     // Cleanup.
+    for k in [
+        "OPENAI_API_KEY",
+        "SANDBOX_TOKEN",
+        "SANDBOX_URL",
+        "ZEROSHIP_CONTROL_URL",
+        "ZEROSHIP_SDK_REGISTRY",
+    ] {
+        std::env::remove_var(k);
+    }
     cleanup(&control_pg, &host).await;
     let _ = std::fs::remove_dir_all(&blob_root);
     let _ = std::fs::remove_dir_all(&probe_root);

@@ -121,6 +121,27 @@ services:
       # byte-identical on control + gateway — both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
       PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
+      # --- Console runtime env, FORWARDED by --bootstrap-console -------------
+      # The deployed console (the AI app-builder, a gateway-fronted zeroship
+      # app) needs these as SERVER-SIDE app env to function. The console seed
+      # (crates/control/src/bootstrap_console.rs) reads each from THIS process
+      # env at install time and writes it onto the console app's env store
+      # (secrets encrypted + exposed to process.env; plain URLs as vars) — never
+      # the browser. An unset var here is skipped (that console feature
+      # degrades) rather than failing the seed. These replace what the retired
+      # `builder` Vite service used to inject.
+      #
+      # OPERATOR MUST SUPPLY: OPENAI_API_KEY (the AI codegen/chat is dead
+      # without it). Export it in the host shell before `docker compose up`;
+      # the empty default lets the stack boot (console AI degrades) if absent.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Sandbox/preview backend — same values the `sandbox` service is
+      # configured with (URL on the compose network + its bearer token).
+      SANDBOX_URL: http://sandbox:9091
+      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
+      # In-cluster control-plane base URL the deployed console's control-client
+      # calls (the localhost default is wrong inside the compose network).
+      ZEROSHIP_CONTROL_URL: http://control:9090
     ports:
       - "9090:9090"
     volumes:
