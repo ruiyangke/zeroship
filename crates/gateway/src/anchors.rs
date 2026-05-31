@@ -15,9 +15,13 @@
 //!   - **`refresh_token_enc`** holds the AES-256-GCM-encrypted server-held
 //!     rotating refresh family (`zeroship_core::crypto`). In the default
 //!     `server_anchor` mode the browser never holds a refresh token.
-//!   - **`cached_access_token` / `cached_access_exp`** cache the last minted
-//!     WRAPPER access token under a SECONDS-scale window so a reload-storm
-//!     coalesces into one Hydra refresh (the `?mint=1` single-flight, §1.2).
+//!
+//! BFF redesign (`2026-05-30-auth-bff-session-redesign` §3.1): the browser no
+//! longer holds a wrapper access token, so the per-anchor cached-WRAPPER slot
+//! (the former `cached_access_token` / `cached_access_exp` columns) is gone.
+//! Reload-storm coalescing is now provided by the family-rotation single-flight
+//! on `GET /__zs/auth/session?mint=1` (still here). The anchor remains the
+//! reload-recovery + server-held refresh-family custody store.
 //!
 //! Every store fn takes a `&Client` (a `PooledClient` derefs to it), so the
 //! caller checks a pooled connection out for exactly ONE operation and
@@ -44,17 +48,10 @@ pub const ANCHOR_ABS_DAYS: i64 = 30;
 /// `ANCHOR_ABS_DAYS` and the breadcrumb.
 pub const ANCHOR_COOKIE_MAX_AGE_SECS: i64 = ANCHOR_ABS_DAYS * 24 * 3600;
 
-/// The server-side cached-wrapper window, in seconds. SECONDS-scale and
-/// `<= 600` (spec §1.2: `min(600, ANCHOR_MINT_CACHE_TTL)`, where
-/// `ANCHOR_MINT_CACHE_TTL` is "a few seconds"). Long enough to collapse a
-/// reload-storm and the cross-node window; short enough that an actively
-/// used anchor still rotates its family well within the 720h ceiling. This
-/// is deliberately MUCH shorter than the 10-min wrapper `exp` the browser
-/// holds — the cache coalesces bursts, it does not extend token lifetime.
-pub const ANCHOR_MINT_CACHE_TTL_SECS: i64 = 5;
-
-/// Browser-held wrapper access-token lifetime in seconds (10 min, §8.5).
-/// The wrapper's own `exp`; distinct from `ANCHOR_MINT_CACHE_TTL_SECS`.
+/// Wrapper access-token lifetime in seconds (10 min, §8.5). Still the
+/// `exp` of the gateway wrappers minted on the surviving non-browser paths
+/// (`/dpop-exchange`); no longer handed to the SPA (BFF redesign §3.1 — the
+/// browser holds no wrapper).
 pub const WRAPPER_TTL_SECS: i64 = 600;
 
 /// Production anchor cookie name (`__Host-` prefix → Secure required).
@@ -157,8 +154,6 @@ pub struct Anchor {
     /// AES-256-GCM ciphertext of the server-held refresh family.
     pub refresh_token_enc: Vec<u8>,
     pub refresh_family_id: String,
-    pub cached_access_token: Option<String>,
-    pub cached_access_exp: Option<chrono::DateTime<chrono::Utc>>,
     pub granted_scopes: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub abs_expires_at: chrono::DateTime<chrono::Utc>,
@@ -173,9 +168,6 @@ pub struct NewAnchor<'a> {
     pub refresh_token_enc: &'a [u8],
     pub refresh_family_id: &'a str,
     pub granted_scopes: &'a [String],
-    /// The wrapper minted at code-exchange, cached for the immediate
-    /// reload-storm window. `None` to skip caching.
-    pub cached_access_token: Option<&'a str>,
 }
 
 /// Insert a new anchor row. `abs_expires_at` is computed as
@@ -187,29 +179,21 @@ pub struct NewAnchor<'a> {
 pub async fn create(conn: &Client, params: &NewAnchor<'_>) -> Result<Anchor> {
     let scopes: Vec<String> = params.granted_scopes.to_vec();
     let refresh_enc = params.refresh_token_enc.to_vec();
-    // cached_access_exp = NOW() + ANCHOR_MINT_CACHE_TTL when a wrapper is
-    // cached at create; NULL otherwise.
     let rows = conn
         .query(
             "INSERT INTO auth.app_session_anchors \
                 (app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, \
-                 cached_access_token, cached_access_exp, granted_scopes, abs_expires_at) \
+                 granted_scopes, abs_expires_at) \
              VALUES ($1, $2, $3, $4, $5, $6, \
-                     CASE WHEN $6::text IS NULL THEN NULL \
-                          ELSE NOW() + ($7::text || ' seconds')::interval END, \
-                     $8, \
-                     NOW() + ($9::text || ' days')::interval) \
+                     NOW() + ($7::text || ' days')::interval) \
              RETURNING id, app_id, client_id, global_user_id, refresh_token_enc, \
-                       refresh_family_id, cached_access_token, cached_access_exp, \
-                       granted_scopes, created_at, abs_expires_at",
+                       refresh_family_id, granted_scopes, created_at, abs_expires_at",
             &[
                 &params.app_id,
                 &params.client_id,
                 &params.global_user_id,
                 &refresh_enc,
                 &params.refresh_family_id,
-                &params.cached_access_token,
-                &ANCHOR_MINT_CACHE_TTL_SECS.to_string(),
                 &scopes,
                 &ANCHOR_ABS_DAYS.to_string(),
             ],
@@ -236,8 +220,7 @@ pub async fn read_live(conn: &Client, id: Uuid) -> Result<Option<Anchor>> {
     let rows = conn
         .query(
             "SELECT id, app_id, client_id, global_user_id, refresh_token_enc, \
-                    refresh_family_id, cached_access_token, cached_access_exp, \
-                    granted_scopes, created_at, abs_expires_at \
+                    refresh_family_id, granted_scopes, created_at, abs_expires_at \
              FROM auth.app_session_anchors \
              WHERE id = $1 AND revoked_at IS NULL AND abs_expires_at > NOW()",
             &[&id],
@@ -247,39 +230,30 @@ pub async fn read_live(conn: &Client, id: Uuid) -> Result<Option<Anchor>> {
     Ok(rows.first().map(row_to_anchor))
 }
 
-/// Persist a rotated refresh family + the freshly-minted cached wrapper
-/// after a `?mint=1` Hydra refresh. `cached_access_exp` is set to
-/// `NOW() + ANCHOR_MINT_CACHE_TTL` (the seconds-scale single-flight
-/// window). `abs_expires_at` and `created_at` are UNTOUCHED — the anchor's
-/// own 30-day clock never slides.
+/// Persist a rotated refresh family after a `?mint=1` Hydra refresh.
+/// `abs_expires_at` and `created_at` are UNTOUCHED — the anchor's own 30-day
+/// clock never slides. The browser no longer holds a wrapper (BFF redesign
+/// §3.1), so there is no cached wrapper to persist here — only the rotated
+/// encrypted refresh family + its lineage id.
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
-pub async fn update_minted(
+pub async fn update_rotated_family(
     conn: &Client,
     id: Uuid,
     refresh_token_enc: &[u8],
     refresh_family_id: &str,
-    cached_access_token: &str,
 ) -> Result<()> {
     let refresh_enc = refresh_token_enc.to_vec();
     conn.execute(
         "UPDATE auth.app_session_anchors SET \
             refresh_token_enc = $2, \
-            refresh_family_id = $3, \
-            cached_access_token = $4, \
-            cached_access_exp = NOW() + ($5::text || ' seconds')::interval \
+            refresh_family_id = $3 \
          WHERE id = $1 AND revoked_at IS NULL",
-        &[
-            &id,
-            &refresh_enc,
-            &refresh_family_id,
-            &cached_access_token,
-            &ANCHOR_MINT_CACHE_TTL_SECS.to_string(),
-        ],
+        &[&id, &refresh_enc, &refresh_family_id],
     )
     .await
-    .map_err(|e| GatewayError::Db(format!("app_session_anchors update_minted: {e}")))?;
+    .map_err(|e| GatewayError::Db(format!("app_session_anchors update_rotated_family: {e}")))?;
     Ok(())
 }
 
@@ -348,54 +322,66 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Anchor {
         global_user_id: row.get("global_user_id"),
         refresh_token_enc: row.get("refresh_token_enc"),
         refresh_family_id: row.get("refresh_family_id"),
-        // Null-aware typed get: only a genuine SQL NULL becomes `None`. A
-        // type/decode error PANICS here rather than silently masquerading as
-        // "no cached wrapper" (which `try_get().ok()` did), so a driver bug
-        // surfaces loudly instead of forcing an extra Hydra refresh.
-        cached_access_token: {
-            let v: Option<String> = row.get("cached_access_token");
-            v
-        },
-        cached_access_exp: {
-            let v: Option<chrono::DateTime<chrono::Utc>> = row.get("cached_access_exp");
-            v
-        },
         granted_scopes: row.get("granted_scopes"),
         created_at: row.get("created_at"),
         abs_expires_at: row.get("abs_expires_at"),
     }
 }
 
-// ─── Per-node mint single-flight (round-6 BLOCKER) ───────────────────────
+// ─── Per-node family-rotation single-flight (round-6 BLOCKER) ────────────
 //
-// Concurrent `?mint=1` minters for the SAME anchor on ONE gateway worker
-// thread coalesce into ONE Hydra refresh. The compio model is single-thread
-// per worker (`!Send` futures), so the keyed map is a thread-local
-// `RefCell<HashMap<AnchorId, Shared<…>>>` — NOT a cross-thread `Mutex`. A
-// `Shared` future is `Clone`, so N callers clone-and-await the SAME future;
-// exactly one drives the body (the Hydra refresh), and all N receive its
-// cloned result.
+// Concurrent `?mint=1` reloaders for the SAME anchor on ONE gateway worker
+// thread coalesce into ONE Hydra refresh (the "family rotation"). The compio
+// model is single-thread per worker (`!Send` futures), so the keyed map is a
+// thread-local `RefCell<HashMap<AnchorId, Shared<…>>>` — NOT a cross-thread
+// `Mutex`. A `Shared` future is `Clone`, so N callers clone-and-await the SAME
+// future; exactly one drives the body (the Hydra refresh), and all N receive
+// its cloned result.
 //
 // The single-flight holds NO db connection and NO lock across the Hydra
 // call: the future body itself checks a pooled connection out, reads, then
 // RELEASES it before awaiting Hydra, and checks another out afterwards to
-// write — see `crate::auth_token::mint`.
+// write — see `crate::auth_token::rotate_family` / `do_refresh`.
+//
+// NOTE on vocabulary: this is FAMILY-ROTATION machinery, not token "minting".
+// The only thing the platform calls a "mint" is the deferred control-plane
+// power-token mint; the `?mint=1` query flag is the SDK's reload-recovery
+// trigger (kept for the wire contract), but the Rust types here are
+// `Rotation*` to avoid that confusion.
 
-/// The result a coalesced mint future resolves to. `Rc`-wrapped + `Clone`
-/// so a `Shared` future can hand the same value to every awaiter (the
-/// underlying `Output` must be `Clone`).
-pub type MintResult = std::result::Result<MintOk, MintError>;
+/// The result a coalesced family-rotation future resolves to. `Clone` so a
+/// `Shared` future can hand the same value to every awaiter (the underlying
+/// `Output` must be `Clone`).
+pub type RotationResult = std::result::Result<RotationOk, RotationError>;
 
-/// A successful mint: the wrapper access token the browser receives.
+/// A successful reload-recovery family rotation (BFF redesign §2.2 / §3.1).
+///
+/// The browser no longer receives a wrapper, so this no longer carries an
+/// access token. It carries the identity facts the `?mint=1` handler needs to
+/// re-create the gateway session from the rotated id_token — the global user
+/// UUID (the gateway session `user_id`), the freshly-granted scopes, and the
+/// id-token `email_verified` / `name` / `auth_time` / `amr` claims. The
+/// relay-alias email swap and `pws_` projection happen in the handler (which
+/// holds the route and salts), exactly as on the `/token` path, so the rotated
+/// raw Hydra access JWT never leaves the gateway and no JWT reaches the browser.
 #[derive(Debug, Clone)]
-pub struct MintOk {
-    pub access_token: String,
-    pub expires_in: i64,
+pub struct RotationOk {
+    pub global_user_id: Uuid,
+    pub granted_scopes: Vec<String>,
+    pub email_verified: Option<bool>,
+    pub name: Option<String>,
+    /// The `picture` claim, sourced from the rotated id_token when the refresh
+    /// grant returns one (BFF minor fix): without this, name/avatar silently
+    /// degrade across a reload-recovery vs the original `/token` row, because
+    /// the rotated raw ACCESS JWT does not always carry the profile claims.
+    pub avatar_url: Option<String>,
+    pub auth_time: Option<i64>,
+    pub amr: Vec<String>,
 }
 
-/// Why a coalesced mint failed. `Clone` so a `Shared` future can fan it out.
+/// Why a coalesced family rotation failed. `Clone` so a `Shared` future can fan it out.
 #[derive(Debug, Clone)]
-pub enum MintError {
+pub enum RotationError {
     /// The anchor is gone / its family was revoked or hit the 720h ceiling
     /// (Hydra `invalid_grant`). The caller deletes the anchor + clears the
     /// breadcrumb and surfaces `401 login_required`.
@@ -406,17 +392,17 @@ pub enum MintError {
     Upstream(String),
 }
 
-/// A type-erased, shared, cloneable mint future. Boxed so the map can hold
+/// A type-erased, shared, cloneable rotation future. Boxed so the map can hold
 /// futures of one concrete type regardless of the concrete `async` block.
-pub type SharedMintFuture =
-    Shared<std::pin::Pin<Box<dyn std::future::Future<Output = MintResult>>>>;
+pub type SharedRotationFuture =
+    Shared<std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>>;
 
-/// Per-worker-thread coalescing map: `anchor_id → in-flight mint future`.
+/// Per-worker-thread coalescing map: `anchor_id → in-flight rotation future`.
 ///
 /// `!Send` (it lives behind a thread-local), matching the single-thread
 /// compio worker model. An entry is inserted on the first miss and removed
 /// once the future resolves, so the map only ever holds genuinely in-flight
-/// mints.
+/// rotations.
 ///
 /// Because it is `!Send`, it CANNOT live in the `Arc<GateState>` shared
 /// across ntex's worker arbiter threads — exactly the same constraint the
@@ -425,47 +411,47 @@ pub type SharedMintFuture =
 /// intended scope (cross-thread/cross-node concurrency is absorbed by the
 /// short cached wrapper + Hydra's rotation grace, §1.2).
 #[derive(Default, Clone)]
-pub struct MintSingleFlight {
-    inner: Rc<RefCell<HashMap<Uuid, SharedMintFuture>>>,
+pub struct RotationSingleFlight {
+    inner: Rc<RefCell<HashMap<Uuid, SharedRotationFuture>>>,
 }
 
-impl std::fmt::Debug for MintSingleFlight {
+impl std::fmt::Debug for RotationSingleFlight {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MintSingleFlight")
+        f.debug_struct("RotationSingleFlight")
             .field("in_flight", &self.inner.borrow().len())
             .finish()
     }
 }
 
-impl MintSingleFlight {
+impl RotationSingleFlight {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Look up the in-flight mint for `anchor_id`, cloning the `Shared`
+    /// Look up the in-flight rotation for `anchor_id`, cloning the `Shared`
     /// future if one exists. `None` ⇒ the caller is the leader and must
     /// `insert` a fresh future.
     #[must_use]
-    pub fn get(&self, anchor_id: Uuid) -> Option<SharedMintFuture> {
+    pub fn get(&self, anchor_id: Uuid) -> Option<SharedRotationFuture> {
         self.inner.borrow().get(&anchor_id).cloned()
     }
 
-    /// Register `fut` as the in-flight mint for `anchor_id` and return a
+    /// Register `fut` as the in-flight rotation for `anchor_id` and return a
     /// clone to await. If a concurrent leader already registered one (it
     /// cannot on a single thread between two synchronous calls, but the API
     /// stays race-safe), the existing one is returned and `fut` is dropped.
-    pub fn insert(&self, anchor_id: Uuid, fut: SharedMintFuture) -> SharedMintFuture {
+    pub fn insert(&self, anchor_id: Uuid, fut: SharedRotationFuture) -> SharedRotationFuture {
         let mut map = self.inner.borrow_mut();
         map.entry(anchor_id).or_insert(fut).clone()
     }
 
-    /// Remove the in-flight entry once the mint resolves.
+    /// Remove the in-flight entry once the rotation resolves.
     pub fn remove(&self, anchor_id: Uuid) {
         self.inner.borrow_mut().remove(&anchor_id);
     }
 
-    /// Number of in-flight mints (test/observability only).
+    /// Number of in-flight rotations (test/observability only).
     #[must_use]
     pub fn in_flight(&self) -> usize {
         self.inner.borrow().len()
@@ -473,26 +459,26 @@ impl MintSingleFlight {
 }
 
 thread_local! {
-    /// One coalescing map per worker thread. `MintSingleFlight` is `!Send`
+    /// One coalescing map per worker thread. `RotationSingleFlight` is `!Send`
     /// (it holds `Rc<RefCell<…>>`), so it lives here rather than in the
     /// `Arc<GateState>` shared across ntex worker arbiter threads — the
     /// same reason the compio-postgres `Pool` is thread-local (`crate::db`).
-    static SINGLE_FLIGHT: MintSingleFlight = MintSingleFlight::new();
+    static SINGLE_FLIGHT: RotationSingleFlight = RotationSingleFlight::new();
 }
 
-/// Run `f` with this worker thread's mint single-flight. The closure gets a
+/// Run `f` with this worker thread's family-rotation single-flight. The closure gets a
 /// cheap `Clone` of the per-thread map (the `Rc` clone is shared state), so
 /// it can `get`/`insert`/`remove` across `.await` points without holding a
 /// `RefCell` borrow.
-pub fn with_single_flight<R>(f: impl FnOnce(MintSingleFlight) -> R) -> R {
+pub fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
     SINGLE_FLIGHT.with(|sf| f(sf.clone()))
 }
 
-/// RAII guard that removes an `anchor_id` from THIS worker thread's mint
+/// RAII guard that removes an `anchor_id` from THIS worker thread's rotation
 /// single-flight map when dropped (round-6 BLOCKER invariant: "remove
 /// `single_flight.entry` once `fut` resolves").
 ///
-/// The guard is owned by the SHARED mint future's body, NOT by the leader
+/// The guard is owned by the SHARED rotation future's body, NOT by the leader
 /// request task. That distinction is the whole point: a `futures::Shared`
 /// future is driven to completion by whichever awaiter is alive, so if the
 /// leader's request is cancelled mid-flight (client disconnect / ntex
@@ -501,7 +487,7 @@ pub fn with_single_flight<R>(f: impl FnOnce(MintSingleFlight) -> R) -> R {
 /// dropped. If EVERY awaiter is dropped before the future resolves, the
 /// future body is dropped too and the guard still fires — so a half-started,
 /// never-resolved entry is also cleared rather than leaking. Either way the
-/// map only ever holds genuinely in-flight mints, and a later mint for the
+/// map only ever holds genuinely in-flight rotations, and a later rotation for the
 /// same anchor re-rotates instead of being handed a stale resolved wrapper
 /// forever.
 #[derive(Debug)]
@@ -610,31 +596,24 @@ mod tests {
     }
 
     #[test]
-    fn cache_ttl_is_seconds_scale_below_wrapper_ttl() {
-        // The cached-wrapper window MUST be seconds-scale and strictly
-        // shorter than the 10-min wrapper exp the browser holds (§1.2).
-        assert!(ANCHOR_MINT_CACHE_TTL_SECS > 0);
-        assert!(
-            ANCHOR_MINT_CACHE_TTL_SECS < WRAPPER_TTL_SECS,
-            "cache TTL ({ANCHOR_MINT_CACHE_TTL_SECS}s) must be << wrapper TTL ({WRAPPER_TTL_SECS}s)"
-        );
-        assert!(
-            ANCHOR_MINT_CACHE_TTL_SECS <= 30,
-            "cache TTL must be a few seconds, not minutes"
-        );
-    }
-
-    #[test]
     fn single_flight_coalesces_then_clears() {
         use futures::FutureExt as _;
-        let sf = MintSingleFlight::new();
+        let sf = RotationSingleFlight::new();
         let id = Uuid::new_v4();
         assert_eq!(sf.in_flight(), 0);
         assert!(sf.get(id).is_none());
 
-        let fut: super::SharedMintFuture = (Box::pin(async {
-            Ok(MintOk { access_token: "t".into(), expires_in: 600 })
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = MintResult>>>)
+        let fut: super::SharedRotationFuture = (Box::pin(async {
+            Ok(RotationOk {
+                global_user_id: Uuid::new_v4(),
+                granted_scopes: vec!["openid".into()],
+                email_verified: Some(true),
+                name: None,
+                avatar_url: None,
+                auth_time: None,
+                amr: vec![],
+            })
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
             .shared();
         let _leader = sf.insert(id, fut);
         assert_eq!(sf.in_flight(), 1);

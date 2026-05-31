@@ -408,6 +408,12 @@ pub struct TokenClaims {
     pub acr: Option<String>,
     #[serde(default)]
     pub amr: Option<Vec<String>>,
+    /// OIDC `auth_time` — seconds since epoch of the end-user authentication
+    /// event. Carried onto the gateway cookie session (BFF redesign §2.2 step
+    /// 5b) so the SPA identity projection + the step-up freshness gate (§5.3)
+    /// can read it. Standard OIDC claim Hydra issues; `None` when absent.
+    #[serde(default)]
+    pub auth_time: Option<i64>,
     #[serde(flatten)]
     pub other: std::collections::BTreeMap<String, serde_json::Value>,
 }

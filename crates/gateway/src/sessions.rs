@@ -30,6 +30,16 @@ pub struct AppSession {
     /// §1.4). Read off the same row the cookie path already loads, so the
     /// per-request `ZeroShip-User.scopes` needs no `control.oauth_grants` join.
     pub granted_scopes: Vec<String>,
+    /// The OIDC `auth_time` claim (the authenticating-event instant) carried
+    /// onto the cookie session at create (BFF redesign §2.2 step 5b). Surfaced
+    /// to the SPA via the `{ user }` projection (`/session`) and used by the
+    /// step-up freshness gate (§5.3). `None` when the id_token omitted it.
+    pub auth_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// The OIDC `amr` claim (authentication methods, e.g. `["pwd"]`) carried
+    /// onto the cookie session at create (BFF redesign §2.2 step 5b). Surfaced
+    /// to the SPA via the projection; the `amr ∋ "mfa"` step-up tightening is a
+    /// later MFA-enablement slice (§5.3).
+    pub amr: Vec<String>,
     pub idle_expires_at: chrono::DateTime<chrono::Utc>,
     pub abs_expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -44,6 +54,12 @@ pub struct NewSession<'a> {
     pub email_verified: bool,
     /// Granted scope set resolved at session-create from the consent grant.
     pub granted_scopes: &'a [String],
+    /// The validated id_token's `auth_time` claim (unix seconds), if present.
+    /// Persisted so the SPA projection + step-up gate read it off the gateway
+    /// session row (the gateway path never touches `auth.users`).
+    pub auth_time: Option<i64>,
+    /// The validated id_token's `amr` claim (e.g. `["pwd"]`), if present.
+    pub amr: &'a [String],
 }
 
 /// Sliding idle timeout. After this many minutes of inactivity the
@@ -64,16 +80,21 @@ pub const ABSOLUTE_HOURS: i64 = 12;
 pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession> {
     let user_id = Uuid::parse_str(params.user_id)
         .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid user_id: {e}")))?;
+    let amr: Vec<String> = params.amr.to_vec();
     let rows = conn
         .query(
             "INSERT INTO auth.gateway_sessions \
                 (user_id, app_id, email, name, avatar_url, email_verified, \
-                 granted_scopes, idle_expires_at, abs_expires_at) \
+                 granted_scopes, auth_time, amr, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, $5, $6, $9, \
+                     CASE WHEN $10::bigint IS NULL THEN NULL \
+                          ELSE to_timestamp($10::bigint) END, \
+                     $11, \
                      NOW() + ($7::text || ' minutes')::interval, \
                      NOW() + ($8::text || ' hours')::interval) \
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, granted_scopes, idle_expires_at, abs_expires_at",
+                       email_verified, granted_scopes, auth_time, amr, \
+                       idle_expires_at, abs_expires_at",
             &[
                 &user_id,
                 &params.app_id,
@@ -84,6 +105,8 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
                 &IDLE_MINUTES.to_string(),
                 &ABSOLUTE_HOURS.to_string(),
                 &params.granted_scopes,
+                &params.auth_time,
+                &amr,
             ],
         )
         .await
@@ -118,7 +141,8 @@ pub async fn validate(conn: &Client, id: Uuid, app_id: &str) -> Result<Option<Ap
                AND idle_expires_at > NOW() \
                AND abs_expires_at > NOW() \
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, granted_scopes, idle_expires_at, abs_expires_at",
+                       email_verified, granted_scopes, auth_time, amr, \
+                       idle_expires_at, abs_expires_at",
             &[&id, &app_id, &IDLE_MINUTES.to_string()],
         )
         .await
@@ -226,6 +250,8 @@ fn row_to_session(row: &compio_postgres::Row) -> AppSession {
         avatar_url: row.try_get("avatar_url").ok(),
         email_verified: row.get("email_verified"),
         granted_scopes: row.try_get("granted_scopes").unwrap_or_default(),
+        auth_time: row.try_get("auth_time").ok(),
+        amr: row.try_get("amr").unwrap_or_default(),
         idle_expires_at: row.get("idle_expires_at"),
         abs_expires_at: row.get("abs_expires_at"),
     }

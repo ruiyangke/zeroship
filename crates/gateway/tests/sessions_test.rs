@@ -45,6 +45,10 @@ async fn create_validate_revoke_roundtrip() {
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            // BFF redesign §2.2 step 5b: auth_time + amr are carried on the
+            // cookie session for the SPA projection + step-up freshness.
+            auth_time: Some(1_700_000_000),
+            amr: &["pwd".to_string()],
         },
     )
     .await
@@ -56,6 +60,13 @@ async fn create_validate_revoke_roundtrip() {
     assert_eq!(session.name.as_deref(), Some("Test User"));
     assert!(session.avatar_url.is_none());
     assert!(session.email_verified);
+    // auth_time/amr round-trip through create (§2.2 step 5b).
+    assert_eq!(
+        session.auth_time.map(|t| t.timestamp()),
+        Some(1_700_000_000),
+        "auth_time must round-trip from the id_token claim"
+    );
+    assert_eq!(session.amr, vec!["pwd".to_string()], "amr must round-trip");
 
     // Sliding-window assertion: validate must return Some immediately
     // after creation, and the returned idle_expires_at should be
@@ -69,6 +80,10 @@ async fn create_validate_revoke_roundtrip() {
         valid.idle_expires_at >= session.idle_expires_at,
         "validate must slide idle_expires_at forward, not backward"
     );
+    // validate() returns auth_time/amr off the same row the per-request
+    // projection reads (BFF redesign §2.2 step 5b).
+    assert_eq!(valid.auth_time.map(|t| t.timestamp()), Some(1_700_000_000));
+    assert_eq!(valid.amr, vec!["pwd".to_string()]);
 
     // Wrong app_id → None (defends against confused-deputy across apps
     // sharing the gateway PG instance).

@@ -77,6 +77,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
         },
     )
     .await
@@ -92,6 +94,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
         },
     )
     .await
@@ -110,6 +114,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
         },
     )
     .await
@@ -422,6 +428,8 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
         },
     )
     .await
@@ -617,6 +625,8 @@ async fn per_app_bcl_writes_token_family_marker() {
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
         },
     )
     .await
@@ -766,6 +776,8 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
             avatar_url: None,
             email_verified: true,
             granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
         },
     )
     .await

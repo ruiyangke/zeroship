@@ -544,6 +544,8 @@ async fn gateway_oidc_rp_full_dance() {
             // Faithful: persist the REAL granted scopes from the token exchange,
             // so the round-trip below proves the cookie path reads them back.
             granted_scopes: &granted_scopes,
+            auth_time: claims.auth_time,
+            amr: claims.amr.as_deref().unwrap_or(&[]),
         },
     )
     .await

@@ -294,7 +294,28 @@ async fn resolve_auth_inner(
         // closed (§6.2) on EVERY policy, including Anon — an authenticated
         // request must never have its global UUID projected outward.
         CookieOutcome::ClientNotProvisioned => return AuthOutcome::ClientNotProvisioned,
-        CookieOutcome::Allowed(header) => Some(header),
+        CookieOutcome::Allowed(header) => {
+            // BFF anti-CSRF gate (spec §1.2/§2.3, P3). The SameSite=Lax
+            // `__Host-zs_app_session` cookie is the SPA's LIVE credential, so a
+            // state-changing same-site `POST /api/*` ridden by an XSS / a
+            // cross-site top-level form-POST is the residual CSRF risk the BFF
+            // trade explicitly bounds. We require, for state-changing methods
+            // authenticated PURELY by this cookie: an `Origin` present and an
+            // exact match of the app's own origin, plus `Sec-Fetch-Site:
+            // same-origin` when the browser sends it. GET/HEAD are exempt
+            // (non-state-changing). No mandatory custom header — raw-JS deploys
+            // that POST a plain form must still work, so the Origin match (which
+            // the browser sets and script cannot forge cross-site) carries the
+            // defense. A failure REJECTS the cookie credential for this request
+            // (treated as if no session resolved) rather than 403, so a public
+            // (`Anon`) route still serves anonymously and a `User` route 401s —
+            // identical posture to a missing cookie.
+            if cookie_csrf_rejected(req, state.config.insecure_dev) {
+                None
+            } else {
+                Some(header)
+            }
+        }
         CookieOutcome::None => None,
     };
     match policy.auth {
@@ -311,6 +332,71 @@ async fn resolve_auth_inner(
             }
         }
     }
+}
+
+/// Whether a state-changing request authenticated PURELY by the SameSite=Lax
+/// `__Host-zs_app_session` cookie must be REJECTED on anti-CSRF grounds (BFF
+/// spec §1.2/§2.3, P3).
+///
+/// Returns `true` (reject the cookie credential) when the method is
+/// state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) AND the same-origin posture
+/// fails: a missing `Origin`, an `Origin: null`, a foreign `Origin` (no
+/// substring/subdomain match, never reflected), or a present `Sec-Fetch-Site`
+/// that is not `same-origin`. `GET`/`HEAD`/`OPTIONS` are exempt
+/// (non-state-changing). When `true`, the caller drops the resolved
+/// `ZeroShip-User` so the request is treated as if no session was present
+/// (anon on a public route, 401 on a protected route) — never a leaked
+/// cross-site mutation.
+///
+/// No custom-header requirement here (unlike `auth_token::same_origin_guard`):
+/// the dispatch path serves raw-JS deploys that legitimately POST a plain form,
+/// so the browser-set `Origin` (which page script cannot forge cross-site)
+/// carries the defense. Bearer/DPoP-authenticated requests never reach this
+/// gate — they are resolved on the earlier arms and carry an explicit,
+/// non-auto-attached `Authorization` header that is itself CSRF-proof.
+fn cookie_csrf_rejected(req: &HttpRequest, insecure_dev: bool) -> bool {
+    let method = req.method();
+    let state_changing = matches!(
+        *method,
+        ntex::http::Method::POST
+            | ntex::http::Method::PUT
+            | ntex::http::Method::PATCH
+            | ntex::http::Method::DELETE
+    );
+    if !state_changing {
+        return false;
+    }
+
+    let host = req
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let scheme = if insecure_dev { "http" } else { "https" };
+    let expected_origin = format!("{scheme}://{host}");
+
+    // Origin: required + exact-match. Missing/null/foreign ⇒ reject.
+    match req
+        .headers()
+        .get(http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(origin) if origin == expected_origin => {}
+        _ => return true,
+    }
+
+    // Sec-Fetch-Site: enforced WHEN present, advisory when absent.
+    if let Some(sfs) = req
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+    {
+        if sfs != "same-origin" {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Outcome of projecting a global user id to its per-app pairwise `pws_…`
@@ -1902,6 +1988,8 @@ mod tests {
             email_verified: Some(true),
             name: Some("Carol".into()),
             scope: Some("openid read:billing".into()),
+            auth_time: None,
+            amr: None,
         };
         let owned = build_worker_user_from_access_claims(&claims);
         assert_eq!(owned.id, "usr_global");
@@ -2806,6 +2894,116 @@ mod tests {
         let mut p = user_policy();
         p.required_scopes = required.iter().map(|s| s.to_string()).collect();
         p
+    }
+
+    // ─── BFF P3 anti-CSRF gate on cookie-authenticated dispatch (DB-free) ──
+
+    /// Build a request with an explicit method + optional Origin / Sec-Fetch-Site
+    /// for the `cookie_csrf_rejected` gate (dev ⇒ `http://` origin compare).
+    fn csrf_req(
+        method: ntex::http::Method,
+        host: &str,
+        origin: Option<&str>,
+        sfs: Option<&str>,
+    ) -> HttpRequest {
+        let mut b = ntex::web::test::TestRequest::default()
+            .method(method)
+            .uri("/api/do")
+            .header(http::header::HOST, host);
+        if let Some(o) = origin {
+            b = b.header(http::header::ORIGIN, o);
+        }
+        if let Some(s) = sfs {
+            b = b.header("sec-fetch-site", s);
+        }
+        b.to_http_request()
+    }
+
+    #[test]
+    fn csrf_gate_exempts_safe_methods() {
+        // GET/HEAD are non-state-changing: never rejected, even with a foreign
+        // Origin (the cookie still authenticates reads).
+        let host = "myapp.zeroship.ai";
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::GET, host, Some("https://evil.example"), None),
+            true,
+        ));
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::HEAD, host, None, None),
+            true,
+        ));
+    }
+
+    #[test]
+    fn csrf_gate_accepts_same_origin_state_change() {
+        // POST with the app's own Origin (dev ⇒ http) + same-origin Sec-Fetch.
+        let host = "myapp.zeroship.ai";
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(
+                ntex::http::Method::POST,
+                host,
+                Some("http://myapp.zeroship.ai"),
+                Some("same-origin"),
+            ),
+            true,
+        ));
+        // Sec-Fetch-Site absent is tolerated (advisory) when Origin matches.
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
+            true,
+        ));
+    }
+
+    #[test]
+    fn csrf_gate_rejects_foreign_missing_and_cross_site_state_change() {
+        let host = "myapp.zeroship.ai";
+        // Foreign Origin on a state-changing POST → reject (drop the cookie cred).
+        assert!(cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("https://evil.example"), None),
+            true,
+        ));
+        // MISSING Origin on a state-changing POST → reject (no Origin to match).
+        assert!(cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, None, None),
+            true,
+        ));
+        // Origin: null → reject.
+        assert!(cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("null"), None),
+            true,
+        ));
+        // Present Sec-Fetch-Site != same-origin → reject even with matching Origin.
+        assert!(cookie_csrf_rejected(
+            &csrf_req(
+                ntex::http::Method::POST,
+                host,
+                Some("http://myapp.zeroship.ai"),
+                Some("cross-site"),
+            ),
+            true,
+        ));
+        // PUT/PATCH/DELETE are state-changing too.
+        for m in [ntex::http::Method::PUT, ntex::http::Method::PATCH, ntex::http::Method::DELETE] {
+            assert!(
+                cookie_csrf_rejected(&csrf_req(m.clone(), host, Some("https://evil.example"), None), true),
+                "{m} with foreign Origin must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn csrf_gate_prod_scheme_is_https() {
+        // insecure_dev=false ⇒ expected origin is https://<host>.
+        let host = "myapp.zeroship.ai";
+        assert!(!cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), Some("same-origin")),
+            false,
+        ));
+        // An http Origin in prod is foreign (scheme mismatch) → reject.
+        assert!(cookie_csrf_rejected(
+            &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
+            false,
+        ));
     }
 
     #[compio::test]
@@ -4416,6 +4614,8 @@ mod tests {
                     avatar_url: None,
                     email_verified: true,
                     granted_scopes: &[],
+                    auth_time: None,
+                    amr: &[],
                 },
             )
             .await
@@ -4550,6 +4750,8 @@ mod tests {
                     avatar_url: None,
                     email_verified: true,
                     granted_scopes: &["openid".to_string(), "read:billing".to_string()],
+                    auth_time: None,
+                    amr: &[],
                 },
             )
             .await
@@ -4617,6 +4819,8 @@ mod tests {
                     avatar_url: None,
                     email_verified: true,
                     granted_scopes: &["openid".to_string(), "email".to_string()],
+                    auth_time: None,
+                    amr: &[],
                 },
             )
             .await
@@ -4943,6 +5147,8 @@ mod tests {
                     avatar_url: None,
                     email_verified: true,
                     granted_scopes: &[],
+                    auth_time: None,
+                    amr: &[],
                 },
             )
             .await
@@ -5089,6 +5295,8 @@ mod tests {
                     avatar_url: None,
                     email_verified: true,
                     granted_scopes: &[],
+                    auth_time: None,
+                    amr: &[],
                 },
             )
             .await
@@ -5119,6 +5327,170 @@ mod tests {
         let pool = crate::db::checkout(&db).await.expect("pool");
         let conn = pool.get().await.expect("pool");
         crate::sessions::revoke(&conn, session.id).await.ok();
+    }
+
+    /// REGRESSION (BFF key-normalization BLOCKER + faithful-e2e gap): a session
+    /// row keyed by the app UUID — EXACTLY what the fixed `/token` handler
+    /// writes (`route.app_id.to_string()`) — must authenticate on the LIVE
+    /// per-request dispatch gate `resolve_auth` and yield a signed
+    /// `ZeroShip-User` for the `pws_` subject. This is the real credential the
+    /// SPA's fetch('/api/...') rides; before the fix `/token` keyed the row by
+    /// the SLUG, so this arm (which passes `app_id.to_string()`) returned None
+    /// and every SPA request was silently unauthenticated. The anchors suite
+    /// only wired /token+/session (both slug), so it was blind to this — this
+    /// test drives the actual dispatch arm with a UUID-keyed session. PG-gated.
+    #[compio::test]
+    async fn resolve_auth_cookie_arm_validates_token_minted_uuid_keyed_session() {
+        let Some(db) = connect_auth_db().await else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let state = build_state_with_wrapper_and_auth_ui_url_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+        let aud = "myapp.zeroship.ai";
+        let client_id = "oac_myapp";
+        let sector = "https://myapp.zeroship.ai";
+        // The dispatch arm passes the app UUID; the fixed /token keys the row by
+        // the SAME UUID. Use a UUID here to faithfully mirror that contract.
+        let app_id = Uuid::new_v4();
+        let app_id_str = app_id.to_string();
+
+        let user_id = Uuid::new_v4();
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "INSERT INTO auth.users (id, email, name, email_verified_at) \
+                 VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
+                &[&user_id, &"live-arm-user@example.com", &"Live Arm User"],
+            )
+            .await
+            .expect("seed user");
+        }
+        // Create the row the way the FIXED /token does: keyed by the app UUID.
+        let session = {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            crate::sessions::create(
+                &conn,
+                &crate::sessions::NewSession {
+                    user_id: &user_id.to_string(),
+                    app_id: &app_id_str, // UUID — the canonical key
+                    email: Some("live-arm-user@example.com"),
+                    name: Some("Live Arm User"),
+                    avatar_url: None,
+                    email_verified: true,
+                    granted_scopes: &[],
+                    auth_time: None,
+                    amr: &[],
+                },
+            )
+            .await
+            .expect("create session")
+        };
+
+        let cookie_name = oidc_rp::app_session_cookie_name(true);
+        let request_id = Uuid::new_v4();
+
+        // A safe GET (the SPA's read path) with the session cookie: the live
+        // arm validates by `app_id.to_string()` and Allows with a pws_ header.
+        let get_req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let outcome = resolve_auth(
+            &get_req,
+            &state,
+            &user_policy(),
+            &app_id,
+            &request_id,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        let AuthOutcome::Allowed { user_header: Some(header) } = outcome else {
+            panic!(
+                "the /token-minted UUID-keyed session MUST authenticate on the LIVE \
+                 dispatch arm (resolve_auth keys by app_id.to_string()), got {outcome:?}"
+            );
+        };
+        let id = decode_header_id(&state, &header);
+        let expected_pws =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), sector);
+        assert_eq!(id, expected_pws, "live arm emits the pws_, never the global UUID");
+        assert!(!header.contains(&user_id.to_string()), "global UUID must not appear");
+
+        // BFF P3 anti-CSRF: a state-changing POST carrying the SAME cookie but a
+        // FOREIGN Origin must NOT authenticate — the cookie credential is
+        // dropped, so a `User` route 401s rather than executing a cross-site
+        // mutation ridden by the SameSite=Lax cookie.
+        let csrf_post = ntex::web::test::TestRequest::default()
+            .method(ntex::http::Method::POST)
+            .uri("/api/transfer")
+            .header(http::header::HOST, aud)
+            .header(http::header::ORIGIN, "https://evil.example")
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let csrf_outcome = resolve_auth(
+            &csrf_post,
+            &state,
+            &user_policy(),
+            &app_id,
+            &request_id,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        assert!(
+            matches!(csrf_outcome, AuthOutcome::Unauthenticated),
+            "a cross-origin state-changing POST riding the Lax session cookie MUST be \
+             rejected (P3 anti-CSRF), got {csrf_outcome:?}"
+        );
+
+        // Same POST with the app's OWN Origin authenticates (the legit SPA path).
+        let same_origin_post = ntex::web::test::TestRequest::default()
+            .method(ntex::http::Method::POST)
+            .uri("/api/transfer")
+            .header(http::header::HOST, aud)
+            .header(http::header::ORIGIN, "http://myapp.zeroship.ai") // dev ⇒ http
+            .header("sec-fetch-site", "same-origin")
+            .header("cookie", format!("{cookie_name}={}", session.id))
+            .to_http_request();
+        let ok_outcome = resolve_auth(
+            &same_origin_post,
+            &state,
+            &user_policy(),
+            &app_id,
+            &request_id,
+            Some(client_id),
+            Some(sector),
+        )
+        .await;
+        assert!(
+            matches!(ok_outcome, AuthOutcome::Allowed { user_header: Some(_) }),
+            "a same-origin state-changing POST MUST authenticate, got {ok_outcome:?}"
+        );
+
+        // Cleanup.
+        {
+            let pool = crate::db::checkout(&db).await.expect("pool");
+            let conn = pool.get().await.expect("pool");
+            conn.execute(
+                "DELETE FROM auth.app_user_identities WHERE global_user_id = $1",
+                &[&user_id],
+            )
+            .await
+            .ok();
+            crate::sessions::revoke(&conn, session.id).await.ok();
+            conn.execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+                .await
+                .ok();
+        }
     }
 
     // ─── Batch A fix 2: self-describing-subject invariant ─────────────────

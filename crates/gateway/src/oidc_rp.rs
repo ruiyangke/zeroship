@@ -634,6 +634,13 @@ pub struct AccessClaims {
     pub email_verified: Option<bool>,
     pub name: Option<String>,
     pub scope: Option<String>,
+    /// OIDC `auth_time` (UNIX seconds), when the token carries it. Forwarded
+    /// onto the re-created gateway session on reload-recovery (BFF §2.2 step
+    /// 5b). `None` when absent — Hydra access JWTs do not always include it.
+    pub auth_time: Option<i64>,
+    /// OIDC `amr` (authentication methods), when present. Forwarded onto the
+    /// re-created gateway session on reload-recovery.
+    pub amr: Option<Vec<String>>,
 }
 
 /// Wire shape of a Hydra access JWT we deserialize. `aud` is a raw
@@ -658,6 +665,10 @@ struct RawAccessClaims {
     name: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    auth_time: Option<i64>,
+    #[serde(default)]
+    amr: Option<Vec<String>>,
 }
 
 /// Resolve the cookie-arm `granted_scopes` (Slice 3, §1.4) from the two
@@ -762,6 +773,8 @@ async fn verify_access_jwt(
         email_verified: raw.email_verified,
         name: raw.name,
         scope: raw.scope,
+        auth_time: raw.auth_time,
+        amr: raw.amr,
     })
 }
 

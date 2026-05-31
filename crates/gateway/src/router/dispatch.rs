@@ -1282,14 +1282,26 @@ async fn handle_auth_callback(
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
 ) -> HttpResponse {
-    // app_id is the subdomain — same logic the manifest dispatcher
-    // uses for normal requests.
-    let Some(app_id) = extract_app_name(&req, None) else {
+    // Resolve the app by subdomain — same logic the manifest dispatcher uses
+    // for normal requests — then key the gateway_sessions row by the app's
+    // STABLE UUID (`app_uuid`), NOT the slug. This is the canonical session
+    // key the live per-request dispatch arm (`router/auth.rs`) validates
+    // against (`app_id.to_string()`); a slug-keyed row would never match on
+    // the real SPA→app request path. The slug can be renamed; the UUID is the
+    // immutable identity.
+    let Some(app_name) = extract_app_name(&req, None) else {
         return render_callback_error(
             state.config.insecure_dev,
             "host header missing or unparseable",
         );
     };
+    let Some((app_uuid, _route)) = state.routes.lookup_by_name(&app_name) else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "app not found for this host",
+        );
+    };
+    let app_id = app_uuid.to_string();
 
     // 1. Parse query (code + state). Hydra may also send `error=...`
     //    for user-denied consent; surface it directly.
@@ -1373,6 +1385,10 @@ async fn handle_auth_callback(
             avatar_url: claims.picture.as_deref(),
             email_verified: claims.email_verified.unwrap_or(false),
             granted_scopes: &granted_scopes,
+            // Carry the OIDC auth_time/amr onto the cookie session so the SPA
+            // projection + step-up gate read them off this row (BFF §2.2/§5.3).
+            auth_time: claims.auth_time,
+            amr: claims.amr.as_deref().unwrap_or(&[]),
         },
     )
     .await

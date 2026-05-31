@@ -11,10 +11,14 @@
 --   - refresh_token_enc holds the encrypted (AES-256-GCM, core::crypto) server-
 --     held rotating refresh family — the browser never holds a refresh token in
 --     the default server_anchor mode.
---   - cached_access_token holds the last minted WRAPPER access token (sub=pws_,
---     the per-app pairwise subject) shared by concurrent ?mint=1; cached_access_exp is the
---     SECONDS-scale single-flight window (min(600, ANCHOR_MINT_CACHE_TTL)) ≪ the
---     10-min wrapper exp the browser holds.
+--
+-- BFF redesign (2026-05-30-auth-bff-session-redesign §3.1): the browser no
+-- longer holds a wrapper access token, so the per-anchor cached-WRAPPER slot
+-- (cached_access_token / cached_access_exp) is gone — there is no browser
+-- wrapper to coalesce. Reload-storm coalescing is now provided by the
+-- family-rotation single-flight on GET /__zs/auth/session?mint=1; the
+-- server-side power-token cache (a future control-plane phase) lives in its own
+-- per-(audience,scopes) table, not on the anchor. Pre-launch, no shim.
 --
 -- NOTE: auth.token_revocations already exists (changeset
 -- zeroship:auth-token-revocations in 0002_auth.sql) — NOT recreated here.
@@ -27,8 +31,6 @@ CREATE TABLE auth.app_session_anchors (
     global_user_id      UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,  -- the GLOBAL user (pws_ is a projection, never stored)
     refresh_token_enc   BYTEA       NOT NULL,            -- AES-256-GCM encrypted server-held rotating refresh family
     refresh_family_id   TEXT        NOT NULL,            -- gateway-generated lineage id (rfam_<base62>), set ONCE at create and carried verbatim across every rotation; Hydra exposes no usable family-lineage field (§1.2)
-    cached_access_token TEXT,                            -- last minted WRAPPER access token, shared by concurrent ?mint=1 (§1.2)
-    cached_access_exp   TIMESTAMPTZ,                     -- server-side cache window = min(600, ANCHOR_MINT_CACHE_TTL), SECONDS-scale ≪ the 10-min wrapper exp
     granted_scopes      TEXT[]      NOT NULL DEFAULT '{}',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- NO idle column: a reload-recovery anchor MUST survive long idle gaps.

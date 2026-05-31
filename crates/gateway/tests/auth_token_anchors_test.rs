@@ -118,6 +118,10 @@ impl MockHydra {
 
     fn access_token(&self) -> String {
         let now = now_secs();
+        // NOTE: the access JWT carries NO `name` / `picture` claims — the
+        // profile facts live on the ID token. This is what makes the BFF minor
+        // fix observable: a reload-recovery that sourced identity ONLY from the
+        // access JWT would silently drop name/avatar.
         self.sign(serde_json::json!({
             "iss": MOCK_ISSUER,
             "sub": self.user_id.to_string(),
@@ -128,7 +132,31 @@ impl MockHydra {
             "scope": "openid email profile offline_access",
         }))
     }
+
+    /// The ID token returned on a `refresh_token` grant. Carries DISTINCT
+    /// `name` + `picture` so the reload-recovery test can prove the re-created
+    /// gateway session sources name/avatar from the rotated ID TOKEN (BFF minor
+    /// fix), not from the access JWT (which carries neither).
+    fn rotated_id_token(&self) -> String {
+        let now = now_secs();
+        self.sign(serde_json::json!({
+            "iss": MOCK_ISSUER,
+            "sub": self.user_id.to_string(),
+            "aud": self.client_id,
+            "exp": now + 3600,
+            "iat": now,
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": ROTATED_NAME,
+            "picture": ROTATED_AVATAR,
+        }))
+    }
 }
+
+/// Distinct name/avatar the mock stamps into the ROTATED id_token (refresh
+/// grant) so the reload-recovery test proves id-token-sourced identity facts.
+const ROTATED_NAME: &str = "Rotated Name";
+const ROTATED_AVATAR: &str = "https://cdn.example/rotated-avatar.png";
 
 fn now_secs() -> i64 {
     i64::try_from(
@@ -206,6 +234,10 @@ async fn token_endpoint(
                 .header("content-type", "application/json")
                 .body(serde_json::json!({
                     "access_token": h.access_token(),
+                    // Refresh grants return a rotated id_token carrying the
+                    // profile facts (name/picture). do_refresh sources identity
+                    // from THIS, not the access JWT (BFF minor fix).
+                    "id_token": h.rotated_id_token(),
                     "refresh_token": format!("rt_{}", Uuid::new_v4().simple()),
                     "token_type": "Bearer",
                     "expires_in": 3600,
@@ -268,6 +300,12 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
 const APP_HOST: &str = "myapp.zeroship.ai";
 const APP_NAME: &str = "myapp";
 const CLIENT_ID: &str = "oac_myapp";
+/// The app's STABLE UUID — the `RouteMap` key. Fixed (not random) so the
+/// live-dispatch regression test can assert that the `/token`-minted
+/// `gateway_sessions` row is keyed by THIS UUID (not the `myapp` slug), which
+/// is exactly what lets the cookie validate on the real SPA→app dispatch arm
+/// (`router/auth.rs` keys sessions by `app_id.to_string()`).
+const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
 
 /// Build a `GateState` whose `OidcRp` dials the loopback mock Hydra and
 /// whose route cache has one provisioned app (`myapp` → `oac_myapp`).
@@ -331,7 +369,7 @@ fn build_route_map() -> zeroship_core::types::RouteMap {
     use zeroship_core::types::RouteEntry;
     let mut m = std::collections::HashMap::new();
     m.insert(
-        Uuid::new_v4(),
+        Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
         RouteEntry {
             name: APP_NAME.into(),
             plan_id: "free".into(),
@@ -456,37 +494,48 @@ async fn session_mint_without_custom_header_is_rejected() {
     assert_eq!(resp.status().as_u16(), 400);
 }
 
-/// Build the SAME coalesced future `auth_token::mint` builds for a leader:
-/// a Hydra refresh-grant wrapped in the REAL `anchors::EntryGuard` so the
-/// single-flight entry is removed when the future body is dropped — NOT when
-/// any one task survives. This is the exact round-6 BLOCKER mechanism.
+/// Build the SAME coalesced future `auth_token::rotate_family` builds for a
+/// leader: a Hydra refresh-grant wrapped in the REAL `anchors::EntryGuard` so
+/// the single-flight entry is removed when the future body is dropped — NOT
+/// when any one task survives. This is the exact round-6 BLOCKER mechanism.
+/// Post-BFF the rotation yields identity facts (a `RotationOk`), NOT a browser
+/// wrapper; the coalescing mechanism it exercises is unchanged.
 fn leader_mint_future(
     oidc: Arc<OidcRp>,
     hydra: Arc<MockHydra>,
     anchor_id: Uuid,
-) -> anchors::SharedMintFuture {
+) -> anchors::SharedRotationFuture {
     use futures::FutureExt as _;
+    let user_id = hydra.user_id;
     (Box::pin(async move {
         // The guard's Drop removes the entry on resolution OR cancellation —
-        // identical to `auth_token::mint`'s leader future.
+        // identical to `auth_token::rotate_family`'s leader future.
         let _guard = anchors::EntryGuard::new(anchor_id);
         match hydra_refresh(&oidc, &hydra).await {
-            Ok(tok) => Ok(anchors::MintOk { access_token: tok, expires_in: 600 }),
-            Err(e) => Err(anchors::MintError::Upstream(e)),
+            Ok(()) => Ok(anchors::RotationOk {
+                global_user_id: user_id,
+                granted_scopes: vec!["openid".into()],
+                email_verified: Some(true),
+                name: None,
+                avatar_url: None,
+                auth_time: None,
+                amr: vec![],
+            }),
+            Err(e) => Err(anchors::RotationError::Upstream(e)),
         }
-    }) as std::pin::Pin<Box<dyn std::future::Future<Output = anchors::MintResult>>>)
+    }) as std::pin::Pin<Box<dyn std::future::Future<Output = anchors::RotationResult>>>)
         .shared()
 }
 
-/// Drive one mint through the REAL single-flight + `EntryGuard` exactly as
-/// `auth_token::mint` does: follower-get → leader-insert(guarded future) →
-/// await. There is NO manual `remove` — removal is the guard's job, so this
-/// faithfully exercises the blocker fix (no leader-only removal).
+/// Drive one rotation through the REAL single-flight + `EntryGuard` exactly as
+/// `auth_token::rotate_family` does: follower-get → leader-insert(guarded
+/// future) → await. There is NO manual `remove` — removal is the guard's job,
+/// so this faithfully exercises the blocker fix (no leader-only removal).
 async fn coalesced_mint(
     oidc: Arc<OidcRp>,
     hydra: Arc<MockHydra>,
     anchor_id: Uuid,
-) -> anchors::MintResult {
+) -> anchors::RotationResult {
     if let Some(existing) = anchors::with_single_flight(|sf| sf.get(anchor_id)) {
         return existing.await;
     }
@@ -533,11 +582,11 @@ async fn n_parallel_mints_cause_one_hydra_refresh() {
         1,
         "single-flight must coalesce {n} concurrent minters into ONE Hydra refresh"
     );
-    // All N callers got a valid access token (the shared result).
+    // All N callers got the SAME rotated identity facts (the shared result).
     assert_eq!(results.len(), n);
     for r in &results {
-        let tok = r.as_ref().expect("each minter resolves the shared result");
-        assert!(!tok.access_token.is_empty());
+        let out = r.as_ref().expect("each caller resolves the shared result");
+        assert_eq!(out.global_user_id, hydra.user_id);
     }
 
     // The single-flight entry is cleared once resolved (the guard fired).
@@ -584,7 +633,7 @@ async fn cancelled_leader_does_not_leak_single_flight_entry() {
 
     // The follower drives the same future to completion → exactly ONE refresh.
     let out = follower.await.expect("follower resolves the shared mint");
-    assert!(!out.access_token.is_empty());
+    assert_eq!(out.global_user_id, hydra.user_id);
     assert_eq!(
         hydra.refresh_calls.load(Ordering::SeqCst),
         1,
@@ -674,20 +723,21 @@ async fn malformed_2xx_refresh_body_is_not_logged() {
 }
 
 /// One real Hydra refresh-grant + local verify of the rotated access JWT —
-/// the same two steps `auth_token::do_refresh` runs (minus the DB write).
-async fn hydra_refresh(oidc: &OidcRp, hydra: &MockHydra) -> Result<String, String> {
+/// the same two steps `auth_token::do_refresh` runs (minus the DB write). The
+/// rotated raw access JWT stays server-side (BFF §2.2) — it is verified but no
+/// browser wrapper is produced from it.
+async fn hydra_refresh(oidc: &OidcRp, hydra: &MockHydra) -> Result<(), String> {
     let tokens = oidc
         .refresh_token_public(CLIENT_ID, "rt_seed")
         .await
         .map_err(|e| e.to_string())?;
-    // Verify the rotated raw access JWT locally (no introspection) — the
-    // §1.2 round-5 transform.
+    // Verify the rotated raw access JWT locally (no introspection).
     let raw = oidc
         .verify_access_token(&tokens.access_token)
         .await
         .map_err(|e| e.to_string())?;
     assert_eq!(raw.sub, hydra.user_id.to_string());
-    Ok(tokens.access_token)
+    Ok(())
 }
 
 // ─── PG-backed full-handler tests (gated on GATEWAY_ANCHORS_DB_URL) ──────
@@ -801,7 +851,13 @@ async fn cleanup(dsn: &str, user_id: Uuid) {
 }
 
 #[ntex::test]
-async fn token_exchange_mints_wrapper_and_sets_anchor() {
+async fn token_exchange_is_identity_only_and_sets_both_cookies() {
+    // BFF redesign §2.2: /token returns ONLY { user, expires_at } (pws_ id) +
+    // sets the live __Host-zs_app_session cookie, the reload-recovery
+    // __Host-zs_app_anchor cookie, and the breadcrumb. NO access_token, NO
+    // scope, NO id_token, NO token_type, NO scopes on the user. A
+    // gateway_sessions row is created. The global UUID never reaches the
+    // browser.
     let Some(dsn) = db_url() else {
         eprintln!("[anchors] skip token_exchange (no GATEWAY_ANCHORS_DB_URL)");
         return;
@@ -826,13 +882,31 @@ async fn token_exchange_mints_wrapper_and_sets_anchor() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200, "code exchange must succeed");
 
-    // Cache-Control: no-store (wrapper tokens must not be cached).
+    // Cache-Control: no-store.
     assert_eq!(
         resp.headers().get("cache-control").and_then(|v| v.to_str().ok()),
         Some("no-store")
     );
 
-    // __Host- anchor cookie (Strict, HttpOnly, Secure) + breadcrumb.
+    // The SPA's LIVE request credential: __Host-zs_app_session (Lax, HttpOnly,
+    // Secure) — the store the cookie arm reads. This is the new cookie /token
+    // sets in the BFF model.
+    let session_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+        .expect("live session cookie set");
+    assert!(session_cookie.contains("HttpOnly"));
+    assert!(session_cookie.contains("SameSite=Lax"));
+    assert!(session_cookie.contains("Secure"));
+    let session_id_str = session_cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .split('=')
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let session_id = Uuid::parse_str(&session_id_str).expect("session id is a uuid");
+
+    // The reload-recovery anchor cookie (Strict, HttpOnly, Secure) + breadcrumb.
     let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
         .expect("anchor cookie set");
     assert!(anchor_cookie.contains("HttpOnly"));
@@ -843,44 +917,64 @@ async fn token_exchange_mints_wrapper_and_sets_anchor() {
     assert!(!breadcrumb.contains("HttpOnly"), "breadcrumb must be JS-readable");
 
     let body: serde_json::Value = read_json(resp).await;
-    assert_eq!(body["expires_in"], 600);
-    assert_eq!(body["token_type"], "Bearer");
-    let access = body["access_token"].as_str().expect("access_token");
 
-    // The browser-held token is the WRAPPER: it verifies against the
-    // gateway's own verifier, and its `sub` is the per-app pairwise `pws_`
-    // (§6.2/G4) — NOT the global Hydra UUID. App JS decoding its own
-    // access_token must never read the global user id.
-    let verifier = state.wrapper_verifier.as_ref().unwrap();
-    let claims = verifier
-        .verify(access, APP_HOST, Some(CLIENT_ID))
-        .expect("wrapper verifies against the gateway verifier");
+    // IDENTITY-ONLY: no token fields anywhere in the body (assert ABSENT).
+    assert!(body.get("access_token").is_none(), "no access_token in body");
+    assert!(body.get("token_type").is_none(), "no token_type in body");
+    assert!(body.get("expires_in").is_none(), "no expires_in in body");
+    assert!(body.get("scope").is_none(), "no scope in body");
+    assert!(body.get("id_token").is_none(), "no id_token in body");
+    // The user projection carries no scopes either (no capability awareness).
+    assert!(
+        body["user"].get("scopes").is_none(),
+        "user projection must carry NO scopes"
+    );
+    assert!(body["expires_at"].is_i64(), "expires_at must be present");
+
+    // User.id is the per-app pws_ (§6.3), never the global UUID.
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
         &user_id.to_string(),
         &format!("https://{APP_HOST}"),
     );
     assert!(expected_pws.starts_with("pws_"), "{expected_pws}");
-    assert_eq!(claims.sub, expected_pws, "wrapper sub must be the pws_");
-    // The global UUID must NOT appear anywhere in the browser token.
-    assert_ne!(claims.sub, user_id.to_string(), "wrapper must not carry the global UUID");
-    assert!(!access.contains(&user_id.to_string()), "raw global UUID must not be in the wrapper");
-    assert_eq!(claims.client_id, CLIENT_ID);
-    assert!(claims.cnf.is_none(), "plain-Bearer browser wrapper has no cnf");
-    assert!(claims.wraps.is_none(), "browser wrapper has no underlying raw token");
-    // User.id is the pws_ too (§6.3), never the global UUID.
     assert_eq!(body["user"]["id"], expected_pws);
     assert_ne!(body["user"]["id"], user_id.to_string());
+    // The global UUID must NOT appear anywhere in the SPA-facing body.
+    let raw_body = serde_json::to_string(&body).unwrap();
+    assert!(
+        !raw_body.contains(&user_id.to_string()),
+        "global UUID must NOT appear in the identity body"
+    );
+
+    // A gateway_sessions row was created for this app, bound to the GLOBAL
+    // user_id (internal), and validates under the session cookie value KEYED BY
+    // THE APP UUID — the canonical key the live dispatch arm uses
+    // (`app_id.to_string()`), NOT the subdomain slug. This is the BFF
+    // key-normalization fix: pre-fix /token keyed the row by the slug, so the
+    // cookie never validated on the real SPA→app path.
+    let validated = {
+        let pool = zeroship_gateway::db::checkout(
+            &zeroship_gateway::db::DbConfig::new(dsn.clone(), 4),
+        )
+        .await
+        .expect("pool");
+        let conn = pool.get().await.expect("conn");
+        zeroship_gateway::sessions::validate(&conn, session_id, APP_UUID)
+            .await
+            .expect("validate")
+    };
+    let s = validated.expect("the /token flow must create a live gateway_sessions row");
+    assert_eq!(s.user_id, user_id.to_string(), "session is bound to the global UUID internally");
+    assert_eq!(s.app_id, APP_UUID, "session is keyed by the canonical app UUID, not the slug");
 
     cleanup(&dsn, user_id).await;
 }
 
-/// 5c §7 — the email-claim swap on the browser wrapper (`/token` mint). With an
-/// active relay alias for `(CLIENT_ID, user)`, the wrapper's `email` claim AND
-/// the `user` projection carry the ALIAS, and the REAL email
-/// (`user@example.com`, what Hydra stamps) is ABSENT from both. The browser
-/// holds this wrapper and the SDK decodes it — so the real email must never be
-/// in it.
+/// §2.3 — the MANDATORY relay-email swap on the `/token` identity projection.
+/// With an active relay alias for `(CLIENT_ID, user)`, the `{ user }.email`
+/// carries the ALIAS, and the REAL email (`user@example.com`, what Hydra
+/// stamps) is ABSENT from the entire SPA-facing body.
 #[ntex::test]
 async fn token_exchange_swaps_email_for_relay_alias() {
     let Some(dsn) = db_url() else {
@@ -910,36 +1004,25 @@ async fn token_exchange_swaps_email_for_relay_alias() {
     assert_eq!(resp.status().as_u16(), 200, "code exchange must succeed");
 
     let body: serde_json::Value = read_json(resp).await;
-    let access = body["access_token"].as_str().expect("access_token");
 
-    // The wrapper's `email` claim is the ALIAS, never the real email.
-    let verifier = state.wrapper_verifier.as_ref().unwrap();
-    let claims = verifier
-        .verify(access, APP_HOST, Some(CLIENT_ID))
-        .expect("wrapper verifies");
-    assert_eq!(
-        claims.email.as_deref(),
-        Some(relay_email.as_str()),
-        "wrapper email claim must be the relay alias"
-    );
-    // The REAL email must not appear anywhere in the browser token.
-    assert!(
-        !access.contains(REAL_EMAIL),
-        "real email must be ABSENT from the wrapper token"
-    );
-    // The user projection in the body carries the alias too.
+    // The user projection carries the relay ALIAS, never the real email.
     assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
     assert_ne!(body["user"]["email"], serde_json::json!(REAL_EMAIL));
+    // The REAL email must not appear ANYWHERE in the SPA-facing body.
+    let raw_body = serde_json::to_string(&body).unwrap();
+    assert!(
+        !raw_body.contains(REAL_EMAIL),
+        "real email must be ABSENT from the identity body"
+    );
 
     cleanup_identities(&dsn, user_id).await;
     cleanup(&dsn, user_id).await;
 }
 
-/// 5c §7 — fail-closed when NO alias is present (e.g. consent minted none yet).
-/// The swap NEVER falls back to the real email: the wrapper carries an EMPTY
-/// email (and certainly not `user@example.com`), and the user projection is
-/// null/empty. This is the "alias absent ⇒ fail closed, never leak real email"
-/// policy.
+/// §2.3 — fail-closed when NO alias is present (e.g. consent minted none yet).
+/// The swap NEVER falls back to the real email: the `{ user }.email` is the
+/// EMPTY string (and certainly not `user@example.com`). "alias absent ⇒ fail
+/// closed, never leak real email."
 #[ntex::test]
 async fn token_exchange_fails_closed_when_no_alias() {
     let Some(dsn) = db_url() else {
@@ -969,24 +1052,18 @@ async fn token_exchange_fails_closed_when_no_alias() {
     assert_eq!(resp.status().as_u16(), 200, "exchange still succeeds");
 
     let body: serde_json::Value = read_json(resp).await;
-    let access = body["access_token"].as_str().expect("access_token");
 
-    // No alias ⇒ fail closed: the real email is NEVER emitted.
+    // No alias ⇒ fail closed: empty email, and the real email is NEVER emitted.
+    assert_eq!(
+        body["user"]["email"],
+        serde_json::json!(""),
+        "no alias ⇒ empty email (fail closed)"
+    );
+    let raw_body = serde_json::to_string(&body).unwrap();
     assert!(
-        !access.contains(REAL_EMAIL),
+        !raw_body.contains(REAL_EMAIL),
         "real email must be ABSENT even when no alias exists (fail closed)"
     );
-    let verifier = state.wrapper_verifier.as_ref().unwrap();
-    let claims = verifier
-        .verify(access, APP_HOST, Some(CLIENT_ID))
-        .expect("wrapper verifies");
-    assert_ne!(
-        claims.email.as_deref(),
-        Some(REAL_EMAIL),
-        "wrapper must not carry the real email when no alias is minted"
-    );
-    // The user projection must not leak the real email either.
-    assert_ne!(body["user"]["email"], serde_json::json!(REAL_EMAIL));
 
     cleanup_identities(&dsn, user_id).await;
     cleanup(&dsn, user_id).await;
@@ -1023,7 +1100,6 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
             refresh_token_enc: &refresh_enc,
             refresh_family_id: "fam",
             granted_scopes: &["openid".to_string()],
-            cached_access_token: None,
         },
     )
     .await
@@ -1043,6 +1119,11 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
 
 #[ntex::test]
 async fn session_mint_recovers_after_reload_one_refresh() {
+    // BFF reload-recovery (§2.2): the gateway session lapses, but the anchor is
+    // valid. /session?mint=1 rotates the server-held family at Hydra exactly
+    // ONCE, RE-creates the gateway_sessions row, RE-sets __Host-zs_app_session,
+    // and returns the identity projection — with NO JWT and NO real email in
+    // the body, and the pws_ id (never the global UUID).
     let Some(dsn) = db_url() else {
         eprintln!("[anchors] skip session_mint_recovers (no GATEWAY_ANCHORS_DB_URL)");
         return;
@@ -1050,12 +1131,14 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     let hydra = Arc::new(MockHydra::new(CLIENT_ID));
     seed_user(&dsn, hydra.user_id).await;
     let user_id = hydra.user_id;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
     let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
 
-    // 1. Establish an anchor via the real /token exchange.
+    // 1. Establish a session + anchor via the real /token exchange.
     let req = test::TestRequest::post()
         .uri("/__zs/auth/token")
         .header("host", APP_HOST)
@@ -1068,34 +1151,47 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     assert_eq!(resp.status().as_u16(), 200);
     let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
         .expect("anchor cookie");
-    let cookie_pair = anchor_cookie.split(';').next().unwrap().to_string();
-    let anchor_id_str = cookie_pair.split('=').nth(1).unwrap().to_string();
-    let anchor_id = Uuid::parse_str(&anchor_id_str).unwrap();
+    let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
 
-    // 2. Simulate a reload AFTER the short cached-wrapper window: expire the
-    //    cache so /session?mint=1 must actually rotate at Hydra.
+    // 2. Simulate a lapsed gateway session: revoke it so the cookie arm misses
+    //    and /session?mint=1 must fall through to anchor reload-recovery.
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
         let conn = pool.get().await.unwrap();
         conn.execute(
-            "UPDATE auth.app_session_anchors SET cached_access_exp = NOW() - interval '1 hour' WHERE id = $1",
-            &[&anchor_id],
+            "UPDATE auth.gateway_sessions SET revoked_at = NOW() WHERE user_id = $1",
+            &[&user_id],
         )
         .await
         .unwrap();
     }
     let before = hydra.refresh_calls.load(Ordering::SeqCst);
 
-    // 3. Reload-recovery: /session?mint=1 with the anchor cookie.
+    // 3. Reload-recovery: /session?mint=1 with the anchor cookie only.
     let req = test::TestRequest::get()
         .uri("/__zs/auth/session?mint=1")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
-        .header("cookie", cookie_pair.clone())
+        .header("cookie", anchor_pair.clone())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200, "reload-recovery must succeed");
+
+    // It RE-sets a fresh __Host-zs_app_session cookie (the SPA regains a live
+    // credential).
+    let new_session_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+        .expect("reload-recovery must re-set the session cookie");
+    assert!(new_session_cookie.contains("HttpOnly"));
+    assert!(new_session_cookie.contains("SameSite=Lax"));
+    let new_session_id = Uuid::parse_str(
+        new_session_cookie
+            .strip_prefix("__Host-zs_app_session=")
+            .and_then(|rest| rest.split(';').next())
+            .expect("session id in cookie"),
+    )
+    .expect("re-created session id is a uuid");
+
     let body: serde_json::Value = read_json(resp).await;
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
@@ -1105,40 +1201,75 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // /session projects the user id as the pws_, NOT the global UUID.
     assert_eq!(body["user"]["id"], expected_pws);
     assert_ne!(body["user"]["id"], user_id.to_string());
-    let fresh = body["access_token"].as_str().expect("fresh wrapper minted");
-    let verifier = state.wrapper_verifier.as_ref().unwrap();
-    let fresh_claims = verifier
-        .verify(fresh, APP_HOST, Some(CLIENT_ID))
-        .expect("minted wrapper verifies");
-    // The refresh-path wrapper carries the pws_ too (not the global UUID).
-    assert_eq!(fresh_claims.sub, expected_pws, "refresh-path wrapper sub must be pws_");
-    assert!(!fresh.contains(&user_id.to_string()), "global UUID must not be in the refreshed wrapper");
+    // NO JWT in the body, and the relay-swapped email (never the real one).
+    assert!(body.get("access_token").is_none(), "no access_token in reload-recovery body");
+    assert!(body.get("id_token").is_none(), "no id_token in reload-recovery body");
+    assert!(body["expires_at"].is_i64());
+    assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
+    let raw_body = serde_json::to_string(&body).unwrap();
+    assert!(!raw_body.contains(REAL_EMAIL), "real email absent from reload-recovery body");
+    assert!(!raw_body.contains(&user_id.to_string()), "global UUID absent from reload-recovery body");
 
-    // Exactly ONE Hydra refresh happened on the cache-miss mint.
+    // Exactly ONE Hydra refresh happened on the family rotation.
     assert_eq!(
         hydra.refresh_calls.load(Ordering::SeqCst),
         before + 1,
-        "cache-miss mint triggers exactly one Hydra refresh"
+        "reload-recovery triggers exactly one Hydra refresh"
     );
 
+    // BFF minor fix: identity facts (name/avatar) on the RE-CREATED gateway
+    // session are sourced from the rotated ID TOKEN, not the access JWT (which
+    // carries neither). The projection carries the rotated name; the re-created
+    // row carries both the rotated name AND avatar. Pre-fix, do_refresh read
+    // only the access JWT, so name/avatar silently degraded to NULL on reload.
+    assert_eq!(
+        body["user"]["name"], ROTATED_NAME,
+        "the projection must carry the rotated id_token name"
+    );
+    {
+        let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
+        let conn = pool.get().await.unwrap();
+        let row = zeroship_gateway::sessions::validate(&conn, new_session_id, APP_UUID)
+            .await
+            .expect("validate ok")
+            .expect("re-created session must validate under the canonical UUID key");
+        assert_eq!(
+            row.name.as_deref(),
+            Some(ROTATED_NAME),
+            "re-created row sources name from the rotated id_token"
+        );
+        assert_eq!(
+            row.avatar_url.as_deref(),
+            Some(ROTATED_AVATAR),
+            "re-created row sources avatar from the rotated id_token (not degraded to NULL)"
+        );
+    }
+
+    cleanup_identities(&dsn, user_id).await;
     cleanup(&dsn, user_id).await;
 }
 
 #[ntex::test]
-async fn cached_wrapper_within_ttl_skips_hydra() {
+async fn session_steady_state_reads_gateway_session_without_hydra() {
+    // BFF steady state (§2.2): a non-mint GET /session with a LIVE
+    // __Host-zs_app_session cookie reads the gateway_sessions row directly and
+    // returns the relay-swapped identity projection — NO anchor read, NO Hydra
+    // round-trip, NO JWT in the body.
     let Some(dsn) = db_url() else {
-        eprintln!("[anchors] skip cached_wrapper_skips (no GATEWAY_ANCHORS_DB_URL)");
+        eprintln!("[anchors] skip session_steady_state (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
     let hydra = Arc::new(MockHydra::new(CLIENT_ID));
     seed_user(&dsn, hydra.user_id).await;
     let user_id = hydra.user_id;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
     let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
 
-    // /token caches the wrapper with a fresh (in-window) cached_access_exp.
+    // /token establishes the live session cookie.
     let req = test::TestRequest::post()
         .uri("/__zs/auth/token")
         .header("host", APP_HOST)
@@ -1149,29 +1280,124 @@ async fn cached_wrapper_within_ttl_skips_hydra() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
-    let anchor_cookie =
-        set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=").expect("anchor cookie");
-    let cookie_pair = anchor_cookie.split(';').next().unwrap().to_string();
+    let session_cookie =
+        set_cookie_with_prefix(&resp, "__Host-zs_app_session=").expect("session cookie");
+    let session_pair = session_cookie.split(';').next().unwrap().to_string();
 
     let before = hydra.refresh_calls.load(Ordering::SeqCst);
-    // Immediately /session?mint=1: the cached wrapper is in-window, so NO
-    // Hydra refresh.
+    // Non-mint GET /session with ONLY the session cookie: reads the live row.
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/session?mint=1")
+        .uri("/__zs/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
-        .header("x-zs-auth", "1")
-        .header("cookie", cookie_pair)
+        .header("cookie", session_pair)
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = read_json(resp).await;
-    assert!(body["access_token"].is_string());
+
+    let expected_pws = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &user_id.to_string(),
+        &format!("https://{APP_HOST}"),
+    );
+    assert_eq!(body["user"]["id"], expected_pws);
+    assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
+    assert!(body.get("access_token").is_none(), "no JWT in steady-state body");
+    assert!(body["expires_at"].is_i64());
+    let raw_body = serde_json::to_string(&body).unwrap();
+    assert!(!raw_body.contains(REAL_EMAIL), "real email absent");
+
+    // The steady-state read does NOT hit Hydra.
     assert_eq!(
         hydra.refresh_calls.load(Ordering::SeqCst),
         before,
-        "an in-window cached wrapper must skip Hydra entirely"
+        "a live-session read must skip Hydra entirely (no family rotation)"
     );
 
+    cleanup_identities(&dsn, user_id).await;
+    cleanup(&dsn, user_id).await;
+}
+
+#[ntex::test]
+async fn token_minted_cookie_validates_on_live_dispatch_arm_key() {
+    // REGRESSION (BFF key-normalization BLOCKER): the SPA's live credential is
+    // the __Host-zs_app_session cookie that POST /__zs/auth/token mints. The
+    // live per-request dispatch arm (`router/auth.rs`) validates that cookie
+    // with `app_id.to_string()` — the app's STABLE UUID (the RouteMap key) —
+    // NOT the subdomain slug. Before the fix, /token wrote the gateway_sessions
+    // row keyed by the SLUG (`route.app_name`), so the cookie validated on
+    // /session (self-consistent slug) but NEVER on the real SPA→app fetch path:
+    // every fetch('/api/...') was silently unauthenticated.
+    //
+    // This test runs the FULL chain: mint the session cookie via the REAL
+    // /token handler, then validate it with the EXACT key the dispatch arm
+    // passes (`APP_UUID`, via `sessions::validate`). It MUST succeed; validating
+    // with the slug MUST fail. Pre-fix this assertion is inverted, so the test
+    // fails — the regression guard the anchors suite previously lacked (it only
+    // wired /token+/session, both slug-keyed, structurally blind to the skew).
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip token_minted_cookie_validates_on_live_dispatch_arm_key (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    seed_user(&dsn, hydra.user_id).await;
+    let user_id = hydra.user_id;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db_cfg.clone()));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    // 1. Mint the session cookie via the REAL /token exchange.
+    let req = test::TestRequest::post()
+        .uri("/__zs/auth/token")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=c&code_verifier=v")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let session_cookie =
+        set_cookie_with_prefix(&resp, "__Host-zs_app_session=").expect("session cookie");
+    // Parse the session id out of the Set-Cookie (`__Host-zs_app_session=<id>; …`).
+    let session_id_str = session_cookie
+        .strip_prefix("__Host-zs_app_session=")
+        .and_then(|rest| rest.split(';').next())
+        .expect("session id in cookie");
+    let session_id = Uuid::parse_str(session_id_str).expect("session id is a uuid");
+
+    // 2. Validate with the CANONICAL app UUID — the exact key the live dispatch
+    //    arm passes (`app_id.to_string()`). MUST succeed.
+    let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
+    let conn = pool.get().await.unwrap();
+    let by_uuid = zeroship_gateway::sessions::validate(&conn, session_id, APP_UUID)
+        .await
+        .expect("validate by uuid ok");
+    assert!(
+        by_uuid.is_some(),
+        "the /token-minted cookie MUST validate under the app UUID — the SAME key \
+         the live SPA→app dispatch arm uses (router/auth.rs: app_id.to_string()). \
+         If this is None the cookie is silently unauthenticated on every real request."
+    );
+    let s = by_uuid.unwrap();
+    assert_eq!(s.app_id, APP_UUID, "the row is keyed by the UUID, not the slug");
+    assert_eq!(s.user_id, user_id.to_string(), "row carries the global user UUID");
+
+    // 3. The OLD slug key must NOT match — proving the row is UUID-keyed (the
+    //    bug was the inverse). The slug-keyed lookup the broken /token used.
+    let by_slug = zeroship_gateway::sessions::validate(&conn, session_id, APP_NAME)
+        .await
+        .expect("validate by slug ok");
+    assert!(
+        by_slug.is_none(),
+        "a slug-keyed validate MUST miss — the canonical session key is the app UUID, \
+         not the subdomain slug (the live dispatch arm never passes the slug)"
+    );
+
+    cleanup_identities(&dsn, user_id).await;
     cleanup(&dsn, user_id).await;
 }
