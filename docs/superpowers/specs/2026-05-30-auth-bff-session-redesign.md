@@ -1512,3 +1512,40 @@ the wrapper `Issuer`/`Verifier`/Bearer arm + `/dpop-exchange` for CLI/server-to-
 (§7). This redesign should be **transparent** to those holders — no `WRAPPER_TTL_SECS` (10-min) or DPoP
 option changes are intended. Confirm at the review gate that none are needed; this does not block any
 phase (the non-browser paths are untouched code).
+
+---
+
+## Decision addendum (2026-05-30, user-ratified): signed STATELESS session cookie
+
+The `__Host-zs_app_session` cookie is **NOT** an opaque `gateway_sessions.id` looked up per
+request. It is a **gateway-SIGNED, HttpOnly, short-lived (~10–15 min) identity assertion**
+(`{ pws_sub, app_client_id, exp, auth_time, amr }`, signed with the gateway ed25519 key + the
+existing current/previous `kid` rotation), **verified LOCALLY on every request — no per-request
+DB/Redis lookup.**
+
+Rationale (user-ratified): the gateway is the hot path; an opaque UUID forces a session-store
+read per request, which doesn't scale. A signed cookie keeps the hot path stateless while
+staying fully BFF-secure — it is HttpOnly (XSS can't read it), an *identity* assertion not a
+power token (capabilities remain grant-gated server-side), and not JS-reachable (honors D1's
+intent). It is the classic BFF "short signed session cookie + long server-held refresh family"
+pattern, and is strictly better than the original client-held wrapper.
+
+Lifecycle:
+- **Login / re-sign:** the gateway mints the signed cookie from the server-held anchor (the
+  30-day rotating refresh family). Store touched on login and on silent re-sign when the short
+  cookie expires — NOT per request.
+- **Per request:** local signature verify (+ `exp`/`aud`==host) → emit the `ZeroShip-User`
+  header. Zero network on the hot path.
+- **Revocation:** the cached per-app family marker `(client_id, pws_)` (already built,
+  seconds-scale TTL) — checked on the cookie arm too. Near-instant modulo the cache TTL (the
+  latency we already accepted for the Bearer/DPoP arms).
+- **`gateway_sessions` row:** retained as the revocation/audit anchor + `auth_time`/`amr`
+  source, NOT read on the per-request path.
+
+Rejected alternatives: opaque-UUID-in-Postgres-per-request (doesn't scale at the hot path);
+opaque-UUID-in-Redis (sub-ms but a hop per request + instant revocation — kept as the fallback
+if truly-instant revocation is ever required over the seconds-scale marker).
+
+Implementation: **slice R1b** (after R1) — replace the cookie-arm `sessions::validate()`
+per-request DB lookup with local signed-cookie verification; reuse the wrapper signing key +
+`kid` rotation; keep the family-marker revocation check.
