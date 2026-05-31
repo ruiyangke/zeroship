@@ -1,12 +1,12 @@
 /**
  * Injectable browser environment. Every DOM/Web-API touchpoint the client
  * uses goes through one of these handles so unit tests can drive the REAL
- * cache / locks / popup / relay / transport logic against hand-rolled fakes
+ * popup / relay / transport logic against hand-rolled fakes
  * (no stubbing of the logic under test).
  *
  * In production each field defaults to the corresponding global. In a test
  * the harness passes a `ClientEnv` whose `window`, `fetch`, `storage`,
- * `location`, `locks`, `crypto`, and `broadcastChannel` are fakes.
+ * `location`, `crypto`, and `broadcastChannel` are fakes.
  */
 
 /** A minimal `Window`-like handle (only the bits the client reads). */
@@ -22,7 +22,6 @@ export interface WindowLike {
   clearTimeout(id: number): void;
   setInterval(handler: () => void, timeout?: number): number;
   clearInterval(id: number): void;
-  readonly Worker?: unknown;
 }
 
 /** The window the popup opens into (only the bits the client reads/sets). */
@@ -52,15 +51,6 @@ export interface BroadcastChannelLike {
   onmessage: ((ev: { data: unknown }) => void) | null;
   postMessage(message: unknown): void;
   close(): void;
-}
-
-/** Web Locks API surface (the one method the client uses). */
-export interface LockManagerLike {
-  request<T>(
-    name: string,
-    options: { signal?: AbortSignal },
-    callback: () => Promise<T>,
-  ): Promise<T>;
 }
 
 /** A `Storage`-like handle (sessionStorage / localStorage). */
@@ -100,12 +90,11 @@ export interface ResolvedEnv {
   fetch: typeof fetch;
   /** sessionStorage — durable PKCE-transaction store. */
   session: StorageLike;
-  /** localStorage — token cache backend + relay fallback. */
+  /** localStorage — relay-event fallback only (NOT a token store). */
   local: StorageLike;
   location: { origin: string };
   cookies: CookieJar;
   crypto: CryptoLike;
-  locks?: LockManagerLike;
   /** Construct a same-origin BroadcastChannel; undefined ⇒ not supported. */
   broadcastChannel?: (name: string) => BroadcastChannelLike;
   /** Subscribe to cross-tab `storage` events (relay fallback). */
@@ -126,7 +115,6 @@ export interface ClientEnv {
   location?: { origin: string };
   cookies?: CookieJar;
   crypto?: CryptoLike;
-  locks?: LockManagerLike;
   broadcastChannel?: (name: string) => BroadcastChannelLike;
   onStorage?: (listener: (ev: StorageEventLike) => void) => () => void;
   /** Override the popup poll/timeout timings (tests run them short). */
@@ -148,7 +136,6 @@ export function resolveEnv(env?: ClientEnv): ResolvedEnv {
     location?: { origin: string };
     document?: { cookie: string };
     crypto?: CryptoLike;
-    navigator?: { locks?: LockManagerLike };
     BroadcastChannel?: new (name: string) => BroadcastChannelLike;
     addEventListener?: (type: string, listener: (ev: unknown) => void) => void;
     removeEventListener?: (type: string, listener: (ev: unknown) => void) => void;
@@ -185,7 +172,6 @@ export function resolveEnv(env?: ClientEnv): ResolvedEnv {
     location: env?.location ?? (g.location as { origin: string }),
     cookies: env?.cookies ?? defaultCookies,
     crypto: env?.crypto ?? (g.crypto as CryptoLike),
-    locks: env?.locks ?? g.navigator?.locks,
     broadcastChannel,
     onStorage,
     popupTiming: { ...DEFAULT_POPUP_TIMING, ...env?.popupTiming },

@@ -50,9 +50,7 @@ const USER: User = {
 
 function makeSession(over: Partial<Session> = {}): Session {
   return {
-    access_token: "at_abc",
     expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: "Bearer",
     user: USER,
     scopes: ["openid", "profile", "email"],
     ...over,
@@ -70,7 +68,6 @@ interface CallLog {
   checkSession: number;
   exchangeCodeForSession: Array<[string, string | undefined]>;
   requestScopes: unknown[][];
-  getAccessTokenWithPopup: unknown[][];
 }
 
 interface FakeClient extends AuthClient {
@@ -96,7 +93,6 @@ function makeFakeClient(): FakeClient {
     checkSession: 0,
     exchangeCodeForSession: [],
     requestScopes: [],
-    getAccessTokenWithPopup: [],
   };
   let current: Session | null = null;
 
@@ -152,17 +148,8 @@ function makeFakeClient(): FakeClient {
     },
     async refreshSession() {
       const s = makeSession();
-      client.emit("TOKEN_REFRESHED", s);
+      client.emit("SESSION_REFRESHED", s);
       return s;
-    },
-    async getAccessToken() {
-      return current?.access_token ?? "at_abc";
-    },
-    async getAccessTokenWithPopup(opts) {
-      // Auth0 parity: an interactive step-up that routes through requestScopes.
-      calls.getAccessTokenWithPopup.push([opts]);
-      const s = await client.requestScopes(opts?.scopes ?? ["openid", "profile", "email"]);
-      return s.access_token;
     },
     isAuthenticated() {
       return current != null;
@@ -172,10 +159,10 @@ function makeFakeClient(): FakeClient {
     },
     async requestScopes(scopes) {
       // Interactive step-up: a real client opens a popup and emits SIGNED_IN
-      // with the upgraded session. Record + emit so tests can assert the
-      // interactive path fired.
+      // with the upgraded (identity-only) session. Record + emit so tests can
+      // assert the interactive path fired.
       calls.requestScopes.push([scopes]);
-      const s = makeSession({ access_token: "at_stepup" });
+      const s = makeSession({ scopes: ["openid", "profile", "email", "payments:write"] });
       client.emit("SIGNED_IN", s);
       return s;
     },
@@ -247,7 +234,12 @@ describe("AuthProvider mount + reactive state", () => {
     assert.equal(observed?.isAuthenticated, true);
     assert.equal(observed?.isLoading, false);
     assert.equal(observed?.user?.id, "pws_alice");
-    assert.equal(observed?.session?.access_token, "at_abc");
+    assert.deepEqual(observed?.session?.scopes, ["openid", "profile", "email"]);
+    assert.equal(
+      "access_token" in (observed?.session as unknown as Record<string, unknown>),
+      false,
+      "BFF model: the React session snapshot carries no token",
+    );
     assert.equal(screen.getByTestId("probe").textContent, "pws_alice");
   });
 
@@ -408,8 +400,8 @@ describe("SignOutButton", () => {
   });
 });
 
-describe("getAccessTokenWithPopup — interactive step-up", () => {
-  test("useAuth().getAccessTokenWithPopup triggers an interactive step-up and returns the token", async () => {
+describe("requestScopes — interactive step-up (NO token to the browser)", () => {
+  test("useAuth().requestScopes triggers an interactive step-up; the snapshot upgrades without a token", async () => {
     const client = makeFakeClient();
     await act(async () => {
       render(
@@ -417,21 +409,34 @@ describe("getAccessTokenWithPopup — interactive step-up", () => {
       );
     });
 
-    assert.equal(typeof observed?.getAccessTokenWithPopup, "function", "exposed on the context value");
+    assert.equal(typeof observed?.requestScopes, "function", "exposed on the context value");
+    // BFF invariant: the React context exposes NO token accessor.
+    assert.equal(
+      (observed as unknown as Record<string, unknown>).getAccessToken,
+      undefined,
+      "getAccessToken must not exist on the React context",
+    );
+    assert.equal(
+      (observed as unknown as Record<string, unknown>).getAccessTokenWithPopup,
+      undefined,
+      "getAccessTokenWithPopup must not exist on the React context",
+    );
 
-    let token: string | undefined;
     await act(async () => {
-      token = await observed!.getAccessTokenWithPopup({ scopes: ["payments:write"] });
+      await observed!.requestScopes(["payments:write"]);
     });
 
-    // It must route through the INTERACTIVE step-up path (requestScopes), not a
-    // silent mint — that is the whole point of the *WithPopup variant.
-    assert.equal(client.calls.getAccessTokenWithPopup.length, 1);
+    // It must route through the INTERACTIVE step-up path (requestScopes).
     assert.equal(client.calls.requestScopes.length, 1, "must drive an interactive step-up");
     assert.deepEqual(client.calls.requestScopes[0], [["payments:write"]]);
-    assert.equal(token, "at_stepup", "returns the freshly-minted access token");
-    // The step-up emitted SIGNED_IN → the snapshot reflects the upgraded session.
-    assert.equal(observed?.session?.access_token, "at_stepup");
+    // The step-up emitted SIGNED_IN → the snapshot reflects the upgraded scopes,
+    // and carries NO token.
+    assert.ok(observed?.session?.scopes.includes("payments:write"));
+    assert.equal(
+      "access_token" in (observed?.session as unknown as Record<string, unknown>),
+      false,
+      "BFF model: no token on the upgraded session",
+    );
   });
 });
 

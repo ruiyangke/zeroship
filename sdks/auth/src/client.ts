@@ -1,45 +1,45 @@
 /**
  * `@zeroship/auth/client` — the headless browser client.
  *
- * `createAuthClient(options)` returns an {@link AuthClient} (Auth0/Supabase
- * parity) that drives the same-origin gateway endpoints
+ * `createAuthClient(options)` returns an {@link AuthClient} (Auth0/Supabase-shaped,
+ * BFF model) that drives the same-origin gateway endpoints
  * (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`):
  *
  *   signInWithOAuth → openPopup (sync) → GET /__zs/auth/authorize →
  *     relay postMessage → exchangeCodeForSession (POST /__zs/auth/session)
- *   getSession   — cache only, no network
+ *   getSession   — cache only, no network (the in-memory identity snapshot)
  *   getUser      — GET /__zs/auth/session (always probes)
- *   refreshSession / silent renewal — GET /__zs/auth/session?mint=1 under navigator.locks
- *   onAuthStateChange — SIGNED_IN | SIGNED_OUT | TOKEN_REFRESHED | USER_UPDATED | RECOVERING
+ *   refreshSession — GET /__zs/auth/session?mint=1 (re-mints the HttpOnly cookie)
+ *   onAuthStateChange — SIGNED_IN | SIGNED_OUT | SESSION_REFRESHED | USER_UPDATED | RECOVERING
  *   signOut      — POST /__zs/auth/signout
  *   checkSession — breadcrumb-gated rehydration on init
  *
+ * BFF INVARIANT: this client never hands a usable access/power token to browser
+ * JS. There is no `getAccessToken`, no token cache, no client-held bearer. The
+ * SPA authenticates its own-app requests with the HttpOnly `__Host-zs_app_session`
+ * cookie (sent automatically, same-origin); a {@link Session} is identity only
+ * (`{ user, expires_at, scopes }`). The client holds at most an in-memory
+ * IDENTITY snapshot (no token) so `getSession()` can answer without a round-trip.
+ *
  * Every DOM/Web-API touchpoint is injectable via {@link ClientEnv} so the real
- * cache / locks / popup / relay / transport logic is unit-tested against fakes.
+ * popup / relay / transport / breadcrumb logic is unit-tested against fakes.
  */
 
 import {
   AuthError,
   type AuthChangeEvent,
   type AuthClientOptions,
-  type ICache,
   type Session,
   type SignInOptions,
   type SignOutOptions,
   type User,
 } from "./types";
-import {
-  CacheManager,
-  InMemoryCache,
-  LocalStorageCache,
-} from "./internal/cache";
 import { Breadcrumb } from "./internal/breadcrumb";
 import { Transport } from "./internal/transport";
 import { TransactionManager, type Transaction } from "./internal/transaction";
 import { generatePkce } from "./internal/pkce";
 import { openPopup, runPopup } from "./internal/popup";
 import { listenForRelay } from "./internal/relay";
-import { RefreshLock } from "./internal/locks";
 import { resolveEnv, type ClientEnv, type ResolvedEnv } from "./internal/env";
 
 const DEFAULT_SCOPES = ["openid", "profile", "email"];
@@ -58,25 +58,21 @@ export interface AuthClient {
   /** Exchange an authorization code (popup relay / redirect callback) for a session. */
   exchangeCodeForSession(code: string, state?: string): Promise<Session>;
 
-  /** Cheap, local. Returns the cached session or null. No network. */
+  /** Cheap, local. Returns the in-memory identity snapshot or null. No network. */
   getSession(): Promise<Session | null>;
   /** Server-validated user via `GET /__zs/auth/session` (always probes). */
   getUser(): Promise<User | null>;
-  /** Force a refresh from the server-held anchor family (`/session?mint=1`). */
+  /** Re-mint the HttpOnly session cookie + identity from the server-held anchor (`/session?mint=1`). */
   refreshSession(): Promise<Session>;
   /** Breadcrumb-gated rehydration after reload (first-party `/session?mint=1`). */
   checkSession(): Promise<Session | null>;
 
-  /** True if a non-expired session is cached. Cache-derived, no network. */
+  /** True if a non-expired identity snapshot is held. Cache-derived, no network. */
   isAuthenticated(): boolean;
   /** Does the current session carry this scope? */
   hasScope(scope: string): boolean;
-  /** Step-up: acquire a token with additional scopes via interactive popup. */
+  /** Step-up: re-consent additional scopes via interactive popup. */
   requestScopes(scopes: string[]): Promise<Session>;
-  /** Returns a valid access token, refreshing if needed (lock-serialized). */
-  getAccessToken(): Promise<string>;
-  /** Step-up via popup specifically (Auth0 `getAccessTokenWithPopup` parity). */
-  getAccessTokenWithPopup(opts?: { scopes?: string[] }): Promise<string>;
 
   onAuthStateChange(cb: Listener): { unsubscribe(): void };
 
@@ -93,16 +89,20 @@ class AuthClientImpl implements AuthClient {
   private readonly scope: string[];
   private readonly refreshSkew: number;
   private readonly transport: Transport;
-  private readonly cacheManager: CacheManager;
   private readonly breadcrumb: Breadcrumb;
   private readonly txns: TransactionManager;
-  private readonly lock: RefreshLock;
   private readonly listeners = new Set<Listener>();
 
-  /** Synchronously-readable cached session (mirror of the cache entry). */
+  /**
+   * The in-memory IDENTITY snapshot (NO token) — the source of truth for
+   * `getSession()` / `isAuthenticated()` / `hasScope()`. Set only from a server
+   * round-trip (exchange / mint / getUser) or cleared on sign-out. Never
+   * persisted to storage; an XSS payload can read who the user is on this app
+   * but there is no credential here to steal.
+   */
   private current: Session | null = null;
-  /** Coalesce concurrent `getAccessToken`/`refreshSession` minters. */
-  private inflightMint: Promise<Session> | null = null;
+  /** Coalesce concurrent `refreshSession` cookie re-mints within this tab. */
+  private inflightRefresh: Promise<Session> | null = null;
   /** Run the unconditional first probe exactly once per page load. */
   private firstProbeDone = false;
 
@@ -112,16 +112,8 @@ class AuthClientImpl implements AuthClient {
     this.scope = options.scope ?? DEFAULT_SCOPES;
     this.refreshSkew = options.refreshSkewSeconds ?? DEFAULT_REFRESH_SKEW;
     this.transport = new Transport(this.appOrigin, this.env.fetch);
-
-    const backend: ICache =
-      options.cache ??
-      (options.cacheLocation === "localstorage"
-        ? new LocalStorageCache(this.env.local)
-        : new InMemoryCache());
-    this.cacheManager = new CacheManager(backend, this.appOrigin);
     this.breadcrumb = new Breadcrumb(this.env.cookies, this.appOrigin);
     this.txns = new TransactionManager(this.env.session);
-    this.lock = new RefreshLock(`zs.refresh.${this.appOrigin}`, this.env.locks);
   }
 
   // ── state plumbing ─────────────────────────────────────────────────────
@@ -136,17 +128,15 @@ class AuthClientImpl implements AuthClient {
     }
   }
 
-  private async store(session: Session, event: AuthChangeEvent): Promise<Session> {
+  private store(session: Session, event: AuthChangeEvent): Session {
     this.current = session;
-    await this.cacheManager.setSession(session);
     this.breadcrumb.set();
     this.emit(event, session);
     return session;
   }
 
-  private async forget(emitSignedOut: boolean): Promise<void> {
+  private forget(emitSignedOut: boolean): void {
     this.current = null;
-    await this.cacheManager.clear();
     if (emitSignedOut) this.emit("SIGNED_OUT", null);
   }
 
@@ -219,7 +209,9 @@ class AuthClientImpl implements AuthClient {
   async requestScopes(scopes: string[]): Promise<Session> {
     // Step-up: interactive popup with the union of current + requested scopes.
     // `prompt: "consent"` re-shows the consent screen so the newly requested
-    // scopes are explicitly granted instead of being SSO-skipped.
+    // scopes are explicitly granted instead of being SSO-skipped. The grant is
+    // recorded server-side (control.oauth_grants); the browser still receives
+    // identity only — never a token for the new scopes.
     const union = Array.from(new Set([...(this.current?.scopes ?? this.scope), ...scopes]));
     return this.signInWithOAuth({ scopes: union, popup: true, prompt: "consent" });
   }
@@ -320,31 +312,24 @@ class AuthClientImpl implements AuthClient {
   // ── read paths ─────────────────────────────────────────────────────────
 
   async getSession(): Promise<Session | null> {
+    // Cache-only: the in-memory identity snapshot. No network, no token.
     if (this.current && this.current.expires_at > nowSecs()) return this.current;
-    // Hydrate the synchronous mirror from the cache entry if present.
-    const entry = await this.cacheManager.getEntry(this.scope, nowSecs());
-    if (entry) {
-      this.current = CacheManager.toSession(entry);
-      return this.current;
-    }
     return null;
   }
 
   async getUser(): Promise<User | null> {
-    // Always probes (force:true) — never trusts a browser-decoded token.
+    // Always probes (force:true) — never trusts a stale in-memory snapshot.
     try {
       const { user } = await this.transport.session();
-      await this.cacheManager.setUser(user);
       if (this.current && this.userChanged(this.current.user, user)) {
         this.current = { ...this.current, user };
-        await this.cacheManager.setSession(this.current);
         this.emit("USER_UPDATED", this.current);
       }
       return user;
     } catch (e) {
       if (e instanceof AuthError && e.code === "login_required") {
         this.breadcrumb.clear();
-        await this.forget(this.current != null);
+        this.forget(this.current != null);
         return null;
       }
       throw e;
@@ -372,57 +357,30 @@ class AuthClientImpl implements AuthClient {
 
   // ── refresh / silent renewal ───────────────────────────────────────────
 
-  async refreshSession(): Promise<Session> {
-    return this.mintUnderLock();
-  }
-
-  async getAccessToken(): Promise<string> {
-    const skew = nowSecs() + this.refreshSkew;
-    if (this.current && this.current.expires_at > skew) {
-      return this.current.access_token;
-    }
-    const session = await this.mintUnderLock();
-    return session.access_token;
-  }
-
-  async getAccessTokenWithPopup(opts: { scopes?: string[] } = {}): Promise<string> {
-    // Auth0 parity: always an INTERACTIVE step-up. Run the popup consent flow
-    // for the requested (or current) scopes and return the freshly-minted token.
-    // The caller MUST invoke this inside a user gesture so the popup is not blocked.
-    const session = await this.requestScopes(opts.scopes ?? this.scope);
-    return session.access_token;
-  }
-
   /**
-   * Mint a fresh session from the server-held anchor family
-   * (`/session?mint=1`), serialized under navigator.locks and coalesced across
-   * concurrent callers. A `login_required` clears the breadcrumb + signs out.
+   * Re-mint the HttpOnly session cookie + refresh the identity snapshot from
+   * the server-held anchor family (`/session?mint=1`), coalesced across
+   * concurrent in-tab callers. There is NO token to refresh — this re-probes
+   * the cookie identity. A `login_required` clears the breadcrumb + signs out.
+   * Cross-tab thundering-herd is already coalesced by the gateway's per-anchor
+   * mint single-flight, so no client-side cross-tab lock is needed.
    */
-  private mintUnderLock(): Promise<Session> {
-    if (this.inflightMint) return this.inflightMint;
-    const run = this.lock
-      .run(async () => {
-        // Re-check inside the lock: a sibling tab may have just minted.
-        const fresh = await this.cacheManager.getEntry(this.scope, nowSecs() + this.refreshSkew);
-        if (fresh) {
-          const s = CacheManager.toSession(fresh);
-          this.current = s;
-          return s;
-        }
-        const session = await this.transport.sessionMint();
-        return this.store(session, "TOKEN_REFRESHED");
-      })
-      .catch(async (e) => {
+  refreshSession(): Promise<Session> {
+    if (this.inflightRefresh) return this.inflightRefresh;
+    const run = this.transport
+      .sessionMint()
+      .then((session) => this.store(session, "SESSION_REFRESHED"))
+      .catch((e) => {
         if (e instanceof AuthError && e.code === "login_required") {
           this.breadcrumb.clear();
-          await this.forget(this.current != null);
+          this.forget(this.current != null);
         }
         throw e;
       })
       .finally(() => {
-        this.inflightMint = null;
+        this.inflightRefresh = null;
       });
-    this.inflightMint = run;
+    this.inflightRefresh = run;
     return run;
   }
 
@@ -442,7 +400,6 @@ class AuthClientImpl implements AuthClient {
     // Short-circuit: a non-expired in-memory session already reflects server
     // state (it can only have been set by a server round-trip or a just-
     // completed exchange), so even the unconditional first probe is redundant.
-    // This spares a cached/hydrated caller an extra mint on init.
     if (this.current && this.current.expires_at > nowSecs()) {
       return this.current;
     }
@@ -465,7 +422,7 @@ class AuthClientImpl implements AuthClient {
         if (e.code === "login_required") {
           // Definitive: clear the breadcrumb and go cleanly anonymous.
           this.breadcrumb.clear();
-          await this.forget(false);
+          this.forget(false);
           return null;
         }
         if (e.code === "client_not_provisioned") {
@@ -507,7 +464,7 @@ class AuthClientImpl implements AuthClient {
       // and complete the local sign-out (intent always wins).
     }
     this.breadcrumb.clear();
-    await this.forget(wasSignedIn);
+    this.forget(wasSignedIn);
   }
 }
 
@@ -525,7 +482,6 @@ export {
   type AuthChangeEvent,
   type AuthClientOptions,
   type AuthErrorCode,
-  type ICache,
   type Session,
   type SignInOptions,
   type SignOutOptions,

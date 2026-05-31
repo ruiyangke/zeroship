@@ -106,7 +106,6 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     const session = await p;
     // BFF: no client-held token (the cookie is the credential). The exchange
     // still resolves a Session — assert the identity projection.
-    assert.equal(session.access_token, "", "BFF model: no browser-held token");
     assert.equal(session.user.id, "pws_alice", "relay wins the race over a late close");
   });
 
@@ -156,7 +155,6 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     });
 
     const session = await signIn;
-    assert.equal(session.access_token, "", "BFF model: no browser-held token");
     assert.equal(session.user.id, "pws_alice");
     assert.equal(session.user.emailVerified, true);
     assert.deepEqual(session.scopes, ["openid", "profile", "email"]);
@@ -238,7 +236,7 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await signIn.catch(() => {});
   });
 
-  test("getAccessTokenWithPopup runs an interactive consent step-up and resolves", async () => {
+  test("requestScopes runs an interactive consent step-up and resolves an identity-only session (NO token)", async () => {
     const h = makeHarness();
     h.fetch.on(
       SESSION_EXCHANGE,
@@ -259,13 +257,13 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     );
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
-    const tokenP = client.getAccessTokenWithPopup({ scopes: ["payments:write"] });
+    const stepUp = client.requestScopes(["payments:write"]);
     const state = await awaitReady(h);
 
-    // It is the INTERACTIVE variant: a popup must have opened with prompt=consent
+    // It is the INTERACTIVE step-up: a popup must have opened with prompt=consent
     // and the requested scope unioned in (no silent mint).
     const q = new URL(h.window.lastOpened!.location.href).searchParams;
-    assert.equal(q.get("prompt"), "consent", "getAccessTokenWithPopup must drive an interactive consent step-up");
+    assert.equal(q.get("prompt"), "consent", "requestScopes must drive an interactive consent step-up");
     assert.match(q.get("scope") ?? "", /payments:write/, "the requested scope is unioned in");
 
     h.window.dispatchMessage({
@@ -273,11 +271,15 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
       data: { type: "zs:authorization_response", response: { code: "stepup-code", state } },
     });
 
-    const token = await tokenP;
-    // BFF model: there is no browser-held token, so getAccessTokenWithPopup
-    // resolves the inert empty sentinel. The step-up's real effect is the
-    // re-signed session cookie (set by the gateway on the exchange response).
-    assert.equal(token, "", "BFF model: no browser-held token to return");
+    const session = await stepUp;
+    // BFF model: the step-up's effect is a server-side grant + a re-signed
+    // session cookie; the browser receives identity ONLY, never a token.
+    assert.equal(
+      "access_token" in (session as unknown as Record<string, unknown>),
+      false,
+      "BFF model: no browser-held token after step-up",
+    );
+    assert.ok(session.scopes.includes("payments:write"), "the newly consented scope is reflected");
   });
 
   test("a relay message for a DIFFERENT flow's state is IGNORED (no cross-flow delivery)", async () => {
@@ -389,7 +391,6 @@ describe("exchangeCodeForSession", () => {
     const state = await awaitReady(h);
 
     const session = await client.exchangeCodeForSession("redirect-code", state);
-    assert.equal(session.access_token, "", "BFF model: no browser-held token");
     assert.equal(session.user.id, "pws_alice");
     const req = h.fetch.requests.find(
       (r) => r.method === "POST" && r.url.includes("/__zs/auth/session"),
@@ -430,7 +431,6 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
     const { h, client } = await signedInClient();
     const before = h.fetch.requests.length;
     const s = await client.getSession();
-    assert.equal(s?.access_token, "", "BFF model: no browser-held token");
     assert.equal(s?.user.id, "pws_alice");
     assert.equal(h.fetch.requests.length, before, "getSession must not hit the network");
     assert.equal(client.isAuthenticated(), true);

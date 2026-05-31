@@ -6,7 +6,7 @@
  *   - `GET  /__zs/auth/authorize`  — query params: code_challenge (S256),
  *     code_challenge_method=S256, state, nonce, scope, redirect_uri, prompt?,
  *     idp_hint? (the provider hint from `SignInOptions.provider`).
- *   - `POST /__zs/auth/session`    — the code→session exchange (BFF slice R1b
+ *   - `POST /__zs/auth/session`    — the code→session exchange (the BFF reshape
  *     MERGED `/token` into `/session`; the old `POST /__zs/auth/token` route is
  *     GONE). Body `{grant_type:'authorization_code', code, code_verifier,
  *     redirect_uri?}` + `X-ZS-Auth`. → `{user, expires_at}` ONLY (no
@@ -17,14 +17,13 @@
  *     `{user, expires_at}` (still no token in the body).
  *   - `POST /__zs/auth/signout`    — `{scope:'local'|'global'}` + `X-ZS-Auth` → 204.
  *
- * BFF model (slice R1b): the gateway no longer hands the browser a power token.
- * The live request credential is the HttpOnly, signed `__Host-zs_app_session`
- * cookie, which rides EVERY same-origin request automatically via
+ * BFF model: the gateway never hands the browser a power token. The live
+ * request credential is the HttpOnly, signed `__Host-zs_app_session` cookie,
+ * which rides EVERY same-origin request automatically via
  * `credentials: 'include'` — there is nothing for app JS to attach as a Bearer.
- * So `exchangeCode`/`sessionMint` parse ONLY `{user, expires_at}` and never read
- * an `access_token` from the body (the gateway emits none). The SDK's
- * `Session.access_token` is an inert empty sentinel (see {@link Session}); the
- * cookie is the credential.
+ * So `exchangeCode`/`sessionMint` parse ONLY `{user, expires_at}` (the gateway
+ * emits no token) and build an IDENTITY-only {@link Session}; the cookie is the
+ * credential.
  *
  * The custom `X-ZS-Auth` header is the primary, browser-version-independent
  * same-origin defense; the gateway also exact-matches `Origin`. Both are
@@ -48,11 +47,11 @@ interface WireUser {
 }
 
 /**
- * The merged `/__zs/auth/session` body (BFF slice R1b) — identity projection
- * ONLY. NO `access_token` / `token_type` / `scope` / `id_token`: under the BFF
- * model the credential is the HttpOnly signed cookie, never the body. `user`
- * carries the relay-swapped email + `pws_` id + the granted `scopes`;
- * `expires_at` is the cookie's Unix-seconds expiry.
+ * The merged `/__zs/auth/session` body (BFF model) — identity projection ONLY.
+ * NO `access_token` / `token_type` / `scope` / `id_token`: under the BFF model
+ * the credential is the HttpOnly signed cookie, never the body. `user` carries
+ * the relay-swapped email + `pws_` id + the granted `scopes`; `expires_at` is
+ * the cookie's Unix-seconds expiry.
  */
 interface SessionResponse {
   user: WireUser;
@@ -201,19 +200,15 @@ export class Transport {
   }
 
   /**
-   * Build the SDK {@link Session} from the cookie-only `/session` body. Under the
-   * BFF model there is no client-held token, so `access_token` is an inert empty
-   * sentinel and the HttpOnly cookie is the real credential; `expires_at` mirrors
-   * the cookie's lifetime so the client can proactively re-mint before it lapses.
+   * Build the IDENTITY-only SDK {@link Session} from the cookie-only `/session`
+   * body. Under the BFF model there is no client-held token at all — the
+   * HttpOnly cookie is the credential; `expires_at` mirrors the cookie's
+   * lifetime so the client can proactively re-mint before it lapses.
    */
   private toSession(body: SessionResponse): Session {
     const user = normalizeUser(body.user);
     return {
-      // No browser-held power token under the BFF model — the cookie is the
-      // credential. Kept as an empty string so the cache/client shape is stable.
-      access_token: "",
       expires_at: body.expires_at,
-      token_type: "Bearer",
       user,
       scopes: user.scopes,
     };

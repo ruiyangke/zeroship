@@ -1,11 +1,12 @@
 /**
  * Hand-rolled DOM/Web-API fakes for the @zeroship/auth client tests.
  *
- * These drive the REAL cache / CacheManager / navigator.locks serialization /
- * popup postMessage handshake / transport / breadcrumb logic — nothing under
- * test is stubbed. Only the browser BOUNDARY (window, fetch, storage, locks,
- * crypto, BroadcastChannel, document.cookie) is faked, exactly the surface the
- * client reads through its injectable {@link ClientEnv}.
+ * These drive the REAL popup postMessage handshake / transport / breadcrumb /
+ * in-memory identity logic — nothing under test is stubbed. Only the browser
+ * BOUNDARY (window, fetch, storage, crypto, BroadcastChannel, document.cookie)
+ * is faked, exactly the surface the client reads through its injectable
+ * {@link ClientEnv}. There is NO token cache and NO refresh lock under the BFF
+ * model, so the harness fakes neither.
  */
 
 import type {
@@ -13,7 +14,6 @@ import type {
   ClientEnv,
   CookieJar,
   CryptoLike,
-  LockManagerLike,
   MessageEventLike,
   StorageEventLike,
   StorageLike,
@@ -99,31 +99,6 @@ export class FakePopup implements WindowProxyLike {
   }
 }
 
-/** A real navigator.locks-style manager: serializes by name. */
-export class FakeLocks implements LockManagerLike {
-  private chains = new Map<string, Promise<unknown>>();
-  /** Observable acquisition order, to assert serialization. */
-  readonly order: string[] = [];
-  async request<T>(
-    name: string,
-    _options: { signal?: AbortSignal },
-    callback: () => Promise<T>,
-  ): Promise<T> {
-    const prior = this.chains.get(name) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((r) => (release = r));
-    this.chains.set(name, next);
-    await prior;
-    this.order.push(`acquire:${name}`);
-    try {
-      return await callback();
-    } finally {
-      this.order.push(`release:${name}`);
-      release();
-    }
-  }
-}
-
 /** A same-isolate BroadcastChannel bus keyed by channel name. */
 class BroadcastBus {
   private channels = new Map<string, Set<FakeBroadcastChannel>>();
@@ -167,12 +142,7 @@ export class FakeWindow implements WindowLike {
   lastOpened?: FakePopup;
   openReturnsNull = false;
   location = { href: "" };
-  readonly Worker?: unknown;
   private messageListeners = new Set<(ev: MessageEventLike) => void>();
-
-  constructor(opts?: { hasWorker?: boolean }) {
-    if (opts?.hasWorker) this.Worker = class {};
-  }
 
   open(_url: string | URL, _target?: string): WindowProxyLike | null {
     if (this.openReturnsNull) return null;
@@ -284,20 +254,18 @@ export interface Harness {
   session: FakeStorage;
   local: FakeStorage;
   cookies: FakeCookies;
-  locks: FakeLocks;
   crypto: FakeCrypto;
   broadcast: BroadcastBus;
   /** Trigger a one-shot localStorage relay storage-event. */
   fireStorage(key: string, newValue: string): void;
 }
 
-export function makeHarness(opts?: { hasWorker?: boolean; withLocks?: boolean }): Harness {
-  const window = new FakeWindow({ hasWorker: opts?.hasWorker });
+export function makeHarness(): Harness {
+  const window = new FakeWindow();
   const fetch = new FakeFetch();
   const session = new FakeStorage();
   const local = new FakeStorage();
   const cookies = new FakeCookies();
-  const locks = new FakeLocks();
   const crypto = new FakeCrypto();
   const bus = new BroadcastBus();
   const storageListeners = new Set<(ev: StorageEventLike) => void>();
@@ -310,7 +278,6 @@ export function makeHarness(opts?: { hasWorker?: boolean; withLocks?: boolean })
     cookies,
     crypto,
     location: { origin: APP_ORIGIN },
-    locks: opts?.withLocks === false ? undefined : locks,
     broadcastChannel: (name: string) => new FakeBroadcastChannel(name, bus),
     onStorage: (listener) => {
       storageListeners.add(listener);
@@ -328,7 +295,6 @@ export function makeHarness(opts?: { hasWorker?: boolean; withLocks?: boolean })
     session,
     local,
     cookies,
-    locks,
     crypto,
     broadcast: bus,
     fireStorage(key: string, newValue: string) {
@@ -338,8 +304,8 @@ export function makeHarness(opts?: { hasWorker?: boolean; withLocks?: boolean })
 }
 
 /**
- * Standard `POST /__zs/auth/session` success body the gateway returns (BFF slice
- * R1b — identity projection ONLY; NO `access_token`/`token_type`/`scope` in the
+ * Standard `POST /__zs/auth/session` success body the gateway returns (BFF model
+ * — identity projection ONLY; NO `access_token`/`token_type`/`scope` in the
  * body, the credential is the HttpOnly signed cookie). The `scopes` ride inside
  * the `user` projection.
  */

@@ -62,10 +62,8 @@ export interface AuthContextValue {
   signInWithPassword(opts?: { scopes?: string[]; popup?: boolean }): Promise<void>;
   /** Local (default) or global sign-out. */
   signOut(opts?: SignOutOptions): Promise<void>;
-  /** A valid access token, refreshing under the lock if near expiry. */
-  getAccessToken(): Promise<string>;
-  /** Step-up: acquire a token with additional scopes via interactive popup (Auth0 parity). */
-  getAccessTokenWithPopup(opts?: { scopes?: string[] }): Promise<string>;
+  /** Step-up: re-consent additional scopes via interactive popup (server-side grant; no token to the browser). */
+  requestScopes(scopes: string[]): Promise<void>;
   /** Does the current session carry this scope? (synchronous, cache-derived) */
   hasScope(scope: string): boolean;
 }
@@ -173,7 +171,7 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
   useEffect(() => {
     mountedRef.current = true;
 
-    // Subscribe FIRST so a SIGNED_IN/TOKEN_REFRESHED emitted by the recovery
+    // Subscribe FIRST so a SIGNED_IN/SESSION_REFRESHED emitted by the recovery
     // path below (exchange / checkSession both emit) is never missed.
     const sub = client.onAuthStateChange((event: AuthChangeEvent, session) => {
       if (!mountedRef.current) return;
@@ -182,7 +180,7 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
           // Still settling a 503-provisioning probe — keep loading, no error.
           return { ...prev, isLoading: true, error: null };
         }
-        // SIGNED_IN | SIGNED_OUT | TOKEN_REFRESHED | USER_UPDATED — the session
+        // SIGNED_IN | SIGNED_OUT | SESSION_REFRESHED | USER_UPDATED — the session
         // argument is authoritative; recovery has settled.
         return fromSession(session, false);
       });
@@ -271,9 +269,15 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
     [client],
   );
 
-  const getAccessToken = useCallback(() => client.getAccessToken(), [client]);
-  const getAccessTokenWithPopup = useCallback(
-    (opts?: { scopes?: string[] }) => client.getAccessTokenWithPopup(opts),
+  const requestScopes = useCallback(
+    async (scopes: string[]): Promise<void> => {
+      try {
+        await client.requestScopes(scopes);
+      } catch (e) {
+        if (mountedRef.current) setState((prev) => ({ ...prev, error: toAuthError(e) }));
+        throw toAuthError(e);
+      }
+    },
     [client],
   );
   // `hasScope` reads the client's live cache directly — it is intentionally NOT
@@ -295,8 +299,7 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
       signInWithOAuth,
       signInWithPassword,
       signOut,
-      getAccessToken,
-      getAccessTokenWithPopup,
+      requestScopes,
       hasScope,
     }),
     [
@@ -304,8 +307,7 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
       signInWithOAuth,
       signInWithPassword,
       signOut,
-      getAccessToken,
-      getAccessTokenWithPopup,
+      requestScopes,
       hasScope,
     ],
   );
