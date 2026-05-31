@@ -32,7 +32,7 @@
 // re-exported from `server.ts` deliberately.
 //
 // Wire convention (single-input object, per the rest of `server/`):
-//   POST /_zs/v1/pm.digest
+//   POST /__zeroship/v1/pm.digest
 //     body: { json: { appId: string } }
 //     response: { summary: string, recommendations: PMRecommendationItem[] }
 

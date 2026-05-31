@@ -5,27 +5,27 @@
  *
  * ## Contract parity (dev mirrors prod exactly)
  *
- * In production the **gateway** serves the same-origin `/__zs/auth/*` endpoints
+ * In production the **gateway** serves the same-origin `/__zeroship/auth/*` endpoints
  * the `@zeroship/auth` browser client drives (`crates/gateway/src/browser_auth.rs`,
- * `crates/gateway/src/auth_token.rs`), owns the `__Host-zs_app_session` cookie,
+ * `crates/gateway/src/auth_token.rs`), owns the `__Host-zeroship_app_session` cookie,
  * and HMAC-signs the resolved identity into the request-bound `ZeroShip-User`
  * header the worker decodes into server-side `env.auth.getUser()` /
  * `currentUser()`.
  *
  * This module is the DEV-TIER implementation of that exact contract:
  *
- *   - `GET  /__zs/auth/authorize`     → frictionless dev login. Instead of a
+ *   - `GET  /__zeroship/auth/authorize`     → frictionless dev login. Instead of a
  *       cross-site hop to Hydra, it 302-redirects straight back to the app's
- *       own `/__zs/auth/popup-callback?code=…&state=…` with a dev auth code.
+ *       own `/__zeroship/auth/popup-callback?code=…&state=…` with a dev auth code.
  *       An optional dev user-picker (multi-user config) renders an HTML form.
- *   - `GET  /__zs/auth/popup-callback`→ the SAME same-origin relay page the
+ *   - `GET  /__zeroship/auth/popup-callback`→ the SAME same-origin relay page the
  *       gateway serves (byte-for-byte): parses code/state from the query and
  *       postMessages `zs:authorization_response` over three channels.
- *   - `POST /__zs/auth/session`       → exchange the dev code for a session;
- *       mints the local `__zs_dev_session` cookie and returns `{user, expires_at}`.
- *   - `GET  /__zs/auth/session[?mint=1]` → read / re-mint; returns `{user,
+ *   - `POST /__zeroship/auth/session`       → exchange the dev code for a session;
+ *       mints the local `__zeroship_dev_session` cookie and returns `{user, expires_at}`.
+ *   - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; returns `{user,
  *       expires_at}` or a `401 {error:"login_required"}` envelope.
- *   - `POST /__zs/auth/signout`       → clears the cookie; `204`.
+ *   - `POST /__zeroship/auth/signout`       → clears the cookie; `204`.
  *
  * Every wire shape — request params, the `{user, expires_at}` body with
  * snake_case `email_verified`, the `pws_`-style id, the granted `scopes`, the
@@ -35,7 +35,7 @@
  *
  * ## Server-side identity injection
  *
- * The `__zs_dev_session` cookie value is `base64url(user_json) "." hex-hmac`,
+ * The `__zeroship_dev_session` cookie value is `base64url(user_json) "." hex-hmac`,
  * signed with the per-dev-server secret `ZEROSHIP_DEV_AUTH_SECRET` (the Vite
  * plugin generates it and passes it to the spawned `zeroship serve` child). The
  * runtime's dev serve path (`crates/runtime/src/core/dev_auth.rs`) reads that
@@ -98,7 +98,7 @@ export interface DevAuthConfig {
 }
 
 /** Cookie name — mirrors `DEV_SESSION_COOKIE` in `dev_auth.rs`. */
-const DEV_SESSION_COOKIE = "__zs_dev_session";
+const DEV_SESSION_COOKIE = "__zeroship_dev_session";
 /** Dev session lifetime (seconds). One day is plenty for a dev loop. */
 const DEV_SESSION_TTL_SECS = 24 * 60 * 60;
 /** RFC 4648 §5 base64url alphabet (no padding) — matches the Rust URL_SAFE_NO_PAD. */
@@ -169,7 +169,7 @@ async function importHmacKey(secret: string): Promise<CryptoKey> {
 }
 
 /**
- * Sign `userJson` into a `__zs_dev_session` token byte-compatible with the
+ * Sign `userJson` into a `__zeroship_dev_session` token byte-compatible with the
  * runtime's `dev_auth::sign_dev_session` (Rust): the HMAC covers the
  * base64url-encoded payload's BYTES (the ASCII of the base64url string), and
  * the tag is lowercase hex.
@@ -382,12 +382,12 @@ function popupCallbackHtml(): string {
 
 /** A tiny dev user-picker form (multi-user config only). */
 function userPickerHtml(users: WireUser[], query: URLSearchParams): string {
-  const redirectUri = query.get("redirect_uri") ?? "/__zs/auth/popup-callback";
+  const redirectUri = query.get("redirect_uri") ?? "/__zeroship/auth/popup-callback";
   const state = query.get("state") ?? "";
   const rows = users
     .map(
       (u) =>
-        `<form method="GET" action="/__zs/auth/authorize">` +
+        `<form method="GET" action="/__zeroship/auth/authorize">` +
         `<input type="hidden" name="dev_user" value="${escapeHtml(u.id)}">` +
         `<input type="hidden" name="state" value="${escapeHtml(state)}">` +
         `<input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">` +
@@ -408,9 +408,9 @@ function escapeHtml(s: string): string {
 // ── the dev-auth fetch handler ───────────────────────────────────────────────
 
 export interface DevAuthProvider {
-  /** True if `pathname` is a `/__zs/auth/*` route this provider owns. */
+  /** True if `pathname` is a `/__zeroship/auth/*` route this provider owns. */
   handles(pathname: string): boolean;
-  /** Serve a `/__zs/auth/*` request. Caller guards with `handles()` first. */
+  /** Serve a `/__zeroship/auth/*` request. Caller guards with `handles()` first. */
   handle(request: Request): Promise<Response>;
 }
 
@@ -434,8 +434,8 @@ export function createDevAuthProvider(
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (path === "/__zs/auth/authorize") return authorize(url);
-    if (path === "/__zs/auth/popup-callback") {
+    if (path === "/__zeroship/auth/authorize") return authorize(url);
+    if (path === "/__zeroship/auth/popup-callback") {
       return new Response(popupCallbackHtml(), {
         status: 200,
         headers: {
@@ -446,10 +446,10 @@ export function createDevAuthProvider(
         },
       });
     }
-    if (path === "/__zs/auth/session") {
+    if (path === "/__zeroship/auth/session") {
       return request.method === "POST" ? exchange(request) : sessionProbe(request, url);
     }
-    if (path === "/__zs/auth/signout") return signout();
+    if (path === "/__zeroship/auth/signout") return signout();
 
     return errorEnvelope(404, "not_found", `no dev-auth route for ${path}`);
   }
@@ -459,7 +459,7 @@ export function createDevAuthProvider(
     // to the app's popup-callback with a dev code + the original state. No IdP.
     const q = url.searchParams;
     const state = q.get("state") ?? "";
-    const redirectUri = q.get("redirect_uri") ?? `${url.origin}/__zs/auth/popup-callback`;
+    const redirectUri = q.get("redirect_uri") ?? `${url.origin}/__zeroship/auth/popup-callback`;
 
     // Multi-user config without an explicit pick → render the picker so a
     // developer can switch identities / scope sets.
@@ -523,7 +523,7 @@ export function createDevAuthProvider(
   }
 
   return {
-    handles: (pathname: string) => pathname.startsWith("/__zs/auth/"),
+    handles: (pathname: string) => pathname.startsWith("/__zeroship/auth/"),
     handle,
   };
 }

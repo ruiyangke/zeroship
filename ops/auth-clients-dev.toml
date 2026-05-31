@@ -8,7 +8,7 @@
 # NOTE: the console client is NOT declared here. The console is now a
 # gateway-fronted regular app; its OAuth client is a PUBLIC PKCE client created
 # by control's `--bootstrap-console` seed (`ensure_app_client`, client_id
-# `oac_<base62>`, redirect_uris `http://console.zeroship.localhost/__zs/auth/*`),
+# `oac_<base62>`, redirect_uris `http://console.zeroship.localhost/__zeroship/auth/*`),
 # NOT a confidential RP client. The bespoke control-side OIDC RP that consumed a
 # confidential `console.zeroship.localhost` client was removed in the R5 cutover.
 # The separate `zeroship-builder` Vite service was retired in the same change —

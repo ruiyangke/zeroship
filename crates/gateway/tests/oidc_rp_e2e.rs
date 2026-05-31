@@ -281,7 +281,7 @@ async fn gateway_oidc_rp_full_dance() {
     let test_client_secret = "gw-test-secret-do-not-use-in-prod".to_string();
     // The gateway never actually fetches this — the test intercepts the
     // final 302 by reading its Location header.
-    let test_redirect = "http://127.0.0.1:9999/__zs/auth/callback";
+    let test_redirect = "http://127.0.0.1:9999/__zeroship/auth/callback";
     admin
         .create_client(&OAuth2Client {
             client_id: test_client_id.clone(),

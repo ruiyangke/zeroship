@@ -15,8 +15,8 @@
 //! pairwise/relay scoping. `ensure_app_client` writes BOTH rows in one
 //! transaction.
 //!
-//! redirect_uris (§1.1): `{scheme}://{host}/__zs/auth/popup-callback` AND
-//! `{scheme}://{host}/__zs/auth/callback` for every host the app serves (apex +
+//! redirect_uris (§1.1): `{scheme}://{host}/__zeroship/auth/popup-callback` AND
+//! `{scheme}://{host}/__zeroship/auth/callback` for every host the app serves (apex +
 //! custom domains). Reconciled idempotently — the desired set is computed on
 //! every change and a Hydra `PUT` is issued only on a diff (a no-op deploy makes
 //! no Hydra call). The set is bounded by [`MAX_REDIRECT_URIS`].
@@ -230,7 +230,7 @@ pub fn build_scope_allowlist(declared: &[ScopeDef]) -> String {
 }
 
 /// The two same-origin OAuth callback paths registered per host (spec §1.1).
-const CALLBACK_PATHS: [&str; 2] = ["/__zs/auth/popup-callback", "/__zs/auth/callback"];
+const CALLBACK_PATHS: [&str; 2] = ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"];
 
 /// Compute the full desired redirect_uri set for a host list. Two URIs per host
 /// (popup-callback + callback). Order is stable (host order, then
@@ -770,8 +770,8 @@ mod tests {
         assert_eq!(
             uris,
             vec![
-                "http://app.zeroship.localhost/__zs/auth/popup-callback".to_string(),
-                "http://app.zeroship.localhost/__zs/auth/callback".to_string(),
+                "http://app.zeroship.localhost/__zeroship/auth/popup-callback".to_string(),
+                "http://app.zeroship.localhost/__zeroship/auth/callback".to_string(),
             ]
         );
     }
@@ -784,8 +784,8 @@ mod tests {
         ];
         let uris = redirect_uris_for_hosts("https", &hosts).unwrap();
         assert_eq!(uris.len(), 4);
-        assert!(uris.contains(&"https://apex.zeroship.ai/__zs/auth/callback".to_string()));
-        assert!(uris.contains(&"https://custom.example.com/__zs/auth/popup-callback".to_string()));
+        assert!(uris.contains(&"https://apex.zeroship.ai/__zeroship/auth/callback".to_string()));
+        assert!(uris.contains(&"https://custom.example.com/__zeroship/auth/popup-callback".to_string()));
     }
 
     #[test]
@@ -837,8 +837,8 @@ mod tests {
     #[test]
     fn reconcile_puts_on_added_host() {
         let cur = vec![
-            "https://apex.zeroship.ai/__zs/auth/popup-callback".to_string(),
-            "https://apex.zeroship.ai/__zs/auth/callback".to_string(),
+            "https://apex.zeroship.ai/__zeroship/auth/popup-callback".to_string(),
+            "https://apex.zeroship.ai/__zeroship/auth/callback".to_string(),
         ];
         let des = redirect_uris_for_hosts(
             "https",
@@ -882,21 +882,21 @@ mod tests {
     #[test]
     fn merge_is_union_dedup_desired_first() {
         let existing = vec![
-            "https://custom.example.com/__zs/auth/popup-callback".to_string(),
-            "https://apex.zeroship.ai/__zs/auth/popup-callback".to_string(),
+            "https://custom.example.com/__zeroship/auth/popup-callback".to_string(),
+            "https://apex.zeroship.ai/__zeroship/auth/popup-callback".to_string(),
         ];
         let desired = vec![
-            "https://apex.zeroship.ai/__zs/auth/popup-callback".to_string(),
-            "https://apex.zeroship.ai/__zs/auth/callback".to_string(),
+            "https://apex.zeroship.ai/__zeroship/auth/popup-callback".to_string(),
+            "https://apex.zeroship.ai/__zeroship/auth/callback".to_string(),
         ];
         let merged = merge_preserving_existing(&existing, &desired);
         // Desired first (in order), then existing extras, deduped.
         assert_eq!(
             merged,
             vec![
-                "https://apex.zeroship.ai/__zs/auth/popup-callback".to_string(),
-                "https://apex.zeroship.ai/__zs/auth/callback".to_string(),
-                "https://custom.example.com/__zs/auth/popup-callback".to_string(),
+                "https://apex.zeroship.ai/__zeroship/auth/popup-callback".to_string(),
+                "https://apex.zeroship.ai/__zeroship/auth/callback".to_string(),
+                "https://custom.example.com/__zeroship/auth/popup-callback".to_string(),
             ]
         );
     }

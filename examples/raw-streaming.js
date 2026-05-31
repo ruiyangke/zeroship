@@ -12,12 +12,12 @@
 //                                          surfacing `issues[]` on the
 //                                          wire — matches Zod's shape.
 //   3. async generator return           → streaming procedure. Over POST
-//                                          /_zs/v1/<id>, raw-JS deploys
+//                                          /__zeroship/v1/<id>, raw-JS deploys
 //                                          fall through to default.fetch
 //                                          (which this demo doesn't
 //                                          expose), so the canonical wire
 //                                          is WebSocket subscription:
-//                                          `wss://host/_zs/v1/<id>` with
+//                                          `wss://host/__zeroship/v1/<id>` with
 //                                          a `{"t":"hello",input}` frame.
 //                                          The runtime's
 //                                          `dispatchSubscription` invokes
@@ -33,17 +33,17 @@
 //   target/release/zeroship serve examples/raw-streaming.js --port 3000
 //
 // Smoke (unary procedures over POST):
-//   curl -X POST http://localhost:3000/_zs/v1/search \
+//   curl -X POST http://localhost:3000/__zeroship/v1/search \
 //        -H 'content-type: application/json' \
 //        -d '{"json":{"q":"hello","limit":3}}'
 //   → {"json":{"hits":[...],"meta":{"q":"hello","limit":3}}}
 //
-//   curl -X POST http://localhost:3000/_zs/v1/search \
+//   curl -X POST http://localhost:3000/__zeroship/v1/search \
 //        -H 'content-type: application/json' \
 //        -d '{"json":{"limit":3}}'
 //   → 400 {"message":"Invalid input",...,"details":{"issues":[...]}}
 //
-//   curl -X POST http://localhost:3000/_zs/v1/echoHeaders \
+//   curl -X POST http://localhost:3000/__zeroship/v1/echoHeaders \
 //        -H 'content-type: application/json' \
 //        -d '{"json":"https://www.google.com/"}'
 //   → {"json":{"status":200,"contentType":"text/html; charset=ISO-8859-1"}}
@@ -104,7 +104,7 @@ search.config = {
 // The dispatcher returns the AsyncIterator unchanged. Over POST, raw-JS
 // deploys without a `default.fetch` fall back to the kernel's fallbackFetch
 // (no native SSE encoder for unary RPC streams). Over a WS upgrade on
-// `/_zs/v1/tick`, the kernel's `dispatchSubscription` pumps each yield as
+// `/__zeroship/v1/tick`, the kernel's `dispatchSubscription` pumps each yield as
 // a `{"t":"data",value}` frame — that's the wire surface for raw streams.
 
 const tick = async function* (input) {

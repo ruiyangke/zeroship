@@ -30,16 +30,16 @@ describe("ControlClient (env-var control service credential)", () => {
     mocks.currentUser.mockReset();
     mocks.currentUser.mockReturnValue({ id: USER_ID, email: "c@example.com" });
     // The control service credential is a SERVER-ONLY app env var.
-    process.env.ZS_CONTROL_SERVICE_TOKEN = SERVICE_TOKEN;
+    process.env.ZEROSHIP_CONTROL_SERVICE_TOKEN = SERVICE_TOKEN;
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
-    delete process.env.ZS_CONTROL_SERVICE_TOKEN;
+    delete process.env.ZEROSHIP_CONTROL_SERVICE_TOKEN;
   });
 
-  it("authenticates with the ZS_CONTROL_SERVICE_TOKEN bearer, not a user token", async () => {
+  it("authenticates with the ZEROSHIP_CONTROL_SERVICE_TOKEN bearer, not a user token", async () => {
     const fetchMock = vi.fn(async () => Response.json([]));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -65,12 +65,12 @@ describe("ControlClient (env-var control service credential)", () => {
   });
 
   it("throws (loudly) when the service credential is not configured", async () => {
-    delete process.env.ZS_CONTROL_SERVICE_TOKEN;
+    delete process.env.ZEROSHIP_CONTROL_SERVICE_TOKEN;
     const fetchMock = vi.fn(async () => Response.json([]));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(newClient().listApps()).rejects.toThrow(
-      /ZS_CONTROL_SERVICE_TOKEN is not set/,
+      /ZEROSHIP_CONTROL_SERVICE_TOKEN is not set/,
     );
     // A missing credential must NOT fall back to an unauthenticated call.
     expect(fetchMock).not.toHaveBeenCalled();

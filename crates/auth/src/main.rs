@@ -499,7 +499,7 @@ mod tests {
     fn secrets_file_ref_used_when_cli_empty() {
         // Unique per-process var name; edition 2021: set_var is safe (no unsafe
         // block; workspace denies unsafe_code).
-        let var = format!("ZS_AUTH_TEST_FILE_TIER_{}", std::process::id());
+        let var = format!("ZEROSHIP_AUTH_TEST_FILE_TIER_{}", std::process::id());
         std::env::set_var(&var, "from-secrets-file");
         let reference = format!("urn:zeroship:env:{var}");
 
@@ -515,7 +515,7 @@ mod tests {
     fn cli_value_wins_over_secrets_file_ref() {
         // A literal CLI value beats the file reference; the env ref is ignored
         // (never read), so an unset env var must not cause a failure.
-        let reference = "urn:zeroship:env:ZS_AUTH_UNSET_PROVES_CLI_WINS";
+        let reference = "urn:zeroship:env:ZEROSHIP_AUTH_UNSET_PROVES_CLI_WINS";
         let out = obtain_secret(
             "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
             "literal-cli-secret",
@@ -531,7 +531,7 @@ mod tests {
     // matching pre-[secrets] optional behaviour byte-for-byte.
     #[test]
     fn resolve_optional_uses_file_tier_and_preserves_empty() {
-        let var = format!("ZS_AUTH_TEST_OPT_TIER_{}", std::process::id());
+        let var = format!("ZEROSHIP_AUTH_TEST_OPT_TIER_{}", std::process::id());
         std::env::set_var(&var, "opt-from-file");
         let reference = format!("urn:zeroship:env:{var}");
 

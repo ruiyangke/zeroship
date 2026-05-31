@@ -216,7 +216,7 @@ async function chatTurn(args: {
     ? { json: { id: args.threadId, appId: args.appId, resume: args.resume } }
     : { json: { id: args.threadId, appId: args.appId, messages: args.messages ?? [] } };
 
-  const res = await fetch(`${BUILDER_URL}/_zs/v1/chat`, {
+  const res = await fetch(`${BUILDER_URL}/__zeroship/v1/chat`, {
     method: "POST",
     headers: {
       accept: "text/event-stream",

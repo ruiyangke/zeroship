@@ -119,7 +119,7 @@ fn build_runtime() -> Runtime {
     Runtime::builder().modules(modules).build()
 }
 
-/// Drive a single `POST /_zs/v1/<id>` call against `runtime` and return
+/// Drive a single `POST /__zeroship/v1/<id>` call against `runtime` and return
 /// the response body. Asserts a 2xx so a misconfigured fixture fails
 /// loudly during warmup instead of silently measuring an error path.
 #[inline]
@@ -164,7 +164,7 @@ fn bench_dispatch(c: &mut Criterion) {
     // through call_fetch_handler initializes `rpc_fn`, builds the
     // ctx_obj singleton, and primes a few V8 caches. We want
     // steady-state numbers, not first-call setup cost.
-    let warm_url = "http://localhost/_zs/v1/echo";
+    let warm_url = "http://localhost/__zeroship/v1/echo";
     let warm_headers = vec![("content-type".to_string(), "application/json".to_string())];
     for _ in 0..16 {
         drive_one(&runtime, "POST", warm_url, &warm_headers, r#"{"json":{}}"#);
@@ -205,7 +205,7 @@ fn bench_dispatch(c: &mut Criterion) {
                         let out = drive_one(
                             &runtime,
                             "POST",
-                            "http://localhost/_zs/v1/echo",
+                            "http://localhost/__zeroship/v1/echo",
                             headers,
                             body,
                         );

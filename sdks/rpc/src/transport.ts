@@ -5,10 +5,10 @@
 //
 // Wire shape:
 //
-//   query (small)  → GET /_zs/v1/<id>?input=<base64url-json>
-//   query (>6 KB)  → POST /_zs/v1/<id> with `X-Method: GET` header
-//   mutation       → POST /_zs/v1/<id>
-//   stream         → POST /_zs/v1/<id> with Accept: text/event-stream
+//   query (small)  → GET /__zeroship/v1/<id>?input=<base64url-json>
+//   query (>6 KB)  → POST /__zeroship/v1/<id> with `X-Method: GET` header
+//   mutation       → POST /__zeroship/v1/<id>
+//   stream         → POST /__zeroship/v1/<id> with Accept: text/event-stream
 //                    response body uses the Vercel AI-SDK Data Stream
 //                    Protocol (line-prefixed `<typeId>:<json>\n`).
 //
@@ -193,14 +193,14 @@ async function sendUnaryOnce<TOut = unknown>(
 
   if (opts.kind === "query") {
     if (input === undefined) {
-      url = `${cfg.baseUrl}/_zs/v1/${procId}`;
+      url = `${cfg.baseUrl}/__zeroship/v1/${procId}`;
       method = "GET";
     } else {
       const enc = await encodeQueryInput(input, cfg.transformer);
-      const candidate = `${cfg.baseUrl}/_zs/v1/${procId}?input=${enc}`;
+      const candidate = `${cfg.baseUrl}/__zeroship/v1/${procId}?input=${enc}`;
       if (byteLength(candidate) > URL_FALLBACK_BYTES) {
         // Fallback: POST with body, signal "still a query" via header.
-        url = `${cfg.baseUrl}/_zs/v1/${procId}`;
+        url = `${cfg.baseUrl}/__zeroship/v1/${procId}`;
         method = "POST";
         body = await encodeBody(input, cfg.transformer);
         headers.set("Content-Type", "application/json");
@@ -212,7 +212,7 @@ async function sendUnaryOnce<TOut = unknown>(
     }
   } else {
     // Mutation / action.
-    url = `${cfg.baseUrl}/_zs/v1/${procId}`;
+    url = `${cfg.baseUrl}/__zeroship/v1/${procId}`;
     method = "POST";
     body = await encodeBody(input, cfg.transformer);
     headers.set("Content-Type", "application/json");
@@ -341,7 +341,7 @@ export interface StreamOptions {
 }
 
 /**
- * POST /_zs/v1/<id> with `Accept: text/event-stream` and read the
+ * POST /__zeroship/v1/<id> with `Accept: text/event-stream` and read the
  * response body as a Vercel AI-SDK Data Stream.
  *
  * Returned async-iter yields each value (parsed per the typeId rule):
@@ -412,7 +412,7 @@ export function streamCall<TOut = unknown>(
       for (const [k, v] of Object.entries(opts.headers)) headers.set(k, v);
     }
 
-    const url = `${cfg.baseUrl}/_zs/v1/${procId}`;
+    const url = `${cfg.baseUrl}/__zeroship/v1/${procId}`;
     const body = await encodeBody(input, cfg.transformer);
 
     let res: Response;
@@ -675,7 +675,7 @@ export function streamCall<TOut = unknown>(
 // Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and the
 // runtime's `_zsAcceptSubscription` (`crates/runtime/src/init.rs`).
 //
-//   GET wss://.../_zs/v1/<id>
+//   GET wss://.../__zeroship/v1/<id>
 //   Sec-WebSocket-Protocol: zs.v1
 //   Authorization: Bearer <jwt>      (optional — cookie auth also OK)
 //
@@ -1085,7 +1085,7 @@ export function subscribeCall<TOut = unknown>(
  * verbatim (browsers resolve it against `location`).
  */
 export function buildSubscriptionUrl(procId: string, baseUrl: string): string {
-  const path = `/_zs/v1/${procId}`;
+  const path = `/__zeroship/v1/${procId}`;
   if (!baseUrl) return path; // relative — browser resolves against location.
   if (baseUrl.startsWith("http://")) return `ws://${baseUrl.slice(7)}${path}`;
   if (baseUrl.startsWith("https://")) return `wss://${baseUrl.slice(8)}${path}`;
@@ -1108,10 +1108,10 @@ export function buildStreamUrl(
   cfg: TransportConfig,
 ): Promise<string> | string {
   if (input === undefined) {
-    return `${cfg.baseUrl}/_zs/v1/${procId}`;
+    return `${cfg.baseUrl}/__zeroship/v1/${procId}`;
   }
   return encodeQueryInput(input, cfg.transformer).then(
-    (enc) => `${cfg.baseUrl}/_zs/v1/${procId}?input=${enc}`,
+    (enc) => `${cfg.baseUrl}/__zeroship/v1/${procId}?input=${enc}`,
   );
 }
 

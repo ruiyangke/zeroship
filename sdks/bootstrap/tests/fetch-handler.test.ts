@@ -43,7 +43,7 @@ describe("createFetchHandler — superjson wire", () => {
       }));
 
       const res = await handler(
-        new Request("https://app.test/_zs/v1/inspect", {
+        new Request("https://app.test/__zeroship/v1/inspect", {
           method: "POST",
           body: JSON.stringify({
             json: "2026-01-01T00:00:00.000Z",
@@ -84,7 +84,7 @@ describe("createFetchHandler — superjson wire", () => {
       console.error = () => {};
       try {
         const res = await handler(
-          new Request("https://app.test/_zs/v1/fail", {
+          new Request("https://app.test/__zeroship/v1/fail", {
             method: "POST",
             body: JSON.stringify({ json: null }),
           }),
@@ -118,7 +118,7 @@ describe("createFetchHandler — superjson wire", () => {
       }));
 
       const res = await handler(
-        new Request("https://app.test/_zs/v1/today", {
+        new Request("https://app.test/__zeroship/v1/today", {
           method: "POST",
           body: JSON.stringify({ json: null }),
         }),

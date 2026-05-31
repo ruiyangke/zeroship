@@ -14,7 +14,7 @@
 //
 //   - Authority (the right to mutate the control plane) comes from a
 //     CONTROL SERVICE CREDENTIAL read from a SERVER-ONLY app env var
-//     (`ZS_CONTROL_SERVICE_TOKEN`). It is passed as the bearer to the
+//     (`ZEROSHIP_CONTROL_SERVICE_TOKEN`). It is passed as the bearer to the
 //     control plane via the `@zeroship/control` SDK. It is never the
 //     creator's token, is never sent to the browser, and is never
 //     returned in any response.
@@ -282,12 +282,12 @@ function controlErrorBody(err: ControlError): string {
  * loudly rather than silently making unauthenticated control calls.
  */
 function controlServiceToken(): string {
-  const token = readEnv("ZS_CONTROL_SERVICE_TOKEN", "");
+  const token = readEnv("ZEROSHIP_CONTROL_SERVICE_TOKEN", "");
   if (!token) {
     throw new Error(
-      "ZS_CONTROL_SERVICE_TOKEN is not set. The console authenticates to the " +
+      "ZEROSHIP_CONTROL_SERVICE_TOKEN is not set. The console authenticates to the " +
         "control plane with a server-only control service credential (a control " +
-        "PAT); set ZS_CONTROL_SERVICE_TOKEN as a server-side app secret.",
+        "PAT); set ZEROSHIP_CONTROL_SERVICE_TOKEN as a server-side app secret.",
     );
   }
   return token;

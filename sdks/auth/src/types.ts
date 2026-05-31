@@ -8,8 +8,8 @@
  * receives an identity projection + an HttpOnly signed session cookie, never a
  * token in the body, and there is NO client-held access/power token anywhere on
  * this surface):
- *   - `POST /__zs/auth/session`         → `{ user, expires_at }`
- *   - `GET  /__zs/auth/session[?mint=1]` → `{ user, expires_at }`
+ *   - `POST /__zeroship/auth/session`         → `{ user, expires_at }`
+ *   - `GET  /__zeroship/auth/session[?mint=1]` → `{ user, expires_at }`
  *   - error envelope                    → `{ error, error_description? }`
  * (see `crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`).
  */
@@ -37,7 +37,7 @@ export interface User {
  * A live session — IDENTITY ONLY: the server-validated user plus the session's
  * expiry and granted scopes. Under the BFF model the gateway custodies the
  * power token server-side and hands the browser an HttpOnly, signed
- * `__Host-zs_app_session` cookie — the live request credential, sent
+ * `__Host-zeroship_app_session` cookie — the live request credential, sent
  * automatically on every same-origin request. There is NO client-held bearer or
  * access token anywhere on this surface: the SPA never holds a usable token, it
  * calls its own same-origin backend and the HttpOnly cookie rides along.
@@ -54,7 +54,7 @@ export interface Session {
  *
  * Under the BFF model there is no client-held token, so the post-sign-in
  * re-establishment of the session/identity (re-minting the HttpOnly cookie via
- * `GET /__zs/auth/session?mint=1`) is signalled as `SESSION_REFRESHED` (the old
+ * `GET /__zeroship/auth/session?mint=1`) is signalled as `SESSION_REFRESHED` (the old
  * token-centric `TOKEN_REFRESHED` name is gone — there is no token to refresh).
  *
  * `RECOVERING` is emitted while a `503 client_not_provisioned` probe retries
@@ -140,7 +140,7 @@ export interface SignInOptions {
    * OIDC `prompt` passthrough for step-up re-authentication. `login` forces a
    * fresh credential challenge; `consent` re-shows the consent screen. Omitted
    * by default so Hydra's SSO skip fires. Forwarded verbatim to
-   * `GET /__zs/auth/authorize` → Hydra (`browser_auth.rs`).
+   * `GET /__zeroship/auth/authorize` → Hydra (`browser_auth.rs`).
    */
   prompt?: "login" | "consent";
 }

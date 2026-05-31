@@ -24,7 +24,7 @@ export default defineConfig({
     // dev domain (leading "." matches the host and any subdomain).
     //
     // No `/auth` proxy: the bespoke OAuth RP is gone. End-user auth runs
-    // through the platform BFF — the gateway's same-origin `/__zs/auth/*`
+    // through the platform BFF — the gateway's same-origin `/__zeroship/auth/*`
     // endpoints + the `@zeroship/auth` SDK — not an app-served `/auth/*`.
     allowedHosts: [".zeroship.localhost"],
   },

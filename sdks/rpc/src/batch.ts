@@ -3,7 +3,7 @@
 //
 // Semantics (`docs/proposals/rpc.md` §6, "Batching"):
 //   - Queries fired in the same microtask tick collapse into one
-//     POST /_zs/v1/_batch.
+//     POST /__zeroship/v1/_batch.
 //   - Mutations and streams are NEVER batched — they pass through
 //     untouched.
 //   - The batch endpoint returns a parallel array of `{ id, status,
@@ -11,7 +11,7 @@
 //     against its own slot.
 //
 // Wire format:
-//   POST /_zs/v1/_batch
+//   POST /__zeroship/v1/_batch
 //   Content-Type: application/zs-batch+json
 //
 //   [ {"id":"a","name":"todos.list","input":{...}}, ... ]
@@ -117,7 +117,7 @@ export function createBatchLink(cfg: BatchConfig): BatchLink {
 
     let res: Response;
     try {
-      res = await cfg.fetch(`${cfg.baseUrl}/_zs/v1/_batch`, {
+      res = await cfg.fetch(`${cfg.baseUrl}/__zeroship/v1/_batch`, {
         method: "POST",
         headers,
         body: JSON.stringify(wireEntries),

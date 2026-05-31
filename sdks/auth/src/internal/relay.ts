@@ -1,7 +1,7 @@
 /**
  * Popup-callback relay listener (gateway §4.4).
  *
- * The `/__zs/auth/popup-callback` page posts the SAME envelope over three
+ * The `/__zeroship/auth/popup-callback` page posts the SAME envelope over three
  * SAME-ORIGIN channels (so a COOP-severed `window.opener` still delivers):
  *
  *   { type: 'zs:authorization_response',

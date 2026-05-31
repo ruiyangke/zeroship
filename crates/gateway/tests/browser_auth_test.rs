@@ -1,6 +1,6 @@
 //! Faithful integration tests for the auth-sdk Slice 1b-browser HTTP
-//! surface (`GET /__zs/auth/authorize`, `GET /__zs/auth/popup-callback`,
-//! `POST /__zs/auth/signout`).
+//! surface (`GET /__zeroship/auth/authorize`, `GET /__zeroship/auth/popup-callback`,
+//! `POST /__zeroship/auth/signout`).
 //!
 //! These drive the REAL ntex handlers through `ntex::web::test`. The
 //! unconditional tests (authorize URL shape, 503 when un-provisioned,
@@ -201,15 +201,15 @@ macro_rules! browser_app {
         web::App::new()
             .state($state.clone())
             .service(
-                web::resource("/__zs/auth/authorize")
+                web::resource("/__zeroship/auth/authorize")
                     .route(web::get().to(browser_auth::authorize)),
             )
             .service(
-                web::resource("/__zs/auth/popup-callback")
+                web::resource("/__zeroship/auth/popup-callback")
                     .route(web::get().to(browser_auth::popup_callback)),
             )
             .service(
-                web::resource("/__zs/auth/signout")
+                web::resource("/__zeroship/auth/signout")
                     .route(web::post().to(browser_auth::signout)),
             )
     }};
@@ -237,7 +237,7 @@ async fn read_text(resp: ntex::web::WebResponse) -> String {
     String::from_utf8(bytes.to_vec()).expect("utf8 body")
 }
 
-// ─── GET /__zs/auth/authorize ────────────────────────────────────────────
+// ─── GET /__zeroship/auth/authorize ────────────────────────────────────────────
 
 #[ntex::test]
 async fn authorize_redirects_to_hydra_with_browser_pkce() {
@@ -245,7 +245,7 @@ async fn authorize_redirects_to_hydra_with_browser_pkce() {
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/authorize?code_challenge=CH_browser&code_challenge_method=S256&state=ST_x&nonce=NO_y&scope=openid+profile+read%3Abilling")
+        .uri("/__zeroship/auth/authorize?code_challenge=CH_browser&code_challenge_method=S256&state=ST_x&nonce=NO_y&scope=openid+profile+read%3Abilling")
         .header(http::header::HOST, APP_HOST)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -266,7 +266,7 @@ async fn authorize_redirects_to_hydra_with_browser_pkce() {
     assert!(loc.contains("scope=openid+profile+read%3Abilling"), "{loc}");
     // redirect_uri defaults to THIS app's own popup-callback.
     assert!(
-        loc.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zs%2Fauth%2Fpopup-callback"),
+        loc.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fpopup-callback"),
         "{loc}"
     );
     // No prompt in the common case (so Hydra SSO skip fires).
@@ -281,7 +281,7 @@ async fn authorize_passes_prompt_through() {
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/authorize?code_challenge=c&state=s&nonce=n&scope=openid&prompt=consent")
+        .uri("/__zeroship/auth/authorize?code_challenge=c&state=s&nonce=n&scope=openid&prompt=consent")
         .header(http::header::HOST, APP_HOST)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -296,7 +296,7 @@ async fn authorize_503_when_client_not_provisioned() {
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/authorize?code_challenge=c&state=s&nonce=n")
+        .uri("/__zeroship/auth/authorize?code_challenge=c&state=s&nonce=n")
         .header(http::header::HOST, APP_HOST)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -311,11 +311,11 @@ async fn authorize_400_when_missing_pkce_or_state_or_nonce() {
     let app = test::init_service(browser_app!(state)).await;
 
     for (uri, why) in [
-        ("/__zs/auth/authorize?state=s&nonce=n", "no code_challenge"),
-        ("/__zs/auth/authorize?code_challenge=c&nonce=n", "no state"),
-        ("/__zs/auth/authorize?code_challenge=c&state=s", "no nonce"),
+        ("/__zeroship/auth/authorize?state=s&nonce=n", "no code_challenge"),
+        ("/__zeroship/auth/authorize?code_challenge=c&nonce=n", "no state"),
+        ("/__zeroship/auth/authorize?code_challenge=c&state=s", "no nonce"),
         (
-            "/__zs/auth/authorize?code_challenge=c&state=s&nonce=n&code_challenge_method=plain",
+            "/__zeroship/auth/authorize?code_challenge=c&state=s&nonce=n&code_challenge_method=plain",
             "plain method rejected",
         ),
     ] {
@@ -334,14 +334,14 @@ async fn authorize_rejects_foreign_redirect_uri() {
     let state = build_state(StateOpts::default());
     let app = test::init_service(browser_app!(state)).await;
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/authorize?code_challenge=c&state=s&nonce=n&redirect_uri=https%3A%2F%2Fevil.example%2Fcb")
+        .uri("/__zeroship/auth/authorize?code_challenge=c&state=s&nonce=n&redirect_uri=https%3A%2F%2Fevil.example%2Fcb")
         .header(http::header::HOST, APP_HOST)
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400, "foreign redirect_uri must 400");
 }
 
-// ─── GET /__zs/auth/popup-callback ───────────────────────────────────────
+// ─── GET /__zeroship/auth/popup-callback ───────────────────────────────────────
 
 #[ntex::test]
 async fn popup_callback_relays_to_own_origin_and_never_reflects_query() {
@@ -351,7 +351,7 @@ async fn popup_callback_relays_to_own_origin_and_never_reflects_query() {
     // Inject an XSS payload into the query — it MUST NOT appear in the body.
     let xss = "<script>alert(1)</script>";
     let uri = format!(
-        "/__zs/auth/popup-callback?code=abc&state=st&error_description={}",
+        "/__zeroship/auth/popup-callback?code=abc&state=st&error_description={}",
         urlencoding(xss)
     );
     let req = test::TestRequest::get()
@@ -418,7 +418,7 @@ async fn popup_callback_nonce_is_per_response() {
     let r1 = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/__zs/auth/popup-callback")
+            .uri("/__zeroship/auth/popup-callback")
             .header(http::header::HOST, APP_HOST)
             .to_request(),
     )
@@ -426,7 +426,7 @@ async fn popup_callback_nonce_is_per_response() {
     let r2 = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/__zs/auth/popup-callback")
+            .uri("/__zeroship/auth/popup-callback")
             .header(http::header::HOST, APP_HOST)
             .to_request(),
     )
@@ -437,7 +437,7 @@ async fn popup_callback_nonce_is_per_response() {
     assert_ne!(n1, n2, "CSP nonce must be fresh per response");
 }
 
-// ─── POST /__zs/auth/signout ─────────────────────────────────────────────
+// ─── POST /__zeroship/auth/signout ─────────────────────────────────────────────
 
 #[ntex::test]
 async fn signout_rejects_missing_custom_header_and_foreign_origin() {
@@ -448,7 +448,7 @@ async fn signout_rejects_missing_custom_header_and_foreign_origin() {
 
     // Missing X-ZS-Auth → 400.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/signout")
+        .uri("/__zeroship/auth/signout")
         .header(http::header::HOST, APP_HOST)
         .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
         .to_request();
@@ -457,7 +457,7 @@ async fn signout_rejects_missing_custom_header_and_foreign_origin() {
 
     // Foreign Origin → 403.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/signout")
+        .uri("/__zeroship/auth/signout")
         .header(http::header::HOST, APP_HOST)
         .header("x-zs-auth", "1")
         .header(http::header::ORIGIN, "https://evil.example")
@@ -474,7 +474,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/signout")
+        .uri("/__zeroship/auth/signout")
         .header(http::header::HOST, APP_HOST)
         .header("x-zs-auth", "1")
         .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
@@ -483,7 +483,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
     assert_eq!(resp.status().as_u16(), 204, "signout must 204");
     // Both cookies cleared (Max-Age=0).
     let anchor_clear =
-        set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=").expect("anchor clear cookie");
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor clear cookie");
     assert!(anchor_clear.contains("Max-Age=0"), "{anchor_clear}");
     let crumb_clear = set_cookie_with_prefix(&resp, &format!("zs.{APP_HOST}.is.authenticated="))
         .expect("breadcrumb clear cookie");
@@ -556,14 +556,14 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
 
     // Sign out (local) carrying the anchor cookie + same-origin guard.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/signout")
+        .uri("/__zeroship/auth/signout")
         .header(http::header::HOST, APP_HOST)
         .header("x-zs-auth", "1")
         .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(
             http::header::COOKIE,
-            format!("__Host-zs_app_anchor={anchor_id}"),
+            format!("__Host-zeroship_app_anchor={anchor_id}"),
         )
         .set_payload(r#"{"scope":"local"}"#)
         .to_request();
@@ -571,7 +571,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     assert_eq!(resp.status().as_u16(), 204, "signout must 204");
 
     // (d) cookies cleared.
-    assert!(set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
+    assert!(set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=")
         .is_some_and(|c| c.contains("Max-Age=0")));
     assert!(
         set_cookie_with_prefix(&resp, &format!("zs.{APP_HOST}.is.authenticated="))

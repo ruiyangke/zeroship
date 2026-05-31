@@ -45,7 +45,7 @@ docker compose logs migrate     # see what was applied
 
 **By hand** against a running dev DB — `ops/db-migrate.sh` wraps the
 `liquibase/liquibase` image (targets the compose Postgres on `localhost:5440`;
-override with `ZS_DB_JDBC`/`ZS_DB_USER`/`ZS_DB_PASS`):
+override with `ZEROSHIP_DB_JDBC`/`ZEROSHIP_DB_USER`/`ZEROSHIP_DB_PASS`):
 
 ```bash
 ops/db-migrate.sh status          # pending vs applied

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3011}"
-RPC="${URL}/_zs/v1"
+URL="${ZEROSHIP_URL:-http://localhost:3011}"
+RPC="${URL}/__zeroship/v1"
 FAILED=0
 
 rpc() {

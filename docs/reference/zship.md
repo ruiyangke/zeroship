@@ -54,7 +54,7 @@ The request path is not stored as a literal route per procedure. Gateway and
 runtime agree on the reserved dispatch prefix:
 
 ```text
-/_zs/v1/<wireId>
+/__zeroship/v1/<wireId>
 ```
 
 The manifest's `transformer` currently defaults to `"json"`. If an app opts

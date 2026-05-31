@@ -346,7 +346,7 @@ pub enum RateLimitPer {
     /// many sessions/devices, unlike [`Self::Session`]. Anonymous callers
     /// fall back to the session cookie, then the IP.
     User,
-    /// Per-origin session id (the `__Host-zs_app_session` cookie). One bucket
+    /// Per-origin session id (the `__Host-zeroship_app_session` cookie). One bucket
     /// per browser/tab, not per user.
     Session,
     /// A single platform-wide bucket shared by every caller of the rule.

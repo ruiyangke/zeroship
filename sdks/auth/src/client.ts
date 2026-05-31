@@ -5,18 +5,18 @@
  * BFF model) that drives the same-origin gateway endpoints
  * (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`):
  *
- *   signInWithOAuth → openPopup (sync) → GET /__zs/auth/authorize →
- *     relay postMessage → exchangeCodeForSession (POST /__zs/auth/session)
+ *   signInWithOAuth → openPopup (sync) → GET /__zeroship/auth/authorize →
+ *     relay postMessage → exchangeCodeForSession (POST /__zeroship/auth/session)
  *   getSession   — cache only, no network (the in-memory identity snapshot)
- *   getUser      — GET /__zs/auth/session (always probes)
- *   refreshSession — GET /__zs/auth/session?mint=1 (re-mints the HttpOnly cookie)
+ *   getUser      — GET /__zeroship/auth/session (always probes)
+ *   refreshSession — GET /__zeroship/auth/session?mint=1 (re-mints the HttpOnly cookie)
  *   onAuthStateChange — SIGNED_IN | SIGNED_OUT | SESSION_REFRESHED | USER_UPDATED | RECOVERING
- *   signOut      — POST /__zs/auth/signout
+ *   signOut      — POST /__zeroship/auth/signout
  *   checkSession — breadcrumb-gated rehydration on init
  *
  * BFF INVARIANT: this client never hands a usable access/power token to browser
  * JS. There is no `getAccessToken`, no token cache, no client-held bearer. The
- * SPA authenticates its own-app requests with the HttpOnly `__Host-zs_app_session`
+ * SPA authenticates its own-app requests with the HttpOnly `__Host-zeroship_app_session`
  * cookie (sent automatically, same-origin); a {@link Session} is identity only
  * (`{ user, expires_at, scopes }`). The client holds at most an in-memory
  * IDENTITY snapshot (no token) so `getSession()` can answer without a round-trip.
@@ -60,7 +60,7 @@ export interface AuthClient {
 
   /** Cheap, local. Returns the in-memory identity snapshot or null. No network. */
   getSession(): Promise<Session | null>;
-  /** Server-validated user via `GET /__zs/auth/session` (always probes). */
+  /** Server-validated user via `GET /__zeroship/auth/session` (always probes). */
   getUser(): Promise<User | null>;
   /** Re-mint the HttpOnly session cookie + identity from the server-held anchor (`/session?mint=1`). */
   refreshSession(): Promise<Session>;

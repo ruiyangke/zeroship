@@ -1,24 +1,24 @@
 /**
  * Gateway transport — the wire calls the SDK makes against the SAME-ORIGIN
- * `/__zs/auth/*` endpoints. Every shape here matches the gateway contract
+ * `/__zeroship/auth/*` endpoints. Every shape here matches the gateway contract
  * exactly (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`).
  *
- *   - `GET  /__zs/auth/authorize`  — query params: code_challenge (S256),
+ *   - `GET  /__zeroship/auth/authorize`  — query params: code_challenge (S256),
  *     code_challenge_method=S256, state, nonce, scope, redirect_uri, prompt?,
  *     idp_hint? (the provider hint from `SignInOptions.provider`).
- *   - `POST /__zs/auth/session`    — the code→session exchange (the BFF reshape
- *     MERGED `/token` into `/session`; the old `POST /__zs/auth/token` route is
+ *   - `POST /__zeroship/auth/session`    — the code→session exchange (the BFF reshape
+ *     MERGED `/token` into `/session`; the old `POST /__zeroship/auth/token` route is
  *     GONE). Body `{grant_type:'authorization_code', code, code_verifier,
  *     redirect_uri?}` + `X-ZS-Auth`. → `{user, expires_at}` ONLY (no
  *     access_token / token_type / scope / id_token); identity travels in the
- *     HttpOnly signed `__Host-zs_app_session` cookie, never the body.
- *   - `GET  /__zs/auth/session`    — `{user, expires_at}`; with `?mint=1`
+ *     HttpOnly signed `__Host-zeroship_app_session` cookie, never the body.
+ *   - `GET  /__zeroship/auth/session`    — `{user, expires_at}`; with `?mint=1`
  *     (+`X-ZS-Auth`) re-signs a fresh session cookie from the anchor and returns
  *     `{user, expires_at}` (still no token in the body).
- *   - `POST /__zs/auth/signout`    — `{scope:'local'|'global'}` + `X-ZS-Auth` → 204.
+ *   - `POST /__zeroship/auth/signout`    — `{scope:'local'|'global'}` + `X-ZS-Auth` → 204.
  *
  * BFF model: the gateway never hands the browser a power token. The live
- * request credential is the HttpOnly, signed `__Host-zs_app_session` cookie,
+ * request credential is the HttpOnly, signed `__Host-zeroship_app_session` cookie,
  * which rides EVERY same-origin request automatically via
  * `credentials: 'include'` — there is nothing for app JS to attach as a Bearer.
  * So `exchangeCode`/`sessionMint` parse ONLY `{user, expires_at}` (the gateway
@@ -27,8 +27,8 @@
  *
  * The custom `X-ZS-Auth` header is the primary, browser-version-independent
  * same-origin defense; the gateway also exact-matches `Origin`. Both are
- * `credentials: 'include'` so the signed `__Host-zs_app_session` cookie (the
- * live credential) + the `__Host-zs_app_anchor` anchor (HttpOnly; the SDK never
+ * `credentials: 'include'` so the signed `__Host-zeroship_app_session` cookie (the
+ * live credential) + the `__Host-zeroship_app_anchor` anchor (HttpOnly; the SDK never
  * reads its name) + the breadcrumb cookie ride along.
  */
 
@@ -47,7 +47,7 @@ interface WireUser {
 }
 
 /**
- * The merged `/__zs/auth/session` body (BFF model) — identity projection ONLY.
+ * The merged `/__zeroship/auth/session` body (BFF model) — identity projection ONLY.
  * NO `access_token` / `token_type` / `scope` / `id_token`: under the BFF model
  * the credential is the HttpOnly signed cookie, never the body. `user` carries
  * the relay-swapped email + `pws_` id + the granted `scopes`; `expires_at` is
@@ -114,7 +114,7 @@ export class Transport {
     private readonly fetchImpl: typeof fetch,
   ) {}
 
-  /** Build the `GET /__zs/auth/authorize` URL the popup/redirect navigates to. */
+  /** Build the `GET /__zeroship/auth/authorize` URL the popup/redirect navigates to. */
   authorizeUrl(params: {
     challenge: string;
     state: string;
@@ -137,12 +137,12 @@ export class Transport {
     // `SignInOptions.provider` → `idp_hint` (Fix 5). The gateway parses it and
     // forwards it to Hydra so the login UI routes to the named upstream IdP.
     if (params.idpHint) q.set("idp_hint", params.idpHint);
-    return `${this.appOrigin}/__zs/auth/authorize?${q.toString()}`;
+    return `${this.appOrigin}/__zeroship/auth/authorize?${q.toString()}`;
   }
 
   /** The default popup-callback redirect URI on the app's own origin. */
   redirectUri(): string {
-    return `${this.appOrigin}/__zs/auth/popup-callback`;
+    return `${this.appOrigin}/__zeroship/auth/popup-callback`;
   }
 
   private async fetchJson(
@@ -163,10 +163,10 @@ export class Transport {
   }
 
   /**
-   * `POST /__zs/auth/session` — exchange the code (+ PKCE verifier) for a
+   * `POST /__zeroship/auth/session` — exchange the code (+ PKCE verifier) for a
    * session (BFF slice R1b merged the old `/token` route here). The gateway runs
    * the code→token exchange, stores the refresh family server-side, ISSUES the
-   * signed `__Host-zs_app_session` cookie, and sets the anchor + breadcrumb. The
+   * signed `__Host-zeroship_app_session` cookie, and sets the anchor + breadcrumb. The
    * response body is `{user, expires_at}` ONLY — no token. The cookie (set on
    * this response, HttpOnly) is the live credential and rides every subsequent
    * same-origin request automatically.
@@ -178,7 +178,7 @@ export class Transport {
     nowSecs: number;
   }): Promise<Session> {
     const res = await this.fetchJson(
-      "/__zs/auth/session",
+      "/__zeroship/auth/session",
       {
         method: "POST",
         headers: {
@@ -215,12 +215,12 @@ export class Transport {
   }
 
   /**
-   * `GET /__zs/auth/session` (no mint) — the server-validated user only. Used
+   * `GET /__zeroship/auth/session` (no mint) — the server-validated user only. Used
    * by `getUser()` and the unconditional reload probe.
    */
   async session(): Promise<{ user: User }> {
     const res = await this.fetchJson(
-      "/__zs/auth/session",
+      "/__zeroship/auth/session",
       { method: "GET" },
       "session request failed",
     );
@@ -230,14 +230,14 @@ export class Transport {
   }
 
   /**
-   * `GET /__zs/auth/session?mint=1` — reload recovery / silent renewal. The
+   * `GET /__zeroship/auth/session?mint=1` — reload recovery / silent renewal. The
    * gateway rotates the server-held anchor family and RE-SIGNS a fresh
-   * `__Host-zs_app_session` cookie (set on this response); the body is
+   * `__Host-zeroship_app_session` cookie (set on this response); the body is
    * `{user, expires_at}` ONLY — no token. Requires `X-ZS-Auth`.
    */
   async sessionMint(): Promise<Session> {
     const res = await this.fetchJson(
-      "/__zs/auth/session?mint=1",
+      "/__zeroship/auth/session?mint=1",
       { method: "GET", headers: { [X_ZS_AUTH]: "1" } },
       "session mint request failed",
     );
@@ -251,10 +251,10 @@ export class Transport {
     return this.toSession(body);
   }
 
-  /** `POST /__zs/auth/signout` — revoke + clear. 204 on success (idempotent). */
+  /** `POST /__zeroship/auth/signout` — revoke + clear. 204 on success (idempotent). */
   async signout(scope: "local" | "global"): Promise<void> {
     const res = await this.fetchJson(
-      "/__zs/auth/signout",
+      "/__zeroship/auth/signout",
       {
         method: "POST",
         headers: {

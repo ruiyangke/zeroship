@@ -9,7 +9,7 @@
  *   }
  *
  * Wire:
- *   POST /_zs/v1/<id> with Accept: text/event-stream + JSON-encoded body.
+ *   POST /__zeroship/v1/<id> with Accept: text/event-stream + JSON-encoded body.
  *   Response body is the AI-SDK Data Stream Protocol — line-prefixed:
  *
  *     0:"text"\n          string yield
@@ -149,7 +149,7 @@ describe("client.stream() — happy path", () => {
     // Verify request shape.
     const c = spy.calls[0];
     assert.equal(c.method, "POST");
-    assert.equal(c.url, "https://api.test/_zs/v1/search.todos");
+    assert.equal(c.url, "https://api.test/__zeroship/v1/search.todos");
     assert.equal(c.headers["accept"], "text/event-stream");
     assert.equal(c.headers["content-type"], "application/json");
     // Default JSON mode sends the bare input value.
@@ -436,8 +436,8 @@ describe("client.streamUrl()", () => {
       messages: [{ role: "user", content: "hi" }],
     });
     assert.ok(
-      res.startsWith("https://api.test/_zs/v1/chat.completion?input="),
-      `expected /_zs/v1/chat.completion?input=..., got: ${res}`,
+      res.startsWith("https://api.test/__zeroship/v1/chat.completion?input="),
+      `expected /__zeroship/v1/chat.completion?input=..., got: ${res}`,
     );
     const u = new URL(res);
     const enc = u.searchParams.get("input");
@@ -457,6 +457,6 @@ describe("client.streamUrl()", () => {
     const res = (
       (rpc as unknown as { ping: { streamUrl(input?: unknown): string } }).ping.streamUrl
     )();
-    assert.equal(res, "https://api.test/_zs/v1/ping");
+    assert.equal(res, "https://api.test/__zeroship/v1/ping");
   });
 });

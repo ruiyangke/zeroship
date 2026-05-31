@@ -540,12 +540,12 @@ describe("provider drives the REAL headless client end-to-end", () => {
   test("a real createAuthClient + checkSession 401 settles anonymous (no error)", async () => {
     // Faithful: build the REAL headless client over the test harness env, then
     // hand it to the provider. The mount path runs the real `checkSession` →
-    // `/__zs/auth/session?mint=1`; a 401 maps to `login_required` → clean
+    // `/__zeroship/auth/session?mint=1`; a 401 maps to `login_required` → clean
     // anonymous. This exercises the actual client+provider integration, not a
     // fake. (The `options` path constructs the same client; we inject the env
     // here only to keep the probe off the network and deterministic.)
     const h = makeHarness();
-    h.fetch.on("/__zs/auth/session", () =>
+    h.fetch.on("/__zeroship/auth/session", () =>
       jsonResponse(401, { error: "login_required", error_description: "no session" }),
     );
     const realClient = createAuthClient({ appOrigin: "https://myapp.zeroship.ai" }, h.env);
@@ -569,7 +569,7 @@ describe("provider drives the REAL headless client end-to-end", () => {
     assert.equal(observed?.error, null, "login_required is a clean anonymous, not an error");
     assert.equal(typeof observed?.signInWithOAuth, "function");
     assert.ok(
-      h.fetch.requests.some((r) => r.url.includes("/__zs/auth/session")),
+      h.fetch.requests.some((r) => r.url.includes("/__zeroship/auth/session")),
       "the real client actually probed /session on mount",
     );
   });

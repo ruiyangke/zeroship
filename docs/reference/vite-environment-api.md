@@ -29,7 +29,7 @@ uses its own HTTP-only control path.
 ```
 Browser
   ├─ normal client assets / browser HMR ───────────────► Vite dev server
-  └─ server routes (/_zs/v1/*, /api/*, /rpc, /_rpc) ──► Vite proxy middleware
+  └─ server routes (/__zeroship/v1/*, /api/*, /rpc, /_rpc) ──► Vite proxy middleware
                                                          │
                                                          ▼
                                                   zeroship child runtime
@@ -170,7 +170,7 @@ wrapper from `@zeroship/bootstrap/dev`, and runs the HMR polling loop.
 
 ## Request Flow
 
-For a server route like `POST /_zs/v1/todos.add`:
+For a server route like `POST /__zeroship/v1/todos.add`:
 
 1. The browser sends the request to Vite.
 2. Vite's pre-middleware sees that the path is a server route and proxies it

@@ -131,9 +131,9 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     const signIn = client.signInWithOAuth({ scopes: ["openid", "profile", "email"] });
     const state = await awaitReady(h);
 
-    // The popup was navigated to GET /__zs/auth/authorize with the S256 params.
+    // The popup was navigated to GET /__zeroship/auth/authorize with the S256 params.
     const url = h.window.lastOpened!.location.href;
-    assert.ok(url.startsWith(`${APP_ORIGIN}/__zs/auth/authorize?`), url);
+    assert.ok(url.startsWith(`${APP_ORIGIN}/__zeroship/auth/authorize?`), url);
     const q = new URL(url).searchParams;
     assert.equal(q.get("code_challenge_method"), "S256");
     assert.ok(q.get("code_challenge"), "code_challenge present");
@@ -142,7 +142,7 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     assert.equal(q.get("scope"), "openid profile email");
     assert.equal(
       q.get("redirect_uri"),
-      `${APP_ORIGIN}/__zs/auth/popup-callback`,
+      `${APP_ORIGIN}/__zeroship/auth/popup-callback`,
     );
 
     // The popup-callback relays the code+state via postMessage to the opener.
@@ -159,9 +159,9 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     assert.equal(session.user.emailVerified, true);
     assert.deepEqual(session.scopes, ["openid", "profile", "email"]);
 
-    // POST /__zs/auth/session was posted with X-ZS-Auth + the PKCE verifier + grant_type.
+    // POST /__zeroship/auth/session was posted with X-ZS-Auth + the PKCE verifier + grant_type.
     const tokenReq = h.fetch.requests.find(
-      (r) => r.method === "POST" && r.url.includes("/__zs/auth/session"),
+      (r) => r.method === "POST" && r.url.includes("/__zeroship/auth/session"),
     )!;
     assert.equal(tokenReq.method, "POST");
     assert.equal(tokenReq.headers["x-zs-auth"], "1");
@@ -169,7 +169,7 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     assert.equal(body.grant_type, "authorization_code");
     assert.equal(body.code, "the-code");
     assert.ok(body.code_verifier, "code_verifier sent from sessionStorage");
-    assert.equal(body.redirect_uri, `${APP_ORIGIN}/__zs/auth/popup-callback`);
+    assert.equal(body.redirect_uri, `${APP_ORIGIN}/__zeroship/auth/popup-callback`);
 
     assert.deepEqual(events, ["SIGNED_IN"]);
     // The breadcrumb fast-path mirror was written.
@@ -393,7 +393,7 @@ describe("exchangeCodeForSession", () => {
     const session = await client.exchangeCodeForSession("redirect-code", state);
     assert.equal(session.user.id, "pws_alice");
     const req = h.fetch.requests.find(
-      (r) => r.method === "POST" && r.url.includes("/__zs/auth/session"),
+      (r) => r.method === "POST" && r.url.includes("/__zeroship/auth/session"),
     )!;
     assert.equal((req.body as Record<string, string>).code, "redirect-code");
 
@@ -438,10 +438,10 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
     assert.equal(client.hasScope("admin"), false);
   });
 
-  test("getUser ALWAYS probes GET /__zs/auth/session and updates the cache", async () => {
+  test("getUser ALWAYS probes GET /__zeroship/auth/session and updates the cache", async () => {
     const { h, client } = await signedInClient();
     h.fetch.on(
-      (u) => u.includes("/__zs/auth/session") && !u.includes("mint=1"),
+      (u) => u.includes("/__zeroship/auth/session") && !u.includes("mint=1"),
       () =>
         jsonResponse(200, {
           user: {
@@ -459,7 +459,7 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
     const user = await client.getUser();
     assert.equal(user?.name, "Alice Renamed");
     const probed = h.fetch.requests.some(
-      (r) => r.url.includes("/__zs/auth/session") && !r.url.includes("mint=1"),
+      (r) => r.url.includes("/__zeroship/auth/session") && !r.url.includes("mint=1"),
     );
     assert.ok(probed, "getUser must probe /session");
     assert.deepEqual(events, ["USER_UPDATED"]);
@@ -468,7 +468,7 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
   test("getUser → 401 login_required clears the breadcrumb and signs out", async () => {
     const { h, client } = await signedInClient();
     h.fetch.on(
-      (u) => u.includes("/__zs/auth/session") && !u.includes("mint=1"),
+      (u) => u.includes("/__zeroship/auth/session") && !u.includes("mint=1"),
       () => jsonResponse(401, { error: "login_required" }),
     );
     const events: AuthChangeEvent[] = [];
@@ -482,10 +482,10 @@ describe("getSession / getUser / isAuthenticated / hasScope", () => {
 });
 
 describe("signOut", () => {
-  test("POSTs /__zs/auth/signout with X-ZS-Auth + scope, clears cache + breadcrumb, emits SIGNED_OUT", async () => {
+  test("POSTs /__zeroship/auth/signout with X-ZS-Auth + scope, clears cache + breadcrumb, emits SIGNED_OUT", async () => {
     const h = makeHarness();
     h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
-    h.fetch.on("/__zs/auth/signout", () => jsonResponse(204, null));
+    h.fetch.on("/__zeroship/auth/signout", () => jsonResponse(204, null));
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
 
     const signIn = client.signInWithOAuth();
@@ -500,7 +500,7 @@ describe("signOut", () => {
     client.onAuthStateChange((e) => events.push(e));
     await client.signOut({ scope: "global" });
 
-    const req = h.fetch.requests.find((r) => r.url.includes("/__zs/auth/signout"))!;
+    const req = h.fetch.requests.find((r) => r.url.includes("/__zeroship/auth/signout"))!;
     assert.equal(req.method, "POST");
     assert.equal(req.headers["x-zs-auth"], "1");
     assert.equal((req.body as Record<string, string>).scope, "global");
@@ -512,7 +512,7 @@ describe("signOut", () => {
   test("clears local state even when the network leg fails (idempotent intent)", async () => {
     const h = makeHarness();
     h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
-    h.fetch.on("/__zs/auth/signout", () => {
+    h.fetch.on("/__zeroship/auth/signout", () => {
       throw new Error("network down");
     });
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);

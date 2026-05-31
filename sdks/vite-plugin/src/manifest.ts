@@ -670,7 +670,7 @@ export async function computeManifestExtras(
 
   // 2. Collision check — two distinct procedures that resolved to the
   //    same wireId. This is unrecoverable: the wire path
-  //    `/_zs/v1/<wireId>` would be ambiguous. Cite both file paths and
+  //    `/__zeroship/v1/<wireId>` would be ambiguous. Cite both file paths and
   //    instruct the user to pin an explicit id.
   const byKey = new Map<string, Assigned[]>();
   for (const a of assignments) {

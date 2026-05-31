@@ -77,7 +77,7 @@ describe("BFF invariant — no client-held token surface", () => {
     const h = makeHarness();
     h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
     h.fetch.on(
-      (u, m) => m === "GET" && u.includes("/__zs/auth/session") && !u.includes("mint=1"),
+      (u, m) => m === "GET" && u.includes("/__zeroship/auth/session") && !u.includes("mint=1"),
       () => jsonResponse(200, { user: tokenSuccessBody().user, expires_at: tokenSuccessBody().expires_at }),
     );
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);

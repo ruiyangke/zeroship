@@ -92,7 +92,7 @@ prompts, middleware, wire shapes) - NOT client-facing RPC procedure
 modules. They're imported by server modules and never reach the browser.
 `chat.ts` and `wizard.ts` carry `lazy: true` in their config so the
 heavy LangGraph / deepagents code only loads on the first call to
-`/_zs/v1/chat` or `/_zs/v1/wizard` — boot stays cheap.
+`/__zeroship/v1/chat` or `/__zeroship/v1/wizard` — boot stays cheap.
 
 ## Configuration (env / secrets)
 

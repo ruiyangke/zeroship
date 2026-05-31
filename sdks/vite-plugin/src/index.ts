@@ -59,7 +59,7 @@ export interface ZeroshipOptions {
   /**
    * Dev-tier auth (the `pnpm dev` impl of the platform auth contract — the
    * peer of `env.db`→SQLite / `env.kv`→redb). When enabled the dev runtime
-   * serves the same-origin `/__zs/auth/*` endpoints the `@zeroship/auth` client
+   * serves the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth` client
    * drives and supplies a logged-in identity to `env.auth.getUser()` /
    * `currentUser()` server-side — with NO gateway / Hydra / control plane.
    *
@@ -68,7 +68,7 @@ export interface ZeroshipOptions {
    * - `{ user: {...} }` — one configured dev user.
    * - `{ users: [...], defaultUserId? }` — multiple users; `/authorize`
    *   renders a tiny dev picker so you can switch identities / scope sets.
-   * - `false` — disable; `/__zs/auth/*` falls through to the user module and
+   * - `false` — disable; `/__zeroship/auth/*` falls through to the user module and
    *   `env.auth.getUser()` returns `null` (anonymous).
    *
    * Dev-only by construction: this provider lives in the dev runtime

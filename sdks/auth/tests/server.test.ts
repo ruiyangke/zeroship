@@ -80,7 +80,7 @@ describe("server auth — no client-side signOut", () => {
   beforeEach(() => setEnvAuth(null));
 
   // The server helper intentionally exposes NO `signOut`: the gateway only
-  // registers `POST /__zs/auth/signout` (X-ZS-Auth + exact-Origin guarded),
+  // registers `POST /__zeroship/auth/signout` (X-ZS-Auth + exact-Origin guarded),
   // which a worker handler cannot issue and a 302 redirect would 405 against.
   // Sign-out is a browser-client concern (`@zeroship/auth/client`).
   test("auth has no signOut method", () => {

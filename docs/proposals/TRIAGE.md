@@ -38,7 +38,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] p4-search-implementation-plan.md (DB P4)
 - [x] p5-encryption-backup-implementation-plan.md (DB P5)
 - [x] runtime-macros-refactor.md (runtime-macros; reference/plugin-system.md)
-- [x] zs-standard-and-vite-v2.md (reference/zs-standard.md + vite-plugin.md exist)
+- [x] zs-standard-and-vite-v2.md (reference/zeroship-standard.md + vite-plugin.md exist)
 
 ### NEEDS DETERMINATION (check shipped vs active)
 - [x] rpc.md [ACTIVE — kept]
@@ -82,7 +82,7 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 
 - sandbox-preview-urls + kv-redesign — archived (shipped)
 
-- rpc.md — ACTIVE (Status: Proposal; RPC-v2 seamless-functions vision aspirational — /_zs/v1 dispatch primitive shipped but full codegen/declarative-gateway vision not). KEPT in docs/proposals/.
+- rpc.md — ACTIVE (Status: Proposal; RPC-v2 seamless-functions vision aspirational — /__zeroship/v1 dispatch primitive shipped but full codegen/declarative-gateway vision not). KEPT in docs/proposals/.
 - plugins-workers-distributed.md — ACTIVE (Status: In progress; kv/storage distributed correctness + stateless-worker migration not yet shipped). KEPT in docs/proposals/.
 
 ## Phase 1 COMPLETE: 24 proposals archived, 2 ACTIVE (rpc, plugins-workers-distributed), 1 living (feature-roadmap).

@@ -102,9 +102,9 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 ///   (no bearer JWT) fall back to the session cookie, then the IP, so an
 ///   unauthenticated burst still gets bucketed instead of sharing one ""
 ///   key.
-/// * `RateLimitPer::Session` — the `__Host-zs_app_session` cookie
+/// * `RateLimitPer::Session` — the `__Host-zeroship_app_session` cookie
 ///   value (the per-origin session id the gateway mints on
-///   `/__zs/auth/callback`). Anonymous callers (no cookie) fall back
+///   `/__zeroship/auth/callback`). Anonymous callers (no cookie) fall back
 ///   to the IP so an unauthenticated burst still gets bucketed;
 ///   without the fallback they'd all share one "" key.
 /// * `RateLimitPer::App` — constant `"app"`. One bucket platform-wide;
@@ -210,7 +210,7 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///   1. JWT subject (extracted from `Authorization: Bearer <jwt>` —
 ///      we do NOT verify the signature here; the gateway's auth
 ///      gate already ran and treats verification failures as 401).
-///   2. `__Host-zs_app_session` cookie value (browser tab affinity).
+///   2. `__Host-zeroship_app_session` cookie value (browser tab affinity).
 ///   3. `Sec-WebSocket-Key` (per-connection nonce — same connection
 ///      always hashes to the same bucket; reconnects vary).
 ///   4. Client IP (last-resort fallback for unauthenticated callers
@@ -279,9 +279,9 @@ pub async fn handle_subdomain(
 
     // OIDC callback for hosted creator apps. Intercepted *before*
     // manifest dispatch so the path can never collide with a route
-    // the creator wrote (the `/__zs/` prefix is reserved). See
+    // the creator wrote (the `/__zeroship/` prefix is reserved). See
     // U5.3 / proposal §10.2.
-    if req.uri().path() == "/__zs/auth/callback" {
+    if req.uri().path() == "/__zeroship/auth/callback" {
         return handle_auth_callback(req, state).await;
     }
 
@@ -531,7 +531,7 @@ async fn execute_resource_tree(
     // 3. Auth gate. `anon` always passes (subject to
     //    `publicly_accessible` being set, which is enforced at
     //    validate-time). `user`/`admin` require a valid
-    //    `__Host-zs_app_session` cookie. Richer admin-vs-user role
+    //    `__Host-zeroship_app_session` cookie. Richer admin-vs-user role
     //    checks will arrive with the auth tier.
     //
     //    On miss for an HTML navigation we kick off the OIDC dance via
@@ -784,12 +784,12 @@ pub(super) struct InflightHandle {
     pub(super) ttl_hours: u32,
 }
 
-/// Resolve the wireId from a `/_zs/v1/<wireId>` dispatch path. The
+/// Resolve the wireId from a `/__zeroship/v1/<wireId>` dispatch path. The
 /// dispatch path always has a leading slash; the wireId is the rest
 /// after the literal prefix. Returns `None` for any non-RPC path —
 /// callers should only enter idempotency for `WorkerRpc` actions.
 fn dispatch_path_wire_id(dispatch_path: &str) -> Option<&str> {
-    dispatch_path.strip_prefix("/_zs/v1/")
+    dispatch_path.strip_prefix("/__zeroship/v1/")
 }
 
 /// Build the standard `application/zs-error+json` envelope for an
@@ -1234,7 +1234,7 @@ fn wants_html(req: &HttpRequest) -> bool {
 /// Build the unauthenticated response: 302 → `auth.zeroship.ai/oauth2/auth`
 /// for HTML navigations, 401 with a `WWW-Authenticate` challenge for
 /// API clients. Sets the `__Host-zs_oidc_stash` cookie carrying PKCE,
-/// state, and the original path so `/__zs/auth/callback` can finish
+/// state, and the original path so `/__zeroship/auth/callback` can finish
 /// the dance.
 fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
     if wants_html(req) {
@@ -1297,14 +1297,14 @@ fn insufficient_scope_response(required: &[String]) -> HttpResponse {
 }
 
 // ---------------------------------------------------------------------------
-// /__zs/auth/callback — the gateway-owned OIDC callback per hosted app
+// /__zeroship/auth/callback — the gateway-owned OIDC callback per hosted app
 // ---------------------------------------------------------------------------
 
-/// Handle `/__zs/auth/callback` on any `{app}.zeroship.ai` host. Reads
+/// Handle `/__zeroship/auth/callback` on any `{app}.zeroship.ai` host. Reads
 /// the signed stash cookie + `code`/`state` query, exchanges with
 /// hydra via `OidcRp::finish_callback`, persists a row in
 /// `auth.gateway_sessions`, sets the per-origin
-/// `__Host-zs_app_session` cookie, clears the stash cookie, and 302s
+/// `__Host-zeroship_app_session` cookie, clears the stash cookie, and 302s
 /// back to the original path the user was trying to reach when the
 /// dance started.
 async fn handle_auth_callback(
@@ -1331,7 +1331,7 @@ async fn handle_auth_callback(
         );
     };
     let app_id = app_uuid.to_string();
-    // The interactive flow now issues the SAME signed `zs-sess+jwt` cookie the
+    // The interactive flow now issues the SAME signed `zeroship-sess+jwt` cookie the
     // SDK popup flow does (BFF slice R1b) — so the cookie arm has ONE
     // local-verify path. We need the route's per-app `oauth_client_id` (the
     // signed cookie's `app` binding) + `sector_identifier` (the `pws_`
@@ -1447,7 +1447,7 @@ async fn handle_auth_callback(
     let _ = session.id;
     drop(conn);
 
-    // 5. Mint the SIGNED `zs-sess+jwt` session cookie from the validated claims
+    // 5. Mint the SIGNED `zeroship-sess+jwt` session cookie from the validated claims
     //    (the SAME mint path the SDK popup flow uses — one cookie shape, one
     //    verifier). `claims.sub` is the global UUID; the helper derives the
     //    per-app `pws_` + relay alias before signing.
@@ -1550,7 +1550,7 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpRespons
     } else {
         "https"
     };
-    let redirect_uri = format!("{scheme}://{host}/__zs/auth/callback");
+    let redirect_uri = format!("{scheme}://{host}/__zeroship/auth/callback");
 
     let (auth_url, stash) = state
         .oidc_rp
@@ -1741,7 +1741,7 @@ mod tests {
         // RateLimitPer::App always returns "app" regardless of IP or
         // cookie state — every caller shares the same bucket.
         let req = ntex::web::test::TestRequest::default()
-            .header("cookie", "__Host-zs_app_session=abc")
+            .header("cookie", "__Host-zeroship_app_session=abc")
             .to_http_request();
         assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, false), "app");
     }
@@ -1781,7 +1781,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header(
                 "cookie",
-                "other=foo; __Host-zs_app_session=abc123; trailing=x",
+                "other=foo; __Host-zeroship_app_session=abc123; trailing=x",
             )
             .to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
@@ -1790,7 +1790,7 @@ mod tests {
 
     #[test]
     fn compute_bucket_id_session_falls_back_to_ip_when_cookie_missing() {
-        // Anonymous caller (no __Host-zs_app_session) → fall back to IP. The
+        // Anonymous caller (no __Host-zeroship_app_session) → fall back to IP. The
         // TestRequest has no peer → "unknown".
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "other=foo")
@@ -1831,11 +1831,11 @@ mod tests {
         let alice = jwt_with_sub("usr_alice");
         let req_a1 = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {alice}"))
-            .header("cookie", "__Host-zs_app_session=device-1")
+            .header("cookie", "__Host-zeroship_app_session=device-1")
             .to_http_request();
         let req_a2 = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {alice}"))
-            .header("cookie", "__Host-zs_app_session=device-2")
+            .header("cookie", "__Host-zeroship_app_session=device-2")
             .to_http_request();
         let req_bob = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {}", jwt_with_sub("usr_bob")))
@@ -1851,7 +1851,7 @@ mod tests {
     fn compute_bucket_id_user_falls_back_to_session_then_ip() {
         // No bearer JWT but a session cookie → degrade to sess:<cookie>.
         let req_sess = ntex::web::test::TestRequest::default()
-            .header("cookie", "__Host-zs_app_session=anon-tab")
+            .header("cookie", "__Host-zeroship_app_session=anon-tab")
             .to_http_request();
         assert_eq!(
             compute_bucket_id(&req_sess, RateLimitPer::User, false, false),
@@ -1867,7 +1867,7 @@ mod tests {
         // degrade rather than key everyone onto one empty bucket.
         let req_bad = ntex::web::test::TestRequest::default()
             .header("authorization", "Bearer not-a-jwt")
-            .header("cookie", "__Host-zs_app_session=anon-tab")
+            .header("cookie", "__Host-zeroship_app_session=anon-tab")
             .to_http_request();
         assert_eq!(
             compute_bucket_id(&req_bad, RateLimitPer::User, false, false),
@@ -1911,7 +1911,7 @@ mod tests {
 
     #[test]
     fn router_wiring_session_buckets_separate_from_ip_buckets() {
-        // Two requests carrying distinct __Host-zs_app_session cookies under
+        // Two requests carrying distinct __Host-zeroship_app_session cookies under
         // RateLimitPer::Session must hit independent buckets even when
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
@@ -1919,10 +1919,10 @@ mod tests {
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
 
         let req_a = ntex::web::test::TestRequest::default()
-            .header("cookie", "__Host-zs_app_session=user-a")
+            .header("cookie", "__Host-zeroship_app_session=user-a")
             .to_http_request();
         let req_b = ntex::web::test::TestRequest::default()
-            .header("cookie", "__Host-zs_app_session=user-b")
+            .header("cookie", "__Host-zeroship_app_session=user-b")
             .to_http_request();
         let bucket_a = compute_bucket_id(&req_a, rl.per, false, false);
         let bucket_b = compute_bucket_id(&req_b, rl.per, false, false);
@@ -1955,10 +1955,10 @@ mod tests {
         let m = manifest_with_resources(resources);
         let c = CompiledManifest::compile(&m);
         let p = c
-            .lookup_resource("/_zs/v1/listTodos")
+            .lookup_resource("/__zeroship/v1/listTodos")
             .expect("matches rpc:listTodos");
         assert_eq!(p.kind, Some(ProcedureKind::Query));
-        // Bare /_rpc/ paths are no longer dispatched — `/_zs/v1/` is
+        // Bare /_rpc/ paths are no longer dispatched — `/__zeroship/v1/` is
         // the only RPC wire prefix.
         assert!(c.lookup_resource("/_rpc/listTodos").is_none());
     }
@@ -1987,7 +1987,7 @@ mod tests {
         );
         let m = manifest_with_resources(resources);
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/expensive").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/expensive").expect("matches");
         assert_eq!(
             p.rate_limit.as_ref().unwrap().rpm,
             Some(10),
@@ -2007,7 +2007,7 @@ mod tests {
             "no per-path resource synthesized in passthrough"
         );
         assert!(
-            c.lookup_resource("/_zs/v1/anything").is_none(),
+            c.lookup_resource("/__zeroship/v1/anything").is_none(),
             "no RPC resource synthesized in passthrough"
         );
         assert!(
@@ -2061,7 +2061,7 @@ mod tests {
             &req,
             &state,
             &uuid::Uuid::new_v4(),
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &body,
             std::time::Instant::now(),
@@ -2099,7 +2099,7 @@ mod tests {
             &req,
             &state,
             &app_id,
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &Bytes::from_static(b"{\"text\":\"hi\"}"),
             std::time::Instant::now(),
@@ -2133,7 +2133,7 @@ mod tests {
             &req,
             &state,
             &app_id,
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &body,
             std::time::Instant::now(),
@@ -2164,7 +2164,7 @@ mod tests {
             &req,
             &state,
             &app_id,
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &body,
             std::time::Instant::now(),
@@ -2204,7 +2204,7 @@ mod tests {
             &req_with_key("a"),
             &state,
             &app_id,
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &Bytes::from_static(b"{\"a\":1}"),
             std::time::Instant::now(),
@@ -2221,7 +2221,7 @@ mod tests {
             &req_with_key("b"),
             &state,
             &app_id,
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &Bytes::from_static(b"{\"b\":2}"),
             std::time::Instant::now(),
@@ -2274,7 +2274,7 @@ mod tests {
             &req,
             &state,
             &app_id,
-            "/_zs/v1/todos.add",
+            "/__zeroship/v1/todos.add",
             &policy,
             &Bytes::from_static(b"{}"),
             std::time::Instant::now(),
@@ -2396,7 +2396,7 @@ mod tests {
         let jwt = format!("h.{payload}.s");
         let req = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {jwt}"))
-            .header("cookie", "__Host-zs_app_session=cookieval")
+            .header("cookie", "__Host-zeroship_app_session=cookieval")
             .to_http_request();
         assert_eq!(subscription_affinity_key(&req, false, false), "sub:alice");
     }
@@ -2404,7 +2404,7 @@ mod tests {
     #[test]
     fn subscription_affinity_falls_back_to_cookie() {
         let req = ntex::web::test::TestRequest::default()
-            .header("cookie", "__Host-zs_app_session=tok123")
+            .header("cookie", "__Host-zeroship_app_session=tok123")
             .to_http_request();
         assert_eq!(subscription_affinity_key(&req, false, false), "sess:tok123");
     }
@@ -2513,7 +2513,7 @@ mod tests {
         let m = subscription_manifest();
         let c = CompiledManifest::compile(&m);
         let p = c
-            .lookup_resource("/_zs/v1/todoTicker")
+            .lookup_resource("/__zeroship/v1/todoTicker")
             .expect("subscription resource");
         assert_eq!(p.kind, Some(ProcedureKind::Subscription));
     }
@@ -2685,7 +2685,7 @@ mod tests {
         // `redirect_uri` is the per-host callback path; insecure_dev=true
         // in the test fixture, so scheme is http.
         assert!(
-            location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zs%2Fauth%2Fcallback"),
+            location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zeroship%2Fauth%2Fcallback"),
             "redirect_uri must include the per-host callback path; got {location:?}"
         );
         // Stash cookie set.
@@ -2719,8 +2719,8 @@ mod tests {
             "/dashboard?welcome=true"
         );
         assert_eq!(
-            sanitize_oidc_original_path("/_zs/auth/callback"),
-            "/_zs/auth/callback"
+            sanitize_oidc_original_path("/__zeroship/auth/callback"),
+            "/__zeroship/auth/callback"
         );
     }
 

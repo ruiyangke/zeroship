@@ -8,7 +8,7 @@
 //! with no other logic in between, so exercising those two public functions in
 //! sequence reproduces the real dev request flow — no shim.
 //!
-//! The `__zs_dev_session` cookie is signed with `dev_auth::sign_dev_session`,
+//! The `__zeroship_dev_session` cookie is signed with `dev_auth::sign_dev_session`,
 //! which is byte-compatible with the JS `signDevSession` in
 //! `@zeroship/bootstrap`'s `dev-auth.ts` (same `base64url(json).hex-hmac`
 //! envelope) — so a cookie the JS dev-auth provider mints in the browser
@@ -111,7 +111,7 @@ fn dispatch_dev(runtime: &Runtime, method: &str, url: &str, cookie: Option<&str>
     }
 }
 
-/// Build a valid `__zs_dev_session` cookie header for `DEV_USER_JSON`.
+/// Build a valid `__zeroship_dev_session` cookie header for `DEV_USER_JSON`.
 fn dev_cookie() -> String {
     let token = dev_auth::sign_dev_session(DEV_SECRET.as_bytes(), DEV_USER_JSON);
     format!("{}={}", dev_auth::DEV_SESSION_COOKIE, token)
@@ -150,7 +150,7 @@ fn env_auth_get_user_resolves_dev_user_from_cookie() {
 }
 
 /// `currentUser()` (the RPC-ctx identity the `@zeroship/server` helpers expose)
-/// resolves the same dev user, driven through the REAL `/_zs/v1/<id>` RPC path.
+/// resolves the same dev user, driven through the REAL `/__zeroship/v1/<id>` RPC path.
 #[test]
 fn current_user_resolves_dev_user_via_rpc_ctx() {
     let _guard = DevEnvGuard::set();
@@ -175,7 +175,7 @@ fn current_user_resolves_dev_user_via_rpc_ctx() {
     let (status, body) = dispatch_dev(
         &runtime,
         "POST",
-        "http://localhost/_zs/v1/whoami",
+        "http://localhost/__zeroship/v1/whoami",
         Some(&dev_cookie()),
         r#"{"json":null}"#,
     );

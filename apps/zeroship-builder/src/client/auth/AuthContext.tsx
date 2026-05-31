@@ -3,7 +3,7 @@
 // The console is now a regular gateway-fronted zeroship app. End-user
 // (creator) auth runs through the platform's BFF: the popup OAuth flow
 // against the seeded per-app public PKCE client + the gateway's
-// `/__zs/auth/*` endpoints, which custody the power token server-side
+// `/__zeroship/auth/*` endpoints, which custody the power token server-side
 // and hand the browser an HttpOnly signed session cookie + a `{ user }`
 // identity projection. NO client-held token (design
 // docs/superpowers/specs/2026-05-30-console-as-regular-app-design.md

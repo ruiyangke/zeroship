@@ -664,7 +664,7 @@ async fn handle_request(
 
     // Dev-tier auth: in self-contained dev (`ZEROSHIP_DEV=1`) there is no
     // gateway to HMAC-sign a `ZeroShip-User` header, so the JS dev-auth
-    // provider (`@zeroship/bootstrap/dev`) mints a local `__zs_dev_session`
+    // provider (`@zeroship/bootstrap/dev`) mints a local `__zeroship_dev_session`
     // cookie instead. Resolve the dev identity from that cookie and thread it
     // through the SAME `call_fetch_handler_with_user` path the worker uses for
     // the gateway header — identical `user_json` shape, identical native

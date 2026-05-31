@@ -87,7 +87,7 @@ describe("buildServerEntrySource — binding-fed emission", () => {
   test("user fetch fall-through is shaped through default.fetch", () => {
     // The normaliser picks `user.default.fetch` first, falling back to
     // a top-level `fetch` export. The bootstrap fetch handler routes
-    // non-/_zs/v1/ traffic through that user handler.
+    // non-/__zeroship/v1/ traffic through that user handler.
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([

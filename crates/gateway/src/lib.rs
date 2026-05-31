@@ -169,13 +169,13 @@ pub struct GateState {
     /// (so a session cookie minted just before the roll still verifies).
     pub prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     /// Signed-session-cookie issuer (BFF redesign slice R1b). Mints the
-    /// gateway-signed `zs-sess+jwt` written into `__Host-zs_app_session`,
-    /// stamping the `zs-sess+jwt` typ. `None` exactly when `signing_key` is
+    /// gateway-signed `zeroship-sess+jwt` written into `__Host-zeroship_app_session`,
+    /// stamping the `zeroship-sess+jwt` typ. `None` exactly when `signing_key` is
     /// `None` (no signing key ⇒ no signed cookie ⇒ the cookie arm fails closed).
     pub session_issuer: Option<Arc<session_token::Issuer>>,
     /// Signed-session-cookie verifier (BFF redesign slice R1b). The cookie arm
     /// (`router::auth::resolve_app_session_user_header_inner`) verifies the
-    /// `__Host-zs_app_session` token with this LOCALLY on every request — no
+    /// `__Host-zeroship_app_session` token with this LOCALLY on every request — no
     /// per-request DB/session-store read. Built in lockstep with
     /// `session_issuer` from the same key, with the previous key folded in via
     /// `Verifier::with_previous` during a rotation overlap.

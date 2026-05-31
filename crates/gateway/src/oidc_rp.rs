@@ -5,13 +5,13 @@
 //! authorize-redirect dance and code exchange on the creator app's behalf
 //! (per proposal §2.2 and §10.2). After a successful exchange the
 //! gateway mints its own per-origin app session cookie
-//! (`__Host-zs_app_session`) — the ID token from hydra never reaches the
+//! (`__Host-zeroship_app_session`) — the ID token from hydra never reaches the
 //! creator app or the browser.
 //!
 //! Wiring into the dispatch pipeline lives in U5 — the gateway's
 //! dispatch handler calls `OidcRp::build_authorize_redirect` on
 //! unauthenticated HTML requests and `OidcRp::finish_callback` from
-//! the `/__zs/auth/callback` handler.
+//! the `/__zeroship/auth/callback` handler.
 
 use std::sync::Arc;
 
@@ -131,7 +131,7 @@ impl OidcRp {
     /// body. `original_path` is the request path the user was trying to
     /// reach; `redirect_uri` is the per-app callback URL the worker
     /// registered with hydra (e.g.
-    /// `https://myapp.zeroship.ai/__zs/auth/callback`).
+    /// `https://myapp.zeroship.ai/__zeroship/auth/callback`).
     ///
     /// Returns `(authorize_url, stash_cookie_value)`. Caller wraps the
     /// cookie value with [`set_stash_cookie`] before setting it on the
@@ -382,7 +382,7 @@ impl OidcRp {
     }
 
     /// Exchange an authorization code for tokens as a PUBLIC PKCE client
-    /// (auth-sdk Slice 1b, `POST /__zs/auth/token`). Unlike
+    /// (auth-sdk Slice 1b, `POST /__zeroship/auth/token`). Unlike
     /// [`OidcRp::finish_callback`] (the interactive cookie flow, which uses
     /// the gateway's confidential `client_secret`), the browser SDK is a
     /// public client: it sends `code` + `code_verifier`, and the gateway
@@ -438,7 +438,7 @@ impl OidcRp {
     }
 
     /// Build the Hydra `/oauth2/auth` URL for the browser PKCE flow
-    /// (auth-sdk Slice 1b-browser, `GET /__zs/auth/authorize`, spec §1.2).
+    /// (auth-sdk Slice 1b-browser, `GET /__zeroship/auth/authorize`, spec §1.2).
     ///
     /// Unlike [`OidcRp::build_authorize_redirect`] (the interactive cookie
     /// flow, which generates the PKCE verifier/state/nonce server-side and
@@ -491,7 +491,7 @@ impl OidcRp {
 
     /// Best-effort revoke a token (refresh family) at Hydra's RFC 7009
     /// `/oauth2/revoke` endpoint as a PUBLIC PKCE client (auth-sdk Slice
-    /// 1b-browser, `POST /__zs/auth/signout`, spec §1.2). The per-app
+    /// 1b-browser, `POST /__zeroship/auth/signout`, spec §1.2). The per-app
     /// `client_id` is sent (public client; no secret) so Hydra scopes the
     /// revoke to this client's family. `token_type_hint=refresh_token`
     /// because signout revokes the server-held refresh family.
@@ -980,9 +980,9 @@ impl Stash {
 //
 // Two cookies live on the per-app origin (`{app}.zeroship.ai`):
 //
-// - `__Host-zs_app_session` — opaque session id minted after a successful
-//   OIDC dance. 12 h max-age, set on `/__zs/auth/callback`, cleared on
-//   `/__zs/auth/logout`. The gateway looks this up server-side to resolve
+// - `__Host-zeroship_app_session` — opaque session id minted after a successful
+//   OIDC dance. 12 h max-age, set on `/__zeroship/auth/callback`, cleared on
+//   `/__zeroship/auth/logout`. The gateway looks this up server-side to resolve
 //   `ZeroShip-User` on every request.
 // - `__Host-zs_oidc_stash` — the signed PKCE+state stash. 10 min max-age,
 //   set on the redirect to hydra, cleared on callback.
@@ -996,16 +996,16 @@ impl Stash {
 // fails with "invalid request".
 
 /// Production app session cookie name (`__Host-` prefix → Secure required).
-pub const APP_SESSION_COOKIE_PROD: &str = "__Host-zs_app_session";
+pub const APP_SESSION_COOKIE_PROD: &str = "__Host-zeroship_app_session";
 /// Dev app session cookie name (no `__Host-` prefix).
-pub const APP_SESSION_COOKIE_DEV: &str = "zs_app_session";
+pub const APP_SESSION_COOKIE_DEV: &str = "zeroship_app_session";
 
 /// Cookie `Max-Age` for the SIGNED STATELESS session cookie (BFF redesign slice
-/// R1b). The cookie is a gateway-signed `zs-sess+jwt` identity assertion with a
+/// R1b). The cookie is a gateway-signed `zeroship-sess+jwt` identity assertion with a
 /// short ~15 min lifetime ([`crate::session_token::SESSION_TOKEN_TTL_SECS`]) —
 /// NOT a 12h opaque session id. The browser holds it only as long as its `exp`;
 /// the durable credential is the 30-day server-held anchor, which silently
-/// re-signs a fresh cookie via `GET /__zs/auth/session` when this one lapses.
+/// re-signs a fresh cookie via `GET /__zeroship/auth/session` when this one lapses.
 pub const APP_SESSION_MAX_AGE_SECS: i64 = crate::session_token::SESSION_TOKEN_TTL_SECS;
 
 /// Resolve the app session cookie name for the current environment.
@@ -1016,7 +1016,7 @@ pub fn app_session_cookie_name(insecure_dev: bool) -> &'static str {
 
 /// Build the `Set-Cookie` header value for the per-app session.
 ///
-/// The value is the gateway-SIGNED `zs-sess+jwt` token (BFF slice R1b), NOT an
+/// The value is the gateway-SIGNED `zeroship-sess+jwt` token (BFF slice R1b), NOT an
 /// opaque session id. `insecure_dev = true` drops the `Secure` flag AND the
 /// `__Host-` prefix (RFC 6265bis §4.1.3.2 — `__Host-` requires Secure). The
 /// cookie stays HttpOnly + SameSite=Lax (XSS cannot read it; the signed token
@@ -1039,7 +1039,7 @@ pub fn clear_app_session_cookie(insecure_dev: bool) -> String {
 }
 
 /// Parse the raw signed session token out of a `Cookie` header value (BFF slice
-/// R1b — the cookie now carries a `zs-sess+jwt`, not a UUID). Returns the token
+/// R1b — the cookie now carries a `zeroship-sess+jwt`, not a UUID). Returns the token
 /// string for the cookie arm to verify LOCALLY via
 /// [`crate::session_token::Verifier`] — no DB round-trip.
 #[must_use]
@@ -1185,7 +1185,7 @@ mod tests {
         );
         let (url, stash) = rp.build_authorize_redirect(
             "/some/path",
-            "https://myapp.zeroship.ai/__zs/auth/callback",
+            "https://myapp.zeroship.ai/__zeroship/auth/callback",
         );
         assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"));
         assert!(url.contains("client_id=gateway"));
@@ -1198,7 +1198,7 @@ mod tests {
         // (form_urlencoded uses `+` for space).
         assert!(url.contains("scope=openid+offline_access+email+profile"));
         // redirect_uri URL-encoded.
-        assert!(url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zs%2Fauth%2Fcallback"));
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fcallback"));
         // Stash is non-empty and contains the dot-separator.
         assert!(stash.contains('.'));
     }
@@ -1221,7 +1221,7 @@ mod tests {
             state: "STATE_xyz",
             nonce: "NONCE_123",
             scope: "openid profile read:billing",
-            redirect_uri: "https://myapp.zeroship.ai/__zs/auth/popup-callback",
+            redirect_uri: "https://myapp.zeroship.ai/__zeroship/auth/popup-callback",
             prompt: None,
             idp_hint: None,
         };
@@ -1238,7 +1238,7 @@ mod tests {
         // scope URL-encoded (form_urlencoded uses `+` for space).
         assert!(url.contains("scope=openid+profile+read%3Abilling"), "{url}");
         assert!(
-            url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zs%2Fauth%2Fpopup-callback"),
+            url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fpopup-callback"),
             "{url}"
         );
         // No prompt in the common case (so Hydra's SSO skip fires).
@@ -1416,10 +1416,10 @@ mod tests {
 
     #[test]
     fn app_session_set_cookie_has_secure_in_prod() {
-        // The cookie now carries a signed zs-sess+jwt token, not a UUID.
+        // The cookie now carries a signed zeroship-sess+jwt token, not a UUID.
         let token = "eyJ.signed.token";
         let c = set_app_session_cookie(token, false);
-        assert!(c.starts_with("__Host-zs_app_session="));
+        assert!(c.starts_with("__Host-zeroship_app_session="));
         assert!(c.contains(token));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
@@ -1437,7 +1437,7 @@ mod tests {
         // the cookie.
         let c = set_app_session_cookie("eyJ.signed.token", true);
         assert!(!c.starts_with("__Host-"), "dev cookie must NOT use __Host- prefix: {c}");
-        assert!(c.starts_with("zs_app_session="), "dev cookie name: {c}");
+        assert!(c.starts_with("zeroship_app_session="), "dev cookie name: {c}");
         assert!(!c.contains("Secure"), "dev cookie must NOT have Secure: {c}");
         assert!(c.contains("HttpOnly"));
         assert!(c.contains("SameSite=Lax"));
@@ -1457,14 +1457,14 @@ mod tests {
     fn app_session_parse_cookie_roundtrips() {
         // The value is now a signed token string (opaque to the parser).
         let token = "eyJhbGc.eyJzdWI.sig";
-        let header = format!("foo=bar; __Host-zs_app_session={token}; baz=qux");
+        let header = format!("foo=bar; __Host-zeroship_app_session={token}; baz=qux");
         assert_eq!(parse_app_session_cookie(&header, false).as_deref(), Some(token));
         assert_eq!(parse_app_session_cookie("nothing-here", false), None);
         // Empty value ⇒ None (no token to verify).
-        assert_eq!(parse_app_session_cookie("__Host-zs_app_session=", false), None);
+        assert_eq!(parse_app_session_cookie("__Host-zeroship_app_session=", false), None);
 
         // Dev mode reads the bare-name cookie.
-        let dev_header = format!("zs_app_session={token}");
+        let dev_header = format!("zeroship_app_session={token}");
         assert_eq!(parse_app_session_cookie(&dev_header, true).as_deref(), Some(token));
         // Prod-prefixed cookie is ignored in dev mode (looks for bare name).
         assert_eq!(parse_app_session_cookie(&header, true), None);

@@ -452,13 +452,13 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     let uris: Vec<String> = oc[0].get("redirect_uris");
     // The popup OAuth flow needs BOTH the popup-callback and the full-page
     // callback registered on the console public client (the `@zeroship/auth`
-    // SDK posts the relay code through `/__zs/auth/popup-callback`).
+    // SDK posts the relay code through `/__zeroship/auth/popup-callback`).
     assert!(
-        uris.iter().any(|u| u == &format!("http://{host}/__zs/auth/popup-callback")),
+        uris.iter().any(|u| u == &format!("http://{host}/__zeroship/auth/popup-callback")),
         "popup-callback redirect_uri registered on the console host: {uris:?}"
     );
     assert!(
-        uris.iter().any(|u| u == &format!("http://{host}/__zs/auth/callback")),
+        uris.iter().any(|u| u == &format!("http://{host}/__zeroship/auth/callback")),
         "callback redirect_uri anchors on the console host: {uris:?}"
     );
     // The Hydra-side client is a public PKCE client (token_endpoint_auth_method
@@ -478,7 +478,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     );
     assert!(entry.deploy_hash.is_some(), "route carries a deploy_hash");
 
-    // (4) Service principal + admin role + PAT row + ZS_CONTROL_SERVICE_TOKEN.
+    // (4) Service principal + admin role + PAT row + ZEROSHIP_CONTROL_SERVICE_TOKEN.
     let role = auth_pg
         .query(
             "SELECT role FROM platform.roles WHERE user_id = $1",
@@ -505,7 +505,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     let secret_names = env_store.list_secret_names(app_id).await.expect("list secrets");
     assert!(
         secret_names.iter().any(|n| n == SERVICE_TOKEN_ENV_KEY),
-        "ZS_CONTROL_SERVICE_TOKEN stored as a secret: {secret_names:?}"
+        "ZEROSHIP_CONTROL_SERVICE_TOKEN stored as a secret: {secret_names:?}"
     );
     let vars = env_store.list_vars(app_id).await.expect("list vars");
     assert!(
@@ -517,7 +517,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     let expose = env_store.list_expose(app_id).await.expect("list expose");
     assert!(
         expose.iter().any(|k| k == SERVICE_TOKEN_ENV_KEY),
-        "ZS_CONTROL_SERVICE_TOKEN exposed to process.env: {expose:?}"
+        "ZEROSHIP_CONTROL_SERVICE_TOKEN exposed to process.env: {expose:?}"
     );
     // The merged worker env surfaces the decrypted token value (non-empty,
     // looks like a PAT JWT — three dot-separated segments).

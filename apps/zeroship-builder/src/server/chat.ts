@@ -5,7 +5,7 @@
 // SSE bytes verbatim to the v6 `useChat` client.
 //
 // Wire (per AI SDK v6 spec, identical to examples/ai-chat):
-//   POST /_zs/v1/chat
+//   POST /__zeroship/v1/chat
 //     fresh body:   { json: { messages: UIMessage[], id: string } }
 //     resume body:  { json: { resume: { token, value }, id: string } }
 //     response:     text/event-stream                  ← UI Message Stream

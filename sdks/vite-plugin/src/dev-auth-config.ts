@@ -36,7 +36,7 @@ export interface ResolvedDevAuthEnv {
  * bootstrap dev-auth provider parses, and mint a fresh HMAC secret.
  *
  * - `undefined` / `true` → ON with the built-in default user (`config = "1"`).
- * - `false` → OFF (`config = null`, no secret) — `/__zs/auth/*` falls through
+ * - `false` → OFF (`config = null`, no secret) — `/__zeroship/auth/*` falls through
  *   to the user module and `env.auth.getUser()` is anonymous.
  * - a single user object / `{ user }` → one configured user.
  * - `{ users, defaultUserId? }` → multi-user (the dev picker renders for >1).

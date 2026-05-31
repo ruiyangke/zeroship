@@ -141,7 +141,7 @@ pub struct PerRuleKey {
     /// * `Ip` → request's client IP string
     /// * `User` → authenticated `sub:<jwt-sub>` (falls back to the session
     ///   cookie, then IP, for anonymous callers)
-    /// * `Session` → `__Host-zs_app_session` cookie value (or fallback IP)
+    /// * `Session` → `__Host-zeroship_app_session` cookie value (or fallback IP)
     /// * `App` → constant `"app"` (single bucket shared by all clients)
     pub bucket: String,
 }
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn per_rule_per_session_separates_buckets() {
-        // Different `__Host-zs_app_session` values → independent buckets even
+        // Different `__Host-zeroship_app_session` values → independent buckets even
         // when the request comes from the same machine.
         let reg = PerRuleRateLimitRegistry::new();
         let app = Uuid::nil();

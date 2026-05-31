@@ -1,5 +1,5 @@
 //! Faithful integration tests for the auth-sdk Slice 1b-anchors
-//! browser-token CORE (`POST /__zs/auth/token`, `GET /__zs/auth/session`,
+//! browser-token CORE (`POST /__zeroship/auth/token`, `GET /__zeroship/auth/session`,
 //! the per-node mint single-flight, the `auth.app_session_anchors` store).
 //!
 //! A loopback MOCK Hydra (in-process ntex test server) serves
@@ -398,7 +398,7 @@ macro_rules! anchors_app {
             // BFF R1b — the MERGED resource: POST + GET both on `/session`
             // (the old `/token` route is gone).
             .service(
-                web::resource("/__zs/auth/session")
+                web::resource("/__zeroship/auth/session")
                     .route(web::post().to(zeroship_gateway::auth_token::session_post))
                     .route(web::get().to(zeroship_gateway::auth_token::session)),
             )
@@ -435,7 +435,7 @@ async fn foreign_origin_is_rejected_no_cors_reflection() {
     // A cross-origin POST /token with a foreign Origin must be rejected
     // outright (403) and MUST NOT echo Access-Control-Allow-Origin.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", "https://evil.example.com")
         .header("x-zs-auth", "1")
@@ -451,7 +451,7 @@ async fn foreign_origin_is_rejected_no_cors_reflection() {
 
     // Origin: null is likewise rejected.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", "null")
         .header("x-zs-auth", "1")
@@ -471,7 +471,7 @@ async fn token_missing_custom_header_is_rejected() {
 
     // Same-origin but NO X-ZS-Auth header → 400 (the primary CSRF defense).
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("content-type", "application/x-www-form-urlencoded")
@@ -491,14 +491,14 @@ async fn session_mint_without_custom_header_is_rejected() {
     // ?mint=1 WITHOUT X-ZS-Auth must not mint (a top-level navigation
     // cannot set the custom header).
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/session?mint=1")
+        .uri("/__zeroship/auth/session?mint=1")
         .header("host", APP_HOST)
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 400);
 }
 
-/// Mint a gateway-signed `__Host-zs_app_session` cookie from the state's session
+/// Mint a gateway-signed `__Host-zeroship_app_session` cookie from the state's session
 /// issuer (the SAME shape `session_post` / the interactive callback emit). The
 /// `sub` is whatever the caller passes — so a test can supply a non-`pws_`
 /// subject to prove the GET-fast-path defense.
@@ -524,7 +524,7 @@ fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> Stri
     format!("{name}={token}")
 }
 
-/// REGRESSION (review minor #3): GET `/__zs/auth/session` fast path. A valid
+/// REGRESSION (review minor #3): GET `/__zeroship/auth/session` fast path. A valid
 /// `pws_` signed cookie is honored LOCALLY with NO DB (smoke mode, `db = None`):
 /// `session_cookie_family_revoked` returns `false` when no DB is configured, so
 /// the projection is returned — exactly like the per-request dispatch cookie arm
@@ -543,7 +543,7 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
 
     let app = test::init_service(anchors_app!(state)).await;
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("cookie", cookie)
         .to_request();
@@ -582,7 +582,7 @@ async fn session_get_fast_path_rejects_non_pairwise_sub() {
 
     let app = test::init_service(anchors_app!(state)).await;
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("cookie", cookie)
         .to_request();
@@ -603,7 +603,7 @@ async fn session_get_fast_path_rejects_non_pairwise_sub() {
     );
 }
 
-/// REGRESSION (review minor #5): POST `/__zs/auth/session` must FAIL FAST when
+/// REGRESSION (review minor #5): POST `/__zeroship/auth/session` must FAIL FAST when
 /// the gateway has no session signing key — BEFORE the Hydra code exchange + the
 /// gateway-session + anchor write. With `session_issuer = None` AND `db = None`,
 /// the old ordering hit the `db_unavailable` 503 first (the signing-key 503 fired
@@ -628,7 +628,7 @@ async fn session_post_fails_fast_without_signing_key() {
 
     let app = test::init_service(anchors_app!(state)).await;
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1007,8 +1007,8 @@ async fn cleanup(dsn: &str, user_id: Uuid) {
 #[ntex::test]
 async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // BFF redesign §2.2: /token returns ONLY { user, expires_at } (pws_ id) +
-    // sets the live __Host-zs_app_session cookie, the reload-recovery
-    // __Host-zs_app_anchor cookie, and the breadcrumb. NO access_token, NO
+    // sets the live __Host-zeroship_app_session cookie, the reload-recovery
+    // __Host-zeroship_app_anchor cookie, and the breadcrumb. NO access_token, NO
     // scope, NO id_token, NO token_type, NO scopes on the user. A
     // gateway_sessions row is created. The global UUID never reaches the
     // browser.
@@ -1025,7 +1025,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     let app = test::init_service(anchors_app!(state.clone())).await;
 
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1042,10 +1042,10 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         Some("no-store")
     );
 
-    // The SPA's LIVE request credential: __Host-zs_app_session (Lax, HttpOnly,
-    // Secure) — now a gateway-SIGNED `zs-sess+jwt`, verified LOCALLY on the hot
+    // The SPA's LIVE request credential: __Host-zeroship_app_session (Lax, HttpOnly,
+    // Secure) — now a gateway-SIGNED `zeroship-sess+jwt`, verified LOCALLY on the hot
     // path (BFF R1b). This is the cookie POST /session sets.
-    let session_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+    let session_cookie = set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=")
         .expect("live session cookie set");
     assert!(session_cookie.contains("HttpOnly"));
     assert!(session_cookie.contains("SameSite=Lax"));
@@ -1062,7 +1062,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         .to_string();
 
     // The reload-recovery anchor cookie (Strict, HttpOnly, Secure) + breadcrumb.
-    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
+    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=")
         .expect("anchor cookie set");
     assert!(anchor_cookie.contains("HttpOnly"));
     assert!(anchor_cookie.contains("SameSite=Strict"));
@@ -1167,7 +1167,7 @@ async fn token_exchange_swaps_email_for_relay_alias() {
     let app = test::init_service(anchors_app!(state.clone())).await;
 
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1215,7 +1215,7 @@ async fn token_exchange_fails_closed_when_no_alias() {
     let app = test::init_service(anchors_app!(state.clone())).await;
 
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1296,7 +1296,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
 async fn session_mint_recovers_after_reload_one_refresh() {
     // BFF reload-recovery (§2.2): the gateway session lapses, but the anchor is
     // valid. /session?mint=1 rotates the server-held family at Hydra exactly
-    // ONCE, RE-creates the gateway_sessions row, RE-sets __Host-zs_app_session,
+    // ONCE, RE-creates the gateway_sessions row, RE-sets __Host-zeroship_app_session,
     // and returns the identity projection — with NO JWT and NO real email in
     // the body, and the pws_ id (never the global UUID).
     let Some(dsn) = db_url() else {
@@ -1315,7 +1315,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
 
     // 1. Establish a session + anchor via the real /token exchange.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1324,7 +1324,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
-    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_anchor=")
+    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=")
         .expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
 
@@ -1344,7 +1344,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
 
     // 3. Reload-recovery: /session?mint=1 with the anchor cookie only.
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/session?mint=1")
+        .uri("/__zeroship/auth/session?mint=1")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1353,14 +1353,14 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200, "reload-recovery must succeed");
 
-    // It RE-SIGNS a fresh __Host-zs_app_session cookie (the SPA regains a live
-    // credential) — a `zs-sess+jwt`, verified locally.
-    let new_session_cookie = set_cookie_with_prefix(&resp, "__Host-zs_app_session=")
+    // It RE-SIGNS a fresh __Host-zeroship_app_session cookie (the SPA regains a live
+    // credential) — a `zeroship-sess+jwt`, verified locally.
+    let new_session_cookie = set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=")
         .expect("reload-recovery must re-set the session cookie");
     assert!(new_session_cookie.contains("HttpOnly"));
     assert!(new_session_cookie.contains("SameSite=Lax"));
     let new_session_token = new_session_cookie
-        .strip_prefix("__Host-zs_app_session=")
+        .strip_prefix("__Host-zeroship_app_session=")
         .and_then(|rest| rest.split(';').next())
         .expect("session token in cookie")
         .to_string();
@@ -1444,7 +1444,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
 #[ntex::test]
 async fn session_steady_state_reads_gateway_session_without_hydra() {
     // BFF steady state (§2.2): a non-mint GET /session with a LIVE
-    // __Host-zs_app_session cookie reads the gateway_sessions row directly and
+    // __Host-zeroship_app_session cookie reads the gateway_sessions row directly and
     // returns the relay-swapped identity projection — NO anchor read, NO Hydra
     // round-trip, NO JWT in the body.
     let Some(dsn) = db_url() else {
@@ -1463,7 +1463,7 @@ async fn session_steady_state_reads_gateway_session_without_hydra() {
 
     // /token establishes the live session cookie.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1473,13 +1473,13 @@ async fn session_steady_state_reads_gateway_session_without_hydra() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
     let session_cookie =
-        set_cookie_with_prefix(&resp, "__Host-zs_app_session=").expect("session cookie");
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").expect("session cookie");
     let session_pair = session_cookie.split(';').next().unwrap().to_string();
 
     let before = hydra.refresh_calls.load(Ordering::SeqCst);
     // Non-mint GET /session with ONLY the session cookie: reads the live row.
     let req = test::TestRequest::get()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("cookie", session_pair)
@@ -1514,7 +1514,7 @@ async fn session_steady_state_reads_gateway_session_without_hydra() {
 #[ntex::test]
 async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     // R1b FAITHFUL REGRESSION: the SPA's live credential is the SIGNED
-    // __Host-zs_app_session cookie that POST /__zs/auth/session mints. The live
+    // __Host-zeroship_app_session cookie that POST /__zeroship/auth/session mints. The live
     // per-request cookie arm verifies it LOCALLY (no DB) and binds it on the
     // route's per-app `client_id` (the cookie `app` claim). This runs the FULL
     // chain: mint the signed cookie via the REAL POST /session handler, then
@@ -1537,7 +1537,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
 
     // 1. Mint the signed cookie via the REAL POST /session exchange.
     let req = test::TestRequest::post()
-        .uri("/__zs/auth/session")
+        .uri("/__zeroship/auth/session")
         .header("host", APP_HOST)
         .header("origin", format!("https://{APP_HOST}"))
         .header("x-zs-auth", "1")
@@ -1547,9 +1547,9 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
     let session_cookie =
-        set_cookie_with_prefix(&resp, "__Host-zs_app_session=").expect("session cookie");
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").expect("session cookie");
     let session_token = session_cookie
-        .strip_prefix("__Host-zs_app_session=")
+        .strip_prefix("__Host-zeroship_app_session=")
         .and_then(|rest| rest.split(';').next())
         .expect("session token in cookie")
         .to_string();

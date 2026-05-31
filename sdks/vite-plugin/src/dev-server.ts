@@ -449,9 +449,9 @@ export function devServerPlugin(
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
             // Dev-tier auth: when enabled, hand the child the dev-user config +
             // the cookie HMAC secret. The runtime's `dev_auth.rs` reads the
-            // secret to verify the `__zs_dev_session` cookie → server-side
+            // secret to verify the `__zeroship_dev_session` cookie → server-side
             // identity; the bootstrap dev-auth provider reads both to serve
-            // `/__zs/auth/*` + sign the cookie. Omitted entirely when disabled.
+            // `/__zeroship/auth/*` + sign the cookie. Omitted entirely when disabled.
             ...(devAuthEnv.config !== null && devAuthEnv.secret !== null
               ? {
                   [ENV_DEV_AUTH]: devAuthEnv.config,
@@ -538,7 +538,7 @@ export function devServerPlugin(
       // This ensures the runtime's RPC + API paths are proxied to it rather
       // than being caught by Vite's index.html fallback. Forwarded path
       // prefixes:
-      //   - /_zs/v1/<id>   ← spec wire (production + dev parity)
+      //   - /__zeroship/v1/<id>   ← spec wire (production + dev parity)
       //   - /api/*         ← raw HTTP routes the user app exposes
       //   - /auth/login, /auth/callback, /auth/logout
       //                     ← builder OAuth code-flow routes
@@ -551,7 +551,7 @@ export function devServerPlugin(
         ) => {
           const url = req.url ?? "";
           if (
-            !url.startsWith("/_zs/v1/") &&
+            !url.startsWith("/__zeroship/v1/") &&
             !url.startsWith("/_rpc") &&
             !url.startsWith("/rpc") &&
             !url.startsWith("/api/") &&
@@ -563,7 +563,7 @@ export function devServerPlugin(
           }
 
           // Forward path as-is — the dev-bootstrap's `default.fetch`
-          // dispatches /_zs/v1/<id> through `default.rpc`, mirroring
+          // dispatches /__zeroship/v1/<id> through `default.rpc`, mirroring
           // production.
           const proxyReq = http.request(
             `http://localhost:${devPort}${url}`,

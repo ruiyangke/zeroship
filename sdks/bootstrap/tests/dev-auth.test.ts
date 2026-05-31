@@ -1,6 +1,6 @@
 /**
  * Faithful test for the dev-tier auth provider — drives the REAL
- * `createDevAuthProvider` through the full `/__zs/auth/*` flow (authorize →
+ * `createDevAuthProvider` through the full `/__zeroship/auth/*` flow (authorize →
  * 302 → popup-callback relay → code exchange → session cookie → probe → mint →
  * signout). Nothing is stubbed: the provider's real HMAC cookie signing
  * (WebCrypto), real code ledger, and real wire shapes are exercised.
@@ -82,22 +82,22 @@ describe("dev-auth provider — cookie token round-trips (WebCrypto HMAC)", () =
   });
 });
 
-describe("dev-auth provider — full /__zs/auth/* flow", () => {
+describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
   test("authorize 302s to popup-callback with a code + state", async () => {
     const p = makeProvider();
     const res = await p.handle(
-      new Request("http://localhost:3001/__zs/auth/authorize?state=st123&scope=openid"),
+      new Request("http://localhost:3001/__zeroship/auth/authorize?state=st123&scope=openid"),
     );
     assert.equal(res.status, 302);
     const loc = new URL(res.headers.get("location")!);
-    assert.equal(loc.pathname, "/__zs/auth/popup-callback");
+    assert.equal(loc.pathname, "/__zeroship/auth/popup-callback");
     assert.ok(loc.searchParams.get("code"));
     assert.equal(loc.searchParams.get("state"), "st123");
   });
 
   test("popup-callback serves the same-origin relay page", async () => {
     const p = makeProvider();
-    const res = await p.handle(new Request("http://localhost:3001/__zs/auth/popup-callback?code=c&state=s"));
+    const res = await p.handle(new Request("http://localhost:3001/__zeroship/auth/popup-callback?code=c&state=s"));
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
     const html = await res.text();
@@ -109,11 +109,11 @@ describe("dev-auth provider — full /__zs/auth/* flow", () => {
   test("exchange mints a session cookie + returns { user, expires_at }", async () => {
     const p = makeProvider();
     // authorize → code
-    const authRes = await p.handle(new Request("http://localhost:3001/__zs/auth/authorize?state=s"));
+    const authRes = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
     const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
 
     const res = await p.handle(
-      new Request("http://localhost:3001/__zs/auth/session", {
+      new Request("http://localhost:3001/__zeroship/auth/session", {
         method: "POST",
         headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
         body: JSON.stringify({ grant_type: "authorization_code", code, code_verifier: "v" }),
@@ -127,15 +127,15 @@ describe("dev-auth provider — full /__zs/auth/* flow", () => {
     assert.equal(body.user.email_verified, true);
     assert.deepEqual(body.user.scopes, ["openid", "profile", "email"]);
     assert.equal(typeof body.expires_at, "number");
-    assert.ok(cookieTokenFrom(res), "exchange sets the __zs_dev_session cookie");
+    assert.ok(cookieTokenFrom(res), "exchange sets the __zeroship_dev_session cookie");
   });
 
   test("session probe with the cookie returns the user; without it → 401 login_required", async () => {
     const p = makeProvider();
-    const authRes = await p.handle(new Request("http://localhost:3001/__zs/auth/authorize?state=s"));
+    const authRes = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
     const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
     const exch = await p.handle(
-      new Request("http://localhost:3001/__zs/auth/session", {
+      new Request("http://localhost:3001/__zeroship/auth/session", {
         method: "POST",
         headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
         body: JSON.stringify({ code }),
@@ -144,15 +144,15 @@ describe("dev-auth provider — full /__zs/auth/* flow", () => {
     const token = cookieTokenFrom(exch)!;
 
     const probe = await p.handle(
-      new Request("http://localhost:3001/__zs/auth/session", {
-        headers: { cookie: `__zs_dev_session=${token}` },
+      new Request("http://localhost:3001/__zeroship/auth/session", {
+        headers: { cookie: `__zeroship_dev_session=${token}` },
       }),
     );
     assert.equal(probe.status, 200);
     const body = (await probe.json()) as { user: { email: string } };
     assert.equal(body.user.email, "dev@localhost");
 
-    const anon = await p.handle(new Request("http://localhost:3001/__zs/auth/session"));
+    const anon = await p.handle(new Request("http://localhost:3001/__zeroship/auth/session"));
     assert.equal(anon.status, 401);
     assert.equal(((await anon.json()) as { error: string }).error, "login_required");
   });
@@ -164,8 +164,8 @@ describe("dev-auth provider — full /__zs/auth/* flow", () => {
       JSON.stringify({ id: "pws_x", email: "x@y", name: "X", email_verified: true, scopes: [] }),
     );
     const res = await p.handle(
-      new Request("http://localhost:3001/__zs/auth/session?mint=1", {
-        headers: { "X-ZS-Auth": "1", cookie: `__zs_dev_session=${token}` },
+      new Request("http://localhost:3001/__zeroship/auth/session?mint=1", {
+        headers: { "X-ZS-Auth": "1", cookie: `__zeroship_dev_session=${token}` },
       }),
     );
     assert.equal(res.status, 200);
@@ -175,7 +175,7 @@ describe("dev-auth provider — full /__zs/auth/* flow", () => {
   test("signout is 204 + clears the cookie (idempotent)", async () => {
     const p = makeProvider();
     const res = await p.handle(
-      new Request("http://localhost:3001/__zs/auth/signout", {
+      new Request("http://localhost:3001/__zeroship/auth/signout", {
         method: "POST",
         headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
         body: JSON.stringify({ scope: "local" }),
@@ -187,7 +187,7 @@ describe("dev-auth provider — full /__zs/auth/* flow", () => {
 
   test("multi-user config without a pick renders the dev picker", async () => {
     const p = makeProvider(JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }));
-    const res = await p.handle(new Request("http://localhost:3001/__zs/auth/authorize?state=s"));
+    const res = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
     const html = await res.text();
@@ -215,9 +215,9 @@ describe("dev-auth provider — DEV-ONLY by construction (build artifact guard)"
         .filter((line) => !line.trim().startsWith("//"))
         .join("\n");
       assert.doesNotMatch(code, /createDevAuthProvider/, `${artifact} must not reference createDevAuthProvider`);
-      assert.doesNotMatch(code, /__zs_dev_session/, `${artifact} must not reference the dev session cookie`);
+      assert.doesNotMatch(code, /__zeroship_dev_session/, `${artifact} must not reference the dev session cookie`);
       assert.doesNotMatch(code, /signDevSession/, `${artifact} must not reference signDevSession`);
-      assert.doesNotMatch(code, /\/__zs\/auth\/authorize/, `${artifact} must not embed the dev authorize route`);
+      assert.doesNotMatch(code, /\/__zeroship\/auth\/authorize/, `${artifact} must not embed the dev authorize route`);
     });
   }
 });

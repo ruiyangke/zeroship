@@ -2,7 +2,7 @@
 //
 // Console fetch handler. Under the BFF cutover the console is a regular
 // gateway-fronted zeroship app: end-user (creator) auth runs entirely
-// through the platform — the gateway's `/__zs/auth/*` endpoints + the
+// through the platform — the gateway's `/__zeroship/auth/*` endpoints + the
 // `@zeroship/auth` browser SDK — NOT a bespoke OAuth RP in the app.
 //
 // So `builderFetch` no longer owns `/auth/{login,callback,logout}`; the

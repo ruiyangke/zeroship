@@ -28,7 +28,7 @@ pub struct CompiledManifest {
     /// Per-resource flattened policy, computed once at app load.
     effective_policies: HashMap<String, EffectivePolicy>,
     /// RPC wire-id (without the `rpc:` prefix) → key into
-    /// `effective_policies`. The wire URL `/_zs/v1/<wireId>` strips the
+    /// `effective_policies`. The wire URL `/__zeroship/v1/<wireId>` strips the
     /// prefix; this table answers "is there an RPC resource for this id?"
     /// in O(1).
     rpc_index: HashMap<String, String>,
@@ -225,7 +225,7 @@ impl CompiledManifest {
     /// Resolve a request to a resource id using the resource-tree.
     /// Returns `None` if no resource matched.
     ///
-    /// * URL beginning with `/_zs/v1/` → strip prefix; lookup
+    /// * URL beginning with `/__zeroship/v1/` → strip prefix; lookup
     ///   `rpc:<remainder>` in `rpc_index`.
     /// * Otherwise → `url_index` lookup (most specific wins).
     pub fn lookup_resource(&self, path: &str) -> Option<&EffectivePolicy> {
@@ -237,7 +237,7 @@ impl CompiledManifest {
     /// instead of the policy. Used by the per-resource rate-limiter to
     /// hash the matched key into a stable `rule_idx`.
     pub fn lookup_resource_key(&self, path: &str) -> Option<String> {
-        if let Some(rest) = path.strip_prefix("/_zs/v1/") {
+        if let Some(rest) = path.strip_prefix("/__zeroship/v1/") {
             return self.rpc_index.get(rest).cloned();
         }
         self.url_index.find(path)
@@ -595,7 +595,7 @@ mod tests {
         let m = Manifest::default();
         let c = CompiledManifest::compile(&m);
         assert!(c.lookup_resource("/foo").is_none());
-        assert!(c.lookup_resource("/_zs/v1/x").is_none());
+        assert!(c.lookup_resource("/__zeroship/v1/x").is_none());
     }
 
     #[test]
@@ -611,11 +611,11 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
         assert_eq!(p.kind, Some(ProcedureKind::Query));
         assert!(matches!(p.action, ResolvedAction::WorkerRpc));
         // Unknown wire id → no match.
-        assert!(c.lookup_resource("/_zs/v1/unknown.method").is_none());
+        assert!(c.lookup_resource("/__zeroship/v1/unknown.method").is_none());
         // Same id without the wire prefix is NOT looked up via rpc_index.
         assert!(c.lookup_resource("/todos.list").is_none());
     }
@@ -685,7 +685,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
         assert_eq!(p.auth, AuthLevel::Admin, "inherits root admin");
         assert_eq!(p.kind, Some(ProcedureKind::Query));
     }
@@ -721,7 +721,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
         assert_eq!(p.auth, AuthLevel::User, "stricter user beats root anon");
     }
 
@@ -759,7 +759,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/todos.add").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/todos.add").expect("matches");
         assert_eq!(p.rate_limit.as_ref().unwrap().rpm, Some(60), "stricter cap wins");
     }
 
@@ -823,7 +823,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/billing.charge").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/billing.charge").expect("matches");
         assert_eq!(
             p.middleware,
             vec!["audit".to_string(), "transaction".to_string()]
@@ -876,7 +876,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/billing.read").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/billing.read").expect("matches");
         assert_eq!(p.required_scopes, vec!["read:billing".to_string()]);
         assert_eq!(p.auth, AuthLevel::User);
     }
@@ -917,7 +917,7 @@ mod tests {
         };
         let c = CompiledManifest::compile(&m);
         let p = c
-            .lookup_resource("/_zs/v1/billing.charge")
+            .lookup_resource("/__zeroship/v1/billing.charge")
             .expect("matches");
         // Root openid + parent read:billing (+ openid deduped) + child write:billing.
         assert_eq!(
@@ -943,7 +943,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
         assert!(p.required_scopes.is_empty());
     }
 
@@ -953,6 +953,6 @@ mod tests {
         let c = CompiledManifest::compile(&m);
         // `*` doesn't dispatch; nothing matches by URL.
         assert!(c.lookup_resource("/anything").is_none());
-        assert!(c.lookup_resource("/_zs/v1/anything").is_none());
+        assert!(c.lookup_resource("/__zeroship/v1/anything").is_none());
     }
 }

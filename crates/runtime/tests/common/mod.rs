@@ -30,7 +30,7 @@ pub fn m(source: &str) -> Vec<ModuleEntry> {
 ///   - Rebuilds a name → fn lookup at module top by walking `globalThis`-
 ///     stashed bindings — since we control the harness we just inline a
 ///     literal `_procedures` map after the user code (see usage below).
-///   - Implements `_zsFetch(request)` for `/_zs/v1/<id>` URLs (POST body is
+///   - Implements `_zsFetch(request)` for `/__zeroship/v1/<id>` URLs (POST body is
 ///     `{"json": <input>}`).
 ///   - Implements `_zsRpc(name, input, ctx)` that throws 404 NOT_FOUND on
 ///     missing keys.
@@ -102,10 +102,10 @@ async function _zsRpcAndRespond(name, input) {{
 }}
 async function _zsFetch(request) {{
     const url = new URL(request.url);
-    if (!url.pathname.startsWith("/_zs/v1/")) {{
+    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
         return new Response("Not Found", {{ status: 404 }});
     }}
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     let input = undefined;
     if (request.method === "POST") {{
         const text = await request.text();
@@ -189,7 +189,7 @@ async fn drive_fetch_outcome(outcome: FetchOutcome) -> (u16, String, Vec<String>
 fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> Result<RequestResult, String> {
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    // Spec wire: POST /_zs/v1/<id> with body { json: <input> }. The
+    // Spec wire: POST /__zeroship/v1/<id> with body { json: <input> }. The
     // legacy `dispatch` contract takes args as a JSON array (e.g.
     // `[3, 4]`); we wrap that as the `input` value (the synthetic-entry
     // shim spreads it over the handler's arguments at call time).
@@ -198,7 +198,7 @@ fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> 
     } else {
         format!(r#"{{"json":{}}}"#, args_json)
     };
-    let url = format!("http://localhost/_zs/v1/{}", url_path_encode(method));
+    let url = format!("http://localhost/__zeroship/v1/{}", url_path_encode(method));
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
@@ -356,10 +356,10 @@ async function _zsRpcAndRespond(name, input) {{
 }}
 async function _zsFetch(request) {{
     const url = new URL(request.url);
-    if (!url.pathname.startsWith("/_zs/v1/")) {{
+    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
         return new Response("Not Found", {{ status: 404 }});
     }}
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     let input = undefined;
     if (request.method === "POST") {{
         const text = await request.text();
@@ -522,7 +522,7 @@ pub fn dispatch_with_env(
     } else {
         format!(r#"{{"json":{}}}"#, args_json)
     };
-    let url = format!("http://localhost/_zs/v1/{}", url_path_encode(method));
+    let url = format!("http://localhost/__zeroship/v1/{}", url_path_encode(method));
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,

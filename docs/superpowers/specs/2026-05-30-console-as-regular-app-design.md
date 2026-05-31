@@ -107,7 +107,7 @@ The console becomes a **first-party pseudo-app**: a platform-seeded `control.app
 and an **explicit `sector_identifier`** (the seed passes the host explicitly rather than deriving
 `{name}.{base}`, since the console host is reserved / 2-label). Creators log in via the standard
 `@zeroship/auth` popup/consent flow on the console host and hold **no power token** — only the HttpOnly
-`__Host-zs_app_session` (+ `__Host-zs_app_anchor`) cookies and a `{ user }` projection. Worker code sees
+`__Host-zeroship_app_session` (+ `__Host-zeroship_app_anchor`) cookies and a `{ user }` projection. Worker code sees
 only `ZeroShip-User`.
 
 ## Bootstrap (install-time seed)

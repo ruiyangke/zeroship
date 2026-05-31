@@ -72,7 +72,7 @@ export const auth = {
   },
 
   // NOTE: there is intentionally NO server-side `signOut` here. The gateway
-  // only registers `POST /__zs/auth/signout` (a state-changing endpoint guarded
+  // only registers `POST /__zeroship/auth/signout` (a state-changing endpoint guarded
   // by `X-ZS-Auth` + exact-Origin); a worker handler cannot issue that POST,
   // and a 302 redirect would land the browser on a GET the gateway 405s. Sign
   // out from the browser via the headless client (`@zeroship/auth/client`):

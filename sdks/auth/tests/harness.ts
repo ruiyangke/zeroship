@@ -196,7 +196,7 @@ export class FakeFetch {
   /**
    * Register a responder. `match` is either a URL substring or a predicate
    * `(url, method) => boolean`. The `method` arg lets a test disambiguate the
-   * merged `/__zs/auth/session` resource (POST exchange vs GET probe) on the
+   * merged `/__zeroship/auth/session` resource (POST exchange vs GET probe) on the
    * SAME path — first-match-wins by registration order.
    */
   on(
@@ -231,12 +231,12 @@ export class FakeFetch {
 }
 
 /**
- * Matcher for the BFF code→session exchange: `POST /__zs/auth/session` (NOT the
+ * Matcher for the BFF code→session exchange: `POST /__zeroship/auth/session` (NOT the
  * GET probe / `?mint=1`). Use this where a test registers both the exchange and
  * a GET `/session` responder on the merged resource.
  */
 export const SESSION_EXCHANGE = (u: string, method: string): boolean =>
-  method === "POST" && u.includes("/__zs/auth/session");
+  method === "POST" && u.includes("/__zeroship/auth/session");
 
 /** Build a JSON `Response`. */
 export function jsonResponse(status: number, body: unknown, headers?: Record<string, string>): Response {
@@ -304,7 +304,7 @@ export function makeHarness(): Harness {
 }
 
 /**
- * Standard `POST /__zs/auth/session` success body the gateway returns (BFF model
+ * Standard `POST /__zeroship/auth/session` success body the gateway returns (BFF model
  * — identity projection ONLY; NO `access_token`/`token_type`/`scope` in the
  * body, the credential is the HttpOnly signed cookie). The `scopes` ride inside
  * the `user` projection.

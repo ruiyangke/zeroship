@@ -1,6 +1,6 @@
 # RPC v2 — Seamless server functions
 
-**Status:** Active proposal · **Wire version:** `/_zs/v1/`
+**Status:** Active proposal · **Wire version:** `/__zeroship/v1/`
 
 Live shipped reference: [`docs/reference/rpc.md`](../reference/rpc.md). This
 proposal is broader than the current implementation; it still tracks planned
@@ -215,10 +215,10 @@ Two procedures resolving to the same wireId is an **unrecoverable build error**.
 ### URL shape
 
 ```
-/_zs/v1/{wireId}
+/__zeroship/v1/{wireId}
 ```
 
-`v1` is the **wire-protocol** version. Major bumps (e.g., a different envelope shape) move to `/_zs/v2/`. Application-level versioning is described in §13.
+`v1` is the **wire-protocol** version. Major bumps (e.g., a different envelope shape) move to `/__zeroship/v2/`. Application-level versioning is described in §13.
 
 ---
 
@@ -473,7 +473,7 @@ When a procedure resolves to `wire: "multipart"`:
 #### Wire example — case (b)
 
 ```
-POST /_zs/v1/updateAvatar HTTP/1.1
+POST /__zeroship/v1/updateAvatar HTTP/1.1
 Content-Type: multipart/form-data; boundary=----zs1f2e3d4c5b6a7890
 Idempotency-Key: 01HJQK…
 
@@ -495,7 +495,7 @@ Content-Type: image/jpeg
 No `_zs.json`; the runtime hands the parsed `FormData` to the handler:
 
 ```
-POST /_zs/v1/uploadAvatar HTTP/1.1
+POST /__zeroship/v1/uploadAvatar HTTP/1.1
 Content-Type: multipart/form-data; boundary=----zsBoundary
 Idempotency-Key: 01HJQK…
 
@@ -650,7 +650,7 @@ const _userDefault = (_zsUser?.default && typeof _zsUser.default === "object") ?
 const _userFetch   = _userDefault?.fetch ?? null;
 
 export default {
-  // RPC entry — the kernel calls this for /_zs/v1/<wireId> requests.
+  // RPC entry — the kernel calls this for /__zeroship/v1/<wireId> requests.
   rpc:   (name, input, ctx) => __dispatchRpc(_procedures, name, input, ctx),
   // SSR / non-RPC fallthrough.
   fetch: (req)              => _userFetch ? _userFetch.call(_userDefault, req) : new Response("Not Found", { status: 404 }),
@@ -746,7 +746,7 @@ The synthetic entry's `default.rpc` is the JS-side wrapper that fans out to `_pr
 Client                                          Gateway                                          Worker
 ─────                                           ───────                                          ──────
 list({ limit: 50 })  →  __rpcCallJson(...)
-                         GET /_zs/v1/todos.list?input=eyJqc29uIjp7...}
+                         GET /__zeroship/v1/todos.list?input=eyJqc29uIjp7...}
                                               →  Lookup "rpc:todos.list" in EffectivePolicy map
                                                  Auth check (ZeroShip-User HMAC)
                                                  Rate limit (per user)
@@ -788,7 +788,7 @@ list returns parsed Todo[]  ←  superjson decode
 ### Query — `GET`
 
 ```
-GET /_zs/v1/{wireId}?input=<base64url(superjson-envelope)>
+GET /__zeroship/v1/{wireId}?input=<base64url(superjson-envelope)>
 Authorization: Bearer <jwt>          (or session cookie + ZeroShip-User header)
 Accept: application/json
 traceparent: 00-<trace-id>-<parent-id>-<flags>     (auto-injected)
@@ -818,7 +818,7 @@ traceparent: 00-<trace-id>-<gateway-span-id>-01
 ### Mutation — `POST`
 
 ```
-POST /_zs/v1/{wireId}
+POST /__zeroship/v1/{wireId}
 Authorization: Bearer <jwt>
 Content-Type: application/json
 Idempotency-Key: 01HJQK…              ← required iff procedure idempotent: true
@@ -832,7 +832,7 @@ Response: `200 OK` + JSON envelope. No `ETag` or `Cache-Control: max-age`.
 ### Multipart mutation — `POST` with FormData
 
 ```
-POST /_zs/v1/{wireId}
+POST /__zeroship/v1/{wireId}
 Authorization: Bearer <jwt>
 Content-Type: multipart/form-data; boundary=----zsBoundary
 Idempotency-Key: 01HJQK…
@@ -856,7 +856,7 @@ The `_zs.json` part is optional (procedures whose inputs are pure FormData may s
 The streaming wire is **chosen by the client's `Accept` header**, not baked into the platform.
 
 ```
-POST /_zs/v1/{wireId}
+POST /__zeroship/v1/{wireId}
 Authorization: Bearer <jwt>
 Content-Type: application/json
 Accept: <one of: application/x-ndjson | text/event-stream | application/octet-stream>
@@ -993,7 +993,7 @@ For `kind: "stream"` procedures, the runtime emits `_zs_keepalive` (NDJSON) / `:
 
 The full subscription contract (backpressure, replay, credit-based flow control, server-emit budget, max-in-flight) ships as a separate proposal `rpc-subscriptions.md`. This proposal commits only to:
 
-- WS upgrade at `/_zs/v1/{wireId}` with `Sec-WebSocket-Protocol: zs.v1`.
+- WS upgrade at `/__zeroship/v1/{wireId}` with `Sec-WebSocket-Protocol: zs.v1`.
 - CHWBL routing by app + session (so reconnects land on the same worker; gateway already supports this via `subscription_affinity_key`).
 - JSON-frame envelope with at minimum: `{t:"hello", input}`, `{t:"data", value}`, `{t:"error", error}`, `{t:"end"}`, `{t:"ping"}` / `{t:"pong"}`.
 - Auth via the standard cookie/header chain on the upgrade request.
@@ -1167,7 +1167,7 @@ throw new RpcError("INVALID_ARGUMENT", "Email already in use", { exposeMessage: 
 Multiple **queries OR mutations** in the same client tick auto-merge (round-01 Medium-4 corrected the v1 draft's "queries-only" rule):
 
 ```
-POST /_zs/v1/_batch
+POST /__zeroship/v1/_batch
 Content-Type: application/zs-batch+json
 
 { "envelope": "v1", "calls": [
@@ -1222,10 +1222,10 @@ Two namespaces, two default dispatches:
 
 | Namespace | Key format | Default dispatch | Wire URL |
 | --- | --- | --- | --- |
-| `rpc:` | `rpc:<dotted-id>` | worker as RPC | `/_zs/v1/<id>` |
+| `rpc:` | `rpc:<dotted-id>` | worker as RPC | `/__zeroship/v1/<id>` |
 | `/` | `/<path>` | worker as SSR (or `static`/`redirect`/`rewrite`) | the path itself |
 
-The `rpc:` prefix appears only in manifest keys — the wire URL is `/_zs/v1/<wireId>` with no `rpc:` in it.
+The `rpc:` prefix appears only in manifest keys — the wire URL is `/__zeroship/v1/<wireId>` with no `rpc:` in it.
 
 ### Wire shape
 
@@ -1253,7 +1253,7 @@ The `rpc:` prefix appears only in manifest keys — the wire URL is `/_zs/v1/<wi
     "/api/admin":        { "auth": "admin", "override": ["auth"] },
     "/api/admin/users":  { "rate_limit": { "rpm": 100, "per": "user" } },
     "/api/public":       { "auth": "anon", "override": ["auth"], "publicly_accessible": true },
-    "/api/v1/*":         { "rewrite": "/_zs/v1/*" },
+    "/api/v1/*":         { "rewrite": "/__zeroship/v1/*" },
 
     "/old-blog/[slug]":  { "redirect": { "to": "/blog/[slug]", "status": 302 } },
     "/legacy":           { "redirect": { "to": "/", "status": 301 } },
@@ -1340,7 +1340,7 @@ export default defineApp({
           children: { "users": { rateLimit: { rpm: 100, per: "user" } } },
         },
         "public": { auth: "anon", override: ["auth"], publiclyAccessible: true },
-        "v1/*":   { rewrite: "/_zs/v1/*" },
+        "v1/*":   { rewrite: "/__zeroship/v1/*" },
       },
     },
 
@@ -1394,7 +1394,7 @@ When the gateway receives `manifest.json`, it pre-computes for every resource an
 
 ```
 1. Identify namespace from the request:
-   - URL begins with /_zs/v1/  → strip prefix; lookup key = "rpc:" + remainder
+   - URL begins with /__zeroship/v1/  → strip prefix; lookup key = "rpc:" + remainder
    - Otherwise                 → lookup key = the URL path
 2. Match against the resources map (most-specific wins):
    - rpc:  walk dot-segment Trie
@@ -1618,7 +1618,7 @@ export const add = mutation(async ({ text }) => {
   await recompute({ ownerId: ctx.user.id });
 
   // Forced wire (rare): same procedure, full HTTP roundtrip.
-  await fetch(new URL("/_zs/v1/cache.recompute", ctx.url.origin), {
+  await fetch(new URL("/__zeroship/v1/cache.recompute", ctx.url.origin), {
     method: "POST",
     headers: { "content-type": "application/json", "authorization": ctx.headers.get("authorization") ?? "" },
     body: JSON.stringify({ json: { ownerId: ctx.user.id } }),
@@ -1700,7 +1700,7 @@ For other AI SDK adapters (e.g., `useCompletion`, `useObject`), the same `wire: 
 
 ### Non-JS clients
 
-Out of scope for the initial release. The wire is plain HTTP+JSON; non-TS callers (Python, Swift, Go, mobile native) hit `POST /_zs/v1/<id>` with a JSON envelope and parse the JSON response. They lose static typing across the boundary; if/when typed multi-language clients become a real need, the path is **OpenAPI emission** via `zod-to-openapi` → `openapi-generator-cli`. Not bespoke per-language generators we maintain.
+Out of scope for the initial release. The wire is plain HTTP+JSON; non-TS callers (Python, Swift, Go, mobile native) hit `POST /__zeroship/v1/<id>` with a JSON envelope and parse the JSON response. They lose static typing across the boundary; if/when typed multi-language clients become a real need, the path is **OpenAPI emission** via `zod-to-openapi` → `openapi-generator-cli`. Not bespoke per-language generators we maintain.
 
 ---
 
@@ -1824,7 +1824,7 @@ procedure exports before the synthetic entry binds them.
 
 1. iOS dev hits the wire directly using `URLSession`:
    ```swift
-   let url = URL(string: "https://app.zeroship.ai/_zs/v1/todos.list?input=" + base64url(envelope))!
+   let url = URL(string: "https://app.zeroship.ai/__zeroship/v1/todos.list?input=" + base64url(envelope))!
    var req = URLRequest(url: url)
    req.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
    let (data, _) = try await URLSession.shared.data(for: req)
@@ -1974,7 +1974,7 @@ The v1 draft punted procedure versioning to creators ("declare `todos.add.v2` ne
 
 | Layer | Mechanism | Who decides | Migration |
 | --- | --- | --- | --- |
-| **Wire-protocol version** | URL prefix `/_zs/v1/` | Platform | Major bump → `/_zs/v2/` co-exists for sunset window; gateway routes both. |
+| **Wire-protocol version** | URL prefix `/__zeroship/v1/` | Platform | Major bump → `/__zeroship/v2/` co-exists for sunset window; gateway routes both. |
 | **Manifest schema version** | `manifest.version: 1` field | Platform | `manifest.version: 2` is the future shape. Older gateways reject the wrong version with a clear error. |
 | **Procedure version** | Field on procedure metadata: `fn.config.version: "2"` (defaults to `"1"`) **and** request header `Zs-Procedure-Version: <version>` | Creator, but platform-aware | Multiple versions of the same `wireId` co-exist; gateway routes by header; default version pinned in manifest. |
 
@@ -2032,7 +2032,7 @@ Per-procedure versioning multiplies the gateway's lookup-table size by `O(versio
 
 ### Within-version compatibility
 
-Within `/_zs/v1/` and within a procedure version: only **additive** changes are wire-stable.
+Within `/__zeroship/v1/` and within a procedure version: only **additive** changes are wire-stable.
 
 #### Wire-compat check — algorithm
 
@@ -2259,7 +2259,7 @@ The intent of the layered check: in the common case (browser; same origin), chec
 | **1** | Native foundation: (a) `RpcError` `#[v8_class]` (mirroring DOMException) at `crates/runtime/src/rpc/error.rs` — class registration on every isolate, brand check, exposed as `globalThis.RpcError`. (b) `crates/runtime/src/rpc/dispatch.rs` with `#[v8_method(fastcall)]` entries. (c) Native superjson encode/decode at `crates/core/src/superjson.rs` (gateway) and `crates/runtime/src/rpc/superjson.rs` (worker, V8-aware). (d) ALS-based ctx population — kernel writes the `ContinuationPreservedEmbedderData` slot before invoking the user procedure. (e) `ctx.headers` / `ctx.url` `Object.freeze` wrapping. (f) Extend `crates/worker/src/cache.rs` with `entered_for_eviction()` to fire per-request `AbortController`s on isolate eviction (§3 abort plumbing). (g) Microbenchmark gate at `crates/runtime/benches/rpc_dispatch.rs` deciding single-call vs. two-step fastcall ABI before phase 1 commits. | ~950 (Rust) | `#[v8_class]`, `#[v8_state_marker]`, `#[v8_method(fastcall)]`, native ALS — all shipped |
 | **2** | Vite plugin: AST scan for file-level + function-level `"use server"`; reference-graph walk; transform-client / transform-server emission; synthetic entry generation. Strict-mode gate. | ~700 (TS) | Phase 1 |
 | **3** | Build: `manifest.artifact` + `manifest.resources` emission; literal-only `defineApp` AST extraction; reserved `_zs.*` field-name check; live-version cap (3 max); `breakingOk` attestation surface. | ~400 (TS) | Phase 2 |
-| **4** | Gateway: load `manifest.resources`, precompute `EffectivePolicy`, route + enforce per request. New `/_zs/v1/` prefix. CHWBL routing. CSRF (Origin → Sec-Fetch-Site → double-submit). ETag/304. Meter event emission. traceparent injection. | ~700 (Rust) | Phase 3 |
+| **4** | Gateway: load `manifest.resources`, precompute `EffectivePolicy`, route + enforce per request. New `/__zeroship/v1/` prefix. CHWBL routing. CSRF (Origin → Sec-Fetch-Site → double-submit). ETag/304. Meter event emission. traceparent injection. | ~700 (Rust) | Phase 3 |
 | **5** | Idempotency: gateway-side SETNX flow with Lua-script release (`crates/gateway/src/idempotency.rs`). KV-backed dedupe table. UUIDv4/v7 entropy check for anonymous mutations. | ~400 (Rust) | Phase 4 |
 | **6** | Streaming: `function*` detection + content-negotiated wires (NDJSON, SSE, octet-stream). AI SDK 5 UI Message Stream emitter. Mid-stream error frames per §6 (NDJSON / SSE / AI SDK 5 / octet-stream-trailers). Heartbeats. **Acceptance**: the `wire: "ai-ui-v1"` byte stream is byte-identical to `streamText({...}).toUIMessageStreamResponse()` for a representative input set (verified against the upstream `ai/react` lib in CI). | ~500 (Rust+TS) | Phase 4 |
 | **7** | Multipart / FormData / Blob / File first-class on the dispatch path. `_zs.json` envelope spec. Native multipart parser already exists; we wire it in. | ~350 (Rust+TS) | Phase 4 |

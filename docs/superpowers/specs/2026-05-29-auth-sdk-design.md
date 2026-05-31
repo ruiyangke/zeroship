@@ -101,7 +101,7 @@ pseudonymous id + relay email** for that user.
 
 | # | Subsystem | Delivers | Depends on |
 |---|---|---|---|
-| 1 | **Per-app OAuth + gateway browser-auth foundation** | per-app public PKCE client (control-plane registers on deploy); gateway same-origin `/__zs/auth/{authorize,popup-callback,token,session,signout}`; gateway **Bearer arm** → `ZeroShip-User`; fix orphaned **`env.auth`** wiring | — |
+| 1 | **Per-app OAuth + gateway browser-auth foundation** | per-app public PKCE client (control-plane registers on deploy); gateway same-origin `/__zeroship/auth/{authorize,popup-callback,token,session,signout}`; gateway **Bearer arm** → `ZeroShip-User`; fix orphaned **`env.auth`** wiring | — |
 | 2 | **`@zeroship/auth` SDK** | client (popup login, first-party `/session` reload-recovery, `getSession`/`getUser`/`onAuthStateChange`/`refreshSession`/`signOut`, `cacheLocation`, rotation + cross-tab lock) + React adapter + server entry | 1 |
 | 3 | **Declared permission scopes** | scope registry, manifest `scopes:`, scope-aware consent UI, per-scope gateway enforcement, SDK scope surface | 1 |
 | 4 | **Pairwise subject identifiers** | per-app pairwise subjects + per-app sector salt; `ZeroShip-User.id` becomes per-app `sub` | 1 |
@@ -117,10 +117,10 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   `crates/auth/` (Askama, ntex/compio, zero-tokio). Password + Google/GitHub OAuth + magic
   link + verify + reset + consent + device + `/me`.
 - End-user login today = **full-page redirect only**: gateway 302 → Hydra → consent →
-  `{app}.zeroship.ai/__zs/auth/callback` → gateway mints opaque session UUID in HTTP-only
-  `__Host-zs_app_session` cookie. **Token never reaches the browser.**
+  `{app}.zeroship.ai/__zeroship/auth/callback` → gateway mints opaque session UUID in HTTP-only
+  `__Host-zeroship_app_session` cookie. **Token never reaches the browser.**
 - Per request: gateway validates session → HMAC-signed `ZeroShip-User` header → worker.
-- Three RP origins: gateway (`__Host-zs_app_session` / `auth.gateway_sessions`), control/console
+- Three RP origins: gateway (`__Host-zeroship_app_session` / `auth.gateway_sessions`), control/console
   (`__Host-zs_console_session` / `auth.console_sessions`), auth UI itself
   (`__Host-zsidp_session` / `auth.sessions`).
 
@@ -129,10 +129,10 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   per deploy** via `PUT /admin/clients/gateway`. Hydra = exact-match, **no wildcards** (RFC 9700).
 - The per-app redirect-URI registration is **designed but NOT yet implemented** in the control
   plane (only third-party client reg exists in `bootstrap_builder.rs`/`oauth_handlers.rs`).
-- ⇒ Popup callback `{app}.zeroship.ai/__zs/auth/popup-callback` is **same-origin to the app
+- ⇒ Popup callback `{app}.zeroship.ai/__zeroship/auth/popup-callback` is **same-origin to the app
   window** → the interactive popup redirects back to our own relay page and `postMessage`s the
   opener. **No cross-origin postMessage, no COOP/`web_message` needed.** (Background silent renewal
-  is NOT done via an iframe — it is the first-party `/__zs/auth/session` anchor path; see §2.)
+  is NOT done via an iframe — it is the first-party `/__zeroship/auth/session` anchor path; see §2.)
 - For per-app consent we register **one public PKCE client per app** (not the shared gateway
   client). Control-plane must create it on app create/deploy + register its redirect URIs.
 - ⚠️ **The gateway has NO Host→client_id mapping today.** It builds a SINGLE `OidcRp` with one
@@ -215,7 +215,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
 - `zeroship-cli` is a live public client (`token_endpoint_auth_method="none"`, `offline_access`,
   `refresh_token` grant) — proof the shape works.
 - Hydra has **no CORS** → browser cannot call `/oauth2/token` directly.
-- ⇒ Gateway same-origin proxy `POST /__zs/auth/token` forwarding to Hydra `/oauth2/token`,
+- ⇒ Gateway same-origin proxy `POST /__zeroship/auth/token` forwarding to Hydra `/oauth2/token`,
   mirroring the `dpop-exchange` precedent (`Cache-Control: no-store`). Caddy already proxies
   `/oauth2/*` → hydra. Gateway CORS infra exists (`crates/gateway/src/router/cors.rs`).
 
@@ -246,7 +246,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
 
 ### Existing SDK + conventions
 - `sdks/auth/` exists but minimal + broken: server-only `getUser/requireUser/isLoggedIn/signOut`;
-  `signOut` 302s to `/__zs/auth/signout` which **has no gateway handler** (live bug); `dist/` is
+  `signOut` 302s to `/__zeroship/auth/signout` which **has no gateway handler** (live bug); `dist/` is
   stale. No `signIn*`/`getSession`/`onAuthStateChange`.
 - SDK conventions: ESM-only, tsup, ES2022, strict TS, `exports` map, `.attw.json` profile
   `esm-only`, `lint:pkg = publint && attw --pack .`, tests `node --import tsx --test test/*`.
@@ -268,7 +268,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   session cookie from an iframe embedded in the app origin, i.e. a third-party cookie on
   `auth.zeroship.ai` (Lax by config; Safari/Firefox block it regardless). Our renewal paths are
   (a) browser refresh-grant when `useRefreshTokens`, and (b) the **first-party server-held anchor**
-  via `GET /__zs/auth/session` (no iframe, no cross-site cookie). The only time we navigate the
+  via `GET /__zeroship/auth/session` (no iframe, no cross-site cookie). The only time we navigate the
   popup to Hydra is the **interactive** login/step-up flow (a top-level navigation inside the
   popup, where the IdP session cookie *is* first-party to `auth.zeroship.ai`). <!-- Added in round 1: addressing BLOCKER — drop silent iframe -->
   We replace Auth0's `web_message` response mode with our **same-origin relay page** for that
@@ -334,7 +334,7 @@ email relay.
   planned native namespace we finally register.
 - **Pre-launch, no back-compat**: the per-app-client model *replaces* the shared `gateway` client
   for the end-user flow in the same change; no `@deprecated` shims. The redirect flow's
-  `/__zs/auth/callback` stays (it's a different, still-valid path), but the SDK is the new
+  `/__zeroship/auth/callback` stays (it's a different, still-valid path), but the SDK is the new
   primary surface.
 - **typed_id everywhere**: per-app client id derives from `app_id`; pairwise subjects are stored
   with `pws_…` typed ids; identity-mapping rows use `usr_…`/`app_…`.
@@ -373,16 +373,16 @@ The gateway forwards to Hydra's `/oauth2/token` (which the browser can't reach d
 ```
    Browser (app origin)            Gateway ({app}.zeroship.ai)            Hydra (auth.zeroship.ai)
    ────────────────────            ───────────────────────────            ────────────────────────
-   @zeroship/auth client    ──►   GET  /__zs/auth/authorize      ──►   302 /oauth2/auth
+   @zeroship/auth client    ──►   GET  /__zeroship/auth/authorize      ──►   302 /oauth2/auth
                             ◄──   302 to Hydra (or login UI)
    popup (top-level nav)    ──►   (login + consent on auth UI)   ──►   /oauth2/auth ... callback
-                            ◄──   GET  /__zs/auth/popup-callback  ◄──   302 back with code+state
+                            ◄──   GET  /__zeroship/auth/popup-callback  ◄──   302 back with code+state
    postMessage(code,state)  ◄──   same-origin relay HTML page (opener only)
-   exchangeCodeForSession   ──►   POST /__zs/auth/token          ──►   POST /oauth2/token (code+PKCE)
+   exchangeCodeForSession   ──►   POST /__zeroship/auth/token          ──►   POST /oauth2/token (code+PKCE)
                             ◄──   {access,id,expires_in}          ◄──   tokens (server keeps refresh)
    Bearer <access>          ──►   any app route (Bearer arm)     →     worker (ZeroShip-User)
    --- reload ---
-   checkSession()           ──►   GET  /__zs/auth/session?mint=1  →    (first-party anchor; no iframe)
+   checkSession()           ──►   GET  /__zeroship/auth/session?mint=1  →    (first-party anchor; no iframe)
                             ◄──   {user, access, expires_at}
 ```
 
@@ -390,13 +390,13 @@ The gateway forwards to Hydra's `/oauth2/token` (which the browser can't reach d
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET  | `/__zs/auth/authorize` | Build the Hydra `/oauth2/auth` URL (per-app client resolved from `Host`, PKCE challenge, state, nonce, scopes, prompt) and 302. **Interactive popup only** (top-level navigation in the popup window). The `prompt=none` silent-iframe variant is removed — see §2. |
-| GET  | `/__zs/auth/popup-callback` | Same-origin HTML relay page: reads `code`/`state` (or `error`) and `postMessage`s `{type:'zs:authorization_response', response:{code,state}}` to `opener`, target origin = own origin. CSP `default-src 'none'; script-src 'unsafe-inline'; frame-ancestors 'self'`, `Referrer-Policy: no-referrer`, `COOP: same-origin`. |
-| POST | `/__zs/auth/token` | **Same-origin-only** proxy to Hydra `/oauth2/token` (`authorization_code` with `code`+`code_verifier`, OR `refresh_token`). `Cache-Control: no-store`. The security boundary is the custom-header + `Origin` + `Sec-Fetch-Site` conjunction (§1.2), **not** CORS; a foreign `Origin` is rejected outright (no credentialed origin reflection — round-3). Returns `{access_token,refresh_token?,id_token,expires_in,token_type}`. Sets the HttpOnly `__Host-zs_app_session` anchor cookie + stores the server-held refresh family. |
-| GET  | `/__zs/auth/session` | From the first-party anchor cookie, return the current user and (with `?mint=1`) a fresh access token minted from the **server-held** refresh family. The SOLE reload-recovery path (no iframe, no 3p cookie). Gated by the `zs.<host>.is.authenticated` breadcrumb. |
-| POST | `/__zs/auth/signout` | **Fix the missing handler.** Revoke tokens (Hydra `/oauth2/revoke`), clear anchor + breadcrumb, optional Hydra RP-logout. `scope: local|global`. |
+| GET  | `/__zeroship/auth/authorize` | Build the Hydra `/oauth2/auth` URL (per-app client resolved from `Host`, PKCE challenge, state, nonce, scopes, prompt) and 302. **Interactive popup only** (top-level navigation in the popup window). The `prompt=none` silent-iframe variant is removed — see §2. |
+| GET  | `/__zeroship/auth/popup-callback` | Same-origin HTML relay page: reads `code`/`state` (or `error`) and `postMessage`s `{type:'zs:authorization_response', response:{code,state}}` to `opener`, target origin = own origin. CSP `default-src 'none'; script-src 'unsafe-inline'; frame-ancestors 'self'`, `Referrer-Policy: no-referrer`, `COOP: same-origin`. |
+| POST | `/__zeroship/auth/token` | **Same-origin-only** proxy to Hydra `/oauth2/token` (`authorization_code` with `code`+`code_verifier`, OR `refresh_token`). `Cache-Control: no-store`. The security boundary is the custom-header + `Origin` + `Sec-Fetch-Site` conjunction (§1.2), **not** CORS; a foreign `Origin` is rejected outright (no credentialed origin reflection — round-3). Returns `{access_token,refresh_token?,id_token,expires_in,token_type}`. Sets the HttpOnly `__Host-zeroship_app_session` anchor cookie + stores the server-held refresh family. |
+| GET  | `/__zeroship/auth/session` | From the first-party anchor cookie, return the current user and (with `?mint=1`) a fresh access token minted from the **server-held** refresh family. The SOLE reload-recovery path (no iframe, no 3p cookie). Gated by the `zs.<host>.is.authenticated` breadcrumb. |
+| POST | `/__zeroship/auth/signout` | **Fix the missing handler.** Revoke tokens (Hydra `/oauth2/revoke`), clear anchor + breadcrumb, optional Hydra RP-logout. `scope: local|global`. |
 
-Existing `/__zs/auth/callback` (legacy redirect flow) and `/__zs/auth/dpop-exchange` are
+Existing `/__zeroship/auth/callback` (legacy redirect flow) and `/__zeroship/auth/dpop-exchange` are
 unchanged.
 
 ### Sequence 1 — popup login (interactive)
@@ -407,16 +407,16 @@ User clicks "Sign in"
   ├─ SDK: window.open('', 'zs:auth', '400x600 centered')   [SYNC — before any await]
   ├─ SDK: generate verifier+challenge(S256), state, nonce; PERSIST {verifier,state,nonce,redirect_uri}
   │        in sessionStorage (keyed by state) + in-memory flow map (survives an opener reload, §4.3)
-  ├─ SDK: authorizeUrl = `${appOrigin}/__zs/auth/authorize?` + {code_challenge,
+  ├─ SDK: authorizeUrl = `${appOrigin}/__zeroship/auth/authorize?` + {code_challenge,
   │        code_challenge_method=S256, state, nonce, scope}
   │        (NO client_id — the gateway injects it from Host; NO prompt — let Hydra's SSO skip fire)
   ├─ SDK: popup.location.href = authorizeUrl
   │
   ▼ popup
-  gateway GET /__zs/auth/authorize  → 302 → Hydra /oauth2/auth
+  gateway GET /__zeroship/auth/authorize  → 302 → Hydra /oauth2/auth
   Hydra → 302 → auth UI /login (no IdP session) → password/OAuth → accept_login
   Hydra → consent: declared scopes rendered (Subsystem 3) → accept_consent
-  Hydra → 302 → gateway GET /__zs/auth/popup-callback?code=…&state=…
+  Hydra → 302 → gateway GET /__zeroship/auth/popup-callback?code=…&state=…
   gateway returns same-origin relay HTML
   relay: window.opener.postMessage({type:'zs:authorization_response',
                                     response:{code, state}}, location.origin)
@@ -425,10 +425,10 @@ User clicks "Sign in"
   ▼ opener (app window)
   SDK message handler: validate e.origin === appOrigin && e.data.type === 'zs:authorization_response'
   SDK: match state → recover verifier from flow map → exchangeCodeForSession(code)
-  SDK: POST ${appOrigin}/__zs/auth/token {grant_type:'authorization_code', code, code_verifier,
-        redirect_uri:`${appOrigin}/__zs/auth/popup-callback`, mode:'server_anchor'}
+  SDK: POST ${appOrigin}/__zeroship/auth/token {grant_type:'authorization_code', code, code_verifier,
+        redirect_uri:`${appOrigin}/__zeroship/auth/popup-callback`, mode:'server_anchor'}
   gateway → POST Hydra /oauth2/token → {access, refresh, id, expires_in}
-  gateway: store refresh family + family-id under __Host-zs_app_session anchor (HttpOnly);
+  gateway: store refresh family + family-id under __Host-zeroship_app_session anchor (HttpOnly);
            respond JSON WITHOUT refresh_token (server_anchor mode); return app_ref
   SDK: cacheManager.set(access + server-validated `user`, app_ref); breadcrumb is set server-side
        on the /token response (SDK may also set it); emit SIGNED_IN  (SDK never decodes the id_token)
@@ -445,8 +445,8 @@ Page reload → memory cache is empty
   ├─ SDK checkSession():
   │    if cookie zs.<host>.is.authenticated absent → return (anonymous, no network)
   │    else:
-  │      GET /__zs/auth/session?mint=1   [first-party anchor cookie ride-along, same-origin]
-  │        gateway: parse __Host-zs_app_session → validate auth.app_session_anchors row
+  │      GET /__zeroship/auth/session?mint=1   [first-party anchor cookie ride-along, same-origin]
+  │        gateway: parse __Host-zeroship_app_session → validate auth.app_session_anchors row
   │          (the DEDICATED anchor store — NOT auth.gateway_sessions; see below + §8.1)
   │          if valid && not expired:
   │              if a cached unexpired access token is stored under the anchor → return it (no Hydra call)
@@ -489,7 +489,7 @@ store, `auth.app_session_anchors` (DDL §8.1), with **anchor-specific lifetime s
   (the gateway rejects it on read), or (b) Hydra rejects a refresh as `invalid_grant` (the gateway
   clears the anchor). Whichever fires first ends the anchor; neither is a function of the other.
 - **The 12h/30-min `auth.gateway_sessions` constants and every consumer/test that asserts them are
-  UNTOUCHED.** The interactive cookie redirect flow (`/__zs/auth/callback`) keeps using
+  UNTOUCHED.** The interactive cookie redirect flow (`/__zeroship/auth/callback`) keeps using
   `gateway_sessions` with its 12h/30-min semantics; only the new SDK anchor uses
   `app_session_anchors`. No `sessions.rs` constant changes, so the `validate()`-slide tests stay
   green.
@@ -497,7 +497,7 @@ store, `auth.app_session_anchors` (DDL §8.1), with **anchor-specific lifetime s
   reload, and assert `/session?mint=1` still recovers (would fail against the old 30-min-idle
   `gateway_sessions` model); a second test advances **> 30 days** and asserts `401 login_required`.
 
-**There is no hidden-iframe fallback.** The anchor cookie (`__Host-zs_app_session`) is the SOLE
+**There is no hidden-iframe fallback.** The anchor cookie (`__Host-zeroship_app_session`) is the SOLE
 durable first-party reload-recovery credential — it survives memory-cache loss without any
 third-party cookie or cross-site iframe. If the anchor is gone (>30d idle, family revoked, or signed
 out elsewhere) the only recovery is an **interactive** popup login. <!-- Added in round 1: addressing BLOCKER — single first-party recovery path -->
@@ -508,7 +508,7 @@ out elsewhere) the only recovery is an **interactive** popup login. <!-- Added i
 exchange to obtain its *own* independent family (see §1.2) — two **separate** families from two
 **separate** codes, each rotated by exactly one holder, so Hydra's reuse detection never fires on a
 browser-vs-server race. When `useRefreshTokens` is off (the default), only the server family exists
-and every fresh access token comes from `/__zs/auth/session?mint=1`. ⚠️ **Round 3 closed the
+and every fresh access token comes from `/__zeroship/auth/session?mint=1`. ⚠️ **Round 3 closed the
 remaining same-family race; round 5 rebuilds the mechanism feasibly:** multiple tabs/reloads all call
 `/session?mint=1` against the *same* server family, so the server family needs a single rotator. The
 mint path uses a **per-node in-process single-flight keyed on the anchor id** (concurrent minters on
@@ -517,7 +517,7 @@ anchor** (seconds-scale TTL ≪ the 10-min wrapper TTL, so a reload-storm skips 
 relies on **Hydra's already-configured rotation grace** (`rotation_grace_period: 30s` /
 `rotation_grace_reuse_count: 3`) to absorb the rare cross-node concurrent mint without a family
 revoke. **No db connection or advisory lock is held across the Hydra HTTP call** — see the round-5
-BLOCKER note under `GET /__zs/auth/session` for why the round-3 "advisory lock across the Hydra
+BLOCKER note under `GET /__zeroship/auth/session` for why the round-3 "advisory lock across the Hydra
 refresh" was unbuildable against the live gateway (`AppState.db` is a single `Arc<Client>`, not a
 pool, and a transaction needs `&mut self`). <!-- Added in round 3: same-server-family concurrent mint serialized. Round 6 (BLOCKER): replace the unbuildable cross-node advisory lock with per-node single-flight + short cached wrapper + Hydra rotation grace -->
 
@@ -548,17 +548,17 @@ getAccessToken*() finds entry expiring within skew (60s)
   │    re-read cache under lock (another tab may have refreshed)
   │    if still stale:
   │      if useRefreshTokens && browser holds its own refresh family:
-  │        POST /__zs/auth/token {grant_type:'refresh_token', refresh_token}   // browser family
+  │        POST /__zeroship/auth/token {grant_type:'refresh_token', refresh_token}   // browser family
   │        gateway → Hydra /oauth2/token (rotation: new refresh issued, old one one-time-use)
   │        cacheManager.updateEntry(old, new)        [atomic rewrite]
   │      else (default — no browser refresh token):
-  │        GET /__zs/auth/session?mint=1             // server family mints; browser never rotates it
+  │        GET /__zeroship/auth/session?mint=1             // server family mints; browser never rotates it
   │        cacheManager.setAccessToken(new)
   │      emit TOKEN_REFRESHED
   │  })
   │
   └─ On invalid_grant (browser family reuse-detected → revoked):
-       drop browser tokens; fall back to GET /__zs/auth/session?mint=1 (server family still live);
+       drop browser tokens; fall back to GET /__zeroship/auth/session?mint=1 (server family still live);
        if that 401s → emit SIGNED_OUT, surface AuthError{code:'invalid_grant'}
 ```
 
@@ -592,7 +592,7 @@ Each app gets its own Hydra client, created/reconciled by the **control plane**.
 - **response_types**: `["code"]`.
 - **scope**: `"openid offline_access profile email"` + the app's declared custom scopes
   (Subsystem 3 mirrors them into this allowlist).
-- **redirect_uris**: `[{scheme}://{host}/__zs/auth/popup-callback, {scheme}://{host}/__zs/auth/callback]`
+- **redirect_uris**: `[{scheme}://{host}/__zeroship/auth/popup-callback, {scheme}://{host}/__zeroship/auth/callback]`
   for every host the app serves (apex + custom domains). Exact-match (RFC 9700) — registered per
   host, no wildcards. ⚠️ **Round-3 (MINOR) — bound the array and the per-deploy PUT cost.** Two-per-host
   growth (2×N) is bounded by a **per-app custom-domain cap (default 50 ⇒ ≤102 redirect_uris)**, well
@@ -678,7 +678,7 @@ from Hydra; the OAuth client identity itself (the FK target, `skip_consent`) liv
 
 New module `crates/gateway/src/browser_auth.rs` (sibling to `dpop_exchange.rs`), one async ntex
 handler per endpoint, registered in `crates/gateway/src/main.rs` alongside the existing
-`/__zs/auth/dpop-exchange` resource. All reuse `state.oidc_rp` (Hydra dial URL, JWKS, introspect),
+`/__zeroship/auth/dpop-exchange` resource. All reuse `state.oidc_rp` (Hydra dial URL, JWKS, introspect),
 `state.config` (insecure_dev, public_url, worker_key), and `oidc_rp::encode_user_header`.
 
 ⚠️ **Round-6 (MAJOR #3) — `OidcRp` holds ONE reused `cyper::Client`; the breaker + timeout attach to
@@ -691,7 +691,7 @@ introspect, JWKS fetch) through it. The bounded `/oauth2/token` timeout and the 
 (§8.7) are state **on that shared client**, so they actually govern Hydra load. No per-call
 `cyper::Client::new()` remains on the browser-auth or DPoP paths. <!-- Added in round 6: addressing MAJOR #3 — oidc_rp reuses one cyper::Client; breaker/timeout attach to it; no per-call client construction -->
 
-#### `GET /__zs/auth/authorize`
+#### `GET /__zeroship/auth/authorize`
 
 Query params (from the SDK): `code_challenge`, `code_challenge_method=S256`, `state`, `nonce`,
 `scope` (space-delimited), `prompt` (**optional** — omitted in the common case; `login` or
@@ -702,7 +702,7 @@ and `idp_hint` (**optional** — the SDK's `SignInOptions.provider`, e.g. `googl
 **`provider` → `idp_hint` passthrough (transport).** `SignInOptions.provider` is forwarded **verbatim**
 to Hydra as the `idp_hint` authorize-URL param — the gateway is a dumb conduit and assigns the value no
 meaning; the **login UI decides** what a hint resolves to (pre-select an upstream IdP, route straight to
-the password page, etc.). The thread is: SDK `provider` → `GET /__zs/auth/authorize?idp_hint=…`
+the password page, etc.). The thread is: SDK `provider` → `GET /__zeroship/auth/authorize?idp_hint=…`
 (`AuthorizeQuery.idp_hint`, `browser_auth.rs`) → `BrowserAuthorizeParams.idp_hint`
 (`oidc_rp.rs`) → Hydra `/oauth2/auth?idp_hint=…`. An empty/absent `provider` drops the param entirely
 (Hydra/login-UI shows the default provider picker). This mirrors the `prompt` passthrough exactly:
@@ -729,12 +729,12 @@ held by the browser, Supabase-style) — this is the key divergence from the exi
 Add `OidcRp::build_browser_authorize_url(client_id, params) -> String` in `oidc_rp.rs` (no stash).
 
 ```
-GET /__zs/auth/authorize?code_challenge=…&code_challenge_method=S256&state=…&nonce=…
+GET /__zeroship/auth/authorize?code_challenge=…&code_challenge_method=S256&state=…&nonce=…
                          &scope=openid%20profile%20read:billing     (no prompt — SSO skip fires)
 → 302 Location: https://auth.zeroship.ai/oauth2/auth?client_id=oac_7Fk…&response_type=code&…
 ```
 
-#### `GET /__zs/auth/popup-callback`
+#### `GET /__zeroship/auth/popup-callback`
 
 Returns a tiny same-origin HTML document (no app code). ⚠️ **Round-2 fix (MINOR) — the inline
 script uses a per-response CSP nonce, not `'unsafe-inline'`.** Response headers:
@@ -787,10 +787,10 @@ will see the SDK's `e.origin === appOrigin` check drop the message. The SDK dete
 distinct `AuthError('config_error', 'cross-origin iframe embedding unsupported')` rather than only
 timing out at 60s. <!-- Added in round 1: addressing MINOR — cross-origin iframe diagnostic -->
 
-#### `POST /__zs/auth/token`
+#### `POST /__zeroship/auth/token`
 
-⚠️ **`/__zs/auth/token` is SAME-ORIGIN-ONLY; CORS is NOT the security boundary** (round-3 MAJOR). The
-SDK calls `${appOrigin}/__zs/auth/token` from the app page (same-origin), so the browser never
+⚠️ **`/__zeroship/auth/token` is SAME-ORIGIN-ONLY; CORS is NOT the security boundary** (round-3 MAJOR). The
+SDK calls `${appOrigin}/__zeroship/auth/token` from the app page (same-origin), so the browser never
 consults CORS on the happy path; cross-origin SDK use is unsupported. We deliberately do **not** use
 credentialed origin-reflection (`allow-origin = reflected origin` + `allow-credentials: true`): that
 pattern turns any reflection bug (subdomain match, `Origin: null`, Host-spoof) into a credentialed
@@ -840,7 +840,7 @@ or `mode=browser_refresh` (`useRefreshTokens` — browser keeps its own family).
 - `mode=server_anchor` (default): the gateway does the code→token exchange, **keeps the refresh
   token server-side** (encrypted under the anchor row), and returns to the browser **only** the
   access token + id token (no `refresh_token` in the JSON). Reload-recovery + ongoing refresh both
-  go through `/__zs/auth/session?mint=1`, which rotates the server family under a DB row lock.
+  go through `/__zeroship/auth/session?mint=1`, which rotates the server family under a DB row lock.
 - `mode=browser_refresh` (`useRefreshTokens`): the SDK runs a **second, independent** authorize →
   popup-callback → code exchange specifically for the browser family. That second code yields the
   browser's own refresh token (returned in the JSON, held in the Web Worker). The server anchor,
@@ -853,7 +853,7 @@ client-side would trust an unverified JWT an XSS or compromised intermediary cou
 validates the id_token (nonce/iss/aud/exp/signature) against the client's JWKS; **we do the
 equivalent on the gateway, which already holds Hydra JWKS** (`state.oidc_rp.jwks`): <!-- Added in round 2: gateway validates id_token (sig/nonce/iss/aud/exp) and returns a trusted user projection; SDK never decodes a raw id_token -->
 
-- On every `/__zs/auth/token` code exchange the gateway, after receiving Hydra's response,
+- On every `/__zeroship/auth/token` code exchange the gateway, after receiving Hydra's response,
   **fully validates the id_token** via `zeroship_core::oidc_verify::verify_id_token(cache=state.oidc_rp.jwks,
   token, expected_iss=state.oidc_rp.issuer, expected_aud=route.oauth_client_id, expected_nonce=None, …)`:
   EdDSA/RS256 signature, `iss`, `aud == route.oauth_client_id` (for an id_token `aud` IS the client_id —
@@ -903,7 +903,7 @@ mechanism then reads: <!-- Added in round 3: browser gets a wrapper access token
   `cnf = None`; `useDpop` sets `cnf = Some(jkt)` exactly as the DPoP exchange binds today. This reuses
   the existing `state.wrapper_issuer` / `state.wrapper_verifier` instances
   (`crates/gateway/src/lib.rs:136/147`), built from the gateway's ed25519 signing key — the **same**
-  key the shipped `/__zs/auth/dpop-exchange` path uses, so **no new key material**. If the signing key
+  key the shipped `/__zeroship/auth/dpop-exchange` path uses, so **no new key material**. If the signing key
   is absent (a misconfiguration), `/token` returns `503` exactly as `dpop-exchange` does today
   (`dpop_exchange.rs:78`), rather than silently handing back the raw Hydra token.
 - ⇒ **The token the browser holds contains the `pws_`, never the global UUID.** App JS decoding its
@@ -990,7 +990,7 @@ every wrapper minted under the old key, signing out every browser session at onc
   atomic from the request path's view (swap the `Arc<Issuer>`/`Arc<Verifier>` state); no in-flight
   request sees a single-key gap.
 - **Optional gateway JWKS endpoint.** The gateway MAY expose **both** wrapper public keys at a
-  read-only `GET /__zs/auth/jwks` (or reuse an existing well-known path) so the wrapper becomes
+  read-only `GET /__zeroship/auth/jwks` (or reuse an existing well-known path) so the wrapper becomes
   independently verifiable by tooling/tests and so a future auth-sidecar (§1.5 escalation) can verify
   wrappers without sharing private key material. This is optional in Phase 1 (the Bearer arm verifies
   in-process against the live key list); the endpoint is purely additive.
@@ -1019,7 +1019,7 @@ binding is the load-bearing guarantee and is sufficient given Hydra is the only 
 200 OK  (mode=server_anchor)
 Cache-Control: no-store
 Content-Type: application/json
-Set-Cookie: __Host-zs_app_session=<anchor>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000
+Set-Cookie: __Host-zeroship_app_session=<anchor>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000
 
 { "access_token":"<gateway WRAPPER jwt — sub=pws_, email=alias, client_id=oac_…, 10-min exp>",
   "id_token":"<jwt — opaque pass-through, NOT trusted by the SDK>", "token_type":"Bearer",
@@ -1032,7 +1032,7 @@ Set-Cookie: __Host-zs_app_session=<anchor>; HttpOnly; Secure; SameSite=Strict; P
 
 The **anchor cookie** value is a server-side row in **`auth.app_session_anchors`** (the dedicated
 anchor store, §8.1 — *not* `auth.gateway_sessions`), holding the app's pairwise sub, the encrypted
-server-held refresh family, and the cached minted access token so `/__zs/auth/session` re-mints
+server-held refresh family, and the cached minted access token so `/__zeroship/auth/session` re-mints
 without any browser-held refresh token. **The anchor is bound to the access-token family** (it stores
 the family's Hydra session id / `jti` lineage), so a stolen browser refresh token alone (in
 `browser_refresh` mode) cannot resurrect or impersonate the anchor.
@@ -1059,9 +1059,9 @@ the family's Hydra session id / `jti` lineage), so a stolen browser refresh toke
 > opts into Supabase-style browser-held refresh by spending a **separate** code for a **separate**
 > family, never a copy. <!-- Added in round 1: single-holder, no copy, no parallel-grant. Round 3: anchor lock. Round 6 (BLOCKER): replace the unbuildable advisory-lock-across-Hydra with per-node single-flight + cached wrapper + Hydra rotation grace -->
 
-#### `GET /__zs/auth/session`
+#### `GET /__zeroship/auth/session`
 
-Reads `__Host-zs_app_session`, validates against `auth.app_session_anchors` (the dedicated anchor
+Reads `__Host-zeroship_app_session`, validates against `auth.app_session_anchors` (the dedicated anchor
 store, §8.1 — **not** `auth.gateway_sessions`), returns the server-validated user projection and
 (with `?mint=1`) a fresh access token minted from the server-held refresh token. Gated by the
 breadcrumb on the client side (the SDK skips this call when the breadcrumb is absent).
@@ -1185,17 +1185,17 @@ mint(anchor):                                              // route → oauth_cl
 ⚠️ **Round-2 hardening (MAJOR) — `?mint=1` is a credential-minting surface and must not be
 triggerable by a top-level navigation.** A `SameSite=Lax` anchor cookie **is** sent on a top-level
 GET navigation, so without a guard a malicious site could navigate the victim to
-`…/__zs/auth/session?mint=1` and cause a token mint (even though the response is unreadable
+`…/__zeroship/auth/session?mint=1` and cause a token mint (even though the response is unreadable
 cross-origin, minting in a loop is abuse, and any future caching/logging of the minted token would
 leak). The mint path therefore **requires a non-simple request header `X-ZS-Auth: 1`** that the SDK
 always sets via `fetch`. A plain top-level navigation cannot set a custom header, so it cannot reach
 the mint branch. Additionally the anchor is moved to **`SameSite=Strict`** (§8.3) — it is never
 legitimately needed on a cross-site request — and the handler enforces `Sec-Fetch-Site:
-same-origin` when present. The non-`mint` read (`GET /__zs/auth/session` without `?mint=1`) returns
+same-origin` when present. The non-`mint` read (`GET /__zeroship/auth/session` without `?mint=1`) returns
 only the cached user projection (no fresh token) and is harmless. <!-- Added in round 2: addressing MAJOR — require custom X-ZS-Auth header on mint + SameSite=Strict anchor so a top-level navigation can't mint -->
 
 ```
-GET /__zs/auth/session?mint=1
+GET /__zeroship/auth/session?mint=1
 Headers (required): X-ZS-Auth: 1        (custom header — absent ⇒ 400 invalid_request, no mint)
 → 200 { "user": {…}, "scopes":[…], "access_token":"<gateway WRAPPER jwt — sub=pws_, 10-min exp>",
         "expires_at":1717000000 }     (wrapper, NOT the raw Hydra JWT; minted via per-node single-flight, §1.2)
@@ -1203,16 +1203,16 @@ Headers (required): X-ZS-Auth: 1        (custom header — absent ⇒ 400 invali
 → 400 { "error":"invalid_request" }  (mint requested without X-ZS-Auth)
 ```
 
-#### `POST /__zs/auth/signout`
+#### `POST /__zeroship/auth/signout`
 
 ```
-POST /__zs/auth/signout
+POST /__zeroship/auth/signout
 Body: { "scope": "local" | "global" }
 ```
 
 - `local`: revoke the server-held refresh family (Hydra `/oauth2/revoke`) and, in
   `browser_refresh` mode, the browser family too; delete the `auth.app_session_anchors` row; clear
-  `__Host-zs_app_session` + breadcrumb; and upsert an `auth.token_revocations` `(client_id, sub)`
+  `__Host-zeroship_app_session` + breadcrumb; and upsert an `auth.token_revocations` `(client_id, sub)`
   family marker so an already-minted wrapper/access token is rejected cross-node (§8.5). The user
   stays signed in on other devices/tabs of **this** app (their anchors are independent) and on
   **other** apps (different per-app client).
@@ -1235,7 +1235,7 @@ matches **any registered per-app client** for the request host, resolves the `ap
 control-plane action, not a side effect of one app's BCL. <!-- Added in round 1: addressing MINOR — per-app BCL disambiguation -->
 
 Returns `204` with `Set-Cookie` clears. The SDK's server `signOut` and client `signOut` both
-target this; **this fixes the live "no handler for /__zs/auth/signout" bug.**
+target this; **this fixes the live "no handler for /__zeroship/auth/signout" bug.**
 
 ### 1.3 Gateway Bearer arm (`router/auth.rs`)
 
@@ -1388,7 +1388,7 @@ Round 2 changes three things: <!-- Added in round 2: addressing MAJOR — shorte
      real cross-node revocation primitive.
 3. **DPoP-binding is the documented default-recommendation for browser sessions** given the stated
    trust model (arbitrary creator JS). It remains opt-in in Phase 1 (the wrapper path
-   `/__zs/auth/dpop-exchange` already mints `cnf.jkt`-bound wrappers with a `jti` replay cache), but
+   `/__zeroship/auth/dpop-exchange` already mints `cnf.jkt`-bound wrappers with a `jti` replay cache), but
    the SDK surfaces a one-flag `useDpop: true` and the docs recommend it for any app handling
    sensitive scopes. The exact quantified window (≤10 min plain-Bearer; per-request sender-constraint
    with DPoP) is stated in §8.5.
@@ -1522,7 +1522,7 @@ across every producer/consumer/fixture: <!-- Added in round 1: addressing BLOCKE
 - **`CompiledRoute` surfaces them** so `lookup_by_name(host) -> (Uuid, Arc<CompiledRoute>)` yields
   the `oauth_client_id` without a second lookup.
 - **Threaded through**: `build_browser_authorize_url(client_id, …)` (the `/authorize` 302), the
-  `/__zs/auth/token` proxy (inject `client_id`), and the Bearer arm's `client_id`-claim binding
+  `/__zeroship/auth/token` proxy (inject `client_id`), and the Bearer arm's `client_id`-claim binding
   (§1.3) all read `route.entry.oauth_client_id`.
 - **Fixtures/tests** updated in the same patch: the gateway route-sync fixtures, `RouteEntry`
   round-trip tests, and the dispatch tests that assert `client_id`.
@@ -1594,7 +1594,7 @@ sdks/auth/
       relay.ts          postMessage + BroadcastChannel/localStorage fallback listener; origin/type/state validation
       pkce.ts           generateVerifier, s256Challenge (Web Crypto)
       transaction.ts    persist/recover {verifier,state,nonce,redirect_uri} in sessionStorage (§4.3) — Auth0 TransactionManager parity
-      transport.ts      authorize URL build, /__zs/auth/token + /__zs/auth/session calls, app_ref capture
+      transport.ts      authorize URL build, /__zeroship/auth/token + /__zeroship/auth/session calls, app_ref capture
       breadcrumb.ts     zs.<app_ref>.is.authenticated cookie read/write/clear
 ```
 
@@ -1694,7 +1694,7 @@ export interface AuthClientOptions {
 export interface SignInOptions {
   /** Optional IdP hint, forwarded verbatim to Hydra as `idp_hint` (passthrough;
       the login UI decides what it means). Omitted ⇒ default provider picker.
-      Threaded SDK → `/__zs/auth/authorize?idp_hint` → Hydra `/oauth2/auth?idp_hint`. */
+      Threaded SDK → `/__zeroship/auth/authorize?idp_hint` → Hydra `/oauth2/auth?idp_hint`. */
   provider?: "google" | "github" | "password";
   scopes?: string[];
   /** Default true. Popup vs full-page redirect. */
@@ -1724,12 +1724,12 @@ export interface AuthClient {
 
   /** Cheap, local. Returns the cached session or null. No network. */
   getSession(): Promise<Session | null>;
-  /** Server-validated user via GET /__zs/auth/session (gateway-validated `user`; always probes,
+  /** Server-validated user via GET /__zeroship/auth/session (gateway-validated `user`; always probes,
       bypassing the breadcrumb — §4.3). The SDK never trusts a browser-decoded id_token. */
   getUser(): Promise<User | null>;
   /** Force a refresh: browser-family rotation (browser_refresh) or /session?mint=1 (server_anchor). */
   refreshSession(): Promise<Session>;
-  /** Rehydrate after reload: breadcrumb-gated; first-party GET /__zs/auth/session?mint=1. No iframe. */
+  /** Rehydrate after reload: breadcrumb-gated; first-party GET /__zeroship/auth/session?mint=1. No iframe. */
   checkSession(): Promise<Session | null>;
 
   /** True if a non-expired session is cached. Cache-derived, no network. */
@@ -1762,7 +1762,7 @@ export const auth = {
   requireUser(): User,           // env.auth.requireUser() (throws → 401 at dispatch)
   isLoggedIn(): boolean,
   /** Returns a 302 Response to POST-less signout; the gateway clears the anchor. */
-  signOut(returnTo?: string): Response,   // → /__zs/auth/signout (now handled — bug fixed)
+  signOut(returnTo?: string): Response,   // → /__zeroship/auth/signout (now handled — bug fixed)
 };
 export default auth;
 ```
@@ -1808,7 +1808,7 @@ the click handler.
 - **The browser keys on a stable per-app `app_ref`, NOT the host, and `app_ref` is NOT the OAuth
   `client_id`.** The SDK doesn't know the Hydra `client_id` (`oac_<base62>`, §1.1; the gateway
   injects it). Auth0 keys on `client_id`; we replace it with a stable **`app_ref`** the **gateway
-  returns** on the first `/__zs/auth/token` and `/__zs/auth/session` response. ⚠️ **Round-5 (MINOR) —
+  returns** on the first `/__zeroship/auth/token` and `/__zeroship/auth/session` response. ⚠️ **Round-5 (MINOR) —
   `app_ref` is a distinct, deliberately non-OAuth value**: a short opaque per-app id derived from
   `app_id` (e.g. `apr_7Fk…`), the same for every host the app serves, used **only** for browser-side
   cache/breadcrumb/lock keying. It is **not** `oac_<base62>` (the `client_id`) — keeping them distinct
@@ -1865,10 +1865,10 @@ the click handler.
   HttpOnly anchor is authoritative.** It is non-HttpOnly so JS can read it and therefore trivially
   forgeable (any first-party JS or XSS can set/clear it), so it must never gate anything that grants
   authority — it only decides whether to *skip a network probe*. Two concrete consequences: <!-- Added in round 2: addressing MAJOR — breadcrumb is non-authoritative; gateway writes it; specify both desync directions; periodic force probe -->
-  - **The gateway writes the breadcrumb server-side** on every `/__zs/auth/token` and
-    `/__zs/auth/session` response (still non-HttpOnly so the SDK can read it, but written by the
+  - **The gateway writes the breadcrumb server-side** on every `/__zeroship/auth/token` and
+    `/__zeroship/auth/session` response (still non-HttpOnly so the SDK can read it, but written by the
     server so it tracks the anchor and cannot drift away from it under normal operation), and clears
-    it on `/__zs/auth/signout`. The SDK also writes it as a fast-path but the server write is the
+    it on `/__zeroship/auth/signout`. The SDK also writes it as a fast-path but the server write is the
     source of truth.
   - **Both desync directions are specified.** (a) *Breadcrumb says authenticated but the anchor is
     gone* → `/session?mint=1` returns `401 login_required`; the SDK clears the breadcrumb and goes
@@ -1882,7 +1882,7 @@ the click handler.
     or cleared breadcrumb can at most add/remove one cheap network call, never grant or deny a
     session. The breadcrumb is cleared on `signOut`.
   - ⚠️ **Cleared-breadcrumb × `503 client_not_provisioned` interaction (round-6).** Because the first
-    `checkSession()` per load probes `/__zs/auth/session` **unconditionally** (regardless of the
+    `checkSession()` per load probes `/__zeroship/auth/session` **unconditionally** (regardless of the
     breadcrumb, consequence (b) above), that probe can race a still-provisioning app and get
     `503 client_not_provisioned` (the defensive `oauth_client_id == None` state, §1.5 — not a routine
     first-deploy window, but possible on a partial sync). The SDK must **not** collapse this into a
@@ -1911,7 +1911,7 @@ the click handler.
   `AuthError('timeout')`.
 - **No `runIframe`.** The hidden-iframe `prompt=none` path is removed (§2): it would require
   reading Hydra's session as a third-party cookie. Silent renewal and reload-recovery go through
-  `/__zs/auth/session?mint=1` (first-party). Step-up for new scopes (`requestScopes`) and recovery
+  `/__zeroship/auth/session?mint=1` (first-party). Step-up for new scopes (`requestScopes`) and recovery
   after the anchor expires both use the **interactive popup** (`prompt=consent` / `prompt=login`),
   never an iframe. <!-- Added in round 1: addressing BLOCKER — remove iframe mechanics from SDK -->
 - `relay.ts` listens for `message`, validates `e.origin === appOrigin && e.data?.type ===
@@ -2598,7 +2598,7 @@ SEPARATE credential from the 12h/30-min interactive `auth.gateway_sessions`, §2
 
 ```sql
 CREATE TABLE auth.app_session_anchors (
-  id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),  -- the __Host-zs_app_session cookie value
+  id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),  -- the __Host-zeroship_app_session cookie value
   app_id              text        NOT NULL,            -- TEXT, consistent with gateway_sessions/app_user_identities
   global_user_id      uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,  -- the GLOBAL user (pws_ is a projection, never stored)
   refresh_token_enc   bytea       NOT NULL,            -- encrypted server-held rotating refresh family
@@ -2614,7 +2614,7 @@ CREATE TABLE auth.app_session_anchors (
 CREATE INDEX app_session_anchors_user ON auth.app_session_anchors (app_id, global_user_id) WHERE revoked_at IS NULL;
 -- The anchor does NOT reuse auth.gateway_sessions (ABSOLUTE_HOURS=12 / IDLE_MINUTES=30, sessions.rs:46-50),
 -- whose 30-min idle expiry would kill "return tomorrow" recovery. This store has no idle window.
--- /__zs/auth/session?mint=1 coalesces concurrent minters via a PER-NODE in-process single-flight keyed
+-- /__zeroship/auth/session?mint=1 coalesces concurrent minters via a PER-NODE in-process single-flight keyed
 -- on id + a short cached wrapper (cached_access_token/exp); NO db lock or connection is held across the
 -- Hydra refresh (§1.2 round-6 BLOCKER redesign — AppState.db is a single Arc<Client>, migrated to a Pool).
 ```
@@ -2710,13 +2710,13 @@ synthesizing the `ZeroShip-User` header; the token itself is never rewritten. <!
 
 | Name | Set by | Attributes | Purpose |
 |---|---|---|---|
-| `__Host-zs_app_anchor` | gateway `/__zs/auth/token` | `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000` (30d) | First-party anchor; server-held refresh family for reload-recovery. **`SameSite=Strict`** (round-2): never needed cross-site, so a top-level navigation cannot ride it. **DEDICATED cookie name (Batch-B MAJOR fix), DISTINCT from the interactive OIDC `__Host-zs_app_session`** — one cookie name ⇒ exactly one server-side table, so a request carrying one is never validated against the wrong store. Name via `anchors::anchor_cookie_name(insecure_dev)` → `zs_app_anchor` (no `__Host-`, no `Secure`) in dev. |
+| `__Host-zeroship_app_anchor` | gateway `/__zeroship/auth/token` | `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000` (30d) | First-party anchor; server-held refresh family for reload-recovery. **`SameSite=Strict`** (round-2): never needed cross-site, so a top-level navigation cannot ride it. **DEDICATED cookie name (Batch-B MAJOR fix), DISTINCT from the interactive OIDC `__Host-zeroship_app_session`** — one cookie name ⇒ exactly one server-side table, so a request carrying one is never validated against the wrong store. Name via `anchors::anchor_cookie_name(insecure_dev)` → `zeroship_app_anchor` (no `__Host-`, no `Secure`) in dev. |
 
 ⚠️ **Round-5 (MINOR) — `SameSite=Strict` is correct precisely because `/session` is reached by a
 same-origin `fetch`, not a cross-site top-level navigation; do NOT "fix" it to `Lax`.** A user who
 arrives at `https://myapp.zeroship.ai` via a **cross-site top-level navigation** (clicking a link in
 an email) will **not** send the Strict anchor on that initial navigation — but `checkSession()` issues
-a **same-origin** `fetch` to `/__zs/auth/session?mint=1` *from* the loaded app page, and a Strict
+a **same-origin** `fetch` to `/__zeroship/auth/session?mint=1` *from* the loaded app page, and a Strict
 cookie **is** sent on a same-origin request regardless of how the user first arrived. So the
 cross-site-entry → same-origin-fetch case still carries the anchor and reload-recovery works. (This
 is also why `?mint=1` requires the `X-ZS-Auth` custom header, §1.2: it cannot be reached by a
@@ -2730,7 +2730,7 @@ The anchor `Max-Age`, the breadcrumb `Max-Age`, and the **`auth.app_session_anch
 are **all 30 days** (NOT `auth.gateway_sessions`, which stays at its `ABSOLUTE_HOURS=12` /
 `IDLE_MINUTES=30` for the interactive cookie redirect flow — §8.1). The anchor has **no idle window**
 (a reload-recovery credential must survive long idle gaps), so it does not die after a 30-min gap.
-The browser **access token** is the **10-min** wrapper (§8.5; refreshed via `/__zs/auth/session?mint=1`
+The browser **access token** is the **10-min** wrapper (§8.5; refreshed via `/__zeroship/auth/session?mint=1`
 via per-node single-flight); the **server-held refresh family** is `720h` (Hydra), and the anchor's
 absolute expiry is **`created_at + 30d`, set once and never slid (round-6 MAJOR)**. The 720h family
 ceiling is **not** mirrored into `abs_expires_at`; it is enforced solely by Hydra returning
@@ -2739,26 +2739,26 @@ clear breadcrumb → interactive login). So the anchor ends at whichever fires f
 absolute expiry, or a Hydra `invalid_grant`. `Max-Age` values are documented, not derived
 per-handler. <!-- Added in round 1: lifetime reconciliation; Round 3: anchor is app_session_anchors (no idle slide); Round 6 (MAJOR): abs_expires_at = created_at+30d set once, NOT min(.,family-ceiling); family ceiling enforced only by Hydra invalid_grant -->
 
-⚠️ The `__Host-zs_app_anchor` cookie attribute table row (above) is the **anchor cookie pointing at
+⚠️ The `__Host-zeroship_app_anchor` cookie attribute table row (above) is the **anchor cookie pointing at
 an `auth.app_session_anchors` row**, not a `gateway_sessions` row. **Batch-B MAJOR fix:** the anchor
-was previously named `__Host-zs_app_session` — the SAME name the interactive OIDC flow uses for a
+was previously named `__Host-zeroship_app_session` — the SAME name the interactive OIDC flow uses for a
 `gateway_sessions.id`. On one origin two storage models shared a name, so a request carrying one
 could be validated against the WRONG table. The anchor now has its own dedicated name
-(`__Host-zs_app_anchor` / dev `zs_app_anchor`), keeping the interactive `__Host-zs_app_session` for
+(`__Host-zeroship_app_anchor` / dev `zeroship_app_anchor`), keeping the interactive `__Host-zeroship_app_session` for
 `gateway_sessions`. Name resolved by `anchors::anchor_cookie_name` (NOT `app_session_cookie_name`).
 
 ⚠️ **`__Host-`/insecure-dev naming is centralized — per store.** The anchor handlers (`/token`,
 `/session`, `/signout`, plus the cookie-clearing on revoke and the anchor validation) use the
 DEDICATED `anchors::anchor_cookie_name(insecure_dev)` helper (the `ANCHOR_COOKIE_{PROD,DEV}`
-constants in `anchors.rs` → `__Host-zs_app_anchor` / dev `zs_app_anchor`) rather than re-deriving
+constants in `anchors.rs` → `__Host-zeroship_app_anchor` / dev `zeroship_app_anchor`) rather than re-deriving
 the name. The interactive OIDC redirect flow continues to use the SEPARATE
 `oidc_rp::app_session_cookie_name(insecure_dev)` helper (`APP_SESSION_COOKIE_{PROD,DEV}` →
-`__Host-zs_app_session`) for its `gateway_sessions` cookie. Two stores, two helpers, two names
+`__Host-zeroship_app_session`) for its `gateway_sessions` cookie. Two stores, two helpers, two names
 (Batch-B MAJOR fix); the `__Host-` prefix + `Secure` drop together in dev for both. <!-- Added in round 1: centralize cookie-name helper; Batch-B: anchor has its OWN name/helper, distinct from the interactive gateway_sessions cookie -->
 
 Headers: `ZeroShip-User` (existing, +scopes); `Authorization: Bearer <jwt>` (new gateway Bearer
 arm, issuer-discriminated, §1.3); `Authorization: DPoP <wrapper>` (existing hardening path). ⚠️
-**Round-3: `/__zs/auth/token` and `/__zs/auth/session` are same-origin-only and emit NO CORS
+**Round-3: `/__zeroship/auth/token` and `/__zeroship/auth/session` are same-origin-only and emit NO CORS
 allow-origin/allow-credentials headers** — the boundary is the custom-header (`X-ZS-Auth`) + exact
 `Origin`-match + `Sec-Fetch-Site` conjunction (§1.2). A foreign, `null`, or (on POST) missing `Origin`
 is rejected. No credentialed origin reflection.
@@ -2801,12 +2801,12 @@ compromises **that app's** session for the affected user. The platform's mitigat
    refresh family (`browser_refresh` mode) — tokens are not in a JS-readable cookie (only the
    boolean breadcrumb is) and not in `localStorage` unless the creator opts in (documented
    tradeoff).
-3. **The anchor is HttpOnly + family-bound.** XSS cannot read the `__Host-zs_app_session` anchor,
+3. **The anchor is HttpOnly + family-bound.** XSS cannot read the `__Host-zeroship_app_session` anchor,
    and a stolen browser refresh token alone cannot resurrect the anchor (it is bound to the
    access-token family / Hydra session lineage, §1.2). In the default `server_anchor` mode the
    browser holds **no** refresh token at all, so the highest-value credential never reaches
    app-readable memory.
-4. **Same-origin-only enforcement** on `/__zs/auth/token` and `/__zs/auth/session` (custom
+4. **Same-origin-only enforcement** on `/__zeroship/auth/token` and `/__zeroship/auth/session` (custom
    `X-ZS-Auth` header + `Origin` exact-match == app origin + `Sec-Fetch-Site: same-origin`, with NO
    credentialed CORS reflection — round-3) — a cross-site page cannot drive the token endpoint even
    if it guesses a code, and a reflection bug cannot turn it into a credentialed mint oracle.
@@ -2829,7 +2829,7 @@ first-party server code, and we say so plainly — it is the accepted cost of tr
   reuse-detection (single-use, 30s grace, family-revoke on replay) never fires on a
   browser-vs-server race because the families are disjoint; `navigator.locks` serializes the
   browser family across tabs.
-- **Same-origin-only, NO CORS reflection (round-3).** `/__zs/auth/token` and `/__zs/auth/session`
+- **Same-origin-only, NO CORS reflection (round-3).** `/__zeroship/auth/token` and `/__zeroship/auth/session`
   emit **no** `Access-Control-Allow-Origin` / `allow-credentials` at all — they are same-origin
   endpoints, so a cross-origin request is simply blocked by the browser (no allow-origin) and a
   foreign / `null` / (POST) missing `Origin` is rejected server-side by exact-string compare.
@@ -2904,7 +2904,7 @@ first-party server code, and we say so plainly — it is the accepted cost of tr
      §1.4),
   6. a route requiring `read:billing` returns 403 without the scope and 200 with it; an **expired
      wrapper Bearer on an `Anon` (public) route still serves the public page** (round-3 §1.3),
-  7. **reload-recovery** survives a page reload via the first-party anchor (`/__zs/auth/session`),
+  7. **reload-recovery** survives a page reload via the first-party anchor (`/__zeroship/auth/session`),
      including **after a >30-min idle gap** (the dedicated `auth.app_session_anchors` store, NOT the
      30-min-idle `gateway_sessions` — round-3 §2/§8.1), with **no** hidden iframe and **no**
      third-party cookie; **N concurrent `?mint=1` make exactly one Hydra refresh** and do not revoke
@@ -2948,7 +2948,7 @@ first-party server code, and we say so plainly — it is the accepted cost of tr
     `app_oauth_clients` and emits `Some(oauth_client_id)` for a provisioned app, `None` for an
     un-provisioned one; the **mixed-default** round-trip (passthrough manifest + `None` OAuth fields)
     serializes/deserializes intact.
-  - gateway: `/__zs/auth/token` **validates the id_token** (sig/iss/aud/exp — the load-bearing
+  - gateway: `/__zeroship/auth/token` **validates the id_token** (sig/iss/aud/exp — the load-bearing
     binding; nonce is defense-in-depth) and returns a server-validated `user`; a forged/altered
     id_token in the Hydra response ⇒ `400 invalid_token` (round-2/3 §1.2). `?mint=1` **without
     `X-ZS-Auth`** ⇒ `400` (cannot mint via top-level nav). A cross-origin `fetch` with a foreign or
@@ -2956,7 +2956,7 @@ first-party server code, and we say so plainly — it is the accepted cost of tr
   - gateway: **N parallel `?mint=1`** against one anchor ⇒ exactly **one** Hydra `/oauth2/token` call,
     all N get a valid token, family not revoked (round-3 §1.2); a mint after the cached token expires
     triggers exactly one new rotation.
-  - gateway: `/__zs/auth/signout` clears anchor + breadcrumb (fixes the live bug — a test that
+  - gateway: `/__zeroship/auth/signout` clears anchor + breadcrumb (fixes the live bug — a test that
     404s today) **and writes the `auth.token_revocations` family marker**. `global` revokes only this
     app's `(app_id, user)` `app_session_anchors` rows + marker, not other apps; a token minted before
     the marker is rejected on a **second** gate node (cross-node — round-3 §8.5).
@@ -3015,11 +3015,11 @@ need production observability and abuse limits — absent from round 1. They reu
 **existing** rate-limit infra (the CHWBL/per-tenant limiter, AGENTS.md), not a new mechanism. <!-- Added in round 2: addressing MINOR — operational rate-limit/metrics/alerting for the token/session proxy -->
 
 - **Rate limits** (per-IP **and** per-app, via the existing limiter):
-  - `POST /__zs/auth/token` — code exchange + refresh; cap bounds Hydra `/oauth2/token` load and
+  - `POST /__zeroship/auth/token` — code exchange + refresh; cap bounds Hydra `/oauth2/token` load and
     blocks mint loops. On exceed: `429` with `Retry-After`.
-  - `GET /__zs/auth/session?mint=1` — minting; per-IP + per-app cap (tighter than `/token` since a
+  - `GET /__zeroship/auth/session?mint=1` — minting; per-IP + per-app cap (tighter than `/token` since a
     valid anchor can mint repeatedly).
-  - `POST /__zs/auth/signout`, `GET /__zs/auth/authorize` — looser caps (cheap), still bounded.
+  - `POST /__zeroship/auth/signout`, `GET /__zeroship/auth/authorize` — looser caps (cheap), still bounded.
 - **Shared, breaker-guarded Hydra client (round-6 MAJOR #3).** ⚠️ The gateway's `oidc_rp` today calls
   `cyper::Client::new()` **per request** (`oidc_rp.rs:191,276`), which gives every call a fresh
   connection pool and no shared breaker/timeout state — undercutting the bounded-timeout/circuit-breaker

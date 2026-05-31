@@ -25,13 +25,13 @@ The platform uses the **BFF model**: the browser holds an HttpOnly signed
 session cookie + an identity projection, never a token. Two surfaces:
 
 1. **Browser** — the `@zeroship/auth` client drives same-origin endpoints:
-   - `GET  /__zs/auth/authorize`     → the login hop (popup or redirect).
-   - `GET  /__zs/auth/popup-callback`→ same-origin HTML relay; postMessages
+   - `GET  /__zeroship/auth/authorize`     → the login hop (popup or redirect).
+   - `GET  /__zeroship/auth/popup-callback`→ same-origin HTML relay; postMessages
      `{ type: "zs:authorization_response", response: { code, state } }`.
-   - `POST /__zs/auth/session`       → code→session exchange; sets the session
+   - `POST /__zeroship/auth/session`       → code→session exchange; sets the session
      cookie; returns `{ user, expires_at }` (NO token in the body).
-   - `GET  /__zs/auth/session[?mint=1]` → read / re-mint; `{ user, expires_at }`.
-   - `POST /__zs/auth/signout`       → revoke + clear; `204`.
+   - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; `{ user, expires_at }`.
+   - `POST /__zeroship/auth/signout`       → revoke + clear; `204`.
 
    The `user` projection is `{ id, email, emailVerified, name, avatar, scopes }`
    (client camelCase); the wire body uses snake_case `email_verified`. `id` is
@@ -57,15 +57,15 @@ Two pieces, mirroring the two contract surfaces:
 
 ### 1. Browser endpoints — `@zeroship/bootstrap` `dev-auth.ts`
 
-`createDevAuthProvider(getEnv)` serves the same-origin `/__zs/auth/*` routes
+`createDevAuthProvider(getEnv)` serves the same-origin `/__zeroship/auth/*` routes
 from inside the dev runtime — no gateway, no Hydra:
 
 - `authorize` → **frictionless dev login**: picks the configured dev user (or
-  the default) and 302s straight back to `/__zs/auth/popup-callback?code&state`
+  the default) and 302s straight back to `/__zeroship/auth/popup-callback?code&state`
   with a locally-minted dev code. A multi-user config renders a tiny dev
   user-picker so you can switch identities / scope sets.
 - `popup-callback` → the **byte-for-byte same** relay page the gateway serves.
-- `session` (POST) → spends the dev code, mints the `__zs_dev_session` cookie,
+- `session` (POST) → spends the dev code, mints the `__zeroship_dev_session` cookie,
   returns `{ user, expires_at }`.
 - `session` (GET / `?mint=1`) → read / re-mint, or `401 { error: "login_required" }`.
 - `signout` → clears the cookie; `204` (idempotent).
@@ -74,9 +74,9 @@ Every wire shape is identical to prod, so the `@zeroship/auth` client is
 unchanged dev↔prod. The provider is wired into the dev fetch handler in
 `dev-entry.ts` (`@zeroship/bootstrap/dev`), ahead of the user module's fetch.
 
-### 2. Server-side identity — `__zs_dev_session` cookie → `user_json`
+### 2. Server-side identity — `__zeroship_dev_session` cookie → `user_json`
 
-The `__zs_dev_session` cookie value is
+The `__zeroship_dev_session` cookie value is
 `base64url(user_json) "." hex-HMAC-SHA256(secret, base64url-payload)`, signed
 with a per-dev-server secret (`ZEROSHIP_DEV_AUTH_SECRET`). The dev runtime's
 serve path (`crates/runtime/src/core/serve.rs::handle_request`) calls
@@ -110,7 +110,7 @@ zeroship({
   devAuth: { users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }],
              defaultUserId: "pws_a" },
 
-  // off — /__zs/auth/* falls through; env.auth.getUser() is anonymous
+  // off — /__zeroship/auth/* falls through; env.auth.getUser() is anonymous
   devAuth: false,
 })
 ```
@@ -137,8 +137,8 @@ The dev-auth provider must never reach a production `.zship`:
 This is **grep-provable** and guarded by a test
 (`sdks/bootstrap/tests/dev-auth.test.ts`): the prod artifacts
 (`dist/runtime-entry.js`, `dist/index.js`, `dist/dispatcher.js`) carry no
-`createDevAuthProvider` / `__zs_dev_session` / `signDevSession` /
-`/__zs/auth/authorize` symbols.
+`createDevAuthProvider` / `__zeroship_dev_session` / `signDevSession` /
+`/__zeroship/auth/authorize` symbols.
 
 ## Tests (the faithful path)
 
@@ -147,7 +147,7 @@ This is **grep-provable** and guarded by a test
   `env.auth.getUser()` and `currentUser()` resolve the dev user from the cookie,
   plus forgery rejection (wrong-secret cookie → anonymous). No gateway/Hydra.
 - `sdks/bootstrap/tests/dev-auth.test.ts` — exercises the real provider through
-  the full `/__zs/auth/*` flow + the WebCrypto HMAC cookie roundtrip, and the
+  the full `/__zeroship/auth/*` flow + the WebCrypto HMAC cookie roundtrip, and the
   production-build absence guard.
 - `sdks/auth/tests/dev-tier.test.ts` — the real `@zeroship/auth` client driving
   the real dev provider end-to-end (`signInWithOAuth` popup flow, `getUser`,
@@ -158,7 +158,7 @@ This is **grep-provable** and guarded by a test
 ```
 crates/runtime/src/core/dev_auth.rs        cookie verify → user_json (dev-gated)
 crates/runtime/src/core/serve.rs           handle_request calls resolve_dev_user_json
-sdks/bootstrap/src/dev-auth.ts             the /__zs/auth/* provider + cookie signing
+sdks/bootstrap/src/dev-auth.ts             the /__zeroship/auth/* provider + cookie signing
 sdks/bootstrap/src/dev-entry.ts            wires the provider into the dev fetch handler
 sdks/vite-plugin/src/dev-auth-config.ts    devAuth option → env pair + secret
 sdks/vite-plugin/src/dev-server.ts         passes the env pair to the serve child

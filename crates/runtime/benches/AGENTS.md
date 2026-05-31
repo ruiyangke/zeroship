@@ -23,7 +23,7 @@ Bench fixtures + runners for measuring the runtime against itself
 | `run_zerobench.sh` | Main runner — boots all four runtime slots + nginx, drives `zerobench` against each, parses + summarises per-scenario |
 | `zeroship-bench.rhai` | The unified Rhai plan declaring every scenario (RPC, HTTP, SSE, WS) — gated by `BENCH_SCENARIO` env var |
 | `scenarios.js` | JS bench fixture — `_scenarios` map drives RPC dispatch; `default.fetch` covers the WinterCG slow path; `default.fetchFast` covers the zeroship fast path; `default.rpc` covers the kernel RPC dispatch |
-| `node_server.js` | Single-process node baseline — implements the same `/_zs/v1/<id>` RPC wire so cross-runtime benches measure apples-to-apples |
+| `node_server.js` | Single-process node baseline — implements the same `/__zeroship/v1/<id>` RPC wire so cross-runtime benches measure apples-to-apples |
 | `node_server_cluster.js` | Forked-cluster node baseline (N workers via `cluster` module) |
 | `node_ws_server.js` | Standalone WS echo server (used by older `run_ws_benchmark.sh`) |
 | `run_benchmark.sh` | Legacy wrk-based runner — superseded by `run_zerobench.sh`, kept for cross-checking |

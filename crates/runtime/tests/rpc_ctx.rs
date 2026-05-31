@@ -116,7 +116,7 @@ fn url_searchparams_set_succeeds_request_scoped() {
 #[test]
 fn frozen_url_searchparams_get_works() {
     // The kernel feeds the url via the dispatch URL. Synthetic-entry
-    // tests post to /_zs/v1/<id> with no query string, so we read from
+    // tests post to /__zeroship/v1/<id> with no query string, so we read from
     // `pathname` to verify the URL is parsed and exposed correctly.
     // searchParams.get returns null on missing key (canonical WHATWG
     // URL behavior).
@@ -132,7 +132,7 @@ fn frozen_url_searchparams_get_works() {
         "[]",
     )
     .unwrap();
-    assert!(r.json.contains(r#""pathname":"/_zs/v1/test""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""pathname":"/__zeroship/v1/test""#), "got: {}", r.json);
     assert!(r.json.contains(r#""missing":null"#), "got: {}", r.json);
 }
 
@@ -227,8 +227,8 @@ fn ctx_scalars_match_request() {
     )
     .unwrap();
     assert!(r.json.contains(r#""method":"POST""#), "got: {}", r.json);
-    assert!(r.json.contains(r#""pathname":"/_zs/v1/test""#), "got: {}", r.json);
-    assert!(r.json.contains(r#""href":"http://localhost/_zs/v1/test""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""pathname":"/__zeroship/v1/test""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""href":"http://localhost/__zeroship/v1/test""#), "got: {}", r.json);
     assert!(r.json.contains(r#""requestIdShape":true"#), "got: {}", r.json);
     assert!(r.json.contains(r#""traceIdShape":true"#), "got: {}", r.json);
 }

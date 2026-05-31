@@ -57,7 +57,7 @@ describe("client — escape hatch (`call`)", () => {
     const result = await rpc.call("listTodos", { limit: 50 }, { kind: "query" });
     assert.deepEqual(result, [{ id: 1 }]);
     assert.equal(spy.calls.length, 1);
-    assert.ok(spy.calls[0].url.includes("/_zs/v1/listTodos"));
+    assert.ok(spy.calls[0].url.includes("/__zeroship/v1/listTodos"));
   });
 
   test("default baseUrl is empty (same-origin)", async () => {
@@ -69,7 +69,7 @@ describe("client — escape hatch (`call`)", () => {
     );
     const rpc = client({ fetch: spy.fetchFn });
     await rpc.call("ping", undefined, { kind: "query" });
-    assert.equal(spy.calls[0].url, "/_zs/v1/ping");
+    assert.equal(spy.calls[0].url, "/__zeroship/v1/ping");
   });
 });
 
@@ -95,7 +95,7 @@ describe("client — typed proxy surface", () => {
     const result = await rpc.listTodos.query({ limit: 50 });
     assert.deepEqual(result, [{ id: 1 }]);
     assert.equal(spy.calls[0].method, "GET");
-    assert.ok(spy.calls[0].url.includes("/_zs/v1/listTodos"));
+    assert.ok(spy.calls[0].url.includes("/__zeroship/v1/listTodos"));
   });
 
   test("rpc.<id>.mutation() POSTs", async () => {
@@ -142,7 +142,7 @@ describe("client — typed proxy surface", () => {
     // rpc.todos.list.query() — the dotted id "todos.list" expands.
     await (rpc as { todos: { list: { query: () => Promise<unknown> } } }).todos
       .list.query();
-    assert.ok(spy.calls[0].url.includes("/_zs/v1/todos.list"));
+    assert.ok(spy.calls[0].url.includes("/__zeroship/v1/todos.list"));
   });
 
   test("stream returns an async-iter", async () => {

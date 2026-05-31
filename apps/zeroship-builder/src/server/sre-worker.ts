@@ -27,7 +27,7 @@
 // (`internal/sre.ts`, translator helpers, etc.).
 //
 // Wire convention (single-input object):
-//   POST /_zs/v1/sre.monitor
+//   POST /__zeroship/v1/sre.monitor
 //     body: { json: { appId: string } }
 //     response: { findings: SREFindingItem[] }
 

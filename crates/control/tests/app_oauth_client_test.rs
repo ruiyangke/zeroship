@@ -381,7 +381,7 @@ async fn appstate_provision_then_delete_end_to_end() {
         hydra_client
             .redirect_uris
             .iter()
-            .any(|u| u == &format!("http://{expected_apex}/__zs/auth/callback")),
+            .any(|u| u == &format!("http://{expected_apex}/__zeroship/auth/callback")),
         "apex host derived by provision_app_oauth_client must match the gateway host {expected_apex}: {:?}",
         hydra_client.redirect_uris
     );

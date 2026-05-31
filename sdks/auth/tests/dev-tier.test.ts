@@ -3,10 +3,10 @@
  * the REAL `@zeroship/bootstrap` dev-auth provider end-to-end, with NO gateway /
  * Hydra. This is the contract-parity proof: the same client code that talks to
  * the gateway in prod resolves a session against the dev provider's
- * `/__zs/auth/*` endpoints, byte-identical wire, only the backend differs.
+ * `/__zeroship/auth/*` endpoints, byte-identical wire, only the backend differs.
  *
  * Nothing under test is stubbed. The harness's `FakeFetch` is wired to forward
- * every `/__zs/auth/*` request into `provider.handle(...)` (the real provider),
+ * every `/__zeroship/auth/*` request into `provider.handle(...)` (the real provider),
  * with a cookie bridge (the provider's `set-cookie` is stored and replayed as
  * the `cookie` header on the next request) — exactly the browser↔gateway cookie
  * relationship, just same-process.
@@ -37,7 +37,7 @@ function wireProviderToHarness(h: Harness, devAuthConfig?: string): DevAuthProvi
   const provider = createDevAuthProvider((name) => env[name]);
   assert.ok(provider, "provider must be created");
 
-  // Cookie bridge — the provider sets `__zs_dev_session` via set-cookie; we
+  // Cookie bridge — the provider sets `__zeroship_dev_session` via set-cookie; we
   // store it and replay it on the next request, exactly as a browser would.
   let cookieJar = "";
   const applySetCookie = (res: Response) => {
@@ -49,7 +49,7 @@ function wireProviderToHarness(h: Harness, devAuthConfig?: string): DevAuthProvi
   };
 
   h.fetch.on(
-    (url) => url.includes("/__zs/auth/"),
+    (url) => url.includes("/__zeroship/auth/"),
     async (rec) => {
       const headers: Record<string, string> = { ...rec.headers };
       if (cookieJar) headers.cookie = cookieJar;
@@ -83,7 +83,7 @@ async function completePopup(h: Harness, provider: DevAuthProvider): Promise<voi
   // built it from the transport. We instead ask the provider to authorize with
   // the same state the client minted (read from the popup navigation target).
   const authorizeUrl = popup!.location.href || h.window.location.href;
-  assert.ok(authorizeUrl.includes("/__zs/auth/authorize"), `popup should navigate to authorize, got ${authorizeUrl}`);
+  assert.ok(authorizeUrl.includes("/__zeroship/auth/authorize"), `popup should navigate to authorize, got ${authorizeUrl}`);
   const authRes = await provider.handle(new Request(authorizeUrl));
   assert.equal(authRes.status, 302);
   const cb = new URL(authRes.headers.get("location")!);
@@ -103,7 +103,7 @@ describe("dev-tier auth — @zeroship/auth client ↔ real dev provider", () => 
     h = makeHarness();
   });
 
-  test("getUser() resolves the configured dev user against GET /__zs/auth/session", async () => {
+  test("getUser() resolves the configured dev user against GET /__zeroship/auth/session", async () => {
     // Sign in through the REAL client+provider popup flow (which sets the dev
     // cookie in our jar), then probe the server-validated user via getUser().
     const provider = wireProviderToHarness(

@@ -45,7 +45,7 @@ fn build_runtime_with_app(app_id: Uuid, user_source: &str, procs_block: &str) ->
 fn start_rpc(runtime: &Runtime, id: &str, input_json: &str) -> FetchOutcome {
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{}", id);
+    let url = format!("http://localhost/__zeroship/v1/{}", id);
     let body = format!(r#"{{"json":{}}}"#, input_json);
     runtime.call_fetch_handler(
         "POST",

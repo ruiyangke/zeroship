@@ -33,7 +33,7 @@ Open http://localhost:3000/ to chat.
 
 ```
 useChat (browser)
-  │ POST /_zs/v1/chat
+  │ POST /__zeroship/v1/chat
   │ body: { json: { messages: UIMessage[] } }
   ▼
 zeroship kernel

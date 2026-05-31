@@ -7,7 +7,7 @@ it changes *what the browser holds* and *where the power token lives*.
 
 **This is a deliberate reversal, decided security-first.** The original build shipped the browser a
 gateway **wrapper access token** (a real capability: `scope` claim, `client_id`, `aud`, Bearer-armed at
-the gateway) via `POST /__zs/auth/token`, held client-side (`cacheLocation: "memory"`, `CacheManager`,
+the gateway) via `POST /__zeroship/auth/token`, held client-side (`cacheLocation: "memory"`, `CacheManager`,
 optional Web-Worker refresh, `navigator.locks`). After reviewing how Auth0 frames the
 authentication/authorization split and how the IETF browser-apps BCP ranks deployment patterns, the
 target is the **Backend-For-Frontend (BFF)** tier:
@@ -66,19 +66,19 @@ The model below is anchored in three sources, all read in full before writing:
   relay alias.
 
 - **The real code seams** (read directly):
-  - `crates/gateway/src/auth_token.rs` — `POST /__zs/auth/token` mints the per-app **wrapper** (the
+  - `crates/gateway/src/auth_token.rs` — `POST /__zeroship/auth/token` mints the per-app **wrapper** (the
     capability) and **returns it in the JSON body** (`"access_token": wrapper`, line 519);
-    `GET /__zs/auth/session?mint=1` re-mints and returns a wrapper (`mint`/`do_refresh`,
+    `GET /__zeroship/auth/session?mint=1` re-mints and returns a wrapper (`mint`/`do_refresh`,
     lines 633–865). This is one of the "power token to the browser" surfaces to remove.
   - `crates/gateway/src/anchors.rs` — `auth.app_session_anchors` custody: encrypted server-held
     refresh family, `WRAPPER_TTL_SECS = 600`, `ANCHOR_ABS_DAYS = 30`, `ANCHOR_MINT_CACHE_TTL_SECS = 5`,
-    `__Host-zs_app_anchor` cookie (`HttpOnly; Secure; SameSite=Strict`, 30d no-idle), a **single**
+    `__Host-zeroship_app_anchor` cookie (`HttpOnly; Secure; SameSite=Strict`, 30d no-idle), a **single**
     `cached_access_token`/`cached_access_exp` column pair, `granted_scopes`, the breadcrumb cookie.
     The custody half **stays**; it becomes the BFF's server-side token store. `anchors.rs:62-68`
     + its test (`anchors.rs:583-588`) assert the anchor is a SEPARATE store from `gateway_sessions`
     that must NEVER be cross-validated — "one cookie name ⇒ exactly one table."
   - `crates/gateway/src/sessions.rs` — `auth.gateway_sessions`: the interactive OIDC cookie session
-    (`__Host-zs_app_session`, `SameSite=Lax`, 12h/30-min idle), carrying its own `granted_scopes`
+    (`__Host-zeroship_app_session`, `SameSite=Lax`, 12h/30-min idle), carrying its own `granted_scopes`
     column. **This is the store the live cookie arm reads today.**
   - `crates/gateway/src/router/auth.rs` — TWO live request arms today:
     - the **Bearer/DPoP arm** (`resolve_bearer_user_header`, line 1090) verifies the gateway wrapper
@@ -88,7 +88,7 @@ The model below is anchored in three sources, all read in full before writing:
       `pws_`. These serve **non-browser clients**; the SPA stops using them.
     - the **cookie arm** (`resolve_app_session_user_header_inner`, line 1520) reads
       `auth.gateway_sessions` via `sessions::validate(conn, session_id, app_id)`, parses the
-      `__Host-zs_app_session` cookie via `oidc_rp::parse_app_session_cookie`, and emits `ZeroShip-User`
+      `__Host-zeroship_app_session` cookie via `oidc_rp::parse_app_session_cookie`, and emits `ZeroShip-User`
       with scopes from the session row's `granted_scopes` (NOT a `control.oauth_grants` join — see
       changeset 0008 below). **This arm reads `gateway_sessions`, not the anchor store.**
   - `db/changelog/changesets/0008_auth_gateway_sessions_granted_scopes.sql` — deliberately
@@ -96,7 +96,7 @@ The model below is anchored in three sources, all read in full before writing:
     `WorkerUser.scopes` … from this column instead of a cross-schema `control.oauth_grants` join on the
     hot path." Any design that re-introduces that join on a per-request path reverses this decision and
     must justify it (see §4).
-  - `crates/gateway/src/dpop_exchange.rs` — `POST /__zs/auth/dpop-exchange` takes a **raw Hydra Bearer**
+  - `crates/gateway/src/dpop_exchange.rs` — `POST /__zeroship/auth/dpop-exchange` takes a **raw Hydra Bearer**
     + an RFC 9449 DPoP proof and mints a `cnf.jkt`-bound wrapper. This is the **third** wrapper-mint
     surface and the ONLY one used by non-browser DPoP clients. Untouched by this redesign.
   - `crates/runtime/src/auth.rs` + `crates/worker/src/cache.rs:52` — **`env.auth` is REGISTERED AND
@@ -146,7 +146,7 @@ The model below is anchored in three sources, all read in full before writing:
     `LocalStorageCache`. The token-holding half is **removed**.
   - `sdks/auth/src/server.ts` — `@zeroship/auth/server` today exposes `getUser`/`requireUser`/
     `isLoggedIn` and **deliberately has NO server-side `signOut`** (lines 74-79: the gateway owns the
-    `Set-Cookie` on `POST /__zs/auth/signout`; a worker handler cannot emit it). This redesign
+    `Set-Cookie` on `POST /__zeroship/auth/signout`; a worker handler cannot emit it). This redesign
     **respects that decision** — see §3.2.
   - `crates/control/src/authz_guard.rs` — `AuthzGuard` ALREADY authenticates OAuth callers: it
     introspects the Bearer at Hydra (`hydra_introspector.introspect`, line 215), checks `result.aud`
@@ -172,8 +172,8 @@ The model below is anchored in three sources, all read in full before writing:
 
 | Artifact | Original build | **This redesign (BFF)** |
 | --- | --- | --- |
-| **Browser holds** | Wrapper **access token** (capability: `scope`, `client_id`, `aud`, Bearer-armed) | **No JWT at all** (per §10-D1 HttpOnly-only). Identity is the `{ user, expires_at, auth_time, amr }` projection from `GET /__zs/auth/session`. The `zs-id+jwt` is signed but held **server-side**. **No scopes. No capability.** |
-| **SPA → own-app auth** | `Authorization: Bearer <wrapper>` (client-attached) | **HttpOnly `__Host-zs_app_session` cookie** (the `gateway_sessions` store the live cookie arm already reads), validated server-side; gateway injects `ZeroShip-User`. No client-held bearer. The `__Host-zs_app_anchor` (Strict) stays **reload-recovery only** — NOT a live request credential. |
+| **Browser holds** | Wrapper **access token** (capability: `scope`, `client_id`, `aud`, Bearer-armed) | **No JWT at all** (per §10-D1 HttpOnly-only). Identity is the `{ user, expires_at, auth_time, amr }` projection from `GET /__zeroship/auth/session`. The `zs-id+jwt` is signed but held **server-side**. **No scopes. No capability.** |
+| **SPA → own-app auth** | `Authorization: Bearer <wrapper>` (client-attached) | **HttpOnly `__Host-zeroship_app_session` cookie** (the `gateway_sessions` store the live cookie arm already reads), validated server-side; gateway injects `ZeroShip-User`. No client-held bearer. The `__Host-zeroship_app_anchor` (Strict) stays **reload-recovery only** — NOT a live request credential. |
 | **Power (access/capability) token** | Minted to the browser at `/token` & `/session?mint=1` | **Never sent to the browser.** Exchanged + held **server-side** — minted in the **control plane** (§3.2) from the server-held grant + rotating refresh family (under `app_session_anchors`). The control plane is the token-custody BFF tier; the worker/console only ever proxies the token, never custodies it. |
 | **Consented scopes** | `control.oauth_grants` (already) | **Unchanged** — `control.oauth_grants`, platform-level, queryable, revocable. |
 | **Authz decision** | Gateway Bearer arm checks the wrapper `scope` claim; client also gated UX | **Server-side, per-operation, at the resource server** (control plane for the console; worker/app for app ops). Client gating is UX-only. |
@@ -195,7 +195,7 @@ from the *weakest* acceptable tier (browser-based client / in-memory token) to t
   across apps), but it cannot *do* anything with the user's authority that the app's own server
   doesn't already do on its behalf.
 - **The HttpOnly session cookie is unreadable by XSS.** SPA→own-app requests authenticate via the
-  interactive `__Host-zs_app_session` cookie (the `gateway_sessions` store — see §2.3), server-validated;
+  interactive `__Host-zeroship_app_session` cookie (the `gateway_sessions` store — see §2.3), server-validated;
   an XSS payload running in the page can ride the cookie (it is same-origin — this is the residual
   CSRF-class risk the BFF trade accepts), but it cannot *exfiltrate* a credential to use elsewhere or
   after the page closes. The blast radius is "actions while the malicious script runs in this tab," not
@@ -210,18 +210,18 @@ from the *weakest* acceptable tier (browser-based client / in-memory token) to t
 **The cost (per the BCP) is CSRF + session-management duty, and it is NOT free — it requires new work on
 the app dispatch path.** Two distinct surfaces need anti-CSRF, and they are not the same surface today:
 
-1. **The auth endpoints** (`POST /__zs/auth/token`, `POST /__zs/auth/signout`) already carry
+1. **The auth endpoints** (`POST /__zeroship/auth/token`, `POST /__zeroship/auth/signout`) already carry
    `same_origin_guard` (`auth_token.rs:177`): `X-ZS-Auth` custom header + exact `Origin` match +
    `Sec-Fetch-Site`. **Unchanged.**
 2. **The app dispatch path** (`fetch('/api/…')`, `@zeroship/rpc`) — the path the SPA now authenticates
    purely by cookie. Normal SPA `fetch` to `/api/*` does **not** set `X-ZS-Auth` today, so the
-   endpoint-level guard does NOT cover it. `SameSite=Lax` on `__Host-zs_app_session` blocks cross-site
+   endpoint-level guard does NOT cover it. `SameSite=Lax` on `__Host-zeroship_app_session` blocks cross-site
    top-level-GET-driven CSRF, but `Lax` still permits same-site requests, and a state-changing
    `POST /api/*` ridden by an XSS payload is same-site.
 
    <!-- Rewritten in round 2: addressing minor #8. The round-1 "Sec-Fetch-Site OR a custom SDK header"
         was under-specified and would BREAK raw fetch('/api/..') in non-SDK / raw-JS deploys (the
-        zs-standard contract supports these; they do NOT use the @zeroship transport and so never set the
+        zeroship-standard contract supports these; they do NOT use the @zeroship transport and so never set the
         custom header). Make the PRIMARY check Origin-match (which forged cross-origin/<form> requests
         cannot set under CORS and which raw same-origin fetch DOES send on state-changing requests),
         mirroring the existing same_origin_guard semantics (auth_token.rs:233-246: Origin exact-match
@@ -233,7 +233,7 @@ the app dispatch path.** Two distinct surfaces need anti-CSRF, and they are not 
      is the binding check: under CORS a cross-origin page (or a `<form>` POST) cannot set `Origin` to the
      target's value; a same-origin XHR/`fetch`/RPC always sends the correct `Origin` on state-changing
      requests. **A raw same-origin `fetch('/api/..', {method:'POST'})` from non-SDK / raw-JS app code
-     passes** — it sends `Origin` automatically — so this does NOT break the `zs-standard` raw-JS deploys.
+     passes** — it sends `Origin` automatically — so this does NOT break the `zeroship-standard` raw-JS deploys.
    - **`Sec-Fetch-Site`, when present, MUST be `same-origin`** (enforced-when-present, advisory-when-absent
      — exactly the existing guard's posture, so older browsers that omit it are not falsely rejected; the
      `Origin` check carries the defense there).
@@ -277,12 +277,12 @@ browser:
 
 | Store | Cookie | SameSite / lifetime | Role today | Role after redesign |
 | --- | --- | --- | --- | --- |
-| **`auth.gateway_sessions`** (`sessions.rs`) | `__Host-zs_app_session` | **Lax**, 12h / 30-min idle | The **live request cookie arm** (`resolve_app_session_user_header_inner`, `router/auth.rs:1520`) reads THIS via `sessions::validate`. Today only the interactive server-rendered `/__zs/auth/callback` (`dispatch.rs:1366`) creates it; the SDK popup flow does NOT. | **The SPA's live request credential.** The SDK popup `/token` flow now ALSO creates a `gateway_sessions` row + sets this cookie, so the existing live cookie arm authenticates SPA requests **with no new arm**. |
-| **`auth.app_session_anchors`** (`anchors.rs`) | `__Host-zs_app_anchor` | **Strict**, 30d, no idle | Reload-recovery only: holds the encrypted server-held refresh family + a single cached-wrapper slot; read ONLY at `/__zs/auth/session?mint=1` to re-mint the browser wrapper. `anchors.rs:62-68` asserts it must NEVER be cross-validated against `gateway_sessions`. | **Reload-recovery anchor (gateway-written) + the BFF refresh-family custody store the CONTROL PLANE reads for the power-token mint** (§3.2 / §3.1). The single cached-wrapper slot is dropped; the per-`(audience,scopes)` cache moves to `auth.app_power_token_cache`. Still NOT a live request credential; the two-store invariant holds. <!-- Revised round 2: control reads/rotates it for the mint (BLOCKER #1 locus). --> |
+| **`auth.gateway_sessions`** (`sessions.rs`) | `__Host-zeroship_app_session` | **Lax**, 12h / 30-min idle | The **live request cookie arm** (`resolve_app_session_user_header_inner`, `router/auth.rs:1520`) reads THIS via `sessions::validate`. Today only the interactive server-rendered `/__zeroship/auth/callback` (`dispatch.rs:1366`) creates it; the SDK popup flow does NOT. | **The SPA's live request credential.** The SDK popup `/token` flow now ALSO creates a `gateway_sessions` row + sets this cookie, so the existing live cookie arm authenticates SPA requests **with no new arm**. |
+| **`auth.app_session_anchors`** (`anchors.rs`) | `__Host-zeroship_app_anchor` | **Strict**, 30d, no idle | Reload-recovery only: holds the encrypted server-held refresh family + a single cached-wrapper slot; read ONLY at `/__zeroship/auth/session?mint=1` to re-mint the browser wrapper. `anchors.rs:62-68` asserts it must NEVER be cross-validated against `gateway_sessions`. | **Reload-recovery anchor (gateway-written) + the BFF refresh-family custody store the CONTROL PLANE reads for the power-token mint** (§3.2 / §3.1). The single cached-wrapper slot is dropped; the per-`(audience,scopes)` cache moves to `auth.app_power_token_cache`. Still NOT a live request credential; the two-store invariant holds. <!-- Revised round 2: control reads/rotates it for the mint (BLOCKER #1 locus). --> |
 | **Wrapper / raw-Hydra Bearer + DPoP arm** (`router/auth.rs:1090`, `dpop_exchange.rs`) | none (header-borne) | token `exp` | Authenticates **non-browser** OAuth clients: gateway wrappers (`iss == public_url`) and raw-Hydra Bearers (`iss != public_url`); DPoP-bound wrappers from `/dpop-exchange`. | **Unchanged for non-browser clients** (CLI, server-to-server). The SPA stops using it entirely. v1's server-side power tokens are real Hydra tokens (introspection path), NOT wrappers; the wrapper arm survives for `/dpop-exchange` (the internal-audience wrapper format is deferred — §3.4 / §7). <!-- Revised round 2: internal-wrapper deferred. --> |
 
 The **two stores must never cross-validate** (`anchors.rs` test at `:583-588`: presenting a
-`__Host-zs_app_session` value must NOT resolve as an anchor, and vice-versa). The redesign keeps that
+`__Host-zeroship_app_session` value must NOT resolve as an anchor, and vice-versa). The redesign keeps that
 invariant: the live cookie arm reads `gateway_sessions`; the anchor is read only on reload-recovery.
 
 ---
@@ -344,20 +344,20 @@ attaches the identity token as a bearer, no resource server honors it.
 ### 2.2 How it is issued (the flow change)
 
 The interactive popup + PKCE + consent flow is **unchanged through the code exchange** (popup → top-level
-nav to `auth.zeroship.ai` → Hydra login/consent → `/__zs/auth/popup-callback` relay → `postMessage` →
-`exchangeCodeForSession`). What changes is the **terminal step at `/__zs/auth/token`**:
+nav to `auth.zeroship.ai` → Hydra login/consent → `/__zeroship/auth/popup-callback` relay → `postMessage` →
+`exchangeCodeForSession`). What changes is the **terminal step at `/__zeroship/auth/token`**:
 
-`POST /__zs/auth/token` (rewritten — `auth_token.rs::token`):
+`POST /__zeroship/auth/token` (rewritten — `auth_token.rs::token`):
 1. Same-origin guard (`X-ZS-Auth` + exact `Origin` + `Sec-Fetch-Site`) — **unchanged**.
 2. Code→token exchange against Hydra (`exchange_code_public`) — **unchanged**.
 3. Validate the id_token (sig/iss/`aud == client_id`/exp, `verify_id_token`) — **unchanged**.
 4. Encrypt + store the rotating refresh family under a new `auth.app_session_anchors` row; set the
-   HttpOnly `__Host-zs_app_anchor` cookie + the breadcrumb — **unchanged** (this is the BFF refresh-family
+   HttpOnly `__Host-zeroship_app_anchor` cookie + the breadcrumb — **unchanged** (this is the BFF refresh-family
    custody; the anchor remains reload-recovery only).
-5. **NEW — create a `gateway_sessions` row + set `__Host-zs_app_session`.** This is the addition that
+5. **NEW — create a `gateway_sessions` row + set `__Host-zeroship_app_session`.** This is the addition that
    gives the SPA a *live request credential* on the store the live cookie arm already reads. Call
-   `sessions::create(&conn, &NewSession { … })` (the same call the interactive `/__zs/auth/callback` makes
-   at `dispatch.rs:1366`) and emit `set_app_session_cookie` (`__Host-zs_app_session`, `SameSite=Lax`,
+   `sessions::create(&conn, &NewSession { … })` (the same call the interactive `/__zeroship/auth/callback` makes
+   at `dispatch.rs:1366`) and emit `set_app_session_cookie` (`__Host-zeroship_app_session`, `SameSite=Lax`,
    12h). The actual `NewSession` shape (`sessions.rs:38-47`) takes `user_id: &str` (the **global UUID
    string**; `create` parses it to a `Uuid` internally, `sessions.rs:65`, since `gateway_sessions.user_id`
    is `UUID`), `email`/`name`/`avatar_url` as `Option<&str>`, plus `email_verified` and
@@ -396,13 +396,13 @@ nav to `auth.zeroship.ai` → Hydra login/consent → `/__zs/auth/popup-callback
 
 **Response — recommended (HttpOnly-only identity, per §10 Q1, now decided):** the identity token is
 **NOT returned in the body**; the browser holds zero JWTs. The SPA learns identity via the `{ user }`
-projection (readable from `GET /__zs/auth/session`). The two cookies are the SPA's only credentials.
+projection (readable from `GET /__zeroship/auth/session`). The two cookies are the SPA's only credentials.
 
 ```
 200 OK
 Cache-Control: no-store
-Set-Cookie: __Host-zs_app_session=<gw_session_id>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200
-Set-Cookie: __Host-zs_app_anchor=<anchor_id>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000
+Set-Cookie: __Host-zeroship_app_session=<gw_session_id>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200
+Set-Cookie: __Host-zeroship_app_anchor=<anchor_id>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000
 Set-Cookie: zs.<app_ref>.is.authenticated=true; SameSite=Lax; …          (breadcrumb)
 
 { "user": { "id":"pws_…", "email":"…@{relay_domain}", "name":"…",
@@ -425,14 +425,14 @@ for step-up UX. (Compare today's body, `auth_token.rs:519` `"access_token": wrap
 > `{ user, expires_at }` projection. §2.1's token *shape* still defines what the gateway signs and holds;
 > it is simply not handed to the browser.
 
-`GET /__zs/auth/session` (rewritten):
-- Reads the `__Host-zs_app_session` cookie first and returns the **identity** projection
+`GET /__zeroship/auth/session` (rewritten):
+- Reads the `__Host-zeroship_app_session` cookie first and returns the **identity** projection
   (`{ user, expires_at, auth_time, amr }`) from the live `gateway_sessions` row. `auth_time`/`amr` come
   from the **new `gateway_sessions.auth_time`/`amr` columns** (§2.2 step 5b) — they are NOT re-derived and
   NOT read from `auth.users` (the gateway path never touches that table). If the gateway session is
-  absent/expired but the `__Host-zs_app_anchor` is valid (reload-recovery), it runs the anchor refresh
+  absent/expired but the `__Host-zeroship_app_anchor` is valid (reload-recovery), it runs the anchor refresh
   path: rotate the server-held family (existing per-node single-flight + cached-token short-circuit),
-  **re-create a fresh `gateway_sessions` row + re-set `__Host-zs_app_session`**, mint a fresh server-held
+  **re-create a fresh `gateway_sessions` row + re-set `__Host-zeroship_app_session`**, mint a fresh server-held
   `zs-id+jwt`, and return the projection. `?mint=1` forces that refresh.
 
   <!-- Added in round 2: addressing MAJOR #5 — the rewritten /session sources identity from the
@@ -465,26 +465,26 @@ for step-up UX. (Compare today's body, `auth_token.rs:519` `"access_token": wrap
      existing arm already reads), created in the popup /token flow (§2.2 step 5). -->
 
 The SPA does **not** attach a bearer. Its requests to its own app (`fetch('/api/…')`, `@zeroship/rpc`
-calls) are same-origin and ride the **HttpOnly `__Host-zs_app_session` cookie** — the `gateway_sessions`
+calls) are same-origin and ride the **HttpOnly `__Host-zeroship_app_session` cookie** — the `gateway_sessions`
 store, which the **existing live cookie arm already reads**:
 
-- **Which cookie the SPA presents on every request:** `__Host-zs_app_session` (Lax, 12h). This is the
+- **Which cookie the SPA presents on every request:** `__Host-zeroship_app_session` (Lax, 12h). This is the
   credential the SDK transport relies on the browser to attach automatically (same-origin cookie). The
   SDK attaches **no** `Authorization` header.
 - **The arm that authenticates it is unchanged in substance:** `resolve_app_session_user_header_inner`
-  (`router/auth.rs:1520`) parses `__Host-zs_app_session`, calls `sessions::validate`, projects the
+  (`router/auth.rs:1520`) parses `__Host-zeroship_app_session`, calls `sessions::validate`, projects the
   per-app `pws_` (`project_pairwise`), reads scopes from the session row's `granted_scopes` (NO
   `control.oauth_grants` join, per changeset 0008), swaps in the relay email, and emits the signed
   `ZeroShip-User`. **We do not need a new arm** — we needed the popup flow to *populate* this store
   (§2.2 step 5), which it now does.
-- **The anchor (`__Host-zs_app_anchor`, Strict, 30d) is NOT a live request credential.** It stays
-  reload-recovery only, read solely by `GET /__zs/auth/session` to re-establish the gateway session +
+- **The anchor (`__Host-zeroship_app_anchor`, Strict, 30d) is NOT a live request credential.** It stays
+  reload-recovery only, read solely by `GET /__zeroship/auth/session` to re-establish the gateway session +
   identity after the 12h gateway session lapses. This preserves the `anchors.rs` invariant ("one cookie
   name ⇒ exactly one table"; the two stores are never cross-validated). Per-request reads hit
   `gateway_sessions`, not the anchor — so there is no new per-request anchor read cost.
 - **Precedence when both cookies are present (the normal steady state):** the live arm reads
-  `__Host-zs_app_session` **only**. `__Host-zs_app_anchor` is ignored on the dispatch path entirely — it
-  is consulted only by `/__zs/auth/session` when the gateway session is missing/expired. There is no
+  `__Host-zeroship_app_session` **only**. `__Host-zeroship_app_anchor` is ignored on the dispatch path entirely — it
+  is consulted only by `/__zeroship/auth/session` when the gateway session is missing/expired. There is no
   collision to resolve on the hot path because exactly one store (`gateway_sessions`) is consulted there.
 - **`gateway_sessions` for SPA apps is KEPT and is now the SPA's primary live credential** (it was
   previously created only for the interactive redirect flow; the popup flow now creates it too). It is
@@ -498,7 +498,7 @@ store, which the **existing live cookie arm already reads**:
 > because the browser sends `Origin` automatically; only cross-origin/`<form>`-forged requests are
 > rejected. The `same_origin_guard` on `/token` does NOT cover this path; this is added in P3.
 
-`getSession()` / `getUser()` (client SDK) return **identity only**, fetched from `GET /__zs/auth/session`
+`getSession()` / `getUser()` (client SDK) return **identity only**, fetched from `GET /__zeroship/auth/session`
 (no client-held JWT):
 ```ts
 interface Session { user: User; expires_at: number; authTime?: number; amr?: string[]; }
@@ -578,7 +578,7 @@ the same PR**, verified against the code:
   removed (its only consumer was the browser-wrapper cache).
 - **Reload-storm coalescing is preserved by a DIFFERENT mechanism, not lost.** The 5s window coalesced
   many tabs re-minting **one browser wrapper** at once. After the redesign the browser does **not** mint
-  anything — reloads hit `GET /__zs/auth/session`, whose anchor reload-recovery already runs the
+  anything — reloads hit `GET /__zeroship/auth/session`, whose anchor reload-recovery already runs the
   **existing per-node single-flight on the refresh-family rotation** (`mint`'s single-flight, kept). So a
   reload storm now coalesces at the **family-rotation single-flight** (one Hydra refresh per node per
   anchor in flight), not at a cached-column window — strictly the same coalescing guarantee, on the path
@@ -709,11 +709,11 @@ export const auth = {
 
 > **No server-side `signOut` — respecting the documented `server.ts` decision (major #5).** The current
 > `sdks/auth/src/server.ts` (lines 74-79) **deliberately omits** a server-side `signOut`: the gateway
-> owns the `Set-Cookie` clear on `POST /__zs/auth/signout` (guarded by `X-ZS-Auth` + exact-Origin), and
+> owns the `Set-Cookie` clear on `POST /__zeroship/auth/signout` (guarded by `X-ZS-Auth` + exact-Origin), and
 > a worker handler cannot emit `__Host-` `Set-Cookie` through the gateway proxy. A worker-returned
-> `Response` has **no mechanism** to clear the HttpOnly `__Host-zs_app_session` / `__Host-zs_app_anchor`
+> `Response` has **no mechanism** to clear the HttpOnly `__Host-zeroship_app_session` / `__Host-zeroship_app_anchor`
 > cookies (those are gateway-owned). So `signOut` stays **client-only** (`@zeroship/auth/client`
-> `client.signOut()` POSTs to `/__zs/auth/signout` with the same-origin guard). This redesign does NOT
+> `client.signOut()` POSTs to `/__zeroship/auth/signout` with the same-origin guard). This redesign does NOT
 > add `auth.signOut(): Response` to the server SDK; that would overturn a correct, documented decision
 > and is not implementable as drawn.
 
@@ -778,7 +778,7 @@ plane has no wrapper-verifier and gains none. Its `scope` claim is the full cons
 reality, §3.4); least-privilege is the mint ceiling + per-op `require` (§5.1), not a narrowed `scope`.
 
 The console browser holds **no JWT and no control-plane bearer** — only the user projection + the two
-HttpOnly cookies (`__Host-zs_app_session`, `__Host-zs_app_anchor`). Control-plane bearers live entirely
+HttpOnly cookies (`__Host-zeroship_app_session`, `__Host-zeroship_app_anchor`). Control-plane bearers live entirely
 in the console server tier. See §6 for the migration off `apps/zeroship-builder/src/server/{oauth,session}.ts`.
 
 ### 3.4 Power-token format + the Hydra down-scope reality (resolves §10 Q2)
@@ -1115,7 +1115,7 @@ Stripe Connect). It currently runs a **bespoke confidential RP**:
      an {app}.zeroship.ai. The whole /token + anchor + gateway_sessions + pws_ machinery is keyed on the
      per-app host via resolve_route (auth_token.rs:73-110), which 503s unless the host is a provisioned app
      with oauth_client_id + sector_identifier (auth_token.rs:420-428). The round-1 draft asserted the
-     console "reuses __Host-zs_app_session" + the popup /token flow but never explained how
+     console "reuses __Host-zeroship_app_session" + the popup /token flow but never explained how
      console.zeroship.ai gets a route entry / oauth_client_id / sector_identifier / anchor / gateway_sessions
      row, nor how __Host- (host-bound) cookies span console→control. This is now spelled out. -->
 
@@ -1137,7 +1137,7 @@ paths without being modeled as something the route cache + auth endpoints recogn
    a creator action. The console is then an app the gateway/auth endpoints already know how to serve.
 2. **Login via `@zeroship/auth` (identity), exactly like any app.** The console SPA logs in via the
    popup/consent flow on its own host and holds **no JWT** — only the two HttpOnly cookies
-   (`__Host-zs_app_session` live credential + `__Host-zs_app_anchor` reload-recovery, both `__Host-` →
+   (`__Host-zeroship_app_session` live credential + `__Host-zeroship_app_anchor` reload-recovery, both `__Host-` →
    bound to `console.zeroship.ai`) and the `{ user }` projection. The bespoke `buildAuthorizationUrl`/
    `exchangeCode` client-side flow and the `__zs_builder_oauth_user` HMAC cookie are removed.
    `apps/zeroship-builder/src/server/{oauth,session}.ts` are deleted; the console SPA uses the standard
@@ -1151,10 +1151,10 @@ paths without being modeled as something the route cache + auth endpoints recogn
    re-derives the user from the signed header, mints a real Hydra `aud=CONTROL_PLANE_AUDIENCE` token (§3.4),
    and the console injects it server-side. The control-plane bearer **never** reaches the console browser.
 4. **Cross-host cookie scoping is resolved by NOT crossing hosts with cookies.** `__Host-` cookies are
-   host-bound, so `__Host-zs_app_session` on `console.zeroship.ai` does **not** travel to
+   host-bound, so `__Host-zeroship_app_session` on `console.zeroship.ai` does **not** travel to
    `control.zeroship.ai` — and it must not. The console→control calls do **not** rely on a cookie: they
    are **server-side** calls carrying the Hydra **Bearer** (injected by the BFF), which is exactly what
-   `AuthzGuard` expects (§5.1). The browser↔console hop uses the host-bound `__Host-zs_app_session`
+   `AuthzGuard` expects (§5.1). The browser↔console hop uses the host-bound `__Host-zeroship_app_session`
    cookie; the console-server↔control hop uses the Bearer. No cookie is asked to span hosts.
 5. **Least-privilege, per-op, not the broad `BUILDER_SCOPES`.** Each control-plane call requests the
    *specific* scope its `Action` needs (`apps:read` for a list, `apps:deploy` for a deploy), so the
@@ -1166,7 +1166,7 @@ paths without being modeled as something the route cache + auth endpoints recogn
    require a recent `auth_time` (via a `max_age=0` re-auth popup) + the elevated scope present in the
    grant, checked at the control plane through the existing `mfa_age_seconds` recency knob. (The `amr=mfa`
    factor is a later slice gated on MFA enablement — §5.3; v1 does NOT require it.)
-7. **Sign-out stays client-driven** (`client.signOut()` → `POST /__zs/auth/signout` on the console host);
+7. **Sign-out stays client-driven** (`client.signOut()` → `POST /__zeroship/auth/signout` on the console host);
    there is no server-side `signOut` (§3.2).
 
 > **Alternative considered + rejected: keep a bespoke console confidential-client server tier.** That
@@ -1192,7 +1192,7 @@ Pre-launch, no back-compat (`AGENTS.md`): rip out, do not shim. Every producer/c
 - **Power token to the browser.** `auth_token.rs::token` no longer returns `"access_token": wrapper`
   (line 519); `session`/`mint`/`do_refresh` no longer return a power wrapper to the browser. The
   wrapper-as-browser-artifact is deleted from the SPA-facing JSON.
-- **The browser-facing wrapper mint paths** at `POST /__zs/auth/token` and `GET /__zs/auth/session?mint=1`
+- **The browser-facing wrapper mint paths** at `POST /__zeroship/auth/token` and `GET /__zeroship/auth/session?mint=1`
   no longer mint a *browser* wrapper at all. (The wrapper *machinery* — `Issuer`/`Verifier`/the Bearer
   arm — stays; see KEEP. What is removed is "mint a wrapper and hand it to the SPA.")
 - **The anchor's single `cached_access_token`/`cached_access_exp` browser-wrapper cache** (`anchors.rs`)
@@ -1213,17 +1213,17 @@ Pre-launch, no back-compat (`AGENTS.md`): rip out, do not shim. Every producer/c
   mint.
 
 ### CHANGE
-- **`POST /__zs/auth/token`** (a) creates a `gateway_sessions` row + sets `__Host-zs_app_session`
+- **`POST /__zeroship/auth/token`** (a) creates a `gateway_sessions` row + sets `__Host-zeroship_app_session`
   (`sessions::create` with the real `NewSession` shape — `user_id: &str`, `Option<&str>` fields,
   `granted_scopes: &[String]`, **plus the new `auth_time`/`amr` fields** — §2.2 step 5/5b), (b) keeps the
   anchor create, and (c) returns `{ user, expires_at }` (with the **relay-swapped** email, §2.3) and
   **no `access_token`, no `scope`, and no `id_token`** (the `zs-id+jwt` is minted but held server-side,
   per the §10 Q1 HttpOnly-only decision).
-- **`GET /__zs/auth/session[?mint=1]`** returns the identity projection (with the **mandatory relay-email
+- **`GET /__zeroship/auth/session[?mint=1]`** returns the identity projection (with the **mandatory relay-email
   swap**, §2.3) from the live `gateway_sessions` row, sourcing `auth_time`/`amr` from the **new
   `gateway_sessions` columns**; when the gateway session is gone but the anchor is valid, it runs anchor
   reload-recovery (rotate family, **re-create the `gateway_sessions` row + re-set
-  `__Host-zs_app_session`** carrying `auth_time`/`amr` forward, mint a server-held `zs-id+jwt`). The
+  `__Host-zeroship_app_session`** carrying `auth_time`/`amr` forward, mint a server-held `zs-id+jwt`). The
   rotated raw Hydra access JWT stays server-side for §3. **No JWT in any SPA-facing body; the real email
   never appears.**
 - **SPA app-auth via the `gateway_sessions` cookie arm** (`resolve_app_session_user_header_inner`,
@@ -1242,7 +1242,7 @@ Pre-launch, no back-compat (`AGENTS.md`): rip out, do not shim. Every producer/c
   routes, §2.1). The only new wiring is the identity minter stamping `zs-id+jwt` and the `/session`
   identity-verification path accepting only `zs-id+jwt`.
 - **The client SDK contract** (`client.ts`/`transport.ts`/`types.ts`/`react.tsx`): `getSession()`/
-  `getUser()` return identity only (fetched from `/__zs/auth/session`, no client-held JWT); `useAuth()`
+  `getUser()` return identity only (fetched from `/__zeroship/auth/session`, no client-held JWT); `useAuth()`
   drops `getAccessToken`/`getAccessTokenWithPopup`/`hasScope`.
 - **Console RP** (`apps/zeroship-builder/src/server/{oauth,session}.ts`): replaced per §6.
 
@@ -1256,7 +1256,7 @@ Pre-launch, no back-compat (`AGENTS.md`): rip out, do not shim. Every producer/c
   threading; populated from the validated id_token claims at session-create (§2.2 step 5b). Required by
   the step-up gate (§5.3) and the SPA projection (§2.3). <!-- Added in round 2: BLOCKER #3. -->
 - **`gateway_sessions` create in the popup flow** (`auth_token.rs::token` calls `sessions::create` +
-  sets `__Host-zs_app_session`) and **re-create on anchor reload-recovery** (`session`/`do_refresh`),
+  sets `__Host-zeroship_app_session`) and **re-create on anchor reload-recovery** (`session`/`do_refresh`),
   with the mandatory relay-email swap on the `{ user }` read path (§2.3). <!-- relay swap: MAJOR #5 -->
 - **Anti-CSRF on the cookie-authenticated dispatch path** (gateway): the **`Origin` exact-match +
   `Sec-Fetch-Site`-when-present** conjunction on state-changing app requests; **no mandatory custom
@@ -1313,8 +1313,8 @@ Pre-launch, no back-compat (`AGENTS.md`): rip out, do not shim. Every producer/c
      wrapper Bearer arm. The KEEP rationale was right by accident but wrong in its stated reason. -->
 - **The wrapper / raw-Hydra Bearer / DPoP arms — with an honest audit of who mints vs. who consumes.**
   The mint/consume picture today:
-  - **Wrapper MINT surfaces (3):** `POST /__zs/auth/token` and `GET /__zs/auth/session?mint=1` (both
-    same-origin **SPA** endpoints) and `POST /__zs/auth/dpop-exchange` (`dpop_exchange.rs`, takes a raw
+  - **Wrapper MINT surfaces (3):** `POST /__zeroship/auth/token` and `GET /__zeroship/auth/session?mint=1` (both
+    same-origin **SPA** endpoints) and `POST /__zeroship/auth/dpop-exchange` (`dpop_exchange.rs`, takes a raw
     Hydra Bearer + DPoP proof). The first two are the SPA-facing mints this redesign **stops handing to
     the browser**; `dpop-exchange` is the only wrapper mint a non-browser DPoP client uses.
   - **Non-browser clients (CLI, server-to-server) do NOT get a gateway wrapper from any SPA endpoint.**
@@ -1395,7 +1395,7 @@ Commit-only, never push. Each slice independently testable; every regression tes
   `gateway_sessions.auth_time`/`amr` columns + `NewSession`/`AppSession`/`validate()` threading (BLOCKER
   #3). Rewrite `auth_token.rs::token` to (a) `sessions::create` (real shape: `user_id: &str` global UUID,
   `Option<&str>` fields, `granted_scopes: &[String]`, new `auth_time`/`amr` from the id_token) + set
-  `__Host-zs_app_session`, (b) keep the anchor create, (c) return `{ user, expires_at }` with the
+  `__Host-zeroship_app_session`, (b) keep the anchor create, (c) return `{ user, expires_at }` with the
   **relay-swapped** email and **no `access_token`/`scope`/`id_token`**. Rewrite `session`/`do_refresh` to
   return the **relay-swapped** identity projection (sourcing `auth_time`/`amr` from the new columns) from
   the gateway session, and on reload-recovery re-create the gateway session from the anchor. Tests:
@@ -1405,13 +1405,13 @@ Commit-only, never push. Each slice independently testable; every regression tes
   relay alias is active** (MAJOR #5 regression test).
 - **P3 — SPA live auth via the `gateway_sessions` cookie arm + dispatch-path anti-CSRF (gateway).** The
   cookie arm (`resolve_app_session_user_header_inner`) already reads `gateway_sessions` + relay-swaps +
-  emits `ZeroShip-User`; verify it authenticates SPA `/api/*` + RPC with only `__Host-zs_app_session`. Add
+  emits `ZeroShip-User`; verify it authenticates SPA `/api/*` + RPC with only `__Host-zeroship_app_session`. Add
   the anti-CSRF conjunction (**`Origin` exact-match + `Sec-Fetch-Site`-when-present, no mandatory custom
   header**) on state-changing cookie-authenticated requests. Confirm the anchor store is NOT consulted on
-  the dispatch path. Tests: an SPA request with only `__Host-zs_app_session` reaches the worker with the
+  the dispatch path. Tests: an SPA request with only `__Host-zeroship_app_session` reaches the worker with the
   correct `ZeroShip-User`; no client bearer; `required_scopes` enforced server-side; a state-changing
   `POST /api/*` with a **mismatched/absent `Origin`** is rejected; a **same-origin raw `fetch` POST with
-  no custom header is ALLOWED** (raw-JS-deploy regression); a `__Host-zs_app_anchor`-only request does NOT
+  no custom header is ALLOWED** (raw-JS-deploy regression); a `__Host-zeroship_app_anchor`-only request does NOT
   authenticate a dispatch request.
 - **P4 — Server power-exchange: CONTROL mint endpoint + JS `@zeroship/auth/server`.** Add the **control
   plane** `POST /internal/power-token` on the existing `internal.rs` router (`control_key` auth + echoed
@@ -1429,7 +1429,7 @@ Commit-only, never push. Each slice independently testable; every regression tes
   worker-named identity)**.
 - **P5 — Client SDK rip-out + identity-only surface.** Remove `CacheManager`/caches/worker/locks/
   `getAccessToken*`/`hasScope`/`Session.access_token`/`Session.scopes`/any client-held `id_token`;
-  `getSession`/`getUser` fetch identity from `/__zs/auth/session` (no client JWT); `react.tsx`/`useAuth()`
+  `getSession`/`getUser` fetch identity from `/__zeroship/auth/session` (no client JWT); `react.tsx`/`useAuth()`
   updated. Tests: the client never stores or refreshes any token; `getSession()` returns identity only;
   reload-recovery re-establishes the session via the anchor (`?mint=1`).
 - **P6 — Console BFF migration (via the `console` pseudo-app).** Seed the `console.zeroship.ai`
@@ -1437,7 +1437,7 @@ Commit-only, never push. Each slice independently testable; every regression tes
   (§6) so the existing `/token`/`/session`/anchor/`gateway_sessions` paths apply. Delete
   `apps/zeroship-builder/src/server/{oauth,session}.ts`; the console SPA uses standard `@zeroship/auth`
   login + server-side `getAccessToken({audience: CONTROL_PLANE_AUDIENCE, scopes:[…]})` per-op (real Hydra
-  `aud`-narrowed tokens via the §3.2 control mint) + the standard `__Host-zs_app_session` cookie; sign-out
+  `aud`-narrowed tokens via the §3.2 control mint) + the standard `__Host-zeroship_app_session` cookie; sign-out
   stays client-driven. Per-op `AuthzGuard` checks (existing introspection + `expected_oauth_audience`,
   §5.1). Tests: console browser holds no control-plane bearer + no JWT; the console-server→control hop
   carries a Bearer, NOT a cookie (host-bound `__Host-` cookies never span to `control.zeroship.ai`); a
@@ -1467,7 +1467,7 @@ Commit-only, never push. Each slice independently testable; every regression tes
      unresolved choices. Only the genuinely-non-blocking Q6 remains open. -->
 
 **D1 — Identity-token transport: HttpOnly-only (decided).** The browser holds **no JWT**; identity is
-exposed only via the `{ user, expires_at, auth_time, amr }` projection from `GET /__zs/auth/session`
+exposed only via the `{ user, expires_at, auth_time, amr }` projection from `GET /__zeroship/auth/session`
 (§2.2). The strictest BFF reading ("no tokens in the browser at all"); the cost (no client-decodable
 `exp`/`auth_time`) is absorbed by the projection. §2.1 still defines the `zs-id+jwt` *shape* the gateway
 signs and holds server-side.
@@ -1517,7 +1517,7 @@ phase (the non-browser paths are untouched code).
 
 ## Decision addendum (2026-05-30, user-ratified): signed STATELESS session cookie
 
-The `__Host-zs_app_session` cookie is **NOT** an opaque `gateway_sessions.id` looked up per
+The `__Host-zeroship_app_session` cookie is **NOT** an opaque `gateway_sessions.id` looked up per
 request. It is a **gateway-SIGNED, HttpOnly, short-lived (~10–15 min) identity assertion**
 (`{ pws_sub, app_client_id, exp, auth_time, amr }`, signed with the gateway ed25519 key + the
 existing current/previous `kid` rotation), **verified LOCALLY on every request — no per-request

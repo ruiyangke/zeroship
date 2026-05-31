@@ -22,7 +22,7 @@
 //!    it.
 //! 4. Mint a broadly-privileged control **PAT** ([`PatIssuer`]) for the console
 //!    and set it as the console app's SERVER-ONLY env var
-//!    `ZS_CONTROL_SERVICE_TOKEN` (an encrypted secret + an opt-in `expose` entry
+//!    `ZEROSHIP_CONTROL_SERVICE_TOKEN` (an encrypted secret + an opt-in `expose` entry
 //!    so the worker surfaces it in `process.env` but the browser never sees it).
 //!
 //! Everything is **idempotent** — every write is an upsert and every derived
@@ -111,9 +111,9 @@ const CONSOLE_PAT_NAME: &str = "zeroship console service token";
 
 /// The server-only app env var the console reads for its control credential.
 /// Stored as an encrypted secret AND added to the per-app `expose` list so the
-/// worker surfaces it in `process.env.ZS_CONTROL_SERVICE_TOKEN` — but it never
+/// worker surfaces it in `process.env.ZEROSHIP_CONTROL_SERVICE_TOKEN` — but it never
 /// reaches the browser.
-pub const SERVICE_TOKEN_ENV_KEY: &str = "ZS_CONTROL_SERVICE_TOKEN";
+pub const SERVICE_TOKEN_ENV_KEY: &str = "ZEROSHIP_CONTROL_SERVICE_TOKEN";
 
 /// How a console runtime env var lands in the per-app env store.
 ///
@@ -418,7 +418,7 @@ pub async fn bootstrap_console(
     ingest_and_commit_zship(registry, blob_store, &app_id, &cfg.console_zship).await?;
 
     // 4. Mint-or-reuse the broadly-privileged service PAT and set it as the
-    //    server-only ZS_CONTROL_SERVICE_TOKEN secret (+ expose).
+    //    server-only ZEROSHIP_CONTROL_SERVICE_TOKEN secret (+ expose).
     let minted_new_pat =
         ensure_service_pat_env(cfg, env_store, pat_issuer, auth_pg, &app_id).await?;
 
@@ -529,7 +529,7 @@ async fn ingest_and_commit_zship(
 // ---------------------------------------------------------------------------
 
 /// Ensure the service `auth.users` row, its `platform.roles` admin grant, the
-/// `control.permission_tokens` PAT row, and the `ZS_CONTROL_SERVICE_TOKEN` env
+/// `control.permission_tokens` PAT row, and the `ZEROSHIP_CONTROL_SERVICE_TOKEN` env
 /// secret + expose entry all exist. Returns whether a fresh PAT was minted
 /// (`false` ⇒ a live PAT row was reused and the env var left as-is).
 async fn ensure_service_pat_env(
@@ -600,7 +600,7 @@ async fn ensure_service_pat_env(
         .await
         .map_err(|e| ConsoleBootstrapError::Db(e.to_string()))?;
 
-    // (d) Store the JWT as the server-only ZS_CONTROL_SERVICE_TOKEN secret and
+    // (d) Store the JWT as the server-only ZEROSHIP_CONTROL_SERVICE_TOKEN secret and
     //     add it to the per-app expose list so the worker surfaces it in
     //     process.env (and ONLY process.env — never the browser).
     env_store
@@ -623,7 +623,7 @@ async fn ensure_service_pat_env(
     tracing::info!(
         token_id = %token_id,
         owner_id = %user_id,
-        "control: minted console service PAT + set ZS_CONTROL_SERVICE_TOKEN"
+        "control: minted console service PAT + set ZEROSHIP_CONTROL_SERVICE_TOKEN"
     );
     Ok(true)
 }

@@ -1,4 +1,4 @@
-# ZS Standard
+# zeroship standard
 
 The deploy contract is centered on the app entry module's default export. The
 runtime bootstrap code is in `sdks/bootstrap/src/runtime-entry.ts`, and the
@@ -39,7 +39,7 @@ export default {
 
 Named exports are normalized into the runtime RPC object by the Vite plugin's
 synthetic server entry and `sdks/bootstrap/src/normalize.ts`. The runtime-owned
-dispatch path is `/_zs/v1/<wireId>`; user code does not route that path
+dispatch path is `/__zeroship/v1/<wireId>`; user code does not route that path
 manually.
 
 Production RPC resources require explicit wire IDs:

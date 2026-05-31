@@ -115,7 +115,7 @@ fn wall_limit(runtime: &Runtime) -> std::time::Duration {
 /// JSON envelope the gateway sends. The full HTTP request (method, URL,
 /// headers, body) flows in here and `Runtime::call_fetch_handler`
 /// dispatches it through the kernel's three-tier path:
-///   1. `default.rpc(name, input, ctx)` for `/_zs/v1/<id>` URLs.
+///   1. `default.rpc(name, input, ctx)` for `/__zeroship/v1/<id>` URLs.
 ///   2. `default.fetchFast(method, url, body, env)` for non-RPC traffic.
 ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path) for
 ///      everything else, including fall-through from (1) and (2).

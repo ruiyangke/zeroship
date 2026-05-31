@@ -1,10 +1,10 @@
 "use server";
-// Wizard RPC procedure — `/_zs/v1/wizard`. The pre-coding clarification
+// Wizard RPC procedure — `/__zeroship/v1/wizard`. The pre-coding clarification
 // flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b + §8.2.7. Plain-LangGraph backend (NOT
 // deepagents) — see the body below for why.
 //
 // Wire (mirrors chat.ts so the client transport is reusable):
-//   POST /_zs/v1/wizard
+//   POST /__zeroship/v1/wizard
 //     fresh body:   { json: { idea: string, id: string } }
 //     resume body:  { json: { resume: { token, value }, id: string } }
 //     response:     text/event-stream  (UI Message Stream)
@@ -29,7 +29,7 @@
 // Client-side <SurveyCard> renders identically; client-side
 // `chatTransport.prepareSendMessagesRequest` already routes resume
 // payloads. The only client-visible difference is the RPC procedure
-// (/_zs/v1/wizard vs /_zs/v1/chat) and the terminal `data-brief` chunk
+// (/__zeroship/v1/wizard vs /__zeroship/v1/chat) and the terminal `data-brief` chunk
 // the wizard emits when the brief is complete (Builder doesn't
 // produce briefs; it consumes them).
 //

@@ -179,4 +179,4 @@ The runner script is `./crates/runtime/benches/run_zerobench.sh`. Read that scri
 - [Architecture overview](../architecture/overview.md) — what each binary (`control`/`worker`/`gate`) does.
 - [Distributed architecture](../architecture/distributed.md) — how control, gateway, and worker talk over the `/internal/*` feeds you wired above.
 - [`.zship` artifact format](../reference/zship.md) — the deploy archive `pnpm build` emits and `zeroship deploy` uploads.
-- [ZS deploy contract](../reference/zs-standard.md) — what `default = { schema?, fetch?, rpc? }` an example app must export.
+- [zeroship deploy contract](../reference/zeroship-standard.md) — what `default = { schema?, fetch?, rpc? }` an example app must export.

@@ -332,7 +332,7 @@ mod tests {
             .expect("route resolves");
         let policy = compiled
             .manifest
-            .lookup_resource("/_zs/v1/billing.read")
+            .lookup_resource("/__zeroship/v1/billing.read")
             .expect("scoped resource compiles");
         assert_eq!(
             policy.required_scopes,

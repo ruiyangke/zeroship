@@ -2,8 +2,8 @@
  * PKCE (RFC 7636) + state/nonce minting via Web Crypto.
  *
  * The browser holds the verifier; only the S256 challenge is sent to the
- * gateway's `GET /__zs/auth/authorize`. The verifier travels to
- * `POST /__zs/auth/session` (same-origin proxy) at exchange time and never
+ * gateway's `GET /__zeroship/auth/authorize`. The verifier travels to
+ * `POST /__zeroship/auth/session` (same-origin proxy) at exchange time and never
  * leaves first-party storage otherwise (gateway §1.2).
  */
 

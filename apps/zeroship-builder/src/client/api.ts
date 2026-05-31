@@ -5,7 +5,7 @@
 //
 // `rpc.chat.streamUrl()` is the AI-SDK entry point — `@zeroship/rpc`
 // exposes it explicitly so we can hand the URL to `useChat` without
-// hardcoding `/_zs/v1/chat`. The transport-level body envelope
+// hardcoding `/__zeroship/v1/chat`. The transport-level body envelope
 // (`{ json: <input> }`) is wrapped in `chatTransport` below.
 
 import { createRpcClient } from "@zeroship/rpc/client";
@@ -17,7 +17,7 @@ import type { UIMessage } from "ai";
 // transforms each server-module export into an RPC stub on the client
 // side (see sdks/vite-plugin/src/transform.ts:317-329 — single-input
 // wire). Callers `import { createApp } from "../api"` and call them
-// like normal async functions; the wire is `/_zs/v1/apps.<name>`.
+// like normal async functions; the wire is `/__zeroship/v1/apps.<name>`.
 //
 // Note on positional args: the wire forwards `args[0]` only. Every
 // proc that needs more than one input takes a single object input
@@ -101,7 +101,7 @@ export function chatTransport<TIn>(
 ) {
   return new DefaultChatTransport({
     // streamUrl() with no input returns a synchronous URL
-    // (`/_zs/v1/<id>`). With `transformer: "superjson"` set on the
+    // (`/__zeroship/v1/<id>`). With `transformer: "superjson"` set on the
     // client it would return a Promise — fine for `api`, which
     // DefaultChatTransport accepts as either form.
     api: handle.streamUrl() as string,

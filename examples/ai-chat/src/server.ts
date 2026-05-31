@@ -6,7 +6,7 @@
 // input, ctx)`.
 //
 // Wire (per AI SDK v6 spec):
-//   POST /_zs/v1/chat
+//   POST /__zeroship/v1/chat
 //     body:    { json: { messages: UIMessage[] } }      ← zeroship envelope
 //     response: text/event-stream                       ← UI Message Stream
 //                with header `x-vercel-ai-ui-message-stream: v1`

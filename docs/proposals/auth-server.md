@@ -106,10 +106,10 @@ For an end-user hitting a creator app:
 
 ```
 1.  Browser → myapp.zeroship.ai/some-page
-2.  Gateway: no __Host-zs_app_session cookie → 302
+2.  Gateway: no __Host-zeroship_app_session cookie → 302
        https://auth.zeroship.ai/oauth2/auth?
          client_id=myapp_<id>&response_type=code&scope=openid+email+profile&
-         redirect_uri=https://myapp.zeroship.ai/__zs/auth/callback&
+         redirect_uri=https://myapp.zeroship.ai/__zeroship/auth/callback&
          state=<rand>&nonce=<rand>&code_challenge=<S256>&code_challenge_method=S256
 
 3.  Browser → hydra at /oauth2/auth
@@ -146,19 +146,19 @@ For an end-user hitting a creator app:
          → { redirect_to: "https://auth.zeroship.ai/oauth2/auth?..." }
 
 8.  Browser → hydra at /oauth2/auth (the redirect_to)
-       302 → https://myapp.zeroship.ai/__zs/auth/callback?code=<...>&state=<...>
+       302 → https://myapp.zeroship.ai/__zeroship/auth/callback?code=<...>&state=<...>
 
-9.  Gateway at /__zs/auth/callback:
+9.  Gateway at /__zeroship/auth/callback:
        POST https://auth.zeroship.ai/oauth2/token  (back-channel via cyper)
          grant_type=authorization_code, code, code_verifier, client_id, client_secret
          → { id_token, access_token, refresh_token, expires_in }
        Verify id_token signature against cached JWKS (auth.zeroship.ai/.well-known/jwks.json).
-       Set __Host-zs_app_session at myapp.zeroship.ai (opaque session id, server-side state
+       Set __Host-zeroship_app_session at myapp.zeroship.ai (opaque session id, server-side state
          lives in gateway's per-app session store — see §9.2).
        302 → /some-page
 
 10. Browser → myapp.zeroship.ai/some-page
-       Gateway: __Host-zs_app_session ok → proxy to worker with
+       Gateway: __Host-zeroship_app_session ok → proxy to worker with
          ZeroShip-User: base64(JSON).hex-hmac
        Worker: env.auth.getUser() resolves to the JSON.
 ```
@@ -640,7 +640,7 @@ They're coordinated through `accept_login`. When we accept, hydra writes its coo
 
 ### 9.2 The RP session at `myapp.zeroship.ai` (and `console.zeroship.ai`)
 
-Set by the gateway (or control plane) after a successful code exchange. Cookie: `__Host-zs_app_session`. Opaque 256-bit session id. Server-side state in the RP's session store (gateway maintains a small per-app session table; control plane uses its existing `dashboard.sessions` if present).
+Set by the gateway (or control plane) after a successful code exchange. Cookie: `__Host-zeroship_app_session`. Opaque 256-bit session id. Server-side state in the RP's session store (gateway maintains a small per-app session table; control plane uses its existing `dashboard.sessions` if present).
 
 The RP session is what gates worker access. The ID token / access token from hydra are validated once (at code-exchange time), and from that point on the per-origin cookie is the load-bearing artifact.
 
@@ -694,7 +694,7 @@ Each client carries:
 | `gateway` | per-deployed-app fan-out client; one `redirect_uri` per app at registration |
 | `builder.zeroship.ai` | builder UI — first-party |
 
-The `gateway` client's `redirect_uris` list grows by one entry every time a creator deploys an app (`https://<app>.zeroship.ai/__zs/auth/callback`). The control plane calls `PUT /admin/clients/gateway` to append the URI during deploy. **Exact-string match** per RFC 9700 §4.1 is preserved — there are no wildcards.
+The `gateway` client's `redirect_uris` list grows by one entry every time a creator deploys an app (`https://<app>.zeroship.ai/__zeroship/auth/callback`). The control plane calls `PUT /admin/clients/gateway` to append the URI during deploy. **Exact-string match** per RFC 9700 §4.1 is preserved — there are no wildcards.
 
 (Alternative: every deployed app gets its own client_id. Pros: fully scoped tokens, per-app secret rotation. Cons: client_id management at deploy/un-deploy. This is one of the §19 open questions.)
 
@@ -719,7 +719,7 @@ In-place, single-PR, no back-compat.
 5. **Control plane** loses `auth_service.rs`, `auth_handlers.rs`, `oauth.rs`, and the `/auth/*` routes. It gains a small `crates/control/src/oidc_rp.rs` that runs an OIDC client against `auth.zeroship.ai`.
 6. **Gateway** loses `crates/gateway/src/user_auth.rs`'s JWT-cookie path. It gains an OIDC RP module that:
    - On unauthenticated HTML requests, redirects to `auth.zeroship.ai/oauth2/auth`.
-   - On `/__zs/auth/callback`, exchanges the code at `auth.zeroship.ai/oauth2/token`, validates the ID token against cached JWKS, sets `__Host-zs_app_session` at the app's origin.
+   - On `/__zeroship/auth/callback`, exchanges the code at `auth.zeroship.ai/oauth2/token`, validates the ID token against cached JWKS, sets `__Host-zeroship_app_session` at the app's origin.
    - The HMAC-signed `ZeroShip-User` payload to the worker is **unchanged**.
 7. **Gateway** also gains a proxy rule for the `auth.zeroship.ai/oauth2/*` and `auth.zeroship.ai/.well-known/*` prefixes — forwards to hydra's public port.
 8. **`sdks/auth`** is reduced: the browser fallback (`window.__zs_user`) is deleted. The package becomes a thin `env.auth.getUser() / requireUser() / signOut()` wrapper around the platform-injected identity. (`env.auth` becomes a newly-registered native namespace — currently "planned" in AGENTS.md.)
@@ -816,7 +816,7 @@ Cookies set at `auth.zeroship.ai`:
 
 Hydra's cookies are intentionally not `__Host-`-prefixed because hydra needs to share its session across subdomains in some deployments. We force them to `auth.zeroship.ai` exact-host scope by setting `serve.cookies.domain=auth.zeroship.ai`. They're SameSite=Lax + Secure + HttpOnly.
 
-Per-app cookies (`__Host-zs_app_session`) are set at the app's origin by the gateway — those are documented in `crates/gateway/`'s design.
+Per-app cookies (`__Host-zeroship_app_session`) are set at the app's origin by the gateway — those are documented in `crates/gateway/`'s design.
 
 ---
 
@@ -965,7 +965,7 @@ If hydra is down, **every login is down** — the platform is dark. Mitigation:
 - Run hydra HA (≥2 replicas).
 - Monitor `/health/ready` on admin port from outside the pod.
 - Database is the dominant failure mode; ensure hot-standby PG.
-- For graceful degradation, our gateway's per-app `__Host-zs_app_session` cookies remain valid (gateway verifies JWT against cached JWKS, doesn't hit hydra per request) — so already-signed-in users keep working until their access tokens expire (1 h).
+- For graceful degradation, our gateway's per-app `__Host-zeroship_app_session` cookies remain valid (gateway verifies JWT against cached JWKS, doesn't hit hydra per request) — so already-signed-in users keep working until their access tokens expire (1 h).
 
 `crates/auth` returns 503 with a polite "auth service is temporarily unavailable" page if hydra admin is unreachable for >5 s.
 

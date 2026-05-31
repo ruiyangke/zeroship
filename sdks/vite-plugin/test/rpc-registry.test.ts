@@ -366,8 +366,8 @@ export function createFetchHandler(loadNormalized) {
   return async function fetchHandler(request, env, ctx) {
     const normalized = await loadNormalized();
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/_zs/v1/")) {
-      const id = url.pathname.slice("/_zs/v1/".length);
+    if (url.pathname.startsWith("/__zeroship/v1/")) {
+      const id = url.pathname.slice("/__zeroship/v1/".length);
       const text = request.method === "POST" ? await request.text() : "";
       const input = text ? JSON.parse(text).json : undefined;
       const fn = normalized.rpc[id];
@@ -477,7 +477,7 @@ export function createFetchHandler(loadNormalized) {
         default: { fetch: (req: Request, env?: unknown, ctx?: unknown) => Promise<Response> };
       };
       const res = await mod.default.fetch(
-        new Request("https://app.test/_zs/v1/chat", {
+        new Request("https://app.test/__zeroship/v1/chat", {
           method: "POST",
           body: JSON.stringify({ json: { prompt: "hi" } }),
         }),

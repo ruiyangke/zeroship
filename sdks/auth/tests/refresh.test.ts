@@ -6,7 +6,7 @@ import { AuthError, type AuthChangeEvent } from "../src/types";
 import { APP_ORIGIN, jsonResponse, makeHarness } from "./harness";
 
 // BFF model — `GET /session?mint=1` returns an identity projection ONLY
-// (`{user, expires_at}`); the re-signed `__Host-zs_app_session` cookie is the
+// (`{user, expires_at}`); the re-signed `__Host-zeroship_app_session` cookie is the
 // credential, never a token in the body. `refreshSession` re-mints that cookie
 // + refreshes the identity snapshot — there is NO token to refresh.
 function mintBody(over?: Record<string, unknown>) {

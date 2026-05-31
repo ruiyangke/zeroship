@@ -16,7 +16,7 @@ async function rpcPost<T>(
   id: string,
   input: unknown,
 ): Promise<T> {
-  const res = await request.post(`/_zs/v1/${id}`, {
+  const res = await request.post(`/__zeroship/v1/${id}`, {
     data: { json: input },
     headers: { accept: "application/json" },
   });
@@ -29,7 +29,7 @@ async function rpcPost<T>(
 }
 
 test.describe("RPC wire capability wrappers", () => {
-  test("query procedure round-trips over /_zs/v1/<id>", async ({ request }) => {
+  test("query procedure round-trips over /__zeroship/v1/<id>", async ({ request }) => {
     // Pre-migration this returned 404 because plain `export async function`
     // declarations were no longer registered as RPC procedures.
     const result = await rpcPost<{ overall: string; dimensions: Array<{ key: string }> }>(
@@ -42,7 +42,7 @@ test.describe("RPC wire capability wrappers", () => {
     expect(result.dimensions.map((d) => d.key)).toContain("correctness");
   });
 
-  test("control-plane proxy action round-trips over /_zs/v1/<id>", async ({ request }) => {
+  test("control-plane proxy action round-trips over /__zeroship/v1/<id>", async ({ request }) => {
     const controlUp = await probe(`${CONTROL_URL}/health`);
     test.skip(
       !controlUp,

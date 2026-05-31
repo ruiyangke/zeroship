@@ -11,7 +11,7 @@
 // The IIFE pattern ensures idempotent install: if the bootstrap script
 // is evaluated more than once (isolate refresh), the second pass keeps
 // the live `__zsDispatch` rather than overwriting it. The function-
-// shape `default.rpc` path documented in `docs/reference/zs-standard.md`
+// shape `default.rpc` path documented in `docs/reference/zeroship-standard.md`
 // bypasses this dispatcher entirely; the bootstrap calls the function
 // directly.
 //

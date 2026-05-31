@@ -19,7 +19,7 @@ End user
    │
    │  GET https://myapp.zeroship.ai/anything
    ▼
-┌──────────────┐    no __Host-zs_app_session cookie → 302 to /oauth2/auth
+┌──────────────┐    no __Host-zeroship_app_session cookie → 302 to /oauth2/auth
 │   gateway    │ ─────────────────────────────────────────────────────────┐
 └──────────────┘                                                          │
        │ also proxies auth.zeroship.ai/{oauth2,.well-known,userinfo}/*    │
@@ -30,10 +30,10 @@ End user
 │ admin  :4445 │                  └──────────────┘                        │
 └──────────────┘                                                          │
    │                                                                      │
-   │ 302 to https://myapp.zeroship.ai/__zs/auth/callback?code=…&state=…   │
+   │ 302 to https://myapp.zeroship.ai/__zeroship/auth/callback?code=…&state=…   │
    ▼                                                                      │
    gateway exchanges code at /oauth2/token, validates the ID token,      │
-   inserts auth.gateway_sessions, sets __Host-zs_app_session cookie,     │
+   inserts auth.gateway_sessions, sets __Host-zeroship_app_session cookie,     │
    then proxies to the worker with ZeroShip-User (HMAC-signed) ◄──────────┘
 ```
 
@@ -70,7 +70,7 @@ The federation routes (`/oauth/google/*`, `/oauth/github/*`), magic-link redempt
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/__zs/auth/callback?code=…&state=…` | Receives the OIDC code, exchanges at hydra's `/oauth2/token`, sets `__Host-zs_app_session`, redirects to the original path |
+| GET | `/__zeroship/auth/callback?code=…&state=…` | Receives the OIDC code, exchanges at hydra's `/oauth2/token`, sets `__Host-zeroship_app_session`, redirects to the original path |
 | POST | `/oidc/backchannel-logout` | OIDC BCL 1.0 receiver — verifies a `logout_token` and revokes the subject's gateway sessions. |
 
 ### Owned by `crates/control` (`console.zeroship.ai`)
@@ -87,7 +87,7 @@ All cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`. `Secure` is set unless the
 |---|---|---|---|
 | `__Host-zsidp_session` | `crates/auth` | `auth.zeroship.ai` | 12 h hard / 30 min idle |
 | `__Host-zsidp_csrf` | `crates/auth` | `auth.zeroship.ai` | per-form |
-| `__Host-zs_app_session` | gateway | each `*.zeroship.ai` app origin | 12 h (43200 s) |
+| `__Host-zeroship_app_session` | gateway | each `*.zeroship.ai` app origin | 12 h (43200 s) |
 | `__Host-zs_oidc_stash` | gateway | each app origin | 10 min (600 s) — pending the OIDC redirect |
 | `__Host-zs_console_session` | control | `console.zeroship.ai` | 12 h |
 | `__Host-zs_console_stash` | control | `console.zeroship.ai` | 10 min |
@@ -102,7 +102,7 @@ The npm package exposes:
 - `auth.getUser()` — the authenticated user, or `null` if anonymous
 - `auth.requireUser()` — the user, or throws a 401-shaped Error
 - `auth.isLoggedIn()` — convenience boolean
-- `auth.signOut(returnTo?)` — returns a 302 `Response` to `/__zs/auth/signout`
+- `auth.signOut(returnTo?)` — returns a 302 `Response` to `/__zeroship/auth/signout`
 
 All read from `env.auth.user`, populated by the runtime from the gateway's HMAC-signed `ZeroShip-User` request header. The gateway is the single source of truth — the previous `window.__zs_user` browser fallback is gone.
 
@@ -135,7 +135,7 @@ The canonical issuer URL is `https://auth.zeroship.ai/` (trailing slash; matches
 Declared in TOML and reconciled into hydra's `/admin/clients` registry at boot. See `ops/auth-clients.example.toml`. Two first-party clients ship at v1:
 
 - `console.zeroship.ai` — creator dashboard. Fixed `redirect_uris`.
-- `gateway` — fans out per-hosted-app callbacks. The control plane appends one `https://<app>.zeroship.ai/__zs/auth/callback` to `redirect_uris` per deploy, via `PUT /admin/clients/gateway`. Exact-string match (RFC 9700 §4.1) — no wildcards.
+- `gateway` — fans out per-hosted-app callbacks. The control plane appends one `https://<app>.zeroship.ai/__zeroship/auth/callback` to `redirect_uris` per deploy, via `PUT /admin/clients/gateway`. Exact-string match (RFC 9700 §4.1) — no wildcards.
 
 Adding or rotating a client is an edit to the TOML; `crates/auth/src/bootstrap` upserts on startup.
 
@@ -177,7 +177,7 @@ For local development against hydra, run `crates/auth` with `AUTH_BOOTSTRAP=1 AU
 
 ## DPoP-bound access (non-browser clients)
 
-Non-browser OAuth clients (CLI, server-to-server) that hold a hydra access token MAY present it RFC 9449 sender-constrained as `Authorization: DPoP <hydra_access_token>` plus a `DPoP:` proof header. The browser SPA does NOT use this path — it rides the signed `__Host-zs_app_session` cookie.
+Non-browser OAuth clients (CLI, server-to-server) that hold a hydra access token MAY present it RFC 9449 sender-constrained as `Authorization: DPoP <hydra_access_token>` plus a `DPoP:` proof header. The browser SPA does NOT use this path — it rides the signed `__Host-zeroship_app_session` cookie.
 
 ### Dispatch enforcement
 

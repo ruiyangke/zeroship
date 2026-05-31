@@ -37,7 +37,7 @@
 //! no-op — defense in depth, not a strict protocol.
 //!
 //! Function-shape `default.rpc` (the advanced / back-compat path —
-//! see `docs/reference/zs-standard.md`) is the caller's responsibility:
+//! see `docs/reference/zeroship-standard.md`) is the caller's responsibility:
 //! a custom dispatcher that wants this rail must call `__zsEnterKind` /
 //! `__zsExitKind` itself.
 //!

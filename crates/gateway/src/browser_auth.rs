@@ -2,16 +2,16 @@
 //!
 //! Three same-origin gateway endpoints the `@zeroship/auth` SDK drives:
 //!
-//! - **`GET /__zs/auth/authorize`** — the ONE cross-site hop. Resolves the
+//! - **`GET /__zeroship/auth/authorize`** — the ONE cross-site hop. Resolves the
 //!   app's per-app PUBLIC PKCE client from `Host`, then 302s to Hydra's
 //!   `/oauth2/auth` carrying the BROWSER-supplied PKCE `code_challenge`
 //!   (S256), `state`, `nonce`, requested `scope`, and an optional `prompt`
-//!   passthrough, with `redirect_uri = {scheme}://{host}/__zs/auth/popup-callback`
+//!   passthrough, with `redirect_uri = {scheme}://{host}/__zeroship/auth/popup-callback`
 //!   (a registered URI from 1d). The gateway holds NO PKCE verifier — the
 //!   browser does (Supabase-style). 503 `client_not_provisioned` when the
 //!   route has no `oauth_client_id` yet.
 //!
-//! - **`GET /__zs/auth/popup-callback`** — a tiny SAME-ORIGIN HTML relay
+//! - **`GET /__zeroship/auth/popup-callback`** — a tiny SAME-ORIGIN HTML relay
 //!   page. Inline (CSP-nonce-tagged) JS reads `code`+`state` (or
 //!   `error`+`error_description`+`state`) FROM `location.search` (never
 //!   reflected into the DOM by the gateway — no XSS sink) and
@@ -22,8 +22,8 @@
 //!   CSP (`default-src 'none'; script-src 'nonce-…'; frame-ancestors 'self'`),
 //!   `Referrer-Policy: no-referrer`, `COOP: same-origin`.
 //!
-//! - **`POST /__zs/auth/signout`** — FIXES the live "no handler" bug. Same-
-//!   origin guard (X-ZS-Auth + exact Origin). Reads the `__Host-zs_app_anchor`
+//! - **`POST /__zeroship/auth/signout`** — FIXES the live "no handler" bug. Same-
+//!   origin guard (X-ZS-Auth + exact Origin). Reads the `__Host-zeroship_app_anchor`
 //!   anchor cookie → loads the anchor → (a) sets the per-app family marker
 //!   via `revoke_family(client_id, pws_sub)`, (b) best-effort revokes the
 //!   server-held refresh family at Hydra `/oauth2/revoke`, (c) deletes the
@@ -51,9 +51,9 @@ fn popup_csp(nonce: &str) -> String {
     format!("default-src 'none'; script-src 'nonce-{nonce}'; frame-ancestors 'self'")
 }
 
-// ─── GET /__zs/auth/authorize ────────────────────────────────────────────
+// ─── GET /__zeroship/auth/authorize ────────────────────────────────────────────
 
-/// `GET /__zs/auth/authorize` — build the Hydra `/oauth2/auth` URL for the
+/// `GET /__zeroship/auth/authorize` — build the Hydra `/oauth2/auth` URL for the
 /// per-app PUBLIC PKCE client and 302. See module docs.
 #[allow(clippy::future_not_send)]
 pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResponse {
@@ -109,7 +109,7 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
     // ultimate allowlist is Hydra's registered redirect_uris, but we reject
     // an obviously-foreign value up front so a misconfigured SDK fails fast.
     let scheme = if state.config.insecure_dev { "http" } else { "https" };
-    let default_redirect = format!("{scheme}://{}/__zs/auth/popup-callback", route.host);
+    let default_redirect = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
     let redirect_uri = match q.redirect_uri.as_deref().filter(|s| !s.is_empty()) {
         None => default_redirect,
         Some(supplied) => {
@@ -145,7 +145,7 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
         .finish()
 }
 
-/// `GET /__zs/auth/authorize` query params (all browser-supplied).
+/// `GET /__zeroship/auth/authorize` query params (all browser-supplied).
 #[derive(Default)]
 struct AuthorizeQuery {
     code_challenge: Option<String>,
@@ -178,9 +178,9 @@ impl AuthorizeQuery {
     }
 }
 
-// ─── GET /__zs/auth/popup-callback ───────────────────────────────────────
+// ─── GET /__zeroship/auth/popup-callback ───────────────────────────────────────
 
-/// `GET /__zs/auth/popup-callback` — the same-origin HTML relay page. See
+/// `GET /__zeroship/auth/popup-callback` — the same-origin HTML relay page. See
 /// module docs. The query params are NEVER reflected into the response body
 /// by the gateway: the inline JS reads them from `location.search` at
 /// runtime and `postMessage`s the PARSED values. The gateway only emits a
@@ -237,9 +237,9 @@ fn popup_callback_html(nonce: &str) -> String {
     )
 }
 
-// ─── POST /__zs/auth/signout ─────────────────────────────────────────────
+// ─── POST /__zeroship/auth/signout ─────────────────────────────────────────────
 
-/// Body the SDK posts to `/__zs/auth/signout`.
+/// Body the SDK posts to `/__zeroship/auth/signout`.
 #[derive(serde::Deserialize, Default)]
 struct SignOutRequest {
     /// `"local"` (default — this device) or `"global"` (this app, every
@@ -248,7 +248,7 @@ struct SignOutRequest {
     scope: Option<String>,
 }
 
-/// `POST /__zs/auth/signout` — FIX the live missing-handler bug. See module
+/// `POST /__zeroship/auth/signout` — FIX the live missing-handler bug. See module
 /// docs. Same-origin guard, then revoke + clear. Always 204 + cookie clears
 /// (idempotent: a signout with no anchor cookie still clears the cookies).
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
@@ -434,7 +434,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
     signout_cleared(&route.host, state.config.insecure_dev)
 }
 
-/// Build the 204 signout response: clear the `__Host-zs_app_anchor` anchor
+/// Build the 204 signout response: clear the `__Host-zeroship_app_anchor` anchor
 /// cookie + the `is.authenticated` breadcrumb, `Cache-Control: no-store`.
 fn signout_cleared(host: &str, insecure_dev: bool) -> HttpResponse {
     HttpResponse::NoContent()

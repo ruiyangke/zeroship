@@ -1,4 +1,4 @@
-//! Gateway-signed **stateless session cookie** (`__Host-zs_app_session`).
+//! Gateway-signed **stateless session cookie** (`__Host-zeroship_app_session`).
 //!
 //! BFF redesign **slice R1b** (`2026-05-30-auth-bff-session-redesign.md`,
 //! "Decision addendum: signed STATELESS session cookie"). The session cookie is
@@ -6,12 +6,12 @@
 //! gateway-SIGNED, `HttpOnly`, short-lived (~15 min) **identity assertion**,
 //! verified LOCALLY on every request (no per-request DB/Redis read).
 //!
-//! ## A dedicated token type, stamped `typ: zs-sess+jwt`
+//! ## A dedicated token type, stamped `typ: zeroship-sess+jwt`
 //!
 //! The cookie is signed with the gateway's ed25519 signing key + the
-//! current/previous `kid` rotation/overlap, and is stamped `typ: zs-sess+jwt`.
+//! current/previous `kid` rotation/overlap, and is stamped `typ: zeroship-sess+jwt`.
 //! That typ tag is load-bearing: this [`Verifier`] hard-rejects any token whose
-//! typ is not `zs-sess+jwt` (e.g. an RFC 9068 `at+jwt` access token), so a
+//! typ is not `zeroship-sess+jwt` (e.g. an RFC 9068 `at+jwt` access token), so a
 //! resource-server access token can never be replayed as a session cookie, and
 //! the cookie — which is inert identity, never a capability — can never be
 //! presented as authorization on the Bearer/DPoP arms (those recognize only a
@@ -49,16 +49,16 @@ use crate::error::{GatewayError, Result};
 
 /// RFC-8725-style typ tag for the signed session cookie. Distinct from the
 /// wrapper's `at+jwt` so the two verifiers never accept each other's tokens.
-pub const SESSION_TOKEN_TYP: &str = "zs-sess+jwt";
+pub const SESSION_TOKEN_TYP: &str = "zeroship-sess+jwt";
 
 /// Short hot-path lifetime of the signed session cookie (~15 min).
 ///
 /// The durable credential is the 30-day server-held anchor; this short cookie is
-/// silently re-signed from the anchor via `GET /__zs/auth/session` when it
+/// silently re-signed from the anchor via `GET /__zeroship/auth/session` when it
 /// lapses.
 pub const SESSION_TOKEN_TTL_SECS: i64 = 15 * 60;
 
-/// Signed-session-cookie claim set (`typ: zs-sess+jwt`).
+/// Signed-session-cookie claim set (`typ: zeroship-sess+jwt`).
 ///
 /// Carries the full [`crate::oidc_rp::WorkerUser`] projection (so the cookie arm
 /// emits `ZeroShip-User` directly) plus the route app binding + freshness/audit
@@ -157,7 +157,7 @@ impl Issuer {
     /// Issue a signed session cookie from an explicit [`SessionMint`]. The
     /// Issuer adds the registered `iss`/`iat`/`exp` claims, the
     /// [`SESSION_TOKEN_TTL_SECS`] lifetime, and signs with the CURRENT key,
-    /// stamping its `kid` + the `zs-sess+jwt` typ.
+    /// stamping its `kid` + the `zeroship-sess+jwt` typ.
     ///
     /// # Errors
     ///
@@ -219,7 +219,7 @@ struct VerifyKey {
 /// Holds an ordered `[current, previous]` ed25519 accept-list (the
 /// rotation-overlap story, identical to the wrapper verifier) plus the expected
 /// `iss`. Selects the key by JWT header `kid`; an unknown/absent `kid` is
-/// rejected. Enforces the `zs-sess+jwt` typ gate.
+/// rejected. Enforces the `zeroship-sess+jwt` typ gate.
 pub struct Verifier {
     keys: Vec<VerifyKey>,
     expected_iss: String,
@@ -267,7 +267,7 @@ impl Verifier {
     }
 
     /// Verify a signed session cookie's signature + `iss` + `exp` + `kid` + the
-    /// `zs-sess+jwt` typ, and bind `app` to `expected_app` (the resolved
+    /// `zeroship-sess+jwt` typ, and bind `app` to `expected_app` (the resolved
     /// route's per-app `client_id`). Returns the decoded claims on success.
     ///
     /// There is NO `aud` claim on a session cookie (the audience binding is the
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn typ_is_zs_sess_jwt_not_at_jwt() {
-        // The session cookie's typ header MUST be zs-sess+jwt (never at+jwt),
+        // The session cookie's typ header MUST be zeroship-sess+jwt (never at+jwt),
         // so a wrapper Verifier (which hard-checks at+jwt) rejects it.
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let issuer = Issuer::new(&signing, ISS.into()).expect("issuer");
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn verify_rejects_a_wrapper_typ() {
         // A token stamped at+jwt (the wrapper typ) must be rejected by the
-        // session-cookie verifier's zs-sess+jwt typ gate.
+        // session-cookie verifier's zeroship-sess+jwt typ gate.
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let kid = crate::signing::jwk_thumbprint(&signing);

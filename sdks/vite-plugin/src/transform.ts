@@ -743,7 +743,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    are callable by other server code, but they are NOT
         //    network-reachable. That means a
         //    misplaced `export * from "./helpers"` no longer publishes
-        //    helpers as `/_zs/v1/<helperName>` endpoints.
+        //    helpers as `/__zeroship/v1/<helperName>` endpoints.
         const wrapperBindings = collectWrapperBindings(ast.body);
         interface ServerFn {
           name: string;

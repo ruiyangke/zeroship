@@ -7,7 +7,7 @@
 //
 // Note on the wire: set/delete procedures use one object input so the
 // generated RPC stubs can forward every field over the single-input
-// `/_zs/v1/<id>` contract.
+// `/__zeroship/v1/<id>` contract.
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

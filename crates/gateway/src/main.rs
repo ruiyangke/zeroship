@@ -459,7 +459,7 @@ fn main() -> std::io::Result<()> {
 
     // BFF redesign slice R1b — the SIGNED STATELESS session cookie. Built from
     // the ed25519 signing key (+ previous key for the rotation overlap),
-    // stamping the distinct `zs-sess+jwt` typ.
+    // stamping the distinct `zeroship-sess+jwt` typ.
     // Both `Some`, or both `None` (one-to-one with `signing_key`): with no key
     // the gateway cannot sign/verify the session cookie, so the cookie arm fails
     // closed. The Issuer always signs with the CURRENT key; the Verifier folds
@@ -732,7 +732,7 @@ fn main() -> std::io::Result<()> {
             })))
             // auth-sdk BFF redesign slice R1b — the ONE identity-session
             // resource. `/token` is GONE (merged here); both methods live on
-            // `/__zs/auth/session`:
+            // `/__zeroship/auth/session`:
             //   - POST = code→token exchange + create anchor + ISSUE the signed
             //     session cookie + return `{ user, expires_at }`.
             //   - GET[?mint=1] = decode the live signed cookie, or (expired /
@@ -740,7 +740,7 @@ fn main() -> std::io::Result<()> {
             // Registered BEFORE the subdomain catch-all. Same-origin-only (no
             // CORS); `?mint=1` + POST additionally require `X-ZS-Auth`.
             .service(
-                web::resource("/__zs/auth/session")
+                web::resource("/__zeroship/auth/session")
                     .route(web::post().to(auth_token::session_post))
                     .route(web::get().to(auth_token::session)),
             )
@@ -750,15 +750,15 @@ fn main() -> std::io::Result<()> {
             // hop); `/popup-callback` serves the same-origin relay page;
             // `/signout` revokes + clears (fixes the live bug).
             .service(
-                web::resource("/__zs/auth/authorize")
+                web::resource("/__zeroship/auth/authorize")
                     .route(web::get().to(browser_auth::authorize)),
             )
             .service(
-                web::resource("/__zs/auth/popup-callback")
+                web::resource("/__zeroship/auth/popup-callback")
                     .route(web::get().to(browser_auth::popup_callback)),
             )
             .service(
-                web::resource("/__zs/auth/signout")
+                web::resource("/__zeroship/auth/signout")
                     .route(web::post().to(browser_auth::signout)),
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn secrets_file_tier_used_when_cli_empty() {
         // Empty CLI + a `[secrets]` env-reference => the reference resolves.
-        let var = format!("ZS_GW_SECRETS_TIER_{}", std::process::id());
+        let var = format!("ZEROSHIP_GW_SECRETS_TIER_{}", std::process::id());
         std::env::set_var(&var, "resolved-from-secrets-file");
         let reference = format!("urn:zeroship:env:{var}");
         let out = zeroship_core::config::obtain_secret(
@@ -1031,7 +1031,7 @@ mod tests {
         let out = zeroship_core::config::obtain_secret(
             "MASTER_KEY",
             "literal-from-cli",
-            Some("urn:zeroship:env:ZS_GW_SECRETS_TIER_NEVER_SET"),
+            Some("urn:zeroship:env:ZEROSHIP_GW_SECRETS_TIER_NEVER_SET"),
             false,
         );
         assert_eq!(

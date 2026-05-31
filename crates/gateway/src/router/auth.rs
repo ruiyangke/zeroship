@@ -144,7 +144,7 @@ async fn family_revocation_decision(
 /// caller layers the HTML-vs-API response decision on top.
 ///
 /// Flow:
-///   1. Look for `__Host-zs_app_session` cookie.
+///   1. Look for `__Host-zeroship_app_session` cookie.
 ///   2. If present + DB configured + validate succeeds → resolved
 ///      user. Header is the HMAC-signed payload the worker expects.
 ///   3. If `policy.auth == Anon` we return `Allowed` regardless of
@@ -374,7 +374,7 @@ async fn resolve_auth_inner(
     let session_user_header = match session_user_header {
         CookieOutcome::Allowed(header) => {
             // BFF anti-CSRF gate (spec §1.2/§2.3, P3). The SameSite=Lax
-            // `__Host-zs_app_session` cookie is the SPA's LIVE credential, so a
+            // `__Host-zeroship_app_session` cookie is the SPA's LIVE credential, so a
             // state-changing same-site `POST /api/*` ridden by an XSS / a
             // cross-site top-level form-POST is the residual CSRF risk the BFF
             // trade explicitly bounds. We require, for state-changing methods
@@ -413,7 +413,7 @@ async fn resolve_auth_inner(
 }
 
 /// Whether a state-changing request authenticated PURELY by the SameSite=Lax
-/// `__Host-zs_app_session` cookie must be REJECTED on anti-CSRF grounds (BFF
+/// `__Host-zeroship_app_session` cookie must be REJECTED on anti-CSRF grounds (BFF
 /// spec §1.2/§2.3, P3).
 ///
 /// Returns `true` (reject the cookie credential) when the method is
@@ -1165,8 +1165,8 @@ enum CookieOutcome {
 }
 
 /// Resolve the `ZeroShip-User` header value from the SIGNED STATELESS session
-/// cookie (BFF redesign **slice R1b** — the addendum). The `__Host-zs_app_session`
-/// cookie is a gateway-signed `zs-sess+jwt` identity assertion, verified LOCALLY
+/// cookie (BFF redesign **slice R1b** — the addendum). The `__Host-zeroship_app_session`
+/// cookie is a gateway-signed `zeroship-sess+jwt` identity assertion, verified LOCALLY
 /// here on every request — **no `sessions::validate`, no per-request DB read for
 /// identity**.
 ///
@@ -1176,7 +1176,7 @@ enum CookieOutcome {
 ///     (current OR previous `kid`), `iss`, `exp`, and `app` == the resolved
 ///     route's `oauth_client_id` (audience binding). A tampered / expired /
 ///     wrong-app / wrong-/unknown-`kid` cookie fails here → [`CookieOutcome::None`].
-///     A `zs-sess+jwt` typ is required (an `at+jwt` access token is rejected by
+///     A `zeroship-sess+jwt` typ is required (an `at+jwt` access token is rejected by
 ///     the session verifier's typ gate).
 ///  3. Defense-in-depth: the cookie `sub` MUST be a `pws_…` pairwise subject
 ///     (every minter projects it; a non-`pws_` cookie is a mint bug → reject).
@@ -1315,8 +1315,8 @@ pub(super) fn jwt_subject_unverified(jwt: &str) -> Option<String> {
 
 /// Pull the app-session cookie value out of a Cookie header.
 ///
-/// Cookie name is `__Host-zs_app_session` in production and
-/// `zs_app_session` in dev (RFC 6265bis §4.1.3.2 — `__Host-` mandates
+/// Cookie name is `__Host-zeroship_app_session` in production and
+/// `zeroship_app_session` in dev (RFC 6265bis §4.1.3.2 — `__Host-` mandates
 /// Secure, which dev runs over plain HTTP without). Returns `None`
 /// when the cookie is missing or empty so callers can fall back to a
 /// different discriminator (e.g. per-rule rate-limit session-keyed
@@ -1345,11 +1345,11 @@ mod tests {
 
     #[test]
     fn extract_session_cookie_handles_empty_value() {
-        // `__Host-zs_app_session=` (empty value) → None, so the caller
+        // `__Host-zeroship_app_session=` (empty value) → None, so the caller
         // falls back to IP. Treating empty as a real bucket key would
         // collapse every cookie-empty client into one shared bucket.
         assert_eq!(
-            extract_session_cookie(Some("__Host-zs_app_session="), false),
+            extract_session_cookie(Some("__Host-zeroship_app_session="), false),
             None
         );
         assert_eq!(extract_session_cookie(None, false), None);
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn extract_session_cookie_reads_app_session_value() {
         let id = uuid::Uuid::new_v4();
-        let header = format!("foo=bar; __Host-zs_app_session={id}; baz=qux");
+        let header = format!("foo=bar; __Host-zeroship_app_session={id}; baz=qux");
         let extracted = extract_session_cookie(Some(&header), false).expect("present");
         assert_eq!(extracted, id.to_string());
     }
@@ -1371,11 +1371,11 @@ mod tests {
         // so the dev parser must look for the bare name and ignore a
         // stale __Host- cookie of the same suffix.
         let id = uuid::Uuid::new_v4();
-        let dev_header = format!("zs_app_session={id}");
+        let dev_header = format!("zeroship_app_session={id}");
         let extracted = extract_session_cookie(Some(&dev_header), true).expect("present");
         assert_eq!(extracted, id.to_string());
 
-        let prod_header = format!("__Host-zs_app_session={id}");
+        let prod_header = format!("__Host-zeroship_app_session={id}");
         assert_eq!(extract_session_cookie(Some(&prod_header), true), None);
     }
 
@@ -3269,7 +3269,7 @@ mod tests {
     // Documents the round-3 decision (mirroring the DPoP precedent): on a
     // User/Admin route an Invalid raw-Hydra Bearer 401s and is NOT silently
     // rescued by a valid cookie session. DB-free under R1b — the cookie is a
-    // SIGNED `zs-sess+jwt` verified locally, so the test mints a real signed
+    // SIGNED `zeroship-sess+jwt` verified locally, so the test mints a real signed
     // cookie (genuinely valid) and proves the Bearer still wins the 401.
     #[ntex::test]
     async fn resolve_auth_invalid_bearer_on_user_route_does_not_use_cookie() {
@@ -3655,10 +3655,10 @@ mod tests {
 
     // ─── R1b: signed stateless session cookie — local-verify cookie arm ────
 
-    /// Mint a gateway-SIGNED `zs-sess+jwt` session cookie via the state's
+    /// Mint a gateway-SIGNED `zeroship-sess+jwt` session cookie via the state's
     /// session issuer, for the given app (`client_id`) + per-app `pws_` subject.
-    /// This is exactly the token `POST /__zs/auth/session` writes into
-    /// `__Host-zs_app_session`.
+    /// This is exactly the token `POST /__zeroship/auth/session` writes into
+    /// `__Host-zeroship_app_session`.
     fn issue_signed_session_cookie(
         state: &crate::GateState,
         client_id: &str,
@@ -3837,7 +3837,7 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
     }
 
-    /// Hand-sign a `zs-sess+jwt` whose `exp` is 100s in the past (beyond the 60s
+    /// Hand-sign a `zeroship-sess+jwt` whose `exp` is 100s in the past (beyond the 60s
     /// verify leeway).
     fn sign_expired_session_cookie(
         signing: &ed25519_dalek::SigningKey,
@@ -3876,7 +3876,7 @@ mod tests {
     }
 
     /// Hand-sign an RFC-9068 `at+jwt`-typ token with the gateway key. Used to
-    /// prove the session-cookie arm's `zs-sess+jwt` typ gate rejects a non-
+    /// prove the session-cookie arm's `zeroship-sess+jwt` typ gate rejects a non-
     /// session token type, even when it is gateway-signed with a valid kid.
     fn sign_at_jwt_typ_token(signing: &ed25519_dalek::SigningKey, sub: &str, aud: &str) -> String {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
@@ -3903,11 +3903,11 @@ mod tests {
         encode(&header, &body, &key).unwrap()
     }
 
-    /// Typ separation, both directions. A signed SESSION cookie (`zs-sess+jwt`)
+    /// Typ separation, both directions. A signed SESSION cookie (`zeroship-sess+jwt`)
     /// presented on the Bearer arm is REJECTED (the Bearer arm only recognizes a
     /// raw-Hydra `iss`, never the gateway-signed session token) — and a gateway-
     /// signed `at+jwt` token presented to the session-cookie arm is rejected by
-    /// the session verifier's `zs-sess+jwt` typ gate. DB-free.
+    /// the session verifier's `zeroship-sess+jwt` typ gate. DB-free.
     #[ntex::test]
     async fn typ_separation_session_cookie_vs_at_jwt_both_ways() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3926,11 +3926,11 @@ mod tests {
             resolve_bearer_user_header(&bearer, &state, &rid, Some(client_id), None).await;
         assert!(
             matches!(bearer_outcome, BearerOutcome::NotUserSession),
-            "a zs-sess+jwt session cookie must not authenticate on the Bearer arm, got {bearer_outcome:?}"
+            "a zeroship-sess+jwt session cookie must not authenticate on the Bearer arm, got {bearer_outcome:?}"
         );
 
         // (2) An at+jwt-typ token presented to the session-cookie arm → None
-        //     (the session verifier hard-rejects a non-`zs-sess+jwt` typ).
+        //     (the session verifier hard-rejects a non-`zeroship-sess+jwt` typ).
         let at_jwt = sign_at_jwt_typ_token(&gateway_signing, &pws, aud);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()

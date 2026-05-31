@@ -20,7 +20,7 @@
  *      would go stale on every edit. The dispatcher (`__zsDispatch`)
  *      consumes the dict each call.
  *   4. WinterCG `default.fetch` via `createFetchHandler(...)` — routes
- *      `/_zs/v1/<id>` through the dispatcher; falls through to user's
+ *      `/__zeroship/v1/<id>` through the dispatcher; falls through to user's
  *      own `default.fetch` for non-RPC paths.
  *
  * The Vite plugin's `dev-bootstrap/index.ts` (post-Stage-7) is a thin
@@ -106,9 +106,9 @@ export interface DevEntryOptions {
   /**
    * Reader for the dev-auth env vars (`ZEROSHIP_DEV_AUTH`,
    * `ZEROSHIP_DEV_AUTH_SECRET`). Defaults to `process.env` lookups in the dev
-   * runtime. The dev-auth provider serves the same-origin `/__zs/auth/*`
+   * runtime. The dev-auth provider serves the same-origin `/__zeroship/auth/*`
    * endpoints the `@zeroship/auth` client drives; when no secret is present it
-   * stays disabled and `/__zs/auth/*` falls through to the user module. Tests
+   * stays disabled and `/__zeroship/auth/*` falls through to the user module. Tests
    * inject a fake reader. This is the SELF-CONTAINED dev tier of the auth
    * contract — it is never present in a production `.zship` (this whole module
    * is dev-only; `runtime-entry.ts` never imports it).
@@ -134,7 +134,7 @@ export interface DevEntry {
  * shape the runtime expects from a user module; the Vite plugin's
  * dev-bootstrap re-exports this verbatim.
  *
- * Per the ZS standard (`docs/reference/zs-standard.md`), `default.rpc`
+ * Per the ZS standard (`docs/reference/zeroship-standard.md`), `default.rpc`
  * is function-shape here — dev's namespace may change per request so
  * the dict is freshly resolved on every call. Production uses dict-
  * shape because the bundle is frozen.
@@ -329,11 +329,11 @@ export function devEntry(options: DevEntryOptions): DevEntry {
 
   const userFetchHandler = createFetchHandler(loadNormalized);
 
-  // Dev-tier auth provider — owns the same-origin `/__zs/auth/*` endpoints in
+  // Dev-tier auth provider — owns the same-origin `/__zeroship/auth/*` endpoints in
   // self-contained dev (no gateway/Hydra). Reads its config from the spawn env
   // (`ZEROSHIP_DEV_AUTH` + `ZEROSHIP_DEV_AUTH_SECRET`, set by the Vite plugin);
   // `null` when no secret is present (e.g. a hand-run `zeroship serve`), in
-  // which case `/__zs/auth/*` falls through to the user module unchanged.
+  // which case `/__zeroship/auth/*` falls through to the user module unchanged.
   const devAuthEnv =
     options.getDevAuthEnv ??
     ((name: string) =>
@@ -342,9 +342,9 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       ]);
   const devAuth = createDevAuthProvider(devAuthEnv);
 
-  // Intercept `/__zs/auth/*` BEFORE the user module's fetch + the RPC
+  // Intercept `/__zeroship/auth/*` BEFORE the user module's fetch + the RPC
   // fall-through. The runtime's dev serve path (`dev_auth.rs`) has ALREADY
-  // resolved the dev identity from the `__zs_dev_session` cookie and threaded
+  // resolved the dev identity from the `__zeroship_dev_session` cookie and threaded
   // it through `call_fetch_handler_with_user` for THIS request — so the
   // app-facing `env.auth.getUser()` / `currentUser()` are populated server-side
   // independently of these endpoints. These endpoints exist purely to drive the

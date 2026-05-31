@@ -120,7 +120,7 @@ struct ControlCli {
     /// app at startup: upsert its `control.apps` row (enterprise plan), its
     /// public-PKCE OAuth client (explicit `sector_identifier` = console host),
     /// ingest the prebuilt `.zship`, and mint the server-only
-    /// `ZS_CONTROL_SERVICE_TOKEN` PAT. In-process + idempotent; NEVER an HTTP
+    /// `ZEROSHIP_CONTROL_SERVICE_TOKEN` PAT. In-process + idempotent; NEVER an HTTP
     /// route. Off by default.
     #[arg(long = "bootstrap-console", action = clap::ArgAction::SetTrue)]
     bootstrap_console: bool,

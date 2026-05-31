@@ -5,8 +5,8 @@
 #   • A running dev server (`pnpm dev` in another shell)
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3001}"
-RPC="${URL}/_zs/v1"
+URL="${ZEROSHIP_URL:-http://localhost:3001}"
+RPC="${URL}/__zeroship/v1"
 FAILED=0
 
 rpc() {

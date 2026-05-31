@@ -209,7 +209,7 @@ describe("subscribeCall — happy path", () => {
     await ticks(2);
     const rec = records[0];
     assert.ok(rec, "WebSocket constructed");
-    assert.equal(rec.url, "wss://api.test/_zs/v1/todoTicker");
+    assert.equal(rec.url, "wss://api.test/__zeroship/v1/todoTicker");
     assert.ok(
       rec.protocols.includes("zs.v1"),
       `expected zs.v1 protocol, got: ${rec.protocols.join(", ")}`,

@@ -1,7 +1,7 @@
 "use server";
 // Benchmark fixture — exercises the full zeroship runtime surface.
 //
-// Wire: each wrapped export is a procedure on `/_zs/v1/<id>`.
+// Wire: each wrapped export is a procedure on `/__zeroship/v1/<id>`.
 // Unary POST bodies use the current RPC envelope `{ json: <input> }`;
 // the default transformer is plain JSON.
 // Single-arg dispatch: the unwrapped `json` value is the handler's
@@ -178,7 +178,7 @@ export const drip = stream(
 
 // ── HTTP fall-through ────────────────────────────────────────────────
 //
-// Anything not on /_zs/v1/<id> goes through `default.fetch`. For bench
+// Anything not on /__zeroship/v1/<id> goes through `default.fetch`. For bench
 // scenarios that hit raw HTTP (e.g. /sse, /ping) we surface a
 // `default.fetch` handler here so the procedure-only build still
 // answers them.

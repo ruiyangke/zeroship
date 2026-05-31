@@ -2,7 +2,7 @@
 //
 // The console authenticates creators through the platform BFF popup
 // flow (`@zeroship/auth/react`): clicking sign-in opens the gateway's
-// `/__zs/auth/authorize` popup against the seeded per-app public PKCE
+// `/__zeroship/auth/authorize` popup against the seeded per-app public PKCE
 // client; on success the gateway sets the HttpOnly session cookie and
 // the SDK publishes the authenticated snapshot. There is NO password
 // form here anymore — the retired bespoke `/auth/{login,register}`

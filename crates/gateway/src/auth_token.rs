@@ -1,31 +1,31 @@
-//! `/__zs/auth/session` (POST + GET) — the ONE identity-session resource of the
+//! `/__zeroship/auth/session` (POST + GET) — the ONE identity-session resource of the
 //! `@zeroship/auth` SDK, **BFF redesign slice R1b**
 //! (`2026-05-30-auth-bff-session-redesign` §2.2 + the signed-cookie addendum).
 //!
-//! **`POST /__zs/auth/token` is GONE — merged into `POST /__zs/auth/session`.**
+//! **`POST /__zeroship/auth/token` is GONE — merged into `POST /__zeroship/auth/session`.**
 //!
 //! The browser receives **only an identity projection + HttpOnly cookies** —
 //! NO power/wrapper access token, NO scopes, NO JWT in any response body. The
-//! `__Host-zs_app_session` cookie is a gateway-SIGNED, short-lived (~15 min)
-//! `zs-sess+jwt` identity assertion verified LOCALLY on every request (no
+//! `__Host-zeroship_app_session` cookie is a gateway-SIGNED, short-lived (~15 min)
+//! `zeroship-sess+jwt` identity assertion verified LOCALLY on every request (no
 //! per-request DB read). The server-held refresh family (the anchor) stays as
 //! the BFF custody store; the platform is the resource server.
 //!
-//! - **`POST /__zs/auth/session`** runs the PKCE code→token exchange on the
+//! - **`POST /__zeroship/auth/session`** runs the PKCE code→token exchange on the
 //!   browser's behalf, then: (a) writes a `auth.gateway_sessions` ROW — KEPT as
 //!   the revocation/audit record + `auth_time`/`amr` source, NO LONGER read on
 //!   the per-request path — AND keeps creating the encrypted server-held
 //!   refresh-family anchor (`auth.app_session_anchors`); (b) ISSUES the signed
-//!   `__Host-zs_app_session` cookie (`zs-sess+jwt`, Lax, ~15m) + the
-//!   `__Host-zs_app_anchor` cookie (Strict, 30d, reload-recovery) + the
+//!   `__Host-zeroship_app_session` cookie (`zeroship-sess+jwt`, Lax, ~15m) + the
+//!   `__Host-zeroship_app_anchor` cookie (Strict, 30d, reload-recovery) + the
 //!   `zs.<host>.is.authenticated` breadcrumb; (c) returns ONLY
 //!   `{ user: { id: pws_, email: relay-alias, … }, expires_at }`. No
 //!   `access_token`, no `scope`, no `id_token`, no `token_type`.
-//! - **`GET /__zs/auth/session[?mint=1]`** DECODES the live signed cookie
+//! - **`GET /__zeroship/auth/session[?mint=1]`** DECODES the live signed cookie
 //!   LOCALLY (no DB) and returns `{ user, expires_at }`. When the cookie has
 //!   lapsed/`?mint=1` but the anchor is valid (reload-recovery), it rotates the
 //!   server-held refresh family, re-writes the audit row, RE-SIGNS a fresh
-//!   `__Host-zs_app_session` cookie, and returns the projection. **No JWT in any
+//!   `__Host-zeroship_app_session` cookie, and returns the projection. **No JWT in any
 //!   body; the real email never appears.**
 //!
 //! ## Same-origin-only (CORS is NOT the boundary)
@@ -263,7 +263,7 @@ pub(crate) fn same_origin_guard(
     Ok(())
 }
 
-/// Form/JSON body the SDK posts to `POST /__zs/auth/session` (the merged
+/// Form/JSON body the SDK posts to `POST /__zeroship/auth/session` (the merged
 /// code→session exchange; the old `/token` route is gone).
 #[derive(serde::Deserialize, Default)]
 struct TokenRequest {
@@ -274,14 +274,14 @@ struct TokenRequest {
     refresh_token: Option<String>,
 }
 
-/// `POST /__zs/auth/session` — code→token exchange, then identity-only response
+/// `POST /__zeroship/auth/session` — code→token exchange, then identity-only response
 /// (BFF redesign §2.2 + slice R1b). This is the POST method of the MERGED
-/// identity-session resource (the old `POST /__zs/auth/token` is gone).
+/// identity-session resource (the old `POST /__zeroship/auth/token` is gone).
 ///
 /// The browser receives ONLY `{ user, expires_at }` (relay-swapped email,
-/// `pws_` id) + two HttpOnly cookies: the SIGNED `__Host-zs_app_session`
-/// (`zs-sess+jwt`, the live credential, verified locally on the hot path) and
-/// `__Host-zs_app_anchor` (reload-recovery). No `access_token`, no `scope`, no
+/// `pws_` id) + two HttpOnly cookies: the SIGNED `__Host-zeroship_app_session`
+/// (`zeroship-sess+jwt`, the live credential, verified locally on the hot path) and
+/// `__Host-zeroship_app_anchor` (reload-recovery). No `access_token`, no `scope`, no
 /// `id_token`, no `token_type` — and the real email never appears.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn session_post(
@@ -335,7 +335,7 @@ pub async fn session_post(
         return error_response(
             HttpResponse::BadRequest(),
             "unsupported_grant_type",
-            "only authorization_code is supported on POST /__zs/auth/session",
+            "only authorization_code is supported on POST /__zeroship/auth/session",
         );
     }
     let (Some(code), Some(verifier)) = (parsed.code.as_deref(), parsed.code_verifier.as_deref())
@@ -349,7 +349,7 @@ pub async fn session_post(
     // Default redirect_uri to the popup-callback on the app origin (what the
     // SDK uses) when the body omits it.
     let scheme = if state.config.insecure_dev { "http" } else { "https" };
-    let default_redirect = format!("{scheme}://{}/__zs/auth/popup-callback", route.host);
+    let default_redirect = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
     let redirect_uri = parsed.redirect_uri.as_deref().unwrap_or(&default_redirect);
 
     // 1. Code→token exchange (public PKCE client; gateway injects client_id).
@@ -585,13 +585,13 @@ pub async fn session_post(
         }))
 }
 
-/// `GET /__zs/auth/session[?mint=1]` — the identity projection (BFF redesign
+/// `GET /__zeroship/auth/session[?mint=1]` — the identity projection (BFF redesign
 /// §2.2). Returns ONLY `{ user, expires_at }` (relay-swapped email, `pws_` id);
 /// NO JWT in any body; the real email never appears.
 ///
-/// Read path: the live `gateway_sessions` row (via the `__Host-zs_app_session`
+/// Read path: the live `gateway_sessions` row (via the `__Host-zeroship_app_session`
 /// cookie) is the primary source. When that row is gone/expired but the
-/// `__Host-zs_app_anchor` is valid, reload-recovery rotates the server-held
+/// `__Host-zeroship_app_anchor` is valid, reload-recovery rotates the server-held
 /// refresh family, re-creates the gateway session + re-sets the session cookie,
 /// and returns the projection. `?mint=1` forces that rotation.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
@@ -841,7 +841,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
 
 /// Emit the identity-only `{ user, expires_at }` response, refreshing the
 /// breadcrumb and (when reload-recovery re-signed a fresh cookie) re-setting the
-/// `__Host-zs_app_session` cookie. NO JWT in the body — the SPA-facing body
+/// `__Host-zeroship_app_session` cookie. NO JWT in the body — the SPA-facing body
 /// carries only `{ user, expires_at }`; the signed cookie travels in the
 /// `Set-Cookie` header (HttpOnly, never JS-readable).
 fn identity_projection_ok(
@@ -1069,7 +1069,7 @@ async fn do_refresh(
 /// Whether the signed session cookie's `(app, pws_)` family was revoked after
 /// the cookie's `iat` — the SAME per-app family-marker gate the per-request
 /// dispatch cookie arm runs ([`crate::router`]'s
-/// `resolve_app_session_user_header_inner`). Keeps `GET /__zs/auth/session`'s
+/// `resolve_app_session_user_header_inner`). Keeps `GET /__zeroship/auth/session`'s
 /// fast path coherent with dispatch so a revoked user is not reported
 /// logged-in for the cookie's residual ~15 min life.
 ///
@@ -1131,7 +1131,7 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Mint the gateway-SIGNED `zs-sess+jwt` session cookie (BFF slice R1b) from the
+/// Mint the gateway-SIGNED `zeroship-sess+jwt` session cookie (BFF slice R1b) from the
 /// resolved identity facts, and return the `Set-Cookie` value. The cookie is
 /// self-contained: it carries the per-app `pws_` subject, the relay-alias email
 /// (or empty — fail closed), `name`/`avatar`/`email_verified`, the granted
@@ -1186,7 +1186,7 @@ fn sign_session_cookie(
     Ok(crate::oidc_rp::set_app_session_cookie(&token, state.config.insecure_dev))
 }
 
-/// Issue the signed `__Host-zs_app_session` cookie for the INTERACTIVE
+/// Issue the signed `__Host-zeroship_app_session` cookie for the INTERACTIVE
 /// server-rendered OIDC callback (`router::dispatch::handle_auth_callback`), so
 /// BOTH the SDK popup flow and the interactive redirect flow produce the SAME
 /// signed-cookie shape and the per-request cookie arm has exactly ONE
@@ -1194,7 +1194,7 @@ fn sign_session_cookie(
 ///
 /// Derives the per-app `pws_` from the validated id-token `sub` (the global
 /// UUID) under the route's `sector`, reads the live relay alias (fail closed to
-/// empty), and signs the `zs-sess+jwt`. Returns the `Set-Cookie` value, or
+/// empty), and signs the `zeroship-sess+jwt`. Returns the `Set-Cookie` value, or
 /// `Err(msg)` when the route has no `sector` yet / no signing key (the caller
 /// renders the callback error page).
 ///

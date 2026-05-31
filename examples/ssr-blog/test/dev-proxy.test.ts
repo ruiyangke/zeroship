@@ -17,7 +17,7 @@ describe("SSR dev proxy routing", () => {
     expect(shouldProxySsrDevPath("/src/entry-client.tsx?t=123")).toBe(false);
     expect(shouldProxySsrDevPath("/node_modules/.vite/deps/react.js")).toBe(false);
     expect(shouldProxySsrDevPath("/assets/index.js")).toBe(false);
-    expect(shouldProxySsrDevPath("/_zs/v1/listPosts")).toBe(false);
+    expect(shouldProxySsrDevPath("/__zeroship/v1/listPosts")).toBe(false);
     expect(shouldProxySsrDevPath("/__zeroship_runtime")).toBe(false);
     expect(shouldProxySsrDevPath("/favicon.ico")).toBe(false);
     expect(shouldProxySsrDevPath("/robots.txt?cache=0")).toBe(false);
