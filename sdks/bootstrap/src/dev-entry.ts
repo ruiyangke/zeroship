@@ -36,6 +36,7 @@
 import "./dispatcher.js";
 import { installSchema as bundledInstallSchema } from "./install-schema.js";
 import { createFetchHandler } from "./fetch-handler.js";
+import { createDevAuthProvider } from "./dev-auth.js";
 import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";
 
 type InstallSchema = typeof bundledInstallSchema;
@@ -102,6 +103,17 @@ export interface DevEntryOptions {
    * `console.error`. Pass a no-op pair to silence the dev path.
    */
   logger?: { log: (msg: string) => void; error: (msg: string) => void };
+  /**
+   * Reader for the dev-auth env vars (`ZEROSHIP_DEV_AUTH`,
+   * `ZEROSHIP_DEV_AUTH_SECRET`). Defaults to `process.env` lookups in the dev
+   * runtime. The dev-auth provider serves the same-origin `/__zs/auth/*`
+   * endpoints the `@zeroship/auth` client drives; when no secret is present it
+   * stays disabled and `/__zs/auth/*` falls through to the user module. Tests
+   * inject a fake reader. This is the SELF-CONTAINED dev tier of the auth
+   * contract — it is never present in a production `.zship` (this whole module
+   * is dev-only; `runtime-entry.ts` never imports it).
+   */
+  getDevAuthEnv?: (name: string) => string | undefined;
 }
 
 export interface DevEntry {
@@ -315,7 +327,35 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     return dispatchRpcAsync(name, input, ctx);
   }
 
-  const fetchHandler = createFetchHandler(loadNormalized);
+  const userFetchHandler = createFetchHandler(loadNormalized);
+
+  // Dev-tier auth provider — owns the same-origin `/__zs/auth/*` endpoints in
+  // self-contained dev (no gateway/Hydra). Reads its config from the spawn env
+  // (`ZEROSHIP_DEV_AUTH` + `ZEROSHIP_DEV_AUTH_SECRET`, set by the Vite plugin);
+  // `null` when no secret is present (e.g. a hand-run `zeroship serve`), in
+  // which case `/__zs/auth/*` falls through to the user module unchanged.
+  const devAuthEnv =
+    options.getDevAuthEnv ??
+    ((name: string) =>
+      (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+        name
+      ]);
+  const devAuth = createDevAuthProvider(devAuthEnv);
+
+  // Intercept `/__zs/auth/*` BEFORE the user module's fetch + the RPC
+  // fall-through. The runtime's dev serve path (`dev_auth.rs`) has ALREADY
+  // resolved the dev identity from the `__zs_dev_session` cookie and threaded
+  // it through `call_fetch_handler_with_user` for THIS request — so the
+  // app-facing `env.auth.getUser()` / `currentUser()` are populated server-side
+  // independently of these endpoints. These endpoints exist purely to drive the
+  // browser `@zeroship/auth` client (cookie lifecycle + identity projection).
+  const fetchHandler = devAuth
+    ? async (request: Request, env: unknown, ctx: unknown): Promise<Response> => {
+        const pathname = new URL(request.url).pathname;
+        if (devAuth.handles(pathname)) return devAuth.handle(request);
+        return userFetchHandler(request, env, ctx);
+      }
+    : userFetchHandler;
 
   return {
     fetch: fetchHandler,

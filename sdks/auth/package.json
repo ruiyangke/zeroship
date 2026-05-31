@@ -32,7 +32,7 @@
     "build": "tsup",
     "lint:pkg": "publint && attw --pack .",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --import ./tests/setup-dom.ts --test 'tests/*.test.ts' 'tests/*.test.tsx'"
+    "test": "node --import tsx --test 'tests/*.test.ts' && node --import tsx --import ./tests/setup-dom.ts --test 'tests/*.test.tsx'"
   },
   "peerDependencies": {
     "react": ">=18"
@@ -47,6 +47,7 @@
     "@happy-dom/global-registrator": "^20.9.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
+    "@zeroship/bootstrap": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",

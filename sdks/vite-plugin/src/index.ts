@@ -25,6 +25,18 @@ import { buildPlugin } from "./build.js";
 import { nodeCompatPlugin, nodeInjectPlugin } from "./node-compat.js";
 import { zeroshipModulePlugin, zeroshipBootstrapResolverPlugin } from "./zeroship-module.js";
 
+/** One configured dev-auth user (all fields optional; sensible defaults). */
+export interface DevAuthUser {
+  /** Opaque per-app pairwise subject. Defaults to a stable `pws_dev…`. */
+  id?: string;
+  /** Per-app email (or relay alias). Defaults to `dev@localhost`. */
+  email?: string | null;
+  name?: string | null;
+  avatar?: string | null;
+  /** Granted scopes. Defaults to `["openid","profile","email"]`. */
+  scopes?: string[];
+}
+
 export interface ZeroshipOptions {
   /** RPC endpoint path (default: "/_rpc") */
   rpcEndpoint?: string;
@@ -44,6 +56,26 @@ export interface ZeroshipOptions {
    *   prerendered HTML into `dist/` themselves.
    */
   mode?: "full" | "static";
+  /**
+   * Dev-tier auth (the `pnpm dev` impl of the platform auth contract — the
+   * peer of `env.db`→SQLite / `env.kv`→redb). When enabled the dev runtime
+   * serves the same-origin `/__zs/auth/*` endpoints the `@zeroship/auth` client
+   * drives and supplies a logged-in identity to `env.auth.getUser()` /
+   * `currentUser()` server-side — with NO gateway / Hydra / control plane.
+   *
+   * - `true` (the default in dev) — a single built-in dev user
+   *   (`pws_dev…` / `dev@localhost` / scopes `openid profile email`).
+   * - `{ user: {...} }` — one configured dev user.
+   * - `{ users: [...], defaultUserId? }` — multiple users; `/authorize`
+   *   renders a tiny dev picker so you can switch identities / scope sets.
+   * - `false` — disable; `/__zs/auth/*` falls through to the user module and
+   *   `env.auth.getUser()` returns `null` (anonymous).
+   *
+   * Dev-only by construction: this provider lives in the dev runtime
+   * (`@zeroship/bootstrap/dev`) and is structurally absent from any production
+   * `.zship` build.
+   */
+  devAuth?: boolean | DevAuthUser | { user: DevAuthUser } | { users: DevAuthUser[]; defaultUserId?: string };
   /** RPC v2 (`docs/proposals/rpc.md` §1) — server-function discovery + emission. */
   rpc?: {
     /**

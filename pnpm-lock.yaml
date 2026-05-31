@@ -812,6 +812,9 @@ importers:
       '@types/react-dom':
         specifier: 'catalog:'
         version: 19.2.3(@types/react@19.2.14)
+      '@zeroship/bootstrap':
+        specifier: workspace:*
+        version: link:../bootstrap
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types

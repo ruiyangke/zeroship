@@ -160,13 +160,16 @@ Creator-facing namespaces registered today:
 env.db.*       structured database operations (no raw SQL)
 env.storage.*  object storage put/get/delete
 env.kv.*       key-value get/set/delete
+env.auth.*     getUser/requireUser — per-request identity (AuthPlugin, registered
+               on the worker + CLI `zeroship serve` vectors). Fed in prod by the
+               gateway's `ZeroShip-User` header; in dev by the dev-auth provider
+               (see `docs/reference/auth-dev-tier.md`).
 ```
 
 Planned or platform-internal namespaces must be documented as such until the
 runtime actually registers them:
 
 ```
-env.auth.*     planned getUser/requireUser namespace; not registered today
 env.meter.*    billing counter increment
 env.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
@@ -227,6 +230,7 @@ Stable contracts, live in `docs/reference/`:
 - `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
 - `rpc.md` — `@zeroship/rpc`: server wrappers, generated and manual clients, transport, transformers, retries
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
+- `auth-dev-tier.md` — the self-contained `pnpm dev` auth provider (the peer of `env.db`→SQLite / `env.kv`→redb): contract parity, the dev impl, the dev-only-by-construction guarantee
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)
 - `websocket-design.md` — WebSocketPair, RFC 6455

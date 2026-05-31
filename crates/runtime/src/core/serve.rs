@@ -662,7 +662,18 @@ async fn handle_request(
     let cancel = CancelFlag::new();
     let ctx = RequestCtx::new(cancel.clone());
 
-    let outcome = runtime.call_fetch_handler(method, url, request_headers, body, &env, ctx);
+    // Dev-tier auth: in self-contained dev (`ZEROSHIP_DEV=1`) there is no
+    // gateway to HMAC-sign a `ZeroShip-User` header, so the JS dev-auth
+    // provider (`@zeroship/bootstrap/dev`) mints a local `__zs_dev_session`
+    // cookie instead. Resolve the dev identity from that cookie and thread it
+    // through the SAME `call_fetch_handler_with_user` path the worker uses for
+    // the gateway header — identical `user_json` shape, identical native
+    // plumbing (`env.auth.getUser()` + `currentUser()`). Returns `None` (and
+    // dispatches anonymously) outside dev or when no valid cookie is present.
+    let user_json = crate::dev_auth::resolve_dev_user_json(request_headers);
+
+    let outcome =
+        runtime.call_fetch_handler_with_user(method, url, request_headers, body, &env, ctx, user_json);
 
     match outcome {
         FetchOutcome::Response { status, headers, body, logs: _ } => {
