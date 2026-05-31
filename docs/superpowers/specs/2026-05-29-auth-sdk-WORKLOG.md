@@ -37,6 +37,22 @@ grant-gated platform ops (no token minted). Design: `docs/superpowers/specs/2026
 - **R4** grant-gated platform capabilities — now a PREREQUISITE of R5 (was a follow-on). Formalize the server-side
   privileged-capability mechanism (likely @zeroship/control SDK call from the worker with a scoped creator credential,
   not a broad native primitive).
+
+### Console-as-regular-app — APPROVED 2026-05-30. Build: R4 → kernel convergence → R5. Commit-only.
+Design doc: `docs/superpowers/specs/2026-05-30-console-as-regular-app-design.md` (formalizes analysis workflow `wci5rpjec`).
+Verdict: console = REAL regular app on the standard dev+prod runtime, FIRST-PARTY PRIVILEGE TIER. Surprise: the builder is
+ALREADY ZS-standard authored (server.ts discovered, uses @zeroship/kv+ui, has a deploy script) — a cutover, not a port.
+Privilege via R4: server-side `@zeroship/auth/server getAccessToken({audience:control,scopes})` → worker→control
+`POST /internal/power-token` (control_key Rust-side, never JS) → control re-derives user from signed ZeroShip-User header +
+grant-ceiling via AuthzGuard. Control bearer NEVER reaches the browser. SECURITY INVARIANT: an ordinary creator app cannot
+mint an aud=control token. **LOCKED DECISIONS:** (1) SSE-over-fetch sufficient — gateway WS-subscription 501 is NOT a console
+blocker; (2) SHARED worker pool, NO dedicated trusted tier — safety rests on no-ambient-authority (control_key never JS,
+identity re-derived server-side); platform-privileged flag only permits declaring reserved scopes; (3) console on enterprise
+plan (no CPU/wall cap); (4) internal services reached via allowlisted PUBLIC hostnames, no SSRF carve-out. BLOCKER to clear:
+multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin into `crates/worker/src/cache.rs create_plugins()`
+(the console imports @zeroship/kv). Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
+never an HTTP route. Cutover DELETES the bespoke RP (builder oauth.ts/session.ts/oauth-store.ts/control-client.ts) + control
+oidc_rp.rs + require_console_session — same patch; control becomes a pure API resource server. Repoint Caddy console → gateway.
 - **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
 - **R5** console collapse (console = pseudo-app on gateway `/__zs/auth/*`; delete builder bespoke RP).
 - **R4** grant-gated platform capabilities (formalize primitive-side grant check).
