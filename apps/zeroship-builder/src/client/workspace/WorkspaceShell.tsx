@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { getApp } from "../api";
+import { getProject } from "../api";
 import { TopBar } from "./TopBar";
 import { CanvasPills, pillsForTier, type CanvasPillId, type CanvasTier } from "./CanvasPills";
 import { PreviewCanvas } from "./PreviewCanvas";
@@ -11,15 +11,12 @@ import { EnvCanvas } from "./canvases/EnvCanvas";
 import { SettingsCanvas } from "./canvases/SettingsCanvas";
 import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
-import { LiveBanner } from "../components/LiveBanner";
 import { ProductTour } from "../components/ProductTour";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { lsGet, lsSet } from "../lib/storage";
-import { track } from "../lib/analytics";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
-const FIRST_DEPLOY_PREFIX = "zeroship_first_deploy_celebrated_";
 const TIER_KEY = "zeroship_canvas_tier";
 
 function readTier(): CanvasTier {
@@ -68,7 +65,6 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   const [active, setActiveState] = useState<CanvasPillId>(() => routeActive ?? "preview");
   const [tier, setTierState] = useState<CanvasTier>(() => readTier());
   const [tourOpen, setTourOpen] = useState(false);
-  const [showLiveBanner, setShowLiveBanner] = useState(false);
 
   // Tier change side-effects: persist + ensure the active pill stays
   // visible. If the new tier hides the current pill, snap to "preview"
@@ -108,25 +104,9 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
 
   const appQuery = useQuery({
     queryKey: ["app", appId],
-    queryFn: () => getApp(appId!),
+    queryFn: () => getProject(appId!),
     enabled: !!appId,
   });
-
-  // First-deploy celebration (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.4). Fires when:
-  //   - we have an app id,
-  //   - the app's deploy_hash transitions from missing to present,
-  //   - and we haven't celebrated this app before on this browser.
-  // We persist the per-app flag so a refresh after celebrating doesn't
-  // re-fire the banner. The user can also dismiss it explicitly.
-  useEffect(() => {
-    if (!appId || !appQuery.data) return;
-    if (!appQuery.data.deploy_hash) return;
-    const flagKey = `${FIRST_DEPLOY_PREFIX}${appId}`;
-    if (lsGet(flagKey) === "true") return;
-    lsSet(flagKey, "true");
-    setShowLiveBanner(true);
-    track("project.first_deploy", { app_id: appId });
-  }, [appId, appQuery.data]);
 
   // Loading / error gates only fire when we have an appId. Test embeds
   // without an appId bypass them and render the local shell.
@@ -249,14 +229,6 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         }}
       >
         <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-y-auto flex flex-col">
-          {showLiveBanner && appId && appQuery.data && (
-            <LiveBanner
-              appName={appQuery.data.name}
-              appUrl={`${appQuery.data.name}.zeroship.app`}
-              shippedAgo="just now"
-              onDismiss={() => setShowLiveBanner(false)}
-            />
-          )}
           {/* Each canvas is wrapped in its own ErrorBoundary so a render
               crash in one pane does not blank the whole workspace.
               The fallback at the bottom keeps each pill clickable

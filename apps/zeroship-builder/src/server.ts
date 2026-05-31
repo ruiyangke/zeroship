@@ -4,7 +4,7 @@
 // module so the plugin's transform can register them all in one
 // bundled fetch handler.
 
-export * from "./server/apps";
+export * from "./server/projects";
 export * from "./server/sandbox";
 export * from "./server/chat";
 export * from "./server/wizard";

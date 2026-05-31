@@ -143,9 +143,6 @@ importers:
       '@zeroship/auth':
         specifier: workspace:*
         version: link:../../sdks/auth
-      '@zeroship/control':
-        specifier: workspace:*
-        version: link:../../sdks/control
       '@zeroship/kv':
         specifier: workspace:*
         version: link:../../sdks/kv

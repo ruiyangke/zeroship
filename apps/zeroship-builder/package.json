@@ -19,7 +19,6 @@
     "@ai-sdk/react": "^3.0.174",
     "ai": "^6.0.172",
     "@zeroship/auth": "workspace:*",
-    "@zeroship/control": "workspace:*",
     "@zeroship/kv": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",

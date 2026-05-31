@@ -51,13 +51,13 @@ export default function App() {
 
         {/* Pre-coding clarification flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7 / §4.8.2b.
             PUBLIC by design — the wizard collects a brief without auth,
-            and only Begin → createApp triggers a 401 when the user
+            and only Begin → createProject triggers a 401 when the user
             isn't signed in. */}
         <Route path="/new" element={<WizardWorkspace />} />
 
         {/* Project workspace — the WORKSPACE Builder takes over here.
             `:appId` is the typed-id (UUIDv7 + base62) returned by
-            createApp; suffix routes (/preview, /files, /env, …) are
+            createProject; suffix routes (/preview, /files, /env, …) are
             handled inside WorkspaceShell via canvas pills. */}
         <Route
           path="/p/:appId/*"

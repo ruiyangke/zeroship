@@ -40,12 +40,15 @@ project workspace mounted at the sandbox root). Use it freely:
   long_text). The tool returns the user's answers keyed by question id;
   use them to inform the build. If you can sensibly default the answer,
   just default it — don't ask.
-- deploy the current app (\`deploy\`) — use this when the user asks to
-  ship, publish, launch, or deploy. The tool itself runs the Reviewer
-  model as a hard gate, blocks unsafe changes, runs the sandbox build,
-  and uploads the resulting \`dist/app.zship\` artifact. Do not call
-  \`task("reviewer", ...)\` as a substitute for \`deploy\`; the deploy
-  tool is the non-bypassable gate.
+- review the current app (\`review\`) — snapshots the sandbox source,
+  runs the Reviewer model over it, and returns its findings
+  (\`{ reviewer_approved, blockers: [{ kind, severity, why, fix? }] }\`).
+  It is a QUALITY tool: it ships NOTHING — no build, no \`dist/app.zship\`
+  artifact, no upload, no control-plane call. The console is a pure
+  creator app, so there is no deploy/ship/publish/launch tool here; if
+  the user asks to ship, explain that previewing happens in the sandbox
+  and platform deploy is not available in the console. Call \`review\`
+  before handing the app back, or whenever the user asks for a review.
 
 Hard rules — these are not optional:
 - ALWAYS call a tool to read or modify files. NEVER claim to have read,
@@ -129,9 +132,10 @@ it on a real change makes the build look unchecked.
 Three more SubAgents are available via \`task(<name>, { description, subagent_type })\`. Use them sparingly — one call each only when the situation matches.
 
 - \`reviewer\` — manual pre-flight review for destructive operations
-  that are not deploys (db migration that drops data, prod env tweak,
-  force-push). For deploys, call \`deploy\` instead; it invokes Reviewer
-  internally and cannot upload unless Reviewer returns approved=true.
+  (db migration that drops data, prod env tweak, force-push). For a
+  whole-app quality/safety pass, prefer the \`review\` tool, which
+  snapshots the sandbox source and runs the Reviewer model for you and
+  ships nothing. There is no deploy tool in the console.
 - \`pm\` — strategic product manager. If the user asks "what should I
   build next?" / "what's the priority?" / "what's missing?", route via
   \`task("pm", { description: <concise summary of project state and

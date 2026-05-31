@@ -15,31 +15,32 @@ import type { UIMessage } from "ai";
 // ─── Project Lifecycle Procedures ─────────────────────────────────
 // Re-export server functions as plain async functions. The vite-plugin
 // transforms each server-module export into an RPC stub on the client
-// side (see sdks/vite-plugin/src/transform.ts:317-329 — single-input
-// wire). Callers `import { createApp } from "../api"` and call them
-// like normal async functions; the wire is `/__zeroship/v1/apps.<name>`.
+// side (see sdks/vite-plugin/src/transform.ts — single-input wire).
+// Callers `import { createProject } from "../api"` and call them like
+// normal async functions; the wire is `/__zeroship/v1/projects.<name>`.
+//
+// The console is a PURE creator app: projects live in the builder's KV
+// store (per-thread sandbox sessions), and env + logs are files in the
+// project's sandbox. There is no control plane — no deploy, no plan, no
+// secret vault, no control-backed logs.
 //
 // Note on positional args: the wire forwards `args[0]` only. Every
 // proc that needs more than one input takes a single object input
-// (e.g. `createApp({ name, plan_id })`).
+// (e.g. `setEnv({ appId, key, value })`).
 export {
-  listApps,
-  getApp,
-  createApp,
-  deleteApp,
-  updatePlan,
-  getAppLogs,
-  listVars,
-  setVar,
-  deleteVar,
-  listSecrets,
-  setSecret,
-  deleteSecret,
-  archiveApp,
-  unarchiveApp,
-  type AppRecord,
+  listProjects,
+  getProject,
+  createProject,
+  deleteProject,
+  archiveProject,
+  unarchiveProject,
+  getEnv,
+  setEnv,
+  deleteEnv,
+  getLogs,
+  type ProjectRecord,
   type EnvVar,
-} from "../server/apps";
+} from "../server/projects";
 
 // Sandbox file procs used by the FilesCanvas. Both take object input
 // so the single-input RPC wire delivers every field.

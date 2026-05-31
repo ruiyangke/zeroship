@@ -9,16 +9,17 @@
 // sandbox provisioning happen synchronously and we navigate to
 // /p/<id>/preview where the WORKSPACE Builder takes over. We:
 //   1. derive a project name from the brief idea (first 3 words),
-//   2. POST createApp({ name }) to the control plane,
+//   2. createProject({ name }) — a KV-local project (per-thread sandbox
+//      session); the console is a pure creator app with no control plane,
 //   3. stash the brief in sessionStorage under `zeroship_pending_brief`,
-//   4. navigate to /p/<app.id>/preview where WorkspaceShell consumes
+//   4. navigate to /p/<project.id>/preview where WorkspaceShell consumes
 //      the stash and seeds ChatRail with a synthesised first message.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useChat } from "@ai-sdk/react";
 import { useMutation } from "@tanstack/react-query";
-import { createApp, rpc, wizardTransport } from "../api";
+import { createProject, rpc, wizardTransport } from "../api";
 import { NotebookPrompt, CmdEnterHint } from "../components/NotebookPrompt";
 import { Button } from "../components/Button";
 import { ChatMessages } from "../workspace/chat/ChatMessages";
@@ -36,13 +37,12 @@ const FIRST_RUN_KEY = "zeroship_first_run";
 const STUCK_TIMEOUT_MS = 60_000;
 
 /**
- * Derive a project name from a free-text idea. The control plane
- * validates `name` as 1-64 chars of alphanumeric / hyphen /
- * underscore — no spaces, no punctuation — AND enforces uniqueness
- * (UNIQUE constraint on apps.name). Take the first three words,
+ * Derive a project name from a free-text idea. Keep it to a tidy
+ * 1-64-char slug (alphanumeric + hyphen): take the first three words,
  * lowercase, slugified to a hyphen-joined string, then suffix with a
- * short random token so two projects from similar ideas don't
- * collide. Falls back to "untitled" when the idea is empty.
+ * short random token so two projects from similar ideas don't collide.
+ * Falls back to "untitled" when the idea is empty. (The id is what the
+ * route + sandbox key off; the name is purely a display label now.)
  */
 function deriveProjectName(idea: string): string {
   const words = idea.trim().split(/\s+/).filter(Boolean).slice(0, 3);
@@ -129,12 +129,12 @@ export function WizardWorkspace() {
     onError: (err) => console.error("[wizard]", err),
   });
 
-  // createApp mutation — `useMutation` gives us isPending + error
+  // createProject mutation — `useMutation` gives us isPending + error
   // without manual state. On success we stash the brief and navigate;
   // on failure the error band at the bottom of the page renders it.
   const createMutation = useMutation({
     mutationFn: async (vars: { name: string; brief: Brief }) => {
-      const app = await createApp({ name: vars.name });
+      const app = await createProject({ name: vars.name });
       return { app, brief: vars.brief };
     },
     onSuccess: ({ app, brief }) => {

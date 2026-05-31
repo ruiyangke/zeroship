@@ -119,9 +119,10 @@ struct ControlCli {
     /// Seed the console (`apps/zeroship-builder`) as a platform-owned regular
     /// app at startup: upsert its `control.apps` row (enterprise plan), its
     /// public-PKCE OAuth client (explicit `sector_identifier` = console host),
-    /// ingest the prebuilt `.zship`, and mint the server-only
-    /// `ZEROSHIP_CONTROL_SERVICE_TOKEN` PAT. In-process + idempotent; NEVER an HTTP
-    /// route. Off by default.
+    /// ingest the prebuilt `.zship`, and forward the console's sandbox runtime
+    /// env (`OPENAI_API_KEY`, `SANDBOX_*`, `ZEROSHIP_SDK_REGISTRY`). The console
+    /// is a pure creator app — it holds no control credential, so the seed mints
+    /// no PAT. In-process + idempotent; NEVER an HTTP route. Off by default.
     #[arg(long = "bootstrap-console", action = clap::ArgAction::SetTrue)]
     bootstrap_console: bool,
 
@@ -827,8 +828,10 @@ fn main() -> std::io::Result<()> {
     // Console seed (R5): make the console deployable + served as a platform-owned
     // regular app. In-process + idempotent + trusted; NEVER an HTTP route.
     // Runs AFTER migrate (Liquibase, out of band), AFTER the registry / env
-    // store / blob store / PAT issuer / auth-pg are up, and BEFORE AppState is
-    // constructed (registry + env_store are moved into it below).
+    // store / blob store are up, and BEFORE AppState is constructed (registry +
+    // env_store are moved into it below). The console is a pure creator app, so
+    // the seed touches only the control schema (apps / oauth / env) — no PAT, no
+    // auth-schema service principal.
     //
     // Compose wiring (R5 cutover — DONE): the console `.zship` is built in the
     // Docker `sdks` stage and COPYed to `/opt/zeroship/console/app.zship`; the
@@ -868,9 +871,7 @@ fn main() -> std::io::Result<()> {
             &registry,
             &env_store,
             &blob_store,
-            &pat_issuer,
             &mut control_pg,
-            &auth_pg,
         )
         .await
         .map_err(|err| {

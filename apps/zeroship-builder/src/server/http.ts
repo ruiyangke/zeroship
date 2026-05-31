@@ -8,10 +8,11 @@
 // So `builderFetch` no longer owns `/auth/{login,callback,logout}`; the
 // retired RP modules (oauth.ts / session.ts / oauth-store.ts) are gone.
 // Identity arrives on every request as the gateway-forwarded
-// `ZeroShip-User` envelope, exposed to app code as `currentUser()` and
-// consumed by `control-client.ts`. This handler only forwards the live
-// preview proxy; the RPC procedures are dispatched by the runtime from
-// the `server.ts` re-exports.
+// `ZeroShip-User` envelope, exposed to app code as `currentUser()`. The
+// console is a pure creator app — it holds no control credential and
+// makes no control calls. This handler only forwards the live preview
+// proxy; the RPC procedures are dispatched by the runtime from the
+// `server.ts` re-exports.
 
 import { previewFetch } from "./preview-proxy.js";
 

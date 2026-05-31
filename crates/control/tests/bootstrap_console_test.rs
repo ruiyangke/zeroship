@@ -7,7 +7,9 @@
 //! synthesized archive through the SAME `zeroship_bundle::ingest` the deploy
 //! handler uses), with a real-HTTP mock Hydra admin standing in only for the
 //! Hydra transport. It then asserts every seeded artifact and that a second run
-//! is idempotent (no error, no duplicate, no PAT re-mint).
+//! is idempotent (no error, no duplicate). It also asserts the **pure creator
+//! app** invariant: the seed mints NO control PAT and injects NO
+//! `ZEROSHIP_CONTROL_SERVICE_TOKEN` / `ZEROSHIP_CONTROL_URL` into the console env.
 //!
 //! REQUIRES a Postgres with the `db/changelog` migrations applied:
 //!   - `CONTROL_TEST_DB` / `AUTH_DB_URL` / `PG_TEST_URL` — the DSN.
@@ -29,12 +31,16 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::app_oauth_client::client_id_for_app;
 use zeroship_control::bootstrap_console::{
-    bootstrap_console, console_app_id, console_app_name, console_service_pat_id,
-    console_service_user_id, ConsoleBootstrapConfig, ConsoleBootstrapStatus, CONSOLE_PLAN_ID,
-    SERVICE_TOKEN_ENV_KEY,
+    bootstrap_console, console_app_id, console_app_name, ConsoleBootstrapConfig,
+    ConsoleBootstrapStatus, CONSOLE_PLAN_ID,
 };
-use zeroship_control::token_handlers::PatIssuer;
 use zeroship_control::{EnvStore, Registry};
+
+/// The server-only control credential the seed USED to mint+inject. The console
+/// is now a pure creator app, so this key must NOT appear in the console env.
+/// Kept as a local literal (the const was deleted from the seed module) so the
+/// regression test can prove its ABSENCE.
+const SERVICE_TOKEN_ENV_KEY: &str = "ZEROSHIP_CONTROL_SERVICE_TOKEN";
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB")
@@ -280,25 +286,13 @@ async fn mock_update_client(
 // ---------------------------------------------------------------------------
 
 /// Remove every seeded row for `host` so the test is hermetic across reruns.
-/// Ordered to respect FKs (permission_tokens → users; app_oauth_clients +
-/// app_secrets/expose cascade with apps; oauth_clients after app_oauth_clients).
+/// The console is a pure creator app: the seed writes only control-schema rows
+/// (apps + cascading oauth/env, plus the standalone oauth_clients identity row).
+/// It mints NO PAT and creates NO auth-schema service principal, so there is no
+/// `permission_tokens` / `auth.users` / `platform.roles` row to clean up.
 async fn cleanup(control: &Client, host: &str) {
     let app_id = console_app_id(host);
     let client_id = client_id_for_app(&app_id);
-    let user_id = console_service_user_id(host);
-    let token_id = console_service_pat_id(host);
-    let _ = control
-        .execute(
-            "DELETE FROM control.authz_decisions WHERE token_id = $1 OR user_id = $2",
-            &[&token_id, &user_id],
-        )
-        .await;
-    let _ = control
-        .execute(
-            "DELETE FROM control.permission_tokens WHERE id = $1",
-            &[&token_id],
-        )
-        .await;
     // Deleting the apps row cascades app_oauth_clients / app_secrets /
     // app_env_expose / app_scope_defs.
     let _ = control
@@ -309,12 +303,6 @@ async fn cleanup(control: &Client, host: &str) {
             "DELETE FROM control.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
-        .await;
-    let _ = control
-        .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&user_id])
-        .await;
-    let _ = control
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
         .await;
 }
 
@@ -334,8 +322,6 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     let host = format!("console-{}.zeroship.localhost", Uuid::new_v4().simple());
     let app_id = console_app_id(&host);
     let client_id = client_id_for_app(&app_id);
-    let user_id = console_service_user_id(&host);
-    let token_id = console_service_pat_id(&host);
 
     // Real components — the SAME types control boots with.
     let registry = Registry::new(&url).await.expect("registry");
@@ -345,7 +331,9 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     std::fs::create_dir_all(&blob_root).expect("mkdir blob root");
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let pat_issuer = PatIssuer::dev_insecure();
+    // A connection to assert the ABSENCE of any console PAT row (the console is a
+    // pure creator app — the seed mints none). `permission_tokens` lives in the
+    // control schema; in dev both DSNs point at one database.
     let auth_pg = pg(&url).await;
     let mut control_pg = pg(&url).await;
 
@@ -361,12 +349,14 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
 
     // ---- Source the console runtime env from the CONTROL process env. ----
     // The seed reads each `CONSOLE_RUNTIME_ENV` source var via `std::env::var`.
-    // Set a representative mix (two credentials + two non-secret URLs) and
+    // Set a representative mix (two credentials + one non-secret URL) and
     // DELIBERATELY leave `ZEROSHIP_SDK_REGISTRY` UNSET so we can assert the
     // skip-unset behaviour (it must NOT be written, and the seed must still
-    // succeed). Values are unique per run so parallel binaries can't collide.
-    // This binary's single test runs under `--test-threads=1`, so the
-    // process-global `set_var` is safe here.
+    // succeed). We ALSO set `ZEROSHIP_CONTROL_URL` in the process env even though
+    // the console is a pure creator app — to PROVE the seed no longer forwards it
+    // (it must not appear in the console env). Values are unique per run so
+    // parallel binaries can't collide. This binary's single test runs under
+    // `--test-threads=1`, so the process-global `set_var` is safe here.
     let openai_val = format!("sk-test-{}", Uuid::new_v4().simple());
     let sandbox_token_val = format!("sbx-{}", Uuid::new_v4().simple());
     let sandbox_url_val = "http://sandbox.test.local:9091".to_string();
@@ -374,7 +364,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     std::env::set_var("OPENAI_API_KEY", &openai_val);
     std::env::set_var("SANDBOX_TOKEN", &sandbox_token_val);
     std::env::set_var("SANDBOX_URL", &sandbox_url_val);
-    std::env::set_var("ZEROSHIP_CONTROL_URL", &control_url_val);
+    std::env::set_var("ZEROSHIP_CONTROL_URL", &control_url_val); // must NOT be forwarded
     std::env::remove_var("ZEROSHIP_SDK_REGISTRY"); // the unset-skip case
 
     let cfg = ConsoleBootstrapConfig {
@@ -386,21 +376,12 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     };
 
     // ---- First run: seeds everything. ----
-    let first = bootstrap_console(
-        &cfg,
-        &registry,
-        &env_store,
-        &blob_store,
-        &pat_issuer,
-        &mut control_pg,
-        &auth_pg,
-    )
-    .await
-    .expect("first seed run");
+    let first = bootstrap_console(&cfg, &registry, &env_store, &blob_store, &mut control_pg)
+        .await
+        .expect("first seed run");
     assert_eq!(first.status, ConsoleBootstrapStatus::Seeded);
     assert_eq!(first.app_id, app_id);
     assert_eq!(first.client_id, client_id);
-    assert!(first.minted_new_pat, "first run mints the service PAT");
 
     // (1) control.apps row on the enterprise plan, with deploy_hash + manifest.
     let apps = control_pg
@@ -478,61 +459,75 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     );
     assert!(entry.deploy_hash.is_some(), "route carries a deploy_hash");
 
-    // (4) Service principal + admin role + PAT row + ZEROSHIP_CONTROL_SERVICE_TOKEN.
-    let role = auth_pg
+    // (4) REGRESSION — the console is a PURE CREATOR APP: it holds NO control
+    //     credential. The seed must mint NO PAT and inject NO
+    //     `ZEROSHIP_CONTROL_SERVICE_TOKEN`. (Pre-change, BOTH were present: a
+    //     broadly-privileged `control.permission_tokens` row owned by a derived
+    //     console service principal, plus an encrypted+exposed service-token env
+    //     secret. These assertions FAIL on the pre-change seed.)
+
+    // (4a) NO console PAT row. There is no derived token id any more, so we prove
+    //      absence over the whole console owner surface: no `permission_tokens`
+    //      row references the console app's host-derived service email pattern,
+    //      and — since the seed creates no `auth.users`/`platform.roles` service
+    //      principal at all — none of those rows exist for this host either.
+    let console_user_email = format!("console-service@{host}");
+    let svc_users = auth_pg
         .query(
-            "SELECT role FROM platform.roles WHERE user_id = $1",
-            &[&user_id],
+            "SELECT id FROM auth.users WHERE email = $1",
+            &[&console_user_email],
         )
         .await
-        .expect("query platform role");
-    assert_eq!(role.len(), 1, "service principal has a platform role");
-    assert_eq!(role[0].get::<_, String>("role"), "admin");
-
-    let pat = auth_pg
+        .expect("query service users");
+    assert!(
+        svc_users.is_empty(),
+        "pure creator console seeds NO service principal (auth.users) — found {} row(s)",
+        svc_users.len()
+    );
+    let n_pat: i64 = auth_pg
         .query(
-            "SELECT owner_id, kind, revoked_at FROM control.permission_tokens WHERE id = $1",
-            &[&token_id],
+            "SELECT COUNT(*)::BIGINT AS n FROM control.permission_tokens pt \
+             JOIN auth.users u ON u.id = pt.owner_id \
+             WHERE u.email = $1",
+            &[&console_user_email],
         )
         .await
-        .expect("query PAT row");
-    assert_eq!(pat.len(), 1, "service PAT row exists");
-    assert_eq!(pat[0].get::<_, Uuid>("owner_id"), user_id);
-    assert_eq!(pat[0].get::<_, String>("kind"), "pat");
-    assert!(pat[0].get::<_, Option<chrono::DateTime<chrono::Utc>>>("revoked_at").is_none());
+        .expect("count console PAT rows")[0]
+        .get("n");
+    assert_eq!(
+        n_pat, 0,
+        "pure creator console seeds NO control PAT (permission_tokens) for {console_user_email}"
+    );
 
-    // The token is stored as a SECRET (encrypted), not a plaintext var.
+    // (4b) NO service-token env on the console app — not a secret, not a var, not
+    //      exposed, not in the merged worker env.
     let secret_names = env_store.list_secret_names(app_id).await.expect("list secrets");
     assert!(
-        secret_names.iter().any(|n| n == SERVICE_TOKEN_ENV_KEY),
-        "ZEROSHIP_CONTROL_SERVICE_TOKEN stored as a secret: {secret_names:?}"
+        !secret_names.iter().any(|n| n == SERVICE_TOKEN_ENV_KEY),
+        "ZEROSHIP_CONTROL_SERVICE_TOKEN must NOT be a secret on a pure creator console: {secret_names:?}"
     );
     let vars = env_store.list_vars(app_id).await.expect("list vars");
     assert!(
         !vars.iter().any(|(k, _)| k == SERVICE_TOKEN_ENV_KEY),
-        "token must NOT be a plaintext var"
+        "ZEROSHIP_CONTROL_SERVICE_TOKEN must NOT be a var: {vars:?}"
     );
-    // It is opted into the expose list so the worker surfaces it in process.env
-    // (server-only — never the browser).
     let expose = env_store.list_expose(app_id).await.expect("list expose");
     assert!(
-        expose.iter().any(|k| k == SERVICE_TOKEN_ENV_KEY),
-        "ZEROSHIP_CONTROL_SERVICE_TOKEN exposed to process.env: {expose:?}"
+        !expose.iter().any(|k| k == SERVICE_TOKEN_ENV_KEY),
+        "ZEROSHIP_CONTROL_SERVICE_TOKEN must NOT be exposed: {expose:?}"
     );
-    // The merged worker env surfaces the decrypted token value (non-empty,
-    // looks like a PAT JWT — three dot-separated segments).
     let worker_env = env_store
         .merged_env_for_worker(app_id)
         .await
         .expect("merged worker env");
-    let token_val = worker_env["secrets"][SERVICE_TOKEN_ENV_KEY]
-        .as_str()
-        .expect("token present in merged secrets");
-    assert_eq!(token_val.split('.').count(), 3, "looks like a JWT");
+    assert!(
+        worker_env["secrets"].get(SERVICE_TOKEN_ENV_KEY).is_none()
+            && worker_env["vars"].get(SERVICE_TOKEN_ENV_KEY).is_none(),
+        "ZEROSHIP_CONTROL_SERVICE_TOKEN must NOT surface in the worker env"
+    );
 
     // (5) FULL server-side runtime env forwarded from the control process env.
-    //     Re-read the live env-store surfaces (they were populated alongside the
-    //     service token above).
+    //     Re-read the live env-store surfaces.
     let secret_names = env_store.list_secret_names(app_id).await.expect("list secrets");
     let vars = env_store.list_vars(app_id).await.expect("list vars");
     let expose = env_store.list_expose(app_id).await.expect("list expose");
@@ -576,10 +571,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
 
     // (5b) Non-secret config → plaintext VAR (always in process.env; no expose
     //      entry needed), retrievable server-side, NOT stored as a secret.
-    for (key, expected) in [
-        ("SANDBOX_URL", &sandbox_url_val),
-        ("ZEROSHIP_CONTROL_URL", &control_url_val),
-    ] {
+    for (key, expected) in [("SANDBOX_URL", &sandbox_url_val)] {
         assert!(
             vars.iter().any(|(k, v)| k == key && v == expected),
             "{key} stored as a plaintext var with the forwarded value: {vars:?}"
@@ -599,7 +591,30 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         );
     }
 
-    // (5c) UNSET source var is SKIPPED — not written as a secret, var, or
+    // (5c) REGRESSION — `ZEROSHIP_CONTROL_URL` is set in the control process env
+    //      (above), but a pure creator console makes ZERO control calls, so the
+    //      seed must NOT forward it: not a var, not a secret, not exposed, not in
+    //      the worker env. (Pre-change it WAS forwarded as a plaintext var.)
+    let _ = &control_url_val; // value set in the process env; asserted absent here
+    assert!(
+        !vars.iter().any(|(k, _)| k == "ZEROSHIP_CONTROL_URL"),
+        "ZEROSHIP_CONTROL_URL must NOT be forwarded as a var on a pure creator console: {vars:?}"
+    );
+    assert!(
+        !secret_names.iter().any(|n| n == "ZEROSHIP_CONTROL_URL"),
+        "ZEROSHIP_CONTROL_URL must NOT be a secret: {secret_names:?}"
+    );
+    assert!(
+        !expose.iter().any(|k| k == "ZEROSHIP_CONTROL_URL"),
+        "ZEROSHIP_CONTROL_URL must NOT be exposed: {expose:?}"
+    );
+    assert!(
+        worker_env["vars"].get("ZEROSHIP_CONTROL_URL").is_none()
+            && worker_env["secrets"].get("ZEROSHIP_CONTROL_URL").is_none(),
+        "ZEROSHIP_CONTROL_URL must NOT surface in the worker env"
+    );
+
+    // (5d) UNSET source var is SKIPPED — not written as a secret, var, or
     //      expose entry — and the seed still succeeded (asserted above).
     assert!(
         !secret_names.iter().any(|n| n == "ZEROSHIP_SDK_REGISTRY"),
@@ -614,24 +629,12 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         "unset ZEROSHIP_SDK_REGISTRY must not be exposed"
     );
 
-    // ---- Second run: idempotent. No error, no duplicate, no PAT re-mint. ----
-    let second = bootstrap_console(
-        &cfg,
-        &registry,
-        &env_store,
-        &blob_store,
-        &pat_issuer,
-        &mut control_pg,
-        &auth_pg,
-    )
-    .await
-    .expect("second seed run is idempotent");
+    // ---- Second run: idempotent. No error, no duplicate. ----
+    let second = bootstrap_console(&cfg, &registry, &env_store, &blob_store, &mut control_pg)
+        .await
+        .expect("second seed run is idempotent");
     assert_eq!(second.status, ConsoleBootstrapStatus::Seeded);
     assert_eq!(second.app_id, app_id);
-    assert!(
-        !second.minted_new_pat,
-        "second run reuses the live PAT (no re-mint)"
-    );
 
     // Exactly one of each row — no duplicates.
     let n_apps: i64 = control_pg
@@ -649,15 +652,18 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .expect("count ext")[0]
         .get("n");
     assert_eq!(n_ext, 1, "no duplicate app_oauth_clients row");
+    // Still no PAT and no service-token secret after the re-run.
     let n_pat: i64 = auth_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.permission_tokens WHERE id = $1",
-            &[&token_id],
+            "SELECT COUNT(*)::BIGINT AS n FROM control.permission_tokens pt \
+             JOIN auth.users u ON u.id = pt.owner_id \
+             WHERE u.email = $1",
+            &[&console_user_email],
         )
         .await
         .expect("count pat")[0]
         .get("n");
-    assert_eq!(n_pat, 1, "no duplicate PAT row");
+    assert_eq!(n_pat, 0, "still no console PAT row after re-run");
     let n_secret: i64 = control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
@@ -666,9 +672,9 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .await
         .expect("count secret")[0]
         .get("n");
-    assert_eq!(n_secret, 1, "no duplicate service-token secret");
+    assert_eq!(n_secret, 0, "still no service-token secret after re-run");
 
-    // (5d) Runtime-env idempotency: each forwarded secret has exactly ONE row
+    // (5e) Runtime-env idempotency: each forwarded secret has exactly ONE row
     //      after the re-run (upsert, not insert), and the decrypted value is
     //      unchanged. Plaintext vars are likewise still present with the same
     //      value, and the unset var is still absent.
@@ -700,25 +706,32 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         worker_env2["vars"]["SANDBOX_URL"].as_str(),
         Some(sandbox_url_val.as_str())
     );
-    assert_eq!(
-        worker_env2["vars"]["ZEROSHIP_CONTROL_URL"].as_str(),
-        Some(control_url_val.as_str())
+    // The control URL stays absent across the re-run (pure creator app).
+    assert!(
+        worker_env2["vars"].get("ZEROSHIP_CONTROL_URL").is_none()
+            && worker_env2["secrets"].get("ZEROSHIP_CONTROL_URL").is_none(),
+        "ZEROSHIP_CONTROL_URL stays absent across re-run"
     );
     assert!(
         worker_env2["secrets"].get("ZEROSHIP_SDK_REGISTRY").is_none()
             && worker_env2["vars"].get("ZEROSHIP_SDK_REGISTRY").is_none(),
         "unset ZEROSHIP_SDK_REGISTRY stays absent across re-run"
     );
-    // The expose list carries exactly the three server-only secrets (the
-    // service token + the two forwarded credentials) and no var keys.
+    // The expose list carries exactly the two forwarded credentials and no var
+    // keys — and crucially NO service token (the console holds no credential).
     let expose2 = env_store.list_expose(app_id).await.expect("list expose 2");
-    for k in [SERVICE_TOKEN_ENV_KEY, "OPENAI_API_KEY", "SANDBOX_TOKEN"] {
+    for k in ["OPENAI_API_KEY", "SANDBOX_TOKEN"] {
         assert!(expose2.iter().any(|e| e == k), "{k} exposed: {expose2:?}");
     }
-    for k in ["SANDBOX_URL", "ZEROSHIP_CONTROL_URL", "ZEROSHIP_SDK_REGISTRY"] {
+    for k in [
+        SERVICE_TOKEN_ENV_KEY,
+        "SANDBOX_URL",
+        "ZEROSHIP_CONTROL_URL",
+        "ZEROSHIP_SDK_REGISTRY",
+    ] {
         assert!(
             !expose2.iter().any(|e| e == k),
-            "{k} (var/unset) must not be in the expose list: {expose2:?}"
+            "{k} (token/var/unset) must not be in the expose list: {expose2:?}"
         );
     }
 
@@ -727,17 +740,10 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         enabled: false,
         ..cfg.clone()
     };
-    let disabled = bootstrap_console(
-        &disabled_cfg,
-        &registry,
-        &env_store,
-        &blob_store,
-        &pat_issuer,
-        &mut control_pg,
-        &auth_pg,
-    )
-    .await
-    .expect("disabled seed run");
+    let disabled =
+        bootstrap_console(&disabled_cfg, &registry, &env_store, &blob_store, &mut control_pg)
+            .await
+            .expect("disabled seed run");
     assert_eq!(disabled.status, ConsoleBootstrapStatus::Disabled);
 
     // Cleanup.

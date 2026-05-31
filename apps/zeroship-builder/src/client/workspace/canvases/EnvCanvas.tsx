@@ -1,9 +1,11 @@
-// ─── EnvCanvas — variables + secrets (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.6) ────────────────
+// ─── EnvCanvas — the project `.env` (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.6) ────────────────────
 //
-// Two sections in one canvas. Variables render values inline; secrets
-// only render the key (the control plane never exposes the value, so
-// the form is set-only — there is no "edit" path, only "rotate by
-// re-setting"). Both use the existing apps.* RPCs.
+// The console is a PURE creator app: a preview sandbox has no secret
+// vault, so the old vars+secrets split collapses to ONE `.env` file in
+// the sandbox project root. This canvas reads/writes it via getEnv /
+// setEnv / deleteEnv (server-side read-modify-write of `.env` over the
+// sandbox files API). Vite auto-restarts the dev server on `.env`
+// change, so edits apply on the next preview reload.
 //
 // Note on the wire: set/delete procedures use one object input so the
 // generated RPC stubs can forward every field over the single-input
@@ -11,14 +13,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  listVars,
-  setVar,
-  deleteVar,
-  listSecrets,
-  setSecret,
-  deleteSecret,
-} from "../../api";
+import { getEnv, setEnv, deleteEnv } from "../../api";
 import { StampButton } from "../../components/StampButton";
 
 export interface EnvCanvasProps {
@@ -29,21 +24,19 @@ export function EnvCanvas({ appId }: EnvCanvasProps) {
   return (
     <div data-testid="env-canvas" className="h-full overflow-auto bg-paper">
       <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
-        <Variables appId={appId} />
-        <div className="h-12" />
-        <Secrets appId={appId} />
+        <Environment appId={appId} />
       </div>
     </div>
   );
 }
 
-// ─── variables (key + value, both visible) ───────────────────────
+// ─── environment (key + value lines from the project `.env`) ──────
 
-function Variables({ appId }: { appId: string }) {
+function Environment({ appId }: { appId: string }) {
   const qc = useQueryClient();
-  const { data: vars, isLoading } = useQuery({
-    queryKey: ["env-vars", appId],
-    queryFn: () => listVars(appId),
+  const { data: env, isLoading } = useQuery({
+    queryKey: ["env", appId],
+    queryFn: () => getEnv(appId),
     retry: false,
   });
   const [adding, setAdding] = useState(false);
@@ -51,30 +44,31 @@ function Variables({ appId }: { appId: string }) {
   const [newVal, setNewVal] = useState("");
 
   const add = useMutation({
-    mutationFn: async () => setVar({ appId, key: newKey, value: newVal }),
+    mutationFn: async () => setEnv({ appId, key: newKey, value: newVal }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["env-vars", appId] });
+      qc.invalidateQueries({ queryKey: ["env", appId] });
       setAdding(false);
       setNewKey("");
       setNewVal("");
     },
   });
   const del = useMutation({
-    mutationFn: async (key: string) => deleteVar({ appId, key }),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["env-vars", appId] }),
+    mutationFn: async (key: string) => deleteEnv({ appId, key }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["env", appId] }),
   });
 
-  const items = vars?.vars ?? [];
+  const items = env?.vars ?? [];
 
   return (
     <section data-testid="env-variables-section">
       <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-        Variables
+        Environment
       </h2>
       <p className="font-serif text-[14px] text-ink-soft mb-4 leading-[1.55]">
-        Settings that are fine to share — URLs, feature flags, defaults.
-        Anyone with your code can see these.
+        Keys your app reads at runtime — URLs, feature flags, API keys.
+        These live in a <code className="font-mono text-[12.5px]">.env</code>{" "}
+        file in your project. Saving one restarts the dev server so the
+        next preview reload picks it up.
       </p>
 
       <div>
@@ -86,13 +80,12 @@ function Variables({ appId }: { appId: string }) {
             data-testid="env-variables-empty"
             className="font-serif italic text-pencil py-3"
           >
-            Nothing here yet — variables are the public knobs your app reads at runtime.
+            Nothing here yet — add the keys your app reads at runtime.
           </div>
         )}
         {items.map((v) => (
           <Row
             key={v.key}
-            mono
             name={v.key}
             value={v.value}
             onDelete={() => del.mutate(v.key)}
@@ -114,7 +107,6 @@ function Variables({ appId }: { appId: string }) {
             saving={add.isPending}
             valuePlaceholder="value"
             keyPlaceholder="VAR_NAME"
-            type="text"
             testidPrefix="env-add-var"
           />
         ) : (
@@ -132,115 +124,16 @@ function Variables({ appId }: { appId: string }) {
   );
 }
 
-// ─── secrets (key only — values are server-only) ────────────────
-
-function Secrets({ appId }: { appId: string }) {
-  const qc = useQueryClient();
-  const { data: secrets, isLoading } = useQuery({
-    queryKey: ["env-secrets", appId],
-    queryFn: () => listSecrets(appId),
-    retry: false,
-  });
-  const [adding, setAdding] = useState(false);
-  const [newKey, setNewKey] = useState("");
-  const [newVal, setNewVal] = useState("");
-
-  const add = useMutation({
-    mutationFn: async () => setSecret({ appId, key: newKey, value: newVal }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["env-secrets", appId] });
-      setAdding(false);
-      setNewKey("");
-      setNewVal("");
-    },
-  });
-  const del = useMutation({
-    mutationFn: async (key: string) => deleteSecret({ appId, key }),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["env-secrets", appId] }),
-  });
-
-  const items = secrets?.secrets ?? [];
-
-  return (
-    <section data-testid="env-secrets-section">
-      <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-        <em className="italic">Secrets</em>
-      </h2>
-      <p className="font-serif text-[14px] text-ink-soft mb-4 leading-[1.55]">
-        Things you don't want public — API keys, passwords, tokens.
-        We encrypt these. They're never shown again after you set them.
-      </p>
-
-      <div>
-        {isLoading && (
-          <div className="font-serif italic text-pencil py-2">loading…</div>
-        )}
-        {!isLoading && items.length === 0 && !adding && (
-          <div
-            data-testid="env-secrets-empty"
-            className="font-serif italic text-pencil py-3"
-          >
-            Nothing here yet — secrets are the keys you'd never paste in chat.
-          </div>
-        )}
-        {items.map((k) => (
-          <Row
-            key={k}
-            secret
-            name={k}
-            value="·····················"
-            onDelete={() => del.mutate(k)}
-            actionLabel="rotate"
-          />
-        ))}
-
-        {adding ? (
-          <AddRow
-            keyValue={newKey}
-            valValue={newVal}
-            onKeyChange={(s) => setNewKey(s.toUpperCase())}
-            onValChange={setNewVal}
-            onCancel={() => {
-              setAdding(false);
-              setNewKey("");
-              setNewVal("");
-            }}
-            onSave={() => add.mutate()}
-            saving={add.isPending}
-            valuePlaceholder="secret value"
-            keyPlaceholder="SECRET_NAME"
-            type="password"
-            testidPrefix="env-add-secret"
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setAdding(true)}
-            data-testid="env-add-secret"
-            className="mt-3 font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
-          >
-            + Add a secret
-          </button>
-        )}
-      </div>
-    </section>
-  );
-}
-
 // ─── shared row primitives ───────────────────────────────────────
 
 function Row({
   name,
   value,
-  secret,
   onDelete,
   actionLabel = "delete",
 }: {
   name: string;
   value: string;
-  secret?: boolean;
-  mono?: boolean;
   onDelete: () => void;
   actionLabel?: string;
 }) {
@@ -251,14 +144,7 @@ function Row({
       className="grid items-center gap-2 sm:gap-4 py-3 border-b border-rule-2 grid-cols-[1fr_auto] sm:grid-cols-[200px_1fr_60px]"
     >
       <span className="font-mono text-[13px] text-ink truncate">{name}</span>
-      <span
-        className={
-          "text-[13px] truncate col-span-2 sm:col-auto sm:order-none order-3 " +
-          (secret
-            ? "font-mono text-pencil tracking-[0.2em]"
-            : "font-mono text-ink-soft")
-        }
-      >
+      <span className="text-[13px] truncate col-span-2 sm:col-auto sm:order-none order-3 font-mono text-ink-soft">
         {value}
       </span>
       <span className="text-right">
@@ -285,7 +171,6 @@ function AddRow({
   saving,
   keyPlaceholder,
   valuePlaceholder,
-  type,
   testidPrefix,
 }: {
   keyValue: string;
@@ -297,7 +182,6 @@ function AddRow({
   saving: boolean;
   keyPlaceholder: string;
   valuePlaceholder: string;
-  type: "text" | "password";
   testidPrefix: string;
 }) {
   const canSave = keyValue.length > 0 && valValue.length > 0;
@@ -315,7 +199,7 @@ function AddRow({
         className="font-mono text-[13px] px-2 py-1.5 bg-white border border-rule outline-none focus:border-ink"
       />
       <input
-        type={type}
+        type="text"
         placeholder={valuePlaceholder}
         value={valValue}
         onChange={(e) => onValChange(e.target.value)}

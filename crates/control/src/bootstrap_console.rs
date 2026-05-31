@@ -20,50 +20,36 @@
 //!    commit `deploy_hash` + `manifest_json`
 //!    ([`Registry::set_deploy_with_manifest`]) so the gateway route-sync serves
 //!    it.
-//! 4. Mint a broadly-privileged control **PAT** ([`PatIssuer`]) for the console
-//!    and set it as the console app's SERVER-ONLY env var
-//!    `ZEROSHIP_CONTROL_SERVICE_TOKEN` (an encrypted secret + an opt-in `expose` entry
-//!    so the worker surfaces it in `process.env` but the browser never sees it).
+//! 4. Forward the console's server-side runtime env (`OPENAI_API_KEY`,
+//!    `SANDBOX_TOKEN`, `SANDBOX_URL`, `ZEROSHIP_SDK_REGISTRY`) from the control
+//!    process env into the per-app env store so the deployed console can craft
+//!    and preview apps in the sandbox.
 //!
 //! Everything is **idempotent** — every write is an upsert and every derived
 //! identifier is deterministic, so re-running the seed at every boot does not
-//! error or duplicate. The PAT is **rotate-or-reuse**: a fresh JWT is minted and
-//! the env var refreshed only when the deterministic `control.permission_tokens`
-//! row is absent (or revoked/expired); a live row is reused without re-minting.
+//! error or duplicate.
 //!
-//! ## Privilege model (MVP, spec §"The privilege mechanism — MVP")
+//! ## Pure creator app — no control credential
 //!
-//! The console's authority is a single static control PAT, owner-scoped to a
-//! dedicated platform-`admin` service principal. The control plane's
-//! [`crate::authz_guard::AuthzGuard`] bearer path verifies the PAT against the
-//! seeded `control.permission_tokens` row, then enforces Cedar **twice**
-//! (owner-without-token, then the token wrapper). So the seed provisions all
-//! three layers the guard needs:
-//!   - an `auth.users` row (the FK target for `permission_tokens.owner_id`),
-//!   - a `platform.roles` row granting that user `role = 'admin'` (so the
-//!     owner-without-token Cedar pass — `policies/platform/admin.cedar` — allows
-//!     every action), and
-//!   - the `control.permission_tokens` PAT row whose wrapper policy `Allow`s the
-//!     broad action set on `Resource::Any`.
-//!
-//! This is deliberately coarse for the MVP (the console self-scopes; per-request
-//! identity-bound scoping is the deferred full-R4 power-token mint). It adds NO
-//! new control-side machinery — it rides the EXISTING PAT bearer path.
+//! The console is a **pure creator app**: it crafts and previews apps in a
+//! sandbox, holds **no** control-plane credential, and makes **zero** control
+//! calls (platform-deploy is deferred to a future device-code flow). The seed
+//! therefore mints **no** PAT and injects **no** `ZEROSHIP_CONTROL_SERVICE_TOKEN`
+//! — creator identity comes only from the platform BFF session (`currentUser()`),
+//! exactly like any other creator app. See
+//! `docs/superpowers/specs/2026-05-31-console-pure-creator-app-design.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use compio_postgres::Client;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_authz::{Action, Effect, Resource, Statement};
 use zeroship_bundle::BlobStore;
 
 use crate::app_oauth_client::{self, client_id_for_app};
 use crate::env_store::EnvStore;
 use crate::registry::Registry;
-use crate::token_handlers::PatIssuer;
 
 /// Default console host in dev (compose / `*.zeroship.localhost`).
 pub const DEV_CONSOLE_HOST: &str = "console.zeroship.localhost";
@@ -97,23 +83,6 @@ pub fn console_app_name(host: &str) -> String {
 /// The console app's enterprise plan id — unlimited CPU/wall via
 /// `registry.rs::runtime_limits_for_plan` ("unlimited" | "enterprise").
 pub const CONSOLE_PLAN_ID: &str = "enterprise";
-
-/// Display name + email for the console service principal (`auth.users`).
-const CONSOLE_SERVICE_USER_NAME: &str = "zeroship console (service)";
-/// The service account email is derived from the host so dev/prod don't collide
-/// on the `auth.users.email` UNIQUE constraint.
-fn console_service_user_email(host: &str) -> String {
-    format!("console-service@{host}")
-}
-
-/// The console service PAT's display name in `control.permission_tokens`.
-const CONSOLE_PAT_NAME: &str = "zeroship console service token";
-
-/// The server-only app env var the console reads for its control credential.
-/// Stored as an encrypted secret AND added to the per-app `expose` list so the
-/// worker surfaces it in `process.env.ZEROSHIP_CONTROL_SERVICE_TOKEN` — but it never
-/// reaches the browser.
-pub const SERVICE_TOKEN_ENV_KEY: &str = "ZEROSHIP_CONTROL_SERVICE_TOKEN";
 
 /// How a console runtime env var lands in the per-app env store.
 ///
@@ -149,25 +118,20 @@ struct RuntimeEnvSpec {
     class: EnvClass,
 }
 
-/// The FULL server-side runtime env the **deployed console** needs to FUNCTION,
-/// beyond the already-seeded [`SERVICE_TOKEN_ENV_KEY`]. Each is forwarded from
-/// the control process env at seed time; an unset source var is SKIPPED with a
-/// warning (the console degrades for that one feature rather than failing the
-/// whole seed). Sourced from the console's server reads
+/// The FULL server-side runtime env the **deployed console** needs to FUNCTION.
+/// Each is forwarded from the control process env at seed time; an unset source
+/// var is SKIPPED with a warning (the console degrades for that one feature
+/// rather than failing the whole seed). Sourced from the console's server reads
 /// (`apps/zeroship-builder/src/server/internal/env.ts` + direct `process.env`):
 ///   - `OPENAI_API_KEY`        — AI codegen/chat/pm/sre/wizard (credential).
 ///   - `SANDBOX_TOKEN`         — sandbox controller bearer token (credential).
 ///   - `SANDBOX_URL`           — sandbox/preview backend URL (non-secret config).
-///   - `ZEROSHIP_CONTROL_URL`  — in-cluster control-plane base URL the console's
-///                               control-client talks to (non-secret config). The
-///                               console reads `ZEROSHIP_CONTROL_URL` first, then
-///                               `CONTROL_URL`; we forward the canonical name.
 ///   - `ZEROSHIP_SDK_REGISTRY` — private npm registry URL for generated apps
 ///                               (non-secret config; optional).
-/// Mirrors what the now-retired `builder.*` compose service used to inject
-/// (`SANDBOX_URL`, `SANDBOX_TOKEN`, `OPENAI_API_KEY`, `CONTROL_URL`); the AI
-/// model is hard-coded in the console (`gpt-5.4-mini`) with no base-URL override,
-/// so there is no model/base-URL env var to forward.
+/// The console is a **pure creator app** (no control credential, zero control
+/// calls), so there is NO `ZEROSHIP_CONTROL_URL` to forward. The AI model is
+/// hard-coded in the console (`gpt-5.4-mini`) with no base-URL override, so there
+/// is no model/base-URL env var to forward either.
 const CONSOLE_RUNTIME_ENV: &[RuntimeEnvSpec] = &[
     RuntimeEnvSpec {
         app_key: "OPENAI_API_KEY",
@@ -185,21 +149,11 @@ const CONSOLE_RUNTIME_ENV: &[RuntimeEnvSpec] = &[
         class: EnvClass::Var,
     },
     RuntimeEnvSpec {
-        app_key: "ZEROSHIP_CONTROL_URL",
-        source_env: "ZEROSHIP_CONTROL_URL",
-        class: EnvClass::Var,
-    },
-    RuntimeEnvSpec {
         app_key: "ZEROSHIP_SDK_REGISTRY",
         source_env: "ZEROSHIP_SDK_REGISTRY",
         class: EnvClass::Var,
     },
 ];
-
-/// Lifetime of the minted service PAT. Long-lived (the console is a standing
-/// service); rotate-or-reuse keeps a single live row, so this only bounds how
-/// long a leaked token stays valid before the next absent-row re-mint.
-const PAT_TTL_DAYS: i64 = 365;
 
 // ---------------------------------------------------------------------------
 // Config / result / error
@@ -236,8 +190,6 @@ pub struct ConsoleBootstrapResult {
     pub app_id: Uuid,
     /// The per-app OAuth client id (`oac_<base62>`).
     pub client_id: String,
-    /// Whether a fresh PAT was minted this run (`false` ⇒ reused the live one).
-    pub minted_new_pat: bool,
 }
 
 #[derive(Debug)]
@@ -246,7 +198,6 @@ pub enum ConsoleBootstrapError {
     Io(String),
     Ingest(String),
     OauthClient(String),
-    Pat(String),
     Env(String),
 }
 
@@ -257,7 +208,6 @@ impl std::fmt::Display for ConsoleBootstrapError {
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Ingest(e) => write!(f, "zship ingest: {e}"),
             Self::OauthClient(e) => write!(f, "oauth client: {e}"),
-            Self::Pat(e) => write!(f, "pat: {e}"),
             Self::Env(e) => write!(f, "env store: {e}"),
         }
     }
@@ -296,89 +246,31 @@ pub fn console_app_id(host: &str) -> Uuid {
     derive_uuid("zeroship:console:app:v1", host)
 }
 
-/// Deterministic console service-principal user id (the `auth.users` row that
-/// owns the service PAT).
-#[must_use]
-pub fn console_service_user_id(host: &str) -> Uuid {
-    derive_uuid("zeroship:console:service-user:v1", host)
-}
-
-/// Deterministic console service-PAT token id (the `control.permission_tokens`
-/// PK). Keeping it derived is what makes the PAT rotate-or-reuse decision a
-/// single-row lookup (no "mint a new PAT every boot").
-#[must_use]
-pub fn console_service_pat_id(host: &str) -> Uuid {
-    derive_uuid("zeroship:console:service-pat:v1", host)
-}
-
-// ---------------------------------------------------------------------------
-// Service PAT wrapper policy
-// ---------------------------------------------------------------------------
-
-/// The broad action set the console service PAT is granted on `Resource::Any`
-/// (MVP — the console self-scopes; documented in the module header + spec). This
-/// is the wrapper policy the AuthzGuard loads from the `permission_tokens` row;
-/// it is bounded above by the owner's `admin` platform role (TOKEN ⊂ USER).
-const CONSOLE_PAT_ACTIONS: &[Action] = &[
-    Action::AppsRead,
-    Action::AppsWrite,
-    Action::AppsDeploy,
-    Action::AppsDelete,
-    Action::DeploymentsRead,
-    Action::DeploymentsRollback,
-    Action::EnvRead,
-    Action::EnvWrite,
-    Action::SecretsRead,
-    Action::SecretsWrite,
-    Action::BillingRead,
-    Action::BillingWrite,
-];
-
-/// Build the console service PAT's wrapper policy JSON in the exact shape
-/// `control.permission_tokens.policies` stores (mirrors
-/// `zeroship_authz::scopes_to_policy`): one `Allow` statement over the broad
-/// action set on `Resource::Any`.
-fn console_pat_policy() -> zeroship_authz::Policy {
-    zeroship_authz::Policy {
-        name: "zeroship_console_service".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: CONSOLE_PAT_ACTIONS.to_vec(),
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Seed entry point
 // ---------------------------------------------------------------------------
 
 /// Idempotently seed the console as a platform-owned regular app.
 ///
-/// `control_pg` talks to the `control` schema (apps, env, deploy commit, PAT
-/// row, oauth_clients). `auth_pg` talks to the `auth` schema (the service
-/// `auth.users` row + `platform.roles`). In the dev single-DB compose stack both
-/// point at the same database; the split mirrors the rest of control.
+/// `control_pg` talks to the `control` schema (apps, env, deploy commit,
+/// oauth_clients). The console is a **pure creator app** — it holds no
+/// control-plane credential — so the seed mints no PAT and touches no `auth`
+/// schema.
 ///
 /// # Errors
-/// [`ConsoleBootstrapError`] on any DB / IO / ingest / Hydra / PAT failure.
-#[allow(clippy::too_many_arguments)]
+/// [`ConsoleBootstrapError`] on any DB / IO / ingest / Hydra / env failure.
 pub async fn bootstrap_console(
     cfg: &ConsoleBootstrapConfig,
     registry: &Registry,
     env_store: &EnvStore,
     blob_store: &Arc<dyn BlobStore>,
-    pat_issuer: &PatIssuer,
     control_pg: &mut Client,
-    auth_pg: &Client,
 ) -> Result<ConsoleBootstrapResult, ConsoleBootstrapError> {
     if !cfg.enabled {
         return Ok(ConsoleBootstrapResult {
             status: ConsoleBootstrapStatus::Disabled,
             app_id: console_app_id(&cfg.console_host),
             client_id: client_id_for_app(&console_app_id(&cfg.console_host)),
-            minted_new_pat: false,
         });
     }
 
@@ -417,15 +309,12 @@ pub async fn bootstrap_console(
     //    uses, then commit deploy_hash + manifest_json atomically.
     ingest_and_commit_zship(registry, blob_store, &app_id, &cfg.console_zship).await?;
 
-    // 4. Mint-or-reuse the broadly-privileged service PAT and set it as the
-    //    server-only ZEROSHIP_CONTROL_SERVICE_TOKEN secret (+ expose).
-    let minted_new_pat =
-        ensure_service_pat_env(cfg, env_store, pat_issuer, auth_pg, &app_id).await?;
-
-    // 5. Forward the console's FULL server-side runtime env (OPENAI_API_KEY,
-    //    SANDBOX_URL/SANDBOX_TOKEN, control URL, SDK registry) from the control
-    //    process env into the same server-only env store. Unset source vars are
-    //    skipped with a warning so the seed never fails or writes an empty value.
+    // 4. Forward the console's server-side runtime env (OPENAI_API_KEY,
+    //    SANDBOX_URL/SANDBOX_TOKEN, SDK registry) from the control process env
+    //    into the per-app env store so the deployed console can craft + preview
+    //    apps in the sandbox. Unset source vars are skipped with a warning so the
+    //    seed never fails or writes an empty value. The console holds NO
+    //    control-plane credential — there is no PAT mint and no service token.
     ensure_runtime_env(env_store, &app_id).await?;
 
     tracing::info!(
@@ -433,15 +322,13 @@ pub async fn bootstrap_console(
         client_id = %client_id,
         host = %cfg.console_host,
         plan = CONSOLE_PLAN_ID,
-        minted_new_pat,
-        "control: console seeded as a regular app"
+        "control: console seeded as a regular app (pure creator, no control credential)"
     );
 
     Ok(ConsoleBootstrapResult {
         status: ConsoleBootstrapStatus::Seeded,
         app_id,
         client_id,
-        minted_new_pat,
     })
 }
 
@@ -525,116 +412,11 @@ async fn ingest_and_commit_zship(
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — service principal + admin role + PAT + env var
-// ---------------------------------------------------------------------------
-
-/// Ensure the service `auth.users` row, its `platform.roles` admin grant, the
-/// `control.permission_tokens` PAT row, and the `ZEROSHIP_CONTROL_SERVICE_TOKEN` env
-/// secret + expose entry all exist. Returns whether a fresh PAT was minted
-/// (`false` ⇒ a live PAT row was reused and the env var left as-is).
-async fn ensure_service_pat_env(
-    cfg: &ConsoleBootstrapConfig,
-    env_store: &EnvStore,
-    pat_issuer: &PatIssuer,
-    auth_pg: &Client,
-    app_id: &Uuid,
-) -> Result<bool, ConsoleBootstrapError> {
-    let host = &cfg.console_host;
-    let user_id = console_service_user_id(host);
-    let token_id = console_service_pat_id(host);
-
-    // (a) Service principal — the FK target for permission_tokens.owner_id.
-    ensure_service_user(auth_pg, &user_id, host).await?;
-    // (b) Platform admin role — so the owner-without-token Cedar pass allows the
-    //     broad action set (admin.cedar: universal allow for platform_role==admin).
-    ensure_platform_admin_role(auth_pg, &user_id).await?;
-
-    // (c) PAT row: rotate-or-reuse on the deterministic token_id. A live row
-    //     (not revoked, not expired) is reused; only an absent/dead row triggers
-    //     a fresh mint + env refresh.
-    let policy = console_pat_policy();
-    let policy_json = policy.to_json_value();
-    let policy_hash = zeroship_authz::policy_hash(&policy_json);
-
-    if pat_row_is_live(auth_pg, &token_id).await? {
-        // The env var was set when the PAT was first minted; leave it untouched
-        // (we never store the JWT, so we can't reconstruct it — and we must not
-        // mint a new one for a still-live row). The seed is still idempotent:
-        // re-running with a live PAT is a clean no-op on the credential.
-        tracing::info!(
-            token_id = %token_id,
-            "control: console service PAT already live — reusing (no re-mint)"
-        );
-        return Ok(false);
-    }
-
-    // Absent or dead → mint fresh.
-    let expires_at = Utc::now() + Duration::days(PAT_TTL_DAYS);
-    let token = pat_issuer
-        .issue(token_id, user_id, policy_hash.clone(), expires_at)
-        .map_err(ConsoleBootstrapError::Pat)?;
-
-    // Upsert the permission_tokens row (deterministic id ⇒ ON CONFLICT refreshes
-    // a previously-revoked/expired row in place rather than inserting a dup).
-    auth_pg
-        .execute(
-            "INSERT INTO control.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', $3, $4, $5, $6) \
-             ON CONFLICT (id) DO UPDATE SET \
-                owner_id = EXCLUDED.owner_id, \
-                name = EXCLUDED.name, \
-                policies = EXCLUDED.policies, \
-                policy_hash = EXCLUDED.policy_hash, \
-                expires_at = EXCLUDED.expires_at, \
-                revoked_at = NULL",
-            &[
-                &token_id,
-                &user_id,
-                &CONSOLE_PAT_NAME,
-                &policy_json,
-                &policy_hash,
-                &expires_at,
-            ],
-        )
-        .await
-        .map_err(|e| ConsoleBootstrapError::Db(e.to_string()))?;
-
-    // (d) Store the JWT as the server-only ZEROSHIP_CONTROL_SERVICE_TOKEN secret and
-    //     add it to the per-app expose list so the worker surfaces it in
-    //     process.env (and ONLY process.env — never the browser).
-    env_store
-        .set_secret(*app_id, SERVICE_TOKEN_ENV_KEY, &token)
-        .await
-        .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
-    // Preserve any other exposed keys; ensure ours is present.
-    let mut expose = env_store
-        .list_expose(*app_id)
-        .await
-        .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
-    if !expose.iter().any(|k| k == SERVICE_TOKEN_ENV_KEY) {
-        expose.push(SERVICE_TOKEN_ENV_KEY.to_owned());
-        env_store
-            .set_expose(*app_id, &expose)
-            .await
-            .map_err(|e| ConsoleBootstrapError::Env(e.to_string()))?;
-    }
-
-    tracing::info!(
-        token_id = %token_id,
-        owner_id = %user_id,
-        "control: minted console service PAT + set ZEROSHIP_CONTROL_SERVICE_TOKEN"
-    );
-    Ok(true)
-}
-
-// ---------------------------------------------------------------------------
-// Step 5 — full server-side runtime env (forwarded from the control process)
+// Step 4 — full server-side runtime env (forwarded from the control process)
 // ---------------------------------------------------------------------------
 
 /// Forward each [`CONSOLE_RUNTIME_ENV`] entry from the **control process env**
-/// (`std::env::var`) into the console app's server-only env store, using the
-/// SAME paths the service token uses:
+/// (`std::env::var`) into the console app's server-only env store:
 ///   - [`EnvClass::Secret`] → `env_store.set_secret` + add to the `expose` list.
 ///   - [`EnvClass::Var`]    → `env_store.set_var` (plaintext; always in
 ///     `process.env`, so no expose entry).
@@ -716,72 +498,15 @@ async fn ensure_runtime_env(
     Ok(())
 }
 
-async fn ensure_service_user(
-    auth_pg: &Client,
-    user_id: &Uuid,
-    host: &str,
-) -> Result<(), ConsoleBootstrapError> {
-    let email = console_service_user_email(host);
-    // email is verified (the principal is platform-owned), no password (it never
-    // logs in interactively — it only owns the service PAT).
-    auth_pg
-        .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
-             VALUES ($1, $2, $3, NOW()) \
-             ON CONFLICT (id) DO UPDATE SET \
-                email = EXCLUDED.email, \
-                name = EXCLUDED.name",
-            &[user_id, &email, &CONSOLE_SERVICE_USER_NAME],
-        )
-        .await
-        .map_err(|e| ConsoleBootstrapError::Db(e.to_string()))?;
-    Ok(())
-}
-
-async fn ensure_platform_admin_role(
-    auth_pg: &Client,
-    user_id: &Uuid,
-) -> Result<(), ConsoleBootstrapError> {
-    auth_pg
-        .execute(
-            "INSERT INTO platform.roles (user_id, role) VALUES ($1, 'admin') \
-             ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[user_id],
-        )
-        .await
-        .map_err(|e| ConsoleBootstrapError::Db(e.to_string()))?;
-    Ok(())
-}
-
-/// True when a non-revoked, non-expired PAT row exists for `token_id`.
-async fn pat_row_is_live(auth_pg: &Client, token_id: &Uuid) -> Result<bool, ConsoleBootstrapError> {
-    let rows = auth_pg
-        .query(
-            "SELECT 1 FROM control.permission_tokens \
-             WHERE id = $1 AND kind = 'pat' AND revoked_at IS NULL \
-               AND (expires_at IS NULL OR expires_at > NOW())",
-            &[token_id],
-        )
-        .await
-        .map_err(|e| ConsoleBootstrapError::Db(e.to_string()))?;
-    Ok(!rows.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn derived_ids_are_deterministic_and_distinct_per_role() {
+    fn derived_app_id_is_deterministic() {
         let host = "console.zeroship.localhost";
         // Stable across calls.
         assert_eq!(console_app_id(host), console_app_id(host));
-        assert_eq!(console_service_user_id(host), console_service_user_id(host));
-        assert_eq!(console_service_pat_id(host), console_service_pat_id(host));
-        // Distinct roles never collide.
-        assert_ne!(console_app_id(host), console_service_user_id(host));
-        assert_ne!(console_app_id(host), console_service_pat_id(host));
-        assert_ne!(console_service_user_id(host), console_service_pat_id(host));
     }
 
     #[test]
@@ -807,19 +532,29 @@ mod tests {
         assert_eq!(cid.len(), 26);
     }
 
+    /// Pure-creator-app invariant (no live PG needed): the console seed forwards
+    /// NO control-plane credential and NO control URL. The runtime-env spec must
+    /// therefore carry neither the service-token key nor the control URL — the
+    /// console makes zero control calls. (Pre-change, `ZEROSHIP_CONTROL_SERVICE_TOKEN`
+    /// was minted+exposed separately and `ZEROSHIP_CONTROL_URL` was in this list.)
     #[test]
-    fn pat_policy_allows_broad_actions_on_any() {
-        let p = console_pat_policy();
-        assert_eq!(p.statements.len(), 1);
-        let s = &p.statements[0];
-        assert_eq!(s.effect, Effect::Allow);
-        assert_eq!(s.resources, vec![Resource::Any]);
-        assert!(s.actions.contains(&Action::AppsDeploy));
-        assert!(s.actions.contains(&Action::SecretsWrite));
-        // Round-trips through the wrapper-JSON the permission_tokens row stores.
-        let json = p.to_json_value();
-        let back = zeroship_authz::Policy::from_json_value(&json).expect("wrapper json round-trips");
-        assert_eq!(back, p);
+    fn runtime_env_carries_no_control_credential_or_url() {
+        let keys: Vec<&str> = CONSOLE_RUNTIME_ENV.iter().map(|s| s.app_key).collect();
+        assert!(
+            !keys.contains(&"ZEROSHIP_CONTROL_SERVICE_TOKEN"),
+            "console is a pure creator app — no service token: {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"ZEROSHIP_CONTROL_URL"),
+            "console makes zero control calls — no control URL: {keys:?}"
+        );
+        let sources: Vec<&str> = CONSOLE_RUNTIME_ENV.iter().map(|s| s.source_env).collect();
+        assert!(!sources.contains(&"ZEROSHIP_CONTROL_SERVICE_TOKEN"));
+        assert!(!sources.contains(&"ZEROSHIP_CONTROL_URL"));
+        // The features the console DOES need to craft + preview in the sandbox.
+        for needed in ["OPENAI_API_KEY", "SANDBOX_TOKEN", "SANDBOX_URL"] {
+            assert!(keys.contains(&needed), "{needed} missing: {keys:?}");
+        }
     }
 
     #[test]

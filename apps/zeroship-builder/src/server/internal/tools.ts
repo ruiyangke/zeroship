@@ -38,7 +38,6 @@ import {
   reviewerResponseSchema,
   type ReviewerResponse,
 } from "./reviewer.js";
-import { getControlClient } from "../control-client.js";
 
 interface ToolExecuteResponse {
   output: string;
@@ -46,30 +45,23 @@ interface ToolExecuteResponse {
   truncated?: boolean;
 }
 
-interface ToolFileDownloadResponse {
-  path: string;
-  content: Uint8Array | null;
-  error: string | null;
-}
-
-interface DeploySandboxBackend {
+// The review tool only needs to snapshot the sandbox source — it reads
+// nothing back as bytes and writes nothing. (The console is a pure
+// creator app: no deploy artifact, no control plane.)
+interface ReviewSandboxBackend {
   execute(command: string): Promise<ToolExecuteResponse>;
-  downloadFiles(paths: string[]): Promise<ToolFileDownloadResponse[]>;
 }
 
-export interface CreateDeployToolOptions {
-  backend: DeploySandboxBackend;
-  appId?: string | null;
+export interface CreateReviewToolOptions {
+  backend: ReviewSandboxBackend;
   apiKey?: string;
 }
 
-const deployInputSchema = z.object({
+const reviewInputSchema = z.object({
   changes: z.string().min(1).describe(
-    "Concise description of the current sandbox changes the Builder wants to ship.",
+    "Concise description of the current sandbox changes to review.",
   ),
 });
-
-const DEPLOY_ARTIFACT_PATH = "dist/app.zship";
 
 const SOURCE_SNAPSHOT_COMMAND = String.raw`set -eu
 printf '## file tree\n'
@@ -98,24 +90,6 @@ find . \
     sed -n '1,220p' "$file" || true
   done`;
 
-const BUILD_ZSHIP_COMMAND = String.raw`set -eu
-if [ ! -f package.json ]; then
-  echo "package.json not found; zeroship deploys must be built by the app project"
-  exit 2
-fi
-
-if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
-  pnpm build
-elif [ -f bun.lockb ] && command -v bun >/dev/null 2>&1; then
-  bun run build
-elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then
-  yarn build
-else
-  npm run build
-fi
-
-test -s dist/app.zship`;
-
 export const askSurveyTool = tool(
   // The LLM's args ARE the survey definition. interrupt() halts the
   // graph; on resume it returns whatever value the client sent in
@@ -140,17 +114,16 @@ export const askSurveyTool = tool(
   },
 );
 
-export function createDeployTool(options: CreateDeployToolOptions) {
-  const { backend, appId, apiKey } = options;
+// Standalone REVIEW tool. The console is a PURE creator app: there is
+// no deploy, no .zship build, no control plane. This tool snapshots the
+// sandbox source, runs the Reviewer model over it, and returns the
+// findings. It ships NOTHING — no build, no artifact download, no
+// upload. See docs/superpowers/specs/2026-05-31-console-pure-creator-app-design.md §2.
+export function createReviewTool(options: CreateReviewToolOptions) {
+  const { backend, apiKey } = options;
 
   return tool(
     async ({ changes }) => {
-      if (!appId) {
-        return JSON.stringify({
-          error: "deploy requires an appId-scoped Builder workspace",
-        });
-      }
-
       const reviewerApiKey = apiKey ?? OPENAI_API_KEY();
       if (!reviewerApiKey) {
         throw new Error(
@@ -158,7 +131,6 @@ export function createDeployTool(options: CreateDeployToolOptions) {
         );
       }
 
-      const control = getControlClient();
       const snapshot = await collectReviewSnapshot(backend);
       const review = await runReviewerGate({
         apiKey: reviewerApiKey,
@@ -166,59 +138,30 @@ export function createDeployTool(options: CreateDeployToolOptions) {
         snapshot,
       });
 
-      if (!review.approved) {
-        return JSON.stringify({
-          blocked: true,
-          reviewer_approved: false,
-          blockers: review.blockers,
-        });
-      }
-
-      const build = await backend.execute(BUILD_ZSHIP_COMMAND);
-      const buildExitCode = build.exitCode ?? -1;
-      if (buildExitCode !== 0) {
-        return JSON.stringify({
-          blocked: true,
-          reason: "build_failed",
-          build: {
-            exit_code: buildExitCode,
-            output: capText(build.output, 12_000),
-          },
-        });
-      }
-
-      const artifact = await downloadArtifact(backend, DEPLOY_ARTIFACT_PATH);
-      const appRecord = await control.getApp(appId).catch(() => null);
-      const deploy = await control.deploy(appId, artifact);
-      const name = appRecord?.name ?? appId;
-
+      // Return the findings only. `approved` reflects whether the
+      // change clears the reviewer's hard-gate bar; `blockers` carries
+      // every finding (the client renders them with severities). No
+      // deploy side-effect is performed regardless of the verdict.
       return JSON.stringify({
-        url: `/apps/${encodeURIComponent(name)}/`,
-        app_id: appId,
-        app_name: appRecord?.name ?? null,
-        deploy_hash: deploy.deploy_hash,
-        blobs_uploaded: deploy.blobs_uploaded ?? null,
-        blobs_deduped: deploy.blobs_deduped ?? null,
-        reviewer_approved: true,
-        reviewer_warnings: review.blockers.length > 0 ? review.blockers : undefined,
+        reviewer_approved: review.approved,
+        blockers: review.blockers,
       });
     },
     {
-      name: "deploy",
+      name: "review",
       description:
-        "Deploy the current sandbox app to zeroship. This tool is the only " +
-        "deploy path: it snapshots the sandbox change, invokes the Reviewer " +
-        "model as a hard gate, blocks on approved=false, then runs the " +
-        "sandbox build and uploads dist/app.zship to the real control-plane " +
-        "/api/apps/{id}/deploy endpoint. Returns JSON with { url, " +
-        "deploy_hash } on success or { blocked: true, blockers } when " +
-        "Reviewer refuses the deploy.",
-      schema: deployInputSchema,
+        "Review the current sandbox app for quality and safety. Snapshots " +
+        "the sandbox source and invokes the Reviewer model, returning its " +
+        "findings: { reviewer_approved, blockers: [{kind, severity, why, " +
+        "fix?}] }. This is a QUALITY tool — it ships nothing (no build, no " +
+        "deploy). Use it before handing the app back to the user, or when " +
+        "the user asks for a review.",
+      schema: reviewInputSchema,
     },
   );
 }
 
-async function collectReviewSnapshot(backend: DeploySandboxBackend): Promise<string> {
+async function collectReviewSnapshot(backend: ReviewSandboxBackend): Promise<string> {
   const result = await backend.execute(SOURCE_SNAPSHOT_COMMAND);
   const exitCode = result.exitCode ?? -1;
   const status = exitCode === 0 ? "ok" : `exit ${exitCode}`;
@@ -251,7 +194,7 @@ async function runReviewerGate(args: {
     new SystemMessage(REVIEWER_PROMPT),
     new HumanMessage(
       [
-        "Review this deploy candidate. Return approved=false only for high or critical blockers; return low/medium findings as warnings.",
+        "Review this change candidate. Return approved=false only for high or critical blockers; return low/medium findings as warnings.",
         "",
         "## Builder change summary",
         args.changes,
@@ -262,19 +205,6 @@ async function runReviewerGate(args: {
     ),
   ]);
   return normalizeReviewerGate(review);
-}
-
-async function downloadArtifact(
-  backend: DeploySandboxBackend,
-  path: string,
-): Promise<Uint8Array> {
-  const [artifact] = await backend.downloadFiles([path]);
-  if (!artifact || artifact.error || !artifact.content) {
-    throw new Error(
-      `deploy artifact ${path} unavailable: ${artifact?.error ?? "empty"}`,
-    );
-  }
-  return artifact.content;
 }
 
 function capText(value: string, max: number): string {
