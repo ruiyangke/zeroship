@@ -131,17 +131,8 @@ async fn guard_from_bearer(
         Err(err) => {
             tracing::debug!(
                 error = %err,
-                "control: bearer was not a valid PAT; trying power-token"
+                "control: bearer was not a valid PAT; trying OAuth introspection"
             );
-            // R4 — a server-side power token (zs-power+jwt) is a control-issued,
-            // identity-bound, scope-capped, short-lived bearer. Verify it
-            // statelessly (no DB row: bounded by its short exp + capped scope),
-            // then build the guard from its sub (global user) + capped scope.
-            if let Some(guard) =
-                guard_from_power_token(raw, state, request_ip, request_id.clone())?
-            {
-                return Ok(Some(guard));
-            }
             return oauth_guard_from_bearer(raw, state, request_ip, request_id).await;
         }
     };
@@ -212,55 +203,6 @@ fn now_unix() -> Result<i64, String> {
             .as_secs(),
     )
     .map_err(|err| format!("clock overflow: {err}"))
-}
-
-/// Verify a server-side power token (`zs-power+jwt`, R4) and build the guard
-/// from its claims. Returns `Ok(None)` if the bearer is NOT a power token (so
-/// the caller falls through to OAuth introspection); `Err` only on a token that
-/// IS a power token but is malformed (bad sub). The token is verified
-/// statelessly — its `aud` was pinned to `expected_oauth_audience` at mint, so
-/// it composes with the same audience contract the OAuth path enforces.
-fn guard_from_power_token(
-    token: &str,
-    state: &AppState,
-    request_ip: Option<IpAddr>,
-    request_id: String,
-) -> Result<Option<AuthzGuard>, web::Error> {
-    let claims = match state.power_token_issuer.verify(token) {
-        Ok(c) => c,
-        Err(err) => {
-            tracing::debug!(error = %err, "control: bearer was not a valid power token");
-            return Ok(None);
-        }
-    };
-    // `sub` is the GLOBAL user UUID (set at mint), so it composes with control
-    // authz, which keys principal_id on the global user.
-    let principal_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid power-token sub"))?;
-
-    // The capped scope set bounds the token's authority via the same
-    // scopes→policy lowering the OAuth path uses, so per-op require(Action,
-    // Resource) only passes for actions within the granted scope.
-    let scopes = authz::parse_scope_string(&claims.scope)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid power-token scope"))?;
-    let token_policy = authz::scopes_to_policy(&scopes);
-
-    // Surface auth_time recency to the authz engine via the existing
-    // mfa_age_seconds knob (in v1 it is an auth-recency age, not an MFA age —
-    // see §5.3). This lets step-up-gated control handlers re-check freshness.
-    let mfa_age_seconds = now_unix()
-        .ok()
-        .map(|now| u32::try_from(now.saturating_sub(claims.auth_time).max(0)).unwrap_or(u32::MAX));
-
-    Ok(Some(AuthzGuard {
-        principal_id,
-        token_id: None,
-        token_policy: Some(token_policy),
-        mfa_verified: false,
-        mfa_age_seconds,
-        request_ip,
-        request_id,
-    }))
 }
 
 async fn oauth_guard_from_bearer(

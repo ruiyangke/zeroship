@@ -45,17 +45,7 @@ pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<H
     }
 }
 
-/// Verify the gateway-signed `ZeroShip-User` header. On success returns
-/// `(decoded_json, raw_signed_header)`:
-///   - `decoded_json` is what `env.auth.getUser()` returns;
-///   - `raw_signed_header` is the VERBATIM `base64(JSON).<rid>.<iat>.<hmac>`
-///     string. The runtime stashes it Rust-side so the power-token op
-///     (`env.auth.getAccessToken`) can echo it to control for stateless
-///     re-verification (R4). It is never exposed to app JS.
-fn verified_user_json(
-    req: &HttpRequest,
-    worker_key: &str,
-) -> Result<Option<(String, String)>, HttpResponse> {
+fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<String>, HttpResponse> {
     let Some(value) = req.headers().get("zeroship-user") else {
         return Ok(None);
     };
@@ -77,7 +67,7 @@ fn verified_user_json(
         header,
         expected_request_id,
     ) {
-        Some(json) => Ok(Some((json, header.to_string()))),
+        Some(json) => Ok(Some(json)),
         None => {
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
             Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#))
@@ -158,9 +148,8 @@ pub async fn dispatch(
     if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
         return resp;
     }
-    let (user_json, user_header) = match verified_user_json(&req, &config.worker_key) {
-        Ok(Some((json, header))) => (Some(json), Some(header)),
-        Ok(None) => (None, None),
+    let user_json = match verified_user_json(&req, &config.worker_key) {
+        Ok(user_json) => user_json,
         Err(resp) => return resp,
     };
 
@@ -243,7 +232,6 @@ pub async fn dispatch(
             &env,
             ctx,
             user_json,
-            user_header,
         );
         runtime.exit_isolate();
         o
@@ -439,8 +427,6 @@ mod tests {
                     db_url: None,
                     kv_url: None,
                     storage_root: None,
-                    control_url: String::new(),
-                    control_key: String::new(),
                 },
             );
             assert!(crate::cache::load_app(
@@ -609,8 +595,6 @@ mod tests {
                     db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
                     kv_url: Some(kv_url),
                     storage_root: Some(storage_root.clone()),
-                    control_url: String::new(),
-                    control_key: String::new(),
                 },
             );
             assert!(crate::cache::load_app(

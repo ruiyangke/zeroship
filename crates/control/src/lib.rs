@@ -21,7 +21,6 @@ pub mod internal;
 pub mod metering;
 pub mod oidc_rp;
 pub mod oauth_grants_handlers;
-pub mod power_token;
 pub mod oauth_handlers;
 pub mod rate_limit;
 pub mod registry;
@@ -196,11 +195,6 @@ pub struct AppState {
     /// Control uses the same key material as the gateway's
     /// `--signing-key-file` wrapper-token issuer for P9 v1.
     pub pat_issuer: Arc<token_handlers::PatIssuer>,
-    /// Ed25519 issuer/verifier for the grant-gated, identity-bound, server-side
-    /// power tokens (R4). Shares the same ed25519 key material as `pat_issuer`
-    /// but mints a distinct `zs-power+jwt` token class with `aud` =
-    /// `expected_oauth_audience`. `AuthzGuard` verifies these statelessly.
-    pub power_token_issuer: Arc<power_token::PowerTokenIssuer>,
     /// Hydra admin introspection client for third-party OAuth bearer
     /// access tokens. Used only after local PAT verification fails.
     pub hydra_introspector: Arc<zeroship_core::hydra::HydraIntrospector>,

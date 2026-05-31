@@ -540,7 +540,6 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
                 refresh_token_enc: &refresh_enc,
                 refresh_family_id: "rfam_test",
                 granted_scopes: &["openid".to_string()],
-                auth_time: None,
             },
         )
         .await

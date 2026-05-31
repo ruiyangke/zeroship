@@ -522,11 +522,6 @@ pub async fn session_post(
                 refresh_token_enc: &refresh_enc,
                 refresh_family_id: &family_id,
                 granted_scopes: &scopes,
-                // Carry the id_token's auth_time onto the anchor so the
-                // server-side power-token mint can gate step-up scopes (R4).
-                auth_time: claims
-                    .auth_time
-                    .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
             },
         )
         .await

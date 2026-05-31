@@ -252,7 +252,6 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
-        power_token_issuer: Arc::new(zeroship_control::power_token::PowerTokenIssuer::dev_insecure("control.zeroship.ai".to_string())),
         hydra_introspector: Arc::new(HydraIntrospector::new(&hydra.base)),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         pairwise_salt: [0u8; 32],

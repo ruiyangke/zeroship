@@ -531,7 +531,7 @@ fn now_unix() -> Result<i64, String> {
     .map_err(|err| format!("clock overflow: {err}"))
 }
 
-pub(crate) fn jwk_thumbprint(key: &ed25519_dalek::SigningKey) -> String {
+fn jwk_thumbprint(key: &ed25519_dalek::SigningKey) -> String {
     use sha2::{Digest, Sha256};
 
     let x = base64::engine::general_purpose::URL_SAFE_NO_PAD

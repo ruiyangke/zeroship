@@ -459,17 +459,6 @@ pub struct RuntimeState {
     /// across every `.await` boundary in a single-threaded async runtime.
     pub per_request_user: HashMap<u64, String>,
 
-    /// Per-request RAW, gateway-signed `ZeroShip-User` header value, keyed by
-    /// `request_id`. This is the VERBATIM `base64(JSON).<request_id>.<iat>.<hmac>`
-    /// string the gateway minted and the worker received — NOT the decoded
-    /// `per_request_user` JSON. The runtime-mediated power-token op
-    /// (`env.auth.getAccessToken`) echoes it to the control mint endpoint so
-    /// control can re-derive identity from the signature itself (R4). It is
-    /// held Rust-side and NEVER exposed to app JS, so app code can neither read
-    /// the gateway signature nor forge an identity. Cleared alongside
-    /// `per_request_user` on every terminal path.
-    pub per_request_user_header: HashMap<u64, String>,
-
     /// For each in-flight request, the list of promises registered via
     /// `ctx.waitUntil(p)` from JS. The kernel keeps the isolate alive past
     /// the response body write until every promise settles or the wall
@@ -600,18 +589,6 @@ pub struct RuntimeState {
     /// reference to `Runtime`, which is single-owner and guarded by a
     /// `RefCell` that can't be held across `.await`.
     pub pump_notify_tx: Option<futures::channel::mpsc::Sender<()>>,
-
-    /// Worker→control mint config for the runtime-mediated power-token op
-    /// (`env.auth.getAccessToken`, R4). Set ONCE at Runtime construction from
-    /// the worker's `WorkerConfig` (`control_url` / `control_key`). Held
-    /// Rust-side; `power_control_key` is the worker↔control shared secret and
-    /// is NEVER surfaced to app JS — the op attaches it to the outbound mint
-    /// request itself, so app code can call `getAccessToken({audience,scopes})`
-    /// without ever seeing the credential. Empty when the runtime is built
-    /// without control config (e.g. `zeroship serve`), in which case the op
-    /// rejects with a configuration error.
-    pub power_control_url: String,
-    pub power_control_key: String,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -642,7 +619,6 @@ impl RuntimeState {
 
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
-            per_request_user_header: HashMap::new(),
             wait_until_by_request: HashMap::new(),
             request_by_id: HashMap::new(),
             request_ctx_by_id: HashMap::new(),
@@ -670,9 +646,6 @@ impl RuntimeState {
 
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,
-
-            power_control_url: String::new(),
-            power_control_key: String::new(),
         }
     }
 

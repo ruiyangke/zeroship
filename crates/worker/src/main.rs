@@ -434,8 +434,6 @@ fn main() -> std::io::Result<()> {
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_root: config.storage_root.clone(),
-                control_url: config.control_url.clone(),
-                control_key: config.control_key.clone(),
             },
         );
         // Per-thread reconcile loop — reads from the shared version map,

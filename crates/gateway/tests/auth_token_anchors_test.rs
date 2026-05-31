@@ -1275,7 +1275,6 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
             refresh_token_enc: &refresh_enc,
             refresh_family_id: "fam",
             granted_scopes: &["openid".to_string()],
-            auth_time: None,
         },
     )
     .await

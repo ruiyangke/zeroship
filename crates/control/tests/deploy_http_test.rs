@@ -281,7 +281,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
-        power_token_issuer: Arc::new(zeroship_control::power_token::PowerTokenIssuer::dev_insecure("control.zeroship.ai".to_string())),
         hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
             "http://127.0.0.1:9",
         )),
