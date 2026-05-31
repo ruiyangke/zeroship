@@ -101,6 +101,17 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
   process env into the console app's server env store (server-only, never browser; unset-skip; idempotent) + compose wiring + a
   faithful seed test. Workflow `wppsiy0r7` (critic 96, all 8 booleans). Re-verified on live PG. **ALL BUILD-VERIFIABLE FUNCTIONAL
   WORK DONE.**
+- **LIVE E2E ✓ (infra + BFF-flow level)** `fc20ea99` (fix) — fresh docker-compose stack validates the cutover end-to-end:
+  migrate ran all 43 changesets clean; control --bootstrap-console ingested the REAL console .zship (deploy_hash 6ece…,
+  7 blobs) + created public PKCE client oac_2gEz9tHlodeyWPNRtQsLsT + minted the service PAT/ZS_CONTROL_SERVICE_TOKEN +
+  seeded runtime env (SANDBOX_TOKEN/URL + ZEROSHIP_CONTROL_URL; OPENAI_API_KEY/SDK_REGISTRY skipped-unset) → "console
+  seeded as a regular app" (host console.zeroship.localhost, plan enterprise); the GATEWAY SERVES the console SPA at
+  console.zeroship.localhost (HTTP 200 — routing-name fix works); /__zs/auth/authorize 302s to Hydra with the seeded
+  console client_id + PKCE S256 (BFF login starts); control = pure API resource server (didn't break). 5th dogfood find:
+  the auth service's relay-forward-mailer defaulted to smtp w/o an SMTP host → crash-loop → fixed to stdout for dev.
+  REMAINING last-mile (env-limited, not done): the browser credential-entry popup completion (needs a seeded dev user +
+  Playwright/chromium) + the AI/sandbox functional flow (needs a real OPENAI_API_KEY — unset here, so AI features degrade
+  by design) + the security assertions (cookie not token in browser; creator app cannot mint aud=control).
 - **REMAINING (owner-deferred / optional):** (1) LIVE docker-compose popup-login E2E (login→control read→deploy→SSE chat→sandbox;
   assert control credential never reaches the browser + a creator app cannot mint aud=control) — heavy, needs the stack up + a
   browser; the deliberate capstone. (2) cleanup: `bootstrap_builder` module is partially orphaned after the cutover
