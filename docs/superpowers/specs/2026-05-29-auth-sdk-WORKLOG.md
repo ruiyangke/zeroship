@@ -22,8 +22,21 @@ grant-gated platform ops (no token minted). Design: `docs/superpowers/specs/2026
   `revoked_after_for` (ceil'd epoch), `is_family_revoked_since` delegates; all 3 arms via `family_revocation_decision`;
   same-node bust via `invalidate()` at /signout + per-app BCL; fail-closed preserved. Workflow `wxo62pxo3` (critic 95,
   all 6 security booleans true). Re-verified: gateway 359/0 + core green on live PG+Hydra. **GATEWAY-SIDE RESHAPE DONE.**
-- **R2** (next) SDK client rip-out (cacheLocation/InMemoryCache/LocalStorageCache/CacheManager/Web-Worker/navigator.locks/
-  getAccessToken — transport already migrated in R1b). BFF invariant: the browser NEVER holds a power token; identity-only.
+- **R2 ✓** `41803822` SDK client rip-out: DELETED cache.ts (token store)/worker.ts (silent-refresh)/locks.ts; removed
+  getAccessToken[WithPopup] + Session.{access_token,refresh_token,token_type} + cacheLocation/useRefreshTokens. Session
+  is identity-only {user,expires_at,scopes}; refreshSession re-mints the COOKIE (?mint=1, no token); TOKEN_REFRESHED→
+  SESSION_REFRESHED. New tests/identity.test.ts BFF-invariant regression suite. Workflow `wg17q1irs` (critic 95, all 8
+  booleans true). Re-verified: tsc clean, 73/73 tests, tsup ESM+DTS build; grep confirms no token surface. **BFF invariant
+  holds end-to-end (gateway + SDK).**
+- **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
+- **R5 (RESHAPING)** console = a REGULAR app on the standard dev+prod runtime (owner directive 2026-05-30, not just a
+  pseudo-app). Requires R4 (grant-gated platform capabilities) as PREREQUISITE — the console needs creator/control-plane
+  powers a sandboxed worker-app lacks; server-side privileged grant, never browser. Analysis workflow `wci5rpjec` running
+  (verdict + phased path pending). Bootstrap = install-time platform-app seed deploy. Heavy build/AI-gen likely stays a
+  called backend service (worker capability envelope).
+- **R4** grant-gated platform capabilities — now a PREREQUISITE of R5 (was a follow-on). Formalize the server-side
+  privileged-capability mechanism (likely @zeroship/control SDK call from the worker with a scoped creator credential,
+  not a broad native primitive).
 - **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
 - **R5** console collapse (console = pseudo-app on gateway `/__zs/auth/*`; delete builder bespoke RP).
 - **R4** grant-gated platform capabilities (formalize primitive-side grant check).
