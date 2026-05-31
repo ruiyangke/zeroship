@@ -69,11 +69,27 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
   Full-R4 preserved in design doc under "Future: full-R4". Workflow `wi7fogn7f` (critic 96, all 7 booleans). Re-verified on
   live PG/Redis: control all green (power_token_test gone), runtime 227 + auth_plugin 7, worker 21 (Phase 2 faithful test
   intact), gateway 27, SDK 73; dropped orphaned dev-DB auth_time column. **MVP control mechanism = env-var key + @zeroship/control.**
-- **R5 (next) console cutover** — install-time `--bootstrap-console` seed (apps row + public PKCE client + ingest prebuilt
-  .zship + deploy_hash); repoint Caddy console → gateway; collapse bespoke RP (builder oauth.ts/session.ts/oauth-store.ts/
-  control-client.ts + control oidc_rp.rs/require_console_session) → @zeroship/auth client + env-var control credential via
-  @zeroship/control; enterprise plan + shared pool. Interdependent cutover — sequence to avoid split-brain auth. PREREQ: confirm
-  the console builds to a valid .zship. Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
+- **R5a ✓** `3abd461b` console BUILDS to .zship (was broken: dangling imports to removed bespoke request-context/auth — the
+  surface R5 replaces). Identity via platform currentUser() (ZeroShip-User); control-client.ts → @zeroship/control with a
+  SERVER-ONLY `ZS_CONTROL_SERVICE_TOKEN` (a control PAT — simplest credential AuthzGuard's bearer path accepts), never
+  browser-exposed. MVP coarseness (documented, deferred to full-R4): control scopes to the PAT owner — per-creator isolation
+  NOT enforced control-side; ZeroShip-Acting-User header is an attribution breadcrumb control doesn't read; console (trusted
+  first-party) self-scopes. Workflow `wdx3qy11d` (critic 90, all 6 booleans). Re-verified: dist/app.zship (1.23MB, worker + 22
+  rpc), credential absent from dist/assets, only apps/zeroship-builder touched, builder 21/21.
+- **R5-CUTOVER (NEXT — DESTRUCTIVE, CHECKPOINT BEFORE PROCEEDING)** the interdependent coordinated flip, paused for owner
+  go-ahead (irreversible RP deletion + deployment routing + split-brain window):
+  1. `--bootstrap-console` seed (additive): INSERT console.apps row (platform-privileged flag) + app_oauth_clients public PKCE
+     client (explicit sector_identifier) + ingest the prebuilt .zship blob + set deploy_hash; in-process at control boot, NEVER an
+     HTTP route. Mirror bootstrap_builder.rs. Also seed/inject the `ZS_CONTROL_SERVICE_TOKEN` (a control PAT) as the console app's
+     server env.
+  2. Login migration: console bespoke RP (oauth.ts/session.ts/oauth-store.ts + builderFetch/http.ts) → @zeroship/auth client +
+     gateway /__zs/auth/* on the console host.
+  3. Routing flip: ops/Caddyfile + compose console.* from control:9090 → gateway:8000.
+  4. Control-side rip: delete crates/control oidc_rp.rs + console_sessions.rs + require_console_session (control = pure API
+     resource server). DO steps 2-4 in ONE coordinated patch to avoid split-brain auth.
+  5. Runtime envelope: console on enterprise plan (no CPU/wall cap); shared worker pool (no trusted tier, per owner).
+  6. Faithful E2E: deployed console .zship via gateway→worker — login (popup) + a control read + a deploy + SSE chat + sandbox
+     round-trip; assert the control credential never reaches the browser. Bootstrap: install-time `--bootstrap-console` seed (mirrors bootstrap_builder.rs), in-process,
 never an HTTP route. Cutover DELETES the bespoke RP (builder oauth.ts/session.ts/oauth-store.ts/control-client.ts) + control
 oidc_rp.rs + require_console_session — same patch; control becomes a pure API resource server. Repoint Caddy console → gateway.
 - **IdP-prune** merge `/consent/{accept,deny}`→`/consent/decision`; remove `/magic/complete` + `/device`; downgrade `/readyz`.
