@@ -38,7 +38,6 @@ import {
 
 import { SANDBOX_URL, SANDBOX_TOKEN, ZEROSHIP_SDK_REGISTRY } from "./env.js";
 import { publicErrorWithRequestId, UpstreamServiceError } from "./upstream-error.js";
-import { userinfo } from "../auth.js";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
 
@@ -155,23 +154,18 @@ function typedUserIdOrNull(id: string): string | null {
   return assertTypedUserId(id);
 }
 
-async function resolveSandboxUserId(explicit?: string): Promise<string> {
+// Identity comes from the PLATFORM session: the gateway forwards the
+// verified `ZeroShip-User` envelope and the worker exposes it to app code
+// as `currentUser()` (read here via `readCurrentUserId()`). There is no
+// bespoke RP fallback — that surface was removed when the console became a
+// regular app on the standard runtime.
+function resolveSandboxUserId(explicit?: string): string {
   if (explicit) return assertTypedUserId(explicit);
 
   const platformUserId = readCurrentUserId();
   if (platformUserId) {
     const typed = typedUserIdOrNull(platformUserId);
     if (typed) return typed;
-  }
-
-  try {
-    const auth = await userinfo();
-    if (auth?.user?.id) {
-      const typed = typedUserIdOrNull(auth.user.id);
-      if (typed) return typed;
-    }
-  } catch (err) {
-    if (!isLocalDevRuntime()) throw err;
   }
 
   if (isLocalDevRuntime()) {
@@ -237,7 +231,7 @@ export async function getOrCreateSandboxFor(
   threadId: string,
   opts: SandboxLookupOptions = {},
 ): Promise<SandboxHandle> {
-  const userId = await resolveSandboxUserId(opts.userId);
+  const userId = resolveSandboxUserId(opts.userId);
   const projectId = deriveSandboxProjectId(opts.projectSourceId ?? threadId);
   const cacheKey = `${userId}:${projectId}`;
 

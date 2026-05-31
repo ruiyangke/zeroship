@@ -2,135 +2,81 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Identity now comes from the PLATFORM session via the `zeroship`
+// module's `currentUser()` (the gateway-verified `ZeroShip-User`), NOT a
+// bespoke OAuth-RP cookie/refresh loop. Mock it so the unit can drive the
+// "authenticated creator" vs "no user" branches.
 const mocks = vi.hoisted(() => ({
-  loadTokens: vi.fn(),
-  saveTokens: vi.fn(),
-  refreshAccessToken: vi.fn(),
+  currentUser: vi.fn(),
 }));
 
-vi.mock("./oauth-store.js", () => ({
-  loadTokens: mocks.loadTokens,
-  saveTokens: mocks.saveTokens,
-}));
-
-vi.mock("./oauth.js", () => ({
-  refreshAccessToken: mocks.refreshAccessToken,
+vi.mock("zeroship", () => ({
+  currentUser: mocks.currentUser,
 }));
 
 import {
   ControlApiError,
   ControlClient,
-  OauthExpiredError,
+  NotAuthenticatedError,
+  getControlClient,
 } from "./control-client";
 
 const USER_ID = "usr_control_client_test";
 const BASE_URL = "https://control.test";
-const STORED_TOKENS = {
-  access_token: "access-old",
-  refresh_token: "refresh-old",
-  expires_at: 4_102_444_800,
-  scope: "apps:read apps:write",
-};
+const SERVICE_TOKEN = "pat_service_credential_abc123";
 
-describe("ControlClient", () => {
+describe("ControlClient (env-var control service credential)", () => {
   beforeEach(() => {
-    mocks.loadTokens.mockReset();
-    mocks.saveTokens.mockReset();
-    mocks.refreshAccessToken.mockReset();
-
-    mocks.loadTokens.mockResolvedValue(STORED_TOKENS);
-    mocks.saveTokens.mockResolvedValue(undefined);
-    mocks.refreshAccessToken.mockResolvedValue({
-      access_token: "access-new",
-      refresh_token: "refresh-new",
-      expires_in: 3600,
-      scope: "apps:read apps:write apps:deploy",
-      token_type: "Bearer",
-    });
+    mocks.currentUser.mockReset();
+    mocks.currentUser.mockReturnValue({ id: USER_ID, email: "c@example.com" });
+    // The control service credential is a SERVER-ONLY app env var.
+    process.env.ZS_CONTROL_SERVICE_TOKEN = SERVICE_TOKEN;
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    delete process.env.ZS_CONTROL_SERVICE_TOKEN;
   });
 
-  it("attaches Authorization: Bearer header from oauth-store", async () => {
+  it("authenticates with the ZS_CONTROL_SERVICE_TOKEN bearer, not a user token", async () => {
     const fetchMock = vi.fn(async () => Response.json([]));
     vi.stubGlobal("fetch", fetchMock);
 
     await newClient().listApps();
 
-    expect(mocks.loadTokens).toHaveBeenCalledWith(USER_ID);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${BASE_URL}/api/apps`);
+    // The bearer is the server-only service credential — control's
+    // AuthzGuard bearer path verifies it as a control PAT.
+    expect(new Headers(init.headers).get("authorization")).toBe(
+      `Bearer ${SERVICE_TOKEN}`,
+    );
+  });
+
+  it("threads the acting creator's id to the control plane (attribution-only until full-R4)", async () => {
+    const fetchMock = vi.fn(async () => Response.json([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await newClient().listApps();
+
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(new Headers(init.headers).get("authorization")).toBe("Bearer access-old");
+    expect(new Headers(init.headers).get("zeroship-acting-user")).toBe(USER_ID);
   });
 
-  it("on 401, refreshes once and retries", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("expired", { status: 401 }))
-      .mockResolvedValueOnce(Response.json({ id: "app_one", name: "One" }));
+  it("throws (loudly) when the service credential is not configured", async () => {
+    delete process.env.ZS_CONTROL_SERVICE_TOKEN;
+    const fetchMock = vi.fn(async () => Response.json([]));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(newClient().createApp("One", "free")).resolves.toEqual({
-      id: "app_one",
-      name: "One",
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
-    expect(mocks.refreshAccessToken).toHaveBeenCalledWith("refresh-old");
-    expect(mocks.saveTokens).toHaveBeenCalledTimes(1);
-    expect(mocks.saveTokens).toHaveBeenCalledWith(USER_ID, {
-      access_token: "access-new",
-      refresh_token: "refresh-new",
-      expires_at: expect.any(Number),
-      scope: "apps:read apps:write apps:deploy",
-    });
-
-    const [, firstInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    const [, secondInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
-    expect(new Headers(firstInit.headers).get("authorization")).toBe("Bearer access-old");
-    expect(new Headers(secondInit.headers).get("authorization")).toBe("Bearer access-new");
-  });
-
-  it("on second 401 after refresh, throws OauthExpiredError", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("expired", { status: 401 }))
-      .mockResolvedValueOnce(new Response("still expired", { status: 401 }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(newClient().listApps()).rejects.toBeInstanceOf(OauthExpiredError);
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
-    expect(mocks.saveTokens).toHaveBeenCalledTimes(1);
-  });
-
-  it("on refresh failure, throws OauthExpiredError", async () => {
-    const fetchMock = vi.fn(async () => new Response("expired", { status: 401 }));
-    vi.stubGlobal("fetch", fetchMock);
-    mocks.refreshAccessToken.mockRejectedValueOnce(new Error("hydra down"));
-
-    await expect(newClient().listApps()).rejects.toBeInstanceOf(OauthExpiredError);
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(mocks.saveTokens).not.toHaveBeenCalled();
-  });
-
-  it("throws OauthExpiredError when no tokens stored", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    mocks.loadTokens.mockResolvedValueOnce(null);
-
-    await expect(newClient().listApps()).rejects.toBeInstanceOf(OauthExpiredError);
-
+    await expect(newClient().listApps()).rejects.toThrow(
+      /ZS_CONTROL_SERVICE_TOKEN is not set/,
+    );
+    // A missing credential must NOT fall back to an unauthenticated call.
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
   });
 
-  it("deploy posts raw bytes with application/x-zship content-type", async () => {
+  it("deploy posts the artifact with application/x-zship content-type", async () => {
     const fetchMock = vi.fn(async () => Response.json({ deploy_hash: "sha256:abc" }));
     vi.stubGlobal("fetch", fetchMock);
     const bytes = new Uint8Array([1, 2, 3, 4]);
@@ -143,25 +89,21 @@ describe("ControlClient", () => {
     const headers = new Headers(init.headers);
     expect(url).toBe(`${BASE_URL}/api/apps/app_one/deploy`);
     expect(init.method).toBe("POST");
-    expect(headers.get("authorization")).toBe("Bearer access-old");
+    expect(headers.get("authorization")).toBe(`Bearer ${SERVICE_TOKEN}`);
     expect(headers.get("content-type")).toBe("application/x-zship");
-    expect(init.body).toBe(bytes);
   });
 
-  it.each([400, 403, 404])(
-    "does NOT retry on %i",
+  it.each([400, 403, 404, 503])(
+    "maps control %i failures to ControlApiError",
     async (status) => {
       const fetchMock = vi.fn(async () => new Response("bad request", { status }));
       vi.stubGlobal("fetch", fetchMock);
+      vi.spyOn(console, "error").mockImplementation(() => {});
 
       await expect(newClient().listApps()).rejects.toMatchObject({
         name: "ControlApiError",
         status,
       } satisfies Partial<ControlApiError>);
-
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
-      expect(mocks.saveTokens).not.toHaveBeenCalled();
     },
   );
 
@@ -179,7 +121,33 @@ describe("ControlClient", () => {
       message: "control request failed",
     } satisfies Partial<ControlApiError>);
 
-    await expect(newClient().getAppLogs("app_one")).rejects.not.toThrow("postgres://internal");
+    await expect(newClient().getAppLogs("app_one")).rejects.not.toThrow(
+      "postgres://internal",
+    );
+  });
+
+  describe("getControlClient — platform identity", () => {
+    it("resolves the creator from currentUser()", async () => {
+      const fetchMock = vi.fn(async () => Response.json([]));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await getControlClient().listApps();
+
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(new Headers(init.headers).get("zeroship-acting-user")).toBe(USER_ID);
+    });
+
+    it("throws NotAuthenticatedError when there is no platform user", () => {
+      mocks.currentUser.mockReturnValue(null);
+      expect(() => getControlClient()).toThrow(NotAuthenticatedError);
+    });
+
+    it("throws NotAuthenticatedError when currentUser() throws (outside a request)", () => {
+      mocks.currentUser.mockImplementation(() => {
+        throw new Error("called outside a request handler");
+      });
+      expect(() => getControlClient()).toThrow(NotAuthenticatedError);
+    });
   });
 });
 

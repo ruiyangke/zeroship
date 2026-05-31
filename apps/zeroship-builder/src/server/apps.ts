@@ -21,9 +21,9 @@ export type { EnvVar } from "./control-client.js";
 //
 // Scoping: per current user. The dev synthetic user is a single id
 // (`usr_dev`), so the dashboard always reads the same list during dev.
-// In prod the `getRequest()` cookie carries the session and the
-// auth-cookie hash gates per-user reads — mirror that here when the
-// real auth wire is on.
+// In prod the platform session identifies the creator (`currentUser()`,
+// from the gateway-verified `ZeroShip-User`) — key this per-creator off
+// that id when the archive store gains a real column.
 const ARCHIVE_KEY = "archive-set:usr_dev";
 
 async function loadArchive(): Promise<Set<string>> {
