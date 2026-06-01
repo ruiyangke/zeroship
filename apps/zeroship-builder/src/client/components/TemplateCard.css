@@ -109,6 +109,14 @@
 .zs-template-card__preview-bar[data-w="full"] {
   inline-size: 100%;
 }
+/* A single-band "cap" row carries no short/med/full width token (data-w
+ * is the kind itself), so give it a full-width fallback — otherwise the
+ * accent cap bar collapses to zero width and is invisible (e.g. № 3 / 7
+ * / 11, whose num%4===3 variant ends in a lone ["cap"] row). */
+.zs-template-card__preview-row[data-multi="false"]
+  .zs-template-card__preview-bar[data-w="cap"] {
+  inline-size: 100%;
+}
 /* Single-band row (height of a thin rule). */
 .zs-template-card__preview-row[data-multi="false"] .zs-template-card__preview-bar {
   block-size: var(--zs-space-half);
