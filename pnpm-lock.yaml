@@ -131,9 +131,6 @@ importers:
       '@langchain/openai':
         specifier: ^1.4.5
         version: 1.4.5(@langchain/core@1.1.44(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(ws@8.20.0))(ws@8.20.0)
-      '@tailwindcss/vite':
-        specifier: 'catalog:'
-        version: 4.2.4(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@tanstack/react-query':
         specifier: 'catalog:'
         version: 5.100.8(react@19.2.5)
@@ -188,12 +185,6 @@ importers:
       remark-gfm:
         specifier: ^4.0.0
         version: 4.0.1
-      tailwind-merge:
-        specifier: 'catalog:'
-        version: 3.5.0
-      tailwindcss:
-        specifier: 'catalog:'
-        version: 4.2.4
       zod:
         specifier: 'catalog:'
         version: 3.25.76
@@ -845,10 +836,6 @@ importers:
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types
-    optionalDependencies:
-      superjson:
-        specifier: ^2.2.6
-        version: 2.2.6
     devDependencies:
       tsx:
         specifier: 'catalog:'
@@ -859,6 +846,10 @@ importers:
       zeroship:
         specifier: workspace:*
         version: link:../..
+    optionalDependencies:
+      superjson:
+        specifier: ^2.2.6
+        version: 2.2.6
 
   sdks/control:
     devDependencies:
@@ -1024,10 +1015,6 @@ importers:
         version: 5.9.3
 
   sdks/rpc:
-    optionalDependencies:
-      superjson:
-        specifier: ^2.2.6
-        version: 2.2.6
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1047,6 +1034,10 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
+    optionalDependencies:
+      superjson:
+        specifier: ^2.2.6
+        version: 2.2.6
 
   sdks/server:
     dependencies:

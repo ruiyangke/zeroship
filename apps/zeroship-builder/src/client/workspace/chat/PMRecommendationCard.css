@@ -1,0 +1,163 @@
+/*
+ * PMRecommendationCard — crystal bespoke layer.
+ *
+ * Structure comes from the @zeroship/ui Card + Collapsible + Badge and
+ * the Stack / Cluster layout primitives. These rules add only the
+ * card-specific bits the DS doesn't carry: the compact eyebrow + body
+ * type ramp, the disclosure toggle row restyled to match the eyebrow,
+ * the alternatives list rhythm, and the mono issue-id chip. Everything
+ * reads from --zs-* tokens so it tracks the active theme.
+ */
+
+/* Card sits inline after the chat message with a small top offset. Zero
+ * the Card root padding + inter-child gap (the md size tokens) so the
+ * header / body / disclosure bands run edge-to-edge and own their own
+ * spacing + hairline dividers — the original three-band layout. */
+.pm-rec {
+  margin-block-start: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  --zs-card-padding-md: 0;
+  --zs-card-gap-md: 0;
+}
+
+/* ─── header band ─────────────────────────────────────────────────────
+ * Eyebrow label + urgency badge, divided from the body by a hairline. */
+.pm-rec__header {
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+
+.pm-rec__eyebrow {
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ─── body band ───────────────────────────────────────────────────────
+ * Primary recommendation: title, supporting `why`, optional issue id. */
+.pm-rec__body {
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+}
+
+.pm-rec__title {
+  color: var(--zs-label);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+.pm-rec__why {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+/* Mono issue id (#123) — shared by primary + alternatives. */
+.pm-rec__issue {
+  color: var(--zs-label-tertiary);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+}
+
+/* ─── disclosure ──────────────────────────────────────────────────────
+ * The Collapsible trigger is restyled from the DS default button row into
+ * a compact eyebrow-style band; the auto chevron is dropped on the
+ * asChild path, replaced by a +/− glyph driven off [data-panel-open]. */
+.pm-rec__disclosure {
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+/* Override the DS trigger padding/type so the toggle reads as a quiet
+ * eyebrow row, not a tall button. Doubled selector raises specificity so
+ * these win over the .zs-collapsible-trigger defaults. */
+.pm-rec__toggle.pm-rec__toggle {
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pm-rec__toggle:hover {
+  color: var(--zs-label);
+}
+
+/* +/− glyph: a horizontal bar plus a vertical bar that hides when the
+ * panel is open, so closed reads "+" and open reads "−". */
+.pm-rec__toggle-glyph {
+  position: relative;
+  display: inline-block;
+  inline-size: 0.625rem;
+  block-size: 0.625rem;
+  flex: none;
+}
+.pm-rec__toggle-glyph::before,
+.pm-rec__toggle-glyph::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  background: currentColor;
+}
+.pm-rec__toggle-glyph::before {
+  inline-size: 0.625rem;
+  block-size: 0.0625rem;
+  transform: translate(-50%, -50%);
+}
+.pm-rec__toggle-glyph::after {
+  inline-size: 0.0625rem;
+  block-size: 0.625rem;
+  transform: translate(-50%, -50%);
+}
+/* Open state: drop the vertical bar so the glyph becomes a minus. */
+.pm-rec__toggle[data-panel-open] .pm-rec__toggle-glyph::after {
+  opacity: 0;
+}
+
+/* The panel content carries a top hairline; the DS panel-inner already
+ * supplies the surrounding padding. */
+.pm-rec__panel .zs-collapsible-panel-inner {
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+/* ─── alternatives list ───────────────────────────────────────────────*/
+.pm-rec__alts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+}
+
+.pm-rec__alt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+}
+
+.pm-rec__alt-title {
+  min-inline-size: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+.pm-rec__alt-why {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+/* Keep the urgency badge from shrinking when the title is long. */
+.pm-rec__urgency {
+  flex: none;
+}

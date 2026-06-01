@@ -1,0 +1,81 @@
+/*
+ * ChatRail — the chat sidebar shell.
+ *
+ * Crystal-only bespoke styling over @zeroship/ui tokens. The DS Stack
+ * primitives arrange the column (header · messages · error · composer);
+ * the rules below carry the things the catalog doesn't: the full-height
+ * sunken-surface panel, the hairline-divided header, and the tinted
+ * error band that sits between the message list and the composer.
+ *
+ * The header title drops the prior editorial serif/italic face — crystal
+ * carries no display font — and reads as a headline in the system face.
+ */
+
+/* Full-height column panel — the rail surface. */
+.zb-chat-rail {
+  block-size: 100%;
+  min-block-size: 0;
+  background: var(--zs-surface-sunken);
+}
+
+/* Header — title + turn count on a hairline. A row Stack handles the
+ * inline layout; this carries the surface/edge details. */
+.zb-chat-rail__header {
+  flex: 0 0 auto;
+  padding-block: var(--zs-space-4) var(--zs-space-2);
+  padding-inline: var(--zs-space-5);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+
+.zb-chat-rail__title {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  letter-spacing: var(--zs-text-headline-tracking);
+  color: var(--zs-label);
+}
+
+/* Turn count — quiet uppercase eyebrow. */
+.zb-chat-rail__count {
+  flex: 0 0 auto;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── error band ──────────────────────────────────────────────────────
+ * A tinted strip between the message list and the composer: a truncated
+ * message on the inline-start, a plain destructive retry button on the
+ * end. Hairline on top to separate it from the scroll region. */
+.zb-chat-rail__error {
+  flex: 0 0 auto;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-5);
+  border-block-start: 0.0625rem solid color-mix(in oklch, var(--zs-system-red) 30%, transparent);
+  background: color-mix(in oklch, var(--zs-system-red) 6%, transparent);
+}
+
+.zb-chat-rail__error-msg {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-system-red);
+}
+
+/* The plain/destructive retry Button already reads as red link-style;
+ * keep it from growing and hold the uppercase eyebrow treatment that the
+ * prior affordance carried. */
+.zb-chat-rail__retry {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}

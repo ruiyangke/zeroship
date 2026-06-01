@@ -1,0 +1,75 @@
+/*
+ * PublicNav — crystal skin for the public/marketing top nav.
+ *
+ * The structure (full-width Container + a space-between Cluster) comes
+ * from the DS layout primitives; the CTA is a DS Button. This sheet
+ * only paints the band chrome + the bespoke link/brand treatment that
+ * has no direct DS component: the bottom hairline, the muted→strong
+ * nav-link states, the uppercase letter-spaced caption type, and the
+ * accented wordmark dot. Everything reads --zs-* tokens — no raw
+ * hex/px (0.0625rem hairline only), no Tailwind, no editorial tokens.
+ */
+
+/* ─── the band ─────────────────────────────────────────────────────── */
+.zs-public-nav {
+  background-color: var(--zs-surface-bg);
+  border-block-end: 0.0625rem solid var(--zs-separator-color);
+}
+
+/* The single space-between row. A touch of vertical padding so the
+ * band has the same visual height as the old py-3 header. */
+.zs-public-nav__bar {
+  padding-block: var(--zs-space-3);
+}
+
+/* ─── wordmark ─────────────────────────────────────────────────────── */
+.zs-public-nav__brand {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-style: italic;
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+  text-decoration: none;
+  transition: opacity 120ms ease;
+}
+.zs-public-nav__brand:hover {
+  opacity: 0.8;
+}
+/* The accent dot — crystal analogue of the old tomato full-stop. */
+.zs-public-nav__brand-dot {
+  color: var(--zs-accent);
+}
+
+/* ─── centre nav links ─────────────────────────────────────────────── */
+.zs-public-nav__links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-7);
+}
+
+/* Shared link treatment for both the centre links and "Sign in":
+ * a small, uppercase, letter-spaced caption that recedes until hover
+ * or active. */
+.zs-public-nav__link {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-public-nav__link:hover {
+  color: var(--zs-label);
+}
+.zs-public-nav__link--active {
+  color: var(--zs-label);
+}
+
+/* ─── right-edge actions ───────────────────────────────────────────── */
+.zs-public-nav__actions {
+  flex: none;
+}

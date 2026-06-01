@@ -1,0 +1,85 @@
+/*
+ * ProductTour — crystal coachmark styling.
+ *
+ * The tour is a custom spotlight overlay: it anchors a card to an
+ * arbitrary on-page DOM rect (measured at runtime), so it cannot use
+ * the DS Dialog/Popover anchoring model. Instead the positioning is
+ * driven by inline `--tour-*` custom properties the component sets from
+ * the measured rect, and the chrome (backdrop, spotlight ring, card
+ * shell) reads `--zs-*` crystal tokens here. The card *content* uses DS
+ * Card / Button / Tag — only the overlay scaffolding lives in this file.
+ */
+
+.zs-tour {
+  position: fixed;
+  inset: 0;
+  z-index: var(--zs-z-modal);
+}
+
+/* Full-viewport dim + dismiss target. The spotlight ring punches the
+ * visual hole via box-shadow, so this layer just carries the click. */
+.zs-tour__backdrop {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  background: var(--zs-scrim);
+}
+
+/* Spotlight frame around the current target. The big outset box-shadow
+ * dims everything outside the rect; the inset ring draws the accent
+ * outline so the eye lands on the surface. pointer-events:none lets the
+ * highlighted surface stay interactive. */
+.zs-tour__spotlight {
+  position: absolute;
+  pointer-events: none;
+  top: var(--tour-spot-top);
+  left: var(--tour-spot-left);
+  width: var(--tour-spot-width);
+  height: var(--tour-spot-height);
+  border-radius: var(--zs-radius-3);
+  box-shadow:
+    0 0 0 100vmax var(--zs-scrim),
+    inset 0 0 0 0.125rem var(--zs-accent);
+  transition: all var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* Tooltip card shell. Width + measured position come from inline vars;
+ * the DS Card inside paints the surface. */
+.zs-tour__card {
+  position: absolute;
+  width: var(--tour-card-width);
+  top: var(--tour-card-top);
+  left: var(--tour-card-left);
+  animation: zs-tour-reveal var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+@keyframes zs-tour-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(var(--zs-space-1));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zs-tour__spotlight {
+    transition: none;
+  }
+  .zs-tour__card {
+    animation: none;
+  }
+}
+
+/* Step counter eyebrow above the title. */
+.zs-tour__eyebrow {
+  font: inherit;
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-weight: var(--zs-text-caption-1-weight);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}

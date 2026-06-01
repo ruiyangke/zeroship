@@ -1,0 +1,177 @@
+/*
+ * Signup — crystal auth surface.
+ *
+ * The page chrome (centering, Card surface, Stack rhythm, the error
+ * Banner, the "or" Separator) all come from @zeroship/ui. These rules
+ * add only the bespoke bits the DS doesn't carry: the serif-free brand
+ * mark, the marketing-scale title/lede, and crystal styling for the two
+ * `@zeroship/auth` SignInButtons (which render their own <button> and
+ * can't be the DS Button, so we mirror the filled / gray Button idioms
+ * here). Everything reads from --zs-* tokens so the page tracks the
+ * active crystal theme.
+ */
+
+/* Centered viewport shell + horizontal padding gutter. */
+.signup-shell {
+  padding-inline: var(--zs-space-4);
+  padding-block: var(--zs-space-8);
+}
+
+/* The auth card — a fixed comfortable column that collapses to full
+ * width on small screens. */
+.signup-card {
+  inline-size: 27.5rem;
+  max-inline-size: 100%;
+}
+
+/* Brand wordmark — quiet link back to the marketing page. */
+.signup-brand {
+  align-self: flex-start;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+  text-decoration: none;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.signup-brand:hover {
+  opacity: 0.8;
+}
+.signup-brand__dot {
+  color: var(--zs-accent);
+}
+
+/* Title + lede — the marketing-scale welcome copy. */
+.signup-title {
+  margin: 0;
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  font-weight: var(--zs-text-large-title-weight);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  color: var(--zs-label);
+}
+.signup-title__accent {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+.signup-lede {
+  margin: 0;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: var(--zs-text-callout-weight);
+  color: var(--zs-label-secondary);
+}
+
+/* "or" divider — Separator hairlines flanking a quiet uppercase label. */
+.signup-or {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-3);
+}
+.signup-or__line {
+  flex: 1;
+}
+.signup-or__label {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+/* ── SignInButton launchers ─────────────────────────────────────────
+ * `@zeroship/auth` SignInButton renders a plain <button> (no asChild),
+ * so we style it here to read as a crystal Button. Shared chrome first,
+ * then the two variants: Google = gray/outline-ish, email = filled. */
+.signup-oauth-btn,
+.signup-email-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-2);
+  inline-size: 100%;
+  block-size: 2.75rem;
+  padding-inline: var(--zs-space-4);
+  border: none;
+  border-radius: var(--zs-control-radius-md);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  font-weight: 590;
+  cursor: pointer;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Google — neutral gray fill (mirrors Button variant="gray"). */
+.signup-oauth-btn {
+  background-color: var(--zs-fill-secondary);
+  color: var(--zs-label);
+}
+@media (hover: hover) {
+  .signup-oauth-btn:hover {
+    background-color: var(--zs-fill);
+  }
+}
+.signup-oauth-btn:active {
+  background-color: var(--zs-fill-tertiary);
+}
+
+/* Email — accent fill (mirrors Button variant="filled"). */
+.signup-email-btn {
+  background-color: var(--zs-accent);
+  color: var(--zs-accent-ink);
+}
+@media (hover: hover) {
+  .signup-email-btn:hover {
+    background-color: var(--zs-accent-hover);
+  }
+}
+.signup-email-btn:active {
+  background-color: var(--zs-accent-active);
+}
+
+/* Shared focus ring — crystal focus-visible affordance. */
+.signup-oauth-btn:focus-visible,
+.signup-email-btn:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-accent);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* Brand glyph — fixed optical size; #EA4335 inside is the official
+ * Google mark color (brand asset, not a theme color). */
+.signup-google-g {
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+}
+
+/* Footer — mode-switch prompt back to /login. */
+.signup-footer {
+  margin: 0;
+  text-align: center;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: var(--zs-text-subheadline-weight);
+  color: var(--zs-label-secondary);
+}
+.signup-footer__link {
+  color: var(--zs-accent);
+  text-decoration: none;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.signup-footer__link:hover {
+  opacity: 0.8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signup-brand,
+  .signup-oauth-btn,
+  .signup-email-btn,
+  .signup-footer__link {
+    transition: none;
+  }
+}

@@ -1,0 +1,128 @@
+/*
+ * SurveyCard — component-scoped styling.
+ *
+ * Crystal-only: every value reads a --zs-* token (or a 0.0625rem
+ * hairline / em letter-spacing). No raw hex/px, no Tailwind utilities,
+ * no editorial tokens. The Card / Field / Input / Radio / Button chrome
+ * comes from @zeroship/ui; this file only sets the card's outer rhythm,
+ * the collapsed "Answered." treatment, the preamble + prompt reading
+ * type, the bespoke <textarea> (which has no DS wrapper) styled over the
+ * same --zs-input-* tokens as the DS Input sm size, and the justified
+ * skip/submit action row.
+ */
+
+/* ─── Outer rhythm — replaces the former `mt-2` top margin ───────────── */
+.survey-card {
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── Collapsed "Answered." record — muted small text ───────────────── */
+.survey-card--collapsed {
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+/* ─── Preamble — the survey's lead-in sentence ──────────────────────── */
+.survey-card__preamble {
+  margin: 0 0 var(--zs-space-3);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+/* ─── Prompt — the per-question label / radio-group heading ─────────── */
+.survey-card__prompt {
+  color: var(--zs-label);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 600;
+}
+
+/* The choice-question prompt is a bare <div> (not a Field.Label); give
+   it the same gap to its options that the Field stack supplies. */
+div > .survey-card__prompt {
+  margin-block-end: var(--zs-space-2);
+}
+
+/* ─── Field — text-question wrapper rhythm ──────────────────────────── */
+.survey-card__field {
+  gap: var(--zs-field-gap);
+}
+
+/* ─── Textarea — long_text control. No DS wrapper exists, so mirror the
+   DS Input sm size over the shared --zs-input-* tokens: same fill,
+   hairline border (box-shadow inset → no layout shift), focus ring,
+   ink, and placeholder. resize:none per the original. ───────────────── */
+.survey-card__textarea {
+  inline-size: 100%;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-control-px-sm);
+  border: 0;
+  border-radius: var(--zs-control-radius-sm);
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  resize: none;
+  /* 0.0625rem hairline via box-shadow inset; the second slot holds the
+     focus-ring target so the transition morphs rather than snaps. */
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.survey-card__textarea::placeholder {
+  color: var(--zs-input-placeholder);
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .survey-card__textarea:not(:focus):hover {
+    background: var(--zs-input-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+}
+
+.survey-card__textarea:focus {
+  outline: none;
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+
+@media (forced-colors: active) {
+  .survey-card__textarea {
+    background: Field;
+    color: FieldText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    forced-color-adjust: none;
+  }
+  .survey-card__textarea:focus {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .survey-card__textarea::placeholder {
+    color: GrayText;
+  }
+}
+
+/* ─── Actions — the justified skip / submit row. Replaces the former
+   `flex justify-between items-center` + top spacing. ─────────────────── */
+.survey-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-block-start: var(--zs-space-4);
+}

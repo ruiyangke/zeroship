@@ -1,0 +1,70 @@
+/*
+ * DiffCard — crystal code-diff surface.
+ *
+ * The DS Card (variant="outline") frames the diff; the bespoke rules
+ * below carry the things the catalog doesn't: the header bar (path +
+ * "diff" eyebrow on a hairline), the monospace scroll region, and the
+ * per-line add/remove ink keyed off data-kind. Everything reads from
+ * --zs-* tokens so the card tracks the active theme.
+ */
+
+/* Card frame — let the header/body own their own padding. */
+.diff-card {
+  margin-block-start: var(--zs-space-2);
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Header bar — file path on the inline-start, "diff" eyebrow trailing,
+ * separated from the body by a hairline. */
+.diff-card__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-space-3);
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-secondary);
+}
+
+.diff-card__path {
+  overflow-wrap: anywhere;
+}
+
+/* Trailing "diff" eyebrow — quietest text on the card. */
+.diff-card__tag {
+  flex: 0 0 auto;
+  color: var(--zs-label-tertiary);
+}
+
+/* Body — monospace, horizontally scrollable, height-capped. */
+.diff-card__body {
+  padding: var(--zs-space-3);
+  max-block-size: 12rem;
+  overflow-x: auto;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-1-line);
+  white-space: pre;
+  color: var(--zs-label-secondary);
+}
+
+/* Per-line ink. The +/- gutter glyph already carries the kind; color
+ * and a faint wash are the secondary signal. */
+.diff-card__line[data-kind="add"] {
+  color: var(--zs-system-green);
+  background: color-mix(in oklch, var(--zs-system-green) 10%, transparent);
+}
+
+.diff-card__line[data-kind="remove"] {
+  color: var(--zs-system-red);
+  background: color-mix(in oklch, var(--zs-system-red) 10%, transparent);
+}
+
+.diff-card__line[data-kind="context"] {
+  color: var(--zs-label-secondary);
+}

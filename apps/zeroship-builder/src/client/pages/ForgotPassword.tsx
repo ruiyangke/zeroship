@@ -6,10 +6,17 @@
 // always shows the standard no-enumeration confirmation message.
 // When the endpoint lands, replace `submit` with the real call and
 // keep the same visible reply.
+//
+// Crystal: built over @zeroship/ui — a centered, elevated Card holds
+// the Field + Input email row and the full-width submit Button; the
+// post-submit reply is a live info Banner (announced once it appears,
+// preserving the no-enumeration guarantee). Bespoke wordmark + footer
+// chrome lives in the co-located ForgotPassword.css reading --zs-*.
 
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { StampButton } from "../components/StampButton";
+import { Banner, Button, Card, Center, Field, Input, Stack } from "@zeroship/ui";
+import "./ForgotPassword.css";
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState("");
@@ -25,62 +32,71 @@ export default function ForgotPassword() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 sm:px-5">
-      <div className="w-[440px] max-w-full bg-white border border-rule px-6 sm:px-10 py-8 sm:py-10 reveal" data-testid="forgot-password-page">
-        <Link to="/" className="font-serif italic text-[20px] font-medium text-ink hover:opacity-80 mb-8 inline-block" style={{ textDecoration: "none" }}>
-          zeroship<span className="text-tomato">.</span>
-        </Link>
-
-        <h1 className="font-serif font-medium text-[36px] -tracking-[0.015em] leading-[1.05] mb-1.5">
-          Forgot your <em className="italic text-tomato">password</em>?
-        </h1>
-        <p className="font-serif text-[14.5px] text-ink-soft mb-7 leading-[1.55]">
-          Tell us the email you signed up with — we'll send a reset link.
-        </p>
-
-        {submitted ? (
-          <div
-            className="px-3 py-3 border border-rule bg-paper-2 font-serif text-[14px] text-ink leading-[1.55]"
-            data-testid="forgot-password-confirmation"
-          >
-            If an account exists for <em className="italic">{email}</em>, we sent reset instructions.
-          </div>
-        ) : (
-          <form onSubmit={submit} className="space-y-4">
-            <label className="block">
-              <span className="block label-uc mb-1.5">Email</span>
-              <input
-                type="email"
-                autoComplete="email"
-                autoFocus
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                data-testid="forgot-password-email"
-                className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink"
-              />
-            </label>
-            <div className="pt-2">
-              <StampButton
-                type="submit"
-                disabled={!email.trim()}
-                className="w-full"
-                data-testid="forgot-password-submit"
-                noArrow
-              >
-                Send reset link
-              </StampButton>
-            </div>
-          </form>
-        )}
-
-        <div className="font-serif text-[14px] text-ink-soft text-center mt-6">
-          Remembered it?{" "}
-          <Link to="/login" className="text-tomato hover:opacity-80" style={{ textDecoration: "none" }} data-testid="forgot-password-link-login">
-            Sign in →
+    <Center minHeight="100dvh" className="fp-center">
+      <Card
+        variant="elevated"
+        className="fp-card"
+        data-testid="forgot-password-page"
+      >
+        <Stack gap={5}>
+          <Link to="/" className="fp-wordmark">
+            zeroship<span className="fp-wordmark__dot">.</span>
           </Link>
-        </div>
-      </div>
-    </div>
+
+          <Stack gap={2}>
+            <h1 className="fp-title">
+              Forgot your <em className="fp-title__accent">password</em>?
+            </h1>
+            <p className="fp-lede">
+              Tell us the email you signed up with — we'll send a reset link.
+            </p>
+          </Stack>
+
+          {submitted ? (
+            <Banner
+              intent="info"
+              live
+              data-testid="forgot-password-confirmation"
+            >
+              If an account exists for <em className="fp-confirm__email">{email}</em>, we sent reset instructions.
+            </Banner>
+          ) : (
+            <form onSubmit={submit} className="fp-form">
+              <Stack gap={4}>
+                <Field required>
+                  <Field.Label>Email</Field.Label>
+                  <Input
+                    type="email"
+                    autoComplete="email"
+                    autoFocus
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    data-testid="forgot-password-email"
+                  />
+                </Field>
+                <Button
+                  type="submit"
+                  variant="filled"
+                  size="large"
+                  disabled={!email.trim()}
+                  className="fp-submit"
+                  data-testid="forgot-password-submit"
+                >
+                  Send reset link
+                </Button>
+              </Stack>
+            </form>
+          )}
+
+          <p className="fp-footer">
+            Remembered it?{" "}
+            <Link to="/login" className="fp-footer__link" data-testid="forgot-password-link-login">
+              Sign in →
+            </Link>
+          </p>
+        </Stack>
+      </Card>
+    </Center>
   );
 }

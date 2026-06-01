@@ -1,0 +1,72 @@
+/*
+ * ChatMessages — crystal skin for the workspace chat message list.
+ *
+ * The DS layer paints + arranges: `ScrollArea` owns the scroll surface
+ * (Viewport = the real overflow container, bar chrome on top) and
+ * `Stack` arranges the message rows on a governed gap. This file owns
+ * only what the DS doesn't cover: the fill-the-rail frame, the viewport
+ * padding, and the editorial empty-state typography — all over `--zs-*`
+ * crystal tokens (no editorial tokens, no Tailwind, no raw hex/px:
+ * rem + system color tokens only).
+ */
+
+/* ─── frame ──────────────────────────────────────────────────────── *
+ *
+ * ChatMessages sits as the fluid middle child of ChatRail's flex
+ * column (header above, composer/error band below). It must take the
+ * remaining height and floor at zero so its own overflow scrolls
+ * instead of pushing the composer off-screen — the old `flex-1
+ * overflow-y-auto … min-h-0` contract, now expressed on the
+ * ScrollArea root. */
+
+.zs-chat-messages {
+  flex: 1;
+  min-block-size: 0;
+}
+
+/* Viewport = the actual scroller (Base UI sets inline `overflow:
+ * scroll` here). It carries the chat's edge padding so the message
+ * column breathes against the rail walls — the old `px-5 py-4`. */
+.zs-chat-messages__viewport {
+  padding-inline: var(--zs-space-5);
+  padding-block: var(--zs-space-4);
+}
+
+/* The Content wrapper + Stack fill the inline axis so message rows and
+ * cards measure against the full rail width. */
+.zs-chat-messages__content {
+  inline-size: 100%;
+}
+
+.zs-chat-messages__stack {
+  inline-size: 100%;
+}
+
+/* ─── empty state ────────────────────────────────────────────────── *
+ *
+ * The first-mount nudge. Editorial copy mapped onto the crystal type
+ * scale: a prominent question heading + a calm helper line with an
+ * inline mono `@` key. */
+
+.zs-chat-messages__empty-title {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+
+.zs-chat-messages__empty-body {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* Inline `@` key chip — mono so it reads as a literal keystroke. */
+.zs-chat-messages__empty-key {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  color: var(--zs-label-secondary);
+}

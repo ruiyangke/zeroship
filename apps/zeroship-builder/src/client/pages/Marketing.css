@@ -1,0 +1,89 @@
+/*
+ * Marketing — crystal skin for the public landing page.
+ *
+ * The page is built on the @zeroship/ui `sections/` layer (Hero,
+ * FeatureGrid, StatsBand, Cta, Footer): each is a full-bleed band that
+ * owns its own inner Container measure + vertical rhythm, so this sheet
+ * paints only the bits the DS doesn't ship as a section:
+ *   - the page backdrop + min-height column;
+ *   - the bespoke "featured templates" gallery band (a DS section doesn't
+ *     cover a card-gallery, so it's a hand-composed Container + Grid band
+ *     that matches the surrounding band rhythm);
+ *   - the № step-number lead-in on the "how it works" feature titles;
+ *   - the footer brand wordmark + accent dot.
+ *
+ * Everything reads --zs-* tokens — no raw hex/px (0.0625rem hairline
+ * only), no Tailwind, no editorial tokens.
+ */
+
+/* ─── page shell ───────────────────────────────────────────────────── */
+.zs-marketing {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background-color: var(--zs-surface-bg);
+  color: var(--zs-label);
+}
+
+.zs-marketing__main {
+  display: block;
+}
+
+/* ─── "how it works" — the № step lead-in ──────────────────────────── */
+/* The feature title is a heading; the № prefix is a small accent caption
+ * stacked above the step name so the four steps read as a numbered run. */
+.zs-marketing__step-num {
+  display: block;
+  margin-block-end: var(--zs-space-1);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--zs-accent-active);
+}
+
+/* ─── featured templates — bespoke gallery band ────────────────────── */
+/* Mirrors the DS section block rhythm (cf. Hero/FeatureGrid padding-block:
+ * var(--zs-space-10)) so the gallery sits in the same cadence as the bands
+ * above and below it. Full-bleed width with the inner Container owning the
+ * readable measure. */
+.zs-marketing__templates {
+  inline-size: 100%;
+  padding-block: var(--zs-space-10);
+}
+
+/* The band header: eyebrow + title at the inline-start, a "See all" action
+ * at the inline-end; wraps gracefully on narrow widths. */
+.zs-marketing__templates-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--zs-space-4);
+}
+
+.zs-marketing__templates-title {
+  margin-block: 0;
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  color: var(--zs-label);
+}
+
+/* ─── footer brand wordmark ────────────────────────────────────────── */
+.zs-marketing__footer-brand {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-style: italic;
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+  text-decoration: none;
+  transition: opacity 120ms ease;
+}
+.zs-marketing__footer-brand:hover {
+  opacity: 0.8;
+}
+.zs-marketing__footer-dot {
+  color: var(--zs-accent);
+}

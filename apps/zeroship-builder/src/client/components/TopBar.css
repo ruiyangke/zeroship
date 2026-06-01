@@ -1,0 +1,159 @@
+/*
+ * TopBar — crystal header bar.
+ *
+ * Three-zone header: brand/crumbs (start), optional status (center),
+ * account avatar + custom right slot (end). The DS Cluster owns the
+ * inline arrangement inside the brand + right zones; these rules own
+ * the header grid, the translucent surface + separator rule, and the
+ * bespoke editorial-leaning type for the wordmark and crumbs. Every
+ * value reads from --zs-* tokens so the bar tracks the active theme.
+ */
+
+.topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-3);
+  background: var(--zs-surface-raised);
+  border-bottom: var(--zs-separator-weight, 0.0625rem) solid var(--zs-separator);
+  backdrop-filter: var(--zs-material-regular, none);
+}
+
+@media (min-width: 40rem) {
+  .topbar {
+    gap: var(--zs-space-4);
+    padding-inline: var(--zs-space-6);
+  }
+}
+
+@media (min-width: 48rem) {
+  .topbar {
+    grid-template-columns: minmax(17.5rem, auto) 1fr auto;
+  }
+}
+
+/* ─── Brand zone — wordmark / admin badge + crumbs.
+ * Override the Cluster's center cross-alignment to a shared baseline so
+ * the italic wordmark and the crumb labels sit on one type baseline
+ * (Cluster's Align union has no `baseline`, so it lives here). */
+/* The Cluster sets `align-items: var(--cluster-align)` from a class and
+ * the property inline; a same-specificity class can't reliably win, so
+ * raise specificity here to force a shared baseline for the wordmark +
+ * crumbs (Cluster's Align union has no `baseline`). */
+.topbar .topbar__brand {
+  min-width: 0;
+  align-items: baseline;
+}
+
+/* Wordmark — the editorial italic lockup, now expressed through the
+ * crystal type + accent tokens (no font-serif / paper / ink names). */
+.topbar__logo {
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1;
+  color: var(--zs-label);
+  border-radius: var(--zs-radius-2);
+  text-decoration: none;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.topbar__logo:hover {
+  opacity: 0.8;
+}
+.topbar__logo:focus-visible {
+  outline: 0.125rem solid var(--zs-focus);
+  outline-offset: 0.125rem;
+}
+.topbar__logo-dot {
+  color: var(--zs-accent);
+}
+
+/* Admin badge — quiet uppercase accent mark in place of the wordmark. */
+.topbar__admin {
+  font-size: var(--zs-text-caption-2-size);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--zs-accent);
+  text-decoration: none;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.topbar__admin:hover {
+  opacity: 0.8;
+}
+
+/* ─── Crumbs — separator glyph + label, italic to match the wordmark. */
+.topbar__crumb {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--zs-space-3);
+  min-width: 0;
+}
+.topbar__sep {
+  color: var(--zs-separator-strong);
+}
+.topbar__crumb-link,
+.topbar__crumb-current {
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  text-decoration: none;
+}
+.topbar__crumb-link {
+  color: var(--zs-label-secondary);
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.topbar__crumb-link:hover {
+  color: var(--zs-label);
+  text-decoration: underline;
+}
+.topbar__crumb-current {
+  color: var(--zs-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Project name crumb — slightly heavier than a plain crumb. */
+.topbar__project {
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  color: var(--zs-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Center zone — optional status strip, centered. */
+.topbar__center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* ─── Right zone — custom slot + account avatar. */
+.topbar__right {
+  min-width: 0;
+}
+
+/* Account avatar lockup — the Link is the interactive wrapper; the DS
+ * Avatar paints the lockup. The admin variant tints the fallback with
+ * the accent so an admin session reads at a glance. */
+.topbar__account {
+  display: inline-flex;
+  border-radius: var(--zs-radius-full);
+  text-decoration: none;
+}
+.topbar__account:focus-visible {
+  outline: 0.125rem solid var(--zs-focus);
+  outline-offset: 0.125rem;
+}
+.topbar__account[data-admin="true"] .zs-avatar__fallback {
+  background: var(--zs-accent);
+  color: var(--zs-accent-ink);
+}

@@ -1,0 +1,14 @@
+/*
+ * AuthGuard — loading-state styling.
+ *
+ * The route gate's one-beat "loading…" indicator. Layout (full-viewport
+ * centering) comes from the DS `Center` (minHeight="100dvh"); this sheet
+ * only sets the label's quiet type. Crystal-only: --zs-* tokens, no raw
+ * hex/px, no Tailwind, no editorial tokens.
+ */
+
+.auth-guard-loading__label {
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}

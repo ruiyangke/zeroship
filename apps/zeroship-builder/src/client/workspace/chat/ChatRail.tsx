@@ -14,10 +14,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
+import { Button, Stack } from "@zeroship/ui";
 import { rpc, chatTransport } from "../../api";
 import type { Brief, SurveyResponse } from "../../types/chat";
 import { ChatComposer } from "./ChatComposer";
 import { ChatMessages } from "./ChatMessages";
+import "./ChatRail.css";
 
 export interface ChatRailProps {
   appName?: string;
@@ -175,13 +177,19 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
   }
 
   return (
-    <div data-testid="chat-rail" className="flex flex-col h-full bg-paper-2">
-      <div className="px-5 pt-4 pb-2 border-b border-rule flex items-baseline justify-between">
-        <h3 className="font-display italic font-medium text-base">Notes &amp; thoughts</h3>
-        <span className="font-sans text-[10px] uppercase tracking-wider text-pencil">
+    <Stack data-testid="chat-rail" className="zb-chat-rail">
+      <Stack
+        className="zb-chat-rail__header"
+        direction="row"
+        align="center"
+        justify="between"
+        gap={3}
+      >
+        <h3 className="zb-chat-rail__title">Notes &amp; thoughts</h3>
+        <span className="zb-chat-rail__count">
           {messages.length} {messages.length === 1 ? "turn" : "turns"}
         </span>
-      </div>
+      </Stack>
 
       <ChatMessages
         messages={messages}
@@ -193,22 +201,29 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
       />
 
       {error && (
-        <div
+        <Stack
           data-testid="chat-error"
-          className="px-5 py-2 border-t border-blood/30 bg-blood/5 font-sans text-[12px] text-blood flex items-center justify-between gap-2"
+          className="zb-chat-rail__error"
+          direction="row"
+          align="center"
+          justify="between"
+          gap={2}
         >
-          <span className="truncate" title={error.message}>
+          <span className="zb-chat-rail__error-msg" title={error.message}>
             {error.message}
           </span>
-          <button
+          <Button
             type="button"
+            variant="plain"
+            intent="destructive"
+            size="small"
             data-testid="chat-retry"
             onClick={handleRetry}
-            className="font-sans uppercase tracking-wider text-[10.5px] text-blood hover:text-ink cursor-pointer"
+            className="zb-chat-rail__retry"
           >
             ↻ retry
-          </button>
-        </div>
+          </Button>
+        </Stack>
       )}
 
       <ChatComposer
@@ -220,6 +235,6 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
         appId={appId}
         placeholder={appName ? `Tell ${appName} what to make.` : "Describe what to make."}
       />
-    </div>
+    </Stack>
   );
 }

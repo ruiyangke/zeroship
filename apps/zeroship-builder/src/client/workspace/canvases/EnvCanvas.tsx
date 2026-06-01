@@ -10,11 +10,17 @@
 // Note on the wire: set/delete procedures use one object input so the
 // generated RPC stubs can forward every field over the single-input
 // `/__zeroship/v1/<id>` contract.
+//
+// Presentation is crystal (@zeroship/ui): the section frame is a
+// FormSection, the add-row uses Field + Input + Button, and the variable
+// rows + status copy live in the co-located EnvCanvas.css over --zs-*
+// tokens.
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Button, FormSection, Input } from "@zeroship/ui";
 import { getEnv, setEnv, deleteEnv } from "../../api";
-import { StampButton } from "../../components/StampButton";
+import "./EnvCanvas.css";
 
 export interface EnvCanvasProps {
   appId: string;
@@ -22,8 +28,8 @@ export interface EnvCanvasProps {
 
 export function EnvCanvas({ appId }: EnvCanvasProps) {
   return (
-    <div data-testid="env-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
+    <div data-testid="env-canvas" className="env-canvas">
+      <div className="env-canvas__page">
         <Environment appId={appId} />
       </div>
     </div>
@@ -60,37 +66,36 @@ function Environment({ appId }: { appId: string }) {
   const items = env?.vars ?? [];
 
   return (
-    <section data-testid="env-variables-section">
-      <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-        Environment
-      </h2>
-      <p className="font-serif text-[14px] text-ink-soft mb-4 leading-[1.55]">
-        Keys your app reads at runtime — URLs, feature flags, API keys.
-        These live in a <code className="font-mono text-[12.5px]">.env</code>{" "}
-        file in your project. Saving one restarts the dev server so the
-        next preview reload picks it up.
-      </p>
-
+    <FormSection
+      data-testid="env-variables-section"
+      title="Environment"
+      description={
+        <>
+          Keys your app reads at runtime — URLs, feature flags, API keys.
+          These live in a <code className="env-canvas__code">.env</code> file in
+          your project. Saving one restarts the dev server so the next preview
+          reload picks it up.
+        </>
+      }
+    >
       <div>
-        {isLoading && (
-          <div className="font-serif italic text-pencil py-2">loading…</div>
-        )}
+        {isLoading && <div className="env-status">loading…</div>}
         {!isLoading && items.length === 0 && !adding && (
-          <div
-            data-testid="env-variables-empty"
-            className="font-serif italic text-pencil py-3"
-          >
+          <div data-testid="env-variables-empty" className="env-status">
             Nothing here yet — add the keys your app reads at runtime.
           </div>
         )}
-        {items.map((v) => (
-          <Row
-            key={v.key}
-            name={v.key}
-            value={v.value}
-            onDelete={() => del.mutate(v.key)}
-          />
-        ))}
+
+        <div className="env-rows">
+          {items.map((v) => (
+            <Row
+              key={v.key}
+              name={v.key}
+              value={v.value}
+              onDelete={() => del.mutate(v.key)}
+            />
+          ))}
+        </div>
 
         {adding ? (
           <AddRow
@@ -110,17 +115,18 @@ function Environment({ appId }: { appId: string }) {
             testidPrefix="env-add-var"
           />
         ) : (
-          <button
-            type="button"
+          <Button
+            variant="plain"
+            size="small"
             onClick={() => setAdding(true)}
             data-testid="env-add-var"
-            className="mt-3 font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+            className="env-add-trigger"
           >
             + Add a variable
-          </button>
+          </Button>
         )}
       </div>
-    </section>
+    </FormSection>
   );
 }
 
@@ -138,24 +144,21 @@ function Row({
   actionLabel?: string;
 }) {
   return (
-    <div
-      // Phone: name on top, value below, action right-aligned in
-      // a third row. Tablet+: original 200px/1fr/60px layout returns.
-      className="grid items-center gap-2 sm:gap-4 py-3 border-b border-rule-2 grid-cols-[1fr_auto] sm:grid-cols-[200px_1fr_60px]"
-    >
-      <span className="font-mono text-[13px] text-ink truncate">{name}</span>
-      <span className="text-[13px] truncate col-span-2 sm:col-auto sm:order-none order-3 font-mono text-ink-soft">
-        {value}
-      </span>
-      <span className="text-right">
-        <button
-          type="button"
+    // Phone: name on top, value below, action right-aligned in a third
+    // row. Tablet+: original 200px/1fr/auto layout returns (EnvCanvas.css).
+    <div className="env-row">
+      <span className="env-row__key">{name}</span>
+      <span className="env-row__value">{value}</span>
+      <span className="env-row__action">
+        <Button
+          variant="plain"
+          intent="destructive"
+          size="small"
           onClick={onDelete}
           aria-label={`${actionLabel} ${name}`}
-          className="font-serif italic text-[12.5px] text-ink-soft hover:text-tomato bg-transparent border-0 cursor-pointer focus:outline-2 focus:outline-tomato focus:outline-offset-2 px-1"
         >
           {actionLabel}
-        </button>
+        </Button>
       </span>
     </div>
   );
@@ -186,41 +189,37 @@ function AddRow({
 }) {
   const canSave = keyValue.length > 0 && valValue.length > 0;
   return (
-    <div
-      className="grid items-center gap-4 py-3 border-b border-rule-2"
-      style={{ gridTemplateColumns: "200px 1fr 120px" }}
-    >
-      <input
+    <div className="env-add">
+      <Input
         autoFocus
+        aria-label="Variable name"
         placeholder={keyPlaceholder}
         value={keyValue}
         onChange={(e) => onKeyChange(e.target.value)}
         data-testid={`${testidPrefix}-key`}
-        className="font-mono text-[13px] px-2 py-1.5 bg-white border border-rule outline-none focus:border-ink"
+        className="env-add__input"
       />
-      <input
+      <Input
         type="text"
+        aria-label="Variable value"
         placeholder={valuePlaceholder}
         value={valValue}
         onChange={(e) => onValChange(e.target.value)}
         data-testid={`${testidPrefix}-value`}
-        className="font-mono text-[13px] px-2 py-1.5 bg-white border border-rule outline-none focus:border-ink"
+        className="env-add__input"
       />
-      <div className="flex gap-2 justify-end">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="font-serif italic text-[12px] text-pencil bg-transparent border-0 cursor-pointer"
-        >
+      <div className="env-add__actions">
+        <Button variant="plain" size="small" onClick={onCancel}>
           cancel
-        </button>
-        <StampButton
+        </Button>
+        <Button
+          size="small"
           onClick={() => canSave && onSave()}
           disabled={!canSave}
           loading={saving}
         >
           Save
-        </StampButton>
+        </Button>
       </div>
     </div>
   );

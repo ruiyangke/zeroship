@@ -1,0 +1,104 @@
+/*
+ * OnboardingIntent — crystal implementation.
+ *
+ * A Center-anchored intent picker: an eyebrow caps lead-in, a large
+ * headline with an accent-emphasized verb, a quiet lede, a Grid of
+ * interactive Card choice tiles, and a plain skip Button. The DS
+ * (Center / Stack / Grid / Card / Button) owns arrangement and chrome;
+ * this sheet owns the editorial typography (eyebrow, headline ramp,
+ * accent emphasis) and the tile's centered italic label with accent
+ * quote glyphs — none of which a DS component covers.
+ *
+ * Everything reads --zs-* tokens — no raw hex/px (hairlines as
+ * 0.0625rem), no editorial tokens, no Tailwind.
+ */
+
+.zb-onboarding-intent {
+  background-color: var(--zs-surface-bg);
+  padding-inline: var(--zs-space-5);
+  padding-block: var(--zs-space-9);
+}
+
+/* The centered content column — capped width so the headline + grid
+ * read as a single editorial measure. */
+.zb-onboarding-intent__panel {
+  inline-size: 40rem;
+  max-inline-size: 100%;
+  text-align: center;
+}
+
+/* Intro stack measure — keep the lede line length comfortable. */
+.zb-onboarding-intent__intro {
+  max-inline-size: 30rem;
+}
+
+/* ─── eyebrow: small uppercase accent caps lead-in ────────────────── */
+.zb-onboarding-intent__eyebrow {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--zs-accent);
+}
+
+/* ─── headline ────────────────────────────────────────────────────── */
+.zb-onboarding-intent__title {
+  margin: 0;
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  font-weight: var(--zs-text-large-title-weight);
+  color: var(--zs-label);
+}
+
+/* The emphasized verb — accent-toned, italic, picking up the old
+ * "make" highlight as a crystal accent. */
+.zb-onboarding-intent__emphasis {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+
+/* ─── lede ────────────────────────────────────────────────────────── */
+.zb-onboarding-intent__lede {
+  margin: 0;
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── choice tiles ────────────────────────────────────────────────── */
+.zb-onboarding-intent__choices {
+  inline-size: 100%;
+}
+
+/* Each tile is an interactive outline Card; recolor cursor + center
+ * the label. Hover/focus states come from the DS Card interactive
+ * treatment. */
+.zb-onboarding-intent__choice {
+  cursor: pointer;
+}
+
+.zb-onboarding-intent__choice-body {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: var(--zs-space-half);
+  min-block-size: var(--zs-space-7);
+  font-style: italic;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  color: var(--zs-label);
+}
+
+/* Accent quote glyphs flanking the label — the crystal analogue of the
+ * old pencil-toned quotation marks. */
+.zb-onboarding-intent__quote {
+  font-style: normal;
+  color: var(--zs-label-quaternary);
+}
+
+/* ─── skip link ───────────────────────────────────────────────────── */
+.zb-onboarding-intent__skip {
+  font-style: italic;
+}

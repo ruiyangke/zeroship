@@ -1,0 +1,131 @@
+/*
+ * Privacy — crystal skin for the public legal page (`/legal/privacy`).
+ *
+ * Structure (PublicNav + a constrained <main> Container, a PageHeader
+ * title band, and the legal prose in a Container/Stack) comes from the
+ * DS layout primitives + the PageHeader composition. This sheet only
+ * paints the bespoke bits that have no direct DS component:
+ *   - the page canvas (the crystal --zs-surface-bg field),
+ *   - the reading-column width (a legal-prose measure, narrower than the
+ *     DS container sizes — expressed in rem, no px),
+ *   - the eyebrow caption + accent rule, the last-updated footnote,
+ *   - the section heading + body prose type, the accented links + inline
+ *     code, and the uppercase footer row.
+ * Everything reads --zs-* tokens — no raw hex/px (0.0625rem hairline
+ * only), no Tailwind utilities, no editorial tokens.
+ */
+
+/* ─── page canvas ──────────────────────────────────────────────────── */
+.zs-privacy-page {
+  min-block-size: 100vh;
+  background: var(--zs-surface-bg);
+}
+
+/* ─── reading column padding ──────────────────────────────────────────
+ * The bespoke ~45rem reading measure (narrower than the DS md size, a
+ * legal-prose measure) is set on the Container via its --container-max-
+ * width custom property inline in the TSX; this rule only adds the
+ * vertical rhythm the Container itself does not own (it pads inline
+ * only). */
+.zs-privacy-page__main {
+  padding-block: var(--zs-space-9) var(--zs-space-10);
+}
+
+/* ─── eyebrow — accent rule + uppercase caption ───────────────────────── */
+.zs-privacy-page__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+.zs-privacy-page__eyebrow-rule {
+  display: inline-block;
+  inline-size: var(--zs-space-3);
+  block-size: 0.0625rem;
+  background: var(--zs-label);
+}
+
+/* ─── accented word in the title (crystal analogue of the tomato em) ──── */
+.zs-privacy-page__title-accent {
+  color: var(--zs-accent);
+  font-style: italic;
+}
+
+/* ─── last-updated footnote ────────────────────────────────────────────── */
+.zs-privacy-page__meta {
+  margin-block: 0;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  letter-spacing: 0.02em;
+  color: var(--zs-label-secondary);
+}
+
+/* ─── prose section heading ────────────────────────────────────────────── */
+.zs-privacy-page__section-title {
+  margin-block: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+}
+
+/* ─── prose body copy ──────────────────────────────────────────────────── */
+.zs-privacy-page__body {
+  margin-block: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-label-secondary);
+}
+.zs-privacy-page__body a {
+  color: var(--zs-accent);
+  text-decoration: none;
+}
+.zs-privacy-page__body a:hover {
+  text-decoration: underline;
+}
+.zs-privacy-page__body code {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-callout-size);
+  color: var(--zs-label);
+}
+
+/* ─── footer row ───────────────────────────────────────────────────────── */
+.zs-privacy-page__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--zs-space-7);
+  row-gap: var(--zs-space-3);
+}
+.zs-privacy-page__footer-link {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-privacy-page__footer-link:hover {
+  color: var(--zs-label);
+}
+.zs-privacy-page__footer-mark {
+  margin-inline-start: auto;
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-secondary);
+}
+.zs-privacy-page__footer-mark-dot {
+  color: var(--zs-accent);
+}

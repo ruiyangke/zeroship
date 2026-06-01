@@ -12,10 +12,18 @@
 // Selecting an item splices the rendered string into the textarea
 // at the trigger position (replacing the `@…` token).
 //
-// We render plain ul/li with click handlers — Tailwind tokens, no
-// portal, no third-party combobox lib. The popover is positioned by
-// the parent (the composer absolutely positions us above its
-// textarea so it tracks resize / scrolls).
+// Crystal: re-skinned over `--zs-*` tokens via the co-located
+// MentionDropdown.css. We deliberately keep the controlled listbox
+// markup (plain ul/li/button with click handlers, no portal, no
+// third-party combobox lib) rather than reaching for the DS
+// Popover/Combobox/Autocomplete — those are trigger-driven and own
+// their open-state + keyboard rover, which would fight this
+// component's contract: the parent composer owns open-state, the
+// query, the active index, mousedown selection, and forwards keyboard
+// events itself, and positions the panel above its own textarea.
+// The skin mirrors the DS Menu popup idiom (opaque surface sheet,
+// popover shadow, accent-tinted active row) without taking on the DS
+// popover's self-contained behavior.
 
 import { useEffect, useRef, useState } from "react";
 import {
@@ -25,7 +33,7 @@ import {
   type FileEntry,
   type Issue,
 } from "../../api";
-import { cn } from "../../lib/utils";
+import "./MentionDropdown.css";
 
 export type MentionItem =
   | { kind: "file"; label: string; insert: string; sub?: string }
@@ -157,30 +165,16 @@ export function MentionDropdown({
   }, [appId, kind, filter]);
 
   return (
-    <div
-      data-testid="mention-dropdown"
-      role="listbox"
-      className={cn(
-        "absolute left-3 right-3 bottom-full mb-1 z-20",
-        "bg-paper border border-ink/40 rounded shadow-lg",
-        "max-h-56 overflow-y-auto",
-      )}
-    >
-      <div className="px-3 py-1.5 border-b border-rule font-sans text-[10px] uppercase tracking-wider text-pencil flex items-center justify-between">
+    <div data-testid="mention-dropdown" role="listbox" className="zs-mention">
+      <div className="zs-mention__head">
         <span>{kind === "file" ? "files" : kind === "issue" ? "issues" : "recent error"}</span>
-        <span className="text-pencil/70">@file · @issue · @recent</span>
+        <span className="zs-mention__legend">@file · @issue · @recent</span>
       </div>
-      {loading && (
-        <div className="px-3 py-2 font-serif italic text-pencil text-[12.5px]">
-          searching…
-        </div>
-      )}
+      {loading && <div className="zs-mention__hint">searching…</div>}
       {!loading && items.length === 0 && (
-        <div className="px-3 py-2 font-serif italic text-pencil text-[12.5px]">
-          no matches
-        </div>
+        <div className="zs-mention__hint">no matches</div>
       )}
-      <ul className="py-1">
+      <ul className="zs-mention__list">
         {items.map((item, i) => (
           <li key={`${item.kind}-${item.insert}`}>
             <button
@@ -197,20 +191,10 @@ export function MentionDropdown({
                 onSelect(item);
               }}
               onMouseEnter={() => onActiveIndexChange(i)}
-              className={cn(
-                "w-full text-left px-3 py-1.5 cursor-pointer",
-                "font-mono text-[12px] flex items-center justify-between gap-3",
-                i === activeIndex
-                  ? "bg-tomato/10 text-ink"
-                  : "text-ink-soft hover:bg-paper-2",
-              )}
+              className="zs-mention__item"
             >
-              <span className="truncate">{item.label}</span>
-              {item.sub && (
-                <span className="font-sans text-[10px] uppercase tracking-wider text-pencil shrink-0">
-                  {item.sub}
-                </span>
-              )}
+              <span className="zs-mention__label">{item.label}</span>
+              {item.sub && <span className="zs-mention__sub">{item.sub}</span>}
             </button>
           </li>
         ))}

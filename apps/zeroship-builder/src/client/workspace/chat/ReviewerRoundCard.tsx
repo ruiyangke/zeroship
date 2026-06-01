@@ -11,14 +11,9 @@
 //    severity + why + fix). Blockers are the actionable bit; lay them
 //    out so the user can see them without expanding.
 
+import { Badge, Card, Cluster } from "@zeroship/ui";
 import type { ReviewerRound } from "../../types/chat";
-
-const SEVERITY_TONE: Record<string, string> = {
-  low: "text-pencil",
-  medium: "text-amber",
-  high: "text-blood",
-  critical: "text-blood font-medium",
-};
+import "./ReviewerRoundCard.css";
 
 export function ReviewerRoundCard({ round }: { round: ReviewerRound }) {
   const blockerCount = round.blockers.length;
@@ -28,15 +23,16 @@ export function ReviewerRoundCard({ round }: { round: ReviewerRound }) {
   // without scanning a full card.
   if (round.approved && blockerCount === 0) {
     return (
-      <div
+      <Cluster
         data-testid="reviewer-round-card"
-        className="mt-1.5 inline-flex items-center gap-2 px-2 py-1 bg-paper-2 border border-rule-2 rounded"
+        gap={2}
+        style={{ marginBlockStart: "var(--zs-space-1)" }}
       >
-        <span className="font-sans text-[10px] uppercase tracking-wider text-pencil">
-          reviewer
-        </span>
-        <span className="font-sans text-[10px] text-ivy">approved</span>
-      </div>
+        <span className="zs-reviewer-card__eyebrow">reviewer</span>
+        <Badge intent="success" variant="soft" size="sm">
+          approved
+        </Badge>
+      </Cluster>
     );
   }
 
@@ -48,54 +44,55 @@ export function ReviewerRoundCard({ round }: { round: ReviewerRound }) {
   const overflow = blockerCount - visible.length;
 
   return (
-    <div
+    <Card
       data-testid="reviewer-round-card"
-      className="mt-2 bg-paper border border-rule-2 rounded"
+      variant="outline"
+      size="sm"
+      style={{ marginBlockStart: "var(--zs-space-2)" }}
     >
-      <div className="px-3 py-1.5 border-b border-rule-2 flex items-center justify-between">
-        <span className="font-sans text-[10px] uppercase tracking-wider text-pencil">
+      <Card.Header>
+        <Card.Title className="zs-reviewer-card__eyebrow zs-reviewer-card__title">
           reviewer
-        </span>
-        <span
-          className={
-            "font-sans text-[10px] " +
-            (round.approved ? "text-amber" : "text-blood")
-          }
-        >
-          {round.approved
-            ? `${blockerCount} ${blockerCount === 1 ? "concern" : "concerns"}`
-            : "blocked"}
-        </span>
-      </div>
-      <ul className="px-3 py-2 space-y-1.5 font-mono text-[11px] leading-snug">
-        {visible.map((b, i) => (
-          <li key={i} className="flex items-start gap-2">
-            <span
-              className={
-                "shrink-0 font-sans uppercase tracking-wider text-[9px] mt-0.5 " +
-                (SEVERITY_TONE[b.severity] ?? "text-pencil")
-              }
-            >
-              {b.severity}
-            </span>
-            <span className="shrink-0 text-ink-soft">{b.kind}</span>
-            <span className="text-ink min-w-0">
-              {b.why}
-              {b.fix ? (
-                <>
-                  <span className="text-pencil"> → </span>
-                  <span className="text-ink-soft">{b.fix}</span>
-                </>
-              ) : null}
-            </span>
-          </li>
-        ))}
-        {overflow > 0 && (
-          <li className="text-pencil font-sans text-[10px]">
-            +{overflow} more
-          </li>
-        )}
-      </ul>
-    </div>
+        </Card.Title>
+        <Card.Action>
+          <Badge
+            intent={round.approved ? "warning" : "danger"}
+            variant="soft"
+            size="sm"
+          >
+            {round.approved
+              ? `${blockerCount} ${blockerCount === 1 ? "concern" : "concerns"}`
+              : "blocked"}
+          </Badge>
+        </Card.Action>
+      </Card.Header>
+      <Card.Content>
+        <ul className="zs-reviewer-card__list">
+          {visible.map((b, i) => (
+            <li key={i} className="zs-reviewer-card__row">
+              <span
+                className="zs-reviewer-card__severity"
+                data-severity={b.severity}
+              >
+                {b.severity}
+              </span>
+              <span className="zs-reviewer-card__kind">{b.kind}</span>
+              <span className="zs-reviewer-card__why">
+                {b.why}
+                {b.fix ? (
+                  <>
+                    <span className="zs-reviewer-card__arrow"> → </span>
+                    <span className="zs-reviewer-card__fix">{b.fix}</span>
+                  </>
+                ) : null}
+              </span>
+            </li>
+          ))}
+          {overflow > 0 && (
+            <li className="zs-reviewer-card__overflow">+{overflow} more</li>
+          )}
+        </ul>
+      </Card.Content>
+    </Card>
   );
 }

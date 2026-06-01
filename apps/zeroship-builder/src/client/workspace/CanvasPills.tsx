@@ -1,4 +1,24 @@
-import { Pill } from "../components/Pill";
+// ─── CanvasPills — crystal canvas tab switcher ──────────────────────
+//
+// Tier-gated switcher across the workspace canvases (preview / files /
+// logs / env / settings). Maker tier shows preview only; ops adds
+// logs/env/settings; code unlocks files too.
+//
+// Built over @zeroship/ui Toggle.Group — a single-selection segmented
+// control. Each segment is a DS Toggle keyed by canvas id. The group is
+// driven controlled via `value={active}`; selection is committed by the
+// per-segment `onClick` (always fires `onChange(id)`, matching the
+// previous hand-rolled Pill contract — re-clicking the active segment
+// re-fires `onChange`, never a deselect). Bespoke sizing for the compact
+// switcher lives in CanvasPills.css against --zs-* tokens.
+//
+// Tier visibility is OWNED BY THE PARENT: only the visible canvases are
+// rendered, so e2e `toBeHidden()` / `toHaveCount(0)` assertions on the
+// `pill:<id>` testids hold. The `canvas-pills` + `pill:<id>` testids and
+// the public props/exports are preserved exactly.
+
+import { Toggle } from "@zeroship/ui";
+import "./CanvasPills.css";
 
 const ALL_PILLS = [
   "preview",
@@ -59,18 +79,30 @@ export interface CanvasPillsProps {
 export function CanvasPills({ active, onChange, visible, tier = "maker" }: CanvasPillsProps) {
   const pills = visible ?? pillsForTier(tier);
   return (
-    <div data-testid="canvas-pills" className="flex items-center gap-1.5">
+    // Controlled single-selection segmented control. `value={active}`
+    // reflects the pressed segment; selection is committed by each
+    // segment's `onClick` (always `onChange(id)`), so the group's own
+    // `onValueChange` is intentionally omitted — re-clicking the active
+    // segment must re-fire `onChange`, not deselect.
+    <Toggle.Group
+      size="sm"
+      value={active}
+      equalWidth={false}
+      aria-label="Canvas"
+      data-testid="canvas-pills"
+      className="canvas-pills"
+    >
       {pills.map((id) => (
-        <Pill
+        <Toggle
           key={id}
+          value={id}
           size="sm"
-          active={active === id}
           onClick={() => onChange(id)}
           data-testid={`pill:${id}`}
         >
           {id}
-        </Pill>
+        </Toggle>
       ))}
-    </div>
+    </Toggle.Group>
   );
 }

@@ -1,0 +1,129 @@
+/*
+ * TemplateCard — crystal skin for the gallery tile on /templates.
+ *
+ * The card chrome (surface, border, hover, footer divider, type ramp)
+ * all comes from the DS Card + Badge + layout primitives. The only
+ * bespoke piece is the tiny placeholder PREVIEW at the top — a few
+ * abstract bars that hint at a template's shape without a real
+ * screenshot. Everything below reads --zs-* tokens; no raw hex/px,
+ * no Tailwind, no editorial tokens.
+ */
+
+/* The clickable Link rendered via <Card asChild> — strip the anchor
+ * underline / inherited link color so the card chrome owns the look. */
+.zs-template-card {
+  text-decoration: none;
+  color: var(--zs-label);
+}
+
+/* ─── meta line: № marginalia + category ──────────────────────────── */
+.zs-template-card__meta {
+  text-transform: capitalize;
+}
+
+/* ─── tagline ─────────────────────────────────────────────────────── */
+.zs-template-card__tagline {
+  /* Description already recedes one step below the title; nothing extra
+   * needed beyond the DS Card.Description treatment. */
+  margin: 0;
+}
+
+/* ─── "what's included" bullet list ───────────────────────────────── */
+.zs-template-card__bullets {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+.zs-template-card__bullet {
+  display: flex;
+  align-items: baseline;
+  gap: var(--zs-space-2);
+}
+/* Accent lead-glyph mirrors the old tomato "·" marginalia, now driven
+ * by the crystal accent token. */
+.zs-template-card__bullet::before {
+  content: "·";
+  color: var(--zs-accent);
+  font-weight: 700;
+  flex: none;
+}
+
+/* ─── footer meta (estimate + Use affordance) ─────────────────────── */
+.zs-template-card__est {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+.zs-template-card__use {
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-accent);
+}
+
+/* ─── placeholder preview ─────────────────────────────────────────── */
+.zs-template-card__preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-1);
+  block-size: 6rem;
+  padding: var(--zs-space-2);
+  background-color: var(--zs-fill-tertiary);
+}
+.zs-template-card__preview-row {
+  display: flex;
+  gap: var(--zs-space-1);
+}
+/* The first row stacks rather than flows inline — preserves the old
+ * "first:flex-col" behavior so the topmost band reads as a header. */
+.zs-template-card__preview-row:first-child {
+  flex-direction: column;
+}
+.zs-template-card__preview-bar {
+  display: block;
+  border-radius: var(--zs-radius-1);
+  background-color: var(--zs-label);
+  opacity: 0.18;
+}
+/* The accent "cap" bar — a single highlighted shape per preview, the
+ * crystal analogue of the old tomato block. */
+.zs-template-card__preview-bar[data-kind="cap"] {
+  background-color: var(--zs-accent);
+  opacity: 0.7;
+}
+
+/* Bar geometry — driven by data attributes so no raw px/inline styling
+ * leaks into the component. Width expresses the short/med/full ramp;
+ * height + flex express the single-band vs multi-block row shape. */
+.zs-template-card__preview-bar[data-w="short"] {
+  inline-size: 35%;
+}
+.zs-template-card__preview-bar[data-w="med"] {
+  inline-size: 70%;
+}
+.zs-template-card__preview-bar[data-w="full"] {
+  inline-size: 100%;
+}
+/* A single-band "cap" row carries no short/med/full width token (data-w
+ * is the kind itself), so give it a full-width fallback — otherwise the
+ * accent cap bar collapses to zero width and is invisible (e.g. № 3 / 7
+ * / 11, whose num%4===3 variant ends in a lone ["cap"] row). */
+.zs-template-card__preview-row[data-multi="false"]
+  .zs-template-card__preview-bar[data-w="cap"] {
+  inline-size: 100%;
+}
+/* Single-band row (height of a thin rule). */
+.zs-template-card__preview-row[data-multi="false"] .zs-template-card__preview-bar {
+  block-size: var(--zs-space-half);
+}
+/* Multi-block row (taller, equal-flex tiles). */
+.zs-template-card__preview-row[data-multi="true"] .zs-template-card__preview-bar {
+  block-size: var(--zs-space-4);
+  flex: 1;
+  inline-size: auto;
+}

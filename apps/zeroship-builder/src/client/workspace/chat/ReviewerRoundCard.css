@@ -1,0 +1,100 @@
+/*
+ * ReviewerRoundCard — bespoke styling for the pre-deploy hard-gate card.
+ *
+ * The DS Card / Badge / Cluster carry the surface, the status chip, and
+ * the row layout. What remains bespoke — and lives here over --zs-*
+ * tokens — is:
+ *   - the small uppercase "reviewer" caption label (a quiet eyebrow, not
+ *     the DS heading scale),
+ *   - the dense monospace blocker list with its per-severity tone ramp,
+ *     terse kind tag, and "why → fix" inline composition.
+ * No raw hex / px: oklch flows through the tokens; sizes are rem.
+ */
+
+/* Caption eyebrow reused by both the compact and expanded forms. */
+.zs-reviewer-card__eyebrow {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--zs-label-tertiary);
+}
+
+/* The Card.Title in the expanded header renders the same eyebrow look
+ * (it stays an <h3> for outline semantics, but reads as a caption). */
+.zs-reviewer-card__title {
+  margin: 0;
+}
+
+/* Blocker list — a dense monospace stack inside Card.Content. */
+.zs-reviewer-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+.zs-reviewer-card__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--zs-space-2);
+}
+
+/* Per-severity tone label. Uppercase caption, fixed at the row start. */
+.zs-reviewer-card__severity {
+  flex-shrink: 0;
+  margin-block-start: 0.0625rem;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.zs-reviewer-card__severity[data-severity="low"] {
+  color: var(--zs-label-tertiary);
+}
+.zs-reviewer-card__severity[data-severity="medium"] {
+  color: var(--zs-system-orange);
+}
+.zs-reviewer-card__severity[data-severity="high"] {
+  color: var(--zs-system-red);
+}
+.zs-reviewer-card__severity[data-severity="critical"] {
+  color: var(--zs-system-red);
+  font-weight: 600;
+}
+
+/* The terse kind tag (e.g. "missing_auth"). */
+.zs-reviewer-card__kind {
+  flex-shrink: 0;
+  color: var(--zs-label-secondary);
+}
+
+/* "why" body, with the optional "→ fix" continuation. min-width:0 lets
+ * the body wrap inside the flex row. */
+.zs-reviewer-card__why {
+  min-width: 0;
+  color: var(--zs-label);
+}
+.zs-reviewer-card__arrow {
+  color: var(--zs-label-tertiary);
+}
+.zs-reviewer-card__fix {
+  color: var(--zs-label-secondary);
+}
+
+/* Overflow note ("+2 more") — a quiet caption row. */
+.zs-reviewer-card__overflow {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-tertiary);
+}

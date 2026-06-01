@@ -1,0 +1,137 @@
+/*
+ * Terms — crystal skin for the public legal page (`/legal/terms`).
+ *
+ * Structure comes from the DS primitives: PublicNav + a Container
+ * rendered as <main>, PageHeader for the title band, and Stack for the
+ * section rhythm. This sheet only paints the bespoke bits that have no
+ * direct DS component:
+ *
+ *   - the page band background + vertical rhythm,
+ *   - the uppercase letter-spaced "Legal · Terms" eyebrow + its rule,
+ *   - the prose body type (paragraphs / inline code / accent links),
+ *   - the italic section sub-headings,
+ *   - the footer caption row + accented wordmark.
+ *
+ * Everything reads --zs-* tokens — no raw hex/px (0.0625rem hairline
+ * only), no Tailwind, no editorial tokens.
+ */
+
+/* ─── the page band ────────────────────────────────────────────────── */
+.zs-terms {
+  min-block-size: 100dvh;
+  background-color: var(--zs-surface-bg);
+}
+
+/* The <main> column: top/bottom rhythm to match the old pt-14 / pb-24.
+ * Inline width + centering come from the Container primitive. */
+.zs-terms__main {
+  padding-block: var(--zs-space-8) var(--zs-space-10);
+}
+
+/* ─── eyebrow — "Legal · Terms" with a leading rule ────────────────── */
+.zs-terms__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+.zs-terms__eyebrow-rule {
+  display: inline-block;
+  inline-size: var(--zs-space-3);
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* ─── last-updated caption (the PageHeader description override) ────── */
+.zs-terms__updated {
+  font-family: var(--zs-font-mono);
+  letter-spacing: 0.02em;
+}
+
+/* ─── prose body ───────────────────────────────────────────────────── */
+.zs-terms__prose {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-label);
+}
+.zs-terms__prose p {
+  margin-block: 0;
+  color: var(--zs-label-secondary);
+}
+/* Inline `.zship` token — monospace, no italic, slightly tighter. */
+.zs-terms__prose code {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-footnote-size);
+  color: var(--zs-label);
+}
+/* Accent links (the old tomato) — both router <Link>s and <a>. */
+.zs-terms__link {
+  color: var(--zs-accent);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-terms__link:hover {
+  color: var(--zs-accent-hover);
+}
+
+/* ─── section sub-heading ──────────────────────────────────────────── */
+.zs-terms__section-title {
+  margin-block: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: var(--zs-text-callout-weight);
+  font-style: italic;
+  color: var(--zs-label);
+}
+
+/* ─── footer ───────────────────────────────────────────────────────── */
+.zs-terms__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--zs-space-7);
+  row-gap: var(--zs-space-3);
+}
+.zs-terms__footer-link {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-tertiary);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-terms__footer-link:hover {
+  color: var(--zs-label);
+}
+.zs-terms__wordmark {
+  margin-inline-start: auto;
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  color: var(--zs-label-tertiary);
+}
+.zs-terms__wordmark-dot {
+  color: var(--zs-accent);
+}
+
+/* ─── forced-colors — keep the bespoke painted bits legible ─────────── */
+@media (forced-colors: active) {
+  .zs-terms__eyebrow-rule {
+    background-color: CanvasText;
+  }
+  .zs-terms__prose p,
+  .zs-terms__section-title,
+  .zs-terms__footer-link,
+  .zs-terms__wordmark {
+    color: CanvasText;
+  }
+}

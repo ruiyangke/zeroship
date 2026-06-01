@@ -1,0 +1,154 @@
+/*
+ * MessageAssistant — crystal presentation for an assistant chat turn.
+ *
+ * Structure comes from the @zeroship/ui Stack primitive (vertical rhythm
+ * via `gap`). These rules carry only the bespoke bits the DS doesn't:
+ * the small "Builder" eyebrow label, the markdown prose typography, the
+ * inline-code / code-block / table surfaces, and the streaming cursor.
+ * Everything reads from --zs-* tokens so it tracks the active theme.
+ */
+
+/* ─── eyebrow label ───────────────────────────────────────────────────
+ * "Builder" — small, tracked, uppercase, muted. */
+.msg-assistant__label {
+  color: var(--zs-label-tertiary);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ─── markdown prose ──────────────────────────────────────────────────
+ * Body copy for the rendered markdown. The narrow chat rail wants a
+ * compact body rhythm; child block elements inherit color/size and only
+ * override what they must. */
+.msg-assistant__prose {
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+}
+
+/* Tighten the default browser block margins so the rail reads compact;
+ * the Stack gap owns the rhythm between message regions, not the prose. */
+.msg-assistant__prose > :first-child {
+  margin-block-start: 0;
+}
+.msg-assistant__prose > :last-child {
+  margin-block-end: 0;
+}
+
+.msg-assistant__prose p {
+  margin-block: var(--zs-space-2);
+}
+
+.msg-assistant__prose ul,
+.msg-assistant__prose ol {
+  margin-block: var(--zs-space-2);
+  padding-inline-start: var(--zs-space-5);
+}
+
+.msg-assistant__prose h1,
+.msg-assistant__prose h2,
+.msg-assistant__prose h3,
+.msg-assistant__prose h4 {
+  margin-block: var(--zs-space-3) var(--zs-space-2);
+  color: var(--zs-label);
+  font-weight: var(--zs-text-headline-weight);
+  line-height: var(--zs-text-headline-line);
+}
+.msg-assistant__prose h1 {
+  font-size: var(--zs-text-title-3-size);
+}
+.msg-assistant__prose h2 {
+  font-size: var(--zs-text-headline-size);
+}
+.msg-assistant__prose h3,
+.msg-assistant__prose h4 {
+  font-size: var(--zs-text-callout-size);
+}
+
+/* Links resolve to the accent so they read as actionable without leaving
+ * the prose color elsewhere. */
+.msg-assistant__prose a {
+  color: var(--zs-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.125rem;
+}
+.msg-assistant__prose a:hover {
+  color: var(--zs-accent-hover);
+}
+
+/* Block code (```fenced```) — the `pre` wrapper carries the surface, the
+ * inner `code.language-*` stays transparent. */
+.msg-assistant__prose pre {
+  margin-block: var(--zs-space-2);
+  padding: var(--zs-space-2);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-2);
+  background: var(--zs-fill-tertiary);
+  overflow-x: auto;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+.msg-assistant__prose pre code {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ─── inline code ─────────────────────────────────────────────────────
+ * Subtle chip; distinct from the block-code surface only by padding. */
+.msg-assistant__code {
+  padding: 0.0625rem 0.25rem;
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-1);
+  background: var(--zs-fill-tertiary);
+  color: var(--zs-label);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+/* ─── tables ──────────────────────────────────────────────────────────
+ * Thin-ruled grid sized down for the narrow rail. */
+.msg-assistant__table {
+  margin-block: var(--zs-space-2);
+  border-collapse: collapse;
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+.msg-assistant__th,
+.msg-assistant__td {
+  padding: var(--zs-space-1) var(--zs-space-2);
+  border: 0.0625rem solid var(--zs-separator);
+  vertical-align: top;
+}
+
+.msg-assistant__th {
+  text-align: start;
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-weight: 600;
+}
+
+/* ─── streaming placeholder + cursor ──────────────────────────────────
+ * Italic "thinking…" while a turn streams with no text yet. */
+.msg-assistant__thinking {
+  color: var(--zs-label-tertiary);
+  font-style: italic;
+}
+
+/* Blink-free block caret trailing the streamed text. Sized to sit on the
+ * body line; aria-hidden so AT ignores it. */
+.msg-assistant__cursor {
+  display: inline-block;
+  inline-size: 0.375rem;
+  block-size: 0.875rem;
+  margin-inline-start: 0.125rem;
+  background: var(--zs-label-secondary);
+  vertical-align: middle;
+}

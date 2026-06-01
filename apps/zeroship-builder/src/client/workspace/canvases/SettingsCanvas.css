@@ -1,0 +1,104 @@
+/*
+ * SettingsCanvas — crystal settings page.
+ *
+ * Structure comes from the @zeroship/ui FormSection (aside orientation),
+ * Card, Input, Button and the Container layout primitive. These rules add
+ * only the canvas-specific bits the DS doesn't carry: the scrollable page
+ * surface, the per-Card title/description rhythm, the danger-zone red
+ * heading, the copy-id row, and the typed-confirmation mono code chip.
+ * Everything reads from --zs-* tokens so it tracks the active theme.
+ */
+
+/* Scrollable page surface — the canvas fills its pane and scrolls its
+ * content. Paints the sunken canvas background so the Cards read as raised
+ * surfaces above it. */
+.settings-canvas {
+  block-size: 100%;
+  overflow: auto;
+  background: var(--zs-surface-bg, var(--zs-surface));
+  font-family: var(--zs-font-system);
+}
+
+/* Vertical rhythm between the settings sections inside the centered
+ * Container. A hairline rule separates each section from the next. */
+.settings-canvas__sections > * {
+  padding-block: var(--zs-space-6);
+}
+.settings-canvas__sections > *:not(:last-child) {
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+
+/* ─── card body copy ──────────────────────────────────────────────────
+ * The archive / danger Cards carry a small headline + a muted line of
+ * supporting copy above their action button. */
+.settings-canvas__card-title {
+  margin: 0 0 var(--zs-space-1);
+  color: var(--zs-label);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: 600;
+}
+
+.settings-canvas__card-copy {
+  margin: 0 0 var(--zs-space-4);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+/* Danger-zone section heading + its Card title resolve to the system red
+ * so the destructive region reads at a glance. */
+.settings-canvas__danger-title {
+  color: var(--zs-system-red);
+}
+
+/* ─── copy-id row ─────────────────────────────────────────────────────
+ * A read-only mono field showing the project id with a copy Button. The
+ * field itself is a DS Input (variant=filled, readOnly); this only governs
+ * the row layout label spacing. */
+.settings-canvas__copy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-1);
+}
+
+.settings-canvas__copy-label {
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: var(--zs-text-footnote-weight);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-canvas__copy-row {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+}
+
+/* The Input wrapper is the flex child of the row — grow it to fill the
+ * track left of the copy Button. */
+.settings-canvas__copy-input-wrap {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+/* The mono id text lands on the inner <input> control. */
+.settings-canvas__copy-input {
+  font-family: var(--zs-font-mono);
+}
+
+/* ─── delete-confirm mono chip ────────────────────────────────────────
+ * The exact project name the user must re-type, shown inline in the
+ * AlertDialog description. */
+.settings-canvas__code {
+  padding: 0.0625rem 0.375rem;
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-1);
+  background: var(--zs-fill-tertiary);
+  color: var(--zs-label);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}

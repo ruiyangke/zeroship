@@ -1,0 +1,180 @@
+/*
+ * Home — crystal page styling.
+ *
+ * Layout (Stack / Cluster / Grid) handles arrangement; this sheet owns
+ * only the bespoke editorial bits the DS doesn't carry: the hero
+ * display type with its accent "make" underline, the lede, the quote-
+ * chip inspiration buttons, the gallery section heading + divider, and
+ * the dashed empty-state surface. Everything reads --zs-* tokens — no
+ * raw hex, no px (0.0625rem hairlines), no editorial tokens.
+ */
+
+/* ─── reveal — gentle fade-in on first paint ─────────────────────── */
+@keyframes zb-home-reveal {
+  from { opacity: 0; transform: translateY(0.25rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.zb-home__hero,
+.zb-home__gallery {
+  animation: zb-home-reveal var(--zs-motion-slow) var(--zs-motion-spring) both;
+}
+.zb-home__gallery {
+  animation-delay: var(--zs-motion-base);
+  margin-block-start: var(--zs-space-9);
+}
+@media (prefers-reduced-motion: reduce) {
+  .zb-home__hero,
+  .zb-home__gallery {
+    animation: none;
+  }
+}
+
+/* ─── hero ───────────────────────────────────────────────────────── */
+.zb-home__title {
+  margin: 0;
+  font-size: var(--zs-text-display-1-size);
+  line-height: var(--zs-text-display-1-line);
+  font-weight: var(--zs-text-display-1-weight);
+  letter-spacing: var(--zs-text-display-1-tracking);
+  color: var(--zs-label);
+}
+
+/* The accent emphasis on "make" + its hand-drawn underline. */
+.zb-home__title-em {
+  position: relative;
+  display: inline-block;
+  font-style: italic;
+  color: var(--zs-accent);
+}
+.zb-home__title-underline {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: -0.0625rem;
+  block-size: 0.375rem;
+  background-color: var(--zs-accent);
+  opacity: 0.2;
+  border-radius: var(--zs-radius-1);
+  transform: rotate(-1.5deg);
+}
+
+.zb-home__lede {
+  margin: 0;
+  max-inline-size: 34rem;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  color: var(--zs-label-secondary);
+}
+.zb-home__lede-strong {
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+}
+
+/* ─── inspiration quote chips ────────────────────────────────────── */
+.zb-home__chip {
+  appearance: none;
+  background: transparent;
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-full);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label);
+  cursor: pointer;
+  transition:
+    border-color var(--zs-motion-fast) var(--zs-motion-ease),
+    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zb-home__chip:hover {
+  border-color: var(--zs-label);
+  background-color: var(--zs-fill-tertiary);
+}
+.zb-home__chip:focus-visible {
+  outline: 0.125rem solid var(--zs-accent);
+  outline-offset: 0.125rem;
+}
+.zb-home__chip-quote {
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── gallery heading ────────────────────────────────────────────── */
+/* Cluster's align union has no `baseline`; restore it here so the
+ * italic title and the uppercase count share a type baseline. Scoped
+ * under .zb-home__gallery to outrank .zs-cluster's own align-items rule
+ * by specificity, so the baseline wins regardless of stylesheet order. */
+.zb-home__gallery .zb-home__gallery-head {
+  align-items: baseline;
+}
+.zb-home__gallery-title {
+  margin: 0;
+  font-style: italic;
+  font-size: var(--zs-text-title-1-size);
+  line-height: var(--zs-text-title-1-line);
+  font-weight: var(--zs-text-title-1-weight);
+  letter-spacing: var(--zs-text-title-1-tracking);
+  color: var(--zs-label);
+}
+.zb-home__gallery-count {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--zs-label-tertiary);
+}
+.zb-home__divider {
+  margin: 0;
+  border: 0;
+  block-size: 0.0625rem;
+  background-color: var(--zs-separator);
+}
+
+/* The archived-count chiplet inside the toggle segment. */
+.zb-home__filter-count {
+  margin-inline-start: var(--zs-space-1);
+  opacity: 0.7;
+}
+
+.zb-home__templates-link {
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-accent);
+  text-decoration: none;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zb-home__templates-link:hover {
+  opacity: 0.8;
+}
+
+/* ─── states ─────────────────────────────────────────────────────── */
+.zb-home__loading {
+  margin: 0;
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label-secondary);
+}
+
+/* Restore original dashed-panel framing around the centered EmptyState. */
+.zb-home__empty {
+  border: 0.0625rem dashed var(--zs-separator);
+  border-radius: var(--zs-radius-3);
+  padding-block: var(--zs-space-8);
+  padding-inline: var(--zs-space-6);
+}
+
+/* ─── gallery tile ───────────────────────────────────────────────── */
+.zb-home__tile {
+  position: relative;
+}
+/* Restore button floats over the top-right of an archived tile. */
+.zb-home__restore {
+  position: absolute;
+  inset-block-start: var(--zs-space-3);
+  inset-inline-end: var(--zs-space-3);
+  z-index: 1;
+}

@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Button } from "../../components/Button";
+import { Button, Card, Field, Input, Radio, Stack } from "@zeroship/ui";
 import type { Survey, SurveyResponse } from "../../types/chat";
+import "./SurveyCard.css";
 
 export interface SurveyCardProps {
   survey: Survey;
@@ -36,9 +37,14 @@ export function SurveyCard({ survey, onSubmit, onSkip, surveyId = "anon" }: Surv
 
   if (submitted) {
     return (
-      <div data-testid="survey-card-collapsed" className="mt-2 px-3 py-1.5 border border-rule-2 bg-paper-2 rounded text-[12px] text-ink-soft">
+      <Card
+        data-testid="survey-card-collapsed"
+        variant="outline"
+        size="sm"
+        className="survey-card survey-card--collapsed"
+      >
         Answered.
-      </div>
+      </Card>
     );
   }
 
@@ -47,87 +53,96 @@ export function SurveyCard({ survey, onSubmit, onSkip, surveyId = "anon" }: Surv
     .every((q) => answers[q.id] !== undefined);
 
   return (
-    <div data-testid="survey-card" className="mt-2 bg-paper border border-rule rounded p-3">
-      {survey.preamble && (
-        <p className="font-serif text-[13.5px] text-ink mb-3">{survey.preamble}</p>
-      )}
-      <div className="space-y-3">
-        {questions.map((q) => (
-          <div key={q.id}>
-            <div className="font-sans text-[12px] font-medium text-ink mb-1.5">{q.prompt}</div>
-            {q.kind.type === "single_choice" && (
-              <div className="flex flex-wrap gap-2">
-                {q.kind.options.slice(0, 6).map((opt) => (
-                  <Button
-                    key={opt.value}
-                    type="button"
+    <Card
+      data-testid="survey-card"
+      variant="outline"
+      size="sm"
+      className="survey-card"
+    >
+      {survey.preamble && <p className="survey-card__preamble">{survey.preamble}</p>}
+      <Stack gap={3}>
+        {questions.map((q) => {
+          if (q.kind.type === "short_text" || q.kind.type === "long_text") {
+            // Text inputs carry their prompt as a linked Field.Label so the
+            // control gets a programmatic name.
+            return (
+              <Field key={q.id} className="survey-card__field">
+                <Field.Label className="survey-card__prompt">{q.prompt}</Field.Label>
+                {q.kind.type === "short_text" ? (
+                  <Input
                     size="sm"
-                    variant={answers[q.id] === opt.value ? "primary" : "secondary"}
-                    onClick={() => pick(q.id, opt.value)}
-                  >
-                    {opt.label}
-                  </Button>
-                ))}
-              </div>
-            )}
-            {q.kind.type === "yes_no" && (
-              <div className="flex gap-2">
-                <Button
-                  type="button"
+                    placeholder={q.kind.placeholder}
+                    maxLength={q.kind.max_length}
+                    value={(answers[q.id] as string | undefined) ?? ""}
+                    onChange={(e) => pick(q.id, e.target.value)}
+                  />
+                ) : (
+                  <textarea
+                    className="survey-card__textarea"
+                    rows={2}
+                    placeholder={q.kind.placeholder}
+                    maxLength={q.kind.max_length}
+                    value={(answers[q.id] as string | undefined) ?? ""}
+                    onChange={(e) => pick(q.id, e.target.value)}
+                  />
+                )}
+              </Field>
+            );
+          }
+
+          // Choice questions: the prompt names the radio group; the chips
+          // are the mutually-exclusive options.
+          return (
+            <div key={q.id}>
+              <div className="survey-card__prompt">{q.prompt}</div>
+              {q.kind.type === "single_choice" && (
+                <Radio.Group
+                  orientation="horizontal"
                   size="sm"
-                  variant={answers[q.id] === true ? "primary" : "secondary"}
-                  onClick={() => pick(q.id, true)}
+                  aria-label={q.prompt}
+                  value={(answers[q.id] as string | undefined) ?? undefined}
+                  onValueChange={(value) => pick(q.id, value)}
                 >
-                  Yes
-                </Button>
-                <Button
-                  type="button"
+                  {q.kind.options.slice(0, 6).map((opt) => (
+                    <Radio key={opt.value} value={opt.value} label={opt.label} />
+                  ))}
+                </Radio.Group>
+              )}
+              {q.kind.type === "yes_no" && (
+                <Radio.Group<boolean>
+                  orientation="horizontal"
                   size="sm"
-                  variant={answers[q.id] === false ? "primary" : "secondary"}
-                  onClick={() => pick(q.id, false)}
+                  aria-label={q.prompt}
+                  value={answers[q.id] === true ? true : answers[q.id] === false ? false : undefined}
+                  onValueChange={(value) => pick(q.id, value)}
                 >
-                  No
-                </Button>
-              </div>
-            )}
-            {q.kind.type === "short_text" && (
-              <input
-                type="text"
-                placeholder={q.kind.placeholder}
-                maxLength={q.kind.max_length}
-                value={(answers[q.id] as string | undefined) ?? ""}
-                onChange={(e) => pick(q.id, e.target.value)}
-                className="w-full px-2 py-1.5 border border-rule bg-paper-2 rounded font-sans text-[13px] focus:outline-none focus:border-ink"
-              />
-            )}
-            {q.kind.type === "long_text" && (
-              <textarea
-                rows={2}
-                placeholder={q.kind.placeholder}
-                maxLength={q.kind.max_length}
-                value={(answers[q.id] as string | undefined) ?? ""}
-                onChange={(e) => pick(q.id, e.target.value)}
-                className="w-full px-2 py-1.5 border border-rule bg-paper-2 rounded font-sans text-[13px] focus:outline-none focus:border-ink resize-none"
-              />
-            )}
-            {/* multi_choice / scale / image_upload are not rendered yet */}
-          </div>
-        ))}
-      </div>
-      <div className="flex justify-between items-center mt-3">
+                  <Radio<boolean> value={true} label="Yes" />
+                  <Radio<boolean> value={false} label="No" />
+                </Radio.Group>
+              )}
+              {/* multi_choice / scale / image_upload are not rendered yet */}
+            </div>
+          );
+        })}
+      </Stack>
+      <div className="survey-card__actions">
         {onSkip ? (
-          <button
-            type="button"
-            onClick={skip}
-            className="font-sans text-[11px] text-pencil hover:text-ink cursor-pointer"
-          >
+          <Button type="button" variant="plain" size="small" onClick={skip}>
             {survey.skip_label ?? "skip — just build"}
-          </button>
-        ) : <span />}
-        <Button type="button" size="sm" variant="primary" onClick={submit} disabled={!allRequiredAnswered}>
+          </Button>
+        ) : (
+          <span />
+        )}
+        <Button
+          type="button"
+          variant="filled"
+          size="small"
+          onClick={submit}
+          disabled={!allRequiredAnswered}
+        >
           Send →
         </Button>
       </div>
-    </div>
+    </Card>
   );
 }

@@ -1,26 +1,24 @@
+import { Card } from "@zeroship/ui";
 import type { Diff } from "../../types/chat";
+import "./DiffCard.css";
 
 export function DiffCard({ diff }: { diff: Diff }) {
   return (
-    <div data-testid="diff-card" className="mt-2 bg-paper border border-rule-2 rounded">
-      <div className="px-3 py-1.5 border-b border-rule-2 font-mono text-[11px] text-ink-soft flex items-center justify-between">
-        <span>{diff.path}</span>
-        <span className="text-pencil text-[10px]">diff</span>
+    <Card variant="outline" className="diff-card" data-testid="diff-card">
+      <div className="diff-card__bar">
+        <span className="diff-card__path">{diff.path}</span>
+        <span className="diff-card__tag">diff</span>
       </div>
-      <div className="p-3 font-mono text-[11px] leading-snug whitespace-pre overflow-x-auto max-h-48">
+      <div className="diff-card__body">
         {/* Simple line diff for now; richer diff tooling can land later. */}
         {simpleDiff(diff.before, diff.after).map((line, i) => (
-          <div key={i} className={
-            line.kind === "add"    ? "bg-ivy/10 text-ivy" :
-            line.kind === "remove" ? "bg-blood/10 text-blood" :
-            "text-ink-soft"
-          }>
+          <div key={i} className="diff-card__line" data-kind={line.kind}>
             {line.kind === "add" ? "+ " : line.kind === "remove" ? "- " : "  "}
             {line.text}
           </div>
         ))}
       </div>
-    </div>
+    </Card>
   );
 }
 

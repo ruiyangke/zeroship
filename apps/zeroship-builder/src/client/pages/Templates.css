@@ -1,0 +1,159 @@
+/*
+ * Templates — crystal skin for the public template gallery (/templates).
+ *
+ * The structure (page canvas → Container/main → intro Stack →
+ * Toggle.Group filter → fluid Grid of TemplateCards → footer) comes from
+ * the DS layout primitives + components. This sheet only paints the
+ * bespoke editorial chrome that has no direct DS equivalent: the page
+ * canvas, the oversized display heading + its accent emphasis, the
+ * uppercase eyebrow rule, the empty-state italic copy, the "describe
+ * your own" underline link, and the uppercase letter-spaced footer
+ * caption row + accented wordmark dot.
+ *
+ * Everything reads --zs-* tokens — no raw hex/px (0.0625rem hairlines
+ * only, expressed in rem), no Tailwind, no editorial tokens.
+ */
+
+/* ─── page canvas ──────────────────────────────────────────────────── */
+.zs-templates-page {
+  min-block-size: 100vh;
+  background-color: var(--zs-surface);
+}
+
+/* The content column. Generous top breathing room under the nav band
+ * and a deep bottom gutter so the footer never hugs the viewport edge. */
+.zs-templates__main {
+  padding-block: var(--zs-space-9) var(--zs-space-10);
+}
+
+/* ─── intro ────────────────────────────────────────────────────────── */
+.zs-templates__intro {
+  max-inline-size: 42.5rem; /* ~680px — the old reading measure */
+  margin-block-end: var(--zs-space-8);
+}
+
+/* Uppercase, letter-spaced eyebrow with a short leading rule. */
+.zs-templates__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+.zs-templates__eyebrow-rule {
+  display: inline-block;
+  inline-size: var(--zs-space-3);
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* Oversized display heading. Crystal has no serif face, so we lean on
+ * the system family in italic for the accented emphasis (mirrors the
+ * PublicNav wordmark treatment); the size is a fluid clamp in rem. */
+.zs-templates__title {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-weight: var(--zs-text-large-title-weight);
+  font-size: clamp(3rem, 7vw, 5rem); /* 48 → 80 */
+  line-height: 0.98;
+  letter-spacing: -0.02em;
+  color: var(--zs-label);
+}
+.zs-templates__title-accent {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+
+.zs-templates__lede {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1.55;
+  color: var(--zs-label-secondary);
+}
+
+/* ─── filter row ───────────────────────────────────────────────────── */
+/* The Toggle.Group ships its own segmented-control chrome; we only let
+ * the row wrap and sit above the grid with the old rhythm. */
+.zs-templates__filters {
+  flex-wrap: wrap;
+  margin-block-end: var(--zs-space-8);
+}
+
+/* ─── grid ─────────────────────────────────────────────────────────── */
+/* Grid + TemplateCard own the look; nothing bespoke needed here. */
+
+/* ─── empty state ──────────────────────────────────────────────────── */
+.zs-templates__empty {
+  border: 0.0625rem dashed var(--zs-separator);
+  padding: var(--zs-space-9);
+}
+.zs-templates__empty-title {
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-weight: var(--zs-text-body-weight);
+  font-size: var(--zs-text-body-size);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── "describe your own" link ─────────────────────────────────────── */
+.zs-templates__blank {
+  margin-block: var(--zs-space-8) var(--zs-space-9);
+}
+.zs-templates__blank-link {
+  display: inline-block;
+  padding-block: var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  color: var(--zs-label);
+  text-decoration: none;
+  border-block-end: 0.0625rem solid var(--zs-separator);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+.zs-templates__blank-link:hover {
+  color: var(--zs-accent);
+  border-block-end-color: var(--zs-accent);
+}
+
+/* ─── footer ───────────────────────────────────────────────────────── */
+.zs-templates__rule {
+  margin-block-end: var(--zs-space-8);
+}
+.zs-templates__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-3) var(--zs-space-7);
+  font-family: var(--zs-font-system);
+}
+.zs-templates__footer-link {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-tertiary);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-templates__footer-link:hover {
+  color: var(--zs-label);
+}
+/* The trailing wordmark caption, pushed to the inline-end edge. */
+.zs-templates__footer-mark {
+  margin-inline-start: auto;
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+}
+.zs-templates__footer-dot {
+  color: var(--zs-accent);
+}

@@ -1,18 +1,28 @@
 // ─── Pricing — public pricing surface (`/pricing`) ──────────────
 //
 // Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.2. Three-tier card grid (Free / Maker / Pro), each
-// with title, big serif price, italic tagline, bullet list, and a
-// primary "Choose" button that routes to /signup?plan=<tier>.
+// with title, big price, tagline, bullet list, and a primary "Choose"
+// button that routes to /signup?plan=<tier>.
 //
 // Top of page: the "Earn, keep most of it" lede explaining the
 // 15 % platform share + Stripe fees, with a worked example mirroring
 // the AGENTS.md revenue model.
+//
+// Crystal skin: PublicNav + a DS Container holds the page column. The
+// tier band is composed from the same DS primitives the @zeroship/ui
+// PricingTable section is built from — Container + Grid + Card — so the
+// load-bearing per-card `data-testid` hooks (pricing-plan-*, the
+// "Most chosen" flag, the responsive boundingBox checks) ride on real
+// card elements. CTAs are DS Buttons (filled for the featured tier,
+// plain elsewhere). All bespoke chrome lives in the co-located
+// Pricing.css reading --zs-* tokens; no Tailwind, no editorial tokens,
+// no raw hex/px. Props, exports, routing, navigation, and every
+// data-testid are preserved exactly.
 
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { Button, Card, Container, Grid } from "@zeroship/ui";
 import { PublicNav } from "../components/PublicNav";
-import { StampButton } from "../components/StampButton";
-import { GhostButton } from "../components/GhostButton";
-import { useNavigate } from "react-router-dom";
+import "./Pricing.css";
 
 interface Plan {
   key: "free" | "maker" | "pro";
@@ -86,146 +96,135 @@ export function Pricing() {
   }
 
   return (
-    <div className="min-h-screen bg-paper" data-testid="pricing-page">
+    <div className="zs-pricing-page" data-testid="pricing-page">
       <PublicNav />
 
-      <main className="mx-auto px-6 pt-14 pb-24" style={{ maxWidth: 960 }}>
-        {/* ─── Lede ─────────────────────────────────────────────── */}
-        <section className="reveal mb-14 max-w-[700px]">
-          <div className="label-uc mb-4 flex items-center gap-2">
-            <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-            Pricing
-          </div>
-          <h1
-            className="font-serif font-medium leading-[0.98] -tracking-[0.02em] mb-5"
-            style={{ fontSize: "clamp(48px, 7vw, 80px)" }}
-          >
-            Earn, keep <em className="italic text-tomato">most</em> of it.
-          </h1>
-          <p className="font-serif text-[19px] leading-[1.5] text-ink-soft mb-3">
-            Subscriptions to zeroship are simple — but the real arithmetic is
-            that we earn a 15&nbsp;% share of what your apps make. Nothing
-            until you do.
-          </p>
-          <p className="font-serif italic text-[15px] text-pencil">
-            A worked example: a creator's app earns $100/mo. Stripe takes
-            ≈$3.20. zeroship takes $15.00. The creator keeps <strong className="not-italic text-ink">$81.80</strong>.
-          </p>
-        </section>
+      <Container size="lg" padX={6} asChild>
+        <main className="zs-pricing-page__main">
+          {/* ─── Lede ─────────────────────────────────────────────── */}
+          <section className="zs-pricing-page__lede">
+            <div className="zs-pricing-page__eyebrow">
+              <span className="zs-pricing-page__eyebrow-rule" aria-hidden="true" />
+              Pricing
+            </div>
+            <h1 className="zs-pricing-page__title">
+              Earn, keep <em>most</em> of it.
+            </h1>
+            <p className="zs-pricing-page__lede-lead">
+              Subscriptions to zeroship are simple — but the real arithmetic is
+              that we earn a 15&nbsp;% share of what your apps make. Nothing
+              until you do.
+            </p>
+            <p className="zs-pricing-page__lede-note">
+              A worked example: a creator's app earns $100/mo. Stripe takes
+              ≈$3.20. zeroship takes $15.00. The creator keeps{" "}
+              <strong>$81.80</strong>.
+            </p>
+          </section>
 
-        {/* ─── Plan cards ───────────────────────────────────────── */}
-        <section className="reveal mb-16">
-          <div
-            className="grid gap-6"
-            style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}
-            data-testid="pricing-plans"
-          >
-            {PLANS.map((p) => (
-              <article
-                key={p.key}
-                data-testid={`pricing-plan-${p.key}`}
-                className={
-                  p.emphasised
-                    ? "bg-white border-2 border-tomato px-7 pt-7 pb-6 relative shadow-[0_24px_28px_-20px_rgba(34,22,12,0.18)]"
-                    : "bg-white border border-rule px-7 pt-7 pb-6 relative"
-                }
-              >
-                {p.emphasised && (
-                  <div
-                    className="absolute -top-3 left-7 bg-tomato text-paper font-sans text-[9.5px] uppercase tracking-[0.2em] px-2 py-0.5"
-                    style={{ transform: "rotate(-1deg)" }}
-                  >
-                    Most chosen
-                  </div>
-                )}
-                <h3 className="font-serif italic text-[15px] text-tomato mb-2">{p.name}</h3>
-                <div className="flex items-baseline gap-2 mb-1.5">
-                  <span
-                    className="font-serif font-medium text-[44px] -tracking-[0.02em] leading-none"
-                    style={{ fontVariationSettings: '"opsz" 144' }}
-                  >
-                    {p.price}
-                  </span>
-                  <span className="font-serif italic text-[14px] text-ink-soft">{p.cadence}</span>
-                </div>
-                <p className="font-serif italic text-[14px] text-ink-soft mb-5 leading-snug">
-                  {p.tagline}
-                </p>
-                <ul className="m-0 p-0 list-none mb-6 font-serif text-[14.5px] text-ink leading-[1.6]">
-                  {p.features.map((f) => (
-                    <li
-                      key={f}
-                      className="py-0.5 before:content-['·'] before:text-tomato before:font-bold before:mr-2"
-                    >
-                      {f}
-                    </li>
-                  ))}
-                </ul>
-                {p.emphasised ? (
-                  <StampButton
-                    onClick={() => choose(p.key)}
-                    data-testid={`pricing-cta-${p.key}`}
-                  >
-                    {p.cta}
-                  </StampButton>
-                ) : (
-                  <GhostButton
-                    onClick={() => choose(p.key)}
-                    data-testid={`pricing-cta-${p.key}`}
-                  >
-                    {p.cta} →
-                  </GhostButton>
-                )}
-              </article>
-            ))}
-          </div>
-        </section>
-
-        {/* ─── 15 % share band ──────────────────────────────────── */}
-        <section className="reveal mb-14 bg-paper-2 border border-rule px-9 py-8 max-w-[760px]">
-          <div className="label-uc mb-3 flex items-center gap-2">
-            <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-            The 15&nbsp;% share, plainly
-          </div>
-          <h2 className="font-serif font-medium text-[28px] -tracking-[0.015em] mb-3 leading-tight">
-            Aligned incentives, no platform fee until you sell.
-          </h2>
-          <p className="font-serif text-[16px] leading-[1.6] text-ink-soft m-0">
-            zeroship makes money <em className="italic">only</em> when your
-            apps make money. Run a free side project — the platform takes
-            nothing. Charge for it — Stripe takes its standard fees and we
-            take 15&nbsp;% of what's left. Infrastructure, agents, hosting,
-            scaling, monitoring: all included.
-          </p>
-        </section>
-
-        {/* ─── Enterprise note ──────────────────────────────────── */}
-        <section className="reveal mb-12 max-w-[700px]">
-          <p className="font-serif italic text-[15px] text-ink-soft m-0">
-            Need an audit log, SSO, a custom contract, or volume pricing?{" "}
-            <Link
-              to="/about"
-              className="text-tomato hover:opacity-80"
-              style={{ textDecoration: "underline", textDecorationStyle: "dotted" }}
+          {/* ─── Plan cards ───────────────────────────────────────── */}
+          <section className="zs-pricing-page__plans-section">
+            <Grid
+              minColWidth="16rem"
+              gap={5}
+              align="stretch"
+              data-testid="pricing-plans"
             >
-              Get in touch
-            </Link>{" "}
-            — we'll work something out.
-          </p>
-        </section>
+              {PLANS.map((p) => (
+                <Card
+                  key={p.key}
+                  variant={p.emphasised ? "elevated" : "outline"}
+                  data-testid={`pricing-plan-${p.key}`}
+                  data-featured={p.emphasised ? "" : undefined}
+                  className="zs-pricing-page__plan"
+                >
+                  {p.emphasised && (
+                    <div className="zs-pricing-page__plan-badge">
+                      Most chosen
+                    </div>
+                  )}
+                  <h3 className="zs-pricing-page__plan-name">{p.name}</h3>
+                  <p className="zs-pricing-page__plan-price">
+                    <span className="zs-pricing-page__plan-amount">
+                      {p.price}
+                    </span>
+                    <span className="zs-pricing-page__plan-cadence">
+                      {p.cadence}
+                    </span>
+                  </p>
+                  <p className="zs-pricing-page__plan-tagline">{p.tagline}</p>
+                  <ul className="zs-pricing-page__plan-features">
+                    {p.features.map((f) => (
+                      <li key={f} className="zs-pricing-page__plan-feature">
+                        {f}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="zs-pricing-page__plan-cta">
+                    <Button
+                      variant={p.emphasised ? "filled" : "plain"}
+                      onClick={() => choose(p.key)}
+                      data-testid={`pricing-cta-${p.key}`}
+                    >
+                      {p.emphasised ? p.cta : `${p.cta} →`}
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </Grid>
+          </section>
 
-        <hr className="hairline mb-10" />
+          {/* ─── 15 % share band ──────────────────────────────────── */}
+          <section className="zs-pricing-page__share">
+            <div className="zs-pricing-page__eyebrow">
+              <span className="zs-pricing-page__eyebrow-rule" aria-hidden="true" />
+              The 15&nbsp;% share, plainly
+            </div>
+            <h2 className="zs-pricing-page__share-title">
+              Aligned incentives, no platform fee until you sell.
+            </h2>
+            <p className="zs-pricing-page__share-body">
+              zeroship makes money <em>only</em> when your apps make money. Run
+              a free side project — the platform takes nothing. Charge for it —
+              Stripe takes its standard fees and we take 15&nbsp;% of what's
+              left. Infrastructure, agents, hosting, scaling, monitoring: all
+              included.
+            </p>
+          </section>
 
-        <footer className="font-sans text-[11px] uppercase tracking-[0.2em] text-pencil flex flex-wrap gap-x-7 gap-y-3 items-center">
-          <Link to="/" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Home</Link>
-          <Link to="/templates" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Templates</Link>
-          <Link to="/skills" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Skills</Link>
-          <Link to="/about" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>About</Link>
-          <span className="ml-auto font-serif italic text-[12px] tracking-normal normal-case text-pencil">
-            zeroship<span className="text-tomato">.</span> &copy; 2026
-          </span>
-        </footer>
-      </main>
+          {/* ─── Enterprise note ──────────────────────────────────── */}
+          <section className="zs-pricing-page__enterprise">
+            <p className="zs-pricing-page__enterprise-note">
+              Need an audit log, SSO, a custom contract, or volume pricing?{" "}
+              <Link to="/about" className="zs-pricing-page__inline-link">
+                Get in touch
+              </Link>{" "}
+              — we'll work something out.
+            </p>
+          </section>
+
+          <hr className="zs-pricing-page__rule" />
+
+          <footer className="zs-pricing-page__footer">
+            <Link to="/" className="zs-pricing-page__footer-link">
+              Home
+            </Link>
+            <Link to="/templates" className="zs-pricing-page__footer-link">
+              Templates
+            </Link>
+            <Link to="/skills" className="zs-pricing-page__footer-link">
+              Skills
+            </Link>
+            <Link to="/about" className="zs-pricing-page__footer-link">
+              About
+            </Link>
+            <span className="zs-pricing-page__footer-mark">
+              zeroship<span className="zs-pricing-page__footer-dot">.</span>{" "}
+              &copy; 2026
+            </span>
+          </footer>
+        </main>
+      </Container>
     </div>
   );
 }

@@ -1,11 +1,19 @@
-// ─── NotebookPrompt — textarea-as-page ──────────────────────────
+// ─── NotebookPrompt — textarea-as-page (crystal) ────────────────
 //
-// White slip on cream, red ruler line on the left, ink underline
-// that draws under the field on focus. The single most-used input
-// in the app — home hero, wizard step 2, every empty composer.
+// An editorial prompt block: a Card surface with a leading accent
+// ruler, an eyebrow label, a large textarea, an ink underline that
+// draws under the field on focus, and a footer row (hint left, action
+// right). The single most-used input in the app — home hero, wizard
+// step 2, every empty composer.
+//
+// Rebuilt over @zeroship/ui (Card + Stack/Cluster layout primitives)
+// plus a co-located stylesheet reading --zs-* tokens for the textarea
+// surface and focus-underline motion (no DS textarea exists; Input is
+// an <input>). The public prop API is unchanged.
 
 import { type FormEvent, type KeyboardEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
-import { cn } from "../lib/utils";
+import { Card, Cluster, Stack } from "@zeroship/ui";
+import "./NotebookPrompt.css";
 
 export interface NotebookPromptProps
   extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "className"> {
@@ -40,58 +48,58 @@ export function NotebookPrompt({
   }
 
   return (
-    <div
-      className={cn(
-        "notebook relative bg-white border border-rule px-9 py-6 shadow-[0_22px_28px_-16px_rgba(34,22,12,0.10),0_4px_8px_-4px_rgba(34,22,12,0.06)]",
-        outerClassName,
-      )}
+    <Card
+      variant="outline"
+      className={
+        outerClassName
+          ? `zb-notebook-prompt ${outerClassName}`
+          : "zb-notebook-prompt"
+      }
     >
-      {/* the red ruler line */}
-      <span
-        className="absolute top-0 bottom-0 w-px"
-        style={{ left: "22px", background: "var(--color-tomato)", opacity: 0.35 }}
-        aria-hidden="true"
-      />
-      {label && (
-        <div className="label-uc mb-2 flex items-center gap-2">
-          <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-          {label}
-        </div>
-      )}
-      <textarea
-        rows={rows}
-        onKeyDown={handleKey}
-        className="w-full resize-none border-0 bg-transparent text-ink outline-none font-serif placeholder:text-pencil placeholder:italic"
-        style={{ fontSize: "20px", lineHeight: "1.4" }}
-        {...rest}
-      />
-      <div
-        className="h-[2px] origin-left scale-x-0 bg-ink transition-transform duration-[480ms]"
-        style={{ transitionTimingFunction: "cubic-bezier(.2,.7,.2,1)" }}
-        data-underline=""
-      />
+      {/* the accent ruler line */}
+      <span className="zb-notebook-prompt__rule" aria-hidden="true" />
+
+      <Stack gap={2}>
+        {label && (
+          <Cluster gap={2} className="zb-notebook-prompt__eyebrow">
+            <span
+              className="zb-notebook-prompt__eyebrow-tick"
+              aria-hidden="true"
+            />
+            {label}
+          </Cluster>
+        )}
+
+        <textarea
+          rows={rows}
+          onKeyDown={handleKey}
+          className="zb-notebook-prompt__textarea"
+          {...rest}
+        />
+
+        <div className="zb-notebook-prompt__underline" data-underline="" />
+      </Stack>
+
       {(hint || action) && (
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <div className="font-sans text-[11px] text-pencil tracking-wide flex items-center gap-1.5">{hint}</div>
+        <Cluster justify="between" gap={3}>
+          <span className="zb-notebook-prompt__hint">{hint}</span>
           <div>{action}</div>
-        </div>
+        </Cluster>
       )}
-      {/* draw the underline on focus-within (CSS via :has). Tailwind doesn't expose this so we handle inline. */}
-      <style>{`
-        .notebook:focus-within > [data-underline] { transform: scaleX(1) !important; }
-      `}</style>
-    </div>
+    </Card>
   );
 }
 
 /** Hint with kbd shortcut — used as the default `hint` prop. */
 export function CmdEnterHint({ verb = "to send" }: { verb?: string }) {
   return (
-    <>
-      <kbd className="font-sans text-[10px] px-1.5 py-px border border-rule rounded-sm bg-paper-2">⌘</kbd>
-      <kbd className="font-sans text-[10px] px-1.5 py-px border border-rule rounded-sm bg-paper-2">↵</kbd>
-      <span>{verb}</span>
-    </>
+    <Cluster gap={1} asChild>
+      <span>
+        <kbd className="zb-cmd-enter-hint__key">⌘</kbd>
+        <kbd className="zb-cmd-enter-hint__key">↵</kbd>
+        <span>{verb}</span>
+      </span>
+    </Cluster>
   );
 }
 

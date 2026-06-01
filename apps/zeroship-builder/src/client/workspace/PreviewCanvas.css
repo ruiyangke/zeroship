@@ -1,0 +1,121 @@
+/*
+ * PreviewCanvas — live sandbox preview frame.
+ *
+ * Crystal-only bespoke styling over @zeroship/ui tokens. The DS Card
+ * supplies the surface (outline variant, clipped to its radius); we
+ * zero its built-in padding/gap so the toolbar and iframe sit
+ * edge-to-edge, then lay out a column inside it: a thin status bar over
+ * a flex-fill stage that holds the iframe + loading/empty overlays.
+ */
+
+.zs-preview-canvas {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--zs-space-4);
+}
+
+/* The no-app empty state centers a single EmptyState, no frame. */
+.zs-preview-canvas--center {
+  align-items: center;
+  justify-content: center;
+}
+
+/* Card surface as the preview frame: drop the Card's intrinsic padding
+ * and gap so its children reach the clipped edges. */
+.zs-preview-frame.zs-preview-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+}
+
+/* ─── status / action bar ─────────────────────────────────────────── */
+.zs-preview-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-space-3);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  border-bottom: 0.0625rem solid var(--zs-separator);
+  background-color: var(--zs-surface-sunken);
+}
+
+.zs-preview-bar__id {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  min-width: 0;
+}
+
+.zs-preview-bar__dot {
+  flex: none;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: var(--zs-radius-full);
+  background-color: var(--zs-label-quaternary);
+}
+.zs-preview-bar__dot[data-status="live"] {
+  background-color: var(--zs-system-green);
+}
+.zs-preview-bar__dot[data-status="error"] {
+  background-color: var(--zs-system-red);
+}
+
+.zs-preview-bar__url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-secondary);
+}
+
+.zs-preview-bar__actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+}
+
+/* ─── iframe stage + overlays ─────────────────────────────────────── */
+.zs-preview-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.zs-preview-iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  /* Apps paint their own background; keep a neutral opaque base so a
+   * transparent app body doesn't bleed the mesh through. */
+  background-color: var(--zs-surface-overlay);
+}
+
+.zs-preview-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--zs-space-6);
+  text-align: center;
+}
+
+/* The "frame still loading" overlay sits above the iframe but must not
+ * eat pointer events meant for the (already interactive) app beneath. */
+.zs-preview-overlay--ghost {
+  pointer-events: none;
+}

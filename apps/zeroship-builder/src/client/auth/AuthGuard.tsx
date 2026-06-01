@@ -12,7 +12,9 @@
 
 import type { ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
+import { Center } from "@zeroship/ui";
 import { useAuth } from "./AuthContext";
+import "./AuthGuard.css";
 
 export function AuthGuard({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -20,12 +22,9 @@ export function AuthGuard({ children }: { children: ReactNode }) {
 
   if (loading) {
     return (
-      <div
-        className="min-h-screen flex items-center justify-center font-serif italic text-ink-soft text-[14px]"
-        data-testid="auth-guard-loading"
-      >
-        loading…
-      </div>
+      <Center minHeight="100dvh" data-testid="auth-guard-loading">
+        <span className="auth-guard-loading__label">loading…</span>
+      </Center>
     );
   }
 

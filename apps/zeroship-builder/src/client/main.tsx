@@ -29,7 +29,7 @@ createRoot(document.getElementById("root")!).render(
     <ErrorBoundary label="the app">
       <QueryClientProvider client={queryClient}>
         <AuthProvider options={{ scope: ["openid", "profile", "email"] }}>
-          <ThemeProvider defaultTheme="studio">
+          <ThemeProvider defaultTheme="crystal">
             <App />
           </ThemeProvider>
         </AuthProvider>

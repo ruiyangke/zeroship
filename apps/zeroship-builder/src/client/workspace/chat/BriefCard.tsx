@@ -14,9 +14,15 @@
 // the user clicks Begin, the card stays as a record but the button
 // disables. The parent page is responsible for navigating away (so
 // even a long mutation is visible).
+//
+// Rebuilt on @zeroship/ui crystal: a Card surface, a Tag eyebrow, a
+// DescriptionList for the answer trail (question → answer pairs), and a
+// Button footer. Bespoke type/colour reads --zs-* tokens in the
+// co-located BriefCard.css.
 
-import { Button } from "../../components/Button";
+import { Button, Card, DescriptionList, Stack, Tag } from "@zeroship/ui";
 import type { Brief } from "../../types/chat";
+import "./BriefCard.css";
 
 export interface BriefCardProps {
   brief: Brief;
@@ -31,52 +37,66 @@ export interface BriefCardProps {
 export function BriefCard({ brief, onBegin, busy, committed }: BriefCardProps) {
   const disabled = busy || committed;
   return (
-    <div
+    <Card
+      variant="outline"
+      size="sm"
       data-testid="brief-card"
-      className={`mt-3 bg-paper border border-rule rounded-md p-4 ${committed ? "opacity-70" : ""}`}
+      data-committed={committed ? "" : undefined}
+      className="zs-brief-card"
     >
-      <div className="font-sans text-[10px] uppercase tracking-wider text-pencil mb-2">
-        Brief ready
-      </div>
-      <p className="font-serif text-[15px] leading-[1.55] text-ink mb-3">
-        {brief.summary}
-      </p>
+      <Card.Content>
+        <Stack gap={3}>
+          <Stack gap={2}>
+            <Tag size="sm" className="zs-brief-card__eyebrow">
+              Brief ready
+            </Tag>
+            <p className="zs-brief-card__summary">{brief.summary}</p>
+          </Stack>
 
-      {brief.answers.length > 0 && (
-        <div className="border-t border-rule-2 pt-3 mb-3">
-          <div className="font-sans text-[10px] uppercase tracking-wider text-pencil mb-2">
-            What you told me
-          </div>
-          <ul className="m-0 p-0 list-none font-serif text-[13px] leading-[1.65] text-ink-soft">
-            {brief.answers.map((a, i) => (
-              <li
-                key={i}
-                className="before:content-['·'] before:text-tomato before:font-bold before:mr-2"
+          {brief.answers.length > 0 && (
+            <Stack gap={2} className="zs-brief-card__answers">
+              <Tag size="sm" className="zs-brief-card__eyebrow">
+                What you told me
+              </Tag>
+              <DescriptionList
+                orientation="vertical"
+                className="zs-brief-card__trail"
               >
-                <span className="text-ink">{a.question}</span>{" "}
-                <em className="italic">{stringifyAnswer(a.answer)}</em>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+                {brief.answers.map((a, i) => (
+                  <DescriptionList.Item
+                    key={i}
+                    className="zs-brief-card__pair"
+                  >
+                    <DescriptionList.Term className="zs-brief-card__question">
+                      {a.question}
+                    </DescriptionList.Term>
+                    <DescriptionList.Detail className="zs-brief-card__answer">
+                      <em>{stringifyAnswer(a.answer)}</em>
+                    </DescriptionList.Detail>
+                  </DescriptionList.Item>
+                ))}
+              </DescriptionList>
+            </Stack>
+          )}
+        </Stack>
+      </Card.Content>
 
-      <div className="flex justify-between items-center">
-        <span className="font-sans text-[11px] text-pencil italic">
+      <Card.Footer align="between" divider="top">
+        <span className="zs-brief-card__note">
           {committed ? "Beginning…" : "I'll create the project and start coding."}
         </span>
         <Button
           type="button"
-          variant="primary"
-          size="sm"
+          variant="filled"
+          size="small"
           onClick={onBegin}
           disabled={disabled}
           data-testid="brief-begin"
         >
           {committed ? "Beginning…" : "Begin →"}
         </Button>
-      </div>
-    </div>
+      </Card.Footer>
+    </Card>
   );
 }
 

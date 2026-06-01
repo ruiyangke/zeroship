@@ -1,173 +1,48 @@
-@import "tailwindcss";
+/*
+ * Builder app-global stylesheet — crystal.
+ *
+ * The @zeroship/ui design system owns the base reset, design tokens, and
+ * per-component styling (imported as "@zeroship/ui/styles.css" in main.tsx
+ * under <ThemeProvider defaultTheme="crystal">). This sheet only sets the
+ * page canvas and a couple of app-wide niceties, all over --zs-* tokens.
+ * No Tailwind, no editorial tokens, no raw hex/px.
+ */
 
-@theme {
-  /* paper / ink / pencil */
-  --color-paper:   oklch(0.97 0.012 89);
-  --color-paper-2: oklch(0.94 0.014 86);
-  --color-paper-3: oklch(0.91 0.014 84);
-  --color-ink:     oklch(0.18 0.013 60);
-  --color-ink-soft:oklch(0.40 0.013 65);
-  --color-pencil:  oklch(0.55 0.012 70);
-  --color-rule:    oklch(0.78 0.014 75);
-  --color-rule-2:  oklch(0.85 0.014 78);
-
-  /* semantic colors — six distinct jobs (per §4.2) */
-  --color-tomato:    oklch(0.61 0.21 27);   /* primary action only */
-  --color-tomato-2:  oklch(0.55 0.21 25);
-  --color-tomato-3:  oklch(0.90 0.06 27);
-  --color-ivy:       oklch(0.58 0.16 152);  /* success / live / healthy */
-  --color-ivy-2:     oklch(0.50 0.16 150);
-  --color-ivy-3:     oklch(0.93 0.05 150);
-  --color-cobalt:    oklch(0.55 0.18 252);  /* info / link */
-  --color-amber:     oklch(0.72 0.15 80);   /* warning */
-  --color-blood:     oklch(0.50 0.21 28);   /* destructive */
-
-  /* type */
-  --font-display: "Fraunces", "Times New Roman", serif;
-  --font-serif:   "Source Serif 4", Georgia, serif;
-  --font-sans:    "Inter", system-ui, sans-serif;
-  --font-mono:    "JetBrains Mono", ui-monospace, monospace;
+html,
+body,
+#root {
+  height: 100%;
 }
 
-html, body, #root { height: 100%; }
 body {
-  background: var(--color-paper);
-  color: var(--color-ink);
-  font-family: var(--font-sans);     /* operational default = sans */
-  font-size: 14px;
-  line-height: 1.5;
+  margin: 0;
+  background: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
   -webkit-font-smoothing: antialiased;
 }
 
-::selection { background: var(--color-tomato); color: var(--color-paper); }
-
-/* hairline rule */
-.hairline { height: 1px; background: var(--color-rule); border: 0; }
-
-/* spinning loader */
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.9s linear infinite; }
-
-/* live pulse — used only on green ivy dots */
-@keyframes pulse-ivy {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 148, 71, 0.5); }
-  50%      { box-shadow: 0 0 0 7px rgba(0, 148, 71, 0); }
+::selection {
+  background: var(--zs-accent);
+  color: var(--zs-accent-ink);
 }
-.pulse-dot { animation: pulse-ivy 1.5s ease-in-out infinite; }
 
-/* respect reduced motion */
+/* Global keyboard focus ring for bare focusable elements (links etc.).
+   DS components manage their own focus rings and override this. */
+:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: 0.125rem;
+  border-radius: 0.125rem;
+}
+
+/* Respect reduced motion globally (a11y). */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
-}
-
-/* ─── Global focus-visible ring (WCAG 2.4.7) ─────────────────────
-   Every interactive element gets a tomato outline on keyboard focus
-   without disturbing pointer interaction. Components can override
-   per-instance via Tailwind `focus:outline-*` if they want a
-   different placement (e.g. round buttons). We use `:focus-visible`
-   so mouse clicks don't paint a ring.
-
-   `outline-offset: 2px` keeps the ring clear of the element's
-   border. The same 2px tomato outline is what Tailwind classes
-   `focus:outline-2 focus:outline-tomato focus:outline-offset-2`
-   reproduce inline — so explicit per-component classes layer
-   cleanly on top.                                                  */
-:focus-visible {
-  outline: 2px solid var(--color-tomato);
-  outline-offset: 2px;
-  border-radius: 2px;
-}
-/* Form inputs get the ring from their `focus:border-ink` class
-   already; suppress the default ring there to avoid the double-line
-   look that breaks the editorial baseline. */
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible {
-  outline: none;
-}
-
-/* ─── stamp-btn — primary action style ─────────────────────────────
-   Used by `<StampButton/>` (components/StampButton.tsx). Tomato-on-
-   paper, slightly rotated, with a soft drop-shadow press. Styled in
-   plain CSS rather than Tailwind because the rotated-stamp look
-   needs precise box-shadow stacking, and Tailwind's utility classes
-   would multiply the cost of every primary CTA in the app. The
-   selector is `.stamp-btn` so the className stays terse.            */
-.stamp-btn {
-  appearance: none;
-  border: 0;
-  background: var(--color-tomato);
-  color: var(--color-paper);
-  font-family: var(--font-sans);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 12px;
-  padding: 14px 24px 12px 24px;
-  cursor: pointer;
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
-    0 1px 0 0 var(--color-tomato-2),
-    0 6px 0 -2px rgba(60, 12, 0, 0.18);
-  transition: transform 80ms ease, box-shadow 80ms ease, background 200ms ease;
-  transform: rotate(-0.6deg);
-  border-radius: 1px;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-}
-.stamp-btn:hover {
-  transform: rotate(-0.2deg) translateY(-1px);
-}
-.stamp-btn:active:not(:disabled) {
-  transform: rotate(-0.4deg) translateY(2px);
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
-    0 0 0 0 var(--color-tomato-2),
-    0 1px 0 -2px rgba(60, 12, 0, 0.18);
-  background: var(--color-tomato-2);
-}
-.stamp-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.stamp-btn .arrow {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-size: 16px;
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 400;
-}
-
-/* ─── label-uc — small editorial caps label ────────────────────────
-   The "label-uc" utility used across canvases/sections renders a
-   small uppercase eyebrow in the editorial sans, similar to the
-   chapter-heading style throughout the design comps.                */
-.label-uc {
-  font-family: var(--font-sans);
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--color-pencil);
-}
-
-/* ─── reveal — gentle fade-in on first paint ───────────────────────
-   Applied liberally on hero sections; pure CSS so it works without
-   any JS. Reduced-motion users skip the animation via the global
-   `prefers-reduced-motion` block earlier in this file.              */
-@keyframes reveal-fade {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.reveal {
-  animation: reveal-fade 480ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
-.reveal.d-1 {
-  animation-delay: 120ms;
 }

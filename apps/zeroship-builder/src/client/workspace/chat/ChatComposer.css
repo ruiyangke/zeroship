@@ -1,0 +1,135 @@
+/*
+ * ChatComposer — crystal presentation.
+ *
+ * The composer is a bespoke surface (a multi-line textarea + a send/stop
+ * row + an @-mention anchor) that has no single DS component — Input is
+ * single-line only. So the chrome here is hand-built over --zs-* tokens:
+ *   - the bordered textarea reuses the DS *input* token family
+ *     (--zs-input-bg / --zs-input-border / --zs-input-ink / placeholder
+ *     / focus ring) so it reads identically to a DS <Input> at rest,
+ *     hover, focus, and disabled;
+ *   - the attachment chips reuse the secondary fill + separator + caption
+ *     type tokens;
+ *   - the keyboard-hint footer uses the footnote/caption type scale and
+ *     tertiary label color.
+ *
+ * Buttons (attach / send / stop) are DS <Button>s — no styling here.
+ * Tokens only: oklch/rem via --zs-*, hairlines at 0.0625rem.
+ */
+
+.chat-composer {
+  position: relative;
+  border-block-start: 0.0625rem solid var(--zs-separator);
+  background: var(--zs-surface);
+  padding-inline: var(--zs-space-4);
+  padding-block: var(--zs-space-3);
+}
+
+/* ─── attachment chips ─────────────────────────────────────────────── */
+
+.chat-composer__attachments {
+  margin-block-end: var(--zs-space-2);
+}
+
+.chat-composer__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  padding-block: var(--zs-space-1);
+  background: var(--zs-fill-secondary);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-2);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-input-ink);
+}
+
+.chat-composer__chip-name {
+  font-family: var(--zs-font-mono);
+}
+
+.chat-composer__chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--zs-label-tertiary);
+  cursor: pointer;
+  font-size: var(--zs-text-caption-1-size);
+  line-height: 1;
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.chat-composer__chip-remove:hover {
+  color: var(--zs-system-red);
+}
+
+/* ─── textarea — DS input token surface, multi-line ────────────────── */
+
+.chat-composer__textarea {
+  inline-size: 100%;
+  resize: none;
+  box-sizing: border-box;
+  padding-inline: var(--zs-control-px-sm);
+  padding-block: var(--zs-space-2);
+  background: var(--zs-input-bg);
+  border: 0.0625rem solid var(--zs-input-border);
+  border-radius: var(--zs-control-radius-md);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-input-ink);
+  transition:
+    border-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.chat-composer__textarea::placeholder {
+  color: var(--zs-input-placeholder);
+}
+
+.chat-composer__textarea:hover:not(:disabled) {
+  border-color: var(--zs-input-border-hover);
+}
+
+.chat-composer__textarea:focus {
+  outline: none;
+  border-color: var(--zs-input-border-focus);
+  box-shadow: 0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+  background: var(--zs-input-bg-focus);
+}
+
+.chat-composer__textarea:disabled {
+  background: var(--zs-input-bg-disabled);
+  color: var(--zs-input-ink-disabled);
+  cursor: not-allowed;
+}
+
+/* ─── footer row ───────────────────────────────────────────────────── */
+
+.chat-composer__footer {
+  margin-block-start: var(--zs-space-2);
+}
+
+.chat-composer__hint {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+/* The hidden native file input — kept out of layout entirely. */
+.chat-composer__file-input {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer__textarea,
+  .chat-composer__chip-remove {
+    transition: none;
+  }
+}

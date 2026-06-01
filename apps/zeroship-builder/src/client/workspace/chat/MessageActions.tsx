@@ -7,12 +7,21 @@
 //   - Assistant turns: ↻ regenerate · 📋 copy
 //   - User turns:      ✎ edit prior   · 📋 copy
 //
-// Buttons are visible only when the parent group is hovered (Tailwind
-// `group-hover:opacity-100`). The row reserves one line of vertical
-// space even when hidden so the bubble layout doesn't shift on hover.
+// Crystal migration: the row is a DS `Cluster` (wrapping inline group)
+// and each action is a DS `Button variant="plain" size="small"` — the
+// link-style, chrome-less button that matches the original ghost look.
+// The two bespoke bits live in MessageActions.css over --zs-* tokens:
+//   - hover-reveal: the row reserves one caption line of vertical space
+//     even when hidden (so the bubble layout doesn't shift on hover) and
+//     fades in on `group-hover` / `focus-within`.
+//   - micro-caption: the actions render as a tiny uppercase tracked
+//     caption, denser than the DS `small` default.
+// Tooltips stay on the native `title` + `aria-label` (no DS Tooltip:
+// that needs an app-root Provider and would change behavior).
 
 import { useState, type ReactNode } from "react";
-import { cn } from "../../lib/utils";
+import { Button, Cluster } from "@zeroship/ui";
+import "./MessageActions.css";
 
 export interface MessageActionsProps {
   /** Plain-text representation copied to clipboard on Copy. */
@@ -50,13 +59,11 @@ export function MessageActions({
   }
 
   return (
-    <div
+    <Cluster
       data-testid="msg-actions"
-      className={cn(
-        "mt-1 flex items-center gap-2 h-5",
-        "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
-        "transition-opacity duration-150",
-      )}
+      gap={2}
+      align="center"
+      className="msg-actions"
     >
       <ActionButton
         onClick={copy}
@@ -83,7 +90,7 @@ export function MessageActions({
           ✎ edit
         </ActionButton>
       )}
-    </div>
+    </Cluster>
   );
 }
 
@@ -99,18 +106,16 @@ function ActionButton({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
+    <Button
+      variant="plain"
+      size="small"
       data-testid={testid}
       title={title}
       aria-label={title}
       onClick={onClick}
-      className={cn(
-        "font-sans text-[10px] uppercase tracking-wider text-pencil",
-        "hover:text-ink cursor-pointer",
-      )}
+      className="msg-action"
     >
       {children}
-    </button>
+    </Button>
   );
 }

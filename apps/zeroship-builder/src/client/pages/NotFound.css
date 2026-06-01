@@ -1,0 +1,53 @@
+/*
+ * NotFound — crystal 404 surface.
+ *
+ * The centering + the column gap + the muted description all come from
+ * the DS Center/EmptyState primitives. These rules only paint the
+ * page-specific chrome the block doesn't carry: the uppercase eyebrow,
+ * the accented word in the title, and the quiet accent tint on the
+ * "back to home" action. Every value reads from --zs-* tokens so the
+ * page tracks the active theme.
+ */
+
+/* Inset the gutter on narrow widths; Center owns the actual centering. */
+.nf-center {
+  padding-inline: var(--zs-space-4);
+}
+
+/* The block paints its own generous padding — pull it back here so the
+   404 reads as a focused message rather than a sprawling empty panel. */
+.nf-empty {
+  padding-block: 0;
+}
+
+/* ─── eyebrow ────────────────────────────────────────────────────────── */
+.nf-eyebrow {
+  margin: 0;
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ─── title ──────────────────────────────────────────────────────────── */
+/* Lift the heading to the title-2 scale (the block's default is title-3)
+   so the 404 message lands with focal weight. */
+.nf-title {
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+  letter-spacing: var(--zs-text-title-2-tracking);
+  font-weight: var(--zs-text-title-2-weight);
+}
+.nf-title__accent {
+  color: var(--zs-accent);
+  font-style: italic;
+}
+
+/* ─── home action ────────────────────────────────────────────────────── */
+/* The plain Button owns its own height + chrome; tint it to the accent
+   so the lone affordance reads as the way back. */
+.nf-home {
+  color: var(--zs-accent);
+}

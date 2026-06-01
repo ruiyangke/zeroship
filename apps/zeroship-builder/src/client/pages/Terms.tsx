@@ -1,123 +1,153 @@
 // ─── Terms — public legal stub (`/legal/terms`) ─────────────────
 //
 // Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.5. V1 placeholder until counsel-reviewed copy lands.
+//
+// Crystal skin: PublicNav + a DS Container rendered as the page <main>,
+// a PageHeader title band (eyebrow / title / last-updated description),
+// and the legal prose laid out with the Stack primitive. Bespoke type +
+// the footer caption row live in the co-located Terms.css (all --zs-*
+// tokens). The public export, routing, links, and every data-testid are
+// preserved exactly — only the presentation changed.
 
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { Container, PageHeader, Separator, Stack } from "@zeroship/ui";
 import { PublicNav } from "../components/PublicNav";
+import "./Terms.css";
 
 export function Terms() {
   return (
-    <div className="min-h-screen bg-paper" data-testid="terms-page">
+    <div className="zs-terms" data-testid="terms-page">
       <PublicNav />
 
-      <main className="mx-auto px-6 pt-14 pb-24" style={{ maxWidth: 720 }}>
-        <section className="reveal mb-10">
-          <div className="label-uc mb-4 flex items-center gap-2">
-            <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-            Legal · Terms
-          </div>
-          <h1
-            className="font-serif font-medium leading-[0.98] -tracking-[0.02em] mb-3"
-            style={{ fontSize: "clamp(40px, 5vw, 60px)" }}
+      <Container asChild size="md" padX={6}>
+        <main className="zs-terms__main">
+          <PageHeader>
+            <PageHeader.Text>
+              <span className="zs-terms__eyebrow">
+                <span className="zs-terms__eyebrow-rule" aria-hidden="true" />
+                Legal · Terms
+              </span>
+              <PageHeader.Title>Terms of service.</PageHeader.Title>
+              <PageHeader.Description className="zs-terms__updated">
+                Last updated: 2026-05-01 · Placeholder text — counsel-reviewed
+                version pending.
+              </PageHeader.Description>
+            </PageHeader.Text>
+          </PageHeader>
+
+          <Stack
+            asChild
+            gap={6}
+            className="zs-terms__prose"
+            style={{ marginBlockStart: "var(--zs-space-8)" }}
           >
-            Terms of <em className="italic text-tomato">service</em>.
-          </h1>
-          <p className="font-mono text-[12px] text-ink-soft tracking-wide">
-            Last updated: 2026-05-01 · Placeholder text — counsel-reviewed
-            version pending.
-          </p>
-        </section>
+            <article>
+              <Section title="Your account">
+                <p>
+                  You're responsible for your account, the projects you ship
+                  under it, and the people you invite. Don't share credentials.
+                  Don't use someone else's email.
+                </p>
+              </Section>
 
-        <article className="font-serif text-[16px] leading-[1.65] text-ink space-y-6 mb-14">
-          <Section title="Your account">
-            <p>
-              You're responsible for your account, the projects you ship
-              under it, and the people you invite. Don't share credentials.
-              Don't use someone else's email.
-            </p>
-          </Section>
+              <Section title="Your code">
+                <p>
+                  You own what you build. The agents wrote it; you ship it; it's
+                  yours. You can export the bundle (<code>.zship</code>) at any
+                  time and run it elsewhere — no lock-in. We get a non-exclusive
+                  licence only to run, store, and serve it on your behalf.
+                </p>
+              </Section>
 
-          <Section title="Your code">
-            <p>
-              You own what you build. The agents wrote it; you ship it; it's
-              yours. You can export the bundle (<code className="font-mono text-[14px] not-italic">.zship</code>) at any time
-              and run it elsewhere — no lock-in. We get a non-exclusive
-              licence only to run, store, and serve it on your behalf.
-            </p>
-          </Section>
+              <Section title="What you can't ship">
+                <p>
+                  No malware, phishing, CSAM, content that violates anyone's
+                  rights, or anything illegal in the jurisdictions where the
+                  app is reachable. We will take down anything that crosses
+                  these lines and may terminate the responsible account.
+                </p>
+              </Section>
 
-          <Section title="What you can't ship">
-            <p>
-              No malware, phishing, CSAM, content that violates anyone's
-              rights, or anything illegal in the jurisdictions where the
-              app is reachable. We will take down anything that crosses
-              these lines and may terminate the responsible account.
-            </p>
-          </Section>
+              <Section title="Payments and the 15&nbsp;% share">
+                <p>
+                  When you charge for your app, Stripe handles the transaction.
+                  We retain 15&nbsp;% of the post-Stripe-fees revenue as our
+                  platform share. The remainder is yours, paid out to your
+                  connected Stripe account on Stripe's standard schedule.
+                </p>
+              </Section>
 
-          <Section title="Payments and the 15&nbsp;% share">
-            <p>
-              When you charge for your app, Stripe handles the transaction.
-              We retain 15&nbsp;% of the post-Stripe-fees revenue as our
-              platform share. The remainder is yours, paid out to your
-              connected Stripe account on Stripe's standard schedule.
-            </p>
-          </Section>
+              <Section title="Service availability">
+                <p>
+                  We aim for 99.95&nbsp;% uptime on Pro plans (see the SLA in
+                  your account dashboard). Free and Maker plans are best-effort.
+                  We schedule maintenance and announce material outages on{" "}
+                  <Link to="/changelog" className="zs-terms__link">
+                    /changelog
+                  </Link>
+                  .
+                </p>
+              </Section>
 
-          <Section title="Service availability">
-            <p>
-              We aim for 99.95&nbsp;% uptime on Pro plans (see the SLA in
-              your account dashboard). Free and Maker plans are best-effort.
-              We schedule maintenance and announce material outages on{" "}
-              <Link to="/changelog" className="text-tomato">/changelog</Link>.
-            </p>
-          </Section>
+              <Section title="Liability">
+                <p>
+                  We provide the service "as is" to the extent permitted by law.
+                  Our liability is capped at the fees you paid us in the
+                  twelve months preceding the claim.
+                </p>
+              </Section>
 
-          <Section title="Liability">
-            <p>
-              We provide the service "as is" to the extent permitted by law.
-              Our liability is capped at the fees you paid us in the
-              twelve months preceding the claim.
-            </p>
-          </Section>
+              <Section title="Changes">
+                <p>
+                  We'll email account holders 30 days before any material change
+                  to these terms. Continuing to use the service after the
+                  effective date constitutes acceptance.
+                </p>
+              </Section>
 
-          <Section title="Changes">
-            <p>
-              We'll email account holders 30 days before any material change
-              to these terms. Continuing to use the service after the
-              effective date constitutes acceptance.
-            </p>
-          </Section>
+              <Section title="Contact">
+                <p>
+                  <a href="mailto:legal@zeroship.dev" className="zs-terms__link">
+                    legal@zeroship.dev
+                  </a>
+                  .
+                </p>
+              </Section>
+            </article>
+          </Stack>
 
-          <Section title="Contact">
-            <p>
-              <a href="mailto:legal@zeroship.dev" className="text-tomato">legal@zeroship.dev</a>.
-            </p>
-          </Section>
-        </article>
+          <Separator
+            decorative
+            style={{ marginBlock: "var(--zs-space-8) var(--zs-space-7)" }}
+          />
 
-        <hr className="hairline mb-10" />
-
-        <footer className="font-sans text-[11px] uppercase tracking-[0.2em] text-pencil flex flex-wrap gap-x-7 gap-y-3 items-center">
-          <Link to="/" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Home</Link>
-          <Link to="/legal/privacy" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Privacy</Link>
-          <Link to="/about" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>About</Link>
-          <span className="ml-auto font-serif italic text-[12px] tracking-normal normal-case text-pencil">
-            zeroship<span className="text-tomato">.</span> &copy; 2026
-          </span>
-        </footer>
-      </main>
+          <footer className="zs-terms__footer">
+            <Link to="/" className="zs-terms__footer-link">
+              Home
+            </Link>
+            <Link to="/legal/privacy" className="zs-terms__footer-link">
+              Privacy
+            </Link>
+            <Link to="/about" className="zs-terms__footer-link">
+              About
+            </Link>
+            <span className="zs-terms__wordmark">
+              zeroship<span className="zs-terms__wordmark-dot">.</span> &copy;
+              2026
+            </span>
+          </footer>
+        </main>
+      </Container>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div>
-      <h3 className="font-serif italic font-medium text-[19px] -tracking-[0.01em] text-ink mb-2">
-        {title}
-      </h3>
-      <div className="text-ink-soft">{children}</div>
-    </div>
+    <Stack gap={2}>
+      <h3 className="zs-terms__section-title">{title}</h3>
+      <div>{children}</div>
+    </Stack>
   );
 }
