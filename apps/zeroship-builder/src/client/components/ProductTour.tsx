@@ -248,7 +248,7 @@ export function ProductTour({ open, onClose }: ProductTourProps) {
         <Card variant="elevated">
           <Card.Header>
             <span className="zs-tour__eyebrow" data-testid="product-tour-step">
-              Step {step + 1} of {STEPS.length}
+              step {step + 1} of {STEPS.length}
             </span>
             <Card.Title>{current.title}</Card.Title>
             <Card.Description>{current.body}</Card.Description>
