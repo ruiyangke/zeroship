@@ -23,9 +23,8 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::types::{AcceptLoginRequest, RejectRequest};
 use crate::hydra_client::HydraAdmin;
+use crate::identity::credentials::{verify_password_credentials, CredentialError};
 use crate::identity::eligibility::{self, LoginIneligible};
-use crate::identity::password;
-use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::{LoginPage, PublicErrorMessage};
@@ -232,188 +231,60 @@ pub async fn post(
         );
     }
 
-    // 2. Rate limit (3 buckets, deepest scope first).
+    // 2. Resolve the remote IP (rate-limit bucket + audit).
     let ip = req
         .connection_info()
         .remote()
         .unwrap_or("0.0.0.0")
         .to_string();
-    let email_norm = form.email.trim().to_ascii_lowercase();
-    let buckets = [
-        (format!("login:eip:{email_norm}:{ip}"), Bucket::LOGIN_EIP),
-        (format!("login:email:{email_norm}"), Bucket::LOGIN_EMAIL),
-        (format!("login:ip:{ip}"), Bucket::LOGIN_IP),
-    ];
-    for (key, bucket) in &buckets {
-        match ratelimit::consume(db.as_ref(), key, *bucket).await {
-            Ok(RateLimitDecision::Allowed) => {}
-            Ok(RateLimitDecision::Throttled(_)) => {
-                audit::emit(
-                    db.as_ref(),
-                    &AuditEvent {
-                        event_type: "login_failure",
-                        outcome: "failure",
-                        client_id: Some(&client_id),
-                        auth_method: Some("pwd"),
-                        detail: json!({ "reason": "rate_limited", "bucket": key }),
-                        ..AuditEvent::from_request(&req)
-                    },
-                )
-                .await;
-                return render_login_error(
-                    &challenge,
-                    &client_name,
-                    &cfg,
-                    "too many attempts, try again later",
-                    429,
-                );
-            }
-            Err(e) => {
-                tracing::error!(error = %e, bucket = %key, "rate-limit consume failed");
-                return render_error(PublicErrorMessage::ContactSupport);
-            }
-        }
-    }
 
-    // 3. Look up user.
-    let user = match users::find_by_email(db.as_ref(), &email_norm).await {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::error!(error = %e, "users::find_by_email failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    // Constant-time enumeration defense: if user is None, locked, or has no
-    // password hash (OAuth-only), verify against the dummy hash so the wall
-    // time matches a real verify.
-    let now = chrono::Utc::now();
-    let phc = user
-        .as_ref()
-        .and_then(|u| {
-            let locked = u.locked_until.is_some_and(|t| t > now);
-            let disabled = u.disabled_at.is_some();
-            if locked || disabled || u.password_hash.is_none() {
-                None
-            } else {
-                u.password_hash.clone()
-            }
-        })
-        .unwrap_or_else(|| password::dummy_hash().to_string());
-
-    // 4. Argon2 verify — CPU-bound, run on spawn_blocking so the event loop
-    // is not parked.
-    let password_clone = form.password.clone();
-    let valid = compio::runtime::spawn_blocking(move || {
-        password::verify(&password_clone, &phc).unwrap_or(false)
-    })
+    // 3–4 + failure arms: the constant-time, fail-closed credential check
+    // (rate-limit → lookup → dummy-hash defense → Argon2 verify → eligibility
+    // → audit) lives in `identity::credentials` so the headless `/password`
+    // endpoint reuses the exact same path. Map its failure classes back to the
+    // form-re-render / opaque-error responses this HTML handler uses.
+    let verified = match verify_password_credentials(
+        db.as_ref(),
+        &req,
+        &client_id,
+        &ip,
+        &form.email,
+        &form.password,
+    )
     .await
-    .unwrap_or(false);
-
-    // Re-evaluate the "real user" predicate (mirror the dummy-hash arm).
-    let ineligible_user = user.as_ref().filter(|u| {
-        u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some()
-    });
-    if let Some(u) = ineligible_user {
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "login_failure",
-                outcome: "failure",
-                user_id: Some(&u.id),
-                client_id: Some(&client_id),
-                auth_method: Some("pwd"),
-                detail: json!({ "reason": "account_ineligible" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_login_error(
-            &challenge,
-            &client_name,
-            &cfg,
-            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
-            403,
-        );
-    }
-
-    let real_user = user.as_ref().filter(|u| {
-        u.locked_until.is_none_or(|t| t <= now)
-            && u.disabled_at.is_none()
-            && u.password_hash.is_some()
-    });
-
-    let Some(u) = real_user else {
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "login_failure",
-                outcome: "failure",
-                client_id: Some(&client_id),
-                auth_method: Some("pwd"),
-                detail: json!({ "reason": "invalid_credentials" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_login_error(
-            &challenge,
-            &client_name,
-            &cfg,
-            "invalid email or password",
-            401,
-        );
-    };
-
-    if !valid {
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "login_failure",
-                outcome: "failure",
-                user_id: Some(&u.id),
-                client_id: Some(&client_id),
-                auth_method: Some("pwd"),
-                detail: json!({ "reason": "invalid_credentials" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_login_error(
-            &challenge,
-            &client_name,
-            &cfg,
-            "invalid email or password",
-            401,
-        );
-    }
-
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), u.id).await {
-        if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %u.id, "password login eligibility check failed");
+    {
+        Ok(v) => v,
+        Err(CredentialError::RateLimited) => {
+            return render_login_error(
+                &challenge,
+                &client_name,
+                &cfg,
+                "too many attempts, try again later",
+                429,
+            );
+        }
+        Err(CredentialError::InvalidCredentials) => {
+            return render_login_error(
+                &challenge,
+                &client_name,
+                &cfg,
+                "invalid email or password",
+                401,
+            );
+        }
+        Err(CredentialError::Ineligible) => {
+            return render_login_error(
+                &challenge,
+                &client_name,
+                &cfg,
+                PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+                403,
+            );
+        }
+        Err(CredentialError::Internal) => {
             return render_error(PublicErrorMessage::ContactSupport);
         }
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "login_failure",
-                outcome: "failure",
-                user_id: Some(&u.id),
-                client_id: Some(&client_id),
-                auth_method: Some("pwd"),
-                detail: json!({ "reason": "account_ineligible" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_login_error(
-            &challenge,
-            &client_name,
-            &cfg,
-            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
-            403,
-        );
-    }
+    };
 
     // 5. Success path.
     //
@@ -421,11 +292,11 @@ pub async fn post(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id: u.id,
+            user_id: verified.id,
             auth_method: "pwd",
             amr: vec!["pwd".into()],
             acr: Some("urn:zeroship:pwd"),
-            expected_credential_version: Some(u.credential_version),
+            expected_credential_version: Some(verified.credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },
@@ -441,13 +312,13 @@ pub async fn post(
 
     // 5b. Bump last_login_at (non-fatal on failure — we already audited the
     // success; the user should still flow through to hydra).
-    if let Err(e) = users::touch_last_login(db.as_ref(), u.id).await {
-        tracing::warn!(error = %e, user_id = %u.id, "touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db.as_ref(), verified.id).await {
+        tracing::warn!(error = %e, user_id = %verified.id, "touch_last_login failed");
     }
 
     // 5c. Accept the hydra login challenge.
     let accept = AcceptLoginRequest {
-        subject: u.id.to_string(),
+        subject: verified.id.to_string(),
         remember: Some(true),
         remember_for: Some(3600),
         acr: Some("urn:zeroship:pwd".into()),
@@ -462,22 +333,11 @@ pub async fn post(
         }
     };
 
-    // 5d. Audit the success.
-    audit::emit(
-        db.as_ref(),
-        &AuditEvent {
-            event_type: "login_success",
-            outcome: "success",
-            user_id: Some(&u.id),
-            client_id: Some(&client_id),
-            auth_method: Some("pwd"),
-            detail: json!({}),
-            ..AuditEvent::from_request(&req)
-        },
-    )
-    .await;
+    // (The `login_success` audit row is emitted inside
+    // `verify_password_credentials` — emitting it again here would
+    // double-count the success.)
 
-    // 5e. 302 with the session cookie + hydra's redirect_to as Location.
+    // 5d. 302 with the session cookie + hydra's redirect_to as Location.
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,

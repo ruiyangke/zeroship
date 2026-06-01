@@ -1,6 +1,13 @@
 //! Auth utilities: control key validation, API key hashing, bearer extraction,
 //! HMAC signing for cross-service identity propagation.
 
+pub mod trusted_clients;
+
+pub use trusted_clients::{
+    default_trusted_oauth_clients, is_trusted_client_id, resolve_trusted_oauth_clients,
+    BUILDER_CLIENT_ID,
+};
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;

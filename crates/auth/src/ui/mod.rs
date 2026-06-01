@@ -20,6 +20,7 @@ pub mod me;
 pub mod oauth_github;
 pub mod oauth_google;
 pub mod oauth_stash;
+pub mod password;
 pub mod reset;
 pub mod signup;
 pub mod verify;

@@ -42,6 +42,13 @@ pub fn configure(
                     .route(web::get().to(ui::login::get))
                     .route(web::post().to(ui::login::post)),
             )
+            // Headless in-page password login (credential→code oracle). JSON
+            // only; gated by the gateway↔auth shared secret (`auth_internal_key`)
+            // — NOT a browser-facing form, so no CSRF cookie / same-origin guard
+            // (the gateway owns those). See `ui::password` module docs.
+            .service(
+                web::resource("/password").route(web::post().to(ui::password::post)),
+            )
             .service(
                 web::resource("/signup")
                     .route(web::get().to(ui::signup::get))

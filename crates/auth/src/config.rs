@@ -106,6 +106,29 @@ pub struct AuthConfig {
     )]
     pub stash_signing_key: String,
 
+    /// Gateway↔auth shared secret gating the headless in-page credential
+    /// endpoint (`POST /password`). That endpoint is a credential→authorization-code
+    /// oracle: anyone who can reach it could brute-force passwords and mint codes.
+    /// Unlike the interactive `/login` UI it has no `same_origin_guard` (that lives
+    /// on the gateway), so it MUST authenticate its only legitimate caller — the
+    /// gateway — service-to-service. The gateway presents this value as
+    /// `Authorization: Bearer <key>`; the handler rejects (401/403) before doing
+    /// any work when it is absent or wrong. Mirrors the worker's `worker_key` /
+    /// control's `control_key` pattern (constant-time compare via
+    /// [`zeroship_core::auth::validate_control_key`]).
+    ///
+    /// Empty default keeps any dev sentinel out of `--help`; outside
+    /// `--dev-insecure` an empty key is a fatal startup error (the endpoint
+    /// would be unauthenticated). Under `--dev-insecure` an empty value DISABLES
+    /// the gate (loopback-only dev), matching `worker_key`'s posture.
+    #[arg(
+        long = "internal-key",
+        env = "AUTH_INTERNAL_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub auth_internal_key: String,
+
     // ─── Google OAuth (optional — federation routes registered only when set) ───
     /// Google OAuth 2.0 client ID. Without it, `/oauth/google/*` routes are
     /// not registered (auth still boots).
@@ -475,6 +498,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("dev_insecure", &self.dev_insecure)
             .field("insecure_dev", &self.insecure_dev)
             .field("stash_signing_key", &"<redacted>")
+            .field("auth_internal_key", &"<redacted>")
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"<redacted>")
             .field("github_client_id", &self.github_client_id)
