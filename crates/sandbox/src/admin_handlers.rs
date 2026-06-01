@@ -352,7 +352,7 @@ pub struct ListSandboxesQuery {
 }
 
 /// Single row of `GET /admin/sandboxes` (cross-tenant). Fields
-/// mirror `sandbox.sandboxes` plus a synthetic `in_memory: bool`
+/// mirror `zeroship.sandboxes` plus a synthetic `in_memory: bool`
 /// flag indicating whether THIS controller still holds the in-memory
 /// registry entry. The flag is `false` for rows owned by peers + for
 /// rows whose handler thread hasn't yet rehydrated post-takeover.
@@ -446,7 +446,7 @@ pub async fn list_all_sandboxes(
                     EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
                     EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
                     EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
-               FROM sandbox.sandboxes \
+               FROM zeroship.sandboxes \
               WHERE deleted_at IS NULL \
                 AND ($1::TEXT IS NULL OR user_id = $1::TEXT) \
                 AND ($2::TEXT IS NULL OR host_id = $2::TEXT) \
@@ -622,7 +622,7 @@ async fn list_all_sandboxes_inner(
                     EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
                     EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
                     EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
-               FROM sandbox.sandboxes \
+               FROM zeroship.sandboxes \
               WHERE deleted_at IS NULL \
                 AND ($1::TEXT IS NULL OR user_id = $1::TEXT) \
                 AND ($2::TEXT IS NULL OR host_id = $2::TEXT) \
@@ -703,8 +703,8 @@ pub async fn list_user_shares(
                     sh.use_count, \
                     EXTRACT(EPOCH FROM sh.last_used_at)::BIGINT AS last_used_at_secs, \
                     sh.iss \
-               FROM sandbox.shares sh \
-               JOIN sandbox.sandboxes s ON sh.sandbox_id = s.sandbox_id \
+               FROM zeroship.shares sh \
+               JOIN zeroship.sandboxes s ON sh.sandbox_id = s.sandbox_id \
               WHERE s.user_id = $1::TEXT AND sh.deleted_at IS NULL \
               ORDER BY sh.issued_at DESC \
               LIMIT 1000",
@@ -768,7 +768,7 @@ pub async fn list_hosts(
                     EXTRACT(EPOCH FROM (now() - last_heartbeat))::DOUBLE PRECISION AS heartbeat_lag_secs, \
                     EXTRACT(EPOCH FROM drain_started_at)::BIGINT AS drain_started_at_secs, \
                     version \
-               FROM sandbox.hosts \
+               FROM zeroship.hosts \
               ORDER BY status, last_heartbeat DESC",
             &[],
         )
@@ -855,7 +855,7 @@ pub async fn export_user(
     let sandboxes_json = match tx
         .query_one(
             "SELECT COALESCE(json_agg(s ORDER BY s.created_at), '[]'::json)::TEXT \
-               FROM sandbox.sandboxes s WHERE s.user_id = $1::TEXT",
+               FROM zeroship.sandboxes s WHERE s.user_id = $1::TEXT",
             &[&user_id],
         )
         .await
@@ -866,8 +866,8 @@ pub async fn export_user(
     let shares_json = match tx
         .query_one(
             "SELECT COALESCE(json_agg(sh ORDER BY sh.issued_at), '[]'::json)::TEXT \
-               FROM sandbox.shares sh \
-               JOIN sandbox.sandboxes s ON sh.sandbox_id = s.sandbox_id \
+               FROM zeroship.shares sh \
+               JOIN zeroship.sandboxes s ON sh.sandbox_id = s.sandbox_id \
               WHERE s.user_id = $1::TEXT",
             &[&user_id],
         )
@@ -881,7 +881,7 @@ pub async fn export_user(
     //
     // Filter out `kind = 'gdpr.delete_user'` from the user-facing
     // export. These rows are operator-side
-    // records — they live in `sandbox.events` because the gdpr-role
+    // records — they live in `zeroship.events` because the gdpr-role
     // INSERT grant runs through that table, but they are NOT user
     // data. They document who/when erased the user (GDPR Art. 30
     // Records of Processing Activities) and surfacing them on a
@@ -894,7 +894,7 @@ pub async fn export_user(
     let events_json = match tx
         .query_one(
             "WITH capped AS ( \
-               SELECT * FROM sandbox.events \
+               SELECT * FROM zeroship.events \
                  WHERE user_id = $1::TEXT \
                    AND kind <> 'gdpr.delete_user' \
                  ORDER BY ts DESC \
@@ -911,7 +911,7 @@ pub async fn export_user(
     };
     let events_count: i64 = match tx
         .query_one(
-            "SELECT count(*)::BIGINT FROM sandbox.events \
+            "SELECT count(*)::BIGINT FROM zeroship.events \
               WHERE user_id = $1::TEXT \
                 AND kind <> 'gdpr.delete_user'",
             &[&user_id],
@@ -924,7 +924,7 @@ pub async fn export_user(
     let deleted_json = match tx
         .query_one(
             "SELECT COALESCE(json_agg(ds ORDER BY ds.deleted_at), '[]'::json)::TEXT \
-               FROM sandbox.deleted_sandboxes ds WHERE ds.user_id = $1::TEXT",
+               FROM zeroship.deleted_sandboxes ds WHERE ds.user_id = $1::TEXT",
             &[&user_id],
         )
         .await
@@ -1025,7 +1025,7 @@ pub async fn delete_user(
     // we never end with audit-but-no-delete or vice versa.
     let sandbox_ids: Vec<String> = match tx
         .query(
-            "SELECT sandbox_id FROM sandbox.sandboxes WHERE user_id = $1::TEXT",
+            "SELECT sandbox_id FROM zeroship.sandboxes WHERE user_id = $1::TEXT",
             &[&user_id],
         )
         .await
@@ -1036,7 +1036,7 @@ pub async fn delete_user(
 
     let events_deleted: i64 = match tx
         .execute(
-            "DELETE FROM sandbox.events WHERE user_id = $1::TEXT",
+            "DELETE FROM zeroship.events WHERE user_id = $1::TEXT",
             &[&user_id],
         )
         .await
@@ -1046,9 +1046,9 @@ pub async fn delete_user(
     };
     let shares_deleted: i64 = match tx
         .execute(
-            "DELETE FROM sandbox.shares \
+            "DELETE FROM zeroship.shares \
               WHERE sandbox_id IN ( \
-                  SELECT sandbox_id FROM sandbox.sandboxes WHERE user_id = $1::TEXT \
+                  SELECT sandbox_id FROM zeroship.sandboxes WHERE user_id = $1::TEXT \
               )",
             &[&user_id],
         )
@@ -1059,9 +1059,9 @@ pub async fn delete_user(
     };
     let tombstoned: i64 = match tx
         .execute(
-            "INSERT INTO sandbox.deleted_sandboxes (sandbox_id, user_id, deleted_at) \
+            "INSERT INTO zeroship.deleted_sandboxes (sandbox_id, user_id, deleted_at) \
              SELECT sandbox_id, user_id, now() \
-               FROM sandbox.sandboxes \
+               FROM zeroship.sandboxes \
               WHERE user_id = $1::TEXT \
              ON CONFLICT (sandbox_id) DO NOTHING",
             &[&user_id],
@@ -1073,7 +1073,7 @@ pub async fn delete_user(
     };
     let sandboxes_deleted: i64 = match tx
         .execute(
-            "DELETE FROM sandbox.sandboxes WHERE user_id = $1::TEXT",
+            "DELETE FROM zeroship.sandboxes WHERE user_id = $1::TEXT",
             &[&user_id],
         )
         .await
@@ -1096,7 +1096,7 @@ pub async fn delete_user(
         "shares_deleted": shares_deleted,
     })
     .to_string();
-    // After migration 0005, `sandbox.events.sandbox_id` is nullable.
+    // After migration 0005, `zeroship.events.sandbox_id` is nullable.
     // The GDPR audit row
     // isn't tied to any specific sandbox; we write `sandbox_id = NULL`
     // rather than synthesizing a never-existed `sbx_…` (which used
@@ -1110,7 +1110,7 @@ pub async fn delete_user(
     let audit_sandbox_id: Option<String> = None;
     if let Err(e) = tx
         .execute(
-            "INSERT INTO sandbox.events (event_id, sandbox_id, user_id, kind, ts, data) \
+            "INSERT INTO zeroship.events (event_id, sandbox_id, user_id, kind, ts, data) \
              VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'gdpr.delete_user', now(), \
                      CAST($4::TEXT AS JSONB))",
             &[&audit_event_id, &audit_sandbox_id, &user_id, &audit_data],
@@ -1877,7 +1877,7 @@ pub async fn poll_wake(
     state: State,
     path: web::types::Path<(String, String)>,
 ) -> HttpResponse {
-    // T1: pure read of `sandbox.wake_jobs` row — accepts either bearer.
+    // T1: pure read of `zeroship.wake_jobs` row — accepts either bearer.
     if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
@@ -2286,7 +2286,7 @@ mod tests {
          user=sandbox_admin schema=sandbox failed: FATAL \
          password authentication failed for user \"sandbox_admin\" \
          (SQLSTATE 28P01) while executing \
-         SELECT sandbox_id FROM sandbox.sandboxes WHERE user_id=$1";
+         SELECT sandbox_id FROM zeroship.sandboxes WHERE user_id=$1";
 
     /// Mimics a `ch-remote` failure: process arg-vec + a host fs path.
     const CH_REMOTE_LEAK_SAMPLE: &str =
@@ -2316,7 +2316,7 @@ mod tests {
             "sandbox_admin",
             "SQLSTATE",
             "28P01",
-            "FROM sandbox.sandboxes",
+            "FROM zeroship.sandboxes",
             "WHERE user_id",
         ] {
             assert!(

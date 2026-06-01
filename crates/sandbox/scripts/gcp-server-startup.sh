@@ -10,8 +10,9 @@
 #   2. write /etc/nomad.d/nomad.hcl in `server` mode (bootstrap_expect=N)
 #   3. start nomad.service
 #   4. (server-1 only, the "pg-host"): bootstrap postgresql, create the
-#      `zeroship` DB + role, apply the sandbox schema by running the
-#      controller binary once with SANDBOX_PG_RUN_MIGRATIONS=1.
+#      `zeroship` DB + role. The schema (sandbox tables included) is
+#      owned by Liquibase (db/changelog/) and applied out-of-band by
+#      ops/db-migrate.sh — the controller no longer self-migrates.
 #   5. emit the sentinel `[startup] zsbx-server-ready` to the serial
 #      console so the provisioner can detect completion via
 #      `gcloud compute instances get-serial-port-output`.
@@ -278,9 +279,9 @@ SELECT 'CREATE DATABASE zeroship'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'zeroship')\gexec
 SQL
 
-  # Migrations: we let the controller apply its own schema with
-  # SANDBOX_PG_RUN_MIGRATIONS=1 on first run from a worker.
-  # Nothing to do here — the migration is idempotent on the worker side.
+  # Schema: owned by Liquibase (db/changelog/), applied out-of-band by
+  # ops/db-migrate.sh. The controller no longer self-migrates; nothing
+  # to do here beyond creating the DB + role above.
   echo "[startup] postgres ready: $(sudo -u postgres psql -tA -c 'SELECT version();' | head -1)"
 fi
 

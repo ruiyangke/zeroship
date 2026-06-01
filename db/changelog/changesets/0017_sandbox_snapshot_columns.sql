@@ -1,20 +1,23 @@
--- 0007_sandbox_snapshot_columns.sql — sandboxes columns for snapshot
+--liquibase formatted sql
+
+-- sandboxes columns for snapshot. Transcribed from
+-- crates/sandbox/migrations/0007_sandbox_snapshot_columns.sql
+-- (sandbox.* → zeroship.*).
 --
 -- Source-of-truth: docs/proposals/sandbox-snapshot-restore.md § 9.1
--- (Migration B). Ships AFTER 0006 has soaked at least one release
--- (§ 13 step 2). All columns NULLable or DEFAULT, so Phase-3 code
--- paths that don't know about snapshots keep working.
+-- (Migration B). Ships AFTER 0016 has soaked at least one release
+-- (§ 13 step 2). All columns NULLable or DEFAULT, so Phase-3 code paths
+-- that don't know about snapshots keep working.
 --
--- Schema-pattern note: the proposal references column `state` and
--- `last_request_completed_at` but the actual schema uses `status` and
--- `last_used_at` (the latter from 0001:96, set on every successful
--- agent op). Proposal's intent maps:
---   proposal.state                       → schema.status
---   proposal.last_request_completed_at   → schema.last_used_at
+-- Schema-pattern note: the proposal references `state` /
+-- `last_request_completed_at` but the actual schema uses `status` /
+-- `last_used_at`.
 --
--- Forward-only. Idempotent via `IF NOT EXISTS` on every ADD.
-
-ALTER TABLE sandbox.sandboxes
+-- splitStatements:false: the ADD COLUMN bundle + the DO-block CHECK guard
+-- + the two partial indexes ship as one unit; the DO block contains `;`
+-- inside `$$`.
+--changeset zeroship-sandbox:sandbox-snapshot-columns splitStatements:false
+ALTER TABLE zeroship.sandboxes
     ADD COLUMN IF NOT EXISTS snapshot_artifact_path     TEXT,
     ADD COLUMN IF NOT EXISTS snapshot_taken_at          TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS snapshot_ch_version        TEXT,
@@ -38,11 +41,11 @@ DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.constraint_column_usage
-        WHERE table_schema = 'sandbox'
+        WHERE table_schema = 'zeroship'
           AND table_name = 'sandboxes'
           AND constraint_name = 'sandboxes_snapshot_artifact_consistency'
     ) THEN
-        ALTER TABLE sandbox.sandboxes
+        ALTER TABLE zeroship.sandboxes
             ADD CONSTRAINT sandboxes_snapshot_artifact_consistency
             CHECK (
                 -- snapshotted must carry the full artifact descriptor.
@@ -57,11 +60,12 @@ END $$;
 -- Lease-takeover scan for transient states (§ 6.1). Filtered partial
 -- index keeps it small (only mid-flight rows live here).
 CREATE INDEX IF NOT EXISTS sandboxes_status_lessee_idx
-    ON sandbox.sandboxes (status, lessee_updated_at)
+    ON zeroship.sandboxes (status, lessee_updated_at)
     WHERE status IN ('snapshotting','restoring','restoring_cold');
 
 -- Idle-eviction sweep (§ 7). Only running + opted-in rows participate;
 -- partial index makes the sweep query cheap regardless of fleet size.
 CREATE INDEX IF NOT EXISTS sandboxes_idle_snapshot_idx
-    ON sandbox.sandboxes (last_used_at)
+    ON zeroship.sandboxes (last_used_at)
     WHERE status = 'running' AND idle_snapshot_opted_in;
+--rollback SELECT 1;

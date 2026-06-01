@@ -1,41 +1,26 @@
--- 0001_initial.sql — pg-backed sandbox state (Phase 0)
+--liquibase formatted sql
+
+-- pg-backed sandbox state (Phase 0). Transcribed verbatim from
+-- crates/sandbox/migrations/0001_initial.sql into the unified `zeroship`
+-- schema. Every `sandbox.<obj>` reference is rewritten to `zeroship.<obj>`.
 --
--- Source-of-truth: docs/proposals/sandbox-pg-state.md § 6 (Schema).
--- Round-7 design v8.
+-- Source-of-truth: docs/proposals/sandbox-pg-state.md § 6 (Schema). Round-7
+-- design v8.
 --
--- This migration is forward-only and idempotent. It runs under the
--- `sandbox_admin` role (DDL) at boot via the designated-migrator
--- pattern (§ 7.1). The bookkeeping INSERT into
--- `sandbox.schema_migrations` is performed by the migration runner,
--- NOT by this file.
---
--- Idempotency: every CREATE uses IF NOT EXISTS so a partial replay
--- (e.g. two migrators racing — § 7.1's UNIQUE-constraint
--- race-tolerance fallback) is a no-op past the first apply.
---
--- Roles (sandbox_admin / sandbox_app / sandbox_audit / sandbox_gdpr,
--- § 13.2) are created in a DO $$ ... $$ block so the migration runs
--- on restricted CI Postgres (where the calling role lacks superuser).
--- In production, the operator deploys the four roles via a separate
--- bootstrap step; this DO block then no-ops because the roles already
--- exist.
+-- Consolidation deltas vs. the source migration:
+--   * `CREATE SCHEMA IF NOT EXISTS sandbox` is DROPPED — the `zeroship`
+--     schema already exists (0001_extensions_schemas.sql).
+--   * `sandbox.schema_migrations` (the embedded-runner bookkeeping table)
+--     is DROPPED, along with every grant that referenced it — Liquibase
+--     tracks applied changesets via DATABASECHANGELOG now.
+--   * The four roles (sandbox_admin / sandbox_app / sandbox_audit /
+--     sandbox_gdpr), the partitioned events table + its partitions, all
+--     CHECK constraints, indexes, and the role-split grant bundle are kept
+--     faithfully (schema-qualified to `zeroship`).
 
--- ─── Schema ──────────────────────────────────────────────────────────
-
-CREATE SCHEMA IF NOT EXISTS sandbox;
-
--- ─── 6.1 sandbox.schema_migrations ───────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS sandbox.schema_migrations (
-    version     BIGINT       PRIMARY KEY,
-    applied_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sha256      TEXT         NOT NULL,
-    description TEXT         NOT NULL DEFAULT ''
-);
-
--- ─── 6.2 sandbox.hosts ───────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS sandbox.hosts (
+-- ─── 6.2 zeroship.hosts ──────────────────────────────────────────────
+--changeset zeroship-sandbox:sandbox-hosts splitStatements:true
+CREATE TABLE zeroship.hosts (
     host_id          TEXT         PRIMARY KEY
                                   CHECK (host_id ~ '^hst_[0-9A-Za-z]{20,40}$'),
     boot_id          TEXT         NOT NULL
@@ -53,15 +38,15 @@ CREATE TABLE IF NOT EXISTS sandbox.hosts (
     version          TEXT         NOT NULL DEFAULT '',
     metadata         JSONB        NOT NULL DEFAULT '{}'::JSONB
 );
+CREATE INDEX idx_hosts_status_heartbeat
+    ON zeroship.hosts (status, last_heartbeat);
+CREATE INDEX idx_hosts_region_status
+    ON zeroship.hosts (region, status);
+--rollback DROP TABLE zeroship.hosts;
 
-CREATE INDEX IF NOT EXISTS idx_hosts_status_heartbeat
-    ON sandbox.hosts (status, last_heartbeat);
-CREATE INDEX IF NOT EXISTS idx_hosts_region_status
-    ON sandbox.hosts (region, status);
-
--- ─── 6.3 sandbox.sandboxes ───────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS sandbox.sandboxes (
+-- ─── 6.3 zeroship.sandboxes ──────────────────────────────────────────
+--changeset zeroship-sandbox:sandbox-sandboxes splitStatements:true
+CREATE TABLE zeroship.sandboxes (
     sandbox_id     TEXT         PRIMARY KEY
                                 CHECK (sandbox_id ~ '^sbx_[0-9A-Za-z]{20,40}$'),
     user_id        TEXT         NOT NULL
@@ -73,7 +58,7 @@ CREATE TABLE IF NOT EXISTS sandbox.sandboxes (
     vm_index       INTEGER      NULL,
     agent_url      TEXT         NULL,
     host_id        TEXT         NOT NULL
-                                REFERENCES sandbox.hosts(host_id) ON DELETE RESTRICT,
+                                REFERENCES zeroship.hosts(host_id) ON DELETE RESTRICT,
     -- Round-6 CAS counter; bumped on every ownership-relevant UPDATE
     -- (see § 6.3 CAS pattern + § 11 lease-based takeover).
     generation     BIGINT       NOT NULL DEFAULT 0
@@ -91,30 +76,29 @@ CREATE TABLE IF NOT EXISTS sandbox.sandboxes (
     deleted_at     TIMESTAMPTZ  NULL,
     metadata       JSONB        NOT NULL DEFAULT '{}'::JSONB
 );
-
 -- Partial unique: at most one active sandbox per (user_id, project_id).
 -- 'recreating' is included because mid-recreate is still claiming the
 -- slot (§ 6.3).
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sandboxes_active_user_project
-    ON sandbox.sandboxes (user_id, project_id)
+CREATE UNIQUE INDEX idx_sandboxes_active_user_project
+    ON zeroship.sandboxes (user_id, project_id)
     WHERE deleted_at IS NULL AND status IN ('starting', 'running', 'recreating');
+CREATE INDEX idx_sandboxes_user_id
+    ON zeroship.sandboxes (user_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_sandboxes_host_id_status
+    ON zeroship.sandboxes (host_id, status) WHERE deleted_at IS NULL;
+CREATE INDEX idx_sandboxes_status_last_used
+    ON zeroship.sandboxes (status, last_used_at) WHERE deleted_at IS NULL;
+CREATE INDEX idx_sandboxes_created_at
+    ON zeroship.sandboxes (created_at);
+--rollback DROP TABLE zeroship.sandboxes;
 
-CREATE INDEX IF NOT EXISTS idx_sandboxes_user_id
-    ON sandbox.sandboxes (user_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_sandboxes_host_id_status
-    ON sandbox.sandboxes (host_id, status) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_sandboxes_status_last_used
-    ON sandbox.sandboxes (status, last_used_at) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_sandboxes_created_at
-    ON sandbox.sandboxes (created_at);
-
--- ─── 6.4 sandbox.shares ──────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS sandbox.shares (
+-- ─── 6.4 zeroship.shares ─────────────────────────────────────────────
+--changeset zeroship-sandbox:sandbox-shares splitStatements:true
+CREATE TABLE zeroship.shares (
     token_id        TEXT         PRIMARY KEY
                                  CHECK (token_id ~ '^tok_[0-9A-Za-z]{20,40}$'),
     sandbox_id      TEXT         NOT NULL
-                                 REFERENCES sandbox.sandboxes(sandbox_id) ON DELETE CASCADE,
+                                 REFERENCES zeroship.sandboxes(sandbox_id) ON DELETE CASCADE,
     port            SMALLINT     NOT NULL
                                  CHECK (port BETWEEN 1 AND 32767),
     scope           TEXT         NOT NULL
@@ -132,17 +116,20 @@ CREATE TABLE IF NOT EXISTS sandbox.shares (
     CHECK (expires_at > issued_at),
     CHECK (revoked_at IS NULL OR revoked_at >= issued_at)
 );
+CREATE INDEX idx_shares_sandbox_id_port
+    ON zeroship.shares (sandbox_id, port) WHERE deleted_at IS NULL;
+CREATE INDEX idx_shares_iss_issued_at
+    ON zeroship.shares (iss, issued_at) WHERE deleted_at IS NULL AND iss IS NOT NULL;
+CREATE INDEX idx_shares_expires_at
+    ON zeroship.shares (expires_at) WHERE deleted_at IS NULL AND revoked_at IS NULL;
+--rollback DROP TABLE zeroship.shares;
 
-CREATE INDEX IF NOT EXISTS idx_shares_sandbox_id_port
-    ON sandbox.shares (sandbox_id, port) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_shares_iss_issued_at
-    ON sandbox.shares (iss, issued_at) WHERE deleted_at IS NULL AND iss IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_shares_expires_at
-    ON sandbox.shares (expires_at) WHERE deleted_at IS NULL AND revoked_at IS NULL;
-
--- ─── 6.5 sandbox.events (PARTITION BY RANGE (ts)) ────────────────────
-
-CREATE TABLE IF NOT EXISTS sandbox.events (
+-- ─── 6.5 zeroship.events (PARTITION BY RANGE (ts)) ───────────────────
+-- splitStatements:false: the partitioned parent + DEFAULT + monthly
+-- partitions + indexes ship as one logical unit (mirrors how the
+-- platform changesets group a table with its indexes).
+--changeset zeroship-sandbox:sandbox-events splitStatements:false
+CREATE TABLE zeroship.events (
     event_id    TEXT         NOT NULL
                              CHECK (event_id ~ '^evt_[0-9A-Za-z]{20,40}$'),
     sandbox_id  TEXT         NOT NULL
@@ -155,71 +142,73 @@ CREATE TABLE IF NOT EXISTS sandbox.events (
                              CHECK (pg_column_size(data) <= 8192),
     PRIMARY KEY (ts, event_id)
 ) PARTITION BY RANGE (ts);
-
 -- Round-1 fix (C3): DEFAULT partition catches any INSERT outside the
 -- pre-provisioned window so the live path never sees the
 -- "no partition of relation" error.
-CREATE TABLE IF NOT EXISTS sandbox.events_default
-    PARTITION OF sandbox.events DEFAULT;
-
+CREATE TABLE zeroship.events_default
+    PARTITION OF zeroship.events DEFAULT;
 -- Six monthly partitions starting from the design's reference date
--- (2026-05). Today is 2026-05-04 so 2026-05 is the current month.
--- The controller-side `ensure_window` task (Phase 1+) provisions
--- forward partitions on a 1h cadence; this migration covers the
--- initial six-month window.
-CREATE TABLE IF NOT EXISTS sandbox.events_2026_05
-    PARTITION OF sandbox.events
+-- (2026-05). The controller-side `ensure_window` task (Phase 1+)
+-- provisions forward partitions on a 1h cadence; this changeset covers
+-- the initial six-month window.
+CREATE TABLE zeroship.events_2026_05
+    PARTITION OF zeroship.events
     FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
-CREATE TABLE IF NOT EXISTS sandbox.events_2026_06
-    PARTITION OF sandbox.events
+CREATE TABLE zeroship.events_2026_06
+    PARTITION OF zeroship.events
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
-CREATE TABLE IF NOT EXISTS sandbox.events_2026_07
-    PARTITION OF sandbox.events
+CREATE TABLE zeroship.events_2026_07
+    PARTITION OF zeroship.events
     FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
-CREATE TABLE IF NOT EXISTS sandbox.events_2026_08
-    PARTITION OF sandbox.events
+CREATE TABLE zeroship.events_2026_08
+    PARTITION OF zeroship.events
     FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
-CREATE TABLE IF NOT EXISTS sandbox.events_2026_09
-    PARTITION OF sandbox.events
+CREATE TABLE zeroship.events_2026_09
+    PARTITION OF zeroship.events
     FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
-CREATE TABLE IF NOT EXISTS sandbox.events_2026_10
-    PARTITION OF sandbox.events
+CREATE TABLE zeroship.events_2026_10
+    PARTITION OF zeroship.events
     FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
-
 -- Round-4 index strategy (PERF-C1, PERF-C2): two BTREEs + BRIN + a
 -- partial covering index on the metering hot kinds.
-CREATE INDEX IF NOT EXISTS idx_events_user_id_ts
-    ON sandbox.events (user_id, ts);
-CREATE INDEX IF NOT EXISTS idx_events_sandbox_ts
-    ON sandbox.events (sandbox_id, ts);
-CREATE INDEX IF NOT EXISTS idx_events_ts_brin
-    ON sandbox.events USING BRIN (ts) WITH (pages_per_range = 32);
-CREATE INDEX IF NOT EXISTS idx_events_metering
-    ON sandbox.events (ts)
+CREATE INDEX idx_events_user_id_ts
+    ON zeroship.events (user_id, ts);
+CREATE INDEX idx_events_sandbox_ts
+    ON zeroship.events (sandbox_id, ts);
+CREATE INDEX idx_events_ts_brin
+    ON zeroship.events USING BRIN (ts) WITH (pages_per_range = 32);
+CREATE INDEX idx_events_metering
+    ON zeroship.events (ts)
     INCLUDE (sandbox_id, user_id, data)
     WHERE kind IN ('compute_seconds', 'share.used', 'preview_egress');
+--rollback DROP TABLE zeroship.events;
 
--- ─── 6.6 sandbox.deleted_sandboxes (tombstone) ───────────────────────
-
-CREATE TABLE IF NOT EXISTS sandbox.deleted_sandboxes (
+-- ─── 6.6 zeroship.deleted_sandboxes (tombstone) ──────────────────────
+--changeset zeroship-sandbox:sandbox-deleted-sandboxes splitStatements:true
+CREATE TABLE zeroship.deleted_sandboxes (
     sandbox_id   TEXT         PRIMARY KEY
                               CHECK (sandbox_id ~ '^sbx_[0-9A-Za-z]{20,40}$'),
     user_id      TEXT         NOT NULL
                               CHECK (user_id ~ '^usr_[0-9A-Za-z]{20,40}$'),
     deleted_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
-
-CREATE INDEX IF NOT EXISTS idx_deleted_sandboxes_deleted_at
-    ON sandbox.deleted_sandboxes (deleted_at);
+CREATE INDEX idx_deleted_sandboxes_deleted_at
+    ON zeroship.deleted_sandboxes (deleted_at);
+--rollback DROP TABLE zeroship.deleted_sandboxes;
 
 -- ─── 13.2 Role split + grants (CI-permissive) ────────────────────────
 --
--- In production the operator provisions the four roles via a separate
--- bootstrap script. In CI / cargo-test, the calling role usually
--- lacks CREATEROLE, so the DO block below tries to create the roles
--- and gracefully no-ops on `insufficient_privilege`. The grants run
--- only when the role exists; missing-role grants are skipped.
-
+-- The four sandbox roles (sandbox_admin / sandbox_app / sandbox_audit /
+-- sandbox_gdpr) are created in a role-existence-guarded DO block so the
+-- migration runs on restricted CI Postgres (where the calling role lacks
+-- CREATEROLE). In production the operator deploys the four roles via a
+-- separate bootstrap step; the DO block then no-ops because the roles
+-- already exist. The grants run only when the role exists.
+--
+-- The `sandbox.schema_migrations` grant from the source migration is
+-- DROPPED (the table no longer exists). splitStatements:false because the
+-- DO block contains `;` inside `$$`.
+--changeset zeroship-sandbox:sandbox-roles-grants splitStatements:false
 DO $bootstrap$
 DECLARE
     can_create_role BOOLEAN;
@@ -245,34 +234,34 @@ BEGIN
 
     -- DDL role (migrations).
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_admin') THEN
-        EXECUTE 'GRANT CREATE, USAGE ON SCHEMA sandbox TO sandbox_admin';
+        EXECUTE 'GRANT CREATE, USAGE ON SCHEMA zeroship TO sandbox_admin';
     END IF;
 
     -- Runtime DML role.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_app') THEN
-        EXECUTE 'GRANT USAGE ON SCHEMA sandbox TO sandbox_app';
+        EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_app';
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON
-                    sandbox.sandboxes, sandbox.shares, sandbox.hosts,
-                    sandbox.deleted_sandboxes, sandbox.schema_migrations
+                    zeroship.sandboxes, zeroship.shares, zeroship.hosts,
+                    zeroship.deleted_sandboxes
                     TO sandbox_app';
         -- Read-only on events: the controller cannot tamper with audit.
-        EXECUTE 'GRANT SELECT ON sandbox.events TO sandbox_app';
+        EXECUTE 'GRANT SELECT ON zeroship.events TO sandbox_app';
     END IF;
 
     -- INSERT-only audit role.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_audit') THEN
-        EXECUTE 'GRANT USAGE ON SCHEMA sandbox TO sandbox_audit';
-        EXECUTE 'GRANT INSERT ON sandbox.events TO sandbox_audit';
+        EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_audit';
+        EXECUTE 'GRANT INSERT ON zeroship.events TO sandbox_audit';
     END IF;
 
     -- GDPR scoped DELETE role.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_gdpr') THEN
-        EXECUTE 'GRANT USAGE ON SCHEMA sandbox TO sandbox_gdpr';
+        EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_gdpr';
         EXECUTE 'GRANT SELECT, DELETE ON
-                    sandbox.sandboxes, sandbox.shares, sandbox.events,
-                    sandbox.deleted_sandboxes
+                    zeroship.sandboxes, zeroship.shares, zeroship.events,
+                    zeroship.deleted_sandboxes
                     TO sandbox_gdpr';
-        EXECUTE 'GRANT INSERT ON sandbox.deleted_sandboxes, sandbox.events TO sandbox_gdpr';
+        EXECUTE 'GRANT INSERT ON zeroship.deleted_sandboxes, zeroship.events TO sandbox_gdpr';
     END IF;
 EXCEPTION
     -- Restricted CI Postgres: silently degrade. The integration tests
@@ -283,3 +272,4 @@ EXCEPTION
         RAISE NOTICE 'sandbox role creation skipped: caller lacks privilege; production deploys roles separately';
 END
 $bootstrap$;
+--rollback SELECT 1;

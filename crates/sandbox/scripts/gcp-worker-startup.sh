@@ -476,14 +476,13 @@ umask 022
 # ───── 6. zsbx-ctl systemd unit ────────────────────────────────
 # Mirrors stress/zsbx-ctl.service.template with these additions:
 #   - SANDBOX_DATABASE_URL via EnvironmentFile (templated above)
-#   - SANDBOX_PG_RUN_MIGRATIONS=1 on worker-1 only (the migrator)
 #   - SANDBOX_SNAPSHOT_ENABLED=true + GCS L2 wiring (snapshot-v6 path)
 #   - SANDBOX_ADMIN_TOKEN_PATH points at /etc/zeroship/sandbox-admin-token
-WORKER_INDEX=$(echo "$HOSTNAME" | grep -oE '[0-9]+$' || echo 1)
-IS_MIGRATOR=0
-if [ "$WORKER_INDEX" = "1" ]; then
-  IS_MIGRATOR=1
-fi
+#
+# The controller no longer self-migrates: the unified `zeroship` schema
+# is owned by Liquibase (db/changelog/, applied by ops/db-migrate.sh /
+# the compose `migrate` service). The controller boots assuming the
+# schema already exists.
 
 cat > /etc/systemd/system/zsbx-ctl.service <<EOF
 [Unit]
@@ -552,8 +551,8 @@ Environment=SANDBOX_SNAPSHOT_ROOT_KEK_PATH=$ROOT_KEK_PATH
 # Admin token file
 Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
 
-# pg migrations: run only on worker-1.
-$( [ "$IS_MIGRATOR" = "1" ] && echo "Environment=SANDBOX_PG_RUN_MIGRATIONS=1" )
+# pg schema is owned by Liquibase (db/changelog/); the controller does
+# not self-migrate. Nothing to set here.
 
 # Option C Phase 4 (T-8b-stress-r7) — driver-side disk image staging.
 # With this flag flipped TRUE, the controller emits \`zsbx_stage_disks=true\`

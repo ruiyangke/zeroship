@@ -1,32 +1,29 @@
--- 0004_role_split_phase3.sql — Phase 3 explicit role-grant tightening
+--liquibase formatted sql
+
+-- Phase 3 explicit role-grant tightening. Transcribed from
+-- crates/sandbox/migrations/0004_role_split_phase3.sql
+-- (sandbox.* → zeroship.*).
 --
 -- Source-of-truth: docs/proposals/sandbox-pg-state.md § 13.2 + the
--- Phase-3 task spec (worktree feat/sandbox-pg).
---
--- Round-7 / migration-0001 created the four roles (sandbox_admin,
--- sandbox_app, sandbox_audit, sandbox_gdpr) and a permissive grant
--- bundle. Phase 3 narrows the grants to the design's invariant:
+-- Phase-3 task spec. 0011 created the four roles and a permissive grant
+-- bundle; this narrows the grants to the design's invariant:
 --
 --   sandbox_app:    SELECT/INSERT/UPDATE/DELETE on non-events tables;
 --                   SELECT/INSERT on events (DELETE forbidden — the
 --                   controller cannot tamper with its own audit trail)
 --   sandbox_audit:  INSERT-only on events (no SELECT, no DELETE)
 --   sandbox_gdpr:   SELECT + DELETE on every table the cascade touches;
---                   INSERT on events + deleted_sandboxes (audit row +
---                   tombstone live in the same TX)
+--                   INSERT on events + deleted_sandboxes
 --   sandbox_admin:  CREATE/USAGE on the schema (DDL/migrations)
 --
--- This migration is forward-only and idempotent. REVOKE-then-GRANT is
--- safe to replay — the final state is the same regardless of which
--- subset of grants 0001's permissive bundle landed in CI vs. prod.
+-- REVOKE-then-GRANT is safe to replay. The `REVOKE ALL ON ALL TABLES IN
+-- SCHEMA zeroship FROM <role>` calls are faithful to the source (the
+-- sandbox roles never held grants on the platform tables, so they are a
+-- no-op against those). The `sandbox.schema_migrations` re-grant from the
+-- source migration is DROPPED (the table no longer exists).
 --
--- The DO block degrades gracefully when the calling role lacks the
--- privilege to manage other roles' grants (CI Postgres runs migrations
--- as a single role); the grants run only when the role exists and the
--- caller can manage it. In production the operator deploys the four
--- roles via a separate bootstrap script BEFORE this migration runs;
--- the bootstrap role has the GRANT/REVOKE capability we need here.
-
+-- splitStatements:false because the DO block contains `;` inside `$$`.
+--changeset zeroship-sandbox:sandbox-role-split-phase3 splitStatements:false
 DO $role_split$
 DECLARE
     can_grant BOOLEAN;
@@ -49,13 +46,13 @@ BEGIN
     -- on events (no DELETE — the controller must not tombstone its
     -- own audit log).
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_app') THEN
-        EXECUTE 'REVOKE ALL ON sandbox.events FROM sandbox_app';
-        EXECUTE 'GRANT SELECT, INSERT ON sandbox.events TO sandbox_app';
+        EXECUTE 'REVOKE ALL ON zeroship.events FROM sandbox_app';
+        EXECUTE 'GRANT SELECT, INSERT ON zeroship.events TO sandbox_app';
         -- Ensure the non-events grants are present (idempotent —
-        -- 0001 already granted these).
+        -- 0011 already granted these).
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON
-                    sandbox.sandboxes, sandbox.shares, sandbox.hosts,
-                    sandbox.deleted_sandboxes, sandbox.schema_migrations
+                    zeroship.sandboxes, zeroship.shares, zeroship.hosts,
+                    zeroship.deleted_sandboxes
                     TO sandbox_app';
     END IF;
 
@@ -64,9 +61,9 @@ BEGIN
     -- controller, eventually a separate process) writes via this
     -- role; the role cannot SELECT, UPDATE, or DELETE rows it wrote.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_audit') THEN
-        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA sandbox FROM sandbox_audit';
-        EXECUTE 'GRANT USAGE ON SCHEMA sandbox TO sandbox_audit';
-        EXECUTE 'GRANT INSERT ON sandbox.events TO sandbox_audit';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA zeroship FROM sandbox_audit';
+        EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_audit';
+        EXECUTE 'GRANT INSERT ON zeroship.events TO sandbox_audit';
     END IF;
 
     -- ─── sandbox_gdpr ───────────────────────────────────────────
@@ -75,13 +72,13 @@ BEGIN
     -- (the GDPR-delete TX writes a `gdpr.delete_user` event row in
     -- the same transaction as the cascade).
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_gdpr') THEN
-        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA sandbox FROM sandbox_gdpr';
-        EXECUTE 'GRANT USAGE ON SCHEMA sandbox TO sandbox_gdpr';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA zeroship FROM sandbox_gdpr';
+        EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_gdpr';
         EXECUTE 'GRANT SELECT, DELETE ON
-                    sandbox.sandboxes, sandbox.shares, sandbox.events,
-                    sandbox.deleted_sandboxes
+                    zeroship.sandboxes, zeroship.shares, zeroship.events,
+                    zeroship.deleted_sandboxes
                     TO sandbox_gdpr';
-        EXECUTE 'GRANT INSERT ON sandbox.deleted_sandboxes, sandbox.events TO sandbox_gdpr';
+        EXECUTE 'GRANT INSERT ON zeroship.deleted_sandboxes, zeroship.events TO sandbox_gdpr';
     END IF;
 
     -- ─── sandbox_admin ──────────────────────────────────────────
@@ -89,32 +86,27 @@ BEGIN
     -- migration role applies DDL via batch_execute as the role's
     -- table-owner; runtime DML is forbidden.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_admin') THEN
-        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA sandbox FROM sandbox_admin';
-        EXECUTE 'GRANT CREATE, USAGE ON SCHEMA sandbox TO sandbox_admin';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA zeroship FROM sandbox_admin';
+        EXECUTE 'GRANT CREATE, USAGE ON SCHEMA zeroship TO sandbox_admin';
     END IF;
 EXCEPTION
     WHEN insufficient_privilege THEN
         RAISE NOTICE 'sandbox role-grant tightening skipped: insufficient privilege on REVOKE/GRANT';
     WHEN deadlock_detected THEN
         -- Two concurrent migrators racing on REVOKE/GRANT for the
-        -- same role observe a deadlock on `pg_authid` (one waiter
-        -- holds the role-grant lock, the other holds the table-lock).
-        -- The winner's grants are durable; the loser's TX is rolled
-        -- back, which the migration runner re-tries via the bookkeeping
-        -- INSERT. Treat as a race-tolerant success — same shape as the
-        -- duplicate_object handling for IF NOT EXISTS in 0001.
+        -- same role observe a deadlock on `pg_authid`. The winner's
+        -- grants are durable; treat as a race-tolerant success. The
+        -- grants are idempotent.
         RAISE NOTICE 'sandbox role-grant tightening: deadlock with concurrent migrator; treating as race-success';
     WHEN serialization_failure THEN
         RAISE NOTICE 'sandbox role-grant tightening: serialization failure (concurrent migrator); treating as race-success';
     WHEN OTHERS THEN
         -- Some pg builds surface the role-grant race as a generic
-        -- internal_error (XX000) rather than a deadlock. Since this
-        -- migration only refines grants — never data — we can treat
-        -- ANY exception as a race-tolerant success and let the next
-        -- migrator's INSERT-bookkeeping path settle the version row.
-        -- The grants are idempotent: whichever migrator wins, the
-        -- final grant set is the same. Loud-log so an operator can
-        -- spot a genuinely-broken grant in the boot log.
+        -- internal_error (XX000). Since this changeset only refines
+        -- grants — never data — treat ANY exception as a race-tolerant
+        -- success. Loud-log so an operator can spot a genuinely-broken
+        -- grant in the boot log.
         RAISE NOTICE 'sandbox role-grant tightening: caught % (SQLSTATE %); treating as race-success', SQLERRM, SQLSTATE;
 END
 $role_split$;
+--rollback SELECT 1;

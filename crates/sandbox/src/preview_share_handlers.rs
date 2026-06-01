@@ -297,7 +297,7 @@ pub async fn mint_share(
         // Skip the audit event entirely when the registry has no
         // record of the sandbox owner. The
         // pre-fix synthetic `usr_unknown` would have failed the
-        // user_id CHECK on sandbox.events anyway (the row's
+        // user_id CHECK on zeroship.events anyway (the row's
         // user_id must match `^usr_[0-9A-Za-z]{20,40}$`); falling
         // back to a warn-and-continue is honest about the
         // missing-info case and keeps the audit log self-consistent.

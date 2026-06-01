@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
-use crate::db::{Database, LATEST_MIGRATION_VERSION};
+use crate::db::Database;
 use crate::persist::Persistence;
 use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
@@ -77,8 +77,9 @@ pub struct AppState {
     /// Pg-backed non-secret state handle (`docs/proposals/sandbox-pg-state.md`
     /// §8.2). `None` is the disabled-by-absence shape:
     /// `SANDBOX_DATABASE_URL` is unset, so pg integration is off.
-    /// The schema is brought to
-    /// [`LATEST_MIGRATION_VERSION`] before this state ships.
+    /// The unified `zeroship` schema (sandbox tables included) is owned
+    /// by Liquibase; boot only verifies connectivity (`Database::ping`)
+    /// and assumes the migrate service already applied the changelog.
     ///
     /// A6b (deferred): restricted to `pub(crate)` because the DSN held
     /// inside `Database` carries an embedded pg password. A
@@ -302,7 +303,7 @@ pub struct AppState {
 
 impl AppState {
     /// Signal background tasks to
-    /// exit cleanly. Best-effort UPDATEs `sandbox.hosts.status =
+    /// exit cleanly. Best-effort UPDATEs `zeroship.hosts.status =
     /// 'draining'` for THIS host so peers know we're going away
     /// before our heartbeat goes silent (without that hint, peers
     /// would wait the full lease_ttl before noticing). The pg
@@ -734,31 +735,26 @@ impl AppState {
         };
 
         if let Some(db) = &database {
-            // Block boot until the schema is at the version this
-            // binary was built against. A designated migrator
-            // applies pending migrations; everyone else polls.
-            // Failure aborts startup.
-            if let Err(e) = db
-                .ensure_schema_at_version(LATEST_MIGRATION_VERSION)
-                .await
-            {
+            // The unified `zeroship` schema is owned by Liquibase (the
+            // compose `migrate` service / `ops/db-migrate.sh` applies
+            // `db/changelog/` before the controller starts). The
+            // controller no longer self-migrates; boot just verifies
+            // connectivity. Failure aborts startup unless the operator
+            // set the SANDBOX_PG_OPTIONAL=1 dev escape hatch.
+            if let Err(e) = db.ping().await {
                 if matches!(std::env::var("SANDBOX_PG_OPTIONAL").as_deref(), Ok("1")) {
                     tracing::warn!(
                         error = %e,
-                        target_version = LATEST_MIGRATION_VERSION,
-                        "SANDBOX_PG_OPTIONAL=1: ensure_schema_at_version failed; \
+                        "SANDBOX_PG_OPTIONAL=1: pg connectivity check failed; \
                          pg integration disabled"
                     );
                 } else {
-                    return Err(format!(
-                        "ensure_schema_at_version({LATEST_MIGRATION_VERSION}): {e}"
-                    ));
+                    return Err(format!("pg connectivity check (ping): {e}"));
                 }
             } else {
                 tracing::info!(
-                    target_version = LATEST_MIGRATION_VERSION,
                     host_id = %db.host_id(),
-                    "sandbox pg: schema ready"
+                    "sandbox pg: connected (schema owned by Liquibase)"
                 );
             }
         }
@@ -1212,7 +1208,7 @@ impl AppState {
 
         // Phase-2 HA: register THIS controller's host row before
         // spawning the heartbeat task. Without this, the FK on
-        // `sandbox.sandboxes.host_id REFERENCES sandbox.hosts(host_id)`
+        // `zeroship.sandboxes.host_id REFERENCES zeroship.hosts(host_id)`
         // rejects every sandbox INSERT and the heartbeat UPDATE
         // affects 0 rows forever (peers eventually see `last_heartbeat`
         // way in the past and would treat us as dead — except there's
@@ -1241,7 +1237,7 @@ impl AppState {
         }
 
         // Phase-2 HA: periodic heartbeat task — UPDATEs
-        // `sandbox.hosts.last_heartbeat` so peers can tell whether
+        // `zeroship.hosts.last_heartbeat` so peers can tell whether
         // we're alive. The task self-runs forever; failure is
         // logged-and-continued (next tick retries).
         if state.database.is_some() {
@@ -1619,7 +1615,7 @@ fn start_health_loop(state: Arc<AppState>) {
 // ────────────────────────────────────────────────────────────────────
 
 /// `SANDBOX_HA_HEARTBEAT_SECS`. Cadence at which the heartbeat task
-/// updates `sandbox.hosts.last_heartbeat`. Default 5 s; validated at
+/// updates `zeroship.hosts.last_heartbeat`. Default 5 s; validated at
 /// boot to be > 0 and `lease_ttl >= 4 × heartbeat`.
 const DEFAULT_HEARTBEAT_SECS: u64 = 5;
 
@@ -1632,7 +1628,7 @@ const DEFAULT_TAKEOVER_POLL_SECS: u64 = 30;
 /// dead. Default 60 s. Validated at boot.
 const DEFAULT_LEASE_TTL_SECS: u64 = 60;
 
-/// Best-effort hostname for `sandbox.hosts.hostname`. Operators can
+/// Best-effort hostname for `zeroship.hosts.hostname`. Operators can
 /// override via `SANDBOX_HOSTNAME` (useful in containers where the
 /// kernel hostname is the random container ID). Falls back to
 /// `/proc/sys/kernel/hostname` on Linux, then `"unknown"`. The column

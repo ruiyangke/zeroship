@@ -603,9 +603,9 @@ impl std::fmt::Debug for Verifier {
 /// `/version` for operators to confirm "the agent is verifying with
 /// the expected controller key".
 ///
-/// **Schema invariant:** the `sandbox.sandboxes.key_fp` column has
+/// **Schema invariant:** the `zeroship.sandboxes.key_fp` column has
 /// `CHECK (key_fp ~ '^[0-9a-f]{32}$')` (see
-/// `crates/sandbox/migrations/0001_initial.sql`). The 16-byte (32-hex)
+/// `db/changelog/changesets/0011_sandbox_initial.sql`). The 16-byte (32-hex)
 /// width is load-bearing — controllers INSERT this string verbatim,
 /// and an 8-byte (16-hex) value silently fails the CHECK on the
 /// snapshot/restore path (cold-boot swallows the error as

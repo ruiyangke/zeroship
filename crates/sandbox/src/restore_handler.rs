@@ -797,7 +797,7 @@ pub(crate) async fn read_snapshot_row(
     let row = client
         .query_opt(
             "SELECT snapshot_artifact_path, snapshot_sha256, snapshot_vm_index, user_id \
-               FROM sandbox.sandboxes \
+               FROM zeroship.sandboxes \
               WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
             &[&sandbox_id_typed],
         )

@@ -10,16 +10,17 @@
 //!     cargo test -p zeroship-sandbox --test sandbox_pg_e2e -- --ignored --test-threads=1
 //! ```
 //!
-//! Each test creates a unique schema. The code still hard-codes the
-//! `sandbox` schema name, so the fixture resets the database with
-//! `DROP SCHEMA sandbox CASCADE` before each test.
+//! The sandbox controller no longer self-migrates: the unified
+//! `zeroship` schema (sandbox tables included) is owned by Liquibase.
+//! The `common::reset_and_migrate` fixture drops the sandbox tables and
+//! re-applies the same changeset DDL before each test.
 //! Tests are serialised via `--test-threads=1` to avoid stomping on
 //! each other's schema reset.
 
-use std::time::Duration;
-
 use compio_postgres::{NoTls, Pool, PoolConfig};
-use zeroship_sandbox::db::{Database, LATEST_MIGRATION_VERSION};
+use zeroship_sandbox::db::Database;
+
+mod common;
 
 const TEST_URL_ENV: &str = "PG_TEST_URL";
 const DEFAULT_URL: &str = "postgres://postgres:zeroship@localhost:5440/zeroship";
@@ -28,53 +29,42 @@ fn test_url() -> String {
     std::env::var(TEST_URL_ENV).unwrap_or_else(|_| DEFAULT_URL.to_string())
 }
 
-/// Drop the `sandbox` schema if it exists. Idempotent.
-async fn reset_schema(url: &str) {
-    let mut cfg = PoolConfig::default();
-    cfg.max_size = 2;
-    let pool = Pool::connect_with_config(url, cfg)
-        .await
-        .expect("connect for reset");
-    let client = pool.get().await.expect("acquire for reset");
-    client
-        .batch_execute("DROP SCHEMA IF EXISTS sandbox CASCADE")
-        .await
-        .expect("drop schema");
-}
-
 // ────────────────────────────────────────────────────────────────────
-// 1. Migration up: fresh pg → run_pending_migrations → schema present
+// 1. Schema present after the Liquibase changelog is applied, and the
+//    controller boots (pings) against the migrated `zeroship` schema.
+//
+//    Regression: the consolidation moved the sandbox DDL into Liquibase
+//    and removed the embedded runner. This test fails if the changesets
+//    don't create the sandbox objects in `zeroship`, or if a query
+//    still targets the old `sandbox` schema (which is never created).
 // ────────────────────────────────────────────────────────────────────
 
 #[compio::test]
 #[ignore = "needs Postgres; run with `docker compose up -d postgres`"]
-async fn migration_up_creates_full_schema() {
+async fn migrated_schema_is_present_and_controller_boots() {
     let url = test_url();
-    reset_schema(&url).await;
+    common::reset_and_migrate(&url).await;
 
-    let db = Database::from_test_config(url.clone(), true, 30)
+    // The controller assumes the schema exists; boot only pings.
+    let db = Database::from_test_config(url.clone())
         .await
         .expect("from_test_config");
+    db.ping().await.expect("controller pings migrated schema");
 
-    let n = db.run_pending_migrations().await.expect("apply migrations");
-    assert!(n >= 1, "expected at least one migration applied, got {n}");
-    assert_eq!(
-        db.current_schema_version().await.unwrap(),
-        LATEST_MIGRATION_VERSION
-    );
-
-    // Spot-check the columns the design depends on. `generation` is
-    // the round-6 CAS counter; if it disappears, the HA design is
-    // broken.
     let mut cfg = PoolConfig::default();
     cfg.max_size = 2;
     let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
     let client = pool.get().await.unwrap();
 
+    // Every sandbox object now lives in the unified `zeroship` schema.
+
+    // Spot-check the columns the design depends on. `generation` is
+    // the round-6 CAS counter; if it disappears, the HA design is
+    // broken.
     let row = client
         .query_one(
             "SELECT data_type FROM information_schema.columns
-              WHERE table_schema = 'sandbox'
+              WHERE table_schema = 'zeroship'
                 AND table_name = 'sandboxes'
                 AND column_name = 'generation'",
             &[],
@@ -89,7 +79,7 @@ async fn migration_up_creates_full_schema() {
         .query_one(
             "SELECT count(*)::INTEGER FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'sandbox' AND c.relname = 'events_default'",
+              WHERE n.nspname = 'zeroship' AND c.relname = 'events_default'",
             &[],
         )
         .await
@@ -103,7 +93,7 @@ async fn migration_up_creates_full_schema() {
         .query_one(
             "SELECT count(*)::INTEGER FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'sandbox'
+              WHERE n.nspname = 'zeroship'
                 AND c.relkind = 'r'
                 AND c.relname LIKE 'events\\_2026\\_%'",
             &[],
@@ -117,7 +107,7 @@ async fn migration_up_creates_full_schema() {
     let row = client
         .query_one(
             "SELECT count(*)::INTEGER FROM pg_indexes
-              WHERE schemaname = 'sandbox' AND indexname = 'idx_events_ts_brin'",
+              WHERE schemaname = 'zeroship' AND indexname = 'idx_events_ts_brin'",
             &[],
         )
         .await
@@ -129,7 +119,7 @@ async fn migration_up_creates_full_schema() {
     let row = client
         .query_one(
             "SELECT count(*)::INTEGER FROM pg_tables
-              WHERE schemaname = 'sandbox' AND tablename = 'deleted_sandboxes'",
+              WHERE schemaname = 'zeroship' AND tablename = 'deleted_sandboxes'",
             &[],
         )
         .await
@@ -139,149 +129,25 @@ async fn migration_up_creates_full_schema() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// 2. Idempotent migrate: applying twice is a no-op (round-2 fix)
+// 2. Re-applying the changelog is idempotent (the fixture itself
+//    re-runs the guarded changesets on every call).
 // ────────────────────────────────────────────────────────────────────
 
 #[compio::test]
 #[ignore = "needs Postgres"]
-async fn migration_apply_is_idempotent() {
+async fn reset_and_migrate_is_idempotent() {
     let url = test_url();
-    reset_schema(&url).await;
+    // Two applies in a row must not error (CREATE ... IF NOT EXISTS,
+    // guarded role creation, DROP ... IF EXISTS on reset).
+    common::reset_and_migrate(&url).await;
+    common::reset_and_migrate(&url).await;
 
-    let db = Database::from_test_config(url.clone(), true, 30)
-        .await
-        .unwrap();
-
-    let first = db.run_pending_migrations().await.expect("first apply");
-    assert!(first >= 1);
-
-    // Second invocation: every migration version is now <= MAX, so
-    // nothing pending. UNIQUE on schema_migrations.version makes
-    // this safe even if the DDL re-runs (it won't here because the
-    // pending filter eliminates the migration upfront).
-    let second = db.run_pending_migrations().await.expect("second apply");
-    assert_eq!(second, 0, "second apply must be a no-op, got {second}");
-
-    assert_eq!(
-        db.current_schema_version().await.unwrap(),
-        LATEST_MIGRATION_VERSION
-    );
+    let db = Database::from_test_config(url).await.unwrap();
+    db.ping().await.expect("ping after second apply");
 }
 
 // ────────────────────────────────────────────────────────────────────
-// 3. Concurrent migrators: two simultaneous SANDBOX_PG_RUN_MIGRATIONS=1
-//    processes both succeed; only one row in schema_migrations.
-// ────────────────────────────────────────────────────────────────────
-
-#[compio::test]
-#[ignore = "needs Postgres"]
-async fn migration_concurrent_migrators_race() {
-    let url = test_url();
-    reset_schema(&url).await;
-
-    let db_a = Database::from_test_config(url.clone(), true, 30)
-        .await
-        .unwrap();
-    let db_b = Database::from_test_config(url.clone(), true, 30)
-        .await
-        .unwrap();
-
-    // Compio is single-threaded; we can't truly run them in parallel
-    // OS-thread-wise, but we can interleave their futures so the
-    // batch_execute / INSERT race resolves via SQLSTATE 23505 on the
-    // loser, exactly like the production race-tolerance fallback
-    // sketch in § 7.1.
-    let (a, b) = futures::join!(db_a.run_pending_migrations(), db_b.run_pending_migrations());
-    a.expect("A apply succeeds");
-    b.expect("B apply succeeds");
-
-    // schema_migrations has exactly one row per version, no
-    // duplicates — pg's PRIMARY KEY on `version` is the lock-free
-    // arbiter (§ 7.1 race-tolerance fallback). Whether one or both
-    // INSERTs ran, the row count is canonical.
-    let mut cfg = PoolConfig::default();
-    cfg.max_size = 2;
-    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
-    let client = pool.get().await.unwrap();
-    let row = client
-        .query_one(
-            "SELECT count(*)::BIGINT FROM sandbox.schema_migrations",
-            &[],
-        )
-        .await
-        .unwrap();
-    let n: i64 = row.get(0);
-    assert_eq!(n, LATEST_MIGRATION_VERSION);
-}
-
-// ────────────────────────────────────────────────────────────────────
-// 4. Regular controller waits for migrator
-// ────────────────────────────────────────────────────────────────────
-
-#[compio::test]
-#[ignore = "needs Postgres"]
-async fn ensure_schema_at_version_blocks_until_migrator_applies() {
-    let url = test_url();
-    reset_schema(&url).await;
-
-    // Migrator with run_migrations=true; non-migrator with =false
-    // and a generous boot_timeout. Drive the non-migrator's wait
-    // loop concurrently with the migrator's apply.
-    let migrator = Database::from_test_config(url.clone(), true, 30)
-        .await
-        .unwrap();
-    let observer = Database::from_test_config(url.clone(), false, 30)
-        .await
-        .unwrap();
-
-    // Race the migrator against the observer's `ensure` — observer
-    // starts first, sees version=0, sleeps 2s, repeats; migrator
-    // applies in the meantime; observer's next poll sees version
-    // >= target and returns Ok.
-    let observer_fut = observer.ensure_schema_at_version(LATEST_MIGRATION_VERSION);
-    // Give the observer one poll-cycle's head-start, then apply.
-    let migrator_fut = async {
-        compio::time::sleep(Duration::from_millis(500)).await;
-        migrator.run_pending_migrations().await
-    };
-
-    let (obs, mig) = futures::join!(observer_fut, migrator_fut);
-    obs.expect("observer ensure ok");
-    mig.expect("migrator apply ok");
-
-    assert_eq!(
-        observer.current_schema_version().await.unwrap(),
-        LATEST_MIGRATION_VERSION
-    );
-}
-
-// ────────────────────────────────────────────────────────────────────
-// 5. Boot timeout: regular controller times out without a migrator
-// ────────────────────────────────────────────────────────────────────
-
-#[compio::test]
-#[ignore = "needs Postgres"]
-async fn ensure_schema_at_version_times_out_without_migrator() {
-    let url = test_url();
-    reset_schema(&url).await;
-
-    // boot_timeout_secs=2 — no migrator runs; the wait loop polls
-    // twice (initial + after 2s sleep) then gives up.
-    let observer = Database::from_test_config(url, false, 2).await.unwrap();
-    let err = observer
-        .ensure_schema_at_version(LATEST_MIGRATION_VERSION)
-        .await
-        .expect_err("must time out");
-    match err {
-        zeroship_sandbox::db::DatabaseError::BootTimeout { required } => {
-            assert_eq!(required, LATEST_MIGRATION_VERSION);
-        }
-        other => panic!("expected BootTimeout, got {other:?}"),
-    }
-}
-
-// ────────────────────────────────────────────────────────────────────
-// 6. Connection-pool baseline: 16 concurrent ping connections
+// 3. Connection-pool baseline: 16 concurrent ping connections
 // ────────────────────────────────────────────────────────────────────
 
 #[compio::test]
@@ -306,7 +172,7 @@ async fn pool_baseline_handles_16_concurrent_ping() {
     futures::future::join_all(futs).await;
 
     // Database::ping smoke-test (also opens a transient pool internally).
-    let db = Database::from_test_config(test_url(), false, 5)
+    let db = Database::from_test_config(test_url())
         .await
         .unwrap();
     db.ping().await.expect("ping ok");
@@ -334,9 +200,8 @@ fn fresh_host(db: &Database) -> Uuid {
 
 async fn migrated_db() -> Database {
     let url = test_url();
-    reset_schema(&url).await;
-    let db = Database::from_test_config(url, true, 30).await.unwrap();
-    db.run_pending_migrations().await.unwrap();
+    common::reset_and_migrate(&url).await;
+    let db = Database::from_test_config(url).await.unwrap();
     db.upsert_host("test-host", "nomad-ch").await.unwrap();
     db
 }
@@ -538,7 +403,7 @@ async fn delete_sandbox_moves_row_to_tombstone() {
     // Original row gone.
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT count(*)::BIGINT FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -547,7 +412,7 @@ async fn delete_sandbox_moves_row_to_tombstone() {
     // Tombstone present.
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM sandbox.deleted_sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT count(*)::BIGINT FROM zeroship.deleted_sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -612,7 +477,7 @@ async fn inject_extra_host(url: &str, hostname: &str) -> (Uuid, String) {
     let boot_typed = zeroship_core::typed_id::uuid_to_base62(&Uuid::now_v7());
     client
         .execute(
-            "INSERT INTO sandbox.hosts (host_id, boot_id, hostname, region, backend, status) \
+            "INSERT INTO zeroship.hosts (host_id, boot_id, hostname, region, backend, status) \
              VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'us-local-1', 'nomad-ch', 'alive')",
             &[&host_typed, &boot_typed, &hostname.to_string()],
         )
@@ -621,7 +486,7 @@ async fn inject_extra_host(url: &str, hostname: &str) -> (Uuid, String) {
     (host_uuid, host_typed)
 }
 
-/// Force `sandbox.hosts.last_heartbeat = now() - secs_ago` for the
+/// Force `zeroship.hosts.last_heartbeat = now() - secs_ago` for the
 /// host_id given. The takeover SQL evaluates `now() - last_heartbeat
 /// < lease_ttl` against pg's own clock, so this is the only way to
 /// simulate a stale peer without sleeping for `lease_ttl`.
@@ -632,7 +497,7 @@ async fn age_heartbeat(url: &str, host_typed: &str, secs_ago: i64) {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.hosts \
+            "UPDATE zeroship.hosts \
                 SET last_heartbeat = now() - make_interval(secs => $2::BIGINT) \
               WHERE host_id = $1::TEXT",
             &[&host_typed.to_string(), &secs_ago],
@@ -651,7 +516,7 @@ async fn refresh_heartbeat(url: &str, host_typed: &str) {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.hosts \
+            "UPDATE zeroship.hosts \
                 SET last_heartbeat = now() \
               WHERE host_id = $1::TEXT",
             &[&host_typed.to_string()],
@@ -667,7 +532,7 @@ async fn read_host_status(url: &str, host_typed: &str) -> Option<String> {
     let client = pool.get().await.unwrap();
     let opt = client
         .query_opt(
-            "SELECT status FROM sandbox.hosts WHERE host_id = $1::TEXT",
+            "SELECT status FROM zeroship.hosts WHERE host_id = $1::TEXT",
             &[&host_typed.to_string()],
         )
         .await
@@ -685,7 +550,7 @@ async fn read_sandbox_owner_and_gen(
     let client = pool.get().await.unwrap();
     let opt = client
         .query_opt(
-            "SELECT host_id, generation FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT host_id, generation FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&sandbox_id.to_string()],
         )
         .await
@@ -1057,7 +922,7 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
     let client = pool.get().await.unwrap();
     let row = client
         .query_one(
-            "SELECT host_id, status, generation FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT host_id, status, generation FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -1105,7 +970,7 @@ async fn set_host_draining_flips_status_and_stamps_drain_started() {
     let row = client
         .query_one(
             "SELECT status, (drain_started_at IS NOT NULL) AS has_drain_started \
-               FROM sandbox.hosts WHERE host_id = $1::TEXT",
+               FROM zeroship.hosts WHERE host_id = $1::TEXT",
             &[&host_typed],
         )
         .await
@@ -1120,7 +985,7 @@ async fn set_host_draining_flips_status_and_stamps_drain_started() {
     db.set_host_draining().await.expect("second set ok");
     let row2 = client
         .query_one(
-            "SELECT status FROM sandbox.hosts WHERE host_id = $1::TEXT",
+            "SELECT status FROM zeroship.hosts WHERE host_id = $1::TEXT",
             &[&host_typed],
         )
         .await
@@ -1224,7 +1089,7 @@ async fn delete_sandbox_with_host_fence_refuses_after_takeover() {
     let client = pool.get().await.unwrap();
     let row = client
         .query_one(
-            "SELECT host_id FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT host_id FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -1316,7 +1181,7 @@ async fn insert_sandbox_with_typed_ids_round_trips_to_pg_row() {
     let client = pool.get().await.unwrap();
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT count(*)::BIGINT FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -1443,7 +1308,7 @@ async fn every_sandbox_status_value_passes_pg_check() {
             let ver: &str = "v51.1";
             client
                 .execute(
-                    "UPDATE sandbox.sandboxes \
+                    "UPDATE zeroship.sandboxes \
                         SET snapshot_artifact_path = $1::TEXT, \
                             snapshot_sha256 = $2::BYTEA, \
                             snapshot_ch_version = $3::TEXT \
@@ -1637,7 +1502,7 @@ async fn draining_host_with_expired_lease_is_taken_over() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.hosts \
+            "UPDATE zeroship.hosts \
                 SET status = 'draining', \
                     drain_started_at = now(), \
                     last_heartbeat = now() - make_interval(secs => 120) \
@@ -1816,7 +1681,7 @@ async fn role_sandbox_app_cannot_delete_events() {
     let client = pool.get().await.unwrap();
 
     assert_sqlstate_42501("sandbox_app DELETE FROM events", || async {
-        client.execute("DELETE FROM sandbox.events", &[]).await
+        client.execute("DELETE FROM zeroship.events", &[]).await
     })
     .await;
 }
@@ -1837,7 +1702,7 @@ async fn role_sandbox_audit_cannot_select_events() {
     // SELECT returns query results; pg returns the SQLSTATE on the
     // wire when the role lacks privilege. compio-postgres surfaces
     // it via Error::code().
-    let res = client.query("SELECT * FROM sandbox.events", &[]).await;
+    let res = client.query("SELECT * FROM zeroship.events", &[]).await;
     match res {
         Ok(_) => panic!("sandbox_audit SELECT FROM events: expected 42501, got Ok"),
         Err(e) => {
@@ -1871,7 +1736,7 @@ async fn role_sandbox_audit_can_insert_events() {
     let event_id = typed_id("evt");
     let n = client
         .execute(
-            "INSERT INTO sandbox.events (event_id, sandbox_id, user_id, kind, ts, data) \
+            "INSERT INTO zeroship.events (event_id, sandbox_id, user_id, kind, ts, data) \
              VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'role_perm_test', now(), '{}'::jsonb)",
             &[&event_id, &info.sandbox_id, &info.user_id],
         )
@@ -1901,7 +1766,7 @@ async fn role_sandbox_gdpr_can_select_sandboxes() {
     let client = pool.get().await.unwrap();
 
     let rows = client
-        .query("SELECT sandbox_id FROM sandbox.sandboxes", &[])
+        .query("SELECT sandbox_id FROM zeroship.sandboxes", &[])
         .await
         .expect("gdpr role must SELECT sandboxes (cascade prerequisite)");
     assert!(
@@ -1933,7 +1798,7 @@ async fn role_sandbox_gdpr_cannot_insert_sandboxes() {
         || async {
             client
                 .execute(
-                    "INSERT INTO sandbox.sandboxes \
+                    "INSERT INTO zeroship.sandboxes \
                        (sandbox_id, user_id, project_id, backend, host_id, \
                         status, key_fp, generation) \
                      VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'docker', \
@@ -1966,7 +1831,7 @@ async fn role_sandbox_app_can_update_sandboxes() {
 
     let n = client
         .execute(
-            "UPDATE sandbox.sandboxes SET last_used_at = now() WHERE sandbox_id = $1::TEXT",
+            "UPDATE zeroship.sandboxes SET last_used_at = now() WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2109,7 +1974,7 @@ async fn clear_snapshot_metadata_nulls_all_snapshot_columns() {
     let row = client
         .query_one(
             "SELECT snapshot_artifact_path, snapshot_sha256, snapshot_ch_version \
-               FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+               FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2180,7 +2045,7 @@ async fn transient_state_lease_expired_filters_by_threshold() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.sandboxes SET lessee_updated_at = now() - interval '5 minutes' \
+            "UPDATE zeroship.sandboxes SET lessee_updated_at = now() - interval '5 minutes' \
               WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
@@ -2224,7 +2089,7 @@ async fn state_transition_to_snapshotting_sets_lessee() {
     let client = pool.get().await.unwrap();
     let pre: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2242,7 +2107,7 @@ async fn state_transition_to_snapshotting_sets_lessee() {
     // lessee_updated_at must be non-NULL now.
     let post: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2284,7 +2149,7 @@ async fn state_transition_to_snapshotting_sets_lessee() {
     // did so pre-fix); verify and then re-enter transient.
     let after_snap: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2299,7 +2164,7 @@ async fn state_transition_to_snapshotting_sets_lessee() {
         .expect("CAS to restoring");
     let after_rst: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2334,7 +2199,7 @@ async fn state_transition_to_running_clears_lessee() {
     let client = pool.get().await.unwrap();
     let mid: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2352,7 +2217,7 @@ async fn state_transition_to_running_clears_lessee() {
         .expect("CAS to running");
     let post: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2404,7 +2269,7 @@ async fn idle_eligible_sandboxes_respects_opt_in_and_threshold() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET idle_snapshot_opted_in = TRUE, \
                     last_used_at = now() - interval '10 minutes' \
               WHERE sandbox_id = $1::TEXT",
@@ -2886,7 +2751,7 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
     let client = pool.get().await.unwrap();
     let n = client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET lessee_updated_at = now() - interval '10 minutes' \
               WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
@@ -2937,7 +2802,7 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
     );
     let post_lessee: Option<std::time::SystemTime> = client
         .query_one(
-            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            "SELECT lessee_updated_at FROM zeroship.sandboxes WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
         )
         .await
@@ -2985,7 +2850,7 @@ async fn sweep_transient_takeover_skips_self_owned_in_flight_row() {
     let client = pool.get().await.unwrap();
     let n = client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET lessee_updated_at = now() - interval '10 minutes' \
               WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
@@ -3104,7 +2969,7 @@ async fn claim_orphan_transient_for_recovery_aba_safe_on_lessee_bump() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET lessee_updated_at = now() - interval '10 minutes' \
               WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
@@ -3117,7 +2982,7 @@ async fn claim_orphan_transient_for_recovery_aba_safe_on_lessee_bump() {
     // to now().
     client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET lessee_updated_at = now() \
               WHERE sandbox_id = $1::TEXT",
             &[&info.sandbox_id],
@@ -3165,7 +3030,7 @@ async fn sweep_idle_eviction_selects_opted_in_stale_rows() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET idle_snapshot_opted_in = TRUE, \
                     last_used_at = now() - interval '30 minutes' \
               WHERE sandbox_id = $1::TEXT",
@@ -3205,7 +3070,7 @@ async fn sweep_idle_eviction_skips_when_feature_disabled() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET idle_snapshot_opted_in = TRUE, \
                     last_used_at = now() - interval '30 minutes' \
               WHERE sandbox_id = $1::TEXT",
@@ -3362,7 +3227,7 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
     let client = pool.get().await.unwrap();
     client
         .execute(
-            "UPDATE sandbox.sandboxes SET snapshot_sha256 = $1::BYTEA \
+            "UPDATE zeroship.sandboxes SET snapshot_sha256 = $1::BYTEA \
               WHERE sandbox_id = $2::TEXT",
             &[&(&new_meta.sha256[..]), &info.sandbox_id],
         )
@@ -3699,9 +3564,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_insert_and_read_round_trip() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let row = sample_row("wak_test_round_trip", "sbx_test_rt_sandbox", "hst_test_owner");
         assert!(
@@ -3748,9 +3612,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_update_state_transitions() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         // Happy path: pending → restoring → ok.
         let happy = sample_row("wak_happy", "sbx_happy", "hst_owner_a");
@@ -3857,9 +3720,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_find_pending_for_sandbox() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let sid = "sbx_idempotency_target";
         // No row at all → None.
@@ -3928,9 +3790,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_gc_expired_terminal_only() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         // Insert three rows: one ok, one failed, one pending.
         for (id, sid) in [
@@ -4003,9 +3864,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_update_state_bumps_lessee_updated_at() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let row = sample_row("wak_lessee_bump", "sbx_lb", "hst_lb_owner");
         assert!(
@@ -4064,7 +3924,7 @@ mod wake_jobs_crud {
         let client = pool.get().await.unwrap();
         let row_before = client
             .query_one(
-                "SELECT lessee_updated_at FROM sandbox.wake_jobs \
+                "SELECT lessee_updated_at FROM zeroship.wake_jobs \
                   WHERE wake_id = 'wak_lessee_bump'",
                 &[],
             )
@@ -4085,7 +3945,7 @@ mod wake_jobs_crud {
 
         let row_after = client
             .query_one(
-                "SELECT lessee_updated_at FROM sandbox.wake_jobs \
+                "SELECT lessee_updated_at FROM zeroship.wake_jobs \
                   WHERE wake_id = 'wak_lessee_bump'",
                 &[],
             )
@@ -4115,9 +3975,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_update_preserves_fields_on_none() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let row = sample_row("wak_preserve", "sbx_preserve", "hst_p_owner");
         assert!(
@@ -4230,9 +4089,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_agent_url_check_constraint_enforced() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url.clone()).await.unwrap();
 
         let row = sample_row("wak_url_check", "sbx_url_check", "hst_url");
         assert!(
@@ -4274,7 +4132,7 @@ mod wake_jobs_crud {
         let client = pool.get().await.unwrap();
         let res = client
             .execute(
-                "UPDATE sandbox.wake_jobs SET agent_url = 'file:///etc/passwd' \
+                "UPDATE zeroship.wake_jobs SET agent_url = 'file:///etc/passwd' \
                  WHERE wake_id = 'wak_url_check'",
                 &[],
             )
@@ -4287,7 +4145,7 @@ mod wake_jobs_crud {
         // Freeform text → reject.
         let res = client
             .execute(
-                "UPDATE sandbox.wake_jobs SET agent_url = 'arbitrary text' \
+                "UPDATE zeroship.wake_jobs SET agent_url = 'arbitrary text' \
                  WHERE wake_id = 'wak_url_check'",
                 &[],
             )
@@ -4297,7 +4155,7 @@ mod wake_jobs_crud {
         // URL with embedded spaces → reject.
         let res = client
             .execute(
-                "UPDATE sandbox.wake_jobs SET agent_url = 'http://example.com/a b' \
+                "UPDATE zeroship.wake_jobs SET agent_url = 'http://example.com/a b' \
                  WHERE wake_id = 'wak_url_check'",
                 &[],
             )
@@ -4312,9 +4170,7 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_lessee_partial_index_present() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
 
         let mut cfg = compio_postgres::PoolConfig::default();
         cfg.max_size = 2;
@@ -4326,7 +4182,7 @@ mod wake_jobs_crud {
         let row = client
             .query_opt(
                 "SELECT indexdef FROM pg_indexes \
-                  WHERE schemaname = 'sandbox' \
+                  WHERE schemaname = 'zeroship' \
                     AND tablename = 'wake_jobs' \
                     AND indexname = 'wake_jobs_lessee_idx'",
                 &[],
@@ -4353,9 +4209,7 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_audit_role_has_no_select() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
 
         let mut cfg = compio_postgres::PoolConfig::default();
         cfg.max_size = 2;
@@ -4379,12 +4233,12 @@ mod wake_jobs_crud {
             return;
         }
 
-        // has_table_privilege('sandbox_audit', 'sandbox.wake_jobs', 'SELECT')
+        // has_table_privilege('sandbox_audit', 'zeroship.wake_jobs', 'SELECT')
         // must be false after 0010 revoked the 0009 grant.
         let has_select: bool = client
             .query_one(
                 "SELECT has_table_privilege('sandbox_audit', \
-                        'sandbox.wake_jobs', 'SELECT')",
+                        'zeroship.wake_jobs', 'SELECT')",
                 &[],
             )
             .await
@@ -4392,21 +4246,18 @@ mod wake_jobs_crud {
             .get(0);
         assert!(
             !has_select,
-            "sandbox_audit MUST NOT have SELECT on sandbox.wake_jobs after 0010"
+            "sandbox_audit MUST NOT have SELECT on zeroship.wake_jobs after 0010"
         );
     }
 
-    /// Migration target version matches the binary's
-    /// LATEST_MIGRATION_VERSION (smoke check that 0009 actually
-    /// applied — the CHECK constraint on `state` is the proof; an
-    /// INSERT with a junk state must fail).
+    /// Smoke check that the wake_jobs changeset (originally migration
+    /// 0009) actually applied — the CHECK constraint on `state` is the
+    /// proof; an INSERT with a junk state must fail.
     #[compio::test]
     #[ignore = "needs Postgres"]
     async fn wake_jobs_state_check_constraint_enforced() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
 
         // Reach into pg directly — `insert_wake_job` only accepts
         // typed `WakeJobState`. We want to prove the SCHEMA rejects
@@ -4420,7 +4271,7 @@ mod wake_jobs_crud {
 
         let res = client
             .execute(
-                "INSERT INTO sandbox.wake_jobs (wake_id, sandbox_id, state, lessee) \
+                "INSERT INTO zeroship.wake_jobs (wake_id, sandbox_id, state, lessee) \
                  VALUES ('wak_bad_state', 'sbx_x', 'totally_invalid', 'hst_y')",
                 &[],
             )
@@ -4454,9 +4305,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_insert_returns_inserted_on_fresh_sandbox() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let row = sample_row("wak_c2_fresh", "sbx_c2_fresh", "hst_c2_owner");
         let outcome = db.insert_wake_job(&row).await.expect("insert");
@@ -4493,9 +4343,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_insert_collapses_concurrent_race_via_unique_index() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let sid = "sbx_c2_race";
         let row_a = sample_row("wak_c2_winner", sid, "hst_c2_a");
@@ -4545,9 +4394,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_unique_index_releases_after_terminal_transition() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let sid = "sbx_c2_terminal";
 
@@ -4618,9 +4466,7 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn wake_jobs_sandbox_pending_uniq_index_present() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
 
         let mut cfg = compio_postgres::PoolConfig::default();
         cfg.max_size = 2;
@@ -4631,7 +4477,7 @@ mod wake_jobs_crud {
         let row = client
             .query_one(
                 "SELECT indexdef FROM pg_indexes \
-                 WHERE schemaname = 'sandbox' \
+                 WHERE schemaname = 'zeroship' \
                    AND tablename = 'wake_jobs' \
                    AND indexname = 'wake_jobs_sandbox_pending_uniq'",
                 &[],
@@ -4685,7 +4531,7 @@ mod wake_jobs_crud {
         let client = pool.get().await.unwrap();
         client
             .execute(
-                "UPDATE sandbox.wake_jobs \
+                "UPDATE zeroship.wake_jobs \
                     SET lessee_updated_at = \
                         now() - make_interval(secs => $1::BIGINT) \
                   WHERE wake_id = $2::TEXT",
@@ -4703,11 +4549,10 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn claim_orphan_wake_marks_stale_row_failed() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30)
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url.clone())
             .await
             .unwrap();
-        db.run_pending_migrations().await.unwrap();
 
         // Insert a row + drop it into the `restoring` state, then
         // backdate `lessee_updated_at` 120 s into the past.
@@ -4766,11 +4611,10 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn claim_orphan_wake_skips_fresh_row() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30)
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url.clone())
             .await
             .unwrap();
-        db.run_pending_migrations().await.unwrap();
 
         let row = sample_row("wak_fresh", "sbx_fresh", "hst_active");
         assert!(
@@ -4807,11 +4651,10 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn claim_orphan_wake_skips_terminal_row() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30)
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url.clone())
             .await
             .unwrap();
-        db.run_pending_migrations().await.unwrap();
 
         // Two terminal rows, both backdated past the threshold.
         let row_ok = sample_row("wak_term_ok", "sbx_term_a", "hst_t");
@@ -4870,11 +4713,10 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn claim_orphan_wake_concurrent_claims_race_cleanly() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url.clone(), true, 30)
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url.clone())
             .await
             .unwrap();
-        db.run_pending_migrations().await.unwrap();
 
         let row = sample_row("wak_race", "sbx_race", "hst_crashed");
         assert!(
@@ -4948,9 +4790,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn update_wake_job_state_after_ok_is_noop() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let row = sample_row("wak_r20_ok", "sbx_r20_ok", "hst_r20");
         assert!(
@@ -5013,9 +4854,8 @@ mod wake_jobs_crud {
     #[ignore = "needs Postgres"]
     async fn update_wake_job_state_after_failed_is_noop() {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = Database::from_test_config(url, true, 30).await.unwrap();
-        db.run_pending_migrations().await.unwrap();
+        common::reset_and_migrate(&url).await;
+        let db = Database::from_test_config(url).await.unwrap();
 
         let row = sample_row("wak_r20_failed", "sbx_r20_failed", "hst_r20");
         assert!(
@@ -5135,11 +4975,10 @@ mod wake_machine_e2e {
     /// instance would have a fresh host_id and the CAS would lose).
     async fn migrated_db_arc() -> StdArc<zeroship_sandbox::db::Database> {
         let url = test_url();
-        reset_schema(&url).await;
-        let db = zeroship_sandbox::db::Database::from_test_config(url, true, 30)
+        common::reset_and_migrate(&url).await;
+        let db = zeroship_sandbox::db::Database::from_test_config(url)
             .await
             .unwrap();
-        db.run_pending_migrations().await.unwrap();
         db.upsert_host("test-host", "nomad-ch").await.unwrap();
         StdArc::new(db)
     }
@@ -5789,7 +5628,7 @@ mod r26_c1_pool_cache {
         // the SAME DSN string, so `cached_pool` returns `Some` on
         // the second call and `install_pool` is bypassed.
         let dsn = dsn_with_app_name("zs_disc3_t1");
-        let db = Database::from_test_config(dsn, false, 30)
+        let db = Database::from_test_config(dsn)
             .await
             .expect("from_test_config");
 
@@ -5847,7 +5686,7 @@ mod r26_c1_pool_cache {
             handles.push(std::thread::spawn(move || {
                 let rt = compio::runtime::Runtime::new().expect("worker runtime");
                 rt.block_on(async move {
-                    let db = Database::from_test_config(dsn, false, 30)
+                    let db = Database::from_test_config(dsn)
                         .await
                         .unwrap_or_else(|e| panic!("worker {i} from_test_config: {e}"));
                     let p1 = db
@@ -5913,10 +5752,10 @@ mod r26_c1_pool_cache {
         let dsn_b = dsn_with_app_name("zs_disc3_t3_b");
         assert_ne!(dsn_a, dsn_b, "test fixture: DSNs must differ verbatim");
 
-        let db_a = Database::from_test_config(dsn_a, false, 30)
+        let db_a = Database::from_test_config(dsn_a)
             .await
             .expect("from_test_config dsn_a");
-        let db_b = Database::from_test_config(dsn_b, false, 30)
+        let db_b = Database::from_test_config(dsn_b)
             .await
             .expect("from_test_config dsn_b");
 
