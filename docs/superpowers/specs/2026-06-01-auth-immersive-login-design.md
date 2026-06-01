@@ -1,9 +1,27 @@
 # Immersive in-page auth login + dev-proxy session-mint fix
 
-**Status:** pilot-decided (offline, 2026-06-01). Branch `feat/auth-immersive-popup`
-(worktree `.worktrees/auth-immersive-popup`, off main `8d191aaa`). **Commit-only,
-NEVER push** — the never-push gate is the human-review safety net before any of the
-security-sensitive Part 2 code reaches production.
+**Status:** IMPLEMENTED offline (2026-06-01); **live e2e + human review pending.** Branch
+`feat/auth-immersive-popup` (worktree `.worktrees/auth-immersive-popup`, off main `8d191aaa`).
+**Commit-only, NEVER pushed** — the never-push gate is the human-review safety net before any of
+the security-sensitive Part 2 code reaches production.
+
+Commits: `59771a58` (Part 1 session-mint fix) · `0edd9702` (Part 2A dev-complete in-page login +
+fetch-binding fix) · `218e14d2` (2B Phase 0 refactors) · `<phase1>` (2B Phase 1 crates/auth
+credential endpoint) · `<phase2>` (2B Phase 2 gateway endpoint). All security reviews APPROVED;
+crate chain builds; offline + unit tests green.
+
+**REMAINING (human-run — not offline-doable):**
+1. **Live e2e (Part 2B Phase 3):** run `crates/auth/tests/e2e_password_grant.rs` against a live
+   Hydra+Postgres (`AUTH_DB_URL`+`HYDRA_ADMIN_URL`), and a full-stack browser→gateway→auth→Hydra
+   pass (docker-compose: Caddy + auth + hydra + gateway) confirming in-page password login mints
+   the BFF cookie with no window. Add a gateway↔auth live e2e mirroring `oidc_rp_e2e.rs`.
+2. **Review the credential surface** (`crates/auth/src/ui/password.rs`, `oauth/headless.rs`,
+   `crates/gateway/src/browser_auth.rs::password`) — esp. the shared-secret gate + first-party
+   fail-closed gate — then merge + push.
+3. **Config:** set `[secrets].auth_internal_key` / `AUTH_INTERNAL_KEY` for both the auth service
+   and the gateway (require_unless_dev makes an empty key fatal in prod); register the per-app
+   popup-callback `redirect_uri` for trusted clients; add the console's `oac_` client to
+   `[auth].trusted_oauth_clients`.
 
 Two asks on the auth login flow:
 1. Fix **"sign-in: session mint request failed"** on the builder `/login`.
