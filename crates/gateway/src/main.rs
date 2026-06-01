@@ -132,6 +132,18 @@ struct GateCli {
     )]
     gateway_oidc_secret: String,
 
+    /// Gateway↔auth shared secret for the headless in-page password exchange
+    /// (`POST /password`). Sent as `Authorization: Bearer <key>` on the
+    /// gateway→auth call ONLY — never to the browser. MUST equal the auth
+    /// service's `AUTH_INTERNAL_KEY`. Required outside `--dev-insecure`.
+    #[arg(
+        long = "auth-internal-key",
+        env = "AUTH_INTERNAL_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    auth_internal_key: String,
+
     /// HMAC key for short-lived OIDC stash cookies.
     #[arg(
         long = "stash-signing-key",
@@ -330,6 +342,15 @@ fn main() -> std::io::Result<()> {
         file_secrets.stash_signing_key.as_deref(),
         cli.check_config,
     );
+    // Gateway↔auth shared secret for the in-page password exchange. Resolved
+    // through the SAME `[secrets]` overlay key (`auth_internal_key`) the auth
+    // service reads, so the two services share one byte-identical value.
+    let auth_internal_key = zeroship_core::config::obtain_secret(
+        "AUTH_INTERNAL_KEY / --auth-internal-key",
+        &cli.auth_internal_key,
+        file_secrets.auth_internal_key.as_deref(),
+        cli.check_config,
+    );
     // Dedicated pairwise-salt secret. A `--pairwise-salt-file` path wins over
     // the inline `--pairwise-salt`/`PAIRWISE_SALT` value (and over the config
     // overlay reference), so prod can keep the value out of the process table.
@@ -365,6 +386,20 @@ fn main() -> std::io::Result<()> {
     } else {
         oidc_client_secret
     };
+
+    // Gateway↔auth shared secret. The in-page password path is a
+    // credential→code oracle on the auth side; the gateway is its only
+    // legitimate caller, authenticated by this bearer. A missing key outside
+    // dev is fatal (an empty key disables the gate on BOTH sides — dev-loopback
+    // only). Left empty in dev (the auth side treats empty as "gate disabled").
+    if let Err(message) = require_unless_dev(
+        "AUTH_INTERNAL_KEY / --auth-internal-key",
+        &auth_internal_key,
+        insecure_dev,
+    ) {
+        tracing::error!(error = %message, "gateway: refusing to start without gateway↔auth internal key");
+        std::process::exit(1);
+    }
 
     // STRENGTH guard. At real boot `stash_signing_key` is the resolved value,
     // so the length/sentinel checks apply to the real material. During
@@ -506,6 +541,10 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(hydra_public_url),
         );
         report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
+        report.field(
+            "auth_internal_key_configured",
+            CheckValue::Secret(!auth_internal_key.is_empty()),
+        );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
@@ -685,6 +724,7 @@ fn main() -> std::io::Result<()> {
             worker_key,
             hydra_public_url,
             auth_ui_url,
+            auth_internal_key,
             insecure_dev,
             trust_proxy,
             public_url,
@@ -767,6 +807,16 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/__zeroship/auth/signout")
                     .route(web::post().to(browser_auth::signout)),
+            )
+            // auth-sdk in-page password login (Part 2A). Same-origin POST of
+            // `{ email, password }`; the gateway runs the credential→code→
+            // session exchange (no cross-site popup). Same mounting discipline
+            // (BEFORE the subdomain catch-all). First-party-only + same-origin
+            // guarded; the gateway holds the PKCE verifier and the gateway↔auth
+            // shared secret (never the browser).
+            .service(
+                web::resource("/__zeroship/auth/password")
+                    .route(web::post().to(browser_auth::password)),
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the

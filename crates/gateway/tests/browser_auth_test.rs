@@ -97,6 +97,10 @@ struct StateOpts {
     db: Option<zeroship_gateway::db::DbConfig>,
     /// Optional previous signing key (session-cookie rotation overlap).
     prev_signing: Option<SigningKey>,
+    /// When true, add the fixture's `CLIENT_ID` to the trusted-client set so the
+    /// first-party gate on `POST /__zeroship/auth/password` PASSES. Default false:
+    /// the fixture client (`oac_myapp`) is NOT trusted, so the gate fails closed.
+    trust_app_client: bool,
 }
 
 impl Default for StateOpts {
@@ -106,6 +110,7 @@ impl Default for StateOpts {
             hydra_base: "http://127.0.0.1:1".into(),
             db: None,
             prev_signing: None,
+            trust_app_client: false,
         }
     }
 }
@@ -140,6 +145,15 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
     let routes = RouteCache::new();
     routes.update(build_route_map(opts.provisioned));
 
+    // The first-party trusted set. Default is the compiled default (which does
+    // NOT include the fixture's `oac_myapp`), so the in-page password gate fails
+    // closed by default; `trust_app_client` adds `CLIENT_ID` to exercise the
+    // gate-passes path.
+    let mut trusted_oauth_clients = zeroship_core::auth::default_trusted_oauth_clients();
+    if opts.trust_app_client {
+        trusted_oauth_clients.insert(CLIENT_ID.to_string());
+    }
+
     Arc::new(GateState {
         config: GateConfig {
             control_url: String::new(),
@@ -149,6 +163,11 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
             worker_key: "worker-key".into(),
             hydra_public_url: opts.hydra_base.clone(),
             auth_ui_url: opts.hydra_base.clone(),
+            // Gateway↔auth shared secret. Non-empty so the gateway sends a
+            // Bearer when it dials auth's POST /password (the value is only
+            // exercised on the live path, which these offline tests stop short
+            // of — the first-party gate / same-origin guard fire before any dial).
+            auth_internal_key: "test-internal-key".into(),
             // insecure_dev=false → prod __Host- / Strict / Secure cookies +
             // https Origin compare are exercised.
             insecure_dev: false,
@@ -175,7 +194,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
         pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
-        trusted_oauth_clients: zeroship_core::auth::default_trusted_oauth_clients(),
+        trusted_oauth_clients,
     })
 }
 
@@ -212,6 +231,10 @@ macro_rules! browser_app {
             .service(
                 web::resource("/__zeroship/auth/signout")
                     .route(web::post().to(browser_auth::signout)),
+            )
+            .service(
+                web::resource("/__zeroship/auth/password")
+                    .route(web::post().to(browser_auth::password)),
             )
     }};
 }
@@ -513,6 +536,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
         hydra_base: base,
         db: Some(db.clone()),
         prev_signing: None,
+        trust_app_client: false,
     });
     let app = test::init_service(browser_app!(state.clone())).await;
 
@@ -622,6 +646,147 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     );
     drop(mock);
     cleanup_user(&dsn, global_user_id).await;
+}
+
+// ─── POST /__zeroship/auth/password (in-page password login) ───────────────────
+
+/// THE security regression test (invariant A): the FIRST-PARTY GATE FAILS
+/// CLOSED. A route whose `client_id` is NOT in `trusted_oauth_clients` is
+/// rejected `403` — the in-page password endpoint hands raw credentials to the
+/// auth credential→code oracle, so it must be restricted to trusted first-party
+/// clients. The fixture client (`oac_myapp`) is deliberately NOT in the default
+/// trusted set. A FULLY-valid same-origin request (X-ZS-Auth + exact Origin)
+/// still 403s — proving the gate, not the same-origin guard, is what rejects.
+#[ntex::test]
+async fn password_first_party_gate_fails_closed_for_untrusted_client() {
+    // Default fixture: provisioned `oac_myapp`, NOT trusted.
+    let state = build_state(StateOpts::default());
+    assert!(
+        !zeroship_core::auth::is_trusted_client_id(&state.trusted_oauth_clients, CLIENT_ID),
+        "fixture precondition: oac_myapp must NOT be trusted by default"
+    );
+    let app = test::init_service(browser_app!(state)).await;
+
+    // A request that passes the same-origin guard in every respect.
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/password")
+        .header(http::header::HOST, APP_HOST)
+        .header("x-zs-auth", "1")
+        .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .set_payload(r#"{"email":"a@b.c","password":"hunter2"}"#)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "untrusted client_id must 403 (first-party gate fails closed)"
+    );
+    let body = read_text(resp).await;
+    assert!(body.contains("forbidden"), "{body}");
+}
+
+/// Invariant A (empty/unknown client_id): a route provisioned with an EMPTY
+/// `oauth_client_id` resolves to an empty `route.client_id`, which is not in the
+/// trusted set ⇒ `403`. (`is_trusted_client_id` returns false for `""`/unknown.)
+#[ntex::test]
+async fn password_first_party_gate_fails_closed_for_empty_client_id() {
+    let state = build_state(StateOpts::default());
+    // Re-point the route at an EMPTY client_id (provisioned, but `""`).
+    {
+        use zeroship_core::types::RouteEntry;
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
+            RouteEntry {
+                name: APP_NAME.into(),
+                plan_id: "free".into(),
+                api_key_hash: String::new(),
+                deploy_hash: None,
+                manifest: zeroship_bundle::Manifest::passthrough(),
+                oauth_client_id: Some(String::new()),
+                sector_identifier: Some(format!("https://{APP_HOST}")),
+            },
+        );
+        state.routes.update(m);
+    }
+    let app = test::init_service(browser_app!(state)).await;
+
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/password")
+        .header(http::header::HOST, APP_HOST)
+        .header("x-zs-auth", "1")
+        .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .set_payload(r#"{"email":"a@b.c","password":"hunter2"}"#)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "empty client_id must 403 (first-party gate fails closed)"
+    );
+}
+
+/// Same-origin guard rejections for `/password` (invariant B), copying the
+/// posture of the signout guard test: a POST missing `X-ZS-Auth` is `400`; a
+/// foreign `Origin` is `403`. These fire BEFORE the first-party gate and need no
+/// DB / Hydra. We use a TRUSTED client so the same-origin guard — not the
+/// first-party gate — is unambiguously what rejects.
+#[ntex::test]
+async fn password_rejects_missing_custom_header_and_foreign_origin() {
+    let state = build_state(StateOpts { trust_app_client: true, ..Default::default() });
+    let app = test::init_service(browser_app!(state)).await;
+
+    // Missing X-ZS-Auth → 400.
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/password")
+        .header(http::header::HOST, APP_HOST)
+        .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 400, "missing X-ZS-Auth must 400");
+
+    // Foreign Origin → 403.
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/password")
+        .header(http::header::HOST, APP_HOST)
+        .header("x-zs-auth", "1")
+        .header(http::header::ORIGIN, "https://evil.example")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403, "foreign Origin must 403");
+}
+
+/// A TRUSTED first-party client clears the same-origin guard AND the first-party
+/// gate, then fails fast at the `db_unavailable` check (the fixture has no DB) —
+/// `503`, NOT `403`. This proves the gate PASSES for a trusted client (the
+/// inverse of the fail-closed test) without standing up Hydra. It also pins the
+/// ordering: same-origin → first-party → signing/db fail-fast, all BEFORE any
+/// outbound auth/Hydra dial. The full gateway→auth→Hydra happy path is a LIVE
+/// e2e (Phase 3, needs the stack).
+#[ntex::test]
+async fn password_trusted_client_passes_gate_then_503_without_db() {
+    let state = build_state(StateOpts { trust_app_client: true, ..Default::default() });
+    assert!(state.db.is_none(), "fixture precondition: no DB configured");
+    let app = test::init_service(browser_app!(state)).await;
+
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/password")
+        .header(http::header::HOST, APP_HOST)
+        .header("x-zs-auth", "1")
+        .header(http::header::ORIGIN, format!("https://{APP_HOST}"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .set_payload(r#"{"email":"a@b.c","password":"hunter2"}"#)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        503,
+        "trusted client passes the gate, then 503s on the missing DB (not 403)"
+    );
+    let body = read_text(resp).await;
+    assert!(body.contains("db_unavailable"), "{body}");
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────

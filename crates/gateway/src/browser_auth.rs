@@ -37,10 +37,16 @@ use ntex::util::Bytes;
 use ntex::web::{types::State, HttpRequest, HttpResponse};
 
 use crate::auth_token::{
-    db_error, error_response, resolve_route, same_origin_guard, CACHE_NO_STORE,
+    db_error, error_response, mint_session_from_code, resolve_route, same_origin_guard,
+    CACHE_NO_STORE,
 };
-use crate::oidc_rp::BrowserAuthorizeParams;
+use crate::oidc_rp::{BrowserAuthorizeParams, PasswordLoginParams};
 use crate::{anchors, GateState};
+
+/// The OAuth scopes the gateway requests for an in-page password login. Matches
+/// the popup flow's default ask: identity + an `offline_access` refresh family
+/// so the gateway can mint the reload-recovery anchor.
+const PASSWORD_LOGIN_SCOPE: &str = "openid profile email offline_access";
 
 /// Strict CSP for the popup-callback page (spec §1.2). `default-src 'none'`
 /// blocks all loads; `script-src 'nonce-<random>'` permits ONLY the inline
@@ -476,6 +482,237 @@ fn parse_signout_body(req: &HttpRequest, body: &[u8]) -> SignOutRequest {
 /// by the `signout_aad_matches_token_aad` regression test.
 fn anchor_aad(client_id: &str, sub: &str) -> Vec<u8> {
     format!("zs-anchor-refresh:{client_id}:{sub}").into_bytes()
+}
+
+// ─── POST /__zeroship/auth/password ─────────────────────────────────────────────
+
+/// Body the SDK posts to `/__zeroship/auth/password` (in-page password login).
+/// Only `email`+`password` are browser-supplied here — the PKCE verifier,
+/// `state`, `nonce`, `code_challenge`, and per-app `client_id`/`redirect_uri`
+/// are all generated/injected by the GATEWAY (the browser never holds the
+/// verifier or the shared secret).
+#[derive(serde::Deserialize, Default)]
+struct PasswordRequest {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// `POST /__zeroship/auth/password` — the gateway side of in-page password login
+/// (auth-sdk in-page password, Part 2A). The browser POSTs `{ email, password }`
+/// same-origin; the gateway runs the credential→code→session exchange WITHOUT a
+/// cross-site popup hop:
+///
+/// 1. (a) resolve the route + per-app PUBLIC client. (b) Same-origin guard
+///    (X-ZS-Auth + exact Origin — same posture as `POST /session` & `/signout`).
+/// 2. (c) FIRST-PARTY GATE — FAIL CLOSED: the in-page password oracle is
+///    available ONLY to trusted first-party clients (`route.client_id ∈
+///    state.trusted_oauth_clients`). An unknown/empty client_id ⇒ `403`. A
+///    third-party app must use the interactive popup (`/authorize`).
+/// 3. (d) fail fast on no session signing key / no DB (`503`).
+/// 4. (e) parse `{ email, password }`. (f) generate the PKCE verifier + S256
+///    challenge + `state`/`nonce` IN THE GATEWAY — the verifier is HELD here and
+///    never sent to auth; only the challenge crosses.
+/// 5. (g) call auth's `POST /password` with `Authorization: Bearer
+///    <auth_internal_key>` (sent to AUTH ONLY). Propagate auth's
+///    `401`/`403`/`429` (and `400`) verbatim to the browser.
+/// 6. (h) on `200 { code }`, redeem it via `mint_session_from_code` (the SAME
+///    code→session tail `POST /session` uses) and return its identity-only
+///    `{ user, expires_at }` response with the signed session + anchor cookies.
+///
+/// The full gateway→auth→Hydra happy path is a LIVE e2e (Phase 3, needs the
+/// stack); the offline tests here pin the security gates (first-party
+/// fail-closed + same-origin) that need no Hydra.
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+pub async fn password(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>) -> HttpResponse {
+    // (a) Resolve the app + per-app PUBLIC client_id (503 if un-provisioned).
+    let route = match resolve_route(&req, &state) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // (b) Same-origin guard: state-changing POST requires the custom X-ZS-Auth
+    // header AND an exact Origin match (same posture as POST /session & /signout).
+    if let Err(resp) = same_origin_guard(&req, &route.host, state.config.insecure_dev, true, true) {
+        return resp;
+    }
+
+    // (c) FIRST-PARTY GATE — FAIL CLOSED. The in-page password endpoint hands
+    // raw credentials to the auth credential→code oracle, so it is restricted to
+    // trusted FIRST-PARTY clients only. A route whose client_id is NOT in the
+    // trusted set (or is empty/unknown) is rejected 403 BEFORE any credential
+    // parse or outbound call — a third-party app must use the popup `/authorize`
+    // flow. THIS is the security regression invariant.
+    if !zeroship_core::auth::is_trusted_client_id(&state.trusted_oauth_clients, &route.client_id) {
+        return error_response(
+            HttpResponse::Forbidden(),
+            "forbidden",
+            "in-page password login is restricted to first-party clients",
+        );
+    }
+
+    // (d) Fail fast on a missing session signing key / DB — the tail
+    // (`mint_session_from_code`) needs both. Surfacing these before the
+    // credential exchange avoids burning the auth call + Hydra exchange only to
+    // 503 at the cookie-sign step (same fail-fast as POST /session).
+    if state.session_issuer.is_none() {
+        tracing::error!("/password: no session signing key configured — cannot mint session cookie");
+        return error_response(
+            HttpResponse::ServiceUnavailable(),
+            "session_signing_unavailable",
+            "gateway has no session signing key",
+        );
+    }
+    if state.db.is_none() {
+        return error_response(
+            HttpResponse::ServiceUnavailable(),
+            "db_unavailable",
+            "no database configured",
+        );
+    }
+
+    // (e) Parse the browser-supplied credentials (form-or-JSON, like
+    // parse_token_request). email + password are both required.
+    let parsed = parse_password_request(&req, &body);
+    let (Some(email), Some(password)) = (
+        parsed.email.as_deref().filter(|s| !s.trim().is_empty()),
+        parsed.password.as_deref().filter(|s| !s.is_empty()),
+    ) else {
+        return error_response(
+            HttpResponse::BadRequest(),
+            "invalid_request",
+            "email + password required",
+        );
+    };
+
+    // (f) Generate the PKCE verifier + S256 challenge + state/nonce IN THE
+    // GATEWAY. The verifier is HELD here (fed into mint_session_from_code in
+    // step h) and is NEVER sent to auth — only the challenge crosses (invariant
+    // C). state/nonce are gateway-chosen opaque tokens for this exchange.
+    let verifier = zeroship_core::pkce::generate_verifier();
+    let challenge = zeroship_core::pkce::s256_challenge(&verifier);
+    let csrf_state = zeroship_core::pkce::generate_verifier();
+    let nonce = zeroship_core::pkce::generate_verifier();
+
+    // redirect_uri = this app's own popup-callback (the registered URI). The
+    // browser redeems nothing — the gateway both mints the challenge and
+    // exchanges the code — but Hydra binds the code to this redirect_uri, so it
+    // MUST match what mint_session_from_code passes to /oauth2/token below.
+    let scheme = if state.config.insecure_dev { "http" } else { "https" };
+    let redirect_uri = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
+
+    // (g) Gateway → auth POST /password (service-to-service, Bearer
+    // auth_internal_key). Propagate auth's credential-arm statuses
+    // (401/403/429, and 400) verbatim so the SDK sees the opaque error.
+    let outcome = match state
+        .oidc_rp
+        .password_login(
+            &state.config.auth_internal_key,
+            &PasswordLoginParams {
+                email,
+                password,
+                client_id: &route.client_id,
+                redirect_uri: &redirect_uri,
+                scope: PASSWORD_LOGIN_SCOPE,
+                state: &csrf_state,
+                nonce: &nonce,
+                code_challenge: &challenge,
+            },
+        )
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if e.is_upstream_unavailable() => {
+            tracing::warn!(error = %e, app = %route.app_name, "/password: auth upstream unavailable");
+            return error_response(
+                HttpResponse::ServiceUnavailable(),
+                "temporarily_unavailable",
+                "auth service unavailable",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, app = %route.app_name, "/password: auth /password call failed");
+            return error_response(
+                HttpResponse::ServiceUnavailable(),
+                "temporarily_unavailable",
+                "auth service call failed",
+            );
+        }
+    };
+
+    // Forward any non-2xx from auth verbatim (status + JSON envelope). The
+    // credential arm's opaque error messages (invalid_credentials, rate-limit,
+    // account_ineligible, consent_required) must reach the SDK unchanged.
+    if !(200..300).contains(&outcome.status) {
+        return forward_auth_error(&outcome);
+    }
+
+    // (h) Parse the 200 `{ code, state? }` and redeem the code via the SAME
+    // code→session tail POST /session uses, feeding the GATEWAY-held verifier +
+    // redirect_uri. Returns the identity-only `{ user, expires_at }` response
+    // with the signed session + anchor cookies.
+    let Some(code) = parse_password_code(&outcome.body) else {
+        tracing::warn!(app = %route.app_name, "/password: auth 200 carried no code");
+        return error_response(
+            HttpResponse::ServiceUnavailable(),
+            "temporarily_unavailable",
+            "auth response missing code",
+        );
+    };
+
+    mint_session_from_code(&state, &route, &code, &verifier, &redirect_uri).await
+}
+
+/// Parse the `/password` body as JSON OR form-urlencoded (Content-Type-driven,
+/// defaulting to form — mirrors `auth_token::parse_token_request`).
+fn parse_password_request(req: &HttpRequest, body: &[u8]) -> PasswordRequest {
+    let ct = req
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if ct.contains("application/json") {
+        serde_json::from_slice(body).unwrap_or_default()
+    } else {
+        let mut out = PasswordRequest::default();
+        for (k, v) in url::form_urlencoded::parse(body) {
+            match k.as_ref() {
+                "email" => out.email = Some(v.into_owned()),
+                "password" => out.password = Some(v.into_owned()),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Extract the authorization `code` from auth's `200 { code, state? }` JSON body.
+fn parse_password_code(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("code")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Forward auth's non-2xx `/password` answer to the browser, preserving the
+/// status and the JSON error envelope verbatim (the SDK relies on auth's opaque
+/// credential-arm messages). Falls back to a generic envelope if auth's status
+/// is not a valid HTTP code or its body is not JSON.
+fn forward_auth_error(outcome: &crate::oidc_rp::PasswordLoginOutcome) -> HttpResponse {
+    let status = ntex::http::StatusCode::from_u16(outcome.status)
+        .unwrap_or(ntex::http::StatusCode::BAD_GATEWAY);
+    let mut builder = HttpResponse::build(status);
+    builder.header("cache-control", CACHE_NO_STORE);
+    match serde_json::from_str::<serde_json::Value>(&outcome.body) {
+        Ok(json) => builder.json(&json),
+        Err(_) => builder.json(&serde_json::json!({
+            "error": "auth_error",
+            "error_description": "auth service returned an error",
+        })),
+    }
 }
 
 #[cfg(test)]

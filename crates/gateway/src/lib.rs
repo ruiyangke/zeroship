@@ -62,6 +62,15 @@ pub struct GateConfig {
     /// service; will be wired through once the service joins compose
     /// (Phase 3 Unit U11).
     pub auth_ui_url: String,
+    /// Gateway↔auth shared secret. Sent as `Authorization: Bearer <key>`
+    /// ONLY on the gateway→auth `POST /password` headless credential exchange
+    /// (in-page password login) — never to the browser. Must equal the auth
+    /// service's `auth_internal_key` (the only legitimate caller it
+    /// authenticates). Empty disables the in-page password path (dev only —
+    /// production boot rejects an empty key via `require_unless_dev`); the
+    /// auth side also treats an empty key as "gate disabled", so the two
+    /// agree on the dev-loopback posture.
+    pub auth_internal_key: String,
     /// Dev-only flag. When true the gateway emits cookies without the
     /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
     /// / docker-compose. Production MUST set this to false — the
