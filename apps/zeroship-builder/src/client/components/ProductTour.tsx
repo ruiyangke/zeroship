@@ -15,8 +15,10 @@
 // time by setting `forceOpen`.
 
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { Button, Card, Cluster } from "@zeroship/ui";
 import { lsSet } from "../lib/storage";
 import { track } from "../lib/analytics";
+import "./ProductTour.css";
 
 const TOUR_DONE_KEY = "zeroship_tour_completed";
 
@@ -186,13 +188,31 @@ export function ProductTour({ open, onClose }: ProductTourProps) {
   // run off-screen.
   const tooltipPos = computeTooltipPosition(current.side, spot);
 
+  // Runtime layout values flow as inline custom properties consumed by
+  // ProductTour.css. These are measured positions, not design constants
+  // — the CSS owns the token-driven chrome; the component owns the
+  // geometry.
+  const spotVars = spot
+    ? ({
+        "--tour-spot-top": `${spot.top}px`,
+        "--tour-spot-left": `${spot.left}px`,
+        "--tour-spot-width": `${spot.width}px`,
+        "--tour-spot-height": `${spot.height}px`,
+      } as React.CSSProperties)
+    : undefined;
+  const cardVars = {
+    "--tour-card-width": `${TOOLTIP_WIDTH}px`,
+    "--tour-card-top": `${tooltipPos.top}px`,
+    "--tour-card-left": `${tooltipPos.left}px`,
+  } as React.CSSProperties;
+
   return (
     <div
       data-testid="product-tour"
       role="dialog"
       aria-modal="true"
       aria-label="Product tour"
-      className="fixed inset-0 z-50"
+      className="zs-tour"
     >
       {/* Backdrop click target — full-viewport, captures the dim
           area's clicks so users can dismiss by clicking outside. The
@@ -201,29 +221,19 @@ export function ProductTour({ open, onClose }: ProductTourProps) {
       <div
         data-testid="product-tour-backdrop"
         onClick={() => complete("skipped")}
-        className="absolute inset-0 cursor-pointer"
-        style={{ background: "rgba(34,22,12,0.4)" }}
+        className="zs-tour__backdrop"
       />
 
       {/* Spotlight frame around the current target. The box-shadow
-          punches a hole in the backdrop by drawing a giant outset
-          shadow; we render a thin tomato outline so the eye lands
-          on the surface immediately. */}
+          punches a hole in the dim by drawing a giant outset shadow; we
+          render a thin accent ring so the eye lands on the surface
+          immediately. */}
       {spot && (
         <div
           data-testid="product-tour-spotlight"
           aria-hidden="true"
-          className="absolute pointer-events-none"
-          style={{
-            top: spot.top,
-            left: spot.left,
-            width: spot.width,
-            height: spot.height,
-            // Cut a hole in the backdrop with an inverted shadow.
-            boxShadow:
-              "0 0 0 9999px rgba(34,22,12,0.4), 0 0 0 2px rgba(212,68,46,0.9) inset",
-            transition: "all 200ms ease-out",
-          }}
+          className="zs-tour__spotlight"
+          style={spotVars}
         />
       )}
 
@@ -232,51 +242,47 @@ export function ProductTour({ open, onClose }: ProductTourProps) {
       <div
         onClick={(e) => e.stopPropagation()}
         data-testid="product-tour-card"
-        className="absolute bg-paper border border-rule shadow-2xl rounded-md p-6 reveal"
-        style={{
-          width: TOOLTIP_WIDTH,
-          top: tooltipPos.top,
-          left: tooltipPos.left,
-        }}
+        className="zs-tour__card"
+        style={cardVars}
       >
-        <div className="font-sans text-[10px] uppercase tracking-[0.22em] text-tomato mb-2">
-          step {step + 1} of {STEPS.length}
-        </div>
-        <h3 className="font-serif italic font-medium text-[24px] leading-[1.1] mb-2">
-          {current.title}
-        </h3>
-        <p className="font-serif text-[14.5px] text-ink-soft leading-[1.55] mb-5">
-          {current.body}
-        </p>
-        <div className="flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={() => complete("skipped")}
-            data-testid="product-tour-skip"
-            className="font-serif italic text-[13.5px] text-pencil hover:text-ink bg-transparent border-0 cursor-pointer"
-          >
-            Skip the tour
-          </button>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={prev}
-              disabled={isFirst}
-              data-testid="product-tour-prev"
-              className="font-serif text-[13px] px-3 py-2 border border-rule bg-paper text-ink cursor-pointer hover:bg-paper-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        <Card variant="elevated">
+          <Card.Header>
+            <span className="zs-tour__eyebrow" data-testid="product-tour-step">
+              Step {step + 1} of {STEPS.length}
+            </span>
+            <Card.Title>{current.title}</Card.Title>
+            <Card.Description>{current.body}</Card.Description>
+          </Card.Header>
+          <Card.Footer align="between">
+            <Button
+              variant="plain"
+              size="small"
+              onClick={() => complete("skipped")}
+              data-testid="product-tour-skip"
             >
-              ← Prev
-            </button>
-            <button
-              type="button"
-              onClick={next}
-              data-testid="product-tour-next"
-              className="font-serif text-[13px] px-4 py-2 border border-ink bg-ink text-paper cursor-pointer hover:opacity-90 transition-opacity"
-            >
-              {isLast ? "Got it" : "Next →"}
-            </button>
-          </div>
-        </div>
+              Skip the tour
+            </Button>
+            <Cluster gap={2}>
+              <Button
+                variant="gray"
+                size="small"
+                onClick={prev}
+                disabled={isFirst}
+                data-testid="product-tour-prev"
+              >
+                ← Prev
+              </Button>
+              <Button
+                variant="filled"
+                size="small"
+                onClick={next}
+                data-testid="product-tour-next"
+              >
+                {isLast ? "Got it" : "Next →"}
+              </Button>
+            </Cluster>
+          </Card.Footer>
+        </Card>
       </div>
     </div>
   );
