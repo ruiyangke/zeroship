@@ -107,6 +107,49 @@ in-page <AuthModal> (app origin, crystal)         gateway (same-origin BFF)     
   green; auth SDK unit tests; an adversarial **security-review** pass on the new gateway
   endpoint (CSRF, origin gating, rate-limit, no-token-leak).
 
+### Concrete backend design (post-exploration, wf wmkmdth11)
+
+There is **no headless credential path today**: the hosted form POSTs
+`/login?login_challenge=…` (form-encoded, Argon2id verify in
+`crates/auth/src/identity/password.rs`, then Hydra `accept_login` → redirect, not a
+code). The gateway is **credential-blind** and `OidcRp` has only
+`authorization_code`+`refresh_token` (no ROPC). The session-mint **tail** is fully
+reusable: `exchange_code_public` → `verify_id_token` → `anchors::create` +
+`sessions::create` → `sign_session_cookie`/`set_app_session_cookie` →
+`user_projection` (all `pub(crate)`, `crates/gateway/src/auth_token.rs`).
+
+**Decomposition (build A first; B is the security-critical core):**
+
+- **A — dev-complete in-page login (low-risk, demonstrable in `vite dev`):**
+  - `sdks/bootstrap/src/dev-auth.ts`: add a `POST /__zeroship/auth/password` arm
+    (`passwordLogin()`) mirroring `exchange()` — JSON `{email,password}`, resolve the
+    seeded user by email (password accepted-and-ignored, frictionless dev ethos;
+    typed `invalid_credentials` on unknown email), `signDevSession` + `sessionBody`.
+    Byte-identical wire to prod. + `bootstrap/tests/dev-auth.test.ts` arm.
+  - `sdks/auth`: replace the popup `signInWithPassword` (client.ts:203-207) with a
+    **headless** `signInWithCredentials({email,password})` that POSTs same-origin to
+    `/__zeroship/auth/password` (`X-ZS-Auth`, credentials:include) and stores the
+    returned identity-only session — **no window**. Add crystal `<AuthModal>` /
+    `<SignInForm>` to `./react`. `signInWithOAuth` (popup) stays for Google.
+    + `react.test.tsx` regression test.
+  - Builder `Login.tsx`/`Signup.tsx`: in-page `<SignInForm>` for the password path;
+    keep a "Continue with Google" popup launcher.
+- **B — prod backend (security-critical; adversarial review; never-push gates it):**
+  - New headless credential endpoint in `crates/auth` (JSON `{email,password,…}`)
+    reusing `password::verify` + dummy-hash enumeration defense + ratelimit +
+    eligibility + audit from `ui/login.rs`, that drives Hydra to mint a code
+    (server-side authorize → accept_login with `acr=urn:zeroship:pwd`/`amr=[pwd]`,
+    consent auto-skipped for the trusted first-party client).
+  - Gateway `POST /__zeroship/auth/password`: `same_origin_guard(.., true, true)` +
+    **first-party gate** (`route.client_id ∈ auth.trusted_oauth_clients`; move the
+    `resolve/contains` helpers from `crates/control` to `crates/core` so the gateway
+    can use them), server-holds the PKCE verifier, calls the auth-service endpoint,
+    then reuses the session-mint tail. Returns `{user, expires_at}` + BFF cookies.
+  - **Open questions to resolve in B (documented for review):** whether Hydra permits
+    a server-driven code mint without an interactive browser challenge (else a
+    server-side redirect-follower); reconciling `service.rs::login`'s own JWT with the
+    BFF model (no-back-compat → likely collapse).
+
 ## Out of scope / risks
 
 - Google/social in-page is impossible (Google blocks framing) — popup retained.
