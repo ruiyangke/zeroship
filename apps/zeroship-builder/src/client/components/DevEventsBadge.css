@@ -13,13 +13,15 @@
  */
 
 /* ─── fixed anchor ──────────────────────────────────────────────────── *
- * Bottom-LEFT so the chip never overlaps the chat composer's Send / Stop
- * buttons (bottom-right). z-modal keeps it above app chrome; the portaled
- * popup itself stacks higher (Popover uses --zs-z-modal + 10). */
+ * Bottom-RIGHT, over the canvas pane. The chat rail (with its composer —
+ * attach 📎 / Send / Stop) is the LEFT panel, so a bottom-LEFT chip would
+ * sit on top of those controls and intercept their clicks; the canvas side
+ * (right) is clear. z-modal keeps it above app chrome; the portaled popup
+ * itself stacks higher (Popover uses --zs-z-modal + 10). */
 .zs-dev-events {
   position: fixed;
   inset-block-end: var(--zs-space-3);
-  inset-inline-start: var(--zs-space-3);
+  inset-inline-end: var(--zs-space-3);
   z-index: var(--zs-z-modal);
   font-family: var(--zs-font-mono);
 }
