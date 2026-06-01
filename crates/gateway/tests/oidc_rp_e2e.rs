@@ -56,7 +56,7 @@ use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 
 use zeroship_gateway::oidc_rp::OidcRp;
-use zeroship_gateway::sessions::{create, revoke, validate, NewSession};
+use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate, NewSession};
 
 // ─── Helpers (duplicated from crates/auth/tests/common/mod.rs) ──────────
 
@@ -531,9 +531,23 @@ async fn gateway_oidc_rp_full_dance() {
 
     // 14. Mint a per-origin gateway session against those claims and
     //     drive validate → revoke → validate (no-op).
+    //
+    // The session store fns are RLS-scoped (changeset 0025) and need a
+    // `&mut Client`. `pg_client` is shared (`Arc`, also lent to GateState), so
+    // open a dedicated mutable client off the same DSN for these store ops.
+    let (mut sess_client, sess_connection) =
+        compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect pg (session store)");
+    compio::runtime::spawn(async move {
+        if let Err(e) = sess_connection.run().await {
+            eprintln!("[oidc_rp_e2e] session-store pg driver: {e}");
+        }
+    })
+    .detach();
     let app_id = Uuid::new_v4();
     let session = create(
-        &pg_client,
+        &mut sess_client,
         &NewSession {
             user_id: &claims.sub,
             app_id,
@@ -551,7 +565,7 @@ async fn gateway_oidc_rp_full_dance() {
     .await
     .expect("session create");
 
-    let validated = validate(&pg_client, session.id, app_id)
+    let validated = validate(&mut sess_client, session.id, app_id)
         .await
         .expect("validate");
     let validated = validated.expect("session must validate immediately after creation");
@@ -564,8 +578,12 @@ async fn gateway_oidc_rp_full_dance() {
         "validate() must return the granted_scopes written at create"
     );
 
-    revoke(&pg_client, session.id).await.expect("revoke");
-    let after_revoke = validate(&pg_client, session.id, app_id)
+    // Per-app revoke (the only revoke path under RLS): revokes this app's
+    // session(s) for the subject.
+    revoke_app_sessions_for_user(&mut sess_client, app_id, &claims.sub)
+        .await
+        .expect("revoke");
+    let after_revoke = validate(&mut sess_client, session.id, app_id)
         .await
         .expect("validate post-revoke");
     assert!(

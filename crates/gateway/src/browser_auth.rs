@@ -293,11 +293,15 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let conn = match pool.get().await {
+        let mut conn = match pool.get().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
-        match anchors::read_live(&conn, anchor_id).await {
+        // RLS-scoped to `route.app_id` (changeset 0025): a cookie replayed
+        // against the wrong app resolves to `None` here, so this READ both
+        // loads the anchor AND enforces the former post-hoc
+        // `anchor.app_id == route.app_id` check.
+        match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
             Ok(None) => return signout_cleared(&route.host, state.config.insecure_dev),
             Err(e) => {
@@ -310,15 +314,6 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             }
         }
     };
-
-    // Defense in depth: the cookie is __Host- (host-scoped), but the anchor's
-    // app_id must still match the resolved route. A mismatch ⇒ clear cookies
-    // without touching the foreign anchor. NB: anchors are keyed by the app
-    // UUID (`route.app_id`), NOT the subdomain slug `app_name` — matching the
-    // /token + /session create path and the live dispatch arm (see RouteCtx).
-    if anchor.app_id != route.app_id {
-        return signout_cleared(&route.host, state.config.insecure_dev);
-    }
 
     // The per-app pairwise `pws_` subject the session cookie / access token
     // carries — the family marker is keyed on `(client_id, pws_sub)` to match
@@ -346,7 +341,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let conn = match pool.get().await {
+        let mut conn = match pool.get().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
@@ -354,6 +349,10 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // (a) Per-app family marker — the PRIMARY cross-node revocation
         //     (§8.5): an already-issued session cookie / access token for
         //     `(client_id, pws_sub)` is rejected from now on. Best-effort.
+        //     `token_revocations` is NOT an RLS table, so this runs directly on
+        //     `&conn` (no tenant GUC) — sequentially before the RLS-scoped
+        //     anchor delete below, so the two `&conn`/`&mut conn` borrows never
+        //     overlap.
         if let Some(pws_sub) = pws_sub.as_deref() {
             if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(
                 &conn,
@@ -378,7 +377,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // (c) Delete the anchor row(s) and collect the family ciphertexts
         //     for the (best-effort) Hydra revoke fan-out.
         if want_global {
-            match anchors::delete_all_for_user(&conn, route.app_id, anchor.global_user_id)
+            match anchors::delete_all_for_user(&mut conn, route.app_id, anchor.global_user_id)
                 .await
             {
                 Ok(deleted) => {
@@ -397,7 +396,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             }
         } else {
             families.push((anchor.refresh_token_enc.clone(), anchor.client_id.clone()));
-            if let Err(e) = anchors::delete(&conn, anchor_id).await {
+            if let Err(e) = anchors::delete(&mut conn, route.app_id, anchor_id).await {
                 tracing::error!(error = %e, "/signout(local): anchor delete failed");
                 return error_response(
                     HttpResponse::InternalServerError(),

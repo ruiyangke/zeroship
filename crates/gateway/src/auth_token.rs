@@ -164,14 +164,14 @@ pub(crate) async fn relay_alias_for(
             return None;
         }
     };
-    let conn = match pool.get().await {
+    let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "relay alias lookup: pool get failed (failing closed on email)");
             return None;
         }
     };
-    match crate::identities::lookup_relay_email(&conn, client_id, global_user_id).await {
+    match crate::identities::lookup_relay_email(&mut conn, client_id, global_user_id).await {
         Ok(alias) => alias,
         Err(e) => {
             tracing::warn!(error = %e, "relay alias lookup failed (failing closed on email)");
@@ -471,7 +471,7 @@ pub async fn session_post(
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let conn = match pool.get().await {
+        let mut conn = match pool.get().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
@@ -480,7 +480,7 @@ pub async fn session_post(
         //     auth_time/amr source). NO LONGER read per request; the signed
         //     cookie is the live credential.
         let session = match crate::sessions::create(
-            &conn,
+            &mut conn,
             &crate::sessions::NewSession {
                 user_id: &global_user_id.to_string(),
                 app_id: app_key,
@@ -514,7 +514,7 @@ pub async fn session_post(
         //     `anchor.app_id == route.app_id` self-consistency check on
         //     reload-recovery is meaningful and never slug-vs-UUID skewed.
         let anchor = match anchors::create(
-            &conn,
+            &mut conn,
             &anchors::NewAnchor {
                 app_id: app_key,
                 client_id: &route.client_id,
@@ -701,11 +701,15 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let conn = match pool.get().await {
+        let mut conn = match pool.get().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
-        match anchors::read_live(&conn, anchor_id).await {
+        // RLS-scoped to `route.app_id` (changeset 0025): an anchor cookie
+        // replayed against the wrong app resolves to `None`, so this READ both
+        // loads the anchor AND enforces the former post-hoc
+        // `anchor.app_id == route.app_id` bind check.
+        match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
             Ok(None) => return login_required(&route.host, state.config.insecure_dev),
             Err(e) => {
@@ -718,13 +722,6 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             }
         }
     };
-
-    // Bind the anchor to this host's app (defense in depth — the cookie is
-    // __Host- so it cannot have come from another host, but the app_id must
-    // still match the resolved route). Both are now the canonical app UUID.
-    if anchor.app_id != route.app_id {
-        return login_required(&route.host, state.config.insecure_dev);
-    }
 
     // Rotate the server-held family via the per-node single-flight (one Hydra
     // refresh for N concurrent reloaders), then re-create the gateway session
@@ -753,12 +750,12 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     Ok(p) => p,
                     Err(e) => return db_error(e),
                 };
-                let conn = match pool.get().await {
+                let mut conn = match pool.get().await {
                     Ok(c) => c,
                     Err(e) => return db_error(e),
                 };
                 if let Err(e) = crate::sessions::create(
-                    &conn,
+                    &mut conn,
                     &crate::sessions::NewSession {
                         user_id: &rotated.global_user_id.to_string(),
                         app_id: route.app_id,
@@ -821,8 +818,8 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         Err(RotationError::LoginRequired) => {
             // Anchor-dead: delete the row + clear the breadcrumb.
             if let Ok(pool) = crate::db::checkout(db_cfg).await {
-                if let Ok(conn) = pool.get().await {
-                    let _ = anchors::delete(&conn, anchor_id).await;
+                if let Ok(mut conn) = pool.get().await {
+                    let _ = anchors::delete(&mut conn, route.app_id, anchor_id).await;
                 }
             }
             login_required(&route.host, state.config.insecure_dev)
@@ -1042,12 +1039,15 @@ async fn do_refresh(
             Ok(p) => p,
             Err(e) => return Err(RotationError::Upstream(format!("pool checkout: {e}"))),
         };
-        let conn = match pool.get().await {
+        let mut conn = match pool.get().await {
             Ok(c) => c,
             Err(e) => return Err(RotationError::Upstream(format!("pool get: {e}"))),
         };
+        // RLS GUC keyed on the anchor's own app_id (loaded RLS-scoped to
+        // route.app_id, so identical to it).
         if let Err(e) =
-            anchors::update_rotated_family(&conn, anchor.id, &new_enc, &family_id).await
+            anchors::update_rotated_family(&mut conn, anchor.app_id, anchor.id, &new_enc, &family_id)
+                .await
         {
             return Err(RotationError::Upstream(format!("anchor update: {e}")));
         }

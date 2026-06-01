@@ -549,9 +549,9 @@ async fn project_pairwise(
         if let Ok(uuid) = Uuid::parse_str(global_user_id) {
             match crate::db::checkout(db_cfg).await {
                 Ok(pool) => match pool.get().await {
-                    Ok(conn) => {
+                    Ok(mut conn) => {
                         if let Err(e) =
-                            crate::identities::upsert(&conn, app_client_id, uuid, &pws).await
+                            crate::identities::upsert(&mut conn, app_client_id, uuid, &pws).await
                         {
                             tracing::warn!(
                                 error = %e,
@@ -561,7 +561,7 @@ async fn project_pairwise(
                         }
                         // Email-claim swap: read the active alias for this
                         // (app, user). None ⇒ caller emits empty email (§7).
-                        match crate::identities::lookup_relay_email(&conn, app_client_id, uuid).await
+                        match crate::identities::lookup_relay_email(&mut conn, app_client_id, uuid).await
                         {
                             Ok(alias) => relay_email = alias,
                             Err(e) => tracing::warn!(

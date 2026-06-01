@@ -23,10 +23,21 @@
 //! on `GET /__zeroship/auth/session?mint=1` (still here). The anchor remains the
 //! reload-recovery + server-held refresh-family custody store.
 //!
-//! Every store fn takes a `&Client` (a `PooledClient` derefs to it), so the
-//! caller checks a pooled connection out for exactly ONE operation and
-//! releases it on drop — NO connection is ever held across the outbound
+//! Every store fn takes a `&mut Client` (a `PooledClient` derefs mutably to
+//! it), so the caller checks a pooled connection out for exactly ONE operation
+//! and releases it on drop — NO connection is ever held across the outbound
 //! Hydra HTTP call (`crate::db`, the round-6 BLOCKER invariant).
+//!
+//! RLS (changeset 0025): `zeroship.app_session_anchors` is FORCE-RLS,
+//! tenant-isolated on `app_id` via the `zeroship.tenant_app` GUC. The gateway
+//! connects as the non-bypass `zeroship_gateway` role, so EVERY op here must
+//! run inside a transaction that first sets that GUC to `route.app_id` (via
+//! [`crate::rls::with_tenant_app`]). `SET LOCAL` auto-reverts at COMMIT /
+//! ROLLBACK, so a pooled connection can never leak the tenant to the next
+//! checkout. An unset GUC fails CLOSED (policy predicate NULL → zero rows).
+//! This is why `read_live` / `update_rotated_family` / `delete` now take the
+//! `app_id` the caller already holds (`route.app_id`): it is the RLS key, and
+//! it replaces the former post-hoc `anchor.app_id == route.app_id` check.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,6 +48,7 @@ use futures::future::Shared;
 use uuid::Uuid;
 
 use crate::error::{GatewayError, Result};
+use crate::rls;
 
 /// Anchor absolute lifetime in days. `abs_expires_at = created_at + 30d`,
 /// set once at create and NEVER slid (spec §8.1/§8.3 round-6). This is the
@@ -177,10 +189,15 @@ pub struct NewAnchor<'a> {
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure or empty return.
-pub async fn create(conn: &Client, params: &NewAnchor<'_>) -> Result<Anchor> {
+pub async fn create(conn: &mut Client, params: &NewAnchor<'_>) -> Result<Anchor> {
     let scopes: Vec<String> = params.granted_scopes.to_vec();
     let refresh_enc = params.refresh_token_enc.to_vec();
-    let rows = conn
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors create begin: {e}")))?;
+    rls::set_tenant_app(&tx, params.app_id).await?;
+    let rows = tx
         .query(
             "INSERT INTO zeroship.app_session_anchors \
                 (app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, \
@@ -202,33 +219,54 @@ pub async fn create(conn: &Client, params: &NewAnchor<'_>) -> Result<Anchor> {
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors create: {e}")))?;
 
-    let row = rows
-        .first()
-        .ok_or_else(|| GatewayError::Db("app_session_anchors create: empty return".into()))?;
-    Ok(row_to_anchor(row))
+    let anchor = {
+        let row = rows
+            .first()
+            .ok_or_else(|| GatewayError::Db("app_session_anchors create: empty return".into()))?;
+        row_to_anchor(row)
+    };
+    tx.commit()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors create commit: {e}")))?;
+    Ok(anchor)
 }
 
-/// Read a LIVE anchor by id. "Live" = exists, not revoked, and within its
-/// own 30-day absolute lifetime (`abs_expires_at > NOW()`). Returns `None`
-/// when the row is missing, revoked, or past its absolute expiry — the
-/// caller treats `None` as `login_required` (and clears the cookie).
+/// Read a LIVE anchor by id, scoped to `app_id`. "Live" = exists, not revoked,
+/// and within its own 30-day absolute lifetime (`abs_expires_at > NOW()`).
+/// Returns `None` when the row is missing, revoked, past its absolute expiry,
+/// OR belongs to a different app — the caller treats `None` as
+/// `login_required` (and clears the cookie).
+///
+/// `app_id` (the caller's `route.app_id`) sets the `zeroship.tenant_app` RLS
+/// GUC AND is matched in the predicate, so a cookie replayed against the wrong
+/// app resolves to `None` here — this REPLACES the former post-hoc
+/// `anchor.app_id == route.app_id` check at the call sites.
 ///
 /// Does NOT slide any expiry — the anchor has no idle window.
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
-pub async fn read_live(conn: &Client, id: Uuid) -> Result<Option<Anchor>> {
-    let rows = conn
+pub async fn read_live(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<Option<Anchor>> {
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors read_live begin: {e}")))?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    let rows = tx
         .query(
             "SELECT id, app_id, client_id, global_user_id, refresh_token_enc, \
                     refresh_family_id, granted_scopes, created_at, abs_expires_at \
              FROM zeroship.app_session_anchors \
-             WHERE id = $1 AND revoked_at IS NULL AND abs_expires_at > NOW()",
-            &[&id],
+             WHERE id = $1 AND app_id = $2 AND revoked_at IS NULL AND abs_expires_at > NOW()",
+            &[&id, &app_id],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors read_live: {e}")))?;
-    Ok(rows.first().map(row_to_anchor))
+    let anchor = rows.first().map(row_to_anchor);
+    tx.commit()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors read_live commit: {e}")))?;
+    Ok(anchor)
 }
 
 /// Persist a rotated refresh family after a `?mint=1` Hydra refresh.
@@ -240,13 +278,18 @@ pub async fn read_live(conn: &Client, id: Uuid) -> Result<Option<Anchor>> {
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
 pub async fn update_rotated_family(
-    conn: &Client,
+    conn: &mut Client,
+    app_id: Uuid,
     id: Uuid,
     refresh_token_enc: &[u8],
     refresh_family_id: &str,
 ) -> Result<()> {
     let refresh_enc = refresh_token_enc.to_vec();
-    conn.execute(
+    let tx = conn.transaction().await.map_err(|e| {
+        GatewayError::Db(format!("app_session_anchors update_rotated_family begin: {e}"))
+    })?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    tx.execute(
         "UPDATE zeroship.app_session_anchors SET \
             refresh_token_enc = $2, \
             refresh_family_id = $3 \
@@ -255,6 +298,9 @@ pub async fn update_rotated_family(
     )
     .await
     .map_err(|e| GatewayError::Db(format!("app_session_anchors update_rotated_family: {e}")))?;
+    tx.commit().await.map_err(|e| {
+        GatewayError::Db(format!("app_session_anchors update_rotated_family commit: {e}"))
+    })?;
     Ok(())
 }
 
@@ -263,13 +309,21 @@ pub async fn update_rotated_family(
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
-pub async fn delete(conn: &Client, id: Uuid) -> Result<()> {
-    conn.execute(
-        "DELETE FROM zeroship.app_session_anchors WHERE id = $1",
-        &[&id],
+pub async fn delete(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<()> {
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors delete begin: {e}")))?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    tx.execute(
+        "DELETE FROM zeroship.app_session_anchors WHERE id = $1 AND app_id = $2",
+        &[&id, &app_id],
     )
     .await
     .map_err(|e| GatewayError::Db(format!("app_session_anchors delete: {e}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors delete commit: {e}")))?;
     Ok(())
 }
 
@@ -285,11 +339,15 @@ pub async fn delete(conn: &Client, id: Uuid) -> Result<()> {
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
 pub async fn delete_all_for_user(
-    conn: &Client,
+    conn: &mut Client,
     app_id: Uuid,
     global_user_id: Uuid,
 ) -> Result<Vec<DeletedFamily>> {
-    let rows = conn
+    let tx = conn.transaction().await.map_err(|e| {
+        GatewayError::Db(format!("app_session_anchors delete_all_for_user begin: {e}"))
+    })?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    let rows = tx
         .query(
             "DELETE FROM zeroship.app_session_anchors \
              WHERE app_id = $1 AND global_user_id = $2 \
@@ -298,13 +356,17 @@ pub async fn delete_all_for_user(
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors delete_all_for_user: {e}")))?;
-    Ok(rows
+    let out = rows
         .iter()
         .map(|row| DeletedFamily {
             refresh_token_enc: row.get("refresh_token_enc"),
             client_id: row.get("client_id"),
         })
-        .collect())
+        .collect();
+    tx.commit().await.map_err(|e| {
+        GatewayError::Db(format!("app_session_anchors delete_all_for_user commit: {e}"))
+    })?;
+    Ok(out)
 }
 
 /// One deleted anchor's family ciphertext + its client_id (for the

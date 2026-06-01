@@ -146,7 +146,7 @@ pub async fn handle(
         },
         None => None,
     };
-    let conn = match pool.as_ref() {
+    let mut conn = match pool.as_ref() {
         Some(pool) => match pool.get().await {
             Ok(c) => Some(c),
             Err(e) => {
@@ -156,7 +156,11 @@ pub async fn handle(
         },
         None => None,
     };
-    if let Some(conn) = conn.as_deref() {
+    // `&mut Client`: the RLS-scoped `revoke_app_sessions_for_user` needs it (it
+    // opens a tenant-GUC transaction). The non-RLS `wrapper_revocation` +
+    // audit-insert calls below reborrow it immutably; every touch is sequential
+    // (no overlapping borrow) and no outbound HTTP runs between them.
+    if let Some(conn) = conn.as_deref_mut() {
         match token.sub.as_deref() {
             Some(sub) => {
                 let revoked = match revoke_scope {
@@ -184,7 +188,7 @@ pub async fn handle(
                                 sector,
                             );
                             if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(
-                                conn, &aud, &pws,
+                                &*conn, &aud, &pws,
                             )
                             .await
                             {
@@ -207,7 +211,7 @@ pub async fn handle(
                                  skipping token-family marker (sessions still revoked)"
                             );
                         }
-                        sessions::revoke_app_sessions_for_user(conn, app_id, sub)
+                        sessions::revoke_app_sessions_for_user(&mut *conn, app_id, sub)
                             .await
                             .unwrap_or_else(|e| {
                                 tracing::error!(
@@ -218,22 +222,25 @@ pub async fn handle(
                                 0
                             })
                     }
-                    // Shared `gateway` client (legacy all-apps path): revoke
-                    // across the subject's gateway sessions. There is NO
-                    // wrapper-token revocation to write here: every wrapper /
-                    // raw-Hydra access token is minted under a per-app `oac_…`
-                    // client and keyed on a per-app `pws_` (Batch A) — the
-                    // shared `gateway` client never owns a live wrapper family,
-                    // so the previous global subject-denylist write was a no-op
-                    // (zero readers) and has been removed (Batch A M2). Session
-                    // revocation IS the real effect of the legacy path.
-                    None => sessions::revoke_all_for_user(conn, sub).await.unwrap_or_else(|e| {
-                        tracing::error!(
-                            error = %e,
-                            "backchannel_logout: revoke_all_for_user failed"
+                    // No per-app client matched (the logout_token's aud is the
+                    // shared `gateway` client, not a per-app `oac_…`). Under RLS
+                    // (changeset 0025) the gateway connects as the non-bypass
+                    // `zeroship_gateway` role, so a single cross-tenant
+                    // `WHERE user_id=$1` over EVERY app is not expressible — and
+                    // the former `revoke_all_for_user` fan-out has been removed.
+                    // Every real BCL now arrives under a per-app client (each
+                    // per-app OAuth client registers its OWN
+                    // `backchannel_logout_uri` with its own `aud`), so this
+                    // branch is a logged no-op rather than a cross-tenant nuke.
+                    None => {
+                        tracing::warn!(
+                            sub = %sub,
+                            aud = %aud,
+                            "backchannel_logout: logout_token aud is not a per-app client; \
+                             no per-app scope to revoke under RLS (no rows touched)"
                         );
                         0
-                    }),
+                    }
                 };
                 tracing::info!(
                     sub = %sub,
@@ -242,7 +249,7 @@ pub async fn handle(
                     revoked,
                     "backchannel_logout: sessions revoked"
                 );
-                emit_revocation_audit(conn, &aud, sub, token.sid.as_deref(), &token.jti, revoked)
+                emit_revocation_audit(&*conn, &aud, sub, token.sid.as_deref(), &token.jti, revoked)
                     .await;
             }
             None => {

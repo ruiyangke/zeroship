@@ -530,9 +530,9 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
 
     let anchor_id = {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
-        let conn = pool.get().await.expect("conn");
+        let mut conn = pool.get().await.expect("conn");
         let a = anchors::create(
-            &conn,
+            &mut conn,
             &anchors::NewAnchor {
                 app_id: Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
                 client_id: CLIENT_ID,
@@ -581,8 +581,11 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     // (b) anchor row deleted (read_live now returns None).
     {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
-        let conn = pool.get().await.expect("conn");
-        let still = anchors::read_live(&conn, anchor_id).await.expect("read");
+        let mut conn = pool.get().await.expect("conn");
+        let still =
+            anchors::read_live(&mut conn, Uuid::parse_str(APP_UUID).expect("valid APP_UUID"), anchor_id)
+                .await
+                .expect("read");
         assert!(still.is_none(), "anchor row must be deleted after signout");
 
         // (a) family marker set for (client_id, pws_sub) — assert a token

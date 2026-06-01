@@ -58,7 +58,7 @@ async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
 
 #[compio::test]
 async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
-    let Some(client) = pg_or_skip().await else {
+    let Some(mut client) = pg_or_skip().await else {
         eprintln!("[identities_relay_test] skip (no AUTH_DB_URL)");
         return;
     };
@@ -80,7 +80,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
 
     // Active ⇒ the swap source returns the alias (apps see the alias, §7).
     assert_eq!(
-        identities::lookup_relay_email(&client, &client_id, user_id)
+        identities::lookup_relay_email(&mut client, &client_id, user_id)
             .await
             .expect("lookup active"),
         Some(relay_email.clone()),
@@ -98,7 +98,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
         .await
         .expect("revoke alias");
     assert_eq!(
-        identities::lookup_relay_email(&client, &client_id, user_id)
+        identities::lookup_relay_email(&mut client, &client_id, user_id)
             .await
             .expect("lookup revoked"),
         None,
@@ -110,7 +110,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
 
 #[compio::test]
 async fn lookup_relay_email_is_none_when_no_alias_minted() {
-    let Some(client) = pg_or_skip().await else {
+    let Some(mut client) = pg_or_skip().await else {
         eprintln!("[identities_relay_test] skip (no AUTH_DB_URL)");
         return;
     };
@@ -132,7 +132,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
 
     // No alias ⇒ None ⇒ the arm fails closed (empty email).
     assert_eq!(
-        identities::lookup_relay_email(&client, &client_id, user_id)
+        identities::lookup_relay_email(&mut client, &client_id, user_id)
             .await
             .expect("lookup no-alias"),
         None,

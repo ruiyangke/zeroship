@@ -1,19 +1,22 @@
-//! Live-PG smoke test for `gateway::sessions::revoke_all_for_user` —
-//! the revoke-side of the OIDC Back-Channel Logout 1.0 handler (Phase
-//! 7 U1.2).
+//! Live-PG smoke test for `gateway::sessions::revoke_app_sessions_for_user` —
+//! the revoke-side of the OIDC Back-Channel Logout 1.0 handler (Phase 7 U1.2),
+//! per-app under RLS (changeset 0025).
 //!
 //! Skipped silently when `AUTH_DB_URL` is unset (same convention as
 //! the rest of the gateway PG smoke tests, e.g. `sessions_test.rs`).
 //!
 //! Coverage:
 //!   - Seed two live sessions for the same user_id (different app_ids)
-//!     and one session for a different user_id.
-//!   - Call `revoke_all_for_user`. Returned count must equal 2 (the
-//!     two same-user rows).
-//!   - Subsequent `validate(...)` on the revoked rows must return None.
-//!   - The unrelated user's session must still validate.
-//!   - Calling `revoke_all_for_user` again returns 0 (idempotent — the
-//!     `revoked_at IS NULL` filter skips already-revoked rows).
+//!     and one session for a different user_id at the FIRST app.
+//!   - Call `revoke_app_sessions_for_user(app_a, user)`. The returned count
+//!     must equal 1 (only the target user's session AT app_a).
+//!   - The same user's session at app_b must STILL validate (per-app scope —
+//!     a per-app BCL never logs the user out of OTHER apps; the former
+//!     cross-tenant `revoke_all_for_user` was removed because the non-bypass
+//!     `zeroship_gateway` role cannot span tenants under RLS).
+//!   - The unrelated user's session at app_a must still validate.
+//!   - Calling it again returns 0 (idempotent — the `revoked_at IS NULL`
+//!     filter skips the already-revoked row).
 //!
 //! The handler-level path (verify + revoke) is exercised by the
 //! Phase 7 follow-up e2e against a real hydra; for the verifier-only
@@ -39,19 +42,19 @@ use zeroship_gateway::{
     enforce, idempotency,
     oidc_rp::OidcRp,
     proxy::HashRing,
-    sessions::{create, revoke_all_for_user, validate, NewSession},
+    sessions::{create, revoke_app_sessions_for_user, validate, NewSession},
     sync::RouteCache,
     GateConfig, GateState,
 };
 
 #[compio::test]
-async fn revoke_all_for_user_revokes_only_the_target_user() {
+async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skipping (no AUTH_DB_URL)");
         return;
     };
 
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    let (mut client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -59,16 +62,16 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     })
     .detach();
 
-
-    // Two sessions for the same user at two different apps — the BCL
-    // handler revokes ACROSS apps for the same sub.
+    // Two sessions for the same user at two different apps. The per-app BCL
+    // revokes ONLY the target app's session — never the other app's (RLS
+    // tenant scope; the former cross-tenant `revoke_all_for_user` was removed).
     let target_user_id = insert_user(&client, "gateway-bcl-target").await;
     let target_user = target_user_id.to_string();
     let app_a = Uuid::new_v4();
     let app_b = Uuid::new_v4();
 
     let s_a = create(
-        &client,
+        &mut client,
         &NewSession {
             user_id: &target_user,
             app_id: app_a,
@@ -85,7 +88,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     .expect("create s_a");
 
     let s_b = create(
-        &client,
+        &mut client,
         &NewSession {
             user_id: &target_user,
             app_id: app_b,
@@ -101,11 +104,11 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     .await
     .expect("create s_b");
 
-    // One session for an unrelated user — must NOT be touched.
+    // One session for an unrelated user at app_a — must NOT be touched.
     let other_user_id = insert_user(&client, "gateway-bcl-other").await;
     let other_user = other_user_id.to_string();
     let s_other = create(
-        &client,
+        &mut client,
         &NewSession {
             user_id: &other_user,
             app_id: app_a,
@@ -122,54 +125,56 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     .expect("create s_other");
 
     // Sanity: all three validate before we revoke.
-    assert!(validate(&client, s_a.id, app_a)
+    assert!(validate(&mut client, s_a.id, app_a)
         .await
         .expect("pre validate s_a")
         .is_some());
-    assert!(validate(&client, s_b.id, app_b)
+    assert!(validate(&mut client, s_b.id, app_b)
         .await
         .expect("pre validate s_b")
         .is_some());
-    assert!(validate(&client, s_other.id, app_a)
+    assert!(validate(&mut client, s_other.id, app_a)
         .await
         .expect("pre validate s_other")
         .is_some());
 
-    // Revoke everything for the target user.
-    let count = revoke_all_for_user(&client, &target_user)
+    // Revoke the target user's sessions AT app_a only.
+    let count = revoke_app_sessions_for_user(&mut client, app_a, &target_user)
         .await
-        .expect("revoke_all_for_user");
-    assert_eq!(count, 2, "expected 2 sessions revoked, got {count}");
+        .expect("revoke_app_sessions_for_user");
+    assert_eq!(count, 1, "expected exactly 1 session revoked (target user @ app_a), got {count}");
 
-    // Both target sessions must now fail validation.
+    // The target session at app_a must now fail validation.
     assert!(
-        validate(&client, s_a.id, app_a)
+        validate(&mut client, s_a.id, app_a)
             .await
             .expect("post validate s_a")
             .is_none(),
-        "s_a must be revoked"
-    );
-    assert!(
-        validate(&client, s_b.id, app_b)
-            .await
-            .expect("post validate s_b")
-            .is_none(),
-        "s_b must be revoked"
+        "s_a (target user @ app_a) must be revoked"
     );
 
-    // The unrelated user's session must still validate.
+    // The SAME user's session at app_b must STILL validate (per-app scope).
     assert!(
-        validate(&client, s_other.id, app_a)
+        validate(&mut client, s_b.id, app_b)
+            .await
+            .expect("post validate s_b")
+            .is_some(),
+        "s_b (same user @ app_b) must NOT be revoked by a per-app BCL at app_a"
+    );
+
+    // The unrelated user's session at app_a must still validate.
+    assert!(
+        validate(&mut client, s_other.id, app_a)
             .await
             .expect("post validate s_other")
             .is_some(),
         "unrelated user's session must NOT be revoked"
     );
 
-    // Idempotent — running revoke_all_for_user again touches no rows.
-    let again = revoke_all_for_user(&client, &target_user)
+    // Idempotent — running it again touches no rows.
+    let again = revoke_app_sessions_for_user(&mut client, app_a, &target_user)
         .await
-        .expect("revoke_all_for_user idempotent");
+        .expect("revoke_app_sessions_for_user idempotent");
     assert_eq!(again, 0, "second revoke must touch 0 rows (filter on revoked_at IS NULL)");
 
     // Cleanup (best effort).
@@ -396,10 +401,11 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     })
     .detach();
     // `db` (single client) drives the test's direct seed/assert/cleanup
-    // helpers (all `&Client`); `db_cfg` backs the handler's `GateState`,
-    // which now holds a `DbConfig` (the handler builds its own per-thread
-    // pool from it). Both point at the same rows.
-    let db = Arc::new(client);
+    // helpers; the RLS-scoped store fns (`create`/`validate`) need `&mut Client`,
+    // so it is bound `mut`. `db_cfg` backs the handler's `GateState`, which now
+    // holds a `DbConfig` (the handler builds its own per-thread pool from it).
+    // Both point at the same rows.
+    let mut db = client;
     let db_cfg = DbConfig::new(dsn.clone(), 4);
 
     let key = make_key();
@@ -419,8 +425,14 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let target_user = insert_user(&db, "gateway-bcl-handler-target").await;
     let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
+    // Per-app BCL (the only revoking path under RLS): register a route whose
+    // `oauth_client_id` matches the logout_token `aud`, so the handler resolves
+    // the per-app revoke scope and revokes THIS app's session for the subject.
+    let app_name = format!("bcl-replay-{}", Uuid::new_v4().simple());
+    let oauth_client_id = format!("oac_bclreplay_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{app_name}.zeroship.localhost");
     let session = create(
-        &db,
+        &mut db,
         &NewSession {
             user_id: &target_user_string,
             app_id,
@@ -437,8 +449,17 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     .expect("create session");
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
-    let token = sign_logout_token(&key, &issuer, &target_user_string, &jti);
-    let state = build_handler_state(db_cfg.clone(), &auth_base);
+    let token =
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+    let state = build_handler_state_with_route(
+        db_cfg.clone(),
+        &auth_base,
+        app_id,
+        &app_name,
+        &oauth_client_id,
+        &sector,
+        zeroship_core::auth::derive_pairwise_salt(b"bcl-replay-stash"),
+    );
     let app = test::init_service(
         web::App::new()
             .state(state.clone())
@@ -457,7 +478,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let first_resp = test::call_service(&app, first).await;
     assert_eq!(first_resp.status(), StatusCode::OK);
     assert!(
-        validate(&db, session.id, app_id)
+        validate(&mut db, session.id, app_id)
             .await
             .expect("validate after first logout")
             .is_none(),
@@ -468,11 +489,10 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         1,
         "first logout_token must emit one revocation audit row"
     );
-    // Batch A M2: the shared-`gateway`-client BCL no longer writes any
-    // wrapper-token denylist — its REAL effect is the session revocation
-    // asserted above (the `validate(...) is_none()` check). Wrapper / raw-Hydra
-    // access tokens are per-app `pws_`-keyed and were never owned by the shared
-    // client, so there is nothing else to revoke here.
+    // The per-app BCL's REAL effects are the session revocation asserted above
+    // (the `validate(...) is_none()` check) plus the `(client_id, pws_)`
+    // token-family marker (covered by `per_app_bcl_writes_token_family_marker`).
+    // Here we focus on replay-idempotency of the audit row.
 
     let replay = test::TestRequest::post()
         .uri("/oidc/backchannel-logout")
@@ -598,7 +618,7 @@ async fn per_app_bcl_writes_token_family_marker() {
         let _ = connection.run().await;
     })
     .detach();
-    let db = Arc::new(client);
+    let mut db = client;
     let db_cfg = DbConfig::new(dsn.clone(), 4);
 
     let key = make_key();
@@ -625,7 +645,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     // Keyed by the app's stable UUID — the SAME id the route is registered
     // under below, so the handler's UUID-keyed per-app revoke matches it.
     create(
-        &db,
+        &mut db,
         &NewSession {
             user_id: &target_user_string,
             app_id,
@@ -655,7 +675,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     // Pre: no marker ⇒ the live token is NOT family-revoked.
     assert!(
         !zeroship_core::wrapper_revocation::is_family_revoked_since(
-            db.as_ref(),
+            &db,
             &oauth_client_id,
             &pws,
             live_token_iat,
@@ -694,7 +714,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     // by the EXACT reader the auth arms run.
     assert!(
         zeroship_core::wrapper_revocation::is_family_revoked_since(
-            db.as_ref(),
+            &db,
             &oauth_client_id,
             &pws,
             live_token_iat,
@@ -748,7 +768,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         let _ = connection.run().await;
     })
     .detach();
-    let db = Arc::new(client);
+    let mut db = client;
     let db_cfg = DbConfig::new(dsn.clone(), 4);
 
     let key = make_key();
@@ -778,7 +798,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     let oauth_client_id = format!("oac_noncanonbcl_{}", Uuid::new_v4().simple());
     let sector = format!("https://{app_name}.zeroship.localhost");
     create(
-        &db,
+        &mut db,
         &NewSession {
             user_id: &canonical_sub,
             app_id,
@@ -809,7 +829,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
 
     assert!(
         !zeroship_core::wrapper_revocation::is_family_revoked_since(
-            db.as_ref(),
+            &db,
             &oauth_client_id,
             &pws_canonical,
             live_token_iat,
@@ -848,7 +868,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     // the live token is rejected. Pre-fix this assertion would FAIL.
     assert!(
         zeroship_core::wrapper_revocation::is_family_revoked_since(
-            db.as_ref(),
+            &db,
             &oauth_client_id,
             &pws_canonical,
             live_token_iat,

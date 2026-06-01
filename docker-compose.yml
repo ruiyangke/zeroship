@@ -104,7 +104,7 @@ services:
       zeroship-control
         --port 9090
         --bind 0.0.0.0
-        --db postgres://postgres:zeroship@postgres:5432/zeroship
+        --db postgres://zeroship_control:zeroship_control@postgres:5432/zeroship
         --blob-store /data/bundles
         --control-key platform-key
         --master-key master-key
@@ -187,7 +187,7 @@ services:
           --auth-ui-url http://auth.zeroship.localhost \
           --hydra-public-url http://auth.zeroship.localhost \
           --gateway-public-url http://api.zeroship.localhost \
-          --db postgres://postgres:zeroship@postgres:5432/zeroship \
+          --db postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship \
           --dev-insecure
     volumes:
       # Same content-addressed blob store control writes to (asset proxy).
@@ -239,6 +239,15 @@ services:
         --control http://control:9090
         --control-key platform-key
         --blob-store /data/bundles
+        # NOTE: the worker's --db is plugin-db's PROVISIONING connection, not a
+        # constrained system-table role. plugin-db's register_model creates
+        # per-app PG roles + schemas (CREATEROLE/CREATEDB) and manages the WAL
+        # replication slot, so this connection MUST stay a privileged principal
+        # (the postgres superuser here in dev). The `zeroship_worker` role from
+        # changeset 0025 exists (and owns ZERO zeroship.* system-table grants),
+        # but it is NOT the worker's login role — the worker never touches the
+        # system tables; its per-app tenant access is gated by plugin-db's own
+        # `SET LOCAL ROLE <per-app role>` mechanism, a separate trust boundary.
         --db postgres://postgres:zeroship@postgres:5432/zeroship
         --kv-url redis://redis:6379
         --storage-root /data/app-storage
@@ -305,7 +314,7 @@ services:
     command: >
       zeroship-auth
         --addr 0.0.0.0:9092
-        --db-url postgres://postgres:zeroship@postgres:5432/zeroship
+        --db-url postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship
         --dev-insecure
         --hydra-public-url http://auth.zeroship.localhost
         --hydra-admin-url http://hydra:4445
@@ -394,6 +403,17 @@ services:
       SANDBOX_AUTO_PULL: "false"
       SANDBOX_IDLE_TIMEOUT_SECS: "1800"
       SANDBOX_MAX_LIFETIME_SECS: "28800"
+      # Pg-backed non-secret sandbox state (P13 role split, changesets
+      # 0011 + 0026). Each handle connects AS its least-privilege role:
+      #   - SANDBOX_DATABASE_URL        → sandbox_app   (runtime DML)
+      #   - SANDBOX_DATABASE_URL_AUDIT  → sandbox_audit (INSERT-only events)
+      #   - SANDBOX_DATABASE_URL_GDPR   → sandbox_gdpr  (scoped DELETE)
+      # The sandbox tables live in the shared `zeroship` schema, owned by the
+      # Liquibase `migrate` service; the sandbox only verifies connectivity at
+      # boot. Setting SANDBOX_DATABASE_URL flips pg integration ON.
+      SANDBOX_DATABASE_URL: postgres://sandbox_app:sandbox_app@postgres:5432/zeroship
+      SANDBOX_DATABASE_URL_AUDIT: postgres://sandbox_audit:sandbox_audit@postgres:5432/zeroship
+      SANDBOX_DATABASE_URL_GDPR: postgres://sandbox_gdpr:sandbox_gdpr@postgres:5432/zeroship
     ports:
       - "9091:9091"
     volumes:
@@ -404,6 +424,14 @@ services:
       - zeroship-sandbox-net
     security_opt:
       - seccomp:unconfined
+    depends_on:
+      # pg integration is now ON (SANDBOX_DATABASE_URL set), so wait for the
+      # schema + roles to exist (postgres healthy + the one-shot migrate done),
+      # the same way control/auth/gateway/worker do.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
   # The AI app-builder IS the console now: a regular zeroship app built to a

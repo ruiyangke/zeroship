@@ -1408,7 +1408,7 @@ async fn handle_auth_callback(
             return render_callback_error(state.config.insecure_dev, "session create failed");
         }
     };
-    let conn = match pool.get().await {
+    let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");
@@ -1416,7 +1416,7 @@ async fn handle_auth_callback(
         }
     };
     let session = match crate::sessions::create(
-        &conn,
+        &mut conn,
         &crate::sessions::NewSession {
             user_id: &claims.sub,
             app_id: app_uuid,

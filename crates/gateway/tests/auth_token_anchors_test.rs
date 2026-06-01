@@ -1259,7 +1259,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     // Create an anchor directly through the REAL store and assert
     // abs_expires_at ≈ created_at + 30d (set once at create).
     let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-    let conn = pool.get().await.expect("conn");
+    let mut conn = pool.get().await.expect("conn");
     let refresh_enc = zeroship_core::crypto::encrypt(
         &zeroship_core::crypto::derive_key("k"),
         b"aad",
@@ -1267,7 +1267,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     )
     .unwrap();
     let anchor = anchors::create(
-        &conn,
+        &mut conn,
         &anchors::NewAnchor {
             app_id: Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
             client_id: CLIENT_ID,

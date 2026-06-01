@@ -27,6 +27,7 @@ use compio_postgres::Client;
 use uuid::Uuid;
 
 use crate::error::{GatewayError, Result};
+use crate::rls;
 
 /// Idempotently record the pairwise mapping for `(app_client_id,
 /// global_user_id)`.
@@ -49,12 +50,17 @@ use crate::error::{GatewayError, Result};
 /// log-and-continue — the mapping is a reverse-lookup cache, not part of
 /// the per-request trust decision.
 pub async fn upsert(
-    conn: &Client,
+    conn: &mut Client,
     app_client_id: &str,
     global_user_id: Uuid,
     pairwise_sub: &str,
 ) -> Result<()> {
-    conn.execute(
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities upsert begin: {e}")))?;
+    rls::set_tenant_client(&tx, app_client_id).await?;
+    tx.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3) \
@@ -65,6 +71,9 @@ pub async fn upsert(
     )
     .await
     .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities upsert commit: {e}")))?;
     Ok(())
 }
 
@@ -75,11 +84,16 @@ pub async fn upsert(
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
 pub async fn lookup_pairwise_sub(
-    conn: &Client,
+    conn: &mut Client,
     app_client_id: &str,
     global_user_id: Uuid,
 ) -> Result<Option<String>> {
-    let rows = conn
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities lookup begin: {e}")))?;
+    rls::set_tenant_client(&tx, app_client_id).await?;
+    let rows = tx
         .query(
             "SELECT pairwise_sub FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
@@ -87,7 +101,11 @@ pub async fn lookup_pairwise_sub(
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities lookup: {e}")))?;
-    Ok(rows.first().map(|row| row.get("pairwise_sub")))
+    let sub = rows.first().map(|row| row.get("pairwise_sub"));
+    tx.commit()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities lookup commit: {e}")))?;
+    Ok(sub)
 }
 
 /// Read the ACTIVE relay alias (`relay_email`) for `(app_client_id,
@@ -107,11 +125,16 @@ pub async fn lookup_pairwise_sub(
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
 pub async fn lookup_relay_email(
-    conn: &Client,
+    conn: &mut Client,
     app_client_id: &str,
     global_user_id: Uuid,
 ) -> Result<Option<String>> {
-    let rows = conn
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup begin: {e}")))?;
+    rls::set_tenant_client(&tx, app_client_id).await?;
+    let rows = tx
         .query(
             "SELECT relay_email FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2 \
@@ -121,6 +144,10 @@ pub async fn lookup_relay_email(
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup: {e}")))?;
-    Ok(rows.first().and_then(|row| row.get("relay_email")))
+    let email = rows.first().and_then(|row| row.get("relay_email"));
+    tx.commit()
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup commit: {e}")))?;
+    Ok(email)
 }
 

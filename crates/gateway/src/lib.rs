@@ -26,6 +26,7 @@ pub mod identities;
 pub mod idempotency;
 pub mod oidc_rp;
 pub mod proxy;
+pub mod rls;
 pub mod router;
 pub mod session_token;
 pub mod sessions;
