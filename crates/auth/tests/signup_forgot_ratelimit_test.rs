@@ -160,7 +160,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     let like = format!("{prefix}-%");
     let created: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.users WHERE email::text LIKE $1",
+            "SELECT COUNT(*) FROM zeroship.users WHERE email::text LIKE $1",
             &[&like],
         )
         .await
@@ -169,12 +169,12 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     assert_eq!(created, 10, "11th signup must be throttled before insert");
 
     pg.execute(
-        "DELETE FROM auth.magic_links WHERE email::text LIKE $1",
+        "DELETE FROM zeroship.magic_links WHERE email::text LIKE $1",
         &[&like],
     )
     .await
     .ok();
-    pg.execute("DELETE FROM auth.users WHERE email::text LIKE $1", &[&like])
+    pg.execute("DELETE FROM zeroship.users WHERE email::text LIKE $1", &[&like])
         .await
         .ok();
 }
@@ -189,7 +189,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
 
     client
         .execute(
-            "ALTER TABLE auth.users \
+            "ALTER TABLE zeroship.users \
              DROP CONSTRAINT IF EXISTS auth_users_signup_m3_name_check",
             &[],
         )
@@ -197,7 +197,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
         .expect("drop stale test constraint");
     client
         .execute(
-            "ALTER TABLE auth.users \
+            "ALTER TABLE zeroship.users \
              ADD CONSTRAINT auth_users_signup_m3_name_check CHECK (name <> 'M3_FAIL')",
             &[],
         )
@@ -265,7 +265,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
 
     let created: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.users WHERE email = $1::citext",
+            "SELECT COUNT(*) FROM zeroship.users WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -274,14 +274,14 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
     assert_eq!(created, 0, "failed signup must not create user");
 
     pg.execute(
-        "ALTER TABLE auth.users \
+        "ALTER TABLE zeroship.users \
          DROP CONSTRAINT IF EXISTS auth_users_signup_m3_name_check",
         &[],
     )
     .await
     .ok();
     pg.execute(
-        "DELETE FROM auth.audit_events \
+        "DELETE FROM zeroship.audit_events \
          WHERE event_type = 'signup_failed' \
            AND detail->>'reason' = 'users_create_failed'",
         &[],
@@ -358,15 +358,15 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
     );
 
     pg.execute(
-        "DELETE FROM auth.magic_links WHERE email = $1::citext",
+        "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
         &[&email],
     )
     .await
     .ok();
-    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
         .await
         .ok();
-    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

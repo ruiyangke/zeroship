@@ -7,12 +7,12 @@
 // converts the Response back to ServerResponse — paying the same allocation
 // cost zeroship pays in default.fetch.
 //
-// Architectural choice: RPC paths (POST /_zs/v1/<id>) bypass the WHATWG
+// Architectural choice: RPC paths (POST /__zeroship/v1/<id>) bypass the WHATWG
 // wrap and dispatch through the legacy node:http body-collect path, the
 // same way zeroship's runtime calls default.rpc directly without ever
 // constructing a Request. This keeps the comparison apples-to-apples:
 //   - WHATWG wrap pays Request/Response/Headers cost  → /hello, /wjson, /wping
-//   - RPC fast path skips Request/Response             → /_zs/v1/<id>
+//   - RPC fast path skips Request/Response             → /__zeroship/v1/<id>
 //
 // Globals: Node 18+ ships built-in Request/Response/Headers (from undici).
 // Verified on Node 22.22.2.
@@ -162,7 +162,7 @@ async function writeResponse(response, res) {
 
 const server = http.createServer((req, res) => {
     // Health check — kept identical to node_server.js so the runner
-    // probe (POST /_zs/v1/ping) is the canonical readiness signal but
+    // probe (POST /__zeroship/v1/ping) is the canonical readiness signal but
     // /health stays available.
     if (req.method === 'GET' && req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -170,11 +170,11 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // RPC fast path — POST /_zs/v1/<id>, superjson `{ json }` envelope.
+    // RPC fast path — POST /__zeroship/v1/<id>, superjson `{ json }` envelope.
     // Bypasses the WHATWG wrap (mirrors zeroship's default.rpc kernel
     // entry which also bypasses Request construction).
-    if (req.method === 'POST' && req.url.startsWith('/_zs/v1/')) {
-        const method = req.url.slice('/_zs/v1/'.length);
+    if (req.method === 'POST' && req.url.startsWith('/__zeroship/v1/')) {
+        const method = req.url.slice('/__zeroship/v1/'.length);
         let body = '';
         req.on('data', (chunk) => (body += chunk));
         req.on('end', async () => {

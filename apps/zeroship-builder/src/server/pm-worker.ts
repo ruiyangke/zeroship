@@ -32,7 +32,7 @@
 // re-exported from `server.ts` deliberately.
 //
 // Wire convention (single-input object, per the rest of `server/`):
-//   POST /_zs/v1/pm.digest
+//   POST /__zeroship/v1/pm.digest
 //     body: { json: { appId: string } }
 //     response: { summary: string, recommendations: PMRecommendationItem[] }
 
@@ -41,10 +41,10 @@ import { z } from "zod";
 
 import { PM_PROMPT } from "./internal/prompts";
 import { listIssues, getQualityScores } from "./agents";
-// `getApp` lives in apps.ts (proxied to the control plane). Keep the
-// wire optional — the digest still works without deploy info, so a
-// catch() below lets a control-plane outage degrade gracefully.
-import { getApp as getAppRecord } from "./apps";
+// `getProject` is the KV-backed project record (the console is a pure
+// creator app — no control plane). Keep the wire optional: the digest
+// still works without it, so a catch() below degrades gracefully.
+import { getProject as getProjectRecord } from "./projects";
 
 // ─── recommendation shape ────────────────────────────────────────
 //
@@ -118,14 +118,13 @@ export const pmDigest = action(async (input: PMDigestInput): Promise<PMDigest> =
     "@langchain/core/messages"
   );
 
-  // Gather context. Each lookup is best-effort — if a stub throws
-  // (e.g., control plane unreachable for getApp), we substitute a
-  // placeholder line and keep going. The model is told what's missing
-  // so its recommendation set reflects the gaps.
+  // Gather context. Each lookup is best-effort — if a stub throws we
+  // substitute a placeholder line and keep going. The model is told
+  // what's missing so its recommendation set reflects the gaps.
   const [issuesResult, scores, appRecord] = await Promise.all([
     Promise.resolve().then(() => listIssues({ appId: input.appId })).catch(() => null),
     Promise.resolve().then(() => getQualityScores({ appId: input.appId })).catch(() => null),
-    Promise.resolve().then(() => getAppRecord(input.appId)).catch(() => null),
+    Promise.resolve().then(() => getProjectRecord(input.appId)).catch(() => null),
   ]);
 
   const contextText = renderProjectContext({
@@ -162,7 +161,7 @@ function renderProjectContext(args: {
   appId: string;
   issuesResult: { issues: Array<{ id: string; title: string; status: string; source: string; assignee: string | null; updated_at: string }> } | null;
   scores: { overall: string; last_run_at: string | null; dimensions: Array<{ key: string; label: string; grade: string; rationale: string }> } | null;
-  appRecord: { id: string; name: string; deploy_hash: string | null; updated_at: string } | null;
+  appRecord: { id: string; name: string; updated_at: string } | null;
 }): string {
   const { appId, issuesResult, scores, appRecord } = args;
 
@@ -170,11 +169,9 @@ function renderProjectContext(args: {
   lines.push(`Project id: ${appId}`);
   if (appRecord) {
     lines.push(`Project name: ${appRecord.name}`);
-    lines.push(
-      `Last deploy: ${appRecord.deploy_hash ? appRecord.deploy_hash.slice(0, 12) : "<never deployed>"} (record updated ${appRecord.updated_at})`,
-    );
+    lines.push(`Project record updated ${appRecord.updated_at}`);
   } else {
-    lines.push("Project record: <unavailable — control plane not reachable>");
+    lines.push("Project record: <unavailable>");
   }
 
   lines.push("");

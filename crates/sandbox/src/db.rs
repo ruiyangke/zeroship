@@ -1,22 +1,15 @@
 //! Pg-backed non-secret state for the sandbox controller.
 //!
 //! See `docs/proposals/sandbox-pg-state.md` for the design. This
-//! module owns the schema, migration runner, and [`Database`]
-//! handle. The live controller currently uses only a subset of that
-//! surface:
+//! module owns connection configuration, the [`Database`] handle,
+//! per-role pools, and sandbox DML. Liquibase owns the schema in the
+//! unified `zeroship` schema; controller boot only verifies database
+//! connectivity via [`Database::ping`].
 //!
 //! - [`Database::from_env`] parses env, opens the pool, validates HA
 //!   env vars, and rejects unsafe lease settings
 //!   (`lease_ttl >= 4 * heartbeat`).
-//! - [`Database::ensure_schema_at_version`] is the boot gate — the
-//!   designated migrator (`SANDBOX_PG_RUN_MIGRATIONS=1`) applies
-//!   pending migrations forward-only; everyone else polls
-//!   `MAX(version)` until the schema reaches `target`.
-//! - [`Database::run_pending_migrations`] is the migrator-side
-//!   forward-only apply loop, race-tolerant against simultaneous
-//!   migrators via the PRIMARY KEY on `schema_migrations.version`.
-//! - [`Database::ping`] / [`Database::current_schema_version`] are
-//!   for tests and `/readyz`.
+//! - [`Database::ping`] is the boot and `/readyz` connectivity check.
 //!
 //! ## What this module deliberately does NOT do
 //!
@@ -25,14 +18,13 @@
 //!   runtime path consumes them yet.
 //! - No worker queue. The `flume` dep is declared in `Cargo.toml`
 //!   for a future worker-pool follow-up.
-//! - No advisory locks. ANYWHERE. Concurrency is enforced by the
-//!   designated-migrator pattern + UNIQUE-constraint race-tolerance
-//!   on `sandbox.schema_migrations.version`.
+//! - No schema migration. The compose `migrate` service /
+//!   `ops/db-migrate.sh` applies the Liquibase changelog before the
+//!   controller starts.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use compio_postgres::{Config, Pool, PoolConfig};
 use uuid::Uuid;
@@ -63,6 +55,12 @@ use uuid::Uuid;
 thread_local! {
     static POOL_APP_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
     static POOL_AUDIT_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
+    /// DDL/migrator role pool. Cached like the app/audit pools — the
+    /// only consumer today is the `sandbox_events` partition
+    /// provisioner sweep (`sweep::ensure_event_partitions`), which runs
+    /// on a long cadence but reuses the connection across the
+    /// provision + retention DDL within a single tick.
+    static POOL_ADMIN_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
 }
 
 /// Try a thread-local cache read. Returns `Some(Rc<Pool>)` if the
@@ -106,112 +104,15 @@ fn install_pool(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Embedded migrations
+// Schema ownership
 // ────────────────────────────────────────────────────────────────────
 //
-// Migration files are read at compile time via `include_str!`. Each
-// file is a single transactional migration (the runner wraps it in
-// BEGIN/COMMIT) plus an idempotent guard around every CREATE so a
-// loser of a two-migrator race can replay safely.
-
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        description: "initial schema (hosts, sandboxes, shares, events, deleted_sandboxes)",
-        sql: include_str!("../migrations/0001_initial.sql"),
-    },
-    Migration {
-        version: 2,
-        description: "sandboxes.status CHECK accepts 'unreachable'",
-        sql: include_str!("../migrations/0002_sandbox_status_unreachable.sql"),
-    },
-    Migration {
-        version: 3,
-        description: "shares.token_id CHECK accepts base64url alphabet",
-        sql: include_str!("../migrations/0003_share_token_id_alphabet.sql"),
-    },
-    Migration {
-        version: 4,
-        description: "role-grant tightening (sandbox_app cannot DELETE from events)",
-        sql: include_str!("../migrations/0004_role_split_phase3.sql"),
-    },
-    Migration {
-        version: 5,
-        description: "events.sandbox_id NULLable (GDPR audit row writes NULL)",
-        sql: include_str!("../migrations/0005_events_sandbox_id_nullable.sql"),
-    },
-    Migration {
-        version: 6,
-        description: "sandboxes.status CHECK accepts snapshot lifecycle values",
-        sql: include_str!("../migrations/0006_sandbox_status_snapshot.sql"),
-    },
-    Migration {
-        version: 7,
-        description: "sandboxes columns for snapshot artifact + lease + idle-sweep",
-        sql: include_str!("../migrations/0007_sandbox_snapshot_columns.sql"),
-    },
-    Migration {
-        version: 8,
-        description: "hosts.region CHECK accepts GCP-zone-suffixed shapes",
-        sql: include_str!("../migrations/0008_relax_hosts_region_regex.sql"),
-    },
-    Migration {
-        version: 9,
-        description: "wake_jobs table (C-7-LT-PR1 async wake-response state machine)",
-        sql: include_str!("../migrations/0009_wake_jobs.sql"),
-    },
-    Migration {
-        version: 10,
-        description: "wake_jobs hardening: revoke audit SELECT, lessee_updated_at index, agent_url CHECK (R16-S1 + R17-A2 + R16-S3)",
-        sql: include_str!("../migrations/0010_wake_jobs_hardening.sql"),
-    },
-    Migration {
-        version: 11,
-        description: "wake_jobs UNIQUE INDEX on sandbox_id WHERE non-terminal — TOCTOU close-off on wake-POST (R17-C2 / GATE-C2)",
-        sql: include_str!("../migrations/0011_wake_jobs_unique.sql"),
-    },
-    Migration {
-        version: 12,
-        description: "wake_jobs error_code CHECK accepts `wake_worker_aborted` for the takeover sweep (R19-C1)",
-        sql: include_str!("../migrations/0012_wake_jobs_aborted_code.sql"),
-    },
-    Migration {
-        version: 13,
-        description: "wake_jobs error_code CHECK accepts `staging_path_missing` for the controller-side preflight (R23-API1 / R25-S1 / R25-I1 / R25-I2)",
-        sql: include_str!("../migrations/0013_wake_jobs_staging_path_missing_code.sql"),
-    },
-    Migration {
-        version: 14,
-        description: "wake_jobs error_code CHECK accepts `agent_version_mismatch` for the restore-path agent /version fingerprint check (T5)",
-        sql: include_str!("../migrations/0014_wake_jobs_agent_version_mismatch_code.sql"),
-    },
-];
-
-/// The latest migration version this binary was built against. Boot
-/// path passes this as `target_version` to
-/// [`Database::ensure_schema_at_version`]; non-migrator controllers
-/// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 14;
-
-#[derive(Debug, Clone, Copy)]
-struct Migration {
-    version: i64,
-    description: &'static str,
-    sql: &'static str,
-}
-
-impl Migration {
-    /// SHA-256 of the SQL body, hex-encoded. Recorded in
-    /// `sandbox.schema_migrations.sha256` so operators can detect a
-    /// migration whose source-file content drifted from what was
-    /// applied historically.
-    fn sha256_hex(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(self.sql.as_bytes());
-        hex::encode(h.finalize())
-    }
-}
+// The controller no longer carries an embedded migration runner. The
+// unified `zeroship` schema (sandbox tables included) is owned by
+// Liquibase — the compose `migrate` service / `ops/db-migrate.sh`
+// applies `db/changelog/` before the controller starts. Boot only
+// verifies connectivity ([`Database::ping`]); it assumes the schema
+// already exists.
 
 // ────────────────────────────────────────────────────────────────────
 // Public configuration / errors
@@ -234,7 +135,7 @@ pub struct DbConfig {
     /// allow-list or `sslmode=verify-full` is still separate work.
     pub dsn: String,
     /// Audit-role DSN. Connects as `sandbox_audit` and is used
-    /// exclusively for `INSERT INTO sandbox.events`. Falls back to
+    /// exclusively for `INSERT INTO zeroship.sandbox_events`. Falls back to
     /// `dsn` (the app role) when `SANDBOX_DATABASE_URL_AUDIT` is unset
     /// — the dev-convenience shape per § 13.2 last paragraph.
     pub dsn_audit: String,
@@ -243,20 +144,23 @@ pub struct DbConfig {
     /// request time, not at boot. Falls back to `dsn` when
     /// `SANDBOX_DATABASE_URL_GDPR` is unset.
     pub dsn_gdpr: String,
+    /// DDL / migrator-role DSN. Connects as the schema-owning role
+    /// (`sandbox_admin`-equivalent — the role granted `CREATE, USAGE
+    /// ON SCHEMA zeroship` in 0011) and is used exclusively to run the
+    /// `sandbox_events` partition DDL (`sweep::ensure_event_partitions`):
+    /// `CREATE TABLE ... PARTITION OF` ahead of time and `DROP TABLE`
+    /// past the retention horizon. Falls back to `dsn` (the app role)
+    /// when `SANDBOX_DATABASE_URL_ADMIN` is unset — the single-role dev
+    /// convenience (CI runs as `postgres`, which owns everything),
+    /// matching the `dsn_audit` / `dsn_gdpr` fallback shape. In
+    /// production the operator sets it to the `sandbox_admin` DSN so
+    /// the runtime app role never holds DDL privilege.
+    pub dsn_admin: String,
     /// Stable controller identity (`hst_<base62>`-derived UUID).
     /// Generated once and persisted at `<state_dir>/host_id` so the
     /// identity survives restarts; an operator who wants a fresh
     /// identity deletes the file. (§ 10.1)
     pub host_id: Uuid,
-    /// `=1` from `SANDBOX_PG_RUN_MIGRATIONS`. Tags this process as
-    /// the deployment's designated migrator.
-    pub run_migrations: bool,
-    /// Maximum seconds a non-migrator waits for the schema to reach
-    /// `target_version`. From `SANDBOX_PG_BOOT_TIMEOUT_SECS`,
-    /// default 60. The proposal used 300 seconds; this code keeps a
-    /// tighter fail-fast default for tests and local development, and
-    /// operators can raise it in production.
-    pub boot_timeout_secs: u64,
     /// Pool max-size. From `SANDBOX_PG_POOL_MAX`, default 16.
     pub pool_max: usize,
 }
@@ -267,9 +171,8 @@ impl std::fmt::Debug for DbConfig {
             .field("dsn", &redact_dsn_for_debug(&self.dsn))
             .field("dsn_audit", &redact_dsn_for_debug(&self.dsn_audit))
             .field("dsn_gdpr", &redact_dsn_for_debug(&self.dsn_gdpr))
+            .field("dsn_admin", &redact_dsn_for_debug(&self.dsn_admin))
             .field("host_id", &self.host_id)
-            .field("run_migrations", &self.run_migrations)
-            .field("boot_timeout_secs", &self.boot_timeout_secs)
             .field("pool_max", &self.pool_max)
             .finish()
     }
@@ -319,30 +222,12 @@ fn redact_dsn_for_debug(dsn: &str) -> String {
     redacted
 }
 
-/// Errors surfaced by [`Database`] at boot or during migration
-/// apply.
+/// Errors surfaced by [`Database`] at boot or during DML.
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
     /// Underlying pg driver failure (connect / TLS / auth / query).
     #[error("pg: {0}")]
     Pg(#[from] compio_postgres::Error),
-    /// Non-migrator boot path observed `MAX(version) < target_version`
-    /// at the moment we last polled. Distinct from `BootTimeout`:
-    /// `SchemaTooOld` is the snapshot diagnosis, `BootTimeout` is
-    /// the give-up after waiting.
-    #[error("schema version {observed} below required {required}")]
-    SchemaTooOld { observed: i64, required: i64 },
-    /// Non-migrator boot path waited up to `boot_timeout_secs` and
-    /// the schema never reached `target_version`. Operator must
-    /// tag a designated migrator (`SANDBOX_PG_RUN_MIGRATIONS=1`) or
-    /// fix whatever is keeping the migrator from making progress.
-    #[error("boot timeout waiting for schema version {required}")]
-    BootTimeout { required: i64 },
-    /// Designated migrator failed to apply a specific version.
-    /// `reason` carries the underlying pg error message; the runner
-    /// rolls the open transaction back before surfacing this.
-    #[error("migration failed at version {version}: {reason}")]
-    MigrationFailed { version: i64, reason: String },
     /// Boot-time configuration validation failed (DSN scheme, HA
     /// env vars, host_id parse, etc). Refuses to start.
     #[error("validation: {0}")]
@@ -403,9 +288,10 @@ pub type Result<T> = std::result::Result<T, DatabaseError>;
 /// stash a `Pool` inside the shared `Arc<AppState>`.
 ///
 /// `Database` holds the resolved DSN + config and builds a transient
-/// pool inline for migration runs and for `ping`. A future hot-path
-/// optimization can replace that with a per-worker thread-local pool
-/// once more controller code relies on database access.
+/// pool inline for the boot smoke-test and for `ping`. A future
+/// hot-path optimization can replace that with a per-worker
+/// thread-local pool once more controller code relies on database
+/// access.
 ///
 /// `Database` itself is `Send + Sync` (just String + Copy fields),
 /// so `Arc<Database>` plumbs cleanly through `AppState` without
@@ -453,12 +339,6 @@ impl Database {
         // make it to runtime.
         validate_ha_env_vars()?;
 
-        let run_migrations = matches!(
-            std::env::var("SANDBOX_PG_RUN_MIGRATIONS").as_deref(),
-            Ok("1")
-        );
-
-        let boot_timeout_secs = parse_env_u64("SANDBOX_PG_BOOT_TIMEOUT_SECS", 60)?;
         let pool_max = parse_env_usize("SANDBOX_PG_POOL_MAX", 16)?;
         if pool_max == 0 {
             return Err(DatabaseError::Validation(
@@ -488,35 +368,32 @@ impl Database {
         // § 13.2 last paragraph; production sets all three.
         let dsn_audit = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_AUDIT", &dsn)?;
         let dsn_gdpr = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_GDPR", &dsn)?;
+        let dsn_admin = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_ADMIN", &dsn)?;
 
         let config = DbConfig {
             dsn,
             dsn_audit,
             dsn_gdpr,
+            dsn_admin,
             host_id,
-            run_migrations,
-            boot_timeout_secs,
             pool_max,
         };
         Ok(Self { config })
     }
 
-    /// Used by tests + the integration test suite: build from a
-    /// `(dsn, run_migrations, boot_timeout_secs)` triple, skipping
-    /// env. Persists no host_id file. Visible across the crate
-    /// boundary for `tests/sandbox_pg_e2e.rs` — production callers
-    /// use [`Database::from_env`].
+    /// Used by tests + the integration test suite: build from a bare
+    /// DSN, skipping env. Persists no host_id file. The schema is
+    /// assumed to already exist (the test fixture applies the
+    /// Liquibase changelog). Visible across the crate boundary for
+    /// `tests/sandbox_pg_e2e.rs` — production callers use
+    /// [`Database::from_env`].
     ///
     /// Gated under `cfg(any(test, feature = "test-support"))` so the
     /// scaffolding is stripped from production rlibs (R28-API2 sweep,
     /// mirrors the R27-API2 `_test_inject_sandbox` precedent).
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn from_test_config(
-        dsn: String,
-        run_migrations: bool,
-        boot_timeout_secs: u64,
-    ) -> Result<Self> {
+    pub async fn from_test_config(dsn: String) -> Result<Self> {
         validate_dsn_scheme(&dsn)?;
         // Smoke-test the connection so callers get a clean error
         // when the test fixture is misconfigured.
@@ -530,13 +407,13 @@ impl Database {
         drop(pool);
         let dsn_audit = dsn.clone();
         let dsn_gdpr = dsn.clone();
+        let dsn_admin = dsn.clone();
         let config = DbConfig {
             dsn,
             dsn_audit,
             dsn_gdpr,
+            dsn_admin,
             host_id: Uuid::now_v7(),
-            run_migrations,
-            boot_timeout_secs,
             pool_max: 4,
         };
         Ok(Self { config })
@@ -556,10 +433,9 @@ impl Database {
             config: DbConfig {
                 dsn: dsn.clone(),
                 dsn_audit: dsn.clone(),
-                dsn_gdpr: dsn,
+                dsn_gdpr: dsn.clone(),
+                dsn_admin: dsn,
                 host_id: Uuid::now_v7(),
-                run_migrations: false,
-                boot_timeout_secs: 60,
                 pool_max: 4,
             },
         }
@@ -657,6 +533,34 @@ impl Database {
         Ok(install_pool(&POOL_AUDIT_CELL, dsn.clone(), pool))
     }
 
+    /// Pool authenticated as the DDL / migrator role
+    /// (`sandbox_admin`-equivalent). Used by the `sandbox_events`
+    /// partition provisioner (`sweep::ensure_event_partitions`) to run
+    /// `CREATE TABLE ... PARTITION OF` / `DROP TABLE` against the
+    /// `zeroship` schema. Falls back to `SANDBOX_DATABASE_URL` when
+    /// `SANDBOX_DATABASE_URL_ADMIN` is unset (single-role dev). Cached
+    /// per-compio-worker (R26-C1) — the provisioner runs on a long
+    /// cadence but issues several DDL statements per tick on the same
+    /// thread, so reusing the connection avoids a fresh handshake per
+    /// statement.
+    pub async fn pool_admin(&self) -> Result<Rc<Pool>> {
+        let dsn = &self.config.dsn_admin;
+        if let Some(pool) = cached_pool(&POOL_ADMIN_CELL, dsn) {
+            return Ok(pool);
+        }
+        let mut cfg = PoolConfig::default();
+        // DDL is light + serial; a small pool is plenty.
+        cfg.max_size = 2;
+        let pool = Rc::new(
+            Pool::connect_with_config(dsn, cfg)
+                .await
+                .map_err(DatabaseError::Pg)?,
+        );
+        // r7-C-followup: see `open_pool` for the rationale.
+        pool.start_housekeeper();
+        Ok(install_pool(&POOL_ADMIN_CELL, dsn.clone(), pool))
+    }
+
     /// Open a transient pool authenticated as the
     /// `sandbox_gdpr` role. Opened on demand inside the GDPR-delete
     /// admin handler and dropped at end-of-request; **never cached**
@@ -691,241 +595,6 @@ impl Database {
             )));
         }
         Ok(())
-    }
-
-    /// Read `MAX(version)` from `sandbox.schema_migrations`. Returns
-    /// 0 if the table does not yet exist (fresh database). Used by
-    /// the boot-path wait loop and by tests.
-    pub async fn current_schema_version(&self) -> Result<i64> {
-        let pool = self.open_pool().await?;
-        let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        // Check existence first so we can return 0 cleanly for a
-        // fresh database without spamming pg with an error.
-        let exists: bool = client
-            .query_one(
-                "SELECT EXISTS (
-                     SELECT 1 FROM pg_catalog.pg_tables
-                      WHERE schemaname = 'sandbox' AND tablename = 'schema_migrations'
-                 )",
-                &[],
-            )
-            .await
-            .map_err(DatabaseError::Pg)?
-            .get(0);
-        if !exists {
-            return Ok(0);
-        }
-        let row = client
-            .query_one(
-                "SELECT COALESCE(MAX(version), 0)::BIGINT FROM sandbox.schema_migrations",
-                &[],
-            )
-            .await
-            .map_err(DatabaseError::Pg)?;
-        let v: i64 = row.get(0);
-        Ok(v)
-    }
-
-    /// The boot-path schema gate (§ 7.1). Returns `Ok(())` once the
-    /// schema is at or past `target`. Designated migrator applies
-    /// pending migrations; everyone else polls.
-    pub async fn ensure_schema_at_version(&self, target: i64) -> Result<()> {
-        if self.config.run_migrations {
-            self.run_pending_migrations().await?;
-        }
-        // Even the designated migrator re-reads `MAX(version)` so a
-        // failed-to-apply migration surfaces as `SchemaTooOld` rather
-        // than silently passing — defensive belt-and-braces.
-        let deadline = Instant::now() + Duration::from_secs(self.config.boot_timeout_secs);
-        loop {
-            let current = self.current_schema_version().await?;
-            if current >= target {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(DatabaseError::BootTimeout { required: target });
-            }
-            // Poll cadence — § 7.1's sketch picks 2s.
-            compio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    /// Apply every embedded migration whose version is greater than
-    /// `MAX(version)`. Each is wrapped in `BEGIN ... COMMIT`; if the
-    /// `INSERT INTO schema_migrations` loses a race against a
-    /// concurrent migrator (UNIQUE on `version`), the loser rolls
-    /// back its TX, observes the migration is now applied, and
-    /// continues. No advisory locks.
-    pub async fn run_pending_migrations(&self) -> Result<u64> {
-        // Bootstrap: ensure the schema + table exist outside any
-        // migration TX so a fresh database can be queried for
-        // `MAX(version)` below. This is itself idempotent.
-        let pool = self.open_pool().await?;
-        Self::ensure_schema_migrations_table(&pool).await?;
-
-        let current = self.current_schema_version_with_pool(&pool).await?;
-        let mut applied: u64 = 0;
-        for m in MIGRATIONS.iter().filter(|m| m.version > current) {
-            Self::apply_one_migration(&pool, *m).await?;
-            applied += 1;
-        }
-        Ok(applied)
-    }
-
-    async fn current_schema_version_with_pool(&self, pool: &Pool) -> Result<i64> {
-        let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        let exists: bool = client
-            .query_one(
-                "SELECT EXISTS (
-                     SELECT 1 FROM pg_catalog.pg_tables
-                      WHERE schemaname = 'sandbox' AND tablename = 'schema_migrations'
-                 )",
-                &[],
-            )
-            .await
-            .map_err(DatabaseError::Pg)?
-            .get(0);
-        if !exists {
-            return Ok(0);
-        }
-        let row = client
-            .query_one(
-                "SELECT COALESCE(MAX(version), 0)::BIGINT FROM sandbox.schema_migrations",
-                &[],
-            )
-            .await
-            .map_err(DatabaseError::Pg)?;
-        Ok(row.get::<_, i64>(0))
-    }
-
-    async fn ensure_schema_migrations_table(pool: &Pool) -> Result<()> {
-        // Two simultaneous migrators racing on the bootstrap CREATE
-        // SCHEMA hit a 23505 (`pg_namespace_nspname_index`) because
-        // pg's IF NOT EXISTS is not race-safe. Same race-tolerance
-        // shape as the migration runner: catch the duplicate-DDL
-        // SQLSTATEs and treat as success.
-        let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        match client
-            .batch_execute(
-                "CREATE SCHEMA IF NOT EXISTS sandbox; \
-                 CREATE TABLE IF NOT EXISTS sandbox.schema_migrations ( \
-                     version     BIGINT       PRIMARY KEY, \
-                     applied_at  TIMESTAMPTZ  NOT NULL DEFAULT now(), \
-                     sha256      TEXT         NOT NULL, \
-                     description TEXT         NOT NULL DEFAULT '' \
-                 )",
-            )
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(e) if is_concurrent_ddl_race(&e) => {
-                tracing::info!(
-                    code = %e.code().map(|c| c.code()).unwrap_or(""),
-                    "sandbox bootstrap: concurrent-DDL race on schema_migrations create; treating as success"
-                );
-                Ok(())
-            }
-            Err(e) => Err(DatabaseError::Pg(e)),
-        }
-    }
-
-    async fn apply_one_migration(pool: &Pool, m: Migration) -> Result<()> {
-        let mut client = pool.get().await.map_err(DatabaseError::Pg)?;
-
-        // The DDL body. `batch_execute` inside a TX runs every
-        // statement in the file under one transaction (BEGIN issued
-        // by `client.transaction()`). Any statement that is itself
-        // not transactionable would have to land in a dedicated
-        // follow-up migration. The current migrations are all plain
-        // DDL wrapped in IF NOT EXISTS guards.
-        let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
-        if let Err(e) = tx.batch_execute(m.sql).await {
-            let _ = tx.rollback().await;
-            // Concurrent-DDL race against another migrator — pg's
-            // `IF NOT EXISTS` is not atomic; the loser sees a
-            // duplicate_schema / duplicate_table / duplicate_object
-            // / unique_violation SQLSTATE. Treat as race-tolerant
-            // success (§ 6.5 partition note + § 7.1). The
-            // bookkeeping INSERT below either lands (we win the
-            // version) or itself unique_violations (we lose).
-            if !is_concurrent_ddl_race(&e) {
-                return Err(DatabaseError::MigrationFailed {
-                    version: m.version,
-                    reason: e.to_string(),
-                });
-            }
-            tracing::info!(
-                version = m.version,
-                code = %e.code().map(|c| c.code()).unwrap_or(""),
-                "sandbox migration body: concurrent-DDL race; retrying bookkeeping insert only"
-            );
-            // Re-acquire a fresh TX for the bookkeeping insert.
-            // The body's effects are now durable (the winner
-            // committed them); we just need to record OUR row, or
-            // recognise that the winner's row is present.
-            return Self::insert_bookkeeping_row(pool, m).await;
-        }
-
-        let sha = m.sha256_hex();
-        let insert_res = tx
-            .execute(
-                "INSERT INTO sandbox.schema_migrations \
-                     (version, sha256, description) \
-                 VALUES ($1::BIGINT, $2::TEXT, $3::TEXT)",
-                &[&m.version, &sha, &m.description.to_string()],
-            )
-            .await;
-
-        match insert_res {
-            Ok(_) => {
-                tx.commit().await.map_err(DatabaseError::Pg)?;
-                tracing::info!(
-                    version = m.version,
-                    description = m.description,
-                    "sandbox.schema_migrations: applied"
-                );
-                Ok(())
-            }
-            Err(e) if is_unique_violation(&e) => {
-                // Race-tolerance fallback: another migrator inserted
-                // this version while we were running our DDL. Our
-                // DDL was idempotent; the unique_violation tells us
-                // the row is now present. Roll back and treat as
-                // success. (§ 7.1)
-                let _ = tx.rollback().await;
-                tracing::info!(
-                    version = m.version,
-                    "sandbox.schema_migrations: applied by concurrent migrator; skipping"
-                );
-                Ok(())
-            }
-            Err(e) => Err(DatabaseError::Pg(e)),
-        }
-    }
-
-    /// Insert ONLY the `schema_migrations` bookkeeping row, used by
-    /// the race-tolerance retry path: we hit a duplicate_schema /
-    /// duplicate_table / etc on the body, which means the winner
-    /// has already committed the body's effects. We just need to
-    /// either land our row (if the winner hadn't reached the
-    /// INSERT yet) or recognise the winner's row (unique_violation
-    /// on our INSERT).
-    async fn insert_bookkeeping_row(pool: &Pool, m: Migration) -> Result<()> {
-        let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        let sha = m.sha256_hex();
-        match client
-            .execute(
-                "INSERT INTO sandbox.schema_migrations \
-                     (version, sha256, description) \
-                 VALUES ($1::BIGINT, $2::TEXT, $3::TEXT) \
-                 ON CONFLICT (version) DO NOTHING",
-                &[&m.version, &sha, &m.description.to_string()],
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(DatabaseError::Pg(e)),
-        }
     }
 }
 
@@ -977,7 +646,7 @@ fn enforce_password_file_mode(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Shape check for `sandbox.shares.token_id`, mirroring migration
+/// Shape check for `zeroship.shares.token_id`, mirroring migration
 /// 0003's CHECK (`^tok_[A-Za-z0-9_-]{20,40}$`). Belt-and-suspenders
 /// before the SQL round-trip so a malformed id surfaces a clean
 /// `Validation` error rather than a SQLSTATE 23514 buried in the
@@ -1168,15 +837,6 @@ fn parse_env_i64(name: &str, default: i64) -> Result<i64> {
     }
 }
 
-fn parse_env_u64(name: &str, default: u64) -> Result<u64> {
-    match std::env::var(name) {
-        Ok(s) => s.trim().parse::<u64>().map_err(|e| {
-            DatabaseError::Validation(format!("{name}={s:?}: {e}"))
-        }),
-        Err(_) => Ok(default),
-    }
-}
-
 fn parse_env_usize(name: &str, default: usize) -> Result<usize> {
     match std::env::var(name) {
         Ok(s) => s.trim().parse::<usize>().map_err(|e| {
@@ -1309,38 +969,6 @@ fn enforce_host_id_file_mode(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// True iff `e` is a SQLSTATE 23505 (unique_violation). Used for
-/// the migration runner's race-tolerance fallback on the bookkeeping
-/// INSERT into `sandbox.schema_migrations` (§ 7.1).
-fn is_unique_violation(e: &compio_postgres::Error) -> bool {
-    e.code() == Some(&compio_postgres::error::SqlState::UNIQUE_VIOLATION)
-}
-
-/// True iff `e` indicates a concurrent DDL race we can safely treat
-/// as success — the loser of two simultaneous `CREATE SCHEMA IF NOT
-/// EXISTS` / `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT
-/// EXISTS` calls. Pg's `IF NOT EXISTS` clauses are NOT atomic
-/// against concurrent creators (the existence check + the create
-/// are separate statements internally); the loser sees one of these
-/// SQLSTATEs.
-///
-/// Same race-tolerance shape § 6.5 calls out for the partition
-/// CREATE on the worker side: "the loser sees 42P07
-/// duplicate_object and proceeds".
-fn is_concurrent_ddl_race(e: &compio_postgres::Error) -> bool {
-    use compio_postgres::error::SqlState;
-    match e.code() {
-        Some(c) => {
-            *c == SqlState::UNIQUE_VIOLATION
-                || *c == SqlState::DUPLICATE_SCHEMA
-                || *c == SqlState::DUPLICATE_TABLE
-                || *c == SqlState::DUPLICATE_OBJECT
-        }
-        None => false,
-    }
-}
-
-
 // ────────────────────────────────────────────────────────────────────
 // Row Types And Write Methods
 // ────────────────────────────────────────────────────────────────────
@@ -1358,7 +986,7 @@ pub struct TakenSandbox {
     pub generation: i64,
 }
 
-/// One row from `sandbox.sandboxes`. Mirrors the persistent shape of
+/// One row from `zeroship.sandboxes`. Mirrors the persistent shape of
 /// the registry's [`crate::backend::SandboxInfo`] plus host/owner and
 /// the CAS counter used during lease-based takeover.
 #[derive(Debug, Clone)]
@@ -1459,7 +1087,7 @@ impl SandboxStatus {
     }
 }
 
-/// One row from `sandbox.shares`. Mirrors the share-token mint
+/// One row from `zeroship.shares`. Mirrors the share-token mint
 /// audit metadata (the token bytes themselves are NEVER stored).
 #[derive(Debug, Clone)]
 pub struct ShareRow {
@@ -1473,8 +1101,8 @@ pub struct ShareRow {
     pub iss: Option<String>,
 }
 
-/// Public-facing view of a `sandbox.shares` row (the `secret_version`
-/// is exposed but no secret bytes — `sandbox.shares` doesn't carry
+/// Public-facing view of a `zeroship.shares` row (the `secret_version`
+/// is exposed but no secret bytes — `zeroship.shares` doesn't carry
 /// any to begin with).
 #[derive(Debug, Clone)]
 pub struct ShareMetadata {
@@ -1489,7 +1117,7 @@ pub struct ShareMetadata {
     pub use_count: i64,
 }
 
-/// One row's-worth of audit material destined for `sandbox.events`.
+/// One row's-worth of audit material destined for `zeroship.sandbox_events`.
 /// `kind` follows the open-enum convention from § 6.5; the `data`
 /// JSONB payload is enforced ≤ 8 KiB by a CHECK constraint on the
 /// table.
@@ -1874,7 +1502,7 @@ impl Database {
         let region = std::env::var("SANDBOX_REGION").unwrap_or_else(|_| "us-local-1".to_string());
         client
             .execute(
-                "INSERT INTO sandbox.hosts (host_id, boot_id, hostname, region, backend, status) \
+                "INSERT INTO zeroship.hosts (host_id, boot_id, hostname, region, backend, status) \
                  VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, $5::TEXT, 'alive') \
                  ON CONFLICT (host_id) DO UPDATE SET \
                      boot_id = EXCLUDED.boot_id, \
@@ -1911,7 +1539,7 @@ impl Database {
         );
         client
             .execute(
-                "UPDATE sandbox.hosts \
+                "UPDATE zeroship.hosts \
                     SET status = 'draining', drain_started_at = COALESCE(drain_started_at, now()) \
                   WHERE host_id = $1::TEXT",
                 &[&host_id_typed],
@@ -1942,7 +1570,7 @@ impl Database {
         );
         client
             .execute(
-                "UPDATE sandbox.hosts \
+                "UPDATE zeroship.hosts \
                     SET last_heartbeat = now() \
                   WHERE host_id = $1::TEXT",
                 &[&host_id_typed],
@@ -1972,7 +1600,7 @@ impl Database {
         let opt = client
             .query_opt(
                 "SELECT EXTRACT(EPOCH FROM (now() - last_heartbeat))::DOUBLE PRECISION \
-                   FROM sandbox.hosts \
+                   FROM zeroship.hosts \
                   WHERE host_id = $1::TEXT",
                 &[&host_id_typed],
             )
@@ -1981,7 +1609,7 @@ impl Database {
         Ok(opt.map(|row| row.get::<_, f64>(0)))
     }
 
-    /// Scan `sandbox.hosts` for hosts whose lease has expired —
+    /// Scan `zeroship.hosts` for hosts whose lease has expired —
     /// `status='alive'` AND `last_heartbeat < now() - lease_ttl`.
     /// Returns the typed-id strings (`hst_...`) of dead hosts. The
     /// takeover task pairs each with a CAS UPDATE per § 11.2.
@@ -1998,7 +1626,7 @@ impl Database {
         // lease expires.
         let rows = client
             .query(
-                "SELECT host_id FROM sandbox.hosts \
+                "SELECT host_id FROM zeroship.hosts \
                   WHERE status IN ('alive', 'draining') \
                     AND last_heartbeat < now() - make_interval(secs => $1::BIGINT)",
                 &[&lease_ttl_i64],
@@ -2066,7 +1694,7 @@ impl Database {
         // the new owner instead of leaving the row degraded forever.
         let rows = tx
             .query(
-                "UPDATE sandbox.sandboxes \
+                "UPDATE zeroship.sandboxes \
                     SET host_id = $1::TEXT, \
                         generation = generation + 1, \
                         last_used_at = now() \
@@ -2074,7 +1702,7 @@ impl Database {
                     AND status IN ('starting', 'running', 'unreachable') \
                     AND deleted_at IS NULL \
                     AND EXISTS ( \
-                        SELECT 1 FROM sandbox.hosts \
+                        SELECT 1 FROM zeroship.hosts \
                          WHERE host_id = $2::TEXT \
                            AND status IN ('alive', 'draining') \
                            AND last_heartbeat < now() - make_interval(secs => $3::BIGINT) \
@@ -2104,7 +1732,7 @@ impl Database {
         // `'draining'` as the prior state so a host that died
         // mid-drain transitions straight to `'dead'`.
         tx.execute(
-            "UPDATE sandbox.hosts \
+            "UPDATE zeroship.hosts \
                 SET status = 'dead' \
               WHERE host_id = $1::TEXT \
                 AND status IN ('alive', 'draining') \
@@ -2145,7 +1773,7 @@ impl Database {
         let agent_url_owned = agent_url.map(|s| s.to_string());
         client
             .execute(
-                "INSERT INTO sandbox.sandboxes \
+                "INSERT INTO zeroship.sandboxes \
                     (sandbox_id, user_id, project_id, backend, vm_index, \
                      agent_url, host_id, generation, status, key_fp, \
                      created_at, started_at, last_used_at) \
@@ -2265,7 +1893,7 @@ impl Database {
         };
         let expected_user_owned = expected_user_id.map(|s| s.to_string());
         let sql = format!(
-            "UPDATE sandbox.sandboxes \
+            "UPDATE zeroship.sandboxes \
                 SET status = $1::TEXT, \
                     generation = generation + 1, \
                     last_used_at = now()\
@@ -2303,7 +1931,7 @@ impl Database {
         // variant can report who owns the row now.
         let lookup = client
             .query_opt(
-                "SELECT generation, host_id FROM sandbox.sandboxes \
+                "SELECT generation, host_id FROM zeroship.sandboxes \
                   WHERE sandbox_id = $1::TEXT \
                     AND ($2::TEXT IS NULL OR user_id = $2::TEXT) \
                     AND deleted_at IS NULL",
@@ -2348,7 +1976,7 @@ impl Database {
                         EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
                         EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
                         EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
-                   FROM sandbox.sandboxes \
+                   FROM zeroship.sandboxes \
                   WHERE sandbox_id = $1::TEXT \
                     AND deleted_at IS NULL",
                 &[&sandbox_id_typed],
@@ -2403,7 +2031,7 @@ impl Database {
                         EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
                         EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
                         EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
-                   FROM sandbox.sandboxes \
+                   FROM zeroship.sandboxes \
                   WHERE host_id = $1::TEXT \
                     AND status IN ('running', 'unreachable') \
                     AND deleted_at IS NULL",
@@ -2484,8 +2112,8 @@ impl Database {
         // The SELECT honours the same fences as the DELETE so we
         // never tombstone a row we don't have authority over.
         tx.execute(
-            "INSERT INTO sandbox.deleted_sandboxes (sandbox_id, user_id) \
-             SELECT sandbox_id, user_id FROM sandbox.sandboxes \
+            "INSERT INTO zeroship.deleted_sandboxes (sandbox_id, user_id) \
+             SELECT sandbox_id, user_id FROM zeroship.sandboxes \
               WHERE sandbox_id = $1::TEXT \
                 AND ($2::TEXT IS NULL OR host_id = $2::TEXT) \
                 AND ($3::TEXT IS NULL OR user_id = $3::TEXT) \
@@ -2500,7 +2128,7 @@ impl Database {
         .map_err(DatabaseError::Pg)?;
         let n = tx
             .execute(
-                "DELETE FROM sandbox.sandboxes \
+                "DELETE FROM zeroship.sandboxes \
                   WHERE sandbox_id = $1::TEXT \
                     AND ($2::TEXT IS NULL OR host_id = $2::TEXT) \
                     AND ($3::TEXT IS NULL OR user_id = $3::TEXT)",
@@ -2533,23 +2161,22 @@ impl Database {
             .map_err(|e| DatabaseError::Validation(e.to_string()))?;
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        let port_i16 = i16::try_from(share.port)
-            .map_err(|e| DatabaseError::Validation(format!("port out of range: {e}")))?;
+        let port_i32 = i32::from(share.port);
         let issued_at_secs = i64::try_from(share.issued_at_secs)
             .map_err(|e| DatabaseError::Validation(format!("issued_at overflow: {e}")))?;
         let expires_at_secs = i64::try_from(share.expires_at_secs)
             .map_err(|e| DatabaseError::Validation(format!("expires_at overflow: {e}")))?;
         client
             .execute(
-                "INSERT INTO sandbox.shares \
+                "INSERT INTO zeroship.shares \
                     (token_id, sandbox_id, port, scope, secret_version, \
                      issued_at, expires_at, iss) \
-                 VALUES ($1::TEXT, $2::TEXT, $3::SMALLINT, $4::TEXT, $5::INTEGER, \
+                 VALUES ($1::TEXT, $2::TEXT, $3::INTEGER, $4::TEXT, $5::INTEGER, \
                          to_timestamp($6::BIGINT), to_timestamp($7::BIGINT), $8::TEXT)",
                 &[
                     &share.token_id,
                     &share.sandbox_id,
-                    &port_i16,
+                    &port_i32,
                     &share.scope,
                     &share.secret_version,
                     &issued_at_secs,
@@ -2576,8 +2203,7 @@ impl Database {
             "sbx_{}",
             zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
         );
-        let port_i16 = i16::try_from(port)
-            .map_err(|e| DatabaseError::Validation(format!("port out of range: {e}")))?;
+        let port_i32 = i32::from(port);
         let rows = client
             .query(
                 "SELECT token_id, port, scope, secret_version, \
@@ -2586,20 +2212,20 @@ impl Database {
                         iss, \
                         COALESCE(EXTRACT(EPOCH FROM last_used_at)::BIGINT, 0) AS last_used_at_secs, \
                         use_count \
-                   FROM sandbox.shares \
+                   FROM zeroship.shares \
                   WHERE sandbox_id = $1::TEXT \
-                    AND port = $2::SMALLINT \
+                    AND port = $2::INTEGER \
                     AND deleted_at IS NULL",
-                &[&sandbox_id_typed, &port_i16],
+                &[&sandbox_id_typed, &port_i32],
             )
             .await
             .map_err(DatabaseError::Pg)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
-            let port_i: i16 = r.get("port");
+            let port_i: i32 = r.get("port");
             out.push(ShareMetadata {
                 token_id: r.get("token_id"),
-                port: port_i.max(0) as u16,
+                port: port_i.clamp(0, u16::MAX as i32) as u16,
                 scope: r.get("scope"),
                 secret_version: r.get::<_, i32>("secret_version"),
                 issued_at_secs: r.get::<_, i64>("issued_at_secs").max(0) as u64,
@@ -2630,7 +2256,7 @@ impl Database {
         );
         let n = client
             .execute(
-                "UPDATE sandbox.shares \
+                "UPDATE zeroship.shares \
                     SET revoked_at = now() \
                   WHERE sandbox_id = $1::TEXT \
                     AND deleted_at IS NULL \
@@ -2706,7 +2332,7 @@ impl Database {
         // all NOT NULL).
         let opt = client
             .query_opt(
-                "UPDATE sandbox.sandboxes \
+                "UPDATE zeroship.sandboxes \
                     SET status = 'snapshotted', \
                         generation = generation + 1, \
                         last_used_at = now(), \
@@ -2743,7 +2369,7 @@ impl Database {
         // CAS missed — read back to distinguish CasLost from NotFound.
         let lookup = client
             .query_opt(
-                "SELECT generation, host_id FROM sandbox.sandboxes \
+                "SELECT generation, host_id FROM zeroship.sandboxes \
                   WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
                 &[&sandbox_id_typed],
             )
@@ -2789,7 +2415,7 @@ impl Database {
         );
         let opt = client
             .query_opt(
-                "UPDATE sandbox.sandboxes \
+                "UPDATE zeroship.sandboxes \
                     SET generation = generation + 1, \
                         last_used_at = now(), \
                         snapshot_artifact_path    = NULL, \
@@ -2817,7 +2443,7 @@ impl Database {
         }
         let lookup = client
             .query_opt(
-                "SELECT generation, host_id FROM sandbox.sandboxes \
+                "SELECT generation, host_id FROM zeroship.sandboxes \
                   WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
                 &[&sandbox_id_typed],
             )
@@ -2867,7 +2493,7 @@ impl Database {
         // status ∈ {snapshotting, restoring, restoring_cold}.
         let n = client
             .execute(
-                "UPDATE sandbox.sandboxes \
+                "UPDATE zeroship.sandboxes \
                     SET lessee_updated_at = now() \
                   WHERE sandbox_id = $1::TEXT \
                     AND host_id = $2::TEXT \
@@ -2919,7 +2545,7 @@ impl Database {
                         EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
                         EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
                         EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
-                   FROM sandbox.sandboxes \
+                   FROM zeroship.sandboxes \
                   WHERE status IN ('snapshotting','restoring','restoring_cold') \
                     AND lessee_updated_at IS NOT NULL \
                     AND lessee_updated_at < now() - make_interval(secs => $1::BIGINT) \
@@ -3047,7 +2673,7 @@ impl Database {
         }
         let opt = client
             .query_opt(
-                "UPDATE sandbox.sandboxes \
+                "UPDATE zeroship.sandboxes \
                     SET status = $1::TEXT, \
                         host_id = $2::TEXT, \
                         generation = generation + 1, \
@@ -3081,7 +2707,7 @@ impl Database {
         // NotFound (row tombstoned).
         let lookup = client
             .query_opt(
-                "SELECT generation, host_id FROM sandbox.sandboxes \
+                "SELECT generation, host_id FROM zeroship.sandboxes \
                   WHERE sandbox_id = $1::TEXT \
                     AND deleted_at IS NULL",
                 &[&sandbox_id_typed],
@@ -3127,7 +2753,7 @@ impl Database {
                         EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
                         EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
                         EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
-                   FROM sandbox.sandboxes \
+                   FROM zeroship.sandboxes \
                   WHERE status = 'running' \
                     AND idle_snapshot_opted_in = TRUE \
                     AND last_used_at < now() - make_interval(secs => $1::BIGINT) \
@@ -3217,7 +2843,7 @@ impl Database {
         for attempt in 0..INSERT_WAKE_JOB_MAX_RETRIES {
             let rows_affected = client
                 .execute(
-                    "INSERT INTO sandbox.wake_jobs \
+                    "INSERT INTO zeroship.wake_jobs \
                         (wake_id, sandbox_id, state, error_code, error_message, \
                          ready_at, agent_url, lessee) \
                      VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, $5::TEXT, \
@@ -3288,7 +2914,7 @@ impl Database {
                         agent_url, lessee, \
                         EXTRACT(EPOCH FROM lessee_updated_at)::BIGINT \
                             AS lessee_updated_at_secs \
-                   FROM sandbox.wake_jobs \
+                   FROM zeroship.wake_jobs \
                   WHERE wake_id = $1::TEXT",
                 &[&wake_id.to_string()],
             )
@@ -3350,7 +2976,7 @@ impl Database {
             ""
         };
         let sql = format!(
-            "UPDATE sandbox.wake_jobs \
+            "UPDATE zeroship.wake_jobs \
                 SET state = $1::TEXT, \
                     error_code = COALESCE($2::TEXT, error_code), \
                     error_message = COALESCE($3::TEXT, error_message), \
@@ -3400,7 +3026,7 @@ impl Database {
                         agent_url, lessee, \
                         EXTRACT(EPOCH FROM lessee_updated_at)::BIGINT \
                             AS lessee_updated_at_secs \
-                   FROM sandbox.wake_jobs \
+                   FROM zeroship.wake_jobs \
                   WHERE sandbox_id = $1::TEXT \
                     AND state NOT IN ('ok', 'failed') \
                   ORDER BY started_at DESC \
@@ -3433,7 +3059,7 @@ impl Database {
         let secs = older_than.as_secs() as i64;
         let n = client
             .execute(
-                "DELETE FROM sandbox.wake_jobs \
+                "DELETE FROM zeroship.wake_jobs \
                   WHERE state IN ('ok', 'failed') \
                     AND updated_at < now() - make_interval(secs => $1::BIGINT)",
                 &[&secs],
@@ -3499,7 +3125,7 @@ impl Database {
         // ids.
         let rows = client
             .query(
-                "UPDATE sandbox.wake_jobs \
+                "UPDATE zeroship.wake_jobs \
                     SET state = 'failed', \
                         error_code = 'wake_worker_aborted', \
                         error_message = \
@@ -3534,7 +3160,7 @@ impl Database {
         // we can keep the `String` parameter binding.
         client
             .execute(
-                "INSERT INTO sandbox.events \
+                "INSERT INTO zeroship.sandbox_events \
                     (event_id, sandbox_id, user_id, kind, ts, data) \
                  VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, now(), \
                          CAST($5::TEXT AS JSONB))",
@@ -3549,6 +3175,158 @@ impl Database {
             .await
             .map_err(DatabaseError::Pg)?;
         Ok(())
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // sandbox_events partition provisioner (P1)
+    // ────────────────────────────────────────────────────────────────
+    //
+    // `zeroship.sandbox_events` is `PARTITION BY RANGE (ts)` with
+    // monthly partitions `sandbox_events_YYYY_MM` plus a
+    // `sandbox_events_default` catch-all (0011). These methods are the
+    // DDL primitives the `sweep::ensure_event_partitions` task drives
+    // on a periodic cadence: provision the current + next-N months
+    // ahead (so the default stays empty in steady state) and drop
+    // partitions whose entire range is past the retention horizon.
+    //
+    // All DDL runs on the admin/migrator pool (`pool_admin`) — the
+    // schema-owning role granted `CREATE` on `zeroship` (0011 § 13.2).
+
+    /// Ensure a single monthly partition exists. Runs
+    /// `CREATE TABLE IF NOT EXISTS zeroship.sandbox_events_<YYYY_MM>
+    ///  PARTITION OF zeroship.sandbox_events
+    ///  FOR VALUES FROM (<start>) TO (<end>)`.
+    ///
+    /// `start` / `end` are `YYYY-MM-DD` month boundaries (the first of
+    /// the month and the first of the next month). `suffix` is the
+    /// `YYYY_MM` table-name suffix.
+    ///
+    /// Idempotent + race-tolerant. Returns `Ok(true)` when the
+    /// partition was created (or already present), `Ok(false)` when a
+    /// concurrent provisioner / a non-empty default partition made the
+    /// CREATE a graceful no-op:
+    ///   - `42P07` duplicate_table — a peer created the same partition
+    ///     between our `IF NOT EXISTS` plan and execute (the IF NOT
+    ///     EXISTS suppresses the common case; this catches the narrow
+    ///     concurrent-DDL race).
+    ///   - `23514` check_violation / `42P17` invalid_object_definition
+    ///     — the DEFAULT partition holds rows that would belong to this
+    ///     month (only possible if the default ever caught an INSERT,
+    ///     i.e. we fell behind). Attaching the partition would require
+    ///     moving those rows; PG refuses. We log + skip so the sweep
+    ///     stays non-fatal; the rows remain queryable in the default
+    ///     partition. Provisioning ≥1 month ahead keeps this off the
+    ///     steady-state path.
+    pub async fn ensure_event_partition(
+        &self,
+        suffix: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<bool> {
+        let pool = self.pool_admin().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        // Identifiers are derived from the system clock (YYYY_MM /
+        // YYYY-MM-DD), never user input — safe to interpolate. The
+        // partition-bound literals are not bindable parameters in DDL.
+        let stmt = format!(
+            "CREATE TABLE IF NOT EXISTS zeroship.sandbox_events_{suffix} \
+             PARTITION OF zeroship.sandbox_events \
+             FOR VALUES FROM ('{start}') TO ('{end}')"
+        );
+        match client.execute(&stmt, &[]).await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let code = e.code();
+                if code == Some(&compio_postgres::error::SqlState::DUPLICATE_TABLE) {
+                    // Lost a concurrent-DDL race; the partition exists.
+                    Ok(false)
+                } else if code
+                    == Some(&compio_postgres::error::SqlState::CHECK_VIOLATION)
+                    || code
+                        == Some(
+                            &compio_postgres::error::SqlState::INVALID_OBJECT_DEFINITION,
+                        )
+                {
+                    tracing::warn!(
+                        target: "sandbox::event_partitions",
+                        suffix,
+                        start,
+                        end,
+                        error = %e,
+                        "sandbox event-partition provision: default partition \
+                         holds overlapping rows; skipping (rows stay queryable \
+                         in sandbox_events_default until the next provision \
+                         tick catches up)"
+                    );
+                    Ok(false)
+                } else {
+                    Err(DatabaseError::Pg(e))
+                }
+            }
+        }
+    }
+
+    /// Drop a single monthly partition by suffix:
+    /// `DROP TABLE IF EXISTS zeroship.sandbox_events_<YYYY_MM>`.
+    ///
+    /// Refuses to touch `sandbox_events_default` defensively — the
+    /// retention sweep only ever passes `YYYY_MM` suffixes, but a
+    /// guard here means a future caller bug can never drop the
+    /// catch-all. Returns `Ok(true)` if a DROP statement was issued.
+    pub async fn drop_event_partition(&self, suffix: &str) -> Result<bool> {
+        if suffix == "default" {
+            return Err(DatabaseError::Validation(
+                "refusing to drop sandbox_events_default (the catch-all \
+                 partition is never a retention target)"
+                    .into(),
+            ));
+        }
+        let pool = self.pool_admin().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let stmt =
+            format!("DROP TABLE IF EXISTS zeroship.sandbox_events_{suffix}");
+        client.execute(&stmt, &[]).await.map_err(DatabaseError::Pg)?;
+        Ok(true)
+    }
+
+    /// List the monthly `sandbox_events_YYYY_MM` partition suffixes
+    /// currently attached to `zeroship.sandbox_events`, in ascending
+    /// order. Excludes `sandbox_events_default`. Used by the retention
+    /// sweep to find partitions past the horizon without re-deriving
+    /// every historical month name.
+    ///
+    /// Reads `pg_inherits` joined to `pg_class` — the authoritative
+    /// catalog for "which tables are partitions of this parent" — so a
+    /// partition created out-of-band still gets retention applied.
+    pub async fn list_event_partition_suffixes(&self) -> Result<Vec<String>> {
+        let pool = self.pool_admin().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let rows = client
+            .query(
+                "SELECT c.relname \
+                   FROM pg_inherits i \
+                   JOIN pg_class c       ON c.oid = i.inhrelid \
+                   JOIN pg_class parent  ON parent.oid = i.inhparent \
+                   JOIN pg_namespace n   ON n.oid = parent.relnamespace \
+                  WHERE n.nspname = 'zeroship' \
+                    AND parent.relname = 'sandbox_events' \
+                    AND c.relname ~ '^sandbox_events_[0-9]{4}_[0-9]{2}$' \
+                  ORDER BY c.relname ASC",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let relname: String = r.get(0);
+                // Strip the `sandbox_events_` prefix → `YYYY_MM`.
+                relname
+                    .strip_prefix("sandbox_events_")
+                    .unwrap_or(&relname)
+                    .to_string()
+            })
+            .collect())
     }
 }
 
@@ -3578,8 +3356,6 @@ mod tests {
         for k in [
             "SANDBOX_DATABASE_URL",
             "SANDBOX_DATABASE_PASSWORD_PATH",
-            "SANDBOX_PG_RUN_MIGRATIONS",
-            "SANDBOX_PG_BOOT_TIMEOUT_SECS",
             "SANDBOX_PG_POOL_MAX",
             "SANDBOX_HOST_ID",
             "SANDBOX_PERSIST_DIR",
@@ -4093,18 +3869,19 @@ mod tests {
             dsn: "postgres://alice:supers3cret@db.example/zs".into(),
             dsn_audit: "postgres://audit:audsec@db.example/zs".into(),
             dsn_gdpr: "postgres://gdpr:gdsec@db.example/zs".into(),
+            dsn_admin: "postgres://admin:admsec@db.example/zs".into(),
             host_id: uuid::Uuid::nil(),
-            run_migrations: false,
-            boot_timeout_secs: 60,
             pool_max: 16,
         };
         let s = format!("{cfg:?}");
         assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
         assert!(!s.contains("audsec"), "audit password must NOT appear in Debug; got {s}");
         assert!(!s.contains("gdsec"), "gdpr password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("admsec"), "admin password must NOT appear in Debug; got {s}");
         assert!(s.contains("alice"), "user must remain visible: {s}");
         assert!(s.contains("audit"), "audit user must remain visible: {s}");
         assert!(s.contains("gdpr"), "gdpr user must remain visible: {s}");
+        assert!(s.contains("admin"), "admin user must remain visible: {s}");
         assert!(s.contains("<redacted>"), "redaction marker missing: {s}");
     }
 
@@ -4114,15 +3891,15 @@ mod tests {
             dsn: "postgres://db.example/zs?sslmode=require&password=supers3cret".into(),
             dsn_audit: "postgres://db.example/zs?sslmode=require&password=audsec".into(),
             dsn_gdpr: "postgres://db.example/zs?sslmode=require&password=gdsec".into(),
+            dsn_admin: "postgres://db.example/zs?sslmode=require&password=admsec".into(),
             host_id: uuid::Uuid::nil(),
-            run_migrations: false,
-            boot_timeout_secs: 60,
             pool_max: 16,
         };
         let s = format!("{cfg:?}");
         assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
         assert!(!s.contains("audsec"), "audit query password must NOT appear in Debug; got {s}");
         assert!(!s.contains("gdsec"), "gdpr query password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("admsec"), "admin query password must NOT appear in Debug; got {s}");
         assert!(s.contains("sslmode=require"), "non-secret query params must remain: {s}");
     }
 

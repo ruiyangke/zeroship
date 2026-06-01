@@ -38,6 +38,10 @@
     "./dev": {
       "types": "./dist/dev-entry.d.ts",
       "import": "./dist/dev-entry.js"
+    },
+    "./dev-auth": {
+      "types": "./dist/dev-auth.d.ts",
+      "import": "./dist/dev-auth.js"
     }
   },
   "files": ["dist", "src"],

@@ -319,7 +319,7 @@ async fn payout_ledger_check_constraints_reject_impossible_rows() {
     let pg = pg(&url).await;
     let bad = pg
         .execute(
-            "INSERT INTO control.payouts
+            "INSERT INTO zeroship.payouts
                 (creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at)
              VALUES ($1, $2, 'invoice.paid', 100, 500, -400, 'usd', NOW())",
             &[&creator, &format!("evt_bad_{}", Uuid::new_v4())],
@@ -327,7 +327,7 @@ async fn payout_ledger_check_constraints_reject_impossible_rows() {
         .await;
     assert!(
         bad.is_err(),
-        "control.payouts CHECK constraints must reject impossible ledger rows"
+        "zeroship.payouts CHECK constraints must reject impossible ledger rows"
     );
 
     store.unlink_account(creator).await.ok();
@@ -399,7 +399,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
     let creator = fresh_creator_id();
 
     pg.execute(
-        "INSERT INTO control.creator_account_history (creator_id, stripe_account_id)
+        "INSERT INTO zeroship.creator_account_history (creator_id, stripe_account_id)
          VALUES ($1, 'acct_openHistoryA12')",
         &[&creator],
     )
@@ -407,7 +407,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
     .expect("insert first open history row");
     let duplicate = pg
         .execute(
-            "INSERT INTO control.creator_account_history (creator_id, stripe_account_id)
+            "INSERT INTO zeroship.creator_account_history (creator_id, stripe_account_id)
              VALUES ($1, 'acct_openHistoryB34')",
             &[&creator],
         )
@@ -417,7 +417,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
         "schema must reject a second open creator_account_history row"
     );
 
-    pg.execute("DELETE FROM control.creator_account_history WHERE creator_id = $1", &[&creator])
+    pg.execute("DELETE FROM zeroship.creator_account_history WHERE creator_id = $1", &[&creator])
         .await
         .ok();
 }

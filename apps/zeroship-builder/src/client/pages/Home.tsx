@@ -8,7 +8,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { listApps, unarchiveApp } from "../api";
+import { listProjects, unarchiveProject } from "../api";
 import { PageFrame } from "../components/PageFrame";
 import { NotebookPrompt, CmdEnterHint } from "../components/NotebookPrompt";
 import { StampButton } from "../components/StampButton";
@@ -26,13 +26,13 @@ export function Home() {
   const [filter, setFilter] = useState<GalleryFilter>("active");
 
   const { data: apps, isLoading } = useQuery({
-    queryKey: ["apps"],
-    queryFn: () => listApps(),
+    queryKey: ["projects"],
+    queryFn: () => listProjects(),
   });
 
   const restore = useMutation({
-    mutationFn: async (id: string) => unarchiveApp({ appId: id }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["apps"] }),
+    mutationFn: async (id: string) => unarchiveProject({ appId: id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
   });
 
   // Split active vs archived once. The gallery list below renders one

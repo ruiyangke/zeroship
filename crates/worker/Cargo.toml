@@ -13,6 +13,8 @@ zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
+zeroship-plugin-kv = { workspace = true }
+zeroship-plugin-storage = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
 serde = { workspace = true }
@@ -27,6 +29,12 @@ url = { workspace = true }
 base64 = { workspace = true }
 cyper = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# The faithful four-namespace dispatch test (kv + storage + db + auth) roots a
+# temp LocalFs storage dir + blob dir per run (KV uses the real Redis backend at
+# REDIS_TEST_URL); tempfile gives each test an isolated dir for the FS legs.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

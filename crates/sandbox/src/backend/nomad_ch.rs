@@ -2124,7 +2124,7 @@ impl NomadCHBackend {
         };
         // v3: secret material only. Pg holds info.user_id /
         // project_id / vm_index / created_at_secs; the share-token
-        // audit is a sandbox.shares row.
+        // audit is a zeroship.shares row.
         let record = crate::persist::SealedAuth {
             version: crate::persist::SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),

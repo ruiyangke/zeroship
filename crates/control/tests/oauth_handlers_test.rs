@@ -21,7 +21,7 @@ use uuid::Uuid;
 use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    oauth_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    oauth_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
 
@@ -54,9 +54,9 @@ struct Fixture {
 impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
         let hydra = MockHydra::start();
-        let (auth_pg_client, auth_pg_conn) = connect(db_url, NoTls).await.expect("auth-pg connect");
+        let (control_pg_client, control_pg_conn) = connect(db_url, NoTls).await.expect("control-pg connect");
         compio::runtime::spawn(async move {
-            let _ = auth_pg_conn.run().await;
+            let _ = control_pg_conn.run().await;
         })
         .detach();
 
@@ -70,12 +70,6 @@ impl Fixture {
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
         let vfs: Arc<dyn BundleStore + Send + Sync> =
             Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-        let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-            "http://localhost:4444",
-            "console.zeroship.ai",
-            "test-oidc-secret".to_string(),
-            b"test-stash-key".to_vec(),
-        ));
 
         let state = Arc::new(AppState {
             registry,
@@ -93,10 +87,9 @@ impl Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp,
-            auth_pg: Arc::new(auth_pg_client),
-            auth_db_url: db_url.to_string(),
+            control_pg: Arc::new(control_pg_client),
             hydra_admin_url: hydra.base.clone(),
+            app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
@@ -106,6 +99,7 @@ impl Fixture {
                 "http://127.0.0.1:9",
             )),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            pairwise_salt: [0u8; 32],
         });
 
         Self {
@@ -123,8 +117,8 @@ impl Fixture {
         let ids: Vec<&str> = client_ids.iter().map(String::as_str).collect();
         let _ = self
             .state
-            .auth_pg
-            .execute("DELETE FROM control.oauth_clients WHERE client_id = ANY($1)", &[&ids])
+            .control_pg
+            .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = ANY($1)", &[&ids])
             .await;
     }
 }
@@ -274,22 +268,22 @@ impl NonAdminPat {
 
     async fn cleanup(&self, state: &AppState) {
         let _ = state
-            .auth_pg
+            .control_pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE token_id = $1 OR user_id = $2",
+                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
         let _ = state
-            .auth_pg
+            .control_pg
             .execute(
-                "DELETE FROM control.permission_tokens WHERE id = $1",
+                "DELETE FROM zeroship.permission_tokens WHERE id = $1",
                 &[&self.token_id],
             )
             .await;
         let _ = state
-            .auth_pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .control_pg
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
@@ -298,9 +292,9 @@ async fn non_admin_pat(state: &AppState) -> NonAdminPat {
     let user_id = Uuid::new_v4();
     let email = format!("non-admin-oauth-{user_id}@zeroship.test");
     state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'Non Admin OAuth Test User', NOW())",
             &[&user_id, &email],
         )
@@ -316,9 +310,9 @@ async fn non_admin_pat(state: &AppState) -> NonAdminPat {
         .issue(token_id, user_id, hash.clone(), expires_at)
         .expect("issue non-admin PAT");
     state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
              VALUES ($1, $2, 'pat', 'integration non-admin PAT', $3, $4, $5)",
             &[&token_id, &user_id, &policies, &hash, &expires_at],
@@ -361,9 +355,9 @@ fn client_body(client_id: &str) -> Value {
 
 async fn count_client(state: &AppState, client_id: &str) -> i64 {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -378,11 +372,11 @@ async fn audit_event_count(
     client_id: &str,
 ) -> i64 {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
-             FROM auth.audit_events \
-             WHERE user_id = $1 AND event_type = $2 AND client_id = $3",
+             FROM zeroship.audit_events \
+             WHERE actor_user_id = $1 AND event_type = $2 AND client_id = $3",
             &[&user_id, &event_type, &client_id],
         )
         .await
@@ -392,9 +386,9 @@ async fn audit_event_count(
 
 async fn persisted_skip_consent(state: &AppState, client_id: &str) -> bool {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
-            "SELECT skip_consent FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT skip_consent FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -649,9 +643,9 @@ async fn list_returns_registered_clients() {
     let redirect_uris = vec!["https://list.example/callback"];
     let scopes = vec!["apps:read", "apps:deploy"];
     fx.state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                  skip_consent, created_by, hydra_client_id) \
              VALUES ($1, 'List Client', NULL, NULL, $2, $3, true, $4, $1)",

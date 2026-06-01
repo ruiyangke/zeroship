@@ -19,7 +19,7 @@ HTTP request
   -> extract app name from path or Host
   -> RouteCache lookup
   -> compiled manifest lookup
-     - RPC: strip `/_zs/v1/` and hit `rpc_index`
+     - RPC: strip `/__zeroship/v1/` and hit `rpc_index`
      - URL: literal match first, then glob match
   -> enforce EffectivePolicy
   -> execute ResolvedAction
@@ -78,7 +78,7 @@ Current `ProcedureKind` handling:
 - `Stream`: unrestricted
 - `Subscription`: GET plus WebSocket upgrade headers
 
-RPC wire URLs are `/_zs/v1/<wireId>`. The older `/_rpc/<method>` path is not part of the current gateway resource lookup.
+RPC wire URLs are `/__zeroship/v1/<wireId>`. The older `/_rpc/<method>` path is not part of the current gateway resource lookup.
 
 ## Static assets
 
@@ -122,4 +122,4 @@ Gateway polls `/internal/routes` every 5 seconds. `RouteCache::update` validates
 - [docs/architecture/distributed.md](../architecture/distributed.md): end-to-end request flow across gateway, worker, and control.
 - [docs/architecture/control-plane.md](../architecture/control-plane.md): where route state and manifests come from.
 - [docs/architecture/blob-store.md](../architecture/blob-store.md): blob-backed static asset and bundle storage.
-- [docs/reference/zs-standard.md](../reference/zs-standard.md): the `/_zs/v1` dispatch contract.
+- [docs/reference/zeroship-standard.md](../reference/zeroship-standard.md): the `/__zeroship/v1` dispatch contract.

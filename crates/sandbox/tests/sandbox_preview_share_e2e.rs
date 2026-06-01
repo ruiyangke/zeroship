@@ -1072,7 +1072,7 @@ async fn mint_endpoint_seals_preview_state_to_disk() {
     assert_eq!(reread.sandbox_id, id.to_string());
     let ring = reread.preview_secrets.expect("ring sealed on mint");
     assert_eq!(ring.sv_current, 1);
-    // per-token audit metadata is now a `sandbox.shares`
+    // per-token audit metadata is now a `zeroship.shares`
     // pg row; the sealed record holds the secret ring only.
     let _ = std::fs::remove_dir_all(&persist_dir);
 }

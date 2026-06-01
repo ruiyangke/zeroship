@@ -146,8 +146,8 @@ async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzEr
                 u.email_verified_at IS NOT NULL AS email_verified, \
                 (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked, \
                 COALESCE(r.role, 'readonly') AS platform_role \
-             FROM auth.users u \
-             LEFT JOIN platform.roles r ON r.user_id = u.id \
+             FROM zeroship.users u \
+             LEFT JOIN zeroship.platform_admin_roles r ON r.user_id = u.id \
              WHERE u.id = $1",
             &[&principal_id],
         )
@@ -168,7 +168,7 @@ async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzEr
 async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships, AuthzError> {
     let rows = pg
         .query(
-            "SELECT app_id, role FROM control.app_members WHERE user_id = $1",
+            "SELECT app_id, role FROM zeroship.app_members WHERE user_id = $1",
             &[&principal_id],
         )
         .await

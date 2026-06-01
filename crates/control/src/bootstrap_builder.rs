@@ -130,7 +130,7 @@ pub async fn bootstrap_builder_oauth_client(
 async fn oauth_client_exists(pg: &Client) -> Result<bool, BuilderClientBootstrapError> {
     let rows = pg
         .query(
-            "SELECT 1 FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT 1 FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&BUILDER_CLIENT_ID],
         )
         .await
@@ -149,7 +149,7 @@ async fn insert_oauth_client(
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
     pg.execute(
-        "INSERT INTO control.oauth_clients \
+        "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id) \
          VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)",

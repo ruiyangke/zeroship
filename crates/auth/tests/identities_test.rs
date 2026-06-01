@@ -24,7 +24,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
     let email = format!("identities-{}@example.test", Uuid::new_v4().simple());
     let row = client
         .query_one(
-            "INSERT INTO auth.users (email, name, password_hash) \
+            "INSERT INTO zeroship.users (email, name, password_hash) \
              VALUES ($1::citext, $2, NULL) RETURNING id",
             &[&email, &"OAuth Only"],
         )
@@ -94,11 +94,11 @@ async fn identities_link_find_list_unlink_roundtrip() {
         .expect("unlink again");
     assert!(!removed_again, "second unlink must report no rows deleted");
 
-    // Cleanup. ON DELETE CASCADE on auth.identities.user_id would have caught
+    // Cleanup. ON DELETE CASCADE on zeroship.federated_identities.user_id would have caught
     // any stray row; we still drop the user explicitly to leave the schema
     // clean for the next test run.
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await
         .ok();
 }
@@ -115,7 +115,7 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
     let email = format!("identities-{}@example.test", Uuid::new_v4().simple());
     let row = client
         .query_one(
-            "INSERT INTO auth.users (email, name, password_hash) \
+            "INSERT INTO zeroship.users (email, name, password_hash) \
              VALUES ($1::citext, $2, NULL) RETURNING id",
             &[&email, &"OAuth Only"],
         )
@@ -171,7 +171,7 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
     );
 
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await
         .ok();
 }

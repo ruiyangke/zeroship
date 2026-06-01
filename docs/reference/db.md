@@ -2,7 +2,7 @@
 
 `@zeroship/db` is the database SDK for zeroship apps. You declare a typed
 schema once on `default.schema` of your entry module (the
-[ZS standard deploy contract](./zs-standard.md)); the platform reads it
+[zeroship standard deploy contract](./zeroship-standard.md)); the platform reads it
 at boot, installs typed Collection wrappers on `env.db`, and your handlers
 call CRUD methods on `env.db.<name>` directly. Behind the scenes the SDK
 calls into the native `env.db` v8_class surface (registered by the Rust
@@ -115,7 +115,7 @@ reads `default.schema` directly off the loaded entry. There is no
 manifest-injected schema path — Stage 5c of the ZS-standard refactor
 dropped that and the SDK now has exactly one discovery surface: the
 entry's default export. See
-[`docs/reference/zs-standard.md`](./zs-standard.md) for the broader
+[`docs/reference/zeroship-standard.md`](./zeroship-standard.md) for the broader
 contract.
 
 ### Collection names

@@ -215,10 +215,15 @@ pub async fn create_token(
     state: State<Arc<AppState>>,
     body: Json<CreateTokenBody>,
 ) -> web::HttpResponse {
+    // A PAT may NOT mint another PAT (no token-chaining): the acting principal
+    // must be an interactive OAuth/BFF session bearer (`token_id == None`,
+    // `token_policy == Some`), not a PAT (`token_id == Some`). Under the R5
+    // cutover the bespoke console-session principal is gone; the non-PAT
+    // principal is now the OAuth access token the BFF session carries.
     if guard.token_id.is_some() {
         return web::HttpResponse::Unauthorized().json(&json!({
-            "error": "session_required",
-            "message": "PATs can only be minted from a console session",
+            "error": "interactive_session_required",
+            "message": "PATs can only be minted from an interactive session bearer, not from another PAT",
         }));
     }
 
@@ -261,9 +266,9 @@ pub async fn create_token(
     };
 
     match state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
              VALUES ($1, $2, 'pat', $3, $4, $5, $6)",
             &[
@@ -313,10 +318,10 @@ pub async fn list_tokens(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT id, name, created_at, expires_at, last_used_at, revoked_at \
-             FROM control.permission_tokens \
+             FROM zeroship.permission_tokens \
              WHERE owner_id = $1 AND kind = 'pat' \
              ORDER BY created_at DESC, id DESC",
             &[&guard.principal_id],
@@ -359,9 +364,9 @@ pub async fn delete_token(
     };
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
-            "UPDATE control.permission_tokens \
+            "UPDATE zeroship.permission_tokens \
              SET revoked_at = COALESCE(revoked_at, NOW()) \
              WHERE id = $1 AND owner_id = $2 AND kind = 'pat' \
              RETURNING revoked_at",
@@ -456,10 +461,10 @@ async fn validate_grant_subset(
                 };
 
                 let authorized = if matches!(resource, Resource::Any) {
-                    authz::is_authorized_anywhere(&state.auth_pg, &state.static_policies, &ctx)
+                    authz::is_authorized_anywhere(&state.control_pg, &state.static_policies, &ctx)
                         .await
                 } else {
-                    authz::enforce(&state.auth_pg, &state.static_policies, &ctx)
+                    authz::enforce(&state.control_pg, &state.static_policies, &ctx)
                         .await
                         .map(|decision| decision == AuthzDecision::Allow)
                 };

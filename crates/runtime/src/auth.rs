@@ -21,7 +21,36 @@
 //! `handle_op_result_pump` / `handle_timer_pump`), so async continuations
 //! resolve to the correct identity.
 
+use crate::plugin::{NativePlugin, NativeRegistrar};
 use crate::state::SharedState;
+
+/// The auth plugin — registers `env.auth.getUser()` / `env.auth.requireUser()`.
+///
+/// `AuthPlugin` is **stateless**: it carries no construction args. Both
+/// callbacks read the current request's user from `RuntimeState` via the
+/// isolate scope slot (see [`current_user`]), so a single shared instance
+/// is correct for every app on every worker thread. It is registered at
+/// both plugin-construction sites — the worker `create_plugins()`
+/// (`crates/worker/src/cache.rs`, the path every production end-user app
+/// runs on) and the CLI `zeroship serve` plugin vector
+/// (`crates/cli/src/main.rs`) — so `env.auth.getUser()` resolves on both.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AuthPlugin;
+
+impl NativePlugin for AuthPlugin {
+    fn namespace(&self) -> &str {
+        "auth"
+    }
+
+    fn name(&self) -> &str {
+        "auth"
+    }
+
+    fn register(&self, r: &mut NativeRegistrar) {
+        r.add("getUser", get_user_callback);
+        r.add("requireUser", require_user_callback);
+    }
+}
 
 /// Store the user JSON for a specific request. Called by the worker
 /// dispatch handler after HMAC-verifying the `ZeroShip-User` header,

@@ -25,11 +25,11 @@
 //!
 //! - **POST `/magic/complete`** — the cross-device completion form. The
 //!   requesting device posts the 6-digit code it saw on the redeeming
-//!   device; we atomically consume `auth.magic_completions`, look up the
+//!   device; we atomically consume `zeroship.magic_completions`, look up the
 //!   user, mint a session, `accept_login`, redirect.
 //!
 //! User creation: a successful redeem on an unknown email creates a new
-//! `auth.users` row with `email_verified_at = NOW()` — clicking the link
+//! `zeroship.users` row with `email_verified_at = NOW()` — clicking the link
 //! is itself proof of email ownership. Reuses `find_or_create_magic_user`
 //! for both same-device and cross-device.
 
@@ -415,7 +415,7 @@ pub async fn verify(
 ///
 /// - **Same-device**: mint a session, `accept_login`, 302 to hydra.
 /// - **Cross-device**: generate a 6-digit code, persist it in
-///   `auth.magic_completions`, render the code on this device for the
+///   `zeroship.magic_completions`, render the code on this device for the
 ///   user to type back on the requesting device.
 #[allow(clippy::future_not_send)]
 pub async fn verify_redeem(
@@ -691,7 +691,7 @@ async fn same_device_finish(
 }
 
 /// Cross-device path: stash a fresh 6-digit code in
-/// `auth.magic_completions`, render the code on this (redeeming) device.
+/// `zeroship.magic_completions`, render the code on this (redeeming) device.
 #[allow(clippy::future_not_send)]
 async fn cross_device_show_code(
     db: &compio_postgres::Client,
@@ -1064,7 +1064,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
             // Magic-link click counts as email verification — make
             // sure the row reflects that (no-op if already verified).
             db.execute(
-                "UPDATE auth.users SET email_verified_at = NOW() \
+                "UPDATE zeroship.users SET email_verified_at = NOW() \
                  WHERE id = $1 AND email_verified_at IS NULL",
                 &[&user.id],
             )
@@ -1076,7 +1076,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
     let name = email.split('@').next().unwrap_or("user");
     let user = users::create(db, email, name, None).await?;
     db.execute(
-        "UPDATE auth.users SET email_verified_at = NOW() WHERE id = $1",
+        "UPDATE zeroship.users SET email_verified_at = NOW() WHERE id = $1",
         &[&user.id],
     )
     .await
@@ -1084,7 +1084,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
     Ok(user.id)
 }
 
-// ─── auth.magic_completions store ────────────────────────────────────
+// ─── zeroship.magic_completions store ────────────────────────────────────
 
 pub mod completions_store {
     use compio_postgres::Client;
@@ -1126,7 +1126,7 @@ pub mod completions_store {
             .map_err(|_| AuthError::Internal("invalid email".into()))?;
 
         db.execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES ($1, $2, $3::citext, $4, NOW() + ($5::text || ' seconds')::interval) \
              ON CONFLICT (csrf_nonce) DO UPDATE SET \
@@ -1161,7 +1161,7 @@ pub mod completions_store {
     ) -> std::result::Result<Completion, ConsumeError> {
         let rows = db
             .query(
-                "UPDATE auth.magic_completions \
+                "UPDATE zeroship.magic_completions \
                  SET attempts = (attempts + 1)::SMALLINT, \
                      consumed_pending_at = NOW() \
                  WHERE csrf_nonce = $1 \
@@ -1190,7 +1190,7 @@ pub mod completions_store {
         let in_flight = db
             .query(
                 "SELECT TRUE AS in_flight \
-                 FROM auth.magic_completions \
+                 FROM zeroship.magic_completions \
                  WHERE csrf_nonce = $1 \
                    AND consumed_at IS NULL \
                    AND consumed_pending_at > NOW() - INTERVAL '60 seconds' \
@@ -1209,7 +1209,7 @@ pub mod completions_store {
 
         let wrong_rows = db
             .query(
-                "UPDATE auth.magic_completions \
+                "UPDATE zeroship.magic_completions \
                  SET attempts = (attempts + 1)::SMALLINT, \
                      consumed_at = CASE \
                          WHEN attempts + 1 >= 5 THEN NOW() \
@@ -1245,7 +1245,7 @@ pub mod completions_store {
     ) -> crate::error::Result<bool> {
         let updated = db
             .execute(
-                "UPDATE auth.magic_completions \
+                "UPDATE zeroship.magic_completions \
                  SET consumed_at = NOW() \
                  WHERE csrf_nonce = $1 \
                    AND consumed_pending_at = $2 \
@@ -1264,7 +1264,7 @@ pub mod completions_store {
     ) -> crate::error::Result<bool> {
         let result = if let Some(ts) = reserved_at {
             db.execute(
-                "UPDATE auth.magic_completions \
+                "UPDATE zeroship.magic_completions \
                  SET consumed_pending_at = NULL \
                  WHERE csrf_nonce = $1 \
                    AND consumed_pending_at = $2 \
@@ -1274,7 +1274,7 @@ pub mod completions_store {
             .await
         } else {
             db.execute(
-                "UPDATE auth.magic_completions \
+                "UPDATE zeroship.magic_completions \
                  SET consumed_pending_at = NULL \
                  WHERE csrf_nonce = $1 \
                    AND consumed_at IS NULL",

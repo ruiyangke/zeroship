@@ -174,43 +174,43 @@ impl M4TestCtx {
         let _ = self
             .pg
             .execute(
-                "DELETE FROM auth.sessions WHERE user_id IN \
-                 (SELECT id FROM auth.users WHERE email = $1::citext)",
+                "DELETE FROM zeroship.idp_sessions WHERE user_id IN \
+                 (SELECT id FROM zeroship.users WHERE email = $1::citext)",
                 &[&email],
             )
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM auth.audit_events WHERE user_id IN \
-                 (SELECT id FROM auth.users WHERE email = $1::citext)",
+                "DELETE FROM zeroship.audit_events WHERE actor_user_id IN \
+                 (SELECT id FROM zeroship.users WHERE email = $1::citext)",
                 &[&email],
             )
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM auth.magic_completions WHERE email = $1::citext",
+                "DELETE FROM zeroship.magic_completions WHERE email = $1::citext",
                 &[&email],
             )
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM auth.magic_links WHERE email = $1::citext",
+                "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
                 &[&email],
             )
             .await;
         let _ = self
             .pg
             .execute(
-                "DELETE FROM auth.email_verifications WHERE email = $1::citext",
+                "DELETE FROM zeroship.email_verifications WHERE email = $1::citext",
                 &[&email],
             )
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM auth.users WHERE email = $1::citext", &[&email])
+            .execute("DELETE FROM zeroship.users WHERE email = $1::citext", &[&email])
             .await;
     }
 
@@ -239,7 +239,7 @@ fn verify_get_renders_interstitial_does_not_consume_token() {
     let remaining: i64 = ctx
         .pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.email_verifications \
+            "SELECT COUNT(*) FROM zeroship.email_verifications \
              WHERE user_id = $1 AND consumed_at IS NULL",
             &[&user_id],
         )
@@ -281,7 +281,7 @@ fn verify_post_redeem_consumes_token_and_marks_verified() {
     let verified: bool = ctx
         .pg
         .query_one(
-            "SELECT email_verified_at IS NOT NULL AS verified FROM auth.users WHERE id = $1",
+            "SELECT email_verified_at IS NOT NULL AS verified FROM zeroship.users WHERE id = $1",
             &[&user_id],
         )
         .await
@@ -414,7 +414,7 @@ fn magic_verify_get_renders_interstitial_does_not_consume() {
         .pg
         .query_one(
             "SELECT consumed_at IS NULL AND consumed_pending_at IS NULL AS pending \
-             FROM auth.magic_links WHERE email = $1::citext",
+             FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -470,7 +470,7 @@ fn magic_verify_redeem_post_consumes_and_redirects() {
         .pg
         .query_one(
             "SELECT consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_links WHERE email = $1::citext",
+             FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -585,7 +585,7 @@ where
 
 async fn verification_failure_audit_count(pg: &compio_postgres::Client) -> i64 {
     pg.query_one(
-        "SELECT COUNT(*) FROM auth.audit_events \
+        "SELECT COUNT(*) FROM zeroship.audit_events \
          WHERE event_type = 'verification_redeemed' \
            AND outcome = 'failure' \
            AND detail->>'reason' = 'invalid_or_expired'",

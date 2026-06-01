@@ -77,7 +77,7 @@ pub mod nomad_ch;
 /// - `pubkey_fp`: stable short fingerprint of the verifying key
 ///   (`sig::pubkey_fingerprint(...)` — first 16 bytes of SHA-256 over
 ///   the 32-byte pubkey, hex-encoded → 32 ASCII chars). Width is
-///   load-bearing: `sandbox.sandboxes.key_fp` has a `CHECK (key_fp ~
+///   load-bearing: `zeroship.sandboxes.key_fp` has a `CHECK (key_fp ~
 ///   '^[0-9a-f]{32}$')` constraint. Used by the controller's
 ///   restart-time `/version` rebind probe (§ II.5 of
 ///   docs/proposals/sandbox-preview-urls.md) to confirm the agent at

@@ -171,9 +171,9 @@ fi
 sleep 4
 
 for port in "${PROBE_PORTS[@]}"; do
-    # zeroship v1 RPC wire — POST /_zs/v1/ping with superjson `{ json }` body.
+    # zeroship v1 RPC wire — POST /__zeroship/v1/ping with superjson `{ json }` body.
     if ! curl -sf -X POST -H 'Content-Type: application/json' \
-        -d '{"json":null}' "http://127.0.0.1:$port/_zs/v1/ping" > /dev/null 2>&1; then
+        -d '{"json":null}' "http://127.0.0.1:$port/__zeroship/v1/ping" > /dev/null 2>&1; then
         echo "FATAL: port $port not responding"; exit 1
     fi
 done

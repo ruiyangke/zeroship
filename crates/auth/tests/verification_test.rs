@@ -39,7 +39,7 @@ async fn pg_connect(dsn: &str) -> Client {
 async fn install_verifications_insert_delay(client: &Client) {
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_verification_insert() \
+            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_verification_insert() \
              RETURNS trigger LANGUAGE plpgsql AS $$ \
              BEGIN \
                  PERFORM pg_sleep(0.2); \
@@ -53,7 +53,7 @@ async fn install_verifications_insert_delay(client: &Client) {
     client
         .execute(
             "DROP TRIGGER IF EXISTS test_sleep_before_verification_insert \
-             ON auth.email_verifications",
+             ON zeroship.email_verifications",
             &[],
         )
         .await
@@ -61,8 +61,8 @@ async fn install_verifications_insert_delay(client: &Client) {
     client
         .execute(
             "CREATE TRIGGER test_sleep_before_verification_insert \
-             BEFORE INSERT ON auth.email_verifications \
-             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_verification_insert()",
+             BEFORE INSERT ON zeroship.email_verifications \
+             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_verification_insert()",
             &[],
         )
         .await
@@ -73,7 +73,7 @@ async fn drop_verifications_insert_delay(client: &Client) {
     client
         .execute(
             "DROP TRIGGER IF EXISTS test_sleep_before_verification_insert \
-             ON auth.email_verifications",
+             ON zeroship.email_verifications",
             &[],
         )
         .await
@@ -120,7 +120,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
 
     let active_count: i64 = client
         .query_one(
-            "SELECT COUNT(*) FROM auth.email_verifications \
+            "SELECT COUNT(*) FROM zeroship.email_verifications \
              WHERE user_id = $1 AND consumed_at IS NULL",
             &[&user.id],
         )
@@ -134,13 +134,13 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
 
     client
         .execute(
-            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
             &[&user.id],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -184,13 +184,13 @@ async fn issue_then_redeem_roundtrip() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
             &[&user.id],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -225,8 +225,8 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
         .query_one(
             "SELECT ev.consumed_at IS NULL AS token_unconsumed, \
                     u.email_verified_at IS NULL AS user_unverified \
-             FROM auth.email_verifications ev \
-             JOIN auth.users u ON u.id = ev.user_id \
+             FROM zeroship.email_verifications ev \
+             JOIN zeroship.users u ON u.id = ev.user_id \
              WHERE ev.user_id = $1",
             &[&user.id],
         )
@@ -245,13 +245,13 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
 
     client
         .execute(
-            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
             &[&user.id],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }
@@ -296,13 +296,13 @@ async fn new_issue_supersedes_previous() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
             &[&user.id],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

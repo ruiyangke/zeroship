@@ -17,7 +17,7 @@
 //!    `accept_logout(challenge)`. Hydra returns a `redirect_to` —
 //!    that's the RP's `post_logout_redirect_uri` (or hydra's
 //!    default if the RP didn't supply one). Best-effort revoke
-//!    the local `auth.sessions` row keyed by the IdP session cookie,
+//!    the local `zeroship.idp_sessions` row keyed by the IdP session cookie,
 //!    and also attempt the historical Hydra-`sid` revoke.
 //!
 //! No "Stay signed in" reject path: hydra has no
@@ -132,7 +132,7 @@ pub async fn post(
         }
     };
 
-    // 3. Best-effort: revoke the local auth.sessions row from the
+    // 3. Best-effort: revoke the local zeroship.idp_sessions row from the
     //    cookie the browser is actually presenting. Failures are
     //    non-fatal — hydra's accept_logout still tears down hydra's
     //    own session.

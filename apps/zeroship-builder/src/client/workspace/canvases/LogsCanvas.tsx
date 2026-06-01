@@ -2,12 +2,14 @@
 //
 // Header: filter pills + search box + auto-scroll toggle.
 // Body: virtualized-ish list of log lines (timestamp · level · msg).
-// Polls getAppLogs(appId) every 2s. Sticky-bottom unless the user
-// has scrolled away from the bottom.
+// Polls getLogs(appId) every 2s — it tails the sandbox's
+// `.zeroship/dev.log` (the preview-start command redirects the
+// dev-server stdout/stderr there). Sticky-bottom unless the user has
+// scrolled away from the bottom.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getAppLogs } from "../../api";
+import { getLogs } from "../../api";
 import { FilterPill } from "../../components/FilterPill";
 
 export interface LogsCanvasProps {
@@ -34,7 +36,7 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
 
   const { data: lines, error } = useQuery({
     queryKey: ["app-logs", appId],
-    queryFn: () => getAppLogs(appId),
+    queryFn: () => getLogs(appId),
     refetchInterval: POLL_MS,
     retry: false,
   });
@@ -129,7 +131,7 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
           >
             {search || filter !== "all"
               ? "Quiet on this front — no lines match that filter."
-              : "Quiet on this front — give it a deploy first."}
+              : "Quiet on this front — open the preview to start the dev server."}
           </div>
         )}
         <div data-testid="logs-list">
@@ -175,8 +177,8 @@ function toneFor(l: Level): string {
 }
 
 function parseLine(raw: string): ParsedLine {
-  // The control plane returns log lines as opaque strings; we do a
-  // best-effort parse to surface a level and a timestamp prefix.
+  // The dev-server log is opaque text; we do a best-effort parse to
+  // surface a level and a timestamp prefix.
   // ISO-8601 prefix? "2026-04-13T12:34:56Z foo bar"
   const tsMatch = raw.match(
     /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$/,

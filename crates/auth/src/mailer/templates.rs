@@ -106,7 +106,14 @@ pub fn build_email(
 ) -> Email {
     Email {
         to,
+        // Transactional mail renders `To:` from `to` (no envelope/header split).
+        header_to: None,
         from,
+        // Transactional auth mail (verify / magic-link / reset / suspicious)
+        // sets neither Reply-To nor an envelope-from override: the driver uses
+        // `from` as both header-From and MAIL FROM, exactly as before.
+        reply_to: None,
+        envelope_from: None,
         subject,
         text,
         html: Some(html),

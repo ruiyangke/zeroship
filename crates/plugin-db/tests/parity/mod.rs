@@ -67,7 +67,7 @@ async function _zsRpcAndRespond(name, input) {
 }
 async function _zsFetch(request) {
     const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     const text = await request.text();
     let input;
     if (text) {
@@ -257,7 +257,7 @@ pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
     let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url_ep = format!("http://localhost/_zs/v1/{name}");
+    let url_ep = format!("http://localhost/__zeroship/v1/{name}");
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url_ep,

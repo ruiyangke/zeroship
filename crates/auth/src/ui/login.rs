@@ -175,7 +175,7 @@ pub struct LoginForm {
 ///    has no `password_hash` (account-enumeration defense).
 /// 4. Argon2 verify wrapped in `compio::runtime::spawn_blocking` (~100 ms,
 ///    must not block the ntex event loop).
-/// 5. On success: insert `auth.sessions`, set `__Host-zsidp_session` cookie,
+/// 5. On success: insert `zeroship.idp_sessions`, set `__Host-zsidp_session` cookie,
 ///    `accept_login` to hydra, 302 to hydra's `redirect_to`.
 /// 6. On failure: re-render the form with a status code matching the
 ///    failure mode (400 / 401 / 429 / 500). Cookies refreshed so the form

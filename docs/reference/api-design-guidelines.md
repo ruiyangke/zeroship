@@ -2,7 +2,7 @@
 
 Design zeroship APIs so generated code matches the current app model:
 
-- app entry points use the [ZS standard](../reference/zs-standard.md) default export (`schema`, `fetch`, `rpc`, optional `fetchFast`)
+- app entry points use the [zeroship standard](../reference/zeroship-standard.md) default export (`schema`, `fetch`, `rpc`, optional `fetchFast`)
 - database access hangs off `env.db` after bootstrap installs schema wrappers
 - auth is an explicit SDK call (`auth.getUser()` / `auth.requireUser()`)
 
@@ -213,7 +213,7 @@ Filters, patches, and row objects should be treated as inputs, not scratch space
 
 ## Checklist
 
-- Is the main path consistent with [docs/reference/zs-standard.md](../reference/zs-standard.md)?
+- Is the main path consistent with [docs/reference/zeroship-standard.md](../reference/zeroship-standard.md)?
 - Is the method name enough for generated code to use it correctly?
 - Is there one obvious way to do the operation?
 - Are parameters ordered consistently?

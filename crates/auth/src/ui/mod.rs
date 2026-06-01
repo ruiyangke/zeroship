@@ -129,6 +129,10 @@ pub struct ConsentPage<'a> {
 #[derive(Debug)]
 pub struct ConsentScopeView {
     pub label: String,
+    /// App-declared scope description (`zeroship.app_scope_defs.description`),
+    /// rendered as a per-scope sub-line on the consent screen. `None` for
+    /// identity/platform scopes and app scopes that declared no description.
+    pub description: Option<String>,
     pub unrecognized: bool,
 }
 

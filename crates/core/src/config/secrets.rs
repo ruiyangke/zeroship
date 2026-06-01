@@ -7,6 +7,14 @@ use base64::Engine;
 /// Development-only stash signing key used by web binaries when insecure dev is explicit.
 pub const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 
+/// Development-only pairwise-salt secret used by gateway + control when insecure
+/// dev is explicit. This is the dedicated seed for the per-app `pws_` identity
+/// anchor (auth-sdk §6.2) — NOT the stash key. It is a PERMANENT value: in
+/// production it must be set to a strong, stable secret and NEVER rotated
+/// without a migration, because rotating it re-keys every app's stored `pws_`.
+/// Both gateway and control must be configured with the IDENTICAL value.
+pub const DEV_PAIRWISE_SALT: &str = "dev-pairwise-salt-never-rotate-in-prod";
+
 /// Require `value` to be non-empty unless insecure development mode is explicit.
 ///
 /// # Errors
@@ -52,6 +60,48 @@ pub fn validate_stash_key(value: &str, insecure_dev: bool) -> Result<(), String>
     if value.len() < 32 {
         return Err(format!(
             "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
+            value.len()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate the production requirement for the dedicated pairwise-salt secret
+/// (auth-sdk §6.2). Same shape as [`validate_stash_key`]: exact-match dev
+/// sentinel rejected, non-empty, raw UTF-8 length ≥ 32 bytes. The error text
+/// stresses the never-rotate contract so an operator does not treat it like a
+/// rotatable operational key.
+///
+/// # Errors
+///
+/// Returns an explanatory error when `value` is the development sentinel, empty,
+/// or shorter than 32 bytes, unless `insecure_dev` is enabled.
+pub fn validate_pairwise_salt(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev {
+        return Ok(());
+    }
+
+    if value == DEV_PAIRWISE_SALT {
+        return Err(
+            "PAIRWISE_SALT is the dev default; refusing to boot without --dev-insecure. \
+             This is the PERMANENT per-app identity anchor — set a strong, stable secret \
+             (identical on gateway + control) and never rotate it without a migration."
+                .to_owned(),
+        );
+    }
+
+    if value.is_empty() {
+        return Err(
+            "PAIRWISE_SALT is required outside --dev-insecure; set a strong (>=32 byte) value \
+             (identical on gateway + control, never rotated without a migration)"
+                .to_owned(),
+        );
+    }
+
+    if value.len() < 32 {
+        return Err(format!(
+            "PAIRWISE_SALT is too short ({} bytes); minimum 32 bytes",
             value.len()
         ));
     }
@@ -396,8 +446,9 @@ mod tests {
 
     use super::{
         decoded_master_key_len, is_loopback_url, is_secret_ref, obtain_secret, parse_secret_ref,
-        require_unless_dev, resolve_secret, validate_master_key_material, validate_secret_ref,
-        validate_stash_key, SecretError, SecretRef, DEV_STASH_SIGNING_KEY,
+        require_unless_dev, resolve_secret, validate_master_key_material, validate_pairwise_salt,
+        validate_secret_ref, validate_stash_key, SecretError, SecretRef, DEV_PAIRWISE_SALT,
+        DEV_STASH_SIGNING_KEY,
     };
 
     // `std::env::set_var` mutates process-global state; serialize the env-touching
@@ -441,6 +492,38 @@ mod tests {
         // insecure_dev bypasses every check
         validate_stash_key("", true).expect("insecure dev bypass");
         validate_stash_key(DEV_STASH_SIGNING_KEY, true).expect("insecure dev bypass sentinel");
+    }
+
+    /// MAJOR fix (pairwise_salt secret lifecycle) — the dedicated pairwise-salt
+    /// secret has its OWN validator with the SAME strength posture as the stash
+    /// key, AND it is a DISTINCT value from the stash key (so they cannot be
+    /// confused / share a lifecycle). The dev sentinel is rejected outside dev.
+    #[test]
+    fn validate_pairwise_salt_unified_and_distinct_from_stash() {
+        // The dedicated salt's dev default is its OWN sentinel — NOT the stash
+        // default (proves the two secrets are decoupled).
+        assert_ne!(
+            DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
+            "the pairwise salt must NOT share the stash key's dev default"
+        );
+
+        // dev sentinel rejected non-dev (loudly names the never-rotate contract)
+        let err = validate_pairwise_salt(DEV_PAIRWISE_SALT, false).expect_err("dev default");
+        assert!(err.contains("dev default"));
+        assert!(err.contains("never rotate") || err.contains("migration"));
+
+        // empty rejected, short rejected, exactly 32 ok
+        assert!(validate_pairwise_salt("", false)
+            .expect_err("empty")
+            .contains("required"));
+        assert!(validate_pairwise_salt("short", false)
+            .expect_err("short")
+            .contains("too short"));
+        validate_pairwise_salt("0123456789abcdef0123456789abcdef", false).expect("strong salt");
+
+        // insecure_dev bypasses every check
+        validate_pairwise_salt("", true).expect("insecure dev bypass");
+        validate_pairwise_salt(DEV_PAIRWISE_SALT, true).expect("insecure dev bypass sentinel");
     }
 
     #[test]

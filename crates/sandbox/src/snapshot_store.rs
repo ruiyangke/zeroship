@@ -52,7 +52,7 @@ pub const ARTIFACT_FILES: &[&str] = &["config.json", "memory-ranges", "state.jso
 #[derive(Debug, Clone)]
 pub struct SnapshotMetadata {
     /// Canonical path (URI) — `gs://bucket/key` for L2, absolute
-    /// filesystem path for L1-only. Stored in `sandbox.sandboxes.
+    /// filesystem path for L1-only. Stored in `zeroship.sandboxes.
     /// snapshot_artifact_path`.
     pub artifact_path: String,
     /// Single SHA-256 over the canonical artifact concatenation. See

@@ -39,7 +39,7 @@ pub async fn check_user_eligible(
     let rows = conn
         .query(
             "SELECT locked_until, disabled_at \
-             FROM auth.users \
+             FROM zeroship.users \
              WHERE id = $1",
             &[&user_id],
         )

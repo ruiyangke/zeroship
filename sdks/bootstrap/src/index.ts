@@ -41,6 +41,15 @@ export type { LoadNormalized } from "./fetch-handler.js";
 export { devEntry } from "./dev-entry.js";
 export type { DevEntry, DevEntryOptions } from "./dev-entry.js";
 
+// NOTE: the dev-tier auth provider (`./dev-auth.js`) is DELIBERATELY NOT
+// re-exported from this barrel. The production synthetic SSR entry does
+// `import "@zeroship/bootstrap"` (the barrel) for its side effects, so a barrel
+// re-export of dev-auth would risk pulling the dev provider into the shipped
+// worker bundle. Consumers reach it via the `./dev-auth` subpath
+// (`@zeroship/bootstrap/dev-auth`) or transitively via `./dev` (dev-entry) —
+// neither of which the prod entry imports. This keeps the dev-auth provider
+// structurally absent from any `.zship` (grep-provable).
+
 // Side-effect-only modules (dispatcher.js installs `__zsDispatch` on
 // the global; runtime-entry.js is the prod-mode TLA orchestrator).
 // These are NOT re-exported from the barrel because they're used

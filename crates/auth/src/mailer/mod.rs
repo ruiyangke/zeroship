@@ -4,7 +4,7 @@
 //!
 //! Every `Mailer::send` MUST call [`check_suppression`] before transport and
 //! return [`MailerError::Suppressed`] if the recipient is in
-//! `auth.email_suppressions`. This is enforced by every driver in this module
+//! `zeroship.email_suppressions`. This is enforced by every driver in this module
 //! (stdout/smtp/resend) — never call the underlying transport directly.
 //!
 //! The `db: &Client` argument on `send` is what makes that contract
@@ -12,6 +12,8 @@
 //! trait demands a connection handle alongside the message.
 
 pub mod bounce;
+pub mod forward;
+pub mod inbound;
 pub mod resend;
 pub mod smtp;
 pub mod sns;
@@ -19,17 +21,37 @@ pub mod stdout;
 pub mod templates;
 pub mod types;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use compio_postgres::Client;
 
 use crate::store::suppressions;
 pub use resend::{ResendConfig, ResendMailer};
-pub use smtp::{SmtpConfig, SmtpMailer};
+pub use smtp::{SmtpConfig, SmtpMailer, SmtpTls};
 pub use stdout::StdoutMailer;
 pub use types::{Address, Email, MailerError, MessageId};
 
+/// The SECOND, dedicated mailer the relay forward path runs on (sub-spec
+/// §5.2a). A newtype around `Arc<dyn Mailer>` so ntex's type-keyed `State<T>`
+/// can distinguish it from the transactional `State<Arc<dyn Mailer>>` — two
+/// bare `Arc<dyn Mailer>` states would collide on the concrete type.
+///
+/// Built by `build_relay_forward_mailer` (forced to SMTP/stdout — never
+/// Resend, which cannot pin envelope-from) and injected via `server::run`. The
+/// relay handler extracts `State<RelayForwardMailer>`; transactional handlers
+/// keep extracting `State<Arc<dyn Mailer>>`.
+#[derive(Clone)]
+pub struct RelayForwardMailer(pub Arc<dyn Mailer>);
+
+impl std::fmt::Debug for RelayForwardMailer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RelayForwardMailer").field(&self.0).finish()
+    }
+}
+
 /// Outbound email transport. Implementations MUST check
-/// `auth.email_suppressions` before transport (via [`check_suppression`]) and
+/// `zeroship.email_suppressions` before transport (via [`check_suppression`]) and
 /// return [`MailerError::Suppressed`] for suppressed recipients.
 #[async_trait]
 pub trait Mailer: Send + Sync + std::fmt::Debug {
@@ -40,7 +62,7 @@ pub trait Mailer: Send + Sync + std::fmt::Debug {
 ///
 /// # Errors
 ///
-/// - [`MailerError::Suppressed`] if `email` is in `auth.email_suppressions`.
+/// - [`MailerError::Suppressed`] if `email` is in `zeroship.email_suppressions`.
 /// - [`MailerError::Transport`] if the suppression query itself fails (DB
 ///   error). We wrap as `Transport` because suppression-check failure is a
 ///   transport-layer fault from the caller's point of view — the message

@@ -52,11 +52,44 @@ pub async fn handle(
 ) -> HttpResponse {
     // `state.oidc_rp.issuer` is the canonical hydra issuer string
     // (built from `auth_ui_url` at boot, optionally overridden via
-    // `OidcRp::with_issuer` in tests). `client_id` matches the OIDC
-    // client registered for the gateway in
-    // `ops/auth-clients.example.toml` (currently `"gateway"`).
+    // `OidcRp::with_issuer` in tests).
     let issuer = state.oidc_rp.issuer.clone();
-    let aud = state.oidc_rp.client_id.clone();
+
+    // Per-app BCL disambiguation (auth-sdk Slice 1d, spec §1.2). Each per-app
+    // OAuth client registers its own `backchannel_logout_uri` with its own
+    // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
+    // (routing only — the signature is still verified below) to learn which
+    // client it is for; a per-app client resolves to one app's subdomain so we
+    // revoke only THAT app's sessions. The legacy shared `gateway` client
+    // (`state.oidc_rp.client_id`) still revokes across the subject's gateway
+    // sessions for that aud.
+    //
+    // `revoke_scope` carries the app's STABLE UUID (`apps.id`) when a per-app
+    // client matched (revoke only that app — the canonical session/anchor
+    // key), or `None` for the shared-client all-apps path.
+    // `revoke_sector` carries that app's `sector_identifier` so the per-app
+    // branch can derive the same `pws_…` the gateway projects, to write the
+    // PER-APP token-family marker (Batch A fix 4) — a per-app BCL must kill the
+    // user's live wrapper / raw-Hydra access token for THAT app, not just its
+    // gateway sessions. `None` sector ⇒ the marker write is skipped (no live
+    // wrapper to revoke without a sector).
+    let aud_candidates =
+        zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
+    let (aud, revoke_scope, revoke_sector): (
+        String,
+        Option<uuid::Uuid>,
+        Option<String>,
+    ) = aud_candidates
+        .iter()
+        .find_map(|cand| {
+            // The per-app session/anchor rows are keyed by the app's STABLE
+            // UUID (`apps.id`), not the renameable subdomain slug — so the
+            // per-app revoke scope carries the app id, never `route.entry.name`.
+            state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
+                (cand.clone(), Some(id), route.entry.sector_identifier.clone())
+            })
+        })
+        .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None, None));
 
     let token = match zeroship_core::logout_token::verify(
         &state.oidc_rp.jwks,
@@ -95,37 +128,128 @@ pub async fn handle(
     // Revoke. The verifier guarantees at least one of sub/sid is
     // present, but only sub maps to a row filter today (the
     // `gateway_sessions.user_id` column).
-    if let Some(db) = state.db.as_ref() {
+    // Check out ONE pooled connection for the whole revocation block.
+    // Every DB touch below (session revoke, wrapper-subject revoke, audit
+    // insert) runs sequentially with no outbound HTTP in between — the
+    // `logout_token` verify (which may fetch JWKS) already completed
+    // above — so a single short-lived checkout covers the block and is
+    // released on drop at the end of the `if let`. `pool` is bound first
+    // so it outlives the `conn` borrowed from it (drop is reverse
+    // declaration order).
+    let pool = match state.db.as_ref() {
+        Some(db_cfg) => match crate::db::checkout(db_cfg).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");
+                None
+            }
+        },
+        None => None,
+    };
+    let mut conn = match pool.as_ref() {
+        Some(pool) => match pool.get().await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");
+                None
+            }
+        },
+        None => None,
+    };
+    // `&mut Client`: the RLS-scoped `revoke_app_sessions_for_user` needs it (it
+    // opens a tenant-GUC transaction). The non-RLS `wrapper_revocation` +
+    // audit-insert calls below reborrow it immutably; every touch is sequential
+    // (no overlapping borrow) and no outbound HTTP runs between them.
+    if let Some(conn) = conn.as_deref_mut() {
         match token.sub.as_deref() {
             Some(sub) => {
-                if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub) {
-                    if let Err(e) =
-                        zeroship_core::wrapper_revocation::revoke_subject(db.as_ref(), subject)
+                let revoked = match revoke_scope {
+                    // Per-app client matched (Slice 1d §1.2): revoke ONLY this
+                    // app's sessions for the subject. We do NOT push the subject
+                    // into the global wrapper denylist — that is a cross-app
+                    // nuke; a per-app BCL must not log the user out of other
+                    // apps. `app_id` is the app's STABLE UUID — the canonical
+                    // session/anchor key.
+                    Some(app_id) => {
+                        // PER-APP token-family marker (Batch A fix 4): write
+                        // `zeroship.token_revocations` on the SAME `(client_id,
+                        // pws_)` key the gateway arms read, so the user's live
+                        // wrapper / raw-Hydra access token for THIS app dies on
+                        // the next request — not just their gateway sessions.
+                        // `aud` is the per-app `oac_…` client; `pws_` is
+                        // `derive_pairwise(sub, sector)` under the app's apex
+                        // sector. Best-effort: a marker write failure must not
+                        // block the session revoke. Skipped (with a warn) when
+                        // the route carries no sector yet.
+                        if let Some(sector) = revoke_sector.as_deref() {
+                            let pws = zeroship_core::auth::derive_pairwise(
+                                &state.pairwise_salt,
+                                sub,
+                                sector,
+                            );
+                            if let Err(e) = zeroship_core::wrapper_revocation::revoke_family(
+                                &*conn, &aud, &pws,
+                            )
                             .await
-                    {
-                        tracing::error!(
-                            error = %e,
-                            sub = %sub,
-                            "backchannel_logout: wrapper subject revoke failed"
-                        );
+                            {
+                                tracing::error!(
+                                    error = %e,
+                                    client_id = %aud,
+                                    "backchannel_logout: per-app token-family marker write failed"
+                                );
+                            }
+                            // SAME-NODE write-side bust (R1d): a BCL landing on
+                            // THIS node busts the local cache entry for
+                            // `(aud, pws)` so the just-written marker is seen
+                            // immediately here; sibling nodes rely on the TTL
+                            // backstop.
+                            state.revocation_cache.invalidate(&aud, &pws);
+                        } else {
+                            tracing::warn!(
+                                app_id = %app_id,
+                                "backchannel_logout: per-app BCL has no sector_identifier; \
+                                 skipping token-family marker (sessions still revoked)"
+                            );
+                        }
+                        sessions::revoke_app_sessions_for_user(&mut *conn, app_id, sub)
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::error!(
+                                    error = %e,
+                                    app_id = %app_id,
+                                    "backchannel_logout: revoke_app_sessions_for_user failed"
+                                );
+                                0
+                            })
                     }
-                } else {
-                    tracing::warn!(
-                        sub = %sub,
-                        "backchannel_logout: non-UUID sub cannot enter wrapper denylist"
-                    );
-                }
-                let revoked = sessions::revoke_all_for_user(db, sub).await.unwrap_or_else(|e| {
-                    tracing::error!(error = %e, "backchannel_logout: revoke_all_for_user failed");
-                    0
-                });
+                    // No per-app client matched (the logout_token's aud is the
+                    // shared `gateway` client, not a per-app `oac_…`). Under RLS
+                    // (changeset 0025) the gateway connects as the non-bypass
+                    // `zeroship_gateway` role, so a single cross-tenant
+                    // `WHERE user_id=$1` over EVERY app is not expressible — and
+                    // the former `revoke_all_for_user` fan-out has been removed.
+                    // Every real BCL now arrives under a per-app client (each
+                    // per-app OAuth client registers its OWN
+                    // `backchannel_logout_uri` with its own `aud`), so this
+                    // branch is a logged no-op rather than a cross-tenant nuke.
+                    None => {
+                        tracing::warn!(
+                            sub = %sub,
+                            aud = %aud,
+                            "backchannel_logout: logout_token aud is not a per-app client; \
+                             no per-app scope to revoke under RLS (no rows touched)"
+                        );
+                        0
+                    }
+                };
                 tracing::info!(
                     sub = %sub,
                     sid = ?token.sid,
+                    app = ?revoke_scope,
                     revoked,
                     "backchannel_logout: sessions revoked"
                 );
-                emit_revocation_audit(db, &aud, sub, token.sid.as_deref(), &token.jti, revoked)
+                emit_revocation_audit(&*conn, &aud, sub, token.sid.as_deref(), &token.jti, revoked)
                     .await;
             }
             None => {
@@ -188,7 +312,7 @@ async fn emit_revocation_audit(
     });
     if let Err(e) = db
         .execute(
-            "INSERT INTO auth.audit_events \
+            "INSERT INTO zeroship.audit_events \
                 (event_type, outcome, client_id, auth_method, detail) \
              VALUES ($1, $2, $3, $4, $5)",
             &[

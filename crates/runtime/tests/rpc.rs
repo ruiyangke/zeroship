@@ -22,7 +22,7 @@ fn dispatch_zs(
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{}", name);
+    let url = format!("http://localhost/__zeroship/v1/{}", name);
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
@@ -172,7 +172,7 @@ fn superjson_output_date_preserves_meta_on_rpc_fast_path() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/today",
+        "http://localhost/__zeroship/v1/today",
         &[("content-type".into(), "application/json".into())],
         r#"{"json":null}"#,
         &env,
@@ -210,7 +210,7 @@ fn persistent_context() {
         let env = EnvSnapshot::empty();
         let ctx = RequestCtx::new(CancelFlag::new());
         let outcome = runtime.call_fetch_handler(
-            "POST", "http://localhost/_zs/v1/count",
+            "POST", "http://localhost/__zeroship/v1/count",
             &[("content-type".into(), "application/json".into())],
             r#"{"json":null}"#, &env, ctx,
         );

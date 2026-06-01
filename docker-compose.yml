@@ -15,12 +15,13 @@
 #   docker compose down -v                        # stop + WIPE volumes (slow next boot)
 #
 # Once up, browse (any *.localhost auto-resolves to 127.0.0.1):
-#   http://builder.zeroship.localhost   — AI builder (needs OPENAI_API_KEY)
-#   http://console.zeroship.localhost   — creator dashboard / control plane
+#   http://console.zeroship.localhost   — the creator console / AI app-builder
+#                                         (a gateway-fronted zeroship app; needs
+#                                          OPENAI_API_KEY on the console app env)
 #   http://auth.zeroship.localhost      — login / OIDC
 #   http://<app>.zeroship.localhost     — a deployed creator app (via gateway)
 #
-# Caddy also carries network ALIASES for the auth/console/api/builder hosts so
+# Caddy also carries network ALIASES for the auth/console/api hosts so
 # CONTAINERS resolve those same names to Caddy — required for server-side OIDC
 # token exchange / JWKS fetch to hit the same issuer the browser sees.
 
@@ -58,8 +59,8 @@ services:
     environment:
       POSTGRES_PASSWORD: zeroship
       POSTGRES_DB: zeroship
-    # Sets the role default search_path so control's migrations resolve their
-    # unqualified `control.*` references in the shared multi-schema DB.
+    # Sets the role default search_path to `zeroship` so unqualified table
+    # references resolve in the single-schema platform DB.
     volumes:
       - ./ops/postgres-init.sql:/docker-entrypoint-initdb.d/00-search-path.sql:ro
     ports:
@@ -103,7 +104,7 @@ services:
       zeroship-control
         --port 9090
         --bind 0.0.0.0
-        --db postgres://postgres:zeroship@postgres:5432/zeroship
+        --db postgres://zeroship_control:zeroship_control@postgres:5432/zeroship
         --blob-store /data/bundles
         --control-key platform-key
         --master-key master-key
@@ -111,12 +112,36 @@ services:
         --hydra-public-url http://auth.zeroship.localhost
         --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
-        --bootstrap-builder-client
-        --builder-client-secret-file /data/builder-client-secret
+        --app-base-domain zeroship.localhost
+        --bootstrap-console
+        --console-host console.zeroship.localhost
+        --console-zship /opt/zeroship/console/app.zship
     environment:
-      # The bootstrapped zeroship-builder OAuth client is registered with this
-      # redirect URI so the builder's localhost OIDC callback is accepted.
-      BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
+      # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
+      # byte-identical on control + gateway — both derive the per-app `pws_`.
+      # Never rotate without a per-app `pws_` migration.
+      PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
+      # --- Console runtime env, FORWARDED by --bootstrap-console -------------
+      # The deployed console (the AI app-builder, a gateway-fronted zeroship
+      # app) needs these as SERVER-SIDE app env to function. The console seed
+      # (crates/control/src/bootstrap_console.rs) reads each from THIS process
+      # env at install time and writes it onto the console app's env store
+      # (secrets encrypted + exposed to process.env; plain URLs as vars) — never
+      # the browser. An unset var here is skipped (that console feature
+      # degrades) rather than failing the seed. These replace what the retired
+      # `builder` Vite service used to inject.
+      #
+      # OPERATOR MUST SUPPLY: OPENAI_API_KEY (the AI codegen/chat is dead
+      # without it). Export it in the host shell before `docker compose up`;
+      # the empty default lets the stack boot (console AI degrades) if absent.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Sandbox/preview backend — same values the `sandbox` service is
+      # configured with (URL on the compose network + its bearer token).
+      SANDBOX_URL: http://sandbox:9091
+      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
+      # In-cluster control-plane base URL the deployed console's control-client
+      # calls (the localhost default is wrong inside the compose network).
+      ZEROSHIP_CONTROL_URL: http://control:9090
     ports:
       - "9090:9090"
     volumes:
@@ -162,7 +187,7 @@ services:
           --auth-ui-url http://auth.zeroship.localhost \
           --hydra-public-url http://auth.zeroship.localhost \
           --gateway-public-url http://api.zeroship.localhost \
-          --db postgres://postgres:zeroship@postgres:5432/zeroship \
+          --db postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship \
           --dev-insecure
     volumes:
       # Same content-addressed blob store control writes to (asset proxy).
@@ -178,6 +203,10 @@ services:
       # Tampering is rejected at decode time; rotating this key
       # invalidates any in-flight OIDC dances.
       STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-key-please-rotate}
+      # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST equal the
+      # control service's PAIRWISE_SALT — both derive the per-app `pws_`. Never
+      # rotate without a per-app `pws_` migration.
+      PAIRWISE_SALT: ${PAIRWISE_SALT:-dev-pairwise-salt-never-rotate-in-prod}
     ports:
       - "8000:8000"
     security_opt:
@@ -210,11 +239,29 @@ services:
         --control http://control:9090
         --control-key platform-key
         --blob-store /data/bundles
+        # NOTE: the worker's --db is plugin-db's PROVISIONING connection, not a
+        # constrained system-table role. plugin-db's register_model creates
+        # per-app PG roles + schemas (CREATEROLE/CREATEDB) and manages the WAL
+        # replication slot, so this connection MUST stay a privileged principal
+        # (the postgres superuser here in dev). The `zeroship_worker` role from
+        # changeset 0025 exists (and owns ZERO zeroship.* system-table grants),
+        # but it is NOT the worker's login role — the worker never touches the
+        # system tables; its per-app tenant access is gated by plugin-db's own
+        # `SET LOCAL ROLE <per-app role>` mechanism, a separate trust boundary.
+        --db postgres://postgres:zeroship@postgres:5432/zeroship
+        --kv-url redis://redis:6379
+        --storage-root /data/app-storage
         --max-isolates 200
         --poll-interval 3
     volumes:
       # Same content-addressed blob store control writes to (deploy blobs).
       - bundles:/data/bundles
+      # SHARED app object store for env.storage. Every worker replica mounts
+      # the SAME named volume at the same path, so a `storage.put` on one
+      # replica is readable by another — the multi-node-consistent LocalFs
+      # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
+      # replaces this in prod behind the same Backend trait.
+      - app-storage:/data/app-storage
       # Mounted at the well-known path => auto-discovered, so the worker
       # picks up the shared [observability] defaults with no --config.
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
@@ -223,7 +270,36 @@ services:
     security_opt:
       - seccomp:unconfined
     depends_on:
-      - control
+      # --db now points at the shared Postgres, so wait for the schema to
+      # exist (postgres healthy + the one-shot migrate completed) the same
+      # way control/gateway do — otherwise the first env.db op races the
+      # migration.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      control:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  # redis — the SHARED key-value store backing the deployed-app `env.kv`
+  # namespace. The worker's `--kv-url redis://redis:6379` points every
+  # worker replica at this ONE instance, so a `kv.set` on one replica is
+  # visible to another (multi-node consistency). The bespoke compio-redis
+  # driver speaks to it; zero tokio. Single-node here in dev; the
+  # `Redis` backend's URL transparently upgrades to cluster mode
+  # (`?cluster=true&seeds=...`) for a sharded prod fleet.
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
 
   # zeroship-auth — OIDC IdP UI + RP in front of the hydra kernel. The gateway
   # redirects unauthenticated end users to it (gateway's
@@ -238,11 +314,12 @@ services:
     command: >
       zeroship-auth
         --addr 0.0.0.0:9092
-        --db-url postgres://postgres:zeroship@postgres:5432/zeroship
+        --db-url postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship
         --dev-insecure
         --hydra-public-url http://auth.zeroship.localhost
         --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
+        --relay-forward-mailer stdout
         --bootstrap
     ports:
       - "9092:9092"
@@ -326,6 +403,17 @@ services:
       SANDBOX_AUTO_PULL: "false"
       SANDBOX_IDLE_TIMEOUT_SECS: "1800"
       SANDBOX_MAX_LIFETIME_SECS: "28800"
+      # Pg-backed non-secret sandbox state (P13 role split, changesets
+      # 0011 + 0026). Each handle connects AS its least-privilege role:
+      #   - SANDBOX_DATABASE_URL        → sandbox_app   (runtime DML)
+      #   - SANDBOX_DATABASE_URL_AUDIT  → sandbox_audit (INSERT-only events)
+      #   - SANDBOX_DATABASE_URL_GDPR   → sandbox_gdpr  (scoped DELETE)
+      # The sandbox tables live in the shared `zeroship` schema, owned by the
+      # Liquibase `migrate` service; the sandbox only verifies connectivity at
+      # boot. Setting SANDBOX_DATABASE_URL flips pg integration ON.
+      SANDBOX_DATABASE_URL: postgres://sandbox_app:sandbox_app@postgres:5432/zeroship
+      SANDBOX_DATABASE_URL_AUDIT: postgres://sandbox_audit:sandbox_audit@postgres:5432/zeroship
+      SANDBOX_DATABASE_URL_GDPR: postgres://sandbox_gdpr:sandbox_gdpr@postgres:5432/zeroship
     ports:
       - "9091:9091"
     volumes:
@@ -336,84 +424,29 @@ services:
       - zeroship-sandbox-net
     security_opt:
       - seccomp:unconfined
-
-  builder:
-    # Frontend dev image = the runtime image (carries the `zeroship` CLI built
-    # for this glibc) + Node 22. vite dev's dev-bootstrap spawns `zeroship`.
-    build:
-      context: .
-      target: frontend
-    image: zeroship-frontend:dev
-    # Self-heal: builder waits for control to write /data/builder-client-secret;
-    # if control is still bootstrapping, retry rather than exit.
-    restart: on-failure
-    # vite dev spawns the `zeroship` runtime (io_uring/compio); the default
-    # seccomp profile blocks io_uring_setup → PermissionDenied. Same opt-in the
-    # other runtime-bearing services use.
-    security_opt:
-      - seccomp:unconfined
-    working_dir: /workspace
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        corepack enable
-        pnpm config set store-dir /pnpm/store
-        for i in $$(seq 1 60); do
-          [ -s /data/builder-client-secret ] && break
-          sleep 1
-        done
-        if [ ! -s /data/builder-client-secret ]; then
-          echo "[builder] missing /data/builder-client-secret" >&2
-          exit 1
-        fi
-        export BUILDER_CLIENT_SECRET="$$(cat /data/builder-client-secret)"
-        pnpm install --frozen-lockfile
-        # Build the workspace SDK packages so their dist/ exists — the builder's
-        # vite.config.ts imports @zeroship/vite-plugin, which vite resolves via
-        # its package.json "exports" → dist. Without this, `vite dev` fails with
-        # "Failed to resolve entry for package @zeroship/vite-plugin". dist is
-        # written into the mounted repo, so a restart reuses it (build once).
-        pnpm build
-        exec pnpm --dir apps/zeroship-builder dev --host 0.0.0.0 --port 3001 --strictPort
-    environment:
-      CONTROL_URL: http://control:9090
-      CONTROL_KEY: platform-key
-      # All four OIDC endpoints use the Caddy-fronted issuer host. The
-      # authorize URL is browser-facing; token / revoke / JWKS run server-side
-      # inside this container — both resolve auth.zeroship.localhost to Caddy
-      # (browser → 127.0.0.1; container → Caddy network alias), so the issuer
-      # the browser sees matches the one the server verifies against.
-      HYDRA_AUTHORIZE_URL: http://auth.zeroship.localhost/oauth2/auth
-      HYDRA_TOKEN_URL: http://auth.zeroship.localhost/oauth2/token
-      HYDRA_REVOKE_URL: http://auth.zeroship.localhost/oauth2/revoke
-      HYDRA_JWKS_URL: http://auth.zeroship.localhost/.well-known/jwks.json
-      BUILDER_CLIENT_ID: zeroship-builder
-      BUILDER_REDIRECT_URI: http://builder.zeroship.localhost/auth/callback
-      BUILDER_INSTANCE_ID: docker-compose
-      BUILDER_TOKEN_ENCRYPTION_KEY: ${BUILDER_TOKEN_ENCRYPTION_KEY:-dev-builder-token-encryption-key-change}
-      SANDBOX_URL: http://sandbox:9091
-      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    ports:
-      - "3001:3001"
-    volumes:
-      - .:/workspace
-      - ./data:/data:ro
-      - builder-pnpm-store:/pnpm/store
     depends_on:
-      control:
-        condition: service_started
-      hydra:
-        condition: service_started
-      sandbox:
-        condition: service_started
+      # pg integration is now ON (SANDBOX_DATABASE_URL set), so wait for the
+      # schema + roles to exist (postgres healthy + the one-shot migrate done),
+      # the same way control/auth/gateway/worker do.
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
+  # The AI app-builder IS the console now: a regular zeroship app built to a
+  # `.zship`, seeded by control's `--bootstrap-console`, served by the gateway
+  # at console.zeroship.localhost. Its OPENAI_API_KEY / sandbox creds are
+  # injected as server-side app env on the seeded console app (control env
+  # store), not via a standalone Vite container. The builder's confidential
+  # OIDC client + BUILDER_*/TOKEN_ENCRYPTION_KEY env are gone with it.
 
   # caddy — dev reverse proxy on :80 for the *.zeroship.localhost domain.
-  # Routes auth/console/api/builder + the {app}.zeroship.localhost catch-all
-  # to the right upstream (see ops/Caddyfile). The network ALIASES make those
+  # Routes auth/console/api + the {app}.zeroship.localhost catch-all to the
+  # right upstream (see ops/Caddyfile). console.* now proxies to the GATEWAY
+  # (the console is a gateway-fronted app). The network ALIASES make those
   # public hostnames ALSO resolve to Caddy from INSIDE the compose network, so
-  # server-side OIDC (control/gateway/builder verifying tokens, fetching JWKS,
+  # server-side OIDC (control/gateway verifying tokens, fetching JWKS,
   # exchanging codes against http://auth.zeroship.localhost) hits the same
   # issuer the browser does.
   caddy:
@@ -428,7 +461,6 @@ services:
           - auth.zeroship.localhost
           - console.zeroship.localhost
           - api.zeroship.localhost
-          - builder.zeroship.localhost
     depends_on:
       control:
         condition: service_started
@@ -438,8 +470,6 @@ services:
         condition: service_started
       hydra:
         condition: service_started
-      builder:
-        condition: service_started
 
 networks:
   zeroship-sandbox-net:
@@ -448,5 +478,9 @@ networks:
 
 volumes:
   bundles:
+  # Shared object store for deployed-app env.storage (LocalFs). One volume,
+  # mounted at the same path on every worker replica → cross-node-consistent.
+  app-storage:
+  # Persisted redis dataset for the deployed-app env.kv store.
+  redis-data:
   verdaccio_storage:
-  builder-pnpm-store:

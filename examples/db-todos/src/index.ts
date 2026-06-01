@@ -14,7 +14,7 @@
 //       - action  can call fetch(); compose via runQuery/runMutation
 //
 // Wire IDs are explicit and dotted:
-//   exports become RPC procedures at /_zs/v1/<id>.
+//   exports become RPC procedures at /__zeroship/v1/<id>.
 
 import { env } from "zeroship";
 import { query, mutation, action, stream } from "@zeroship/rpc/server";

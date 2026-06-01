@@ -8,7 +8,7 @@
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
 //! `.zship` archives. `deploy` uploads those archives directly to the
 //! control plane. Deploy/secret/var commands read the bearer token from
-//! `--token=PAT`, `ZS_TOKEN`, or credentials saved by `zeroship login`.
+//! `--token=PAT`, `ZEROSHIP_TOKEN`, or credentials saved by `zeroship login`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -119,6 +119,14 @@ fn cmd_serve(args: &[String]) {
         .unwrap_or_else(|| PathBuf::from(".zeroship/storage"));
     plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
     eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
+
+    // Auth plugin: always on. Stateless — the callbacks read the
+    // per-request user from `RuntimeState` (set from the verified
+    // `ZeroShip-User` header). Pinned here AND in the worker's
+    // `create_plugins()` so `env.auth.getUser()` resolves on both the dev
+    // (`zeroship serve`) and the production worker path.
+    plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
+    eprintln!("[zeroship] auth plugin registered");
 
     // KV plugin backend selection, in priority order:
     //   1. ZEROSHIP_KV_URL set → Redis (distributed-correctness: shared
@@ -292,7 +300,7 @@ fn print_usage() {
     eprintln!("                   Run a single JS file with the V8 runtime.");
     eprintln!("  zeroship deploy   <path-to-.zship> --app=<id> [--control=URL] [--token=PAT]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
-    eprintln!("                   Token source: --token, ZS_TOKEN, or zeroship login.");
+    eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
     eprintln!("  zeroship login    [--auth-url=https://auth.zeroship.ai]");
     eprintln!("                   Sign in with OAuth Device Authorization Grant.");
     eprintln!("  zeroship whoami");
@@ -327,12 +335,12 @@ pub(crate) fn flag_str(args: &[String], prefix: &str) -> Option<String> {
 }
 
 const MISSING_TOKEN_HINT: &str =
-    "no API token found; run `zeroship login`, pass `--token=<PAT>`, or set ZS_TOKEN";
+    "no API token found; run `zeroship login`, pass `--token=<PAT>`, or set ZEROSHIP_TOKEN";
 
 pub(crate) fn resolve_bearer_token(args: &[String]) -> Result<String, String> {
     resolve_bearer_token_from(
         args,
-        || std::env::var("ZS_TOKEN").ok(),
+        || std::env::var("ZEROSHIP_TOKEN").ok(),
         crate::auth::load_credentials,
     )
 }
@@ -394,7 +402,7 @@ mod tests {
         let token = resolve_bearer_token_from(
             &args,
             || Some("env-token".to_string()),
-            || panic!("credentials should not be read when ZS_TOKEN is present"),
+            || panic!("credentials should not be read when ZEROSHIP_TOKEN is present"),
         )
         .expect("env token");
         assert_eq!(token, "env-token");

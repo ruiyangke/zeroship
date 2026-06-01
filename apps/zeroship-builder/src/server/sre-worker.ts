@@ -27,7 +27,7 @@
 // (`internal/sre.ts`, translator helpers, etc.).
 //
 // Wire convention (single-input object):
-//   POST /_zs/v1/sre.monitor
+//   POST /__zeroship/v1/sre.monitor
 //     body: { json: { appId: string } }
 //     response: { findings: SREFindingItem[] }
 
@@ -35,7 +35,7 @@ import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
 import { SRE_PROMPT } from "./internal/prompts";
-import { getAppLogs } from "./apps";
+import { getLogs } from "./projects";
 
 // ─── finding shape ───────────────────────────────────────────────
 //
@@ -87,10 +87,10 @@ const sreMonitorInputSchema = z.object({
  * Run an SRE monitor pass over the given app's recent logs + perf.
  *
  * Flow:
- *   1. Pull the last log slice via the existing `getAppLogs` proxy.
- *      (Real "last hour" windowing lives behind the control plane —
- *      for now we take what `getAppLogs` returns and tell the model
- *      that's the available window.)
+ *   1. Pull the last log slice via `getLogs` (tails the sandbox's
+ *      `.zeroship/dev.log`). Real "last hour" windowing isn't available
+ *      in a preview sandbox — we take what `getLogs` returns and tell
+ *      the model that's the available window.
  *   2. Synthesize a perf-context line. Until the real metrics pipeline
  *      lands, this is a placeholder so the prompt is structurally
  *      complete.
@@ -119,12 +119,13 @@ export const sreMonitor = action(async (
     "@langchain/core/messages"
   );
 
-  // Best-effort log fetch — control-plane unreachable degrades to
-  // "no logs available" rather than throwing. The model is told
-  // what's missing so it returns an empty findings array (or an info-
-  // severity "insufficient data" finding) instead of guessing.
+  // Best-effort log fetch — a sandbox that never started the preview
+  // (no `.zeroship/dev.log`) degrades to "no logs available" rather
+  // than throwing. The model is told what's missing so it returns an
+  // empty findings array (or an info-severity "insufficient data"
+  // finding) instead of guessing.
   const logs = await Promise.resolve()
-    .then(() => getAppLogs(input.appId))
+    .then(() => getLogs(input.appId))
     .catch(() => null);
 
   const contextText = renderHealthContext({

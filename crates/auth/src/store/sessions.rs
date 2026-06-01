@@ -1,4 +1,4 @@
-//! `auth.sessions` CRUD — the `IdP` login session at `auth.zeroship.ai`.
+//! `zeroship.idp_sessions` CRUD — the `IdP` login session at `auth.zeroship.ai`.
 
 use compio_postgres::Client;
 
@@ -35,12 +35,12 @@ pub struct CreateSession<'a> {
 pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session> {
     let rows = conn
         .query(
-            "INSERT INTO auth.sessions \
+            "INSERT INTO zeroship.idp_sessions \
                 (user_id, auth_method, amr, acr, credential_version, idle_expires_at, abs_expires_at) \
              SELECT id, $2, $3, $4, credential_version, \
                     NOW() + ($5::text || ' minutes')::interval, \
                     NOW() + ($6::text || ' hours')::interval \
-             FROM auth.users \
+             FROM zeroship.users \
              WHERE id = $1 \
                AND ($7::BIGINT IS NULL OR credential_version = $7::BIGINT) \
              RETURNING id, user_id, auth_method, amr, acr, credential_version, \
@@ -87,17 +87,17 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
 pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> {
     let rows = conn
         .query(
-            "UPDATE auth.sessions \
+            "UPDATE zeroship.idp_sessions \
              SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
-             FROM auth.users \
-             WHERE auth.sessions.id = $1 \
-               AND auth.users.id = auth.sessions.user_id \
-               AND auth.sessions.credential_version = auth.users.credential_version \
-               AND auth.sessions.revoked_at IS NULL \
-               AND auth.sessions.idle_expires_at > NOW() \
-               AND auth.sessions.abs_expires_at > NOW() \
-             RETURNING auth.sessions.id, auth.sessions.user_id, auth_method, amr, acr, \
-                       auth.sessions.credential_version, idle_expires_at, abs_expires_at",
+             FROM zeroship.users \
+             WHERE zeroship.idp_sessions.id = $1 \
+               AND zeroship.users.id = zeroship.idp_sessions.user_id \
+               AND zeroship.idp_sessions.credential_version = zeroship.users.credential_version \
+               AND zeroship.idp_sessions.revoked_at IS NULL \
+               AND zeroship.idp_sessions.idle_expires_at > NOW() \
+               AND zeroship.idp_sessions.abs_expires_at > NOW() \
+             RETURNING zeroship.idp_sessions.id, zeroship.idp_sessions.user_id, auth_method, amr, acr, \
+                       zeroship.idp_sessions.credential_version, idle_expires_at, abs_expires_at",
             &[
                 &id,
                 &crate::sessions::login::IDLE_MINUTES.to_string(),
@@ -124,7 +124,7 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
 /// `AuthError::Db` on PG failure.
 pub async fn revoke(conn: &Client, id: uuid::Uuid) -> Result<()> {
     conn.execute(
-        "UPDATE auth.sessions SET revoked_at = NOW() WHERE id = $1",
+        "UPDATE zeroship.idp_sessions SET revoked_at = NOW() WHERE id = $1",
         &[&id],
     )
     .await

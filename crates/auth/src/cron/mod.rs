@@ -4,7 +4,7 @@
 //! runtime. Tasks observe their schedule from
 //! [`AuthConfig`](crate::config::AuthConfig) (so an operator can shorten
 //! `--cron-tick-secs` for staging environments) and coordinate via
-//! `auth.cron_state` rows when they need durable "last-ran" tracking.
+//! `zeroship.cron_state` rows when they need durable "last-ran" tracking.
 //!
 //! P6-U1 ships `jwk_rotation`; P6-U2 adds `audit_retention`;
 //! `token_sweep` drops expired one-shot token rows after their grace window.

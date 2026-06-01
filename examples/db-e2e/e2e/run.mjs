@@ -104,7 +104,7 @@ function rpcBody(input) {
 }
 
 async function rpc(baseUrl, name, input = {}) {
-  const response = await fetch(`${baseUrl}/_zs/v1/${name}`, {
+  const response = await fetch(`${baseUrl}/__zeroship/v1/${name}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: rpcBody(input),
@@ -173,7 +173,7 @@ class LineValueStream {
 
 async function openValueStream(baseUrl, name, input) {
   const response = await fetch(
-    `${baseUrl}/_zs/v1/${name}?input=${encodeStreamInput(input)}`,
+    `${baseUrl}/__zeroship/v1/${name}?input=${encodeStreamInput(input)}`,
     { headers: { Accept: "text/event-stream" } },
   );
   if (!response.ok || !response.body) {

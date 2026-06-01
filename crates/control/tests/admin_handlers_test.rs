@@ -1,8 +1,8 @@
 //! Live-PG regression tests for platform admin handlers.
 //!
 //! Skips when no test Postgres URL is set. The handlers use AuthzGuard,
-//! so the tests create real `auth.users`, `auth.console_sessions`,
-//! `platform.roles`, permission tokens, and policy rows.
+//! so the tests create real `auth.users`, `platform.roles`, permission
+//! tokens (the bearer principal path), and policy rows.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,10 +13,9 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    admin_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    admin_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
-use zeroship_core::oidc_verify::TokenClaims;
 
 mod common;
 
@@ -52,9 +51,9 @@ impl Drop for Fixture {
 }
 
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
-    let (auth_pg_client, auth_pg_conn) = connect(db_url, NoTls).await.expect("auth-pg connect");
+    let (control_pg_client, control_pg_conn) = connect(db_url, NoTls).await.expect("control-pg connect");
     compio::runtime::spawn(async move {
-        let _ = auth_pg_conn.run().await;
+        let _ = control_pg_conn.run().await;
     })
     .detach();
 
@@ -68,12 +67,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> =
         Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
 
     let state = Arc::new(AppState {
         registry,
@@ -91,10 +84,9 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
-        oidc_rp,
-        auth_pg: Arc::new(auth_pg_client),
-        auth_db_url: db_url.to_string(),
+        control_pg: Arc::new(control_pg_client),
         hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+        app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
@@ -104,6 +96,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
             "http://127.0.0.1:9",
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        pairwise_salt: [0u8; 32],
     });
 
     Fixture {
@@ -120,7 +113,7 @@ async fn insert_user(pg: &Client, label: &str) -> Uuid {
     );
     let rows = pg
         .query(
-            "INSERT INTO auth.users (email, name, email_verified_at) \
+            "INSERT INTO zeroship.users (email, name, email_verified_at) \
              VALUES ($1, $2, NOW()) \
              RETURNING id",
             &[&email, &label],
@@ -130,38 +123,10 @@ async fn insert_user(pg: &Client, label: &str) -> Uuid {
     rows[0].get("id")
 }
 
-fn claims_for(user_id: Uuid) -> TokenClaims {
-    TokenClaims {
-        sub: user_id.to_string(),
-        iss: "https://auth.zeroship.test/".to_string(),
-        aud: serde_json::Value::String("console.zeroship.ai".to_string()),
-        exp: 9_999_999_999,
-        iat: 0,
-        nbf: None,
-        nonce: None,
-        at_hash: None,
-        c_hash: None,
-        email: Some(format!("{user_id}@zeroship.test")),
-        email_verified: Some(true),
-        name: Some("Admin Handler User".to_string()),
-        picture: None,
-        acr: None,
-        amr: None,
-        other: Default::default(),
-    }
-}
-
-async fn session_cookie(pg: &Client, user_id: Uuid) -> String {
-    let session = zeroship_control::console_sessions::create(pg, &claims_for(user_id))
-        .await
-        .expect("create console session");
-    oidc_rp::set_console_session_cookie(&session.id, false)
-}
-
 async fn count_role(pg: &Client, user_id: Uuid, role: &str) -> i64 {
     let rows = pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM platform.roles \
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.platform_admin_roles \
              WHERE user_id = $1 AND role = $2",
             &[&user_id, &role],
         )
@@ -173,7 +138,7 @@ async fn count_role(pg: &Client, user_id: Uuid, role: &str) -> i64 {
 async fn count_audit(pg: &Client, event_type: &str, target: Uuid) -> i64 {
     let rows = pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM auth.audit_events \
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.audit_events \
              WHERE event_type = $1 AND detail->>'target' = $2",
             &[&event_type, &target.to_string()],
         )
@@ -198,18 +163,15 @@ async fn app_flag(pg: &Client, app_id: Uuid, column: &str) -> bool {
 async fn cleanup_user(pg: &Client, user_id: Uuid) {
     let _ = pg
         .execute(
-            "DELETE FROM control.authz_decisions WHERE user_id = $1",
+            "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = pg
-        .execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user_id])
         .await;
     let _ = pg
-        .execute("DELETE FROM auth.console_sessions WHERE user_id = $1", &[&user_id])
-        .await;
-    let _ = pg
-        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
 }
 
@@ -228,9 +190,10 @@ async fn non_admin_cannot_grant_platform_role() {
         return;
     };
     let fx = build_test_state(&db_url, "non-admin").await;
-    let actor = insert_user(&fx.state.auth_pg, "non-admin-actor").await;
-    let target = insert_user(&fx.state.auth_pg, "non-admin-target").await;
-    let cookie = session_cookie(&fx.state.auth_pg, actor).await;
+    // A NON-admin actor (a creator who is not a platform admin) — bearer is the
+    // only principal path now, so the actor is a non-admin PAT.
+    let actor = common::authz_fixture::non_admin_pat(&fx.state).await;
+    let target = insert_user(&fx.state.control_pg, "non-admin-target").await;
 
     let app = test::init_service(
         web::App::new()
@@ -239,6 +202,7 @@ async fn non_admin_cannot_grant_platform_role() {
     )
     .await;
 
+    // (1) No bearer at all → rejected (401/403).
     let req = test::TestRequest::post()
         .uri(&format!("/admin/users/{target}/role"))
         .set_json(&serde_json::json!({"role": "admin"}))
@@ -249,18 +213,19 @@ async fn non_admin_cannot_grant_platform_role() {
         "unauthenticated admin role grant should be rejected"
     );
 
+    // (2) Authenticated as a non-admin → 403 forbidden, no role written.
     let req = test::TestRequest::post()
         .uri(&format!("/admin/users/{target}/role"))
-        .header("cookie", cookie)
+        .header("authorization", actor.bearer())
         .set_json(&serde_json::json!({"role": "admin"}))
         .to_request();
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert_eq!(count_role(&fx.state.auth_pg, target, "admin").await, 0);
+    assert_eq!(count_role(&fx.state.control_pg, target, "admin").await, 0);
 
-    cleanup_user(&fx.state.auth_pg, actor).await;
-    cleanup_user(&fx.state.auth_pg, target).await;
+    actor.cleanup(&fx.state).await;
+    cleanup_user(&fx.state.control_pg, target).await;
 }
 
 #[compio::test]
@@ -271,7 +236,7 @@ async fn admin_can_grant_platform_role() {
     };
     let fx = build_test_state(&db_url, "grant").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
-    let target = insert_user(&fx.state.auth_pg, "grant-target").await;
+    let target = insert_user(&fx.state.control_pg, "grant-target").await;
 
     let app = test::init_service(
         web::App::new()
@@ -287,13 +252,13 @@ async fn admin_can_grant_platform_role() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    assert_eq!(count_role(&fx.state.auth_pg, target, "support").await, 1);
+    assert_eq!(count_role(&fx.state.control_pg, target, "support").await, 1);
     assert_eq!(
-        count_audit(&fx.state.auth_pg, "platform_role_granted", target).await,
+        count_audit(&fx.state.control_pg, "platform_role_granted", target).await,
         1
     );
 
-    cleanup_user(&fx.state.auth_pg, target).await;
+    cleanup_user(&fx.state.control_pg, target).await;
     pat.cleanup(&fx.state).await;
 }
 
@@ -305,11 +270,11 @@ async fn admin_can_revoke_platform_role() {
     };
     let fx = build_test_state(&db_url, "revoke").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
-    let target = insert_user(&fx.state.auth_pg, "revoke-target").await;
+    let target = insert_user(&fx.state.control_pg, "revoke-target").await;
     fx.state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO platform.roles (user_id, role, granted_by) \
+            "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
              VALUES ($1, 'support', $2)",
             &[&target, &pat.user_id],
         )
@@ -329,9 +294,9 @@ async fn admin_can_revoke_platform_role() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    assert_eq!(count_role(&fx.state.auth_pg, target, "support").await, 0);
+    assert_eq!(count_role(&fx.state.control_pg, target, "support").await, 0);
 
-    cleanup_user(&fx.state.auth_pg, target).await;
+    cleanup_user(&fx.state.control_pg, target).await;
     pat.cleanup(&fx.state).await;
 }
 
@@ -367,7 +332,7 @@ async fn admin_can_audit_lock_app() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(app_flag(&fx.state.auth_pg, app_record.id, "audit_locked").await);
+    assert!(app_flag(&fx.state.control_pg, app_record.id, "audit_locked").await);
 
     let _ = fx.state.registry.delete_app(&app_record.id).await;
     pat.cleanup(&fx.state).await;
@@ -402,7 +367,7 @@ async fn admin_can_suspend_app() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(app_flag(&fx.state.auth_pg, app_record.id, "suspended").await);
+    assert!(app_flag(&fx.state.control_pg, app_record.id, "suspended").await);
 
     let _ = fx.state.registry.delete_app(&app_record.id).await;
     pat.cleanup(&fx.state).await;
@@ -419,8 +384,8 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
     let policy_id = "lock_writes";
     let _ = fx
         .state
-        .auth_pg
-        .execute("DELETE FROM control.platform_policies WHERE id = $1", &[&policy_id])
+        .control_pg
+        .execute("DELETE FROM zeroship.platform_policies WHERE id = $1", &[&policy_id])
         .await;
 
     let app = test::init_service(
@@ -442,9 +407,9 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     let rows = fx
         .state
-        .auth_pg
+        .control_pg
         .query(
-            "SELECT cedar_source, enabled FROM control.platform_policies WHERE id = $1",
+            "SELECT cedar_source, enabled FROM zeroship.platform_policies WHERE id = $1",
             &[&policy_id],
         )
         .await
@@ -455,8 +420,8 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
 
     let _ = fx
         .state
-        .auth_pg
-        .execute("DELETE FROM control.platform_policies WHERE id = $1", &[&policy_id])
+        .control_pg
+        .execute("DELETE FROM zeroship.platform_policies WHERE id = $1", &[&policy_id])
         .await;
     pat.cleanup(&fx.state).await;
 }
@@ -472,8 +437,8 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
     let policy_id = "invalid_cedar";
     let _ = fx
         .state
-        .auth_pg
-        .execute("DELETE FROM control.platform_policies WHERE id = $1", &[&policy_id])
+        .control_pg
+        .execute("DELETE FROM zeroship.platform_policies WHERE id = $1", &[&policy_id])
         .await;
 
     let app = test::init_service(
@@ -495,9 +460,9 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let rows = fx
         .state
-        .auth_pg
+        .control_pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM control.platform_policies WHERE id = $1",
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.platform_policies WHERE id = $1",
             &[&policy_id],
         )
         .await

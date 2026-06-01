@@ -85,7 +85,7 @@ async fn verify_get_without_magic_cookie_does_not_consume_token() {
         .query_one(
             "SELECT consumed_pending_at IS NOT NULL AS pending, \
                     consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_links \
+             FROM zeroship.magic_links \
              WHERE email = $1::citext AND purpose = 'login'",
             &[&email],
         )
@@ -98,7 +98,7 @@ async fn verify_get_without_magic_cookie_does_not_consume_token() {
 
     let completions: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.magic_completions WHERE email = $1::citext",
+            "SELECT COUNT(*) FROM zeroship.magic_completions WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -111,7 +111,7 @@ async fn verify_get_without_magic_cookie_does_not_consume_token() {
 
     let users: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM auth.users WHERE email = $1::citext",
+            "SELECT COUNT(*) FROM zeroship.users WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -120,7 +120,7 @@ async fn verify_get_without_magic_cookie_does_not_consume_token() {
     assert_eq!(users, 0, "cookie-less GET must not create a user");
 
     pg.execute(
-        "DELETE FROM auth.magic_links WHERE email = $1::citext",
+        "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
         &[&email],
     )
     .await

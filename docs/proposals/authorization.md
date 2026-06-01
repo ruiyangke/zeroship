@@ -174,7 +174,7 @@ Creators write Cedar directly here — it's the right level for app-internal log
 Three deployment surfaces share this pipeline:
 
 1. **Control plane** (`crates/control/`) — every handler that touches an app, env, deploy, billing, or member runs through `AuthzGuard`. Cedar engine is in-process.
-2. **Gateway** (`crates/gateway/`) — relevant only for platform-internal admin routes the gateway exposes (today: backchannel-logout receiver). Most user-facing gateway behavior is access enforcement (does this session exist?), which is auth, not authz; authz only kicks in on `/__zs/admin/*` if we add such routes.
+2. **Gateway** (`crates/gateway/`) — relevant only for platform-internal admin routes the gateway exposes (today: backchannel-logout receiver). Most user-facing gateway behavior is access enforcement (does this session exist?), which is auth, not authz; authz only kicks in on `/__zeroship/admin/*` if we add such routes.
 3. **Worker** (`crates/worker/` + `crates/plugin-authz/`, new) — Cedar engine runs inside the V8 isolate via v8class for end-user authz inside creator apps. P12 only.
 
 The same Rust `crates/authz/` crate compiles into all three. v8class bindings live in `crates/plugin-authz/`.

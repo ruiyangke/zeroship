@@ -5,8 +5,8 @@
 # status → cancel/reset → audit-log inspection.
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3001}"
-RPC="${URL}/_zs/v1"
+URL="${ZEROSHIP_URL:-http://localhost:3001}"
+RPC="${URL}/__zeroship/v1"
 FAILED=0
 
 rpc() {
@@ -94,7 +94,7 @@ echo "[check 5] migration status + audit log"
 STATUS=$(rpc migrationStatus '{"name":"events.add_user_hash"}')
 check "status reports applied" contains "$STATUS" '"applied"\|"isDone":true'
 
-# Dev runtime doesn't expose `/_zs/db/audit/events`; status reads from
+# Dev runtime doesn't expose `/__zeroship/db/audit/events`; status reads from
 # the same audit table so use that as the reachable check.
 check "status surfaces audit-backed state" contains "$STATUS" '"processed":\|"status":'
 

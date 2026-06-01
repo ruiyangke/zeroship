@@ -39,7 +39,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
-| **ZS deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zs-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
+| **zeroship deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
@@ -160,13 +160,16 @@ Creator-facing namespaces registered today:
 env.db.*       structured database operations (no raw SQL)
 env.storage.*  object storage put/get/delete
 env.kv.*       key-value get/set/delete
+env.auth.*     getUser/requireUser — per-request identity (AuthPlugin, registered
+               on the worker + CLI `zeroship serve` vectors). Fed in prod by the
+               gateway's `ZeroShip-User` header; in dev by the dev-auth provider
+               (see `docs/reference/auth-dev-tier.md`).
 ```
 
 Planned or platform-internal namespaces must be documented as such until the
 runtime actually registers them:
 
 ```
-env.auth.*     planned getUser/requireUser namespace; not registered today
 env.meter.*    billing counter increment
 env.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
@@ -221,12 +224,13 @@ Default to npm package. Native primitives are forever.
 Stable contracts, live in `docs/reference/`:
 
 - `api-design-guidelines.md` — 10 principles for AI-friendly APIs
-- `zs-standard.md` — the deploy contract: `default = { schema?, fetch?, rpc? }`, dispatch, raw-JS deploys
+- `zeroship-standard.md` — the deploy contract: `default = { schema?, fetch?, rpc? }`, dispatch, raw-JS deploys
 - `control.md` — `@zeroship/control`: framework-neutral client for control-plane app, auth, deploy, and env endpoints
 - `db.md` — `@zeroship/db`: `default.schema` discovery, CRUD, aggregation, naming strategy
 - `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
 - `rpc.md` — `@zeroship/rpc`: server wrappers, generated and manual clients, transport, transformers, retries
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
+- `auth-dev-tier.md` — the self-contained `pnpm dev` auth provider (the peer of `env.db`→SQLite / `env.kv`→redb): contract parity, the dev impl, the dev-only-by-construction guarantee
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)
 - `websocket-design.md` — WebSocketPair, RFC 6455

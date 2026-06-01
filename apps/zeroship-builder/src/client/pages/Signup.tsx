@@ -1,42 +1,36 @@
-// ─── Signup — atelier auth ──────────────────────────────────────
+// ─── Signup — atelier auth (BFF popup) ──────────────────────────
+//
+// Account creation is a hosted flow now: the same `@zeroship/auth`
+// popup as Login, against the seeded per-app public PKCE client. The
+// IdP's hosted-password screen handles register-or-sign-in; the
+// retired bespoke `/auth/register` endpoint is gone. On first
+// authentication we route into the onboarding intent flow.
 
-import { useState, type FormEvent } from "react";
+import { useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
-import { register as apiRegister, googleStartUrl } from "../api/auth";
 import { useAuth } from "../auth/AuthContext";
-import { StampButton } from "../components/StampButton";
+import { SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
 
 export default function Signup() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { refresh } = useAuth();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
+  const { user, loading } = useAuth();
+  const { error } = useSdkAuth();
 
   const params = new URLSearchParams(location.search);
   const returnTo = sanitizeReturn(params.get("return"));
+  const oauthError = params.get("error") ?? error?.message ?? null;
 
-  const mut = useMutation({
-    mutationFn: async () => apiRegister({ email, password, name }),
-    onSuccess: async () => {
-      await refresh();
-      // First signup → run the onboarding intent flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1.
-      // If the caller wanted a deeper destination (`?return=…`), respect
-      // that — login flows and OAuth callbacks supply it. Bare /signup
-      // submissions land on `/home` by default; we redirect those to
-      // /onboarding/intent so the first-run survey fires.
+  useEffect(() => {
+    if (!loading && user) {
+      // First signup → run the onboarding intent flow per
+      // `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1.
+      // A deeper `?return=…` (set by an AuthGuard bounce) is respected;
+      // a bare /signup lands on the first-run survey.
       const dest = returnTo === "/home" ? "/onboarding/intent" : returnTo;
       navigate(dest, { replace: true });
-    },
-  });
-
-  function submit(e: FormEvent) {
-    e.preventDefault();
-    if (!email.trim() || !password || !name.trim()) return;
-    mut.mutate();
-  }
+    }
+  }, [loading, user, returnTo, navigate]);
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 sm:px-5">
@@ -52,59 +46,32 @@ export default function Signup() {
           Sign up to start a project. We'll save your work the moment you describe it.
         </p>
 
-        <form onSubmit={submit} className="space-y-4">
-          <Field label="Email" type="email" autoComplete="email" autoFocus required value={email} onChange={setEmail} testId="signup-email" />
-          <Field
-            label="Choose a password"
-            type="password"
-            autoComplete="new-password"
-            required
-            value={password}
-            onChange={setPassword}
-            testId="signup-password"
-            help="At least 8 characters"
-          />
-          <Field
-            label="What should we call you?"
-            type="text"
-            required
-            value={name}
-            onChange={setName}
-            testId="signup-name"
-            help="We'll only show this on projects you publish"
-          />
-          <div className="pt-2">
-            <StampButton
-              type="submit"
-              loading={mut.isPending}
-              disabled={mut.isPending || !email.trim() || !password || !name.trim()}
-              className="w-full"
-              data-testid="signup-submit"
-              noArrow
-            >
-              {mut.isPending ? "Creating…" : "Create account"}
-            </StampButton>
+        {oauthError && (
+          <div className="mb-4 px-3 py-2 border border-tomato bg-tomato/10 font-serif italic text-tomato text-[13px]" data-testid="signup-oauth-error">
+            sign-up: {oauthError}
           </div>
-          {mut.isError && (
-            <div className="font-serif italic text-tomato text-[13px]" data-testid="signup-error">
-              {mut.error.message}
-            </div>
-          )}
-        </form>
+        )}
+
+        <SignInButton
+          data-testid="signup-google"
+          className="flex items-center justify-center gap-2 w-full h-10 border border-rule bg-white text-ink font-sans text-[11px] uppercase tracking-[0.18em] hover:border-ink transition-colors"
+          provider="google"
+        >
+          <GoogleG />
+          sign up with google
+        </SignInButton>
 
         <div className="my-6 flex items-center gap-3 font-sans text-[10px] uppercase tracking-[0.2em] text-pencil">
           <span className="flex-1 h-px bg-rule" />or<span className="flex-1 h-px bg-rule" />
         </div>
 
-        <a
-          href={googleStartUrl(returnTo)}
-          data-testid="signup-google"
-          className="flex items-center justify-center gap-2 w-full h-10 border border-rule bg-white text-ink font-sans text-[11px] uppercase tracking-[0.18em] hover:border-ink transition-colors"
-          style={{ textDecoration: "none" }}
+        <SignInButton
+          provider="password"
+          data-testid="signup-submit"
+          className="flex items-center justify-center gap-2 w-full h-10 bg-ink text-paper font-sans text-[11px] uppercase tracking-[0.18em] hover:opacity-90 transition-opacity"
         >
-          <GoogleG />
-          sign up with google
-        </a>
+          Sign up with email
+        </SignInButton>
 
         <div className="font-serif text-[14px] text-ink-soft text-center mt-6">
           Already have one?{" "}
@@ -114,30 +81,6 @@ export default function Signup() {
         </div>
       </div>
     </div>
-  );
-}
-
-function Field({
-  label, type, autoComplete, autoFocus, required, value, onChange, testId, help,
-}: {
-  label: string; type: string; autoComplete?: string; autoFocus?: boolean; required?: boolean;
-  value: string; onChange: (v: string) => void; testId?: string; help?: string;
-}) {
-  return (
-    <label className="block">
-      <span className="block label-uc mb-1.5">{label}</span>
-      <input
-        type={type}
-        autoComplete={autoComplete}
-        autoFocus={autoFocus}
-        required={required}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        data-testid={testId}
-        className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink"
-      />
-      {help && <span className="block mt-1 font-serif italic text-[12px] text-pencil">{help}</span>}
-    </label>
   );
 }
 

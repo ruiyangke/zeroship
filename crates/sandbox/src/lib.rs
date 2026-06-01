@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
-use crate::db::{Database, LATEST_MIGRATION_VERSION};
+use crate::db::Database;
 use crate::persist::Persistence;
 use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
@@ -77,8 +77,9 @@ pub struct AppState {
     /// Pg-backed non-secret state handle (`docs/proposals/sandbox-pg-state.md`
     /// §8.2). `None` is the disabled-by-absence shape:
     /// `SANDBOX_DATABASE_URL` is unset, so pg integration is off.
-    /// The schema is brought to
-    /// [`LATEST_MIGRATION_VERSION`] before this state ships.
+    /// The unified `zeroship` schema (sandbox tables included) is owned
+    /// by Liquibase; boot only verifies connectivity (`Database::ping`)
+    /// and assumes the migrate service already applied the changelog.
     ///
     /// A6b (deferred): restricted to `pub(crate)` because the DSN held
     /// inside `Database` carries an embedded pg password. A
@@ -205,6 +206,14 @@ pub struct AppState {
     /// every iteration. Static at runtime (env reload not supported).
     pub wake_lifecycle: crate::config::WakeLifecycleConfig,
 
+    /// P1: `sandbox_events` partition provisioner configuration.
+    /// Resolved at boot from env
+    /// (`SANDBOX_EVENT_PARTITION_{AHEAD_MONTHS,RETENTION_MONTHS,SWEEP_SECS}`).
+    /// The provisioner sweep (`sweep::ensure_event_partitions`) reads
+    /// `ahead_months` / `retention_months` at every tick. Static at
+    /// runtime (env reload not supported).
+    pub event_partition: crate::config::EventPartitionConfig,
+
     /// r3-A (T-8b-stress-r3 fix): the local Nomad agent's node ID,
     /// fetched once at boot via `GET /v1/agent/self`. When `Some`, the
     /// jobspec builders emit a `Constraints` block pinning every
@@ -302,7 +311,7 @@ pub struct AppState {
 
 impl AppState {
     /// Signal background tasks to
-    /// exit cleanly. Best-effort UPDATEs `sandbox.hosts.status =
+    /// exit cleanly. Best-effort UPDATEs `zeroship.hosts.status =
     /// 'draining'` for THIS host so peers know we're going away
     /// before our heartbeat goes silent (without that hint, peers
     /// would wait the full lease_ttl before noticing). The pg
@@ -626,6 +635,7 @@ impl AppState {
             // assignment on `let mut state = new_fixture(...)`.
             wake_response_mode: crate::config::WakeResponseMode::Sync,
             wake_lifecycle: crate::config::WakeLifecycleConfig::default(),
+            event_partition: crate::config::EventPartitionConfig::default(),
             // r3-A: fixtures get `None` — no boot-time /v1/agent/self
             // lookup happens for in-process tests, so the produced
             // jobspecs omit the Constraints block (matches pre-r3-A
@@ -734,31 +744,26 @@ impl AppState {
         };
 
         if let Some(db) = &database {
-            // Block boot until the schema is at the version this
-            // binary was built against. A designated migrator
-            // applies pending migrations; everyone else polls.
-            // Failure aborts startup.
-            if let Err(e) = db
-                .ensure_schema_at_version(LATEST_MIGRATION_VERSION)
-                .await
-            {
+            // The unified `zeroship` schema is owned by Liquibase (the
+            // compose `migrate` service / `ops/db-migrate.sh` applies
+            // `db/changelog/` before the controller starts). The
+            // controller no longer self-migrates; boot just verifies
+            // connectivity. Failure aborts startup unless the operator
+            // set the SANDBOX_PG_OPTIONAL=1 dev escape hatch.
+            if let Err(e) = db.ping().await {
                 if matches!(std::env::var("SANDBOX_PG_OPTIONAL").as_deref(), Ok("1")) {
                     tracing::warn!(
                         error = %e,
-                        target_version = LATEST_MIGRATION_VERSION,
-                        "SANDBOX_PG_OPTIONAL=1: ensure_schema_at_version failed; \
+                        "SANDBOX_PG_OPTIONAL=1: pg connectivity check failed; \
                          pg integration disabled"
                     );
                 } else {
-                    return Err(format!(
-                        "ensure_schema_at_version({LATEST_MIGRATION_VERSION}): {e}"
-                    ));
+                    return Err(format!("pg connectivity check (ping): {e}"));
                 }
             } else {
                 tracing::info!(
-                    target_version = LATEST_MIGRATION_VERSION,
                     host_id = %db.host_id(),
-                    "sandbox pg: schema ready"
+                    "sandbox pg: connected (schema owned by Liquibase)"
                 );
             }
         }
@@ -998,6 +1003,17 @@ impl AppState {
             wake_jobs_gc_retention_secs = wake_lifecycle.wake_jobs_gc_retention_secs,
             "sandbox wake-response: contract mode + lifecycle resolved"
         );
+        // P1: sandbox_events partition provisioner config. Resolved at
+        // boot; propagates to `sweep::ensure_event_partitions` via
+        // `AppState::event_partition`.
+        let event_partition = crate::config::EventPartitionConfig::from_env()
+            .map_err(|e| format!("EventPartitionConfig::from_env: {e}"))?;
+        tracing::info!(
+            ahead_months = event_partition.ahead_months,
+            retention_months = event_partition.retention_months,
+            sweep_secs = event_partition.sweep_secs,
+            "sandbox event-partitions: provisioner config resolved"
+        );
 
         // Phase-A snapshot/restore wiring. When `snapshot_enabled =
         // true`, construct the production trio:
@@ -1197,6 +1213,7 @@ impl AppState {
             restore_backend,
             wake_response_mode,
             wake_lifecycle,
+            event_partition,
             local_nomad_node_id,
             nomad_stop_permits,
             // R33-I1: same `Arc` installed on the inner NomadCHBackend
@@ -1212,7 +1229,7 @@ impl AppState {
 
         // Phase-2 HA: register THIS controller's host row before
         // spawning the heartbeat task. Without this, the FK on
-        // `sandbox.sandboxes.host_id REFERENCES sandbox.hosts(host_id)`
+        // `zeroship.sandboxes.host_id REFERENCES zeroship.hosts(host_id)`
         // rejects every sandbox INSERT and the heartbeat UPDATE
         // affects 0 rows forever (peers eventually see `last_heartbeat`
         // way in the past and would treat us as dead — except there's
@@ -1241,7 +1258,7 @@ impl AppState {
         }
 
         // Phase-2 HA: periodic heartbeat task — UPDATEs
-        // `sandbox.hosts.last_heartbeat` so peers can tell whether
+        // `zeroship.hosts.last_heartbeat` so peers can tell whether
         // we're alive. The task self-runs forever; failure is
         // logged-and-continued (next tick retries).
         if state.database.is_some() {
@@ -1305,6 +1322,20 @@ impl AppState {
         // sweeps; single-tenant deploys keep the operator-wipe story.
         if state.database.is_some() {
             sweep::spawn_host_dir_gc(state.clone());
+        }
+        // P1: sandbox_events partition provisioner. Monthly partitions,
+        // provisioned `ahead_months` ahead (default 3) so the `default`
+        // catch-all stays empty in steady state, with `retention_months`
+        // (default 12) of history retained — partitions whose entire
+        // range is past the horizon are dropped. Runs the DDL on the
+        // admin/migrator pool (`Database::pool_admin`). Gated on
+        // `database.is_some()` like every other pg-only sweep — in dev
+        // compose the sandbox is PG-less so this simply does not run
+        // (the 0011-shipped six-month window covers dev). 0011 falsely
+        // claimed an `ensure_window` controller task already did this;
+        // THIS is that task, now real.
+        if state.database.is_some() {
+            sweep::spawn_event_partition_provisioner(state.clone());
         }
         // T6: auto-spawn idle eviction sweep. Production now has all
         // deps wired (snapshot_store + ch_remote + restore_backend
@@ -1619,7 +1650,7 @@ fn start_health_loop(state: Arc<AppState>) {
 // ────────────────────────────────────────────────────────────────────
 
 /// `SANDBOX_HA_HEARTBEAT_SECS`. Cadence at which the heartbeat task
-/// updates `sandbox.hosts.last_heartbeat`. Default 5 s; validated at
+/// updates `zeroship.hosts.last_heartbeat`. Default 5 s; validated at
 /// boot to be > 0 and `lease_ttl >= 4 × heartbeat`.
 const DEFAULT_HEARTBEAT_SECS: u64 = 5;
 
@@ -1632,7 +1663,7 @@ const DEFAULT_TAKEOVER_POLL_SECS: u64 = 30;
 /// dead. Default 60 s. Validated at boot.
 const DEFAULT_LEASE_TTL_SECS: u64 = 60;
 
-/// Best-effort hostname for `sandbox.hosts.hostname`. Operators can
+/// Best-effort hostname for `zeroship.hosts.hostname`. Operators can
 /// override via `SANDBOX_HOSTNAME` (useful in containers where the
 /// kernel hostname is the random container ID). Falls back to
 /// `/proc/sys/kernel/hostname` on Linux, then `"unknown"`. The column

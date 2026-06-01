@@ -35,7 +35,7 @@ async fn pg_connect(dsn: &str) -> Client {
 async fn install_magic_links_insert_delay(client: &Client) {
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_magic_link_insert() \
+            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_link_insert() \
              RETURNS trigger LANGUAGE plpgsql AS $$ \
              BEGIN \
                  PERFORM pg_sleep(0.2); \
@@ -48,7 +48,7 @@ async fn install_magic_links_insert_delay(client: &Client) {
         .expect("create insert delay function");
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
             &[],
         )
         .await
@@ -56,8 +56,8 @@ async fn install_magic_links_insert_delay(client: &Client) {
     client
         .execute(
             "CREATE TRIGGER test_sleep_before_magic_link_insert \
-             BEFORE INSERT ON auth.magic_links \
-             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_magic_link_insert()",
+             BEFORE INSERT ON zeroship.magic_links \
+             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_link_insert()",
             &[],
         )
         .await
@@ -67,7 +67,7 @@ async fn install_magic_links_insert_delay(client: &Client) {
 async fn drop_magic_links_insert_delay(client: &Client) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
             &[],
         )
         .await
@@ -77,7 +77,7 @@ async fn drop_magic_links_insert_delay(client: &Client) {
 async fn install_magic_completion_reserve_delay(client: &Client) {
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_magic_completion_reserve() \
+            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_completion_reserve() \
              RETURNS trigger LANGUAGE plpgsql AS $$ \
              BEGIN \
                  IF NEW.consumed_pending_at IS NOT NULL \
@@ -94,7 +94,7 @@ async fn install_magic_completion_reserve_delay(client: &Client) {
     client
         .execute(
             "DROP TRIGGER IF EXISTS test_sleep_before_magic_completion_reserve \
-             ON auth.magic_completions",
+             ON zeroship.magic_completions",
             &[],
         )
         .await
@@ -102,8 +102,8 @@ async fn install_magic_completion_reserve_delay(client: &Client) {
     client
         .execute(
             "CREATE TRIGGER test_sleep_before_magic_completion_reserve \
-             BEFORE UPDATE OF consumed_pending_at ON auth.magic_completions \
-             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_magic_completion_reserve()",
+             BEFORE UPDATE OF consumed_pending_at ON zeroship.magic_completions \
+             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_completion_reserve()",
             &[],
         )
         .await
@@ -114,7 +114,7 @@ async fn drop_magic_completion_reserve_delay(client: &Client) {
     client
         .execute(
             "DROP TRIGGER IF EXISTS test_sleep_before_magic_completion_reserve \
-             ON auth.magic_completions",
+             ON zeroship.magic_completions",
             &[],
         )
         .await
@@ -148,7 +148,7 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
 
     client
         .execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
             &[&csrf_nonce, &code, &email, &login_challenge],
@@ -190,7 +190,7 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
             "SELECT attempts, \
                     consumed_pending_at IS NOT NULL AS pending, \
                     consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_completions \
+             FROM zeroship.magic_completions \
              WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
@@ -216,7 +216,7 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            "DELETE FROM zeroship.magic_completions WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
         .await
@@ -256,7 +256,7 @@ async fn concurrent_issue_leaves_one_active_token() {
 
     let active_count: i64 = client
         .query_one(
-            "SELECT COUNT(*) FROM auth.magic_links \
+            "SELECT COUNT(*) FROM zeroship.magic_links \
              WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
             &[&email, &"login"],
         )
@@ -270,7 +270,7 @@ async fn concurrent_issue_leaves_one_active_token() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -311,7 +311,7 @@ async fn issue_then_redeem_happy_path() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -351,7 +351,7 @@ async fn second_redeem_returns_none() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -380,7 +380,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
         .query(
             "SELECT consumed_pending_at IS NOT NULL AS pending, \
                     consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_links \
+             FROM zeroship.magic_links \
              WHERE token_hash = $1",
             &[&first.token_hash.as_slice()],
         )
@@ -419,7 +419,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -449,7 +449,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
     // `stale_pending_redeem_burns_link_as_consumed`).
     client
         .execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_pending_at = NOW() - INTERVAL '61 seconds' \
              WHERE token_hash = $1",
             &[&first.token_hash.as_slice()],
@@ -485,7 +485,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
     // And the row is indeed consumed (the burn stuck).
     let row = client
         .query_one(
-            "SELECT consumed_at IS NOT NULL AS consumed FROM auth.magic_links \
+            "SELECT consumed_at IS NOT NULL AS consumed FROM zeroship.magic_links \
              WHERE token_hash = $1",
             &[&first.token_hash.as_slice()],
         )
@@ -496,7 +496,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -534,7 +534,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -560,7 +560,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 
     client
         .execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_pending_at = NOW() - INTERVAL '6 seconds' \
              WHERE token_hash = $1",
             &[&first.token_hash.as_slice()],
@@ -579,7 +579,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
     let rows = client
         .query(
             "SELECT consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_links \
+             FROM zeroship.magic_links \
              WHERE token_hash = $1",
             &[&first.token_hash.as_slice()],
         )
@@ -591,7 +591,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -613,7 +613,7 @@ async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
 
     client
         .execute(
-            "INSERT INTO auth.magic_links \
+            "INSERT INTO zeroship.magic_links \
                 (token_hash, email, csrf_nonce, purpose, expires_at) \
              VALUES ($1, $2::citext, $3, $4, NOW() + INTERVAL '60 minutes')",
             &[&token_hash.as_slice(), &email, &csrf_nonce, &purpose],
@@ -632,7 +632,7 @@ async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
     let rows = client
         .query(
             "SELECT consumed_at IS NULL AS still_unconsumed \
-             FROM auth.magic_links \
+             FROM zeroship.magic_links \
              WHERE token_hash = $1 AND email = $2::citext AND purpose = $3",
             &[&token_hash.as_slice(), &email, &purpose],
         )
@@ -647,7 +647,7 @@ async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -669,7 +669,7 @@ async fn expired_token_returns_none() {
     // Force the row's expiry into the past.
     client
         .execute(
-            "UPDATE auth.magic_links SET expires_at = NOW() - INTERVAL '1 minute' \
+            "UPDATE zeroship.magic_links SET expires_at = NOW() - INTERVAL '1 minute' \
              WHERE email = $1::citext AND consumed_at IS NULL",
             &[&email],
         )
@@ -683,7 +683,7 @@ async fn expired_token_returns_none() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -716,7 +716,7 @@ async fn new_issue_supersedes_previous_unconsumed() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -748,7 +748,7 @@ async fn login_issue_does_not_supersede_reset_token() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -769,7 +769,7 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
 
     client
         .execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
             &[&csrf_nonce, &code, &email, &login_challenge],
@@ -798,7 +798,7 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
     let rows = client
         .query(
             "SELECT consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_completions \
+             FROM zeroship.magic_completions \
              WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
@@ -821,7 +821,7 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
 
     client
         .execute(
-            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            "DELETE FROM zeroship.magic_completions WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
         .await
@@ -843,7 +843,7 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
 
     seed_client
         .execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
             &[&csrf_nonce, &code, &email, &login_challenge],
@@ -879,7 +879,7 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
     let rows = seed_client
         .query(
             "SELECT attempts, consumed_at IS NOT NULL AS consumed \
-             FROM auth.magic_completions \
+             FROM zeroship.magic_completions \
              WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
@@ -899,7 +899,7 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
 
     seed_client
         .execute(
-            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            "DELETE FROM zeroship.magic_completions WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
         .await
@@ -920,7 +920,7 @@ async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() 
 
     client
         .execute(
-            "INSERT INTO auth.magic_completions \
+            "INSERT INTO zeroship.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
              VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
             &[&csrf_nonce, &code, &email, &login_challenge],
@@ -933,7 +933,7 @@ async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() 
         .expect("first consume");
     client
         .execute(
-            "UPDATE auth.magic_completions \
+            "UPDATE zeroship.magic_completions \
              SET consumed_pending_at = NOW() - INTERVAL '61 seconds' \
              WHERE csrf_nonce = $1",
             &[&csrf_nonce],
@@ -965,7 +965,7 @@ async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() 
 
     client
         .execute(
-            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            "DELETE FROM zeroship.magic_completions WHERE csrf_nonce = $1",
             &[&csrf_nonce],
         )
         .await

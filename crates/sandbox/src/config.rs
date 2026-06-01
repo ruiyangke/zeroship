@@ -1222,6 +1222,131 @@ impl Default for WakeLifecycleConfig {
     }
 }
 
+/// Configuration knobs for the `zeroship.sandbox_events` partition
+/// provisioner (P1). Resolved once at boot from env vars and stored on
+/// `AppState`; the provisioner sweep (`sweep::ensure_event_partitions`)
+/// reads these at every tick.
+///
+/// `sandbox_events` is `PARTITION BY RANGE (ts)` with monthly
+/// partitions and a `default` catch-all (0011). The provisioner keeps
+/// `ahead_months` of forward partitions provisioned (so the default
+/// stays empty in steady state) and drops partitions whose entire
+/// range is older than `retention_months`.
+#[derive(Debug, Clone, Copy)]
+pub struct EventPartitionConfig {
+    /// How many months of FORWARD partitions to keep provisioned past
+    /// the current month. Default 3. Provisioning ahead means an
+    /// INSERT for "now" always lands in a real monthly partition, so
+    /// the `default` catch-all stays empty under steady state.
+    ///
+    /// Env: `SANDBOX_EVENT_PARTITION_AHEAD_MONTHS`. Values are clamped
+    /// to `[MIN_AHEAD_MONTHS, MAX_AHEAD_MONTHS]` at boot (a value of 0
+    /// would only provision the current month — one late-month INSERT
+    /// near a month boundary could spill into the default — and an
+    /// absurdly large value would create hundreds of empty partitions).
+    pub ahead_months: u32,
+
+    /// Retention horizon, in months. A monthly partition whose ENTIRE
+    /// range is older than `retention_months` before the current month
+    /// is dropped. Default 12. `sandbox_events_default` is never
+    /// dropped regardless of this value.
+    ///
+    /// Env: `SANDBOX_EVENT_PARTITION_RETENTION_MONTHS`. Values below
+    /// `MIN_RETENTION_MONTHS` are rejected at boot — too short a
+    /// horizon would drop audit history operators may still need.
+    pub retention_months: u32,
+
+    /// How often the provisioner sweep wakes up, in seconds. Default
+    /// 3600 (1 hour) — provisioning months ahead means the cadence
+    /// only governs how quickly a freshly-rolled month / a newly past
+    /// retention horizon is acted on; an hour is far tighter than the
+    /// monthly granularity needs.
+    ///
+    /// Env: `SANDBOX_EVENT_PARTITION_SWEEP_SECS`. Floored at
+    /// `MIN_SWEEP_SECS` (a sub-minute cadence would pointlessly hammer
+    /// `pg_inherits`).
+    pub sweep_secs: u64,
+}
+
+impl EventPartitionConfig {
+    pub const DEFAULT_AHEAD_MONTHS: u32 = 3;
+    pub const MIN_AHEAD_MONTHS: u32 = 1;
+    /// Cap on forward provisioning. 24 months of empty monthly
+    /// partitions is already far past any reasonable operational need;
+    /// a typo like `=1200` should not create 1200 empty tables.
+    pub const MAX_AHEAD_MONTHS: u32 = 24;
+
+    pub const DEFAULT_RETENTION_MONTHS: u32 = 12;
+    /// Minimum retention. Below 2 months the sweep could drop the
+    /// immediately-prior month while month-boundary stragglers (events
+    /// whose `ts` is late in the prior month) might still be read by
+    /// metering reconciliation. 2 is the floor; the default (12) has
+    /// ample headroom.
+    pub const MIN_RETENTION_MONTHS: u32 = 2;
+
+    pub const DEFAULT_SWEEP_SECS: u64 = 3600;
+    pub const MIN_SWEEP_SECS: u64 = 60;
+
+    /// Resolve from env. Unset → defaults; unparseable → `Err` (boot
+    /// refuses to start); out-of-range ahead/sweep values are clamped
+    /// to their bounds, retention below the minimum is rejected.
+    pub fn from_env() -> Result<Self, String> {
+        let ahead = match std::env::var("SANDBOX_EVENT_PARTITION_AHEAD_MONTHS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u32 = s.trim().parse().map_err(|e| {
+                    format!("SANDBOX_EVENT_PARTITION_AHEAD_MONTHS={s:?}: parse: {e}")
+                })?;
+                n.clamp(Self::MIN_AHEAD_MONTHS, Self::MAX_AHEAD_MONTHS)
+            }
+            _ => Self::DEFAULT_AHEAD_MONTHS,
+        };
+        let retention = match std::env::var("SANDBOX_EVENT_PARTITION_RETENTION_MONTHS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u32 = s.trim().parse().map_err(|e| {
+                    format!(
+                        "SANDBOX_EVENT_PARTITION_RETENTION_MONTHS={s:?}: parse: {e}"
+                    )
+                })?;
+                if n < Self::MIN_RETENTION_MONTHS {
+                    return Err(format!(
+                        "SANDBOX_EVENT_PARTITION_RETENTION_MONTHS={n} \
+                         must be >= {} (a shorter horizon risks dropping \
+                         audit history still needed by metering \
+                         reconciliation)",
+                        Self::MIN_RETENTION_MONTHS
+                    ));
+                }
+                n
+            }
+            _ => Self::DEFAULT_RETENTION_MONTHS,
+        };
+        let sweep_secs = match std::env::var("SANDBOX_EVENT_PARTITION_SWEEP_SECS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u64 = s.trim().parse().map_err(|e| {
+                    format!("SANDBOX_EVENT_PARTITION_SWEEP_SECS={s:?}: parse: {e}")
+                })?;
+                n.max(Self::MIN_SWEEP_SECS)
+            }
+            _ => Self::DEFAULT_SWEEP_SECS,
+        };
+        Ok(Self {
+            ahead_months: ahead,
+            retention_months: retention,
+            sweep_secs,
+        })
+    }
+}
+
+impl Default for EventPartitionConfig {
+    fn default() -> Self {
+        Self {
+            ahead_months: Self::DEFAULT_AHEAD_MONTHS,
+            retention_months: Self::DEFAULT_RETENTION_MONTHS,
+            sweep_secs: Self::DEFAULT_SWEEP_SECS,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod wake_response_mode_tests {

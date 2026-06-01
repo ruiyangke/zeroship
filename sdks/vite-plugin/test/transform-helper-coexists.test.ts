@@ -102,7 +102,7 @@ export const provision = procedure(async (req) => ({ provisioned: req }));
     const ctx = makeCtx("ssr");
     // The original path-based auto-publish footgun:
     // `export * from "./helpers"`
-    // silently published every helper as `/_zs/v1/<helperName>`.
+    // silently published every helper as `/__zeroship/v1/<helperName>`.
     // Now: the re-exported helpers are not wrapper calls in THIS
     // file's AST, so they're not registered.
     const code = `"use server";

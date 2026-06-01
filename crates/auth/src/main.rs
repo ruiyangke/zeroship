@@ -21,7 +21,7 @@ use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::mailer::{
-    Mailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
+    Mailer, RelayForwardMailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
 };
 use zeroship_auth::server;
 use zeroship_auth::startup_validation::validate_hydra_admin_url;
@@ -83,6 +83,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // work. The constructed driver is reused below on normal startup.
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
     tracing::info!(driver = %cfg.mailer, "mailer ready");
+
+    // The SECOND, dedicated relay-forward mailer (sub-spec §5.2a). Built during
+    // the same cheap pre-boot validation pass so a misconfigured relay SMTP
+    // block fails fast with a named env var, exactly like the transactional
+    // mailer. Forced to SMTP/stdout — Resend can't pin envelope-from (§3.2).
+    let relay_forward_mailer: RelayForwardMailer = build_relay_forward_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.relay_forward_mailer, "relay-forward mailer ready");
 
     if cfg.check_config {
         let mut report = CheckConfigReport::new();
@@ -191,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
-    server::run(cfg, admin, db, google_jwks, mailer).await?;
+    server::run(cfg, admin, db, google_jwks, mailer, relay_forward_mailer).await?;
     Ok::<(), Box<dyn std::error::Error>>(())
         })
 }
@@ -259,6 +266,21 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         cfg.postmark_webhook_password.as_deref(),
         file_secrets.postmark_webhook_password.as_deref(),
     );
+    // Relay secrets (Slice 5). No dedicated [secrets] file slot yet, so the
+    // file tier is `None` — CLI/env resolution + reference-format validation
+    // still apply, exactly like the optional SMTP/Resend secrets.
+    cfg.relay_inbound_password = resolve_optional(
+        check,
+        "AUTH_RELAY_INBOUND_PASSWORD / --relay-inbound-password",
+        cfg.relay_inbound_password.as_deref(),
+        None,
+    );
+    cfg.relay_smtp_password = resolve_optional(
+        check,
+        "AUTH_RELAY_SMTP_PASSWORD / --relay-smtp-password",
+        cfg.relay_smtp_password.as_deref(),
+        None,
+    );
 }
 
 /// Obtain one optional secret across the CLI/env and `[secrets]` file tiers.
@@ -304,7 +326,7 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
                 port: cfg.smtp_port,
                 username: cfg.smtp_username.clone(),
                 password: cfg.smtp_password.clone(),
-                use_starttls: cfg.smtp_starttls,
+                tls: cfg.smtp_tls,
             })
             .map_err(|e| AuthError::Config(format!("smtp mailer: {e}")))?;
             Ok(Arc::new(driver))
@@ -319,6 +341,41 @@ fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
         }
         other => Err(AuthError::Config(format!(
             "unknown mailer: {other:?}; use stdout|smtp|resend"
+        ))),
+    }
+}
+
+/// Build the SECOND, dedicated relay-forward mailer (sub-spec §5.2a). Keyed on
+/// `--relay-forward-mailer` (default `smtp`) and reads the SEPARATE
+/// `AUTH_RELAY_SMTP_*` config block so the relay sending identity/credentials
+/// are independent of the transactional `AUTH_SMTP_*`. Rejects `resend` for
+/// this role: the relay forward path must pin the SMTP envelope-from to the
+/// relay bounce mailbox, which Resend's HTTP API cannot do (§3.2).
+fn build_relay_forward_mailer(cfg: &AuthConfig) -> Result<RelayForwardMailer, AuthError> {
+    match cfg.relay_forward_mailer.as_str() {
+        "smtp" => {
+            let host = cfg.relay_smtp_host.clone().ok_or_else(|| {
+                AuthError::Config(
+                    "AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp".into(),
+                )
+            })?;
+            let driver = SmtpMailer::new(&SmtpConfig {
+                host,
+                port: cfg.relay_smtp_port,
+                username: cfg.relay_smtp_username.clone(),
+                password: cfg.relay_smtp_password.clone(),
+                tls: cfg.relay_smtp_tls,
+            })
+            .map_err(|e| AuthError::Config(format!("relay smtp mailer: {e}")))?;
+            Ok(RelayForwardMailer(Arc::new(driver)))
+        }
+        // Dev: forward → terminal (the e2e prefers smtp so it can assert the
+        // rendered envelope, but stdout is valid for eyeballing the surgery).
+        "stdout" => Ok(RelayForwardMailer(Arc::new(StdoutMailer))),
+        other => Err(AuthError::Config(format!(
+            "AUTH_RELAY_FORWARD_MAILER={other:?} unsupported; relay forward needs \
+             envelope-from control — use smtp (or stdout in dev). resend cannot pin \
+             envelope-from (sub-spec §3.2)."
         ))),
     }
 }
@@ -442,7 +499,7 @@ mod tests {
     fn secrets_file_ref_used_when_cli_empty() {
         // Unique per-process var name; edition 2021: set_var is safe (no unsafe
         // block; workspace denies unsafe_code).
-        let var = format!("ZS_AUTH_TEST_FILE_TIER_{}", std::process::id());
+        let var = format!("ZEROSHIP_AUTH_TEST_FILE_TIER_{}", std::process::id());
         std::env::set_var(&var, "from-secrets-file");
         let reference = format!("urn:zeroship:env:{var}");
 
@@ -458,7 +515,7 @@ mod tests {
     fn cli_value_wins_over_secrets_file_ref() {
         // A literal CLI value beats the file reference; the env ref is ignored
         // (never read), so an unset env var must not cause a failure.
-        let reference = "urn:zeroship:env:ZS_AUTH_UNSET_PROVES_CLI_WINS";
+        let reference = "urn:zeroship:env:ZEROSHIP_AUTH_UNSET_PROVES_CLI_WINS";
         let out = obtain_secret(
             "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
             "literal-cli-secret",
@@ -474,7 +531,7 @@ mod tests {
     // matching pre-[secrets] optional behaviour byte-for-byte.
     #[test]
     fn resolve_optional_uses_file_tier_and_preserves_empty() {
-        let var = format!("ZS_AUTH_TEST_OPT_TIER_{}", std::process::id());
+        let var = format!("ZEROSHIP_AUTH_TEST_OPT_TIER_{}", std::process::id());
         std::env::set_var(&var, "opt-from-file");
         let reference = format!("urn:zeroship:env:{var}");
 

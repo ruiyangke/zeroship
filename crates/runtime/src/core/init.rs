@@ -202,17 +202,17 @@ export {
 /// wrapping the user's original entry (renamed internally to `__user__.js`).
 ///
 /// The kernel invokes one of three entry points per request:
-///   - `user.default.rpc(name, input, ctx)`  for `/_zs/v1/<id>` (when set)
+///   - `user.default.rpc(name, input, ctx)`  for `/__zeroship/v1/<id>` (when set)
 ///   - `user.default.fetchFast(method, url, body, env)`  for non-RPC paths (when set)
 ///   - `user.default.fetch(request, env, ctx)`  WinterCG slow path (always)
 ///
 /// The synthetic SSR entry (emitted by `@zeroship/vite-plugin`) provides
-/// `default.{fetch, rpc}` and owns the `/_zs/v1/<id>` wire dispatch. Raw
+/// `default.{fetch, rpc}` and owns the `/__zeroship/v1/<id>` wire dispatch. Raw
 /// user code (no plugin) can export any subset; the bootstrap forwards
 /// whichever are present.
 ///
 /// This module exists to:
-///   1. **WS-subscription dispatch**: WebSocket upgrades on `/_zs/v1/<id>`
+///   1. **WS-subscription dispatch**: WebSocket upgrades on `/__zeroship/v1/<id>`
 ///      reach `_zsAcceptSubscription` → `dispatchSubscription` →
 ///      `user.default.rpc(name, input, ctx)`. The kernel itself doesn't
 ///      know about subscriptions — they ride entirely on user-space JS
@@ -226,7 +226,7 @@ export {
 ///
 /// The `default` export shape is `{ fetch, rpc, fetchFast, subscribe }`
 /// — `rpc` is the standalone RPC entry (kernel calls it directly when
-/// the URL matches /_zs/v1/<id>; symmetric to `default.fetch`),
+/// the URL matches /__zeroship/v1/<id>; symmetric to `default.fetch`),
 /// `fetchFast` is the optional zeroship-extension HTTP fast path for
 /// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
 /// Name of the process-lifetime `v8::Private` symbol under which the
@@ -497,7 +497,7 @@ function errorResponse(err) {
 // Implementation note: this runs entirely in user-space JS over the
 // existing WebSocketPair primitive — the kernel itself doesn't know
 // about subscriptions. The synthetic SSR entry detects WS-upgrade
-// requests on `/_zs/v1/<id>` and calls into `dispatchSubscription` to
+// requests on `/__zeroship/v1/<id>` and calls into `dispatchSubscription` to
 // hand off the server side of the pair. For the bootstrap fallback
 // (apps without the synthetic entry) we expose the same handler so
 // runtime tests + bare-bone apps can wire WS subscriptions directly.
@@ -621,14 +621,14 @@ async function dispatchSubscription(methodName, input, ws) {
 // handles the WS handshake from the returned Response.
 //
 // `urlStr` is the request URL (used to extract the wireId after the
-// `/_zs/v1/` prefix). On structural failure (bad URL, missing method)
+// `/__zeroship/v1/` prefix). On structural failure (bad URL, missing method)
 // we return an HTTP error response — the kernel will write that
 // instead of upgrading.
 function _zsAcceptSubscription(urlStr) {
     let methodName = null;
     try {
         const u = new URL(urlStr);
-        const m = u.pathname.match(/^\/_zs\/v1\/(.+)$/);
+        const m = u.pathname.match(/^\/__zeroship\/v1\/(.+)$/);
         if (m) methodName = decodeURIComponent(m[1]);
     } catch (_e) {}
     if (!methodName) {
@@ -748,20 +748,20 @@ const USER_FETCH = (user && user.default && typeof user.default.fetch === "funct
 //   - { status, headers, body } plain object → HTTP response
 //   - string / Uint8Array → 200 OK + that body
 //   - null → kernel falls back to the slow `fetch(request, env, ctx)` path
-// Kernel dispatches to this for non-/_zs/v1/<id> traffic when the user
-// module exports it. /_zs/v1/<id> requests go through `default.rpc`
+// Kernel dispatches to this for non-/__zeroship/v1/<id> traffic when the user
+// module exports it. /__zeroship/v1/<id> requests go through `default.rpc`
 // instead — fetchFast and rpc are siblings, not layered.
 const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
     : null;
 
 // Standalone RPC entry — the kernel calls this directly when the URL
-// matches /_zs/v1/<id>, bypassing Request/URL construction. Symmetric
+// matches /__zeroship/v1/<id>, bypassing Request/URL construction. Symmetric
 // to fetch — independent kernel entry point. Returned values get
 // envelope-wrapped on the wire by the kernel; promises get awaited;
 // async iterators fall through to the slow path's stream encoder.
 //
-// Two shapes accepted (see `docs/reference/zs-standard.md`):
+// Two shapes accepted (see `docs/reference/zeroship-standard.md`):
 //   - plain object (dict-shape, `{ [wireId]: handler }`): the canonical
 //     contract. Wrapped in `globalThis.__zsDispatch` so the runtime
 //     owns input validation, capability frame, stream framing, and
@@ -802,7 +802,7 @@ if (user && user.default && user.default.rpc != null) {
     }
 }
 
-const FALLBACK_ZS_V1_TAG = "/_zs/v1/";
+const FALLBACK_ZS_V1_TAG = "/__zeroship/v1/";
 
 // Coerce a user-supplied page handler return value into a Response.
 // Strings/null are wrapped as text/html. Response is passed through.
@@ -817,11 +817,11 @@ function coerceToHtmlResponse(result, status) {
 
 // Fallback fetch — used only when the user's module doesn't export a
 // default.fetch handler. Handles:
-//   - /_zs/v1/<id>    + WS upgrade  → dispatchSubscription
+//   - /__zeroship/v1/<id>    + WS upgrade  → dispatchSubscription
 //   - GET /           → user.index() if exported, returns HTML
 //   - else            → 404
 //
-// Unary /_zs/v1/<id> requests fall through here when there's no
+// Unary /__zeroship/v1/<id> requests fall through here when there's no
 // `default.fetch`; we 404. Real apps ship via the synthetic SSR
 // entry which exports `default.{fetch, rpc}` and handles them.
 async function fallbackFetch(request) {
@@ -861,7 +861,7 @@ export default {
     // runtime's WebSocketPair primitive.
     subscribe: dispatchSubscription,
     // Standalone RPC entry. When set, the kernel calls this directly
-    // for /_zs/v1/<id> requests and never builds a Request object.
+    // for /__zeroship/v1/<id> requests and never builds a Request object.
     // Symmetric to fetch — independent kernel entry, not layered.
     rpc: USER_RPC,
     // Zeroship extension: non-WinterCG fast HTTP dispatch for non-RPC

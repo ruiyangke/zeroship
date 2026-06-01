@@ -2,7 +2,7 @@
 #
 # Single entry point Liquibase reads
 # (`--changelog-file=db/changelog/db.changelog-master.yaml`). It owns the
-# control / auth / platform schemas. Hydra owns its own schema via
+# single `zeroship` schema. Hydra owns its own schema via
 # `hydra migrate` (the hydra-migrate compose service) — do NOT add hydra
 # tables here.
 #

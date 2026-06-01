@@ -15,8 +15,8 @@
 
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3000}"
-RPC="${URL}/_zs/v1"
+URL="${ZEROSHIP_URL:-http://localhost:3000}"
+RPC="${URL}/__zeroship/v1"
 FAILED=0
 
 rpc() {

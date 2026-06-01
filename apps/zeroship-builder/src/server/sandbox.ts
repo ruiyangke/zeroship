@@ -116,6 +116,72 @@ export const readSandboxFile = action(async (
   return res.text();
 }, { id: "sandbox.files.read", input: readSandboxFileInputSchema, maxInputBytes: 8_192 });
 
+// ─── internal file read/write helpers (NOT RPC procs) ───────────
+//
+// `projects.ts` builds `.env` + `.zeroship/dev.log` on top of the same
+// `/sandboxes/:id/files/{path}` GET/PUT the canvas uses. These are plain
+// async functions (no `action()` wrapper) so they can be called
+// server-to-server without becoming public endpoints. They resolve the
+// project's sandbox the same way the canvas procs do, so a write here is
+// visible to the agent and the preview immediately.
+
+/**
+ * Read a file from the project's sandbox. Returns `null` when the file
+ * doesn't exist (404) — callers treat "absent" as empty rather than an
+ * error (a fresh project has no `.env` and no `dev.log` yet). Any other
+ * non-OK status throws.
+ */
+export async function readSandboxFileFor(
+  appId: string,
+  path: string,
+): Promise<string | null> {
+  const sandbox = await getOrCreateSandboxFor(appId, { projectSourceId: appId });
+  const res = await fetch(
+    `${SANDBOX_URL()}/sandboxes/${sandbox.id}/files/${encodePath(path)}${ownerQ(sandbox.userId)}`,
+    { headers: authHeaders() },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: "read file",
+      status: res.status,
+      body: await res.text(),
+      publicMessage: "file read failed",
+    });
+  }
+  return res.text();
+}
+
+/**
+ * Write a file into the project's sandbox (PUT `/files/{path}`). Creates
+ * or overwrites. Throws an `UpstreamServiceError` on a non-OK status.
+ */
+export async function writeSandboxFileFor(
+  appId: string,
+  path: string,
+  content: string,
+): Promise<void> {
+  const sandbox = await getOrCreateSandboxFor(appId, { projectSourceId: appId });
+  const res = await fetch(
+    `${SANDBOX_URL()}/sandboxes/${sandbox.id}/files/${encodePath(path)}${ownerQ(sandbox.userId)}`,
+    {
+      method: "PUT",
+      headers: authHeaders({ "content-type": "text/plain" }),
+      body: content,
+    },
+  );
+  if (!res.ok) {
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: "write file",
+      status: res.status,
+      body: await res.text(),
+      publicMessage: "file write failed",
+    });
+  }
+}
+
 export interface LivePreviewInput {
   appId: string;
   port?: number;

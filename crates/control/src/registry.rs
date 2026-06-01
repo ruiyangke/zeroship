@@ -144,7 +144,7 @@ impl Registry {
         let conn = self.conn().await?;
 
         conn.execute(
-            "INSERT INTO control.apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
             &[&name, &plan_id, &api_key, &key_hash],
         )
         .await?;
@@ -152,7 +152,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps WHERE name = $1",
+                 FROM zeroship.apps WHERE name = $1",
                 &[&name],
             )
             .await?;
@@ -168,7 +168,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps WHERE id = $1",
+                 FROM zeroship.apps WHERE id = $1",
                 &[id],
             )
             .await?;
@@ -181,7 +181,7 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps WHERE name = $1",
+                 FROM zeroship.apps WHERE name = $1",
                 &[&name],
             )
             .await?;
@@ -194,19 +194,52 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM control.apps ORDER BY name",
+                 FROM zeroship.apps ORDER BY name",
                 &[],
             )
             .await?;
         Ok(rows.iter().map(row_to_record).collect())
     }
 
-    /// Delete an app by id. Returns true if a row was deleted.
+    /// Delete an app by id. Returns true if the app row was deleted.
+    ///
+    /// ATOMIC: deletes the `zeroship.apps` row AND the per-app
+    /// `zeroship.oauth_clients` row (`client_id = client_id_for_app(id)`) in ONE
+    /// transaction, so the real FK chain cascades every dependent row in the
+    /// single `zeroship` schema in one shot:
+    ///   - apps          → {gateway_sessions, app_members, app_session_anchors
+    ///                       (by app_id), app_oauth_clients, app_usage,
+    ///                       app_vars, app_secrets, …}
+    ///   - oauth_clients → {oauth_grants, app_user_identities,
+    ///                       app_session_anchors (by client_id)}
+    ///
+    /// Deleting the per-app oauth_clients row is what closes the relay arm:
+    /// `app_user_identities.app_client_id` FKs into `oauth_clients(client_id)`
+    /// ON DELETE CASCADE, so this single txn replaces the former best-effort
+    /// alias-revoke companion UPDATE (no orphaned live aliases possible).
+    ///
+    /// Runs on a DEDICATED owned connection (`conn()` → fresh mutable `Client`)
+    /// so the RAII `transaction()` guard owns it; an aborted txn never poisons a
+    /// shared handle.
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
-        let conn = self.conn().await?;
-        let n = conn
-            .execute("DELETE FROM control.apps WHERE id = $1", &[id])
+        let client_id = crate::app_oauth_client::client_id_for_app(id);
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        let n = tx
+            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
             .await?;
+        // Delete the per-app oauth_clients row in the SAME txn. Its FK children
+        // (oauth_grants, app_user_identities, app_session_anchors-by-client_id)
+        // cascade. Keyed on the deterministic `client_id_for_app(id)` — the same
+        // value `provision_app_oauth_client` wrote — so no extension-table read
+        // is needed (and the app_oauth_clients row is already cascade-gone with
+        // the apps row above; this targets the shared oauth_clients row).
+        tx.execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(n > 0)
     }
 
@@ -215,7 +248,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE control.apps SET deploy_hash = $1, \
+                "UPDATE zeroship.apps SET deploy_hash = $1, \
                  updated_at = NOW() WHERE id = $2",
                 &[&hash, id],
             )
@@ -235,7 +268,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE control.apps SET deploy_hash = $1, manifest_json = $2, \
+                "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
                  updated_at = NOW() WHERE id = $3",
                 &[&deploy_hash, &manifest_json, id],
             )
@@ -250,7 +283,7 @@ impl Registry {
     pub async fn get_manifest_json(&self, id: &Uuid) -> Result<Option<String>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT manifest_json FROM control.apps WHERE id = $1", &[id])
+            .query("SELECT manifest_json FROM zeroship.apps WHERE id = $1", &[id])
             .await?;
         Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("manifest_json")))
     }
@@ -260,7 +293,7 @@ impl Registry {
         let conn = self.conn().await?;
         let n = conn
             .execute(
-                "UPDATE control.apps SET plan_id = $1, \
+                "UPDATE zeroship.apps SET plan_id = $1, \
                  updated_at = NOW() WHERE id = $2",
                 &[&plan_id, id],
             )
@@ -282,7 +315,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM control.apps",
+                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM zeroship.apps",
                 &[],
             )
             .await?;
@@ -324,7 +357,7 @@ impl Registry {
     pub(crate) async fn bump_env_version(&self, app_id: Uuid) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "UPDATE control.apps SET env_version = env_version + 1 WHERE id = $1",
+            "UPDATE zeroship.apps SET env_version = env_version + 1 WHERE id = $1",
             &[&app_id],
         )
         .await?;
@@ -339,10 +372,16 @@ impl Registry {
     /// always defined (legacy fallback path was removed).
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
         let conn = self.conn().await?;
+        // LEFT JOIN control.app_oauth_clients (§1.5): a provisioned app yields
+        // Some(oauth_client_id)/Some(sector_identifier); an un-provisioned app
+        // (no extension row) yields NULL ⇒ None. The join key is the app id.
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, api_key_hash, deploy_hash, manifest_json \
-                 FROM control.apps",
+                "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
+                        a.manifest_json, c.client_id AS oauth_client_id, \
+                        c.sector_identifier \
+                 FROM zeroship.apps a \
+                 LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id",
                 &[],
             )
             .await?;
@@ -374,6 +413,15 @@ impl Registry {
                     api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
                     manifest,
+                    // OAuth identity fields (§1.5), populated by the LEFT JOIN
+                    // on `control.app_oauth_clients` above. A provisioned app
+                    // (Slice 1d created its per-app client) yields
+                    // `Some(client_id)`/`Some(sector_identifier)`; an
+                    // un-provisioned app has no extension row, so the join
+                    // produces NULL ⇒ `None`. The gateway's
+                    // `CompiledRoute`/browser-auth/Bearer arm consume these.
+                    oauth_client_id: row.get("oauth_client_id"),
+                    sector_identifier: row.get("sector_identifier"),
                 },
             );
         }
@@ -391,7 +439,7 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "INSERT INTO control.usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.app_usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
              ON CONFLICT (app_id, resource) DO UPDATE SET value = u.value + EXCLUDED.value",
             &[app_id, &resource, &delta],
         )
@@ -407,7 +455,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT resource, value FROM control.usage WHERE app_id = $1",
+                "SELECT resource, value FROM zeroship.app_usage WHERE app_id = $1",
                 &[app_id],
             )
             .await?;

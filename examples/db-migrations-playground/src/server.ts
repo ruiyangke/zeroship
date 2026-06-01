@@ -166,7 +166,7 @@ export const eventStats = query(
 
 // ---------------------------------------------------------------------------
 // Migration drivers — thin RPC wrappers around `@zeroship/migrations`
-// so the smoke can `POST /_zs/v1/runMigration` etc. without depending
+// so the smoke can `POST /__zeroship/v1/runMigration` etc. without depending
 // on a control-plane HTTP endpoint that doesn't exist in the dev
 // runtime.
 // ---------------------------------------------------------------------------

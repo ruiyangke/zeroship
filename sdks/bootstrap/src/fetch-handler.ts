@@ -1,6 +1,6 @@
 /**
- * WinterCG `fetch` wrapper that owns the `/_zs/v1/<id>` fall-through:
- *   - GET / POST against `/_zs/v1/<id>` → dispatch through
+ * WinterCG `fetch` wrapper that owns the `/__zeroship/v1/<id>` fall-through:
+ *   - GET / POST against `/__zeroship/v1/<id>` → dispatch through
  *     `__zsDispatch(rpc, id, input, ctx)`. Streaming results are
  *     encoded via the AI-SDK line-prefixed protocol; unary results use
  *     the SuperJSON-compatible `{ "json": ..., "meta"?: ... }` envelope.
@@ -104,8 +104,8 @@ export function createFetchHandler(loadNormalized: LoadNormalized): (request: Re
   return async function dispatchFetch(request: Request, env: unknown, ctx: unknown): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname.startsWith("/_zs/v1/")) {
-      const id = url.pathname.slice("/_zs/v1/".length);
+    if (url.pathname.startsWith("/__zeroship/v1/")) {
+      const id = url.pathname.slice("/__zeroship/v1/".length);
       if (!id) return errResponse(400, "INVALID_ARGUMENT", "missing wireId");
 
       let input: unknown = undefined;
@@ -130,7 +130,7 @@ export function createFetchHandler(loadNormalized: LoadNormalized): (request: Re
           }
         }
       } else {
-        return errResponse(405, "FAILED_PRECONDITION", `method ${request.method} not allowed on /_zs/v1/`);
+        return errResponse(405, "FAILED_PRECONDITION", `method ${request.method} not allowed on /__zeroship/v1/`);
       }
 
       return rpcAndRespond(loadNormalized, id, input, ctx);

@@ -1,9 +1,8 @@
 "use server";
 
-import { CONTROL_URL, SANDBOX_TOKEN, SANDBOX_URL } from "./internal/env";
+import { SANDBOX_TOKEN, SANDBOX_URL } from "./internal/env";
 import { getOrCreateSandboxFor } from "./internal/sandbox-backend";
 
-const AUTH_PREFIX = "/auth/";
 const PREVIEW_PREFIX = "/api/preview/";
 const HOP_BY_HOP = new Set([
   "connection",
@@ -25,10 +24,11 @@ interface PreviewPath {
 
 export async function previewFetch(request: Request): Promise<Response> {
   const url = new URL(request.url);
-  if (url.pathname === "/auth" || url.pathname.startsWith(AUTH_PREFIX)) {
-    return proxyAuth(request, url);
-  }
-
+  // The console is a pure creator app: it serves no `/auth/*` proxy and
+  // makes no control-plane calls. End-user (creator) auth runs entirely
+  // through the platform BFF (the gateway's `/__zeroship/auth/*`), and
+  // identity reaches app code via `currentUser()`. The only thing
+  // `builderFetch` forwards is the live preview proxy below.
   const parsed = parsePreviewPath(url.pathname);
   if (!parsed) {
     return new Response("Not Found", { status: 404 });
@@ -67,24 +67,6 @@ export async function previewFetch(request: Request): Promise<Response> {
       { status: 502 },
     );
   }
-}
-
-async function proxyAuth(request: Request, url: URL): Promise<Response> {
-  const target = new URL(`${url.pathname}${url.search}`, CONTROL_URL());
-  const controlRes = await fetch(target, {
-    method: request.method,
-    headers: proxyAuthRequestHeaders(request),
-    body: request.method === "GET" || request.method === "HEAD"
-      ? undefined
-      : await request.arrayBuffer(),
-    redirect: "manual",
-  });
-
-  return new Response(controlRes.body, {
-    status: controlRes.status,
-    statusText: controlRes.statusText,
-    headers: proxyGenericResponseHeaders(controlRes.headers),
-  });
 }
 
 function parsePreviewPath(pathname: string): PreviewPath | null {
@@ -156,46 +138,6 @@ function proxyRequestHeaders(request: Request): Headers {
   }
   out.set("authorization", `Bearer ${token}`);
   return out;
-}
-
-function proxyAuthRequestHeaders(request: Request): Headers {
-  const out = new Headers();
-  for (const [key, value] of request.headers) {
-    const lower = key.toLowerCase();
-    if (HOP_BY_HOP.has(lower)) continue;
-    if (
-      lower === "content-length" ||
-      lower === "host" ||
-      lower === "x-forwarded-for" ||
-      lower === "x-forwarded-host" ||
-      lower === "x-forwarded-proto"
-    ) {
-      continue;
-    }
-    out.set(key, value);
-  }
-  return out;
-}
-
-function proxyGenericResponseHeaders(headers: Headers): Headers {
-  const out = new Headers();
-  const setCookies = readSetCookies(headers);
-  headers.forEach((value, key) => {
-    const lower = key.toLowerCase();
-    if (HOP_BY_HOP.has(lower) || lower === "content-length") return;
-    if (lower === "set-cookie" && setCookies.length > 0) return;
-    out.append(key, value);
-  });
-  for (const cookie of setCookies) {
-    out.append("set-cookie", cookie);
-  }
-  out.set("cache-control", "no-store");
-  return out;
-}
-
-function readSetCookies(headers: Headers): string[] {
-  const api = headers as Headers & { getSetCookie?: () => string[] };
-  return api.getSetCookie?.() ?? [];
 }
 
 function proxyResponseHeaders(headers: Headers, parsed: PreviewPath): Headers {

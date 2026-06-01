@@ -1,6 +1,6 @@
 //! `/signup` GET + POST handlers.
 //!
-//! Signup creates the `auth.users` row, then redirects back to `/login`
+//! Signup creates the `zeroship.users` row, then redirects back to `/login`
 //! (continuing the OIDC flow if a `login_challenge` is present). Email
 //! verification is a Phase 5 addition; for Phase 2 we just create the row
 //! and let the user proceed straight to `/login`.

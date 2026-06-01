@@ -8,6 +8,7 @@ import { resolve, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChildProcess, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import http from "node:http";
 import {
   MODULE_FETCH_PATH,
@@ -15,8 +16,11 @@ import {
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
+  ENV_DEV_AUTH,
+  ENV_DEV_AUTH_SECRET,
   DEFAULT_DEV_PORT,
 } from "./constants.js";
+import { resolveDevAuthEnv, type DevAuthOption } from "./dev-auth-config.js";
 import {
   ZeroshipDevEnvironment,
   createZeroshipEnvironmentOptions,
@@ -30,6 +34,11 @@ import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 export interface DevServerOptions {
   devServerPort?: number;
   serverEntry?: string;
+  /**
+   * Dev-tier auth config. `undefined` defaults to ON with the built-in dev
+   * user; `false` disables. See `ZeroshipOptions.devAuth`.
+   */
+  devAuth?: DevAuthOption;
 }
 
 type FetchMethod = "fetchModule" | "getBuiltins";
@@ -181,6 +190,13 @@ export function devServerPlugin(
   state: TransformState
 ): Plugin[] {
   const devPort = options.devServerPort ?? DEFAULT_DEV_PORT;
+
+  // Resolve the dev-tier auth env pair ONCE per dev-server lifetime. The secret
+  // is stable across child restarts (the crash-restart handler re-spawns the
+  // runtime) so cookies minted before a restart still verify afterward.
+  const devAuthEnv = resolveDevAuthEnv(options.devAuth, () =>
+    randomBytes(32).toString("hex"),
+  );
 
   let root = "";
   let isDev = false;
@@ -431,6 +447,17 @@ export function devServerPlugin(
             [ENV_DEV]: "1",
             [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
+            // Dev-tier auth: when enabled, hand the child the dev-user config +
+            // the cookie HMAC secret. The runtime's `dev_auth.rs` reads the
+            // secret to verify the `__zeroship_dev_session` cookie → server-side
+            // identity; the bootstrap dev-auth provider reads both to serve
+            // `/__zeroship/auth/*` + sign the cookie. Omitted entirely when disabled.
+            ...(devAuthEnv.config !== null && devAuthEnv.secret !== null
+              ? {
+                  [ENV_DEV_AUTH]: devAuthEnv.config,
+                  [ENV_DEV_AUTH_SECRET]: devAuthEnv.secret,
+                }
+              : {}),
           };
 
           try {
@@ -511,7 +538,7 @@ export function devServerPlugin(
       // This ensures the runtime's RPC + API paths are proxied to it rather
       // than being caught by Vite's index.html fallback. Forwarded path
       // prefixes:
-      //   - /_zs/v1/<id>   ← spec wire (production + dev parity)
+      //   - /__zeroship/v1/<id>   ← spec wire (production + dev parity)
       //   - /api/*         ← raw HTTP routes the user app exposes
       //   - /auth/login, /auth/callback, /auth/logout
       //                     ← builder OAuth code-flow routes
@@ -524,7 +551,7 @@ export function devServerPlugin(
         ) => {
           const url = req.url ?? "";
           if (
-            !url.startsWith("/_zs/v1/") &&
+            !url.startsWith("/__zeroship/v1/") &&
             !url.startsWith("/_rpc") &&
             !url.startsWith("/rpc") &&
             !url.startsWith("/api/") &&
@@ -536,7 +563,7 @@ export function devServerPlugin(
           }
 
           // Forward path as-is — the dev-bootstrap's `default.fetch`
-          // dispatches /_zs/v1/<id> through `default.rpc`, mirroring
+          // dispatches /__zeroship/v1/<id> through `default.rpc`, mirroring
           // production.
           const proxyReq = http.request(
             `http://localhost:${devPort}${url}`,

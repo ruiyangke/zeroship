@@ -115,7 +115,7 @@ fn wall_limit(runtime: &Runtime) -> std::time::Duration {
 /// JSON envelope the gateway sends. The full HTTP request (method, URL,
 /// headers, body) flows in here and `Runtime::call_fetch_handler`
 /// dispatches it through the kernel's three-tier path:
-///   1. `default.rpc(name, input, ctx)` for `/_zs/v1/<id>` URLs.
+///   1. `default.rpc(name, input, ctx)` for `/__zeroship/v1/<id>` URLs.
 ///   2. `default.fetchFast(method, url, body, env)` for non-RPC traffic.
 ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path) for
 ///      everything else, including fall-through from (1) and (2).
@@ -421,7 +421,14 @@ mod tests {
                   }
                 }
             "#;
-            crate::cache::init_cache(10, None);
+            crate::cache::init_cache(
+                10,
+                crate::cache::KernelConfig {
+                    db_url: None,
+                    kv_url: None,
+                    storage_root: None,
+                },
+            );
             assert!(crate::cache::load_app(
                 app_id,
                 source,
@@ -444,6 +451,8 @@ mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
+                kv_url: None,
+                storage_root: None,
                 max_isolates: 10,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
@@ -490,6 +499,195 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(blob_root);
         });
+    }
+
+    /// Phase-2 faithful regression: a deployed app must boot against the
+    /// FULL `env.{db,kv,storage,auth}` kernel on the multi-node worker
+    /// path — not just `env.{db,auth}`. This drives the REAL dispatch
+    /// pipeline an end-user request takes: `init_cache` → `load_app`
+    /// (which calls `create_plugins()` — the very vector a deployed app
+    /// gets) → ntex `/dispatch/{app_id}` → `call_fetch_handler`. There is
+    /// NO hand-built plugin list and NO dispatcher shim; the JS handler
+    /// runs inside the isolate `create_plugins()` actually feeds.
+    ///
+    /// The handler asserts all four namespaces RESOLVE, then round-trips
+    /// `env.kv.set/get` (against the real `Redis` backend `create_plugins`
+    /// builds) and `env.storage.put/get` (against the real `LocalFs`
+    /// backend). `env.db` is asserted present (its pool connects lazily, so
+    /// no live Postgres is needed to prove the namespace is installed);
+    /// `env.auth.getUser()` resolves to null with no user header.
+    ///
+    /// PRE-PHASE-2 this FAILS: the old `create_plugins()` pushed only
+    /// `DbPlugin` + `AuthPlugin`, so `typeof env.kv` / `typeof env.storage`
+    /// were `"undefined"` and the handler's assertion would 500.
+    ///
+    /// Service dependency: a single-node Redis reachable at `REDIS_TEST_URL`
+    /// (e.g. `redis://127.0.0.1:6379`). When unset the KV leg can't run
+    /// faithfully, so the test SKIPS (matching `plugin-kv`'s
+    /// `tests/redis_backend.rs`); set `KV_REQUIRE_REDIS=1` to turn the skip
+    /// into a hard failure in CI. Storage + db + auth need no external
+    /// service.
+    #[test]
+    fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
+        let Some(kv_url) = std::env::var("REDIS_TEST_URL").ok().filter(|s| !s.is_empty())
+        else {
+            if std::env::var("KV_REQUIRE_REDIS").ok().as_deref() == Some("1") {
+                panic!("KV_REQUIRE_REDIS=1 but REDIS_TEST_URL is unset");
+            }
+            eprintln!(
+                "skipping dispatch_resolves_full_kernel_kv_storage_db_auth \
+                 (set REDIS_TEST_URL=redis://127.0.0.1:6379)"
+            );
+            return;
+        };
+
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            init_runtime();
+
+            let app_id = Uuid::new_v4();
+            // The handler exercises every kernel namespace and reports a
+            // JSON verdict. A missing namespace surfaces as a thrown
+            // TypeError (→ 500), so a green 200 + matching body proves the
+            // full kernel resolved AND the kv/storage round-trips landed.
+            let source = br#"
+                export default {
+                  async fetch(req, env) {
+                    const present = {
+                      db: typeof env.db,
+                      kv: typeof env.kv,
+                      storage: typeof env.storage,
+                      auth: typeof env.auth,
+                    };
+                    // KV round-trip: set then read back.
+                    await env.kv.set("phase2-key", "phase2-value");
+                    const kvBack = await env.kv.get("phase2-key");
+                    // Storage round-trip: put base64 "hi" then read it back.
+                    // The native env.storage.* primitive returns a JSON
+                    // STRING (the @zeroship/storage SDK parses it); mirror
+                    // that here so the test exercises the real contract.
+                    const b64 = btoa("hi");
+                    await env.storage.put("uploads", "f.txt", b64, "text/plain");
+                    const raw = await env.storage.get("uploads", "f.txt");
+                    const got = raw ? JSON.parse(raw) : null;
+                    // Auth resolves (null with no user header).
+                    const user = await env.auth.getUser();
+                    return Response.json({
+                      present,
+                      kvBack,
+                      storageBack: got ? got.bytesBase64 : null,
+                      user,
+                    });
+                  }
+                }
+            "#;
+
+            let storage_root = tmpdir("storage");
+            crate::cache::init_cache(
+                10,
+                crate::cache::KernelConfig {
+                    // Dummy DSN: DbPlugin stores the URL and connects lazily,
+                    // so `env.db` is installed without a live Postgres.
+                    db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
+                    kv_url: Some(kv_url),
+                    storage_root: Some(storage_root.clone()),
+                },
+            );
+            assert!(crate::cache::load_app(
+                app_id,
+                source,
+                AppRuntimeLimits::default()
+            ));
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            crate::sync::put_env_from_json(
+                &envs,
+                app_id,
+                r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                0,
+            )
+            .expect("insert env");
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("blob");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let config = Arc::new(crate::WorkerConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
+                kv_url: None,
+                storage_root: None,
+                max_isolates: 10,
+                poll_interval_secs: 60,
+                worker_key: String::new(),
+                shutdown_timeout_secs: 0,
+                blob_store,
+            });
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/dispatch/{app_id}").route(web::post().to(dispatch)),
+                    ),
+            )
+            .await;
+
+            let envelope = serde_json::json!({
+                "method": "GET",
+                "url": "http://example.test/kernel-probe",
+                "headers": [],
+                "body": "",
+            });
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{app_id}"))
+                .set_payload(serde_json::to_vec(&envelope).unwrap())
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "full-kernel dispatch must succeed; a missing env.* namespace 500s"
+            );
+            let body = test::read_body(resp).await;
+            let v: serde_json::Value =
+                serde_json::from_slice(&body).expect("handler returned JSON");
+
+            // All four namespaces resolved to live objects.
+            assert_eq!(v["present"]["db"], "object", "env.db must resolve");
+            assert_eq!(v["present"]["kv"], "object", "env.kv must resolve");
+            assert_eq!(
+                v["present"]["storage"], "object",
+                "env.storage must resolve"
+            );
+            assert_eq!(v["present"]["auth"], "object", "env.auth must resolve");
+            // KV set/get round-tripped through the real Redis backend.
+            assert_eq!(v["kvBack"], "phase2-value", "kv round-trip");
+            // Storage put/get round-tripped through the real LocalFs backend.
+            assert_eq!(
+                v["storageBack"],
+                base64_encode_hi(),
+                "storage round-trip (base64 of \"hi\")"
+            );
+            // Auth resolved (no user header → null).
+            assert!(v["user"].is_null(), "auth.getUser() returns null sans user");
+
+            let _ = std::fs::remove_dir_all(blob_root);
+            let _ = std::fs::remove_dir_all(storage_root);
+        });
+    }
+
+    /// `btoa("hi")` — the base64 the JS handler stores. Kept Rust-side so
+    /// the assertion can't drift from the handler's literal.
+    fn base64_encode_hi() -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(b"hi")
     }
 }
 

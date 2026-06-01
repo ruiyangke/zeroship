@@ -6,6 +6,8 @@ use clap::Parser;
 use zeroship_core::config::{
     parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY,
 };
+
+use crate::mailer::SmtpTls;
 use zeroship_core::observability::ObservabilityFlags;
 
 const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
@@ -235,10 +237,16 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_SMTP_PASSWORD", hide_env_values = true)]
     pub smtp_password: Option<String>,
 
-    /// `true` ⇒ open plaintext then upgrade with STARTTLS (port 587).
-    /// `false` ⇒ open implicit TLS / SMTPS (port 465).
-    #[arg(long, env = "AUTH_SMTP_STARTTLS", default_value = "true")]
-    pub smtp_starttls: bool,
+    /// Transport encryption for the transactional SMTP leg:
+    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
+    /// `plaintext` (no TLS — dev/test sinks like mailpit on :1025 ONLY).
+    #[arg(
+        long = "smtp-tls",
+        env = "AUTH_SMTP_TLS",
+        value_enum,
+        default_value_t = SmtpTls::Starttls
+    )]
+    pub smtp_tls: SmtpTls,
 
     /// Resend API key (required when `--mailer=resend`).
     #[arg(long, env = "AUTH_RESEND_API_KEY", hide_env_values = true)]
@@ -270,6 +278,79 @@ pub struct AuthConfig {
     )]
     pub public_url: String,
 
+    // ─── Relay email (Slice 5 — app → user one-way forwarding) ───────────
+    /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
+    /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
+    /// (sub-spec §9). The inbound webhook resolves `OriginalRecipient` against
+    /// this domain and the forward builder rewrites `From`/`Reply-To` to it.
+    #[arg(
+        long = "relay-domain",
+        env = "RELAY_DOMAIN",
+        default_value = "relay.zeroship.localhost"
+    )]
+    pub relay_domain: String,
+
+    /// HTTP Basic-auth username the inbound provider (Postmark Inbound) must
+    /// present on every `POST /webhooks/relay-inbound`. When unset, the handler
+    /// 401s so an unverified POST cannot drive a forward/suppression spoof
+    /// (sub-spec §4.3 step 1).
+    #[arg(long = "relay-inbound-user", env = "AUTH_RELAY_INBOUND_USER")]
+    pub relay_inbound_user: Option<String>,
+
+    /// HTTP Basic-auth password paired with [`Self::relay_inbound_user`].
+    #[arg(
+        long = "relay-inbound-password",
+        env = "AUTH_RELAY_INBOUND_PASSWORD",
+        hide_env_values = true
+    )]
+    pub relay_inbound_password: Option<String>,
+
+    /// Relay-forward mailer driver: `smtp` (default — the forward path needs
+    /// envelope-from control) | `stdout` (dev terminal). `resend` is REJECTED
+    /// for this role (it cannot pin envelope-from, sub-spec §3.2/§5.2a). This
+    /// is a SECOND, dedicated mailer distinct from [`Self::mailer`] so the relay
+    /// sends from the relay-domain identity (§5.5 reputation isolation).
+    #[arg(
+        long = "relay-forward-mailer",
+        env = "AUTH_RELAY_FORWARD_MAILER",
+        default_value = "smtp"
+    )]
+    pub relay_forward_mailer: String,
+
+    /// Relay-forward SMTP host (required when `--relay-forward-mailer=smtp`).
+    /// Independent of [`Self::smtp_host`] — the relay sending identity is
+    /// distinct from the transactional one (sub-spec §5.2a).
+    #[arg(long = "relay-smtp-host", env = "AUTH_RELAY_SMTP_HOST")]
+    pub relay_smtp_host: Option<String>,
+
+    /// Relay-forward SMTP port. Defaults to 587 (STARTTLS).
+    #[arg(long = "relay-smtp-port", env = "AUTH_RELAY_SMTP_PORT", default_value = "587")]
+    pub relay_smtp_port: u16,
+
+    /// Relay-forward SMTP username (optional — dev sinks need none).
+    #[arg(long = "relay-smtp-username", env = "AUTH_RELAY_SMTP_USERNAME")]
+    pub relay_smtp_username: Option<String>,
+
+    /// Relay-forward SMTP password (paired with `--relay-smtp-username`).
+    #[arg(
+        long = "relay-smtp-password",
+        env = "AUTH_RELAY_SMTP_PASSWORD",
+        hide_env_values = true
+    )]
+    pub relay_smtp_password: Option<String>,
+
+    /// Transport encryption for the relay-forward SMTP leg:
+    /// `starttls` (default, port 587) | `implicit` (SMTPS, port 465) |
+    /// `plaintext` (no TLS). Dev sinks (mailpit on :1025) use `plaintext`;
+    /// prod uses `starttls`.
+    #[arg(
+        long = "relay-smtp-tls",
+        env = "AUTH_RELAY_SMTP_TLS",
+        value_enum,
+        default_value_t = SmtpTls::Starttls
+    )]
+    pub relay_smtp_tls: SmtpTls,
+
     // ─── Postmark webhook (bounce/complaint receiver, P5-U7) ─────────────
     /// HTTP Basic-auth username Postmark must present on every
     /// `POST /webhooks/postmark` request. Configured per-server in the
@@ -289,7 +370,7 @@ pub struct AuthConfig {
     pub postmark_webhook_password: Option<String>,
 
     // ─── Cron (P6-U1: jwk_rotation; future units add audit retention) ───
-    /// Days between JWK rotations. Once a set's `auth.cron_state` row is
+    /// Days between JWK rotations. Once a set's `zeroship.cron_state` row is
     /// older than this, the next cron tick prepends fresh keys and they
     /// become the active signers (hydra signs with the head of the
     /// list). 90 days mirrors the OIDC operator handbook default.
@@ -403,6 +484,10 @@ impl std::fmt::Debug for AuthConfig {
             .field("resend_api_key", &"<redacted>")
             .field("public_url", &self.public_url)
             .field("postmark_webhook_password", &"<redacted>")
+            .field("relay_domain", &self.relay_domain)
+            .field("relay_forward_mailer", &self.relay_forward_mailer)
+            .field("relay_inbound_password", &"<redacted>")
+            .field("relay_smtp_password", &"<redacted>")
             .finish_non_exhaustive()
     }
 }
@@ -600,6 +685,76 @@ mod tests {
             "--insecure-dev",
         ])
         .expect_err("--insecure-dev no longer accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    // ─── SMTP TLS mode (Bug 2 regression) ────────────────────────────────
+    // The old `--smtp-starttls`/`--relay-smtp-starttls` were bare `bool` flags
+    // with `default_value = "true"`: passing a value (`=false`) errored and the
+    // bare flag could only ever set `true`, so there was NO way to disable TLS
+    // on the command line (only via env). These value-enum flags fix that AND
+    // add the previously-missing `plaintext` arm for dev/test sinks.
+
+    #[test]
+    fn smtp_tls_defaults_to_starttls() {
+        let cfg = test_config();
+        assert_eq!(cfg.smtp_tls, SmtpTls::Starttls);
+        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Starttls);
+    }
+
+    #[test]
+    fn smtp_tls_accepts_plaintext_value_on_cli() {
+        // Pre-fix `--smtp-starttls=false` errored ("unexpected value"); the
+        // valued enum parses an explicit mode, including the new plaintext arm.
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-tls",
+            "plaintext",
+            "--relay-smtp-tls",
+            "plaintext",
+        ]);
+        assert_eq!(cfg.smtp_tls, SmtpTls::Plaintext);
+        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Plaintext);
+    }
+
+    #[test]
+    fn smtp_tls_accepts_implicit_and_starttls_values() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-tls=implicit",
+            "--relay-smtp-tls=starttls",
+        ]);
+        assert_eq!(cfg.smtp_tls, SmtpTls::Implicit);
+        assert_eq!(cfg.relay_smtp_tls, SmtpTls::Starttls);
+    }
+
+    #[test]
+    fn smtp_tls_rejects_unknown_mode() {
+        let err = AuthConfig::try_parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-tls",
+            "nope",
+        ])
+        .expect_err("unknown smtp-tls mode must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn old_smtp_starttls_flag_is_rejected() {
+        // No back-compat: the bare bool flag is gone, replaced by `--smtp-tls`.
+        let err = AuthConfig::try_parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--smtp-starttls",
+        ])
+        .expect_err("--smtp-starttls no longer accepted");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 

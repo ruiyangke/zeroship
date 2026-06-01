@@ -178,11 +178,11 @@ pub async fn list_oauth_clients(
     }
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                     skip_consent, created_at, created_by, hydra_client_id \
-             FROM control.oauth_clients \
+             FROM zeroship.oauth_clients \
              ORDER BY created_at DESC, client_id ASC",
             &[],
         )
@@ -220,9 +220,9 @@ pub async fn delete_oauth_client(
     }
 
     match state
-        .auth_pg
+        .control_pg
         .execute(
-            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -315,9 +315,9 @@ async fn ensure_client_absent(
     client_id: &str,
 ) -> Result<(), web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
-            "SELECT 1 FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT 1 FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -340,9 +340,9 @@ async fn ensure_client_present(
     client_id: &str,
 ) -> Result<(), web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
-            "SELECT 1 FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT 1 FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
@@ -370,9 +370,9 @@ async fn insert_oauth_client(
     let redirect_uris: Vec<&str> = body.redirect_uris.iter().map(String::as_str).collect();
     let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
-            "INSERT INTO control.oauth_clients \
+            "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                  skip_consent, created_by, hydra_client_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $1) \

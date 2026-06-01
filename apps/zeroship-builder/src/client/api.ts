@@ -5,52 +5,42 @@
 //
 // `rpc.chat.streamUrl()` is the AI-SDK entry point — `@zeroship/rpc`
 // exposes it explicitly so we can hand the URL to `useChat` without
-// hardcoding `/_zs/v1/chat`. The transport-level body envelope
+// hardcoding `/__zeroship/v1/chat`. The transport-level body envelope
 // (`{ json: <input> }`) is wrapped in `chatTransport` below.
 
 import { createRpcClient } from "@zeroship/rpc/client";
 import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
 
-// Compatibility shim for the orphan tree (auth pages, admin, old
-// project workspace). Vite resolves bare `from "../api"` to api.ts
-// rather than api/index.ts, so the old api/index.ts is dead code.
-// TopBar / AuthContext / Account / Login / Signup still reference
-// `isDevAutoAuth` via that import path; export the same shim here
-// so the module chain loads. A later cleanup can delete this once the
-// orphaned surfaces are removed.
-export function isDevAutoAuth(): boolean {
-  return import.meta.env.DEV;
-}
-
 // ─── Project Lifecycle Procedures ─────────────────────────────────
 // Re-export server functions as plain async functions. The vite-plugin
 // transforms each server-module export into an RPC stub on the client
-// side (see sdks/vite-plugin/src/transform.ts:317-329 — single-input
-// wire). Callers `import { createApp } from "../api"` and call them
-// like normal async functions; the wire is `/_zs/v1/apps.<name>`.
+// side (see sdks/vite-plugin/src/transform.ts — single-input wire).
+// Callers `import { createProject } from "../api"` and call them like
+// normal async functions; the wire is `/__zeroship/v1/projects.<name>`.
+//
+// The console is a PURE creator app: projects live in the builder's KV
+// store (per-thread sandbox sessions), and env + logs are files in the
+// project's sandbox. There is no control plane — no deploy, no plan, no
+// secret vault, no control-backed logs.
 //
 // Note on positional args: the wire forwards `args[0]` only. Every
 // proc that needs more than one input takes a single object input
-// (e.g. `createApp({ name, plan_id })`).
+// (e.g. `setEnv({ appId, key, value })`).
 export {
-  listApps,
-  getApp,
-  createApp,
-  deleteApp,
-  updatePlan,
-  getAppLogs,
-  listVars,
-  setVar,
-  deleteVar,
-  listSecrets,
-  setSecret,
-  deleteSecret,
-  archiveApp,
-  unarchiveApp,
-  type AppRecord,
+  listProjects,
+  getProject,
+  createProject,
+  deleteProject,
+  archiveProject,
+  unarchiveProject,
+  getEnv,
+  setEnv,
+  deleteEnv,
+  getLogs,
+  type ProjectRecord,
   type EnvVar,
-} from "../server/apps";
+} from "../server/projects";
 
 // Sandbox file procs used by the FilesCanvas. Both take object input
 // so the single-input RPC wire delivers every field.
@@ -112,7 +102,7 @@ export function chatTransport<TIn>(
 ) {
   return new DefaultChatTransport({
     // streamUrl() with no input returns a synchronous URL
-    // (`/_zs/v1/<id>`). With `transformer: "superjson"` set on the
+    // (`/__zeroship/v1/<id>`). With `transformer: "superjson"` set on the
     // client it would return a Promise — fine for `api`, which
     // DefaultChatTransport accepts as either form.
     api: handle.streamUrl() as string,

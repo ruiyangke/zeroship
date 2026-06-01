@@ -620,12 +620,12 @@ fn zeroship_get_request_returns_request() {
 }
 
 // ===========================================================================
-// Spec wire: /_zs/v1/<id> + superjson { json } envelope
+// Spec wire: /__zeroship/v1/<id> + superjson { json } envelope
 // ===========================================================================
 //
-// `/_zs/v1/<id>` traffic routes through `default.rpc`; everything else
+// `/__zeroship/v1/<id>` traffic routes through `default.rpc`; everything else
 // hits `default.fetch(request, env, ctx)`. See
-// `docs/reference/zs-standard.md` for the full contract.
+// `docs/reference/zeroship-standard.md` for the full contract.
 //
 // Tests synthesize a tiny `default.{fetch, rpc}` shim that wears
 // function-shape `default.rpc` (the advanced / back-compat path). The
@@ -692,10 +692,10 @@ async function _zsRpcAndRespond(rpc, name, input) {
 }
 async function _zsFetchEntry(request, rpc) {
     const url = new URL(request.url);
-    if (!url.pathname.startsWith("/_zs/v1/")) {
+    if (!url.pathname.startsWith("/__zeroship/v1/")) {
         return new Response("Not Found", { status: 404 });
     }
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
     let input = undefined;
     if (request.method === "POST") {
@@ -749,7 +749,7 @@ fn bootstrap_routes_rpc_to_named_export() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/greet",
+        "http://localhost/__zeroship/v1/greet",
         &[("content-type".into(), "application/json".into())],
         r#"{"json":"world"}"#,
         &env,
@@ -775,7 +775,7 @@ fn bootstrap_rpc_method_not_found_returns_404() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/unknown",
+        "http://localhost/__zeroship/v1/unknown",
         &[("content-type".into(), "application/json".into())],
         "{}",
         &env,
@@ -800,7 +800,7 @@ fn bootstrap_rpc_malformed_json_returns_400() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/greet",
+        "http://localhost/__zeroship/v1/greet",
         &[("content-type".into(), "application/json".into())],
         "not-json",
         &env,
@@ -827,7 +827,7 @@ fn bootstrap_rpc_input_extracted_from_json_envelope() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/echo",
+        "http://localhost/__zeroship/v1/echo",
         &[("content-type".into(), "application/json".into())],
         r#"{"json":{"hello":"world"}}"#,
         &env,
@@ -874,7 +874,7 @@ fn rpc_error_envelope_carries_code_details_retryable() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/fail",
+        "http://localhost/__zeroship/v1/fail",
         &[("content-type".into(), "application/json".into())],
         "{}",
         &env,
@@ -912,7 +912,7 @@ fn rpc_error_envelope_omits_absent_optional_fields() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/fail",
+        "http://localhost/__zeroship/v1/fail",
         &[("content-type".into(), "application/json".into())],
         "{}",
         &env,
@@ -959,7 +959,7 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/fail",
+        "http://localhost/__zeroship/v1/fail",
         &[("content-type".into(), "application/json".into())],
         "{}",
         &env,
@@ -1002,7 +1002,7 @@ fn sse_error_frame_carries_code_details_retryable() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/stream",
+        "http://localhost/__zeroship/v1/stream",
         &[("content-type".into(), "application/json".into())],
         "{}",
         &env,

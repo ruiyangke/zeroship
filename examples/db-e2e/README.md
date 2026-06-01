@@ -11,7 +11,7 @@ Server-only `@zeroship/db` demo for the full SQLite-backed surface area.
 - Security: `t.encrypted`, masking, `MaskedValue.canUnmask`, row unmask, bulk unmask, per-query unmask hints
 - Transactions: `db.transaction(...)`, rollback, nested savepoints, `TxCollection` / `TxQuery`
 - Search: FTS, vector search, geo `near`
-- Realtime: `db.live(...)` streamed over `/_zs/v1/liveTasks`
+- Realtime: `db.live(...)` streamed over `/__zeroship/v1/liveTasks`
 
 ## Build
 
@@ -35,7 +35,7 @@ DATABASE_URL=sqlite:.zeroship/dev.sqlite \
   ../../target/debug/zeroship serve dist/server/index.js --port 3000
 ```
 
-Then hit the RPC endpoints under `http://127.0.0.1:3000/_zs/v1/*`.
+Then hit the RPC endpoints under `http://127.0.0.1:3000/__zeroship/v1/*`.
 
 ## End-to-end suite
 

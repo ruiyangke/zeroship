@@ -10,15 +10,15 @@
 //   zeroship serve examples/raw-rpc.js --port 3000
 //
 // Then hit:
-//   curl -X POST http://localhost:3000/_zs/v1/ping \
+//   curl -X POST http://localhost:3000/__zeroship/v1/ping \
 //        -H 'content-type: application/json' -d '{"json":null}'
 //   → {"json":"pong"}
 //
-//   curl -X POST http://localhost:3000/_zs/v1/echo \
+//   curl -X POST http://localhost:3000/__zeroship/v1/echo \
 //        -H 'content-type: application/json' -d '{"json":{"hello":"world"}}'
 //   → {"json":{"echo":{"hello":"world"}}}
 //
-//   curl -X POST http://localhost:3000/_zs/v1/add \
+//   curl -X POST http://localhost:3000/__zeroship/v1/add \
 //        -H 'content-type: application/json' -d '{"json":[2,3]}'
 //   → {"json":5}
 //

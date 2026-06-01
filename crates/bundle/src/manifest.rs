@@ -97,6 +97,19 @@ pub struct Manifest {
     #[serde(default)]
     pub sourcemaps: HashMap<String, String>,
 
+    /// Per-app auth declaration. Carries the app's CUSTOM OAuth scopes
+    /// (`auth.scopes`) the consent screen offers end users. Omitted on the
+    /// wire when empty (`AuthConfig::is_empty`), so a manifest that declares
+    /// no scopes serializes without an `auth` key and round-trips unchanged.
+    ///
+    /// Declared scopes are end-user (namespace-(b)) scopes — self-grantable,
+    /// never platform-delegated. On deploy the control plane validates them
+    /// (format + platform-vocab collision), persists them to
+    /// `control.app_scope_defs`, and mirrors the allowlist into the per-app
+    /// Hydra client `scope` — all atomically (auth-sdk Slice 3, spec §5.1).
+    #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
+    pub auth: AuthConfig,
+
     /// Informational; not load-bearing on the hot path.
     #[serde(default)]
     pub metadata: ManifestMetadata,
@@ -132,9 +145,93 @@ impl Default for Manifest {
             runtime_assets: HashMap::new(),
             asset_version: 0,
             sourcemaps: HashMap::new(),
+            auth: AuthConfig::default(),
             metadata: ManifestMetadata::default(),
             exports: None,
         }
+    }
+}
+
+/// Per-app auth declaration carried on the manifest. Today it holds only the
+/// app's declared OAuth scopes (`scopes`); future auth-related declarations
+/// (e.g. relay-email policy) extend this struct.
+///
+/// Empty by default; serializes to nothing when empty (`is_empty`) so a
+/// manifest that declares no scopes round-trips identically to one with no
+/// `auth` key at all.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AuthConfig {
+    /// App-declared custom end-user scopes (namespace-(b), spec §5.1). Each
+    /// is `{ id, label, description }`. The consent screen renders these with
+    /// their `label`/`description`; they are self-grantable by the end user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<ScopeDef>,
+}
+
+impl AuthConfig {
+    /// True when nothing is declared — drives `skip_serializing_if` so an
+    /// app with no auth declaration omits the `auth` key entirely.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty()
+    }
+}
+
+/// One app-declared custom scope (`manifest.auth.scopes[i]`).
+///
+/// `id` follows the `verb:resource` convention (lowercase, `:`-segmented),
+/// e.g. `read:billing`. `label` + `description` are what the consent screen
+/// renders. Format is validated by [`ScopeDef::validate_id_format`]; the
+/// control plane additionally rejects ids that collide with the closed
+/// platform-scope vocabulary (spec §5.1) — that collision check lives in the
+/// control crate because only it depends on `zeroship_authz`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeDef {
+    /// Scope id, e.g. `read:billing`. `verb:resource`, lowercase.
+    pub id: String,
+    /// Short human label rendered on the consent screen.
+    pub label: String,
+    /// Longer description of what granting the scope allows. Optional;
+    /// omitted on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl ScopeDef {
+    /// Validate a scope id's FORMAT (not platform-vocab collision — that is
+    /// the control plane's job, spec §5.1). The id must match
+    /// `^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*)*$`: one or more `:`-separated
+    /// segments, each starting with a lowercase letter then lowercase
+    /// alphanumerics / underscores.
+    ///
+    /// Returns the offending reason on failure so the deploy error is
+    /// actionable.
+    ///
+    /// # Errors
+    /// A human-readable message when `id` is malformed.
+    pub fn validate_id_format(id: &str) -> Result<(), String> {
+        if id.is_empty() {
+            return Err("scope id is empty".to_string());
+        }
+        for segment in id.split(':') {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_lowercase() => {}
+                _ => {
+                    return Err(format!(
+                        "scope id {id:?} segment {segment:?} must start with a lowercase letter"
+                    ));
+                }
+            }
+            for c in chars {
+                if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                    return Err(format!(
+                        "scope id {id:?} segment {segment:?} may contain only [a-z0-9_]"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -226,6 +323,7 @@ impl Manifest {
             runtime_assets: HashMap::new(),
             asset_version: 0,
             sourcemaps: HashMap::new(),
+            auth: AuthConfig::default(),
             metadata: ManifestMetadata {
                 compiler: Some(format!(
                     "zeroship-passthrough@{}",
@@ -322,6 +420,13 @@ impl Manifest {
                 }
             }
         }
+        // Declared scope ids must be well-formed (`verb:resource`, lowercase).
+        // Platform-vocabulary collision is rejected separately by the control
+        // plane on deploy (spec §5.1) — it has the `zeroship_authz::Scope`
+        // dependency this crate deliberately does not.
+        for scope in &self.auth.scopes {
+            ScopeDef::validate_id_format(&scope.id)?;
+        }
         if !self.resources.is_empty() {
             self.validate_resources()?;
         }
@@ -394,6 +499,27 @@ impl Manifest {
                     ));
                 }
             }
+            // `required_scopes` must be well-formed AND declared. An id that
+            // is malformed, or references neither a `manifest.auth.scopes`
+            // ScopeDef nor a reserved identity scope, can never appear in any
+            // principal's grant — so the route would hard-403 every request
+            // forever and still pass validate(). Catch it at deploy time.
+            // (Declared scopes are format-checked separately above; here we
+            // re-check format so a typo in `required_scopes` is rejected with
+            // a route-scoped message rather than slipping through.)
+            for scope in &entry.required_scopes {
+                ScopeDef::validate_id_format(scope).map_err(|e| {
+                    format!("resource {key:?}: required_scopes id {scope:?} is malformed: {e}")
+                })?;
+                let declared = self.auth.scopes.iter().any(|s| &s.id == scope);
+                if !declared && !is_reserved_identity_scope(scope) {
+                    return Err(format!(
+                        "resource {key:?}: required_scopes id {scope:?} is not declared in \
+                         manifest.auth.scopes and is not a reserved identity scope \
+                         (openid, profile, email, offline_access)"
+                    ));
+                }
+            }
         }
         // 2. Override-marker presence — every shadowed field needs an
         //    explicit `override: [field]` on the child. Walk the
@@ -426,6 +552,14 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+/// The reserved OIDC identity scopes every issuer grants implicitly. A
+/// route may demand these in `required_scopes` without declaring them in
+/// `manifest.auth.scopes` (they are platform-issued, not app-declared).
+/// Mirrors the OIDC core scope set plus `offline_access` (refresh tokens).
+fn is_reserved_identity_scope(s: &str) -> bool {
+    matches!(s, "openid" | "profile" | "email" | "offline_access")
 }
 
 /// Resource-key syntax check. Three legal shapes:

@@ -1,7 +1,7 @@
 {
   "name": "@zeroship/auth",
   "version": "0.1.0",
-  "description": "Auth SDK for zeroship — platform-managed authentication",
+  "description": "Auth SDK for zeroship — platform-managed authentication (server helpers + headless browser client)",
   "type": "module",
   "license": "MIT",
   "publishConfig": {
@@ -9,8 +9,20 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
     }
   },
   "files": [
@@ -19,12 +31,30 @@
   "scripts": {
     "build": "tsup",
     "lint:pkg": "publint && attw --pack .",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test 'tests/*.test.ts' && node --import tsx --import ./tests/setup-dom.ts --test 'tests/*.test.tsx'"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
+    "@happy-dom/global-registrator": "^20.9.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@zeroship/bootstrap": "workspace:*",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
     "@zeroship/types": "workspace:*",
     "publint": "^0.3.21",
+    "react": "catalog:",
+    "react-dom": "catalog:",
     "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:",

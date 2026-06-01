@@ -34,7 +34,7 @@ These fields exist on `ZeroshipOptions`, but the current `zeroship()` pipeline d
 
 | Option | Current reality |
 | --- | --- |
-| `rpcEndpoint` | The transform receives it, but generated client stubs and the shared RPC client use the shipped `/_zs/v1/<wireId>` path. |
+| `rpcEndpoint` | The transform receives it, but generated client stubs and the shared RPC client use the shipped `/__zeroship/v1/<wireId>` path. |
 | `rpc.strict` | `resolveRpcStrict()` and `server-graph.ts` exist, but the build path in [`sdks/vite-plugin/src/build.ts`](../../sdks/vite-plugin/src/build.ts) still emits manifest metadata from wrapper discovery only. |
 
 ## Procedure discovery in the active build path
@@ -110,14 +110,14 @@ Names are never used to infer `query`. Reads opt in via `query(...)` or an expli
 [`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is to normalize the app module and delegate RPC fall-through to `@zeroship/bootstrap`:
 
 - `default.schema` is passed through
-- `default.fetch` is a shared bootstrap fetch handler that routes `/_zs/v1/<wireId>` and falls through to the user's own fetch for non-RPC paths
+- `default.fetch` is a shared bootstrap fetch handler that routes `/__zeroship/v1/<wireId>` and falls through to the user's own fetch for non-RPC paths
 - `default.rpc` is a plain object keyed by `wireId`
 
-The runtime-side dispatcher and stream encoder live in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zs-standard.md`](zs-standard.md), not as generated helper code in the entry.
+The runtime-side dispatcher and stream encoder live in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zeroship-standard.md`](zeroship-standard.md), not as generated helper code in the entry.
 
 ## See also
 
 - [`vite-environment-api.md`](vite-environment-api.md)
 - [`rpc.md`](rpc.md)
-- [`zs-standard.md`](zs-standard.md)
+- [`zeroship-standard.md`](zeroship-standard.md)
 - [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md)

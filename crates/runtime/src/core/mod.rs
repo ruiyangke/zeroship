@@ -5,6 +5,7 @@
 //! wires V8 to the compio event loop.
 
 pub mod channel;
+pub mod dev_auth;
 pub mod dispatch;
 pub mod dynamic_import;
 pub mod init;

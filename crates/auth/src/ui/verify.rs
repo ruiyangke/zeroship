@@ -1,5 +1,5 @@
 //! `/verify` handlers — GET renders a POST interstitial, then POST redeems
-//! an email-verification token and marks `auth.users.email_verified_at = NOW()`.
+//! an email-verification token and marks `zeroship.users.email_verified_at = NOW()`.
 //!
 //! Per proposal §8.3 (Phase 5). The token is issued by [`crate::ui::signup`]
 //! on a successful signup and emailed to the user. Clicking the link in
@@ -79,7 +79,7 @@ pub async fn post_redeem(
 
     // 1. Redeem atomically AND mark the user verified in one statement.
     //    `redeem` alone only consumes the token; it leaves
-    //    `auth.users.email_verified_at` untouched, so the user would see
+    //    `zeroship.users.email_verified_at` untouched, so the user would see
     //    "Email verified" while the row stayed unverified. Use
     //    `redeem_and_mark_verified` so the consume and the user update are
     //    the same atomic SQL statement (see verification.rs).

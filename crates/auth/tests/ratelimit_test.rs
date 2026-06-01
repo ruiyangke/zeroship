@@ -67,7 +67,7 @@ async fn concurrent_consumes_are_atomic() {
     let key = format!("test:atomic:{}", uuid::Uuid::new_v4().simple());
     seed_client
         .execute(
-            "INSERT INTO auth.rate_limits (bucket_key, tokens, updated_at) \
+            "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
              VALUES ($1, 5.0::REAL, NOW())",
             &[&key],
         )

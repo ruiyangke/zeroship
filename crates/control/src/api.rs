@@ -10,9 +10,9 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
-use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, Resource};
 
+use crate::app_oauth_client;
 use crate::authz_guard::AuthzGuard;
 use crate::deploy::{self, IngestError};
 use crate::registry::RegistryError;
@@ -92,6 +92,26 @@ pub async fn create_app(
     }
     match state.registry.create_app(&body.name, &body.plan_id).await {
         Ok(record) => {
+            // Slice 1d (§1.1): provision the per-app public PKCE OAuth client
+            // BEFORE the app is routable, so the route-sync push that makes the
+            // host live already carries Some(oauth_client_id) — no cold-start
+            // 503. Best-effort relative to the create response: a Hydra/DB
+            // hiccup here is logged + metered, and the next deploy re-provisions
+            // (ensure_app_client is idempotent). The app still exists.
+            // No manifest exists at create, so no declared scopes yet — the
+            // client gets the baseline allowlist; the first deploy mirrors the
+            // manifest's `auth.scopes`.
+            if let Err(e) = state
+                .provision_app_oauth_client(&record.id, &record.name, &[])
+                .await
+            {
+                tracing::error!(
+                    app_id = %record.id,
+                    app_name = %record.name,
+                    error = %e,
+                    "control: per-app OAuth client provisioning failed on create (will retry on deploy)"
+                );
+            }
             // Include api_key in the create response (it's skipped from normal serialization)
             let mut json = serde_json::to_value(&record).unwrap();
             json["api_key"] = serde_json::Value::String(record.api_key.clone());
@@ -174,7 +194,37 @@ pub async fn delete_app(
         }
     }
     match state.registry.delete_app(&uid).await {
-        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true})),
+        Ok(true) => {
+            // Slice 1d (§1.1): on app delete, DELETE the per-app OAuth client
+            // from Hydra. The DB rows cascade with the apps row, but Hydra is a
+            // separate source of truth — without this, every deleted app leaks a
+            // live public PKCE client (oac_<base62>) with valid redirect_uris.
+            // Best-effort + idempotent (Hydra 404 → Ok): a hiccup here is logged,
+            // not fatal — the app row is already gone, so the route is dead. The
+            // residual client can be GC'd later, never minting codes for a live
+            // app. Ordered AFTER the DB delete so a Hydra outage can't strand a
+            // live app with no client.
+            if let Err(e) = state.delete_app_oauth_client(&uid).await {
+                tracing::error!(
+                    app_id = %uid,
+                    error = %e,
+                    "control: per-app OAuth client delete failed on app delete (Hydra client leaked — GC later)"
+                );
+            }
+            // App deletion is now ATOMIC at the DB layer: `registry.delete_app`
+            // removes the `zeroship.apps` row AND the per-app
+            // `zeroship.oauth_clients` row in ONE transaction, so the real FK
+            // cascades tear down every dependent row in the single `zeroship`
+            // schema — apps → {gateway_sessions, app_members, app_session_anchors
+            // (by app_id)} and oauth_clients → {oauth_grants, app_user_identities,
+            // app_session_anchors (by client_id)}. The former best-effort relay
+            // alias-revoke companion (and its `deleted:true, aliases_revoked:false`
+            // 500 path) is GONE: there are no orphaned live aliases to sweep
+            // because `app_user_identities` cascade-deletes with the oauth_clients
+            // row. The Hydra-client delete above stays (Hydra is a separate source
+            // of truth, not reachable by a DB FK).
+            web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true}))
+        }
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
@@ -308,8 +358,94 @@ pub async fn deploy(
 
     match result {
         Ok(success) => {
+            // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
+            // manifest commit so the route-sync invariant holds without a
+            // cold-start window. The manifest commit (below) is what makes the
+            // app's host resolvable to the gateway's 5s route-sync pull; doing
+            // the OAuth provisioning first means that by the time the route is
+            // published, the client (and its control.app_oauth_clients row that
+            // get_routes LEFT-JOINs into oauth_client_id) already exists — so a
+            // route-sync pull can never observe a live route with
+            // oauth_client_id=None. Reconcile is diff-then-PUT (a no-op deploy
+            // makes no Hydra call) and idempotent. Best-effort relative to the
+            // deploy response: a Hydra hiccup is logged and the next deploy
+            // re-provisions; the deploy 200 does NOT imply provisioning
+            // succeeded (the SDK relies on retryable-503 client_not_provisioned
+            // handling for that rare window).
+            // Slice 3 (§5.1/§5.2): re-parse the ingested manifest to extract its
+            // declared `auth.scopes`. `ingest` only enforces scope-id FORMAT
+            // (ScopeDef::validate_id_format inside Manifest::validate), NOT the
+            // platform-vocabulary collision rule — so the deploy handler MUST run
+            // the full `validate_app_scopes` guard here and HARD-FAIL the deploy
+            // before anything is provisioned or committed. A re-parse failure is a
+            // control-side programming error (ingest already parsed+validated the
+            // same bytes), but we still abort the deploy rather than silently drop
+            // declared scopes (which would wipe the app_scope_defs registry on the
+            // next provision).
+            let declared_scopes =
+                match serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json) {
+                    Ok(m) => m.auth.scopes,
+                    Err(e) => {
+                        tracing::error!(
+                            app_id = %uid,
+                            error = %e,
+                            "control: could not re-parse ingested manifest for declared scopes"
+                        );
+                        return web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                            "error": "manifest reparse failed",
+                            "detail": e.to_string(),
+                        }));
+                    }
+                };
+
+            // Reject a colliding/reserved/malformed declared scope (e.g.
+            // `billing:read`) with a 400 BEFORE the manifest is committed or the
+            // route published — the creator gets a real error instead of a
+            // silently un-provisioned scope set.
+            if let Err(e) = app_oauth_client::validate_app_scopes(&declared_scopes) {
+                let (id, reason) = match &e {
+                    app_oauth_client::AppOauthClientError::InvalidScope { id, reason } => {
+                        (id.clone(), reason.clone())
+                    }
+                    other => (String::new(), other.to_string()),
+                };
+                return web::HttpResponse::BadRequest().json(&serde_json::json!({
+                    "error": "invalid_scope",
+                    "scope": id,
+                    "detail": reason,
+                }));
+            }
+
+            // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
+            // manifest commit so the route-sync invariant holds. Scopes are
+            // already validated above, so `ensure_app_client`'s internal
+            // `validate_app_scopes` cannot reject; any error here is a Hydra/DB
+            // hiccup and stays best-effort relative to the deploy response.
+            match state.registry.get_app(&uid).await {
+                Ok(Some(app)) => {
+                    if let Err(e) = state
+                        .provision_app_oauth_client(&uid, &app.name, &declared_scopes)
+                        .await
+                    {
+                        tracing::error!(
+                            app_id = %uid,
+                            error = %e,
+                            "control: per-app OAuth client reconcile failed on deploy"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::error!(
+                    app_id = %uid,
+                    error = %e,
+                    "control: deploy could not load app for OAuth client reconcile"
+                ),
+            }
+
             // Atomic UPDATE: deploy_hash + manifest_json land together
-            // so the gateway never sees half-applied state.
+            // so the gateway never sees half-applied state. Committed AFTER
+            // OAuth provisioning so the route only becomes resolvable once the
+            // client exists.
             match state
                 .registry
                 .set_deploy_with_manifest(&uid, &success.deploy_hash, &success.manifest_json)
@@ -508,402 +644,6 @@ async fn fetch_worker_logs(
 
     serde_json::from_slice::<Vec<String>>(&bytes)
         .map_err(|e| format!("parse logs JSON: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// /auth/callback — control plane OIDC RP callback (P3-U7 / U8)
-// ---------------------------------------------------------------------------
-//
-// `console.zeroship.ai` is registered with hydra as a first-party OIDC
-// client (`skip_consent=true`). The control plane is the relying party:
-// it owns the authorize redirect, the stash cookie, and the callback
-// code exchange. This is the canonical (and only) console-auth surface
-// since U8 retired the legacy `/auth/login`, `/auth/register`,
-// `/auth/userinfo`, `/auth/consent`, `/auth/authorize`, and
-// `/auth/google/*` handlers along with `auth_service`.
-
-/// Handle `GET /auth/callback?code=…&state=…` on `console.zeroship.ai`.
-///
-/// Reads the signed `__Host-zs_console_stash` cookie, exchanges the
-/// code with hydra via `ConsoleOidcRp::finish_callback`, persists a
-/// row in `auth.console_sessions`, sets `__Host-zs_console_session`,
-/// clears the stash cookie, and 302s back to the original path the
-/// user was trying to reach when the dance started.
-pub async fn auth_callback(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    let oidc_rp = &state.oidc_rp;
-    let pg = state.auth_pg.as_ref();
-
-    // 1. Parse query (code + state). Hydra may also send `error=...`
-    //    for user-denied consent; surface it directly.
-    let query_str = req.uri().query().unwrap_or("");
-    let mut code: Option<String> = None;
-    let mut state_param: Option<String> = None;
-    let mut oauth_error: Option<String> = None;
-    for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
-        match k.as_ref() {
-            "code" => code = Some(v.into_owned()),
-            "state" => state_param = Some(v.into_owned()),
-            "error" => oauth_error = Some(v.into_owned()),
-            _ => {}
-        }
-    }
-    if let Some(e) = oauth_error {
-        return render_callback_error(state.insecure_dev, &format!("oauth error: {e}"));
-    }
-    let (Some(code), Some(state_param)) = (code, state_param) else {
-        return render_callback_error(
-            state.insecure_dev,
-            "missing code or state query parameter",
-        );
-    };
-
-    // 2. Read the signed stash cookie.
-    let cookie_header = req
-        .headers()
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let Some(stash) = crate::oidc_rp::parse_console_stash_cookie(cookie_header, state.insecure_dev) else {
-        return render_callback_error(state.insecure_dev, "missing stash cookie");
-    };
-
-    // 3. Exchange the code with hydra + verify the ID token.
-    let (claims, original_path) = match oidc_rp
-        .finish_callback(&code, &state_param, &stash)
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "control: oidc callback failed");
-            return render_callback_error(
-                state.insecure_dev,
-                oidc_callback_public_error(&e),
-            );
-        }
-    };
-
-    // 4. Create a per-origin console session row.
-    let session = match crate::console_sessions::create(pg, &claims).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "control: console session create failed");
-            return render_callback_error(state.insecure_dev, "session create failed");
-        }
-    };
-    let user_id = Uuid::parse_str(&claims.sub).ok();
-    let ev = AuditEvent {
-        event_type: "console_session_create",
-        outcome: "success",
-        user_id: user_id.as_ref(),
-        client_id: Some("console.zeroship.ai"),
-        auth_method: Some("oidc"),
-        detail: serde_json::json!({
-            "session_id": session.id.to_string(),
-            "issuer": claims.iss,
-            "email_verified": claims.email_verified,
-        }),
-        ..AuditEvent::from_request(&req)
-    };
-    if let Err(err) = auth_audit::emit_strict(pg, &ev).await {
-        tracing::error!(error = %err, "control: console session audit insert failed");
-        return render_callback_error(state.insecure_dev, "session create failed");
-    }
-
-    // 5. 302 back to the original path, set console-session cookie,
-    //    clear the stash cookie. Two `Set-Cookie` headers on one
-    //    response is valid per RFC 6265 §3.
-    let mut builder = web::HttpResponse::Found();
-    builder.header("location", sanitize_oidc_original_path(&original_path));
-    builder.header(
-        "set-cookie",
-        crate::oidc_rp::set_console_session_cookie(&session.id, state.insecure_dev),
-    );
-    builder.header(
-        "set-cookie",
-        crate::oidc_rp::clear_console_stash_cookie(state.insecure_dev),
-    );
-    builder.finish()
-}
-
-/// Render the failed-callback page. Generic on purpose — leaking the
-/// hydra error string to the user would help an attacker probe. The
-/// structured error is already in the control log at warn / error.
-fn render_callback_error(_insecure_dev: bool, msg: &str) -> web::HttpResponse {
-    let body = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\
-        <h1>Sign-in failed</h1><p>{}</p>\
-        <p><a href=\"/\">Back to dashboard</a></p>",
-        html_escape(msg),
-    );
-    web::HttpResponse::BadRequest()
-        .content_type("text/html; charset=utf-8")
-        .body(body)
-}
-
-fn oidc_callback_public_error(e: &crate::oidc_rp::OidcRpError) -> &'static str {
-    match e {
-        crate::oidc_rp::OidcRpError::StashInvalid
-        | crate::oidc_rp::OidcRpError::StateMismatch
-        | crate::oidc_rp::OidcRpError::TokenExchange(_)
-        | crate::oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
-    }
-}
-
-/// Minimal HTML-escape — enough to make the rendered error page safe
-/// when the upstream message contains user input.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// Validate the `__Host-zs_console_session` cookie and return either
-/// the live session or an `Err(HttpResponse)` the caller must return
-/// directly. On miss / expired:
-///   - "wants HTML" (no `Accept` containing `application/json`,
-///     `text/event-stream`, or `application/x-zship`) → 302 to
-///     `/oauth2/auth` (kicks off the dance, original path stashed).
-///   - everything else → 401 JSON envelope.
-///
-/// On success: returns the [`ConsoleSession`] with `idle_expires_at`
-/// already slid forward by `console_sessions::validate`.
-///
-/// `state.insecure_dev = true` builds an `http://` redirect_uri;
-/// production always uses `https://`. The redirect target is computed
-/// from the request's `Host` header.
-///
-/// # Errors
-///
-/// Returns `Err(HttpResponse)` whenever the caller should send a
-/// non-2xx response (missing cookie, validate miss, infrastructure not
-/// configured). The error variant is always a fully-formed response —
-/// never propagated up the stack as a real `Err`.
-pub async fn require_console_session(
-    req: &web::HttpRequest,
-    state: &AppState,
-) -> std::result::Result<crate::console_sessions::ConsoleSession, web::HttpResponse> {
-    let cookie_header = req
-        .headers()
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let Some(id) = crate::oidc_rp::parse_console_session_cookie(cookie_header, state.insecure_dev) else {
-        return Err(reject_response(req, state));
-    };
-
-    let pg = state.auth_pg.as_ref();
-    match crate::console_sessions::validate(pg, id).await {
-        Ok(Some(session)) => Ok(session),
-        Ok(None) => Err(reject_response(req, state)),
-        Err(e) => {
-            tracing::error!(error = %e, "control: console_sessions::validate failed");
-            Err(web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error": "session validate failed"})))
-        }
-    }
-}
-
-/// 302 → hydra (HTML clients) or 401 JSON (API clients).
-fn reject_response(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
-    if wants_html(req) {
-        start_oidc_redirect(req, state)
-    } else {
-        reject_unauth_response()
-    }
-}
-
-fn reject_unauth_response() -> web::HttpResponse {
-    web::HttpResponse::Unauthorized()
-        .json(&serde_json::json!({"error": "unauthenticated"}))
-}
-
-/// True when the request looks like an HTML/browser navigation.
-/// Anything that prefers JSON/SSE/zship is an API call and gets a
-/// 401, not a 302.
-fn wants_html(req: &web::HttpRequest) -> bool {
-    let accept = req
-        .headers()
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    !accept.contains("application/json")
-        && !accept.contains("text/event-stream")
-        && !accept.contains("application/x-zship")
-}
-
-/// Build the 302 → hydra redirect that kicks off the OIDC dance.
-/// Stash cookie carries the PKCE verifier + state + original_path so
-/// the callback can resume.
-fn start_oidc_redirect(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
-    let oidc_rp = &state.oidc_rp;
-    let original_path = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/")
-        .to_string();
-    let original_path = sanitize_oidc_original_path(&original_path);
-    let host = req
-        .headers()
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let scheme = if state.insecure_dev { "http" } else { "https" };
-    let redirect_uri = format!("{scheme}://{host}/auth/callback");
-
-    let (auth_url, stash) =
-        oidc_rp.build_authorize_redirect(&original_path, &redirect_uri);
-
-    let mut builder = web::HttpResponse::Found();
-    builder.header("location", auth_url);
-    builder.header(
-        "set-cookie",
-        crate::oidc_rp::set_console_stash_cookie(&stash, state.insecure_dev),
-    );
-    builder.finish()
-}
-
-fn sanitize_oidc_original_path(path: &str) -> String {
-    if is_safe_oidc_original_path(path) {
-        path.to_string()
-    } else {
-        "/".to_string()
-    }
-}
-
-fn is_safe_oidc_original_path(path: &str) -> bool {
-    if path == "/" {
-        return true;
-    }
-
-    let bytes = path.as_bytes();
-    if bytes.len() < 2 || bytes[0] != b'/' {
-        return false;
-    }
-
-    if !matches!(
-        bytes[1],
-        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'
-    ) {
-        return false;
-    }
-
-    let first_segment_end = path[1..]
-        .find('/')
-        .map(|idx| idx + 1)
-        .unwrap_or(path.len());
-    !path[1..first_segment_end].contains(':')
-}
-
-#[cfg(test)]
-mod console_auth_tests {
-    //! Standalone tests for the `require_console_session` helper.
-    //!
-    //! Constructing a full `AppState` here would require a live PG,
-    //! so we exercise the cookie-parsing / `wants_html` / `reject`
-    //! branches via the leaf helpers. The full integration is covered
-    //! by `console_sessions_test.rs` which runs against a real PG.
-
-    use super::*;
-    use ntex::http::header::{self, HeaderValue};
-    use ntex::http::Method;
-    use ntex::web::test::TestRequest;
-
-    #[test]
-    fn wants_html_returns_true_for_browser_accept() {
-        let req = TestRequest::default()
-            .header(
-                header::ACCEPT,
-                HeaderValue::from_static(
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                ),
-            )
-            .method(Method::GET)
-            .to_http_request();
-        assert!(wants_html(&req));
-    }
-
-    #[test]
-    fn wants_html_returns_false_for_json_accept() {
-        let req = TestRequest::default()
-            .header(
-                header::ACCEPT,
-                HeaderValue::from_static("application/json"),
-            )
-            .method(Method::GET)
-            .to_http_request();
-        assert!(!wants_html(&req));
-    }
-
-    #[test]
-    fn wants_html_returns_false_for_sse_accept() {
-        let req = TestRequest::default()
-            .header(
-                header::ACCEPT,
-                HeaderValue::from_static("text/event-stream"),
-            )
-            .method(Method::GET)
-            .to_http_request();
-        assert!(!wants_html(&req));
-    }
-
-    #[test]
-    fn wants_html_returns_true_for_missing_accept() {
-        // Browsers always set Accept; missing-Accept is unusual but the
-        // safe default is "treat as HTML" so curl users still get a
-        // redirect they can follow.
-        let req = TestRequest::default().method(Method::GET).to_http_request();
-        assert!(wants_html(&req));
-    }
-
-    #[test]
-    fn reject_unauth_response_is_401_json() {
-        let resp = reject_unauth_response();
-        assert_eq!(resp.status().as_u16(), 401);
-        let ct = resp
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert!(ct.contains("application/json"), "want JSON, got {ct}");
-    }
-
-    #[test]
-    fn oidc_original_path_rejects_protocol_relative_redirects() {
-        assert_eq!(sanitize_oidc_original_path("//evil.com/path"), "/");
-        assert_eq!(sanitize_oidc_original_path("/\\evil.com/path"), "/");
-        assert_eq!(sanitize_oidc_original_path("/foo:bar/baz"), "/");
-        assert_eq!(sanitize_oidc_original_path("https://evil.com/path"), "/");
-    }
-
-    #[test]
-    fn oidc_original_path_keeps_origin_relative_paths() {
-        assert_eq!(sanitize_oidc_original_path("/"), "/");
-        assert_eq!(
-            sanitize_oidc_original_path("/dashboard?welcome=true"),
-            "/dashboard?welcome=true"
-        );
-        assert_eq!(
-            sanitize_oidc_original_path("/_zs/auth/callback"),
-            "/_zs/auth/callback"
-        );
-    }
-
-    #[test]
-    fn oidc_callback_token_exchange_error_is_generic() {
-        let err = crate::oidc_rp::OidcRpError::TokenExchange(
-            "HTTP 500: hydra says postgres://internal".into(),
-        );
-        assert_eq!(
-            oidc_callback_public_error(&err),
-            "sign-in could not be completed",
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

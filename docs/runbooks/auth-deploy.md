@@ -63,6 +63,25 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 | `AUTH_INSECURE_DEV` | unset | dev only | Drops the `Secure` flag on cookies. **Never set in production.** |
 | `AUTH_STASH_SIGNING_KEY` | dev default | **yes in prod** | HMAC key (≥32 bytes) signing the federation stash cookies. The dev default is loud-warned at boot; a weak value lets an attacker forge stash cookies and bypass OAuth state/PKCE checks. |
 
+### crates/gateway + crates/control — pairwise identity salt
+
+This secret is configured on **both** the gateway and the control plane, and it
+**must be byte-identical** on the two services — both derive the per-app
+pairwise subject (`pws_…`) from it.
+
+| Env var | Default | Required? | What it controls |
+|---|---|---|---|
+| `PAIRWISE_SALT` | dev default | **yes in prod** | The dedicated, **permanent** seed for every app's `pws_…` identity anchor (auth-sdk §6.2). ≥32 bytes; the dev default aborts boot outside `--dev-insecure`. **Identical on gateway + control.** |
+| `PAIRWISE_SALT_FILE` | unset | optional | Path to a file holding the salt. Takes precedence over `PAIRWISE_SALT`; prefer it in prod so the value never appears in the process table. |
+
+> **⚠️ NEVER rotate `PAIRWISE_SALT` without a migration.** `pws_…` is the
+> stable per-app foreign key apps store to identify a user. Rotating this secret
+> silently re-keys *every* app's `pws_` for *every* user — breaking every
+> app-stored reference. It is deliberately **separate from**
+> `AUTH_STASH_SIGNING_KEY` (a rotatable, short-lived OIDC-stash HMAC) precisely
+> so that rotating operational keys does not disturb the permanent identity
+> anchor. Treat it like an encryption root key: set once, back it up, leave it.
+
 ### crates/auth — mailer
 
 | Env var | Default | Required? | What it controls |
@@ -74,7 +93,7 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 | `AUTH_SMTP_PORT` | `587` | no | 587 (STARTTLS) or 465 (implicit TLS). |
 | `AUTH_SMTP_USERNAME` | — | optional | SMTP username (if relay requires auth). |
 | `AUTH_SMTP_PASSWORD` | — | optional | Paired with `AUTH_SMTP_USERNAME`. |
-| `AUTH_SMTP_STARTTLS` | `true` | no | `true` = STARTTLS on 587, `false` = implicit SMTPS on 465. |
+| `AUTH_SMTP_TLS` | `starttls` | no | Transport encryption: `starttls` (587) \| `implicit` (SMTPS, 465) \| `plaintext` (no TLS — dev/test sinks like mailpit on :1025 ONLY). |
 | `AUTH_RESEND_API_KEY` | — | when `AUTH_MAILER=resend` | Resend HTTP API key. |
 | `AUTH_POSTMARK_WEBHOOK_USER` | unset | when using Postmark | HTTP Basic-auth user Postmark presents on `/webhooks/postmark`. Unset = handler returns 401. |
 | `AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Paired with the above. |

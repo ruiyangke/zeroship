@@ -8,7 +8,7 @@
 //   d:{}                   — done
 //
 // These tests drive the synthetic-entry shim's SSE encoder over the
-// `/_zs/v1/<id>` wire (HTTP POST). Async generators returned by
+// `/__zeroship/v1/<id>` wire (HTTP POST). Async generators returned by
 // procedures are piped through the shim's `_zsRpcAndRespond` helper.
 
 mod common;
@@ -24,7 +24,7 @@ fn drain_sse(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str) -> String 
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{}", name);
+    let url = format!("http://localhost/__zeroship/v1/{}", name);
     let outcome = runtime.call_fetch_handler(
         "POST", &url,
         &[("content-type".into(), "application/json".into())],

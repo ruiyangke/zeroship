@@ -27,7 +27,7 @@ async fn retention_deletes_old_security_events() {
     // Seed: an old security event (366 days ago) + a young one (1 day ago).
     client
         .execute(
-            "INSERT INTO auth.audit_events (event_type, outcome, occurred_at, detail) \
+            "INSERT INTO zeroship.audit_events (event_type, outcome, occurred_at, detail) \
              VALUES ($1, 'success', NOW() - INTERVAL '366 days', $2::jsonb)",
             &[&"login_success", &serde_json::json!({ "tag": test_tag.clone() })],
         )
@@ -36,7 +36,7 @@ async fn retention_deletes_old_security_events() {
 
     client
         .execute(
-            "INSERT INTO auth.audit_events (event_type, outcome, occurred_at, detail) \
+            "INSERT INTO zeroship.audit_events (event_type, outcome, occurred_at, detail) \
              VALUES ($1, 'success', NOW() - INTERVAL '1 day', $2::jsonb)",
             &[&"login_success", &serde_json::json!({ "tag": test_tag.clone() })],
         )
@@ -49,7 +49,7 @@ async fn retention_deletes_old_security_events() {
     // The old row should be gone; the young one still present.
     let rows = client
         .query(
-            "SELECT 1 AS one FROM auth.audit_events WHERE detail->>'tag' = $1",
+            "SELECT 1 AS one FROM zeroship.audit_events WHERE detail->>'tag' = $1",
             &[&test_tag],
         )
         .await
@@ -59,7 +59,7 @@ async fn retention_deletes_old_security_events() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.audit_events WHERE detail->>'tag' = $1",
+            "DELETE FROM zeroship.audit_events WHERE detail->>'tag' = $1",
             &[&test_tag],
         )
         .await
@@ -85,7 +85,7 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
     // event_type, the row would be swept.
     client
         .execute(
-            "INSERT INTO auth.audit_events (event_type, outcome, occurred_at, detail) \
+            "INSERT INTO zeroship.audit_events (event_type, outcome, occurred_at, detail) \
              VALUES ('refresh_reuse_detected', 'failure', NOW() - INTERVAL '2000 days', $1::jsonb)",
             &[&serde_json::json!({ "tag": test_tag.clone() })],
         )
@@ -96,7 +96,7 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
 
     let rows = client
         .query(
-            "SELECT 1 AS one FROM auth.audit_events WHERE detail->>'tag' = $1",
+            "SELECT 1 AS one FROM zeroship.audit_events WHERE detail->>'tag' = $1",
             &[&test_tag],
         )
         .await
@@ -106,7 +106,7 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
     // Cleanup.
     client
         .execute(
-            "DELETE FROM auth.audit_events WHERE detail->>'tag' = $1",
+            "DELETE FROM zeroship.audit_events WHERE detail->>'tag' = $1",
             &[&test_tag],
         )
         .await

@@ -200,7 +200,7 @@ fn entity_cache_invalidation_refreshes_platform_role() {
         assert_eq!(denied, AuthzDecision::Deny);
 
         pg.execute(
-            "INSERT INTO platform.roles (user_id, role) VALUES ($1, 'admin')",
+            "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, 'admin')",
             &[&fixture.user_id],
         )
         .await
@@ -227,8 +227,8 @@ fn audit_decision_recorded() {
         let rows = pg
             .query(
                 "SELECT action, resource_type, resource_id, decision, matched_policies \
-             FROM control.authz_decisions \
-             WHERE user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
+             FROM zeroship.authz_decisions \
+             WHERE actor_user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
              ORDER BY occurred_at DESC \
              LIMIT 1",
                 &[
@@ -302,7 +302,7 @@ impl Fixture {
         let email = format!("{label}-{user_id}@example.com");
 
         pg.execute(
-            "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
             &[&user_id, &email, &label],
         )
         .await
@@ -310,7 +310,7 @@ impl Fixture {
 
         if let Some(role) = platform_role {
             pg.execute(
-                "INSERT INTO platform.roles (user_id, role) VALUES ($1, $2)",
+                "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, $2)",
                 &[&user_id, &role],
             )
             .await
@@ -319,7 +319,7 @@ impl Fixture {
 
         if let Some(role) = app_role {
             pg.execute(
-                "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+                "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
                 &[&app_id, &user_id, &role],
             )
             .await
@@ -348,7 +348,7 @@ impl Fixture {
         let app_name = format!("authz-{label}-{}", Uuid::new_v4().simple());
 
         pg.execute(
-            "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
             &[&user_id, &email, &label],
         )
         .await
@@ -368,7 +368,7 @@ impl Fixture {
         .await
         .expect("insert app");
         pg.execute(
-            "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
             &[&app_id, &user_id, &app_role],
         )
         .await
@@ -387,7 +387,7 @@ impl Fixture {
         let policies = policy.to_json_value();
         let hash = policy_hash(&policies);
         pg.execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash) \
              VALUES ($1, $2, 'pat', $3, $4, $5)",
             &[&token_id, &self.user_id, &"test token", &policies, &hash],
@@ -437,23 +437,23 @@ impl Fixture {
     async fn cleanup(&self, pg: &Client) {
         let _ = pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
             )
             .await;
         for token_id in &self.token_ids {
             let _ = pg
-                .execute("DELETE FROM control.permission_tokens WHERE id = $1", &[token_id])
+                .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[token_id])
                 .await;
         }
         let _ = pg
             .execute(
-                "DELETE FROM control.app_members WHERE user_id = $1",
+                "DELETE FROM zeroship.app_members WHERE user_id = $1",
                 &[&self.user_id],
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         if let Some(app_db_id) = self.app_db_id {
             let _ = pg
@@ -461,7 +461,7 @@ impl Fixture {
                 .await;
         }
         let _ = pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }

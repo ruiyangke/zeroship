@@ -423,7 +423,7 @@ No rows truncated — every distinct `env::var`/`parse_env`/`read_*_env` call si
 | `--control=` | CLI flag | URL | `http://localhost:9090` | no | no | control-plane base URL | crates/cli/src/main.rs:204; secrets.rs:49 |
 | `ZEROSHIP_CONTROL_URL` | env | URL | `http://localhost:9090` | no | no | control-plane URL fallback when `--control=` absent | crates/cli/src/main.rs:205; secrets.rs:50 |
 | `--token=` | CLI flag | str (PAT) | — | yes (bearer) | no (falls through to env/creds) | deploy/secret/var bearer (1st precedence) | crates/cli/src/main.rs:349 |
-| `ZS_TOKEN` | env | str (PAT) | — | yes (bearer) | no (falls through to creds file) | bearer fallback (2nd precedence) | crates/cli/src/main.rs:335 |
+| `ZEROSHIP_TOKEN` | env | str (PAT) | — | yes (bearer) | no (falls through to creds file) | bearer fallback (2nd precedence) | crates/cli/src/main.rs:335 |
 | `--auth-url` / `--auth-url=` | CLI flag | URL | `https://auth.zeroship.ai` | no | no | `zeroship login` OAuth IdP base URL | crates/cli/src/auth.rs:59-61 |
 | `ZEROSHIP_CONFIG_HOME` | env | path | — (1st of config-dir chain) | no | no | overrides config dir for CLI token store | crates/cli/src/auth.rs:272 |
 | `XDG_CONFIG_HOME` | env | path | — (2nd of chain) | no | no | config dir for CLI token store | crates/cli/src/auth.rs:274 |

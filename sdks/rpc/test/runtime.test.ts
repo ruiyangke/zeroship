@@ -64,9 +64,9 @@ describe("generated direct-call runtime", () => {
     await saveTodo({ text: "hi" }, { idempotencyKey: "idem-manual" });
 
     assert.equal(spy.calls[0].method, "GET");
-    assert.ok(spy.calls[0].url.startsWith("https://api.test/_zs/v1/todos.list"));
+    assert.ok(spy.calls[0].url.startsWith("https://api.test/__zeroship/v1/todos.list"));
     assert.equal(spy.calls[1].method, "POST");
-    assert.equal(spy.calls[1].url, "https://api.test/_zs/v1/todos.save");
+    assert.equal(spy.calls[1].url, "https://api.test/__zeroship/v1/todos.save");
     assert.equal(spy.calls[1].headers["idempotency-key"], "idem-manual");
     assert.equal(listTodos.id, "todos.list");
     assert.equal(saveTodo.kind, "mutation");
@@ -87,7 +87,7 @@ describe("generated direct-call runtime", () => {
       assert.deepEqual(out, { ok: true });
       assert.equal(spy.calls.length, 1);
       assert.equal(spy.calls[0].method, "GET");
-      assert.ok(spy.calls[0].url.startsWith("https://api.test/_zs/v1/todos.list"));
+      assert.ok(spy.calls[0].url.startsWith("https://api.test/__zeroship/v1/todos.list"));
       assert.equal(spy.calls[0].headers.authorization, "Bearer tok");
       assert.equal(spy.calls[0].headers["x-app"], "demo");
     } finally {
@@ -138,7 +138,7 @@ describe("generated direct-call runtime", () => {
 
     assert.equal(spy.calls.length, 1);
     assert.equal(spy.calls[0].method, "GET");
-    assert.ok(spy.calls[0].url.startsWith("https://api.test/_zs/v1/todos.list"));
+    assert.ok(spy.calls[0].url.startsWith("https://api.test/__zeroship/v1/todos.list"));
   });
 
   test("call() can read procedure metadata from global configuration", async () => {
@@ -158,7 +158,7 @@ describe("generated direct-call runtime", () => {
 
       assert.equal(spy.calls.length, 1);
       assert.equal(spy.calls[0].method, "GET");
-      assert.ok(spy.calls[0].url.startsWith("https://api.test/_zs/v1/todos.list"));
+      assert.ok(spy.calls[0].url.startsWith("https://api.test/__zeroship/v1/todos.list"));
     } finally {
       restore();
     }
@@ -170,6 +170,6 @@ describe("generated direct-call runtime", () => {
     const url = await chat.streamUrl({ prompt: "hello" });
 
     assert.equal(typeof url, "string");
-    assert.ok(url.startsWith("/_zs/v1/chat.ask?input="), url);
+    assert.ok(url.startsWith("/__zeroship/v1/chat.ask?input="), url);
   });
 });

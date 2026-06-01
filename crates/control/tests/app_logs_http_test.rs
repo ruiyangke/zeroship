@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
 
@@ -63,21 +63,15 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
-    let (auth_pg_client, auth_pg_conn) =
+    let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
-            .expect("auth-pg connect");
+            .expect("control-pg connect");
     compio::runtime::spawn(async move {
-        let _ = auth_pg_conn.run().await;
+        let _ = control_pg_conn.run().await;
     })
     .detach();
-    let auth_pg = Arc::new(auth_pg_client);
+    let control_pg = Arc::new(control_pg_client);
 
     Fixture {
         state: Arc::new(AppState {
@@ -96,10 +90,9 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp,
-            auth_pg,
-            auth_db_url: db_url.to_string(),
+            control_pg,
             hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+            app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
@@ -111,6 +104,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             logout_jti_cache: Arc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),
             ),
+            pairwise_salt: [0u8; 32],
         }),
         blob_root,
         deploy_tmp_dir,

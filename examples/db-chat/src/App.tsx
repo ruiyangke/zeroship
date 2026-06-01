@@ -21,10 +21,10 @@ import {
 const client = createDefaultClient();
 
 // In a real app, the RPC procedures are imported from a generated
-// client. This example calls them via plain fetch() to /_zs/v1/<name>
+// client. This example calls them via plain fetch() to /__zeroship/v1/<name>
 // for simplicity — the server module's exports are in `./server.ts`.
 async function rpc<T>(proc: string, input: unknown): Promise<T> {
-  const r = await fetch(`/_zs/v1/${proc}`, {
+  const r = await fetch(`/__zeroship/v1/${proc}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ json: input }),

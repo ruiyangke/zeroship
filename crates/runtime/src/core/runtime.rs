@@ -584,7 +584,7 @@ pub(crate) struct RuntimeInner {
     pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
     /// Cached reference to `module.default.rpc` — the RPC dispatcher.
     /// Signature: `rpc(name, input, ctx) → any | Promise<any> | AsyncIterator<any>`.
-    /// When set AND the incoming URL matches `/_zs/v1/<id>` (POST or GET),
+    /// When set AND the incoming URL matches `/__zeroship/v1/<id>` (POST or GET),
     /// the kernel slices the id, parses the body's superjson `{ json }`
     /// envelope in V8, and calls `rpc(id, input, ctx)` directly —
     /// bypassing Request construction, URL parsing, async body read,
@@ -1236,7 +1236,7 @@ impl RuntimeInner {
                                 }
                                 // RPC standalone entry point: cache
                                 // default.rpc for the kernel-side RPC
-                                // fast path. When set, /_zs/v1/<id>
+                                // fast path. When set, /__zeroship/v1/<id>
                                 // requests skip Request construction
                                 // and call rpc(id, input, ctx) directly.
                                 let rpc_key = v8::String::new(scope, "rpc").unwrap();
@@ -1394,7 +1394,7 @@ impl RuntimeInner {
 
     /// Kernel's sole HTTP dispatch primitive. Three tiers, in order:
     ///   1. `default.rpc(name, input, ctx)` when set + URL matches
-    ///      `/_zs/v1/<id>` and the request isn't a WS upgrade.
+    ///      `/__zeroship/v1/<id>` and the request isn't a WS upgrade.
     ///   2. `default.fetchFast(method, url, body, env)` when set.
     ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path).
     ///
@@ -1482,7 +1482,7 @@ impl RuntimeInner {
         }
 
         // Kernel dispatch — three tiers, in order of preference:
-        //   1. RPC fast path: URL matches /_zs/v1/<id> AND `default.rpc`
+        //   1. RPC fast path: URL matches /__zeroship/v1/<id> AND `default.rpc`
         //      is exported. Slice id in Rust, parse body envelope in V8,
         //      call rpc(id, input, ctx). No Request construction. Sync
         //      and Promise returns are envelope-wrapped; AsyncIterator
@@ -3046,7 +3046,7 @@ fn classify_fetch_fast_return(
 // Standalone kernel entry point for `default.rpc(name, input, ctx)`.
 // Activates when:
 //   - `default.rpc` is exported by the user module (cached as `rpc_fn`)
-//   - The incoming URL contains `/_zs/v1/<id>` (POST or GET)
+//   - The incoming URL contains `/__zeroship/v1/<id>` (POST or GET)
 //
 // The kernel slices the id in Rust (no URL-object construction), parses
 // the body's superjson `{ json, meta? }` envelope in V8, and calls
@@ -3080,7 +3080,7 @@ enum RpcCallResult {
     FallThrough,
 }
 
-/// Slice `<id>` from a URL whose path contains `/_zs/v1/<id>`. Returns
+/// Slice `<id>` from a URL whose path contains `/__zeroship/v1/<id>`. Returns
 /// None for non-POST/GET methods or malformed URLs. Cheaper than
 /// constructing a URL object: a single `find` for the tag plus a single
 /// `find` for the first query/fragment terminator.
@@ -3088,7 +3088,7 @@ fn extract_zs_v1_id<'a>(method: &str, url: &'a str) -> Option<&'a str> {
     if !(method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("GET")) {
         return None;
     }
-    const TAG: &str = "/_zs/v1/";
+    const TAG: &str = "/__zeroship/v1/";
     let start = url.find(TAG)? + TAG.len();
     let rest = &url[start..];
     let end = start + rest.find(|c: char| c == '?' || c == '#').unwrap_or(rest.len());

@@ -32,7 +32,7 @@ use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 
-/// Dispatch a `/_zs/v1/<id>` POST through the runtime, return either
+/// Dispatch a `/__zeroship/v1/<id>` POST through the runtime, return either
 /// the success body envelope or the error envelope (parsed JSON value).
 fn dispatch_zs_for_capability(
     source: &str,
@@ -46,7 +46,7 @@ fn dispatch_zs_for_capability(
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{name}");
+    let url = format!("http://localhost/__zeroship/v1/{name}");
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
@@ -81,7 +81,7 @@ fn dispatch_zs_for_capability(
 /// frame logic: reads `fn.config.kind`, calls `__zsEnterKind` before
 /// invocation, exits on settle (sync, then, catch). Worn as
 /// function-shape `default.rpc` (the advanced / back-compat path —
-/// `docs/reference/zs-standard.md`) so the shim is auditable in one
+/// `docs/reference/zeroship-standard.md`) so the shim is auditable in one
 /// place; dict-shape deploys get the same behaviour via the runtime
 /// dispatcher.
 const SSR_SHIM: &str = r#"
@@ -132,7 +132,7 @@ async function _zsRpcAndRespond(name, input) {
 }
 async function _zsFetch(request) {
     const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     const text = await request.text();
     let input;
     if (text) {

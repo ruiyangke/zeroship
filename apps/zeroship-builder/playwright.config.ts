@@ -6,7 +6,7 @@ const skipWebServer = process.env.PLAYWRIGHT_NO_WEBSERVER === "1";
 //
 // `chat-openai.spec.ts` runs against the worktree's
 // dev server on :5173. The zeroship vite-plugin spins an in-process
-// V8 runtime that handles `/_zs/v1/chat` directly.
+// V8 runtime that handles `/__zeroship/v1/chat` directly.
 //
 // `reuseExistingServer` means the runner uses your already-running
 // `npm run dev` if one exists on :5173, otherwise it starts one.

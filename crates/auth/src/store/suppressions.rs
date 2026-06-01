@@ -1,10 +1,10 @@
-//! `auth.email_suppressions` CRUD — the bounce/complaint blocklist that
+//! `zeroship.email_suppressions` CRUD — the bounce/complaint blocklist that
 //! every `Mailer` impl consults before transport.
 //!
 //! Schema (owned by Liquibase — `db/changelog/`):
 //!
 //! ```sql
-//! CREATE TABLE auth.email_suppressions (
+//! CREATE TABLE zeroship.email_suppressions (
 //!     email         CITEXT PRIMARY KEY,
 //!     reason        TEXT NOT NULL,
 //!     suppressed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -29,7 +29,7 @@ use crate::error::{AuthError, Result};
 pub async fn is_suppressed(conn: &Client, email: &str) -> Result<bool> {
     let rows = conn
         .query(
-            "SELECT 1 FROM auth.email_suppressions WHERE email = $1::citext",
+            "SELECT 1 FROM zeroship.email_suppressions WHERE email = $1::citext",
             &[&email],
         )
         .await
@@ -51,7 +51,7 @@ pub async fn add(
     provider_msg: Option<&str>,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO auth.email_suppressions (email, reason, provider_msg) \
+        "INSERT INTO zeroship.email_suppressions (email, reason, provider_msg) \
          VALUES ($1::citext, $2, $3) \
          ON CONFLICT (email) DO UPDATE \
             SET reason = EXCLUDED.reason, \

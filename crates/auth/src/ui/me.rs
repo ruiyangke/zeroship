@@ -11,7 +11,7 @@
 //! Refuse to unlink the last credential. The user MUST retain at least one
 //! way to sign in after the unlink, defined as:
 //!
-//!   - a local password (`auth.users.password_hash IS NOT NULL`), OR
+//!   - a local password (`zeroship.users.password_hash IS NOT NULL`), OR
 //!   - at least one OTHER linked identity (different `provider`).
 //!
 //! Without this guard a single-provider OAuth user could lock themselves
@@ -59,7 +59,7 @@ const MAX_PROVIDER_PATH_BYTES: usize = 64;
 ///   3. Look up the user by `session.user_id`. None → error page (the
 ///      session row pointed at a user that no longer exists; this is a
 ///      data-integrity warning, not a normal flow).
-///   4. List `auth.identities` rows for the user.
+///   4. List `zeroship.federated_identities` rows for the user.
 ///   5. Render `MePage` with a fresh CSRF cookie (used by the unlink form).
 ///
 /// `!Send` for the same structural reason every other ntex handler in

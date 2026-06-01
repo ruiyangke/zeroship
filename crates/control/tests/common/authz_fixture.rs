@@ -16,76 +16,103 @@ impl AdminPat {
 
     pub async fn cleanup(&self, state: &AppState) {
         let _ = state
-            .auth_pg
+            .control_pg
             .execute(
-                "DELETE FROM control.authz_decisions WHERE token_id = $1 OR user_id = $2",
+                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
         let _ = state
-            .auth_pg
+            .control_pg
             .execute(
-                "DELETE FROM control.permission_tokens WHERE id = $1",
+                "DELETE FROM zeroship.permission_tokens WHERE id = $1",
                 &[&self.token_id],
             )
             .await;
         let _ = state
-            .auth_pg
-            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .control_pg
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = state
-            .auth_pg
-            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .control_pg
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
 
 pub async fn admin_pat(state: &AppState) -> AdminPat {
+    issue_pat(state, true, admin_policy()).await
+}
+
+/// A PAT owned by a NON-admin user with an empty wrapper policy. Used to
+/// assert that the bearer principal path rejects an unauthorized actor — e.g.
+/// a creator who is not a platform admin cannot grant platform roles. (Under
+/// the R5 cutover the bespoke console-session principal path is gone; bearer is
+/// the only principal, so the "non-admin actor" case is a non-admin PAT.)
+///
+/// `#[allow(dead_code)]`: `common` is shared across every control test crate;
+/// only `admin_handlers_test` uses this, so the others would warn.
+#[allow(dead_code)]
+pub async fn non_admin_pat(state: &AppState) -> AdminPat {
+    issue_pat(state, false, empty_policy()).await
+}
+
+async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
     let user_id = Uuid::new_v4();
-    let email = format!("admin-pat-{user_id}@zeroship.test");
+    let email = format!("pat-{user_id}@zeroship.test");
     state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO auth.users (id, email, name, email_verified_at) \
-             VALUES ($1, $2::citext, 'Admin PAT Test User', NOW())",
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
+             VALUES ($1, $2::citext, 'PAT Test User', NOW())",
             &[&user_id, &email],
         )
         .await
-        .expect("insert admin PAT user");
-    state
-        .auth_pg
-        .execute(
-            "INSERT INTO platform.roles (user_id, role, granted_by) \
-             VALUES ($1, 'admin', $1)",
-            &[&user_id],
-        )
-        .await
-        .expect("insert admin PAT role");
+        .expect("insert PAT user");
+    if admin {
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
+                 VALUES ($1, 'admin', $1)",
+                &[&user_id],
+            )
+            .await
+            .expect("insert admin PAT role");
+    }
 
     let token_id = Uuid::new_v4();
-    let policies = admin_policy().to_json_value();
+    let policies = policy.to_json_value();
     let hash = policy_hash(&policies);
     let expires_at = Utc::now() + Duration::days(1);
     let token = state
         .pat_issuer
         .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue admin PAT");
+        .expect("issue PAT");
 
     state
-        .auth_pg
+        .control_pg
         .execute(
-            "INSERT INTO control.permission_tokens \
+            "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'integration admin PAT', $3, $4, $5)",
+             VALUES ($1, $2, 'pat', 'integration PAT', $3, $4, $5)",
             &[&token_id, &user_id, &policies, &hash, &expires_at],
         )
         .await
-        .expect("insert admin PAT row");
+        .expect("insert PAT row");
 
     AdminPat {
         user_id,
         token_id,
         token,
+    }
+}
+
+#[allow(dead_code)]
+fn empty_policy() -> Policy {
+    Policy {
+        name: "integration non-admin".to_owned(),
+        statements: Vec::new(),
     }
 }
 

@@ -86,16 +86,23 @@ pub struct SecretSection {
     pub worker_key: Option<String>,
     /// Stash signing key reference.
     pub stash_signing_key: Option<String>,
+    /// Dedicated pairwise-salt secret reference (auth-sdk §6.2). The PERMANENT
+    /// per-app `pws_` identity anchor seed — independent of the stash key,
+    /// never rotated without a migration. Must be identical on gateway+control.
+    pub pairwise_salt: Option<String>,
     /// Gateway OIDC relying-party client secret reference.
     pub gateway_oidc_secret: Option<String>,
-    /// Console OIDC relying-party client secret reference.
-    pub console_oidc_secret: Option<String>,
     /// Stripe webhook signing secret reference.
     pub stripe_webhook_secret: Option<String>,
     /// Primary database URL reference.
     pub database_url: Option<String>,
     /// Auth database URL reference.
     pub auth_db_url: Option<String>,
+    /// App-runtime KV (Redis) connection URL reference. Back-fills the
+    /// worker's `--kv-url` / `ZEROSHIP_KV_URL` when those are empty; powers
+    /// the deployed app `env.kv` namespace. May carry credentials, so it is
+    /// a reference here (never a plaintext URL).
+    pub kv_url: Option<String>,
     /// Legacy master keys (for key rotation) reference.
     pub legacy_master_keys: Option<String>,
     /// Google OAuth client secret reference.

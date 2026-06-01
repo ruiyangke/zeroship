@@ -28,7 +28,7 @@ lockstep.
 - `normalize.ts` — `normalizeUserModule(mod) → { schema, fetch, rpc }`.
   Turns a user module namespace into the standard ZS shape.
 - `fetch-handler.ts` — WinterCG `fetch` wrapper that routes
-  `/_zs/v1/<id>` through the dispatcher and falls through to the
+  `/__zeroship/v1/<id>` through the dispatcher and falls through to the
   user's own `default.fetch`.
 - `runtime-entry.ts` — TLA orchestrator the runtime crate
   `include_str!`s. Calls `installSchema` and awaits `ready` so module

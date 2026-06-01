@@ -37,13 +37,13 @@ let echo_url = `http://${host}:${echo_port}`;
 let only = env("BENCH_SCENARIO", "");
 let want = |name| only == "" || only == name;
 
-// RPC wire (zeroship v1, /_zs/v1/<id> with superjson `{ json }`
+// RPC wire (zeroship v1, /__zeroship/v1/<id> with superjson `{ json }`
 // envelope). Body is a single JSON value wrapped under `json` —
 // `null` for no-arg procedures, `<value>` for single-arg. Response
 // arrives as `{ json: <value> }`. Status 200 on success; 4xx/5xx
 // for validation/dispatch errors.
 fn rpc(base, method, body) {
-    POST(`${base}/_zs/v1/${method}`)
+    POST(`${base}/__zeroship/v1/${method}`)
         .header("Content-Type", "application/json")
         .body(body)
         .expect_status(200)

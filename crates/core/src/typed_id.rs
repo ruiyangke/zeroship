@@ -37,6 +37,45 @@ pub fn uuid_to_base62(uuid: &uuid::Uuid) -> String {
     String::from_utf8(buf.to_vec()).expect("base62 chars are valid UTF-8")
 }
 
+/// Encode an arbitrary byte slice as a base62 string by treating it as a
+/// big-endian integer and repeatedly dividing by 62.
+///
+/// Unlike [`uuid_to_base62`] (fixed 22-char width for a 128-bit UUID), this
+/// handles inputs of any length, so it can encode an HMAC tag. The output
+/// length is not fixed; callers that want a bounded id should truncate the
+/// returned string (e.g. the pairwise-subject derivation takes the first 20
+/// chars). Empty input yields an empty string.
+#[must_use]
+pub fn base62_encode_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    // Big-endian byte-array long division by 62, collecting remainders.
+    let mut digits = bytes.to_vec();
+    let mut out = Vec::new();
+    // Strip leading zero bytes only after the loop preserves value; we loop
+    // until the running number is zero.
+    loop {
+        let mut rem: u16 = 0;
+        let mut all_zero = true;
+        for d in &mut digits {
+            let cur = (rem << 8) | u16::from(*d);
+            let q = cur / 62;
+            rem = cur % 62;
+            *d = u8::try_from(q).unwrap_or(0);
+            if *d != 0 {
+                all_zero = false;
+            }
+        }
+        out.push(BASE62[rem as usize]);
+        if all_zero {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base62 chars are valid UTF-8")
+}
+
 /// Decode 22-char base62 string to UUID bytes.
 pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
     if s.len() != 22 {
@@ -158,6 +197,34 @@ pub const SESSION_PREFIX: &str = "ses";
 /// stores the full typed-id string (`wak_<base62>`).
 pub const WAKE_PREFIX: &str = "wak";
 
+/// Per-app OAuth `client_id` prefix (auth-sdk Slice 1d, spec §1.1): the
+/// deterministic, stable-for-app-life OAuth client id is `oac_<base62-app-id>`.
+/// Distinct from [`APP_PREFIX`] (the app *entity* typed_id) on purpose — the
+/// OAuth `client_id` is a derived identifier, not a typed_id.
+///
+/// This is the SINGLE source of truth for the prefix string. The control plane
+/// mints the id ([`app_oauth_client_id`]) and the auth consent classifier
+/// decodes it back to the app UUID ([`app_id_from_oauth_client_id`]); both go
+/// through this constant so they can never drift.
+pub const APP_OAUTH_CLIENT_PREFIX: &str = "oac";
+
+/// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
+/// Deterministic and stable for the life of the app (spec §1.1).
+#[must_use]
+pub fn app_oauth_client_id(app_id: &uuid::Uuid) -> String {
+    format!("{APP_OAUTH_CLIENT_PREFIX}_{}", uuid_to_base62(app_id))
+}
+
+/// Decode a per-app OAuth `client_id` (`oac_<base62-app-id>`) back to its app
+/// UUID. Returns `None` for any client id that is not a per-app end-user client
+/// (a missing `oac_` prefix or a non-base62 tail), e.g. the builder/console
+/// clients. The exact inverse of [`app_oauth_client_id`].
+#[must_use]
+pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<uuid::Uuid> {
+    let encoded = client_id.strip_prefix(APP_OAUTH_CLIENT_PREFIX)?.strip_prefix('_')?;
+    base62_to_uuid(encoded).ok()
+}
+
 /// Generate a new user ID: `usr_{base62(uuidv7)}`
 pub fn new_user_id() -> String {
     generate(USER_PREFIX)
@@ -194,6 +261,22 @@ mod tests {
     }
 
     #[test]
+    fn base62_encode_bytes_only_base62_chars() {
+        // The HMAC-tag encoder must emit only base62 alphabet chars and be
+        // deterministic + injective enough that distinct tags differ.
+        let a = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
+        let b = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x03]);
+        assert_ne!(a, b);
+        assert_eq!(a, base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]));
+        assert!(a.bytes().all(|c| BASE62.contains(&c)), "{a}");
+        assert!(base62_encode_bytes(&[]).is_empty());
+        // A full 32-byte HMAC tag yields >= 20 chars (enough to truncate to
+        // the pairwise body length).
+        let tag = [0xffu8; 32];
+        assert!(base62_encode_bytes(&tag).len() >= 20);
+    }
+
+    #[test]
     fn roundtrip_typed_id() {
         let id = new_user_id();
         assert!(id.starts_with("usr_"));
@@ -202,6 +285,25 @@ mod tests {
         assert_eq!(prefix, "usr");
         let back = from_uuid_string("usr", &uuid.to_string()).unwrap();
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn app_oauth_client_id_round_trips() {
+        let app = uuid::Uuid::now_v7();
+        let client_id = app_oauth_client_id(&app);
+        assert!(client_id.starts_with("oac_"), "got {client_id}");
+        // oac_ + 22 base62 chars.
+        assert_eq!(client_id.len(), 26, "got {client_id}");
+        // Distinct from the app_ entity typed_id namespace.
+        assert!(!client_id.starts_with("app_"));
+        // The decode is the exact inverse of the mint — the single-source-of-
+        // truth that keeps control (minter) and auth (decoder) from drifting.
+        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(app));
+        // Non-per-app clients (builder/console) and malformed tails → None.
+        assert_eq!(app_id_from_oauth_client_id("zeroship-builder-abc"), None);
+        assert_eq!(app_id_from_oauth_client_id("oac_not-base62"), None);
+        // The bare prefix with no underscore must not decode.
+        assert_eq!(app_id_from_oauth_client_id("oacsomething"), None);
     }
 
     #[test]

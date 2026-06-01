@@ -1,10 +1,10 @@
 /**
  * Transport behavior.
  *
- *   query     → GET /_zs/v1/<id>?input=<base64url-json>
+ *   query     → GET /__zeroship/v1/<id>?input=<base64url-json>
  *   query (>6KB)
- *             → POST /_zs/v1/<id> with X-Method: GET header
- *   mutation  → POST /_zs/v1/<id> with JSON body
+ *             → POST /__zeroship/v1/<id> with X-Method: GET header
+ *   mutation  → POST /__zeroship/v1/<id> with JSON body
  *
  * JSON is the default. SuperJSON remains opt-in for callers that need
  * Date / BigInt / Map / Set revival and install the optional dependency.
@@ -80,7 +80,7 @@ describe("transport — query (GET)", () => {
     assert.equal(spy.calls.length, 1);
     const c = spy.calls[0];
     assert.equal(c.method, "GET");
-    assert.ok(c.url.startsWith("https://api.test/_zs/v1/listTodos?input="), `got ${c.url}`);
+    assert.ok(c.url.startsWith("https://api.test/__zeroship/v1/listTodos?input="), `got ${c.url}`);
 
     // The encoded input should be base64url-encoded superjson, decodable
     // back to the original value.
@@ -119,7 +119,7 @@ describe("transport — query (GET)", () => {
 
     const c = spy.calls[0];
     assert.equal(c.method, "POST");
-    assert.equal(c.url, "https://api.test/_zs/v1/hugeQuery");
+    assert.equal(c.url, "https://api.test/__zeroship/v1/hugeQuery");
     assert.equal(c.headers["x-method"], "GET");
     assert.ok(c.body && c.body.length > 100);
     // Default JSON mode sends the bare input value.
@@ -141,7 +141,7 @@ describe("transport — mutation (POST)", () => {
     assert.deepEqual(result, { id: 5, text: "hi" });
     const c = spy.calls[0];
     assert.equal(c.method, "POST");
-    assert.equal(c.url, "https://api.test/_zs/v1/addTodo");
+    assert.equal(c.url, "https://api.test/__zeroship/v1/addTodo");
     assert.equal(c.headers["content-type"], "application/json");
     assert.ok(c.body);
     const bodyParsed = JSON.parse(c.body!);

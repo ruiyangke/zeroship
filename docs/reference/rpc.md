@@ -82,7 +82,7 @@ const todo = await createTodo(
 
 The transform rewrites those imports to callable procedure references created
 by `@zeroship/rpc/client`. Generated stubs and manual clients therefore share
-the same behavior: same-origin `/_zs/v1/<id>` by default, configurable
+the same behavior: same-origin `/__zeroship/v1/<id>` by default, configurable
 `baseUrl`, auth, headers, timeout, retry policy, idempotency, transformer, and
 `RpcError` handling.
 
@@ -159,14 +159,14 @@ await rpc.call("todos.list", { userId });
 
 ## Transport
 
-The shipped wire path is `/_zs/v1/<wireId>`.
+The shipped wire path is `/__zeroship/v1/<wireId>`.
 
 | Kind | Request shape |
 | --- | --- |
-| `query` | `GET /_zs/v1/<id>?input=<base64url-json>` for small inputs. Large query URLs fall back to `POST` with `X-Method: GET`. |
-| `mutation` | `POST /_zs/v1/<id>` with a JSON body. |
+| `query` | `GET /__zeroship/v1/<id>?input=<base64url-json>` for small inputs. Large query URLs fall back to `POST` with `X-Method: GET`. |
+| `mutation` | `POST /__zeroship/v1/<id>` with a JSON body. |
 | `action` | Same as mutation, but with action capability on the server side. |
-| `stream` | `POST /_zs/v1/<id>` with `Accept: text/event-stream`; client consumes AI SDK data stream frames. |
+| `stream` | `POST /__zeroship/v1/<id>` with `Accept: text/event-stream`; client consumes AI SDK data stream frames. |
 
 Every request gets `X-Request-Id`. Auth resolvers set
 `Authorization: Bearer <token>` when they return a token. Idempotent writes get

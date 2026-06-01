@@ -6,19 +6,19 @@
 
 pub mod api;
 pub mod admin_handlers;
+pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;
 pub mod authz_guard;
-pub mod backchannel_logout;
 pub mod bootstrap_builder;
-pub mod console_sessions;
+pub mod bootstrap_console;
+pub mod cron;
 pub mod deploy;
 pub mod env_handlers;
 pub mod env_store;
 pub mod http_util;
 pub mod internal;
 pub mod metering;
-pub mod oidc_rp;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod rate_limit;
@@ -147,25 +147,34 @@ pub struct AppState {
     /// type. Files are unlinked immediately after ingest (success or
     /// failure).
     pub deploy_tmp_dir: std::path::PathBuf,
-    /// OIDC relying-party for `console.zeroship.ai`. Drives the
-    /// authorize-redirect → callback → session-mint flow on the
-    /// creator dashboard (proposal §2.3). Mandatory now that U8 has
-    /// retired the legacy `auth_service` / `auth_handlers` chain —
-    /// the OIDC RP is the only console-auth surface.
-    pub oidc_rp: Arc<oidc_rp::ConsoleOidcRp>,
-    /// Postgres client pointed at the `auth` schema, used by
-    /// `console_sessions::{create,validate,revoke}`. Distinct from the
-    /// `registry` PG client (which talks to the control schema)
-    /// because in multi-DB deployments the auth tables may live in a
-    /// separate cluster. Mandatory post-U8.
-    pub auth_pg: Arc<compio_postgres::Client>,
-    /// Connection URL for the auth/control auth schema. Used only for
-    /// short-lived dedicated sessions that need session-scoped advisory locks.
-    pub auth_db_url: String,
+    /// Shared long-lived Postgres client on the SINGLE physical `zeroship`
+    /// database — the same DB the `registry` opens per-query connections on.
+    /// Used by the `AuthzGuard` bearer path (`zeroship.permission_tokens`
+    /// lookup + Cedar enforcement against `zeroship.*`), the audit emitter,
+    /// and the connected-app OAuth grant handlers.
+    ///
+    /// There is no separate auth database any more: control's former
+    /// `--auth-db` was only ever a config capability (compose always pointed
+    /// it at the same DB), and every system table lives in the one `zeroship`
+    /// schema. Handlers that need a transaction-capable owned connection open a
+    /// fresh one via `registry.conn()` (mutable `&mut self`); `control_pg` is
+    /// the pipelined shared handle for autocommit reads/writes.
+    ///
+    /// The console is a regular gateway-fronted app authenticated via
+    /// `@zeroship/auth` (BFF); the control plane is a pure API resource
+    /// server with NO OIDC RP of its own — the bespoke `ConsoleOidcRp` +
+    /// `console_sessions` surface was removed in the R5 cutover.
+    pub control_pg: Arc<compio_postgres::Client>,
     /// Hydra admin API base URL. Control uses this for admin-owned OAuth
     /// client registration/deletion; Hydra remains the source of truth for
     /// generated client secrets.
     pub hydra_admin_url: String,
+    /// Apex domain hosted creator apps serve under, e.g. `zeroship.ai`
+    /// (prod) or `zeroship.localhost` (dev). An app named `myapp` serves
+    /// at `myapp.{app_base_domain}`; the per-app OAuth client's
+    /// redirect_uris / sector_identifier are derived from that apex host
+    /// (Slice 1d, spec §1.1).
+    pub app_base_domain: String,
     /// OAuth client IDs that get `skip_consent=true` when registered.
     pub trusted_oauth_clients: HashSet<String>,
     /// Expected audience for OAuth access tokens accepted by the control
@@ -186,6 +195,15 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
+    /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
+    /// stash signing key the gateway uses via
+    /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a
+    /// dashboard "disconnect app" (grant revoke) can derive the per-app
+    /// `pws_…` subject and write the `auth.token_revocations` family marker on
+    /// the SAME `(client_id, pws_)` key the gateway's wrapper / Bearer / DPoP
+    /// arms read — killing the live access token, not just the relay alias
+    /// (Batch A fix 4). MUST stay byte-identical to the gateway's salt.
+    pub pairwise_salt: [u8; 32],
 }
 
 impl AppState {
@@ -193,6 +211,87 @@ impl AppState {
     #[must_use]
     pub fn is_trusted(&self, client_id: &str) -> bool {
         Self::is_trusted_client_id(&self.trusted_oauth_clients, client_id)
+    }
+
+    /// The URL scheme hosted apps serve under: `http` in dev-insecure,
+    /// `https` otherwise. Drives per-app OAuth redirect_uri derivation.
+    #[must_use]
+    pub fn app_scheme(&self) -> &'static str {
+        if self.insecure_dev {
+            "http"
+        } else {
+            "https"
+        }
+    }
+
+    /// The apex host an app named `name` serves at:
+    /// `{name}.{app_base_domain}`. The per-app OAuth client's
+    /// redirect_uris / sector_identifier anchor here (Slice 1d, §1.1).
+    #[must_use]
+    pub fn apex_host_for_app(&self, name: &str) -> String {
+        format!("{name}.{}", self.app_base_domain)
+    }
+
+    /// Idempotently provision (or reconcile) the per-app public PKCE OAuth
+    /// client for `app_id` named `name`, using the apex host derived from
+    /// `app_base_domain`. Wraps [`app_oauth_client::ensure_app_client`] with
+    /// a fresh control-DB connection + a `HydraAdmin` over `hydra_admin_url`.
+    /// Slice 1d (spec §1.1). On success returns the per-app `client_id`
+    /// (`oac_<base62-app-id>`).
+    ///
+    /// `declared_scopes` are the app's manifest `auth.scopes` (Slice 3,
+    /// spec §5.1): validated + mirrored into both the Hydra client `scope`
+    /// allowlist and `control.app_scope_defs` atomically. Pass `&[]` at app
+    /// **create** (no manifest yet); the deploy path passes the deployed
+    /// manifest's declared scopes.
+    ///
+    /// # Errors
+    /// Surfaces the underlying [`app_oauth_client::AppOauthClientError`] as a
+    /// string. Callers log + continue (provisioning is best-effort relative
+    /// to the create/deploy response, but the route-sync invariant — every
+    /// deployed app's `RouteEntry` carries `Some(oauth_client_id)` — is held
+    /// by re-provisioning on deploy).
+    pub async fn provision_app_oauth_client(
+        &self,
+        app_id: &uuid::Uuid,
+        name: &str,
+        declared_scopes: &[zeroship_bundle::ScopeDef],
+    ) -> Result<String, String> {
+        let scheme = self.app_scheme();
+        let apex = self.apex_host_for_app(name);
+        let hosts = vec![apex];
+        let hydra = zeroship_auth::hydra_client::HydraAdmin::new(self.hydra_admin_url.clone());
+        let mut conn = self
+            .registry
+            .conn()
+            .await
+            .map_err(|e| format!("control db conn: {e}"))?;
+        app_oauth_client::ensure_app_client(
+            &mut conn, &hydra, app_id, name, scheme, &hosts, declared_scopes,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// Delete the per-app public PKCE OAuth client from Hydra for `app_id`
+    /// (Slice 1d, spec §1.1: "on app delete → DELETE /admin/clients/<id>").
+    /// Wraps [`app_oauth_client::delete_app_client`] over a `HydraAdmin` built
+    /// from `hydra_admin_url`. The `control.oauth_clients` /
+    /// `control.app_oauth_clients` DB rows cascade-delete with the
+    /// `control.apps` row, so this only removes the Hydra-side registration.
+    ///
+    /// Hydra's `DELETE /admin/clients/{id}` is idempotent (404 → Ok), so a
+    /// re-run or a never-provisioned app is a clean no-op.
+    ///
+    /// # Errors
+    /// Surfaces the underlying [`app_oauth_client::AppOauthClientError`] as a
+    /// string. Callers log + continue: a leaked Hydra client is best-effort
+    /// GC, not a delete-blocking failure.
+    pub async fn delete_app_oauth_client(&self, app_id: &uuid::Uuid) -> Result<(), String> {
+        let hydra = zeroship_auth::hydra_client::HydraAdmin::new(self.hydra_admin_url.clone());
+        app_oauth_client::delete_app_client(&hydra, app_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Return whether `client_id` is present in a trusted-client set.

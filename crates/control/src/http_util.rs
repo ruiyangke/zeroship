@@ -125,7 +125,7 @@ mod tests {
         let namespace = format!("http-util-test-{}", Uuid::new_v4().simple());
         let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 90));
         let key = format!("control:{namespace}:ip:{ip}");
-        pg.execute("DELETE FROM auth.rate_limits WHERE bucket_key = $1", &[&key])
+        pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
             .await
             .expect("cleanup rate-limit bucket");
 
@@ -155,7 +155,7 @@ mod tests {
             .expect("second call throttled");
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        pg.execute("DELETE FROM auth.rate_limits WHERE bucket_key = $1", &[&key])
+        pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key = $1", &[&key])
             .await
             .expect("cleanup rate-limit bucket");
     }

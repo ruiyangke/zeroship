@@ -160,7 +160,7 @@ function ensureHmrPollStarted() {
 }
 
 // Function-shape `default.rpc` per the ZS standard
-// (`docs/reference/zs-standard.md`): dev's namespace may change per
+// (`docs/reference/zeroship-standard.md`): dev's namespace may change per
 // request so the dict resolves on every call. Dispatch + schema-install
 // live in `@zeroship/bootstrap`; this module only owns the runner +
 // registry + HMR poll.

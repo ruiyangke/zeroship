@@ -3,7 +3,7 @@
 //! Per proposal §8.3 (Phase 5):
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token + a 16-byte CSRF
-//!   nonce. Store the SHA-256 of the token in `auth.magic_links`. Return
+//!   nonce. Store the SHA-256 of the token in `zeroship.magic_links`. Return
 //!   the raw token + the CSRF nonce to the caller (which embeds the raw
 //!   token in the email body and sets the nonce in a cookie at the
 //!   requesting device).
@@ -43,7 +43,7 @@ const TOKEN_LEN_BYTES: usize = 32;
 /// `__Host-zsidp_csrf` cookie's entropy.
 const CSRF_NONCE_LEN_BYTES: usize = 16;
 
-/// Distinguishing `purpose` written into `auth.magic_links.purpose` for
+/// Distinguishing `purpose` written into `zeroship.magic_links.purpose` for
 /// login magic links.
 pub const LOGIN_PURPOSE: &str = "login";
 
@@ -127,7 +127,7 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
         // 2. Invalidate any previously unconsumed tokens for this email
         //    and purpose so only the most recent token can be redeemed.
         conn.execute(
-            "UPDATE auth.magic_links SET consumed_at = NOW() \
+            "UPDATE zeroship.magic_links SET consumed_at = NOW() \
              WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
             &[&email, &purpose],
         )
@@ -136,7 +136,7 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
 
         // 3. Insert the new row.
         conn.execute(
-            "INSERT INTO auth.magic_links \
+            "INSERT INTO zeroship.magic_links \
                 (token_hash, email, csrf_nonce, purpose, expires_at) \
              VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
             &[
@@ -191,7 +191,7 @@ pub async fn redeem_pending(
     let stale_secs = PENDING_STALE_SECONDS as f64;
     let rows = conn
         .query(
-            "UPDATE auth.magic_links SET consumed_pending_at = NOW() \
+            "UPDATE zeroship.magic_links SET consumed_pending_at = NOW() \
              WHERE token_hash = $1 \
                AND purpose = $2 \
                AND consumed_at IS NULL \
@@ -214,7 +214,7 @@ pub async fn redeem_pending(
 
     let stale = conn
         .query(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_at = NOW() \
              WHERE token_hash = $1 \
                AND purpose = $2 \
@@ -236,7 +236,7 @@ pub async fn redeem_pending(
     let in_flight = conn
         .query(
             "SELECT TRUE AS in_flight \
-             FROM auth.magic_links \
+             FROM zeroship.magic_links \
              WHERE token_hash = $1 \
                AND purpose = $2 \
                AND consumed_at IS NULL \
@@ -264,7 +264,7 @@ pub async fn finalize_consume(
 ) -> Result<bool> {
     let updated = conn
         .execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_at = NOW() \
              WHERE token_hash = $1 \
                AND consumed_pending_at = $2 \
@@ -285,7 +285,7 @@ pub async fn clear_consume_pending(
 ) -> Result<bool> {
     let updated = if let Some(ts) = reserved_at {
         conn.execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_pending_at = NULL \
              WHERE token_hash = $1 \
                AND consumed_pending_at = $2 \
@@ -295,7 +295,7 @@ pub async fn clear_consume_pending(
         .await
     } else {
         conn.execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_pending_at = NULL \
              WHERE token_hash = $1 \
                AND consumed_at IS NULL",

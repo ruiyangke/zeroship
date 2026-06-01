@@ -30,8 +30,8 @@ test("initial load does not duplicate bootstrap RPCs", async ({ page }) => {
   const counts = { publicUser: 0, listTodos: 0 };
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname === "/_zs/v1/users.public") counts.publicUser += 1;
-    if (url.pathname === "/_zs/v1/todos.list") counts.listTodos += 1;
+    if (url.pathname === "/__zeroship/v1/users.public") counts.publicUser += 1;
+    if (url.pathname === "/__zeroship/v1/todos.list") counts.listTodos += 1;
   });
 
   await bootedPage(page);
@@ -56,7 +56,7 @@ test("todo stream emits one snapshot for one committed create", async ({ page })
       return value;
     };
     const postJson = async (id: string, input: unknown, accept = "application/json") => {
-      const res = await fetch(`/_zs/v1/${id}`, {
+      const res = await fetch(`/__zeroship/v1/${id}`, {
         method: "POST",
         headers: { accept, "content-type": "application/json" },
         body: JSON.stringify(input),
@@ -69,7 +69,7 @@ test("todo stream emits one snapshot for one committed create", async ({ page })
     const user = unwrap(await userRes.json()) as { id: string };
 
     const controller = new AbortController();
-    const streamRes = await fetch("/_zs/v1/todos.subscribe", {
+    const streamRes = await fetch("/__zeroship/v1/todos.subscribe", {
       method: "POST",
       headers: { accept: "text/event-stream", "content-type": "application/json" },
       body: JSON.stringify({ userId: user.id }),

@@ -12,12 +12,12 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // URL-path RPC wire (zeroship v1): POST /_zs/v1/<id> with body =
+    // URL-path RPC wire (zeroship v1): POST /__zeroship/v1/<id> with body =
     // superjson `{ json: <input> }` envelope. Response is the raw
     // return value wrapped as `{ json: <result> }` with Content-Type
     // application/json. Single-arg dispatch: fn(input).
-    if (req.method === 'POST' && req.url.startsWith('/_zs/v1/')) {
-        const method = req.url.slice('/_zs/v1/'.length);
+    if (req.method === 'POST' && req.url.startsWith('/__zeroship/v1/')) {
+        const method = req.url.slice('/__zeroship/v1/'.length);
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {

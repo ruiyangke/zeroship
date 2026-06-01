@@ -5,17 +5,16 @@
 // dashed footing rule with status + last-update meta.
 
 import { Link } from "react-router-dom";
-import type { AppRecord } from "../api";
+import type { ProjectRecord } from "../api";
 
 export interface ProjectCardProps {
-  app: AppRecord;
+  app: ProjectRecord;
   num: string;
-  /** Tagline override — defaults to the app's name styled-italically. */
+  /** Tagline override — defaults to the project's name styled-italically. */
   tagline?: string;
 }
 
 export function ProjectCard({ app, num, tagline }: ProjectCardProps) {
-  const live = !!app.deploy_hash;
   const updated = fmtDate(app.updated_at);
   const display = tagline ?? `An app called ${app.name}.`;
 
@@ -48,18 +47,7 @@ export function ProjectCard({ app, num, tagline }: ProjectCardProps) {
         {display}
       </p>
       <div className="flex justify-between items-baseline pt-3 border-t border-dashed border-rule font-sans text-[10.5px] uppercase tracking-[0.16em] text-pencil">
-        {live ? (
-          <span className="text-tomato font-semibold inline-flex items-center gap-1.5">
-            <span
-              className="inline-block size-[5px] rounded-full bg-tomato pulse-dot"
-              style={{ boxShadow: "0 0 0 2.5px rgba(220,75,50,0.18)" }}
-              aria-hidden="true"
-            />
-            Live
-          </span>
-        ) : (
-          <span>Draft</span>
-        )}
+        <span>{app.archived ? "Archived" : "Draft"}</span>
         <span>upd. {updated}</span>
       </div>
     </Link>

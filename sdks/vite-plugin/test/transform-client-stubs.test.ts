@@ -5,7 +5,7 @@
  * server-marked exports
  * with branded ProcedureRef stubs that:
  *
- *   - call the wire (`/_zs/v1/<wireId>`) when invoked,
+ *   - call the wire (`/__zeroship/v1/<wireId>`) when invoked,
  *   - carry the `__SERVER_REFERENCE` symbol (so `<form action={fn}>`
  *     and prop-passed server actions can be detected at runtime),
  *   - expose `id`, `kind`, `wire` metadata on the function value.

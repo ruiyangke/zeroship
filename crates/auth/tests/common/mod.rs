@@ -254,18 +254,18 @@ pub async fn fresh_login_challenge(
 /// Delete sessions + user row for `email`. CITEXT columns require an explicit
 /// `text→citext` cast for the bind (compio-postgres binds `&str` as TEXT; PG
 /// won't auto-cast in a WHERE). Sessions are deleted first to avoid tripping
-/// the FK from `auth.sessions.user_id`. Errors are swallowed (best-effort).
+/// the FK from `zeroship.idp_sessions.user_id`. Errors are swallowed (best-effort).
 pub async fn cleanup_user(pg: &compio_postgres::Client, email: &str) {
     let _ = pg
         .execute(
-            "DELETE FROM auth.sessions WHERE user_id IN \
-             (SELECT id FROM auth.users WHERE email = $1::citext)",
+            "DELETE FROM zeroship.idp_sessions WHERE user_id IN \
+             (SELECT id FROM zeroship.users WHERE email = $1::citext)",
             &[&email],
         )
         .await;
     let _ = pg
         .execute(
-            "DELETE FROM auth.users WHERE email = $1::citext",
+            "DELETE FROM zeroship.users WHERE email = $1::citext",
             &[&email],
         )
         .await;
@@ -277,7 +277,7 @@ pub async fn cleanup_rate_limits_like(pg: &compio_postgres::Client, patterns: &[
     for pat in patterns {
         let _ = pg
             .execute(
-                "DELETE FROM auth.rate_limits WHERE bucket_key LIKE $1",
+                "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
                 &[pat],
             )
             .await;

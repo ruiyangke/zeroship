@@ -54,7 +54,7 @@ fn dummy_db_noop(
 ///
 /// `user_src` is the user-entry JS string. The shim wraps it with a
 /// hand-rolled function-shape `default.rpc` dispatcher (the documented
-/// advanced / back-compat path — see `docs/reference/zs-standard.md`).
+/// advanced / back-compat path — see `docs/reference/zeroship-standard.md`).
 /// Using function-shape here keeps the test surface narrow: the
 /// runtime's `__zsDispatch` is exercised by `rpc_dispatch.rs`; here we
 /// just need a working dispatch path that surfaces the probe result.
@@ -97,10 +97,10 @@ async function _zsRpcAndRespond(name, input) {{
 }}
 async function _zsFetch(request) {{
     const url = new URL(request.url);
-    if (!url.pathname.startsWith("/_zs/v1/")) {{
+    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
         return new Response("Not Found", {{ status: 404 }});
     }}
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     let input = undefined;
     if (request.method === "POST") {{
         const text = await request.text();
@@ -122,7 +122,7 @@ export default {{ fetch: _zsFetch, rpc: _zsRpc }};
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{method}");
+    let url = format!("http://localhost/__zeroship/v1/{method}");
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
@@ -182,7 +182,7 @@ function readGate() { return globalThis.__zsCapturedSchema ?? null; }
 const _procedures = { readGate };
 async function _zsFetch(request) {
     const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     const fn = _procedures[id];
     const result = await fn(undefined);
     return new Response(JSON.stringify({ json: result === undefined ? null : result }), {
@@ -206,7 +206,7 @@ export default {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/readGate",
+        "http://localhost/__zeroship/v1/readGate",
         &[("content-type".into(), "application/json".into())],
         "",
         &env,
@@ -259,7 +259,7 @@ async function _zsRpcAndRespond(name, input) {
 }
 async function _zsFetch(request) {
     const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     return await _zsRpcAndRespond(id, undefined);
 }
 export default {
@@ -316,7 +316,7 @@ import "@zeroship/db/internal";
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_zs/v1/readCaptured",
+        "http://localhost/__zeroship/v1/readCaptured",
         &[("content-type".into(), "application/json".into())],
         "",
         &env,

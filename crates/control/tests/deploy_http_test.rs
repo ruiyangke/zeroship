@@ -32,11 +32,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_bundle::{
-    AssetEntry, BlobStore, BundleStore, LocalDiskBlobStore, LocalFs, Manifest,
-    ManifestMetadata, WorkerCode,
+    AssetEntry, AuthConfig, BlobStore, BundleStore, LocalDiskBlobStore, LocalFs, Manifest,
+    ManifestMetadata, ScopeDef, WorkerCode,
 };
 use zeroship_control::{
-    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
 
@@ -122,12 +122,31 @@ fn manifest_for(
         runtime_assets: HashMap::new(),
         asset_version: 0,
         sourcemaps: HashMap::new(),
+        auth: Default::default(),
         metadata: ManifestMetadata {
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
     }
+}
+
+/// Like [`manifest_for`] but with a worker module and a set of declared
+/// `auth.scopes` ids (each gets a throwaway `label`). Used by the
+/// scope-collision deploy tests.
+fn manifest_with_scopes(worker_hash: &str, scope_ids: &[&str]) -> Manifest {
+    let mut m = manifest_for(Some(worker_hash), &[]);
+    m.auth = AuthConfig {
+        scopes: scope_ids
+            .iter()
+            .map(|id| ScopeDef {
+                id: (*id).to_string(),
+                label: format!("label for {id}"),
+                description: None,
+            })
+            .collect(),
+    };
+    m
 }
 
 /// Pack `(name, bytes)` entries into a tar archive, then zstd-compress
@@ -220,21 +239,15 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
-    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
-        "http://localhost:4444",
-        "console.zeroship.ai",
-        "test-oidc-secret".to_string(),
-        b"test-stash-key".to_vec(),
-    ));
-    let (auth_pg_client, auth_pg_conn) =
+    let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
             .await
-            .expect("auth-pg connect");
+            .expect("control-pg connect");
     compio::runtime::spawn(async move {
-        let _ = auth_pg_conn.run().await;
+        let _ = control_pg_conn.run().await;
     })
     .detach();
-    let auth_pg = Arc::new(auth_pg_client);
+    let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
         registry,
@@ -252,10 +265,9 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
-        oidc_rp,
-        auth_pg,
-        auth_db_url: db_url.to_string(),
+        control_pg,
         hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+        app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
@@ -265,6 +277,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
             "http://127.0.0.1:9",
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        pairwise_salt: [0u8; 32],
     });
 
     Fixture {
@@ -560,6 +573,165 @@ async fn deploy_manifest_not_first_returns_400() {
     assert!(
         dir_is_empty(&fx.deploy_tmp_dir),
         "deploy_tmp_dir must be empty after a rejected deploy",
+    );
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+}
+
+/// Spec §5.1/§5.2 regression: a manifest declaring a scope that collides
+/// with the closed platform-delegated vocabulary (`billing:read`) MUST be
+/// REJECTED by the deploy handler with a 4xx — NOT accepted with a 200 and
+/// then silently un-provisioned. `ingest` only enforces scope-id FORMAT, so
+/// the collision guard has to run in the handler before the manifest commit.
+#[compio::test]
+async fn deploy_colliding_scope_returns_400_invalid_scope() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
+        return;
+    };
+
+    let fx = build_test_state(&db_url, "scopecollide").await;
+
+    let app_name = format!("httpsc-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    let record = fx
+        .state
+        .registry
+        .create_app(&app_name, "free")
+        .await
+        .expect("create app");
+    let app_id = record.id;
+
+    // Well-formed scope id, but `billing:read` is in the closed
+    // `Scope::parse` platform vocabulary — must collide.
+    let server = b"export default { fetch() { return new Response('ok'); } }";
+    let server_hash = sha256_hex(server);
+    let manifest = manifest_with_scopes(&server_hash, &["billing:read"]);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let blobs = vec![(server_hash.clone(), server.to_vec())];
+    let body = build_zship(&manifest_bytes, &blobs, true);
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
+    )
+    .await;
+
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .header("authorization", pat.bearer())
+        .header("content-type", "application/x-zship")
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "colliding scope must hard-fail the deploy with 400"
+    );
+
+    let bytes = test::read_body(resp).await;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("response is JSON");
+    assert_eq!(
+        json.get("error").and_then(|v| v.as_str()),
+        Some("invalid_scope"),
+        "error tag must be invalid_scope, got {json:?}"
+    );
+    assert_eq!(
+        json.get("scope").and_then(|v| v.as_str()),
+        Some("billing:read"),
+        "offending scope id surfaced to the creator"
+    );
+
+    // The deploy must NOT have committed: deploy_hash stays unset.
+    let after = fx
+        .state
+        .registry
+        .get_app(&app_id)
+        .await
+        .expect("get app")
+        .expect("app still exists");
+    assert!(
+        after.deploy_hash.is_none(),
+        "a rejected-scope deploy must not commit a deploy_hash"
+    );
+
+    assert!(
+        dir_is_empty(&fx.deploy_tmp_dir),
+        "deploy_tmp_dir must be empty after a rejected deploy",
+    );
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+}
+
+/// Companion to the collision test: a well-formed, NON-colliding declared
+/// scope (`read:billing`, the mirror order, which is NOT in the platform
+/// vocabulary) deploys cleanly with a 200.
+#[compio::test]
+async fn deploy_noncolliding_scope_returns_200() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
+        return;
+    };
+
+    let fx = build_test_state(&db_url, "scopeok").await;
+
+    let app_name = format!("httpok-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    let record = fx
+        .state
+        .registry
+        .create_app(&app_name, "free")
+        .await
+        .expect("create app");
+    let app_id = record.id;
+
+    let server = b"export default { fetch() { return new Response('ok'); } }";
+    let server_hash = sha256_hex(server);
+    let manifest = manifest_with_scopes(&server_hash, &["read:billing"]);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let blobs = vec![(server_hash.clone(), server.to_vec())];
+    let body = build_zship(&manifest_bytes, &blobs, true);
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
+    )
+    .await;
+
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .header("authorization", pat.bearer())
+        .header("content-type", "application/x-zship")
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "non-colliding scope must deploy cleanly"
+    );
+
+    let bytes = test::read_body(resp).await;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("response is JSON");
+    assert_eq!(
+        json.get("deploy_hash").and_then(|v| v.as_str()).map(str::len),
+        Some(64),
+        "deploy committed with a sha256 deploy_hash"
     );
 
     let _ = fx.state.registry.delete_app(&app_id).await;

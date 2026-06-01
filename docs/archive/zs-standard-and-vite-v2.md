@@ -5,7 +5,7 @@
 **Date:** 2026-05-20
 
 > Historical record. The reference doc for end users is
-> `docs/reference/zs-standard.md`. One decision differs from the original
+> `docs/reference/zeroship-standard.md`. One decision differs from the original
 > proposal: **function-shape `default.rpc` is a permanent advanced /
 > back-compat path** (Open Q1 reversed). The dev-bootstrap exports
 > function-shape because dev needs per-request namespace re-resolution.
@@ -360,7 +360,7 @@ Raw `.js` demos (already conform to standard):
   serialised for graceful upgrade; runtime never reads it).
 - Update docs:
   - `docs/reference/db.md` — the schema-discovery section refers to `default.schema` on the entry.
-  - New `docs/reference/zs-standard.md` — the export contract documented as a reference.
+  - New `docs/reference/zeroship-standard.md` — the export contract documented as a reference.
   - `AGENTS.md` — task router updated.
 - Stale comments referencing removed helpers (`_zsRpc`, `_zsFetch`,
   `_zsRpcWithAutoTx`, `_zsRpcPost`, `__zsManifestSchemaPath`) cleaned
@@ -412,7 +412,7 @@ advanced / back-compat path. Two reasons:
 The runtime checks `typeof rpc === "function"` first; otherwise treats
 it as a dict. Most users use dict (Vite emits it; raw deploys default
 to it); advanced users override. Documented in
-`docs/reference/zs-standard.md` under "Advanced: function-shape
+`docs/reference/zeroship-standard.md` under "Advanced: function-shape
 default.rpc".
 
 ### 2. Wrappers (`query`, `mutation`, `action`)
@@ -431,7 +431,7 @@ The runtime's WebSocket upgrade path (`_zsAcceptSubscription`) currently does `a
 
 ### 4. fetchFast opt-in
 
-`init.rs:647` shows the runtime supports `default.fetchFast(method, url, body, env)` as a fast-path. This is independent of `default.fetch` / `default.rpc` and stays unchanged. Documenting it in `zs-standard.md` so users know it exists.
+`init.rs:647` shows the runtime supports `default.fetchFast(method, url, body, env)` as a fast-path. This is independent of `default.fetch` / `default.rpc` and stays unchanged. Documenting it in `zeroship-standard.md` so users know it exists.
 
 ### 5. Client RPC stub generation
 
@@ -479,4 +479,4 @@ Each stage gets a critic+fixer pass per the established pattern. Total: ~5 days 
 - **Dispatcher in embedded JS, not Rust:** the dispatch logic invokes user JS; Rust would only add FFI overhead. Embedded JS keeps everything one language.
 - **Schema on entry's `default.schema`:** simpler than the Stage-1 manifest-path approach. The Vite plugin re-exports `src/schema.ts` if the user split it out.
 - **Keep `@zeroship/server` wrappers separate from `@zeroship/db`:** they're a server-side ergonomic that pre-dates db auto-tx coupling.
-> Archived 2026-05-25: shipped. Live reference: docs/reference/zs-standard.md + docs/reference/vite-plugin.md.
+> Archived 2026-05-25: shipped. Live reference: docs/reference/zeroship-standard.md + docs/reference/vite-plugin.md.

@@ -4,7 +4,7 @@
 //! field. POST validates CSRF + password length, atomically redeems the
 //! reset token (single-use), Argon2-hashes the new password on a
 //! `spawn_blocking` worker (the event loop stays free), updates
-//! `auth.users.password_hash`, emits a `password_changed` audit event,
+//! `zeroship.users.password_hash`, emits a `password_changed` audit event,
 //! revokes every existing session, consumes outstanding email tokens,
 //! clears cross-device magic completions, and redirects to `/login`.
 //!
@@ -137,7 +137,6 @@ pub async fn post(
         user_id = %completed.user_id,
         idp_sessions = revoked.idp_sessions,
         gateway_sessions = revoked.gateway_sessions,
-        console_sessions = revoked.console_sessions,
         magic_tokens = revoked.magic_tokens,
         magic_completions = revoked.magic_completions,
         "password_reset revoked sessions and stale tokens"
@@ -177,7 +176,6 @@ pub async fn post(
 struct ResetRevocationCounts {
     idp_sessions: u64,
     gateway_sessions: u64,
-    console_sessions: u64,
     magic_tokens: u64,
     magic_completions: u64,
 }
@@ -246,31 +244,23 @@ async fn complete_password_reset_tx(
 
     let idp_sessions = conn
         .execute(
-            "DELETE FROM auth.sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
             &[&completed.user_id],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("password_reset delete auth.sessions: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("password_reset delete zeroship.idp_sessions: {e}")))?;
 
     let gateway_sessions = conn
         .execute(
-            "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
             &[&completed.user_id],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete gateway_sessions: {e}")))?;
 
-    let console_sessions = conn
-        .execute(
-            "DELETE FROM auth.console_sessions WHERE user_id = $1",
-            &[&completed.user_id],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("password_reset delete console_sessions: {e}")))?;
-
     let magic_tokens = conn
         .execute(
-            "UPDATE auth.magic_links \
+            "UPDATE zeroship.magic_links \
              SET consumed_at = NOW() \
              WHERE email = $1::citext \
                AND consumed_at IS NULL",
@@ -281,7 +271,7 @@ async fn complete_password_reset_tx(
 
     let magic_completions = conn
         .execute(
-            "DELETE FROM auth.magic_completions WHERE email = $1::citext",
+            "DELETE FROM zeroship.magic_completions WHERE email = $1::citext",
             &[&completed.email],
         )
         .await
@@ -290,7 +280,6 @@ async fn complete_password_reset_tx(
     let counts = ResetRevocationCounts {
         idp_sessions,
         gateway_sessions,
-        console_sessions,
         magic_tokens,
         magic_completions,
     };
@@ -305,7 +294,6 @@ async fn complete_password_reset_tx(
             detail: serde_json::json!({
                 "idp_sessions": counts.idp_sessions,
                 "gateway_sessions": counts.gateway_sessions,
-                "console_sessions": counts.console_sessions,
                 "magic_tokens": counts.magic_tokens,
                 "magic_completions": counts.magic_completions,
             }),

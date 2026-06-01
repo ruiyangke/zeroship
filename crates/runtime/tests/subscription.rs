@@ -20,7 +20,7 @@
 //                              ping/pong                     keepalive
 //
 // These tests drive the full path: synthesize a WS-upgrade GET to
-// `/_zs/v1/<id>`, intercept the server-side WebSocket of the pair,
+// `/__zeroship/v1/<id>`, intercept the server-side WebSocket of the pair,
 // inject a `hello` event on the server side, drain outgoing events
 // from the client side as the generator progresses.
 
@@ -35,7 +35,7 @@ use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestC
 
 // ── Test scaffolding ────────────────────────────────────────────────────
 
-/// Send a WS-upgrade GET to `/_zs/v1/<id>`. Returns the ws_id of the
+/// Send a WS-upgrade GET to `/__zeroship/v1/<id>`. Returns the ws_id of the
 /// CLIENT side of the pair (the one returned to the kernel) — the
 /// server side is `client_ws_id + 1` (the next ID). Also enables the
 /// per-WS event log on both halves so the test can observe events
@@ -45,7 +45,7 @@ fn upgrade(runtime: &Runtime) -> u32 {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "GET",
-        "http://localhost/_zs/v1/sub",
+        "http://localhost/__zeroship/v1/sub",
         &[
             ("connection".into(), "Upgrade".into()),
             ("upgrade".into(), "websocket".into()),

@@ -38,7 +38,6 @@ import {
 
 import { SANDBOX_URL, SANDBOX_TOKEN, ZEROSHIP_SDK_REGISTRY } from "./env.js";
 import { publicErrorWithRequestId, UpstreamServiceError } from "./upstream-error.js";
-import { userinfo } from "../auth.js";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
 
@@ -155,23 +154,18 @@ function typedUserIdOrNull(id: string): string | null {
   return assertTypedUserId(id);
 }
 
-async function resolveSandboxUserId(explicit?: string): Promise<string> {
+// Identity comes from the PLATFORM session: the gateway forwards the
+// verified `ZeroShip-User` envelope and the worker exposes it to app code
+// as `currentUser()` (read here via `readCurrentUserId()`). There is no
+// bespoke RP fallback — that surface was removed when the console became a
+// regular app on the standard runtime.
+function resolveSandboxUserId(explicit?: string): string {
   if (explicit) return assertTypedUserId(explicit);
 
   const platformUserId = readCurrentUserId();
   if (platformUserId) {
     const typed = typedUserIdOrNull(platformUserId);
     if (typed) return typed;
-  }
-
-  try {
-    const auth = await userinfo();
-    if (auth?.user?.id) {
-      const typed = typedUserIdOrNull(auth.user.id);
-      if (typed) return typed;
-    }
-  } catch (err) {
-    if (!isLocalDevRuntime()) throw err;
   }
 
   if (isLocalDevRuntime()) {
@@ -237,7 +231,7 @@ export async function getOrCreateSandboxFor(
   threadId: string,
   opts: SandboxLookupOptions = {},
 ): Promise<SandboxHandle> {
-  const userId = await resolveSandboxUserId(opts.userId);
+  const userId = resolveSandboxUserId(opts.userId);
   const projectId = deriveSandboxProjectId(opts.projectSourceId ?? threadId);
   const cacheKey = `${userId}:${projectId}`;
 
@@ -503,7 +497,11 @@ export interface PreviewServerResult {
 function previewServerCommand(port: number): string {
   return String.raw`set -eu
 PORT="__PREVIEW_PORT__"
-LOG=".zeroship/preview.log"
+# Dev-server stdout+stderr is redirected here so the LogsCanvas can tail
+# it via the files API (the console is a pure creator app — there is no
+# control-plane log endpoint). Keep this path in sync with
+# server/projects.ts DEV_LOG_PATH.
+LOG=".zeroship/dev.log"
 PID=".zeroship/preview.pid"
 mkdir -p .zeroship
 
@@ -559,10 +557,14 @@ if [ -f package.json ]; then
   else
     CMD="npm run dev -- --host 0.0.0.0 --port $PORT"
   fi
-  nohup sh -lc "$CMD" > "$LOG" 2>&1 < /dev/null &
+  # Append (not truncate) so the LogsCanvas tail keeps prior lines from
+  # this session across a dev-server restart; a marker delimits each
+  # fresh boot. Detach + return immediately is preserved (nohup &).
+  printf '%s --- dev server starting (%s) ---\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '')" "$CMD" >> "$LOG"
+  nohup sh -lc "$CMD" >> "$LOG" 2>&1 < /dev/null &
   echo "$!" > "$PID"
 elif [ -f index.html ] && command -v python3 >/dev/null 2>&1; then
-  nohup python3 -m http.server "$PORT" --bind 0.0.0.0 > "$LOG" 2>&1 < /dev/null &
+  nohup python3 -m http.server "$PORT" --bind 0.0.0.0 >> "$LOG" 2>&1 < /dev/null &
   echo "$!" > "$PID"
 elif [ -f index.html ] && command -v perl >/dev/null 2>&1; then
   cat > .zeroship/preview-static.pl <<'PERL'
@@ -593,7 +595,7 @@ while (my $client = $server->accept()) {
   close $client;
 }
 PERL
-  nohup perl .zeroship/preview-static.pl "$PORT" > "$LOG" 2>&1 < /dev/null &
+  nohup perl .zeroship/preview-static.pl "$PORT" >> "$LOG" 2>&1 < /dev/null &
   echo "$!" > "$PID"
 else
   echo "preview source not ready: expected package.json or index.html in the sandbox root"
@@ -612,7 +614,7 @@ done
 
 echo "preview did not start on :$PORT"
 if [ -f "$LOG" ]; then
-  echo "--- .zeroship/preview.log ---"
+  echo "--- .zeroship/dev.log ---"
   tail -80 "$LOG" || true
 fi
 exit 4

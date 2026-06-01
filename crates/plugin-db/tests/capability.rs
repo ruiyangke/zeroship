@@ -55,7 +55,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{name}");
+    let url = format!("http://localhost/__zeroship/v1/{name}");
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
@@ -90,7 +90,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
 /// frame logic: reads `fn.config.kind`, calls `__zsEnterKind` before
 /// invocation, exits on settle. This is a function-shape `default.rpc`
 /// (the advanced / back-compat path — see
-/// `docs/reference/zs-standard.md`) so the shim owns the frame logic
+/// `docs/reference/zeroship-standard.md`) so the shim owns the frame logic
 /// directly; dict-shape deploys get the same behaviour through
 /// `__zsDispatch`.
 const SHIM: &str = r#"
@@ -136,7 +136,7 @@ async function _zsRpcAndRespond(name, input) {
 }
 async function _zsFetch(request) {
     const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     const text = await request.text();
     let input;
     if (text) {

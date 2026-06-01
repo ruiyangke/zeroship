@@ -12,11 +12,13 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000 } },
 });
 
-// AuthProvider mounted globally so any child component can `useAuth()`.
-// In dev (`isDevAutoAuth()` returns true) the provider short-circuits
-// to a synthetic user — no /auth/userinfo round-trip and no login
-// gate. Production-side auth flows (Login / Signup / OAuth) live in
-// the orphan tree and a later cleanup wires them up.
+// AuthProvider (from `@zeroship/auth/react`, re-exported by the console
+// AuthContext adapter) mounted globally so any child can `useAuth()`.
+// It builds one BFF AuthClient against the same-origin gateway and runs
+// mount-time session recovery; the popup OAuth flow against the seeded
+// per-app public PKCE client is the only login path (dev and prod
+// alike). `appOrigin` defaults to `location.origin`; we pin the console
+// scope set explicitly.
 //
 // The root ErrorBoundary catches any render-phase crash so the app
 // shows an editorial wall instead of a blank white page. Per-canvas
@@ -26,7 +28,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary label="the app">
       <QueryClientProvider client={queryClient}>
-        <AuthProvider>
+        <AuthProvider options={{ scope: ["openid", "profile", "email"] }}>
           <ThemeProvider defaultTheme="studio">
             <App />
           </ThemeProvider>

@@ -9,12 +9,13 @@ use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_overlay_string,
-    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_STASH_SIGNING_KEY,
+    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT,
+    DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_gateway::{
-    backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
-    signing, sync, wrapper_token, GateConfig, GateState,
+    auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
+    router, session_token, signing, sync, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -79,7 +80,14 @@ struct GateCli {
     #[arg(long = "db", env = "DATABASE_URL", default_value = "", hide_env_values = true)]
     db: String,
 
-    /// PEM/PKCS#8 signing key file for gateway-issued wrapper tokens.
+    /// Maximum number of pooled PostgreSQL connections the gateway
+    /// keeps open for session/anchor/revocation work. Bounds concurrent
+    /// DB fan-out so a Hydra brownout (or any stalled query) cannot pile
+    /// up unbounded checkouts. Ignored when `--db` is empty.
+    #[arg(long = "db-pool-size", env = "DB_POOL_SIZE", default_value_t = 16)]
+    db_pool_size: usize,
+
+    /// PEM/PKCS#8 signing key file for the gateway-signed session cookie.
     #[arg(
         long = "signing-key-file",
         env = "GATEWAY_SIGNING_KEY_FILE",
@@ -87,7 +95,19 @@ struct GateCli {
     )]
     gateway_signing_key_file: String,
 
-    /// Public URL advertised as the gateway wrapper-token issuer.
+    /// PEM/PKCS#8 PREVIOUS signing key file for the session-cookie rotation
+    /// overlap (auth-sdk §8.5). Set ONLY during a key roll: the Verifier
+    /// then accepts session cookies signed by EITHER the current or this
+    /// previous key. The Issuer always signs with the current key only.
+    /// Empty (default) ⇒ single-key Verifier.
+    #[arg(
+        long = "prev-signing-key-file",
+        env = "GATEWAY_PREV_SIGNING_KEY_FILE",
+        default_value = ""
+    )]
+    gateway_prev_signing_key_file: String,
+
+    /// Public URL advertised as the gateway session-cookie issuer.
     #[arg(
         long = "gateway-public-url",
         env = "GATEWAY_PUBLIC_URL",
@@ -120,6 +140,25 @@ struct GateCli {
         hide_env_values = true
     )]
     stash_signing_key: String,
+
+    /// Dedicated PERMANENT pairwise-salt secret (value). The seed for every
+    /// app's `pws_` per-app identity anchor (auth-sdk §6.2) — independent of
+    /// the rotatable stash key. MUST be identical on gateway + control and
+    /// MUST NOT be rotated without a per-app `pws_` migration. Prefer
+    /// `--pairwise-salt-file` in production so the value never appears in a
+    /// process listing.
+    #[arg(
+        long = "pairwise-salt",
+        env = "PAIRWISE_SALT",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pairwise_salt: String,
+
+    /// Path to a file holding the dedicated pairwise-salt secret. Takes
+    /// precedence over `--pairwise-salt` / `PAIRWISE_SALT` when set.
+    #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
+    pairwise_salt_file: String,
 
     /// Allow explicitly insecure local development startup.
     /// CLI presence overrides the env var, so `--dev-insecure=false`
@@ -179,6 +218,36 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Resolve the dedicated pairwise-salt secret. Precedence:
+///   1. `--pairwise-salt-file` / `PAIRWISE_SALT_FILE` (read the file verbatim,
+///      trimming a trailing newline) — keeps the value out of the process table,
+///   2. else `obtain_secret` on `--pairwise-salt` / `PAIRWISE_SALT` (+ the
+///      config-overlay reference).
+///
+/// A configured-but-unreadable file is fatal (a misconfigured prod salt must
+/// fail loudly, not silently fall through to the dev default).
+fn resolve_pairwise_salt(
+    salt_file: &str,
+    salt_value: &str,
+    file_ref: Option<&str>,
+    check_config: bool,
+) -> String {
+    if !salt_file.is_empty() {
+        return std::fs::read_to_string(salt_file)
+            .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, path = %salt_file, "gateway: cannot read --pairwise-salt-file");
+                std::process::exit(1);
+            });
+    }
+    zeroship_core::config::obtain_secret(
+        "PAIRWISE_SALT / --pairwise-salt",
+        salt_value,
+        file_ref,
+        check_config,
+    )
+}
+
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
     let boot = bootstrap_or_exit(
@@ -234,6 +303,7 @@ fn main() -> std::io::Result<()> {
     let blob_cache_disk_gb = cli.blob_cache_disk_gb;
     let blob_cache_disk_root = cli.blob_cache_disk_root;
     let auth_ui_url = cli.auth_ui_url;
+    let db_pool_size = cli.db_pool_size.max(1);
     // DSN carries the database password, so it is resolved like any other
     // secret (literals — including colon-laden DSNs — pass through unchanged).
     let pg_dsn = zeroship_core::config::obtain_secret(
@@ -254,9 +324,19 @@ fn main() -> std::io::Result<()> {
         file_secrets.stash_signing_key.as_deref(),
         cli.check_config,
     );
+    // Dedicated pairwise-salt secret. A `--pairwise-salt-file` path wins over
+    // the inline `--pairwise-salt`/`PAIRWISE_SALT` value (and over the config
+    // overlay reference), so prod can keep the value out of the process table.
+    let pairwise_salt = resolve_pairwise_salt(
+        &cli.pairwise_salt_file,
+        &cli.pairwise_salt,
+        file_secrets.pairwise_salt.as_deref(),
+        cli.check_config,
+    );
     // File-PATH field (names a file to read), NOT a secret value — left
     // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
+    let prev_signing_key_path = cli.gateway_prev_signing_key_file;
     let public_url = cli.gateway_public_url;
 
     if let Err(message) =
@@ -297,6 +377,27 @@ fn main() -> std::io::Result<()> {
         stash_signing_key
     };
 
+    // STRENGTH guard for the dedicated pairwise-salt secret. Same posture as
+    // the stash key: skip the strength check when `--check-config` still holds a
+    // raw secret reference (its text is not the secret). Outside dev a missing /
+    // weak / dev-default salt aborts boot — the per-app `pws_` anchor must be a
+    // strong, stable, operator-set secret.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&pairwise_salt) {
+        if let Err(message) =
+            zeroship_core::config::validate_pairwise_salt(&pairwise_salt, insecure_dev)
+        {
+            tracing::error!(error = %message, "gateway: refusing to start with unsafe pairwise salt");
+            std::process::exit(1);
+        }
+    }
+    // Keep the operator-supplied `pairwise_salt` String intact (the check-config
+    // report reads it pre-dev-default); derive the effective secret separately.
+    let pairwise_salt_secret = if pairwise_salt.is_empty() {
+        DEV_PAIRWISE_SALT.to_string()
+    } else {
+        pairwise_salt.clone()
+    };
+
     // S3 — symmetric WORKER_KEY enforcement. The worker refuses a
     // non-loopback bind without a key; the gateway is the caller of those
     // worker admin endpoints, so it must fail just as hard rather than
@@ -309,13 +410,13 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Phase 8 U1 — load the gateway's wrapper-token signing key. The
-    // flag is optional: when empty, the boot succeeds but DPoP-exchange
-    // endpoints (added in U2/U3) will 503. We log a clear warning so
-    // operators don't get a surprise during DPoP rollout.
+    // Load the gateway's session-cookie signing key. The flag is optional:
+    // when empty, the boot succeeds but the signed session cookie cannot be
+    // issued/verified, so the cookie auth arm fails closed. We log a clear
+    // warning so operators don't get a surprise.
     let signing_key: Option<Arc<ed25519_dalek::SigningKey>> = if signing_key_path.is_empty() {
         tracing::warn!(
-            "GATEWAY_SIGNING_KEY_FILE not set — DPoP token-exchange endpoints will 503"
+            "GATEWAY_SIGNING_KEY_FILE not set — signed session cookies disabled (cookie auth fails closed)"
         );
         None
     } else {
@@ -330,26 +431,56 @@ fn main() -> std::io::Result<()> {
         Some(Arc::new(key))
     };
 
-    // Phase 8 U3 — wrapper-token issuer. One-to-one with `signing_key`:
-    // both Some, or both None. Built once at boot so the per-request
-    // /__zs/auth/dpop-exchange path doesn't pay for PKCS#8 encoding +
-    // thumbprinting on every request.
-    let wrapper_issuer: Option<Arc<wrapper_token::Issuer>> = signing_key.as_ref().map(|sk| {
-        let issuer = wrapper_token::Issuer::new(sk.as_ref(), public_url.clone())
-            .expect("wrapper_token::Issuer construction");
+    // auth-sdk Slice 1b-browser — load the PREVIOUS session-cookie signing key
+    // for the rotation overlap (§8.5). Set ONLY during a key roll. When present,
+    // the session Verifier is built via `Verifier::with_previous` (accepts
+    // session cookies signed by EITHER key). Ignored (with a warning) when no
+    // current key is configured, since there is nothing to overlap with.
+    let prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>> =
+        if prev_signing_key_path.is_empty() {
+            None
+        } else if signing_key.is_none() {
+            tracing::warn!(
+                "GATEWAY_PREV_SIGNING_KEY_FILE set but no current signing key — ignoring \
+                 (a previous key needs a current key to overlap with)"
+            );
+            None
+        } else {
+            let key = signing::load_from_path(std::path::Path::new(&prev_signing_key_path))
+                .expect("gateway: load previous signing key");
+            let kid = signing::jwk_thumbprint(&key);
+            tracing::info!(
+                path = %prev_signing_key_path,
+                kid = %kid,
+                "gateway PREVIOUS signing key loaded (rotation overlap active)"
+            );
+            Some(Arc::new(key))
+        };
+
+    // BFF redesign slice R1b — the SIGNED STATELESS session cookie. Built from
+    // the ed25519 signing key (+ previous key for the rotation overlap),
+    // stamping the distinct `zeroship-sess+jwt` typ.
+    // Both `Some`, or both `None` (one-to-one with `signing_key`): with no key
+    // the gateway cannot sign/verify the session cookie, so the cookie arm fails
+    // closed. The Issuer always signs with the CURRENT key; the Verifier folds
+    // in the previous key during an overlap so a cookie minted just before a
+    // roll still verifies for its ~15 min life.
+    let session_issuer: Option<Arc<session_token::Issuer>> = signing_key.as_ref().map(|sk| {
+        let issuer = session_token::Issuer::new(sk.as_ref(), public_url.clone())
+            .expect("session_token::Issuer construction");
         Arc::new(issuer)
     });
-
-    // Phase 8 U4 — wrapper-token verifier. Built from the PUBLIC half
-    // of the same signing key in lockstep with `wrapper_issuer` (both
-    // Some, or both None). The dispatch path consults this to detect
-    // wrapper-bound DPoP requests; raw-hydra DPoP requests fall through
-    // to the P7-U5 introspection path. Cheap to construct (no PKCS#8
-    // encoding — `DecodingKey::from_ed_der` accepts the raw 32-byte
-    // public key), so we just build it eagerly at boot.
-    let wrapper_verifier: Option<Arc<wrapper_token::Verifier>> = signing_key.as_ref().map(|sk| {
-        let public = sk.verifying_key();
-        Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
+    let session_verifier: Option<Arc<session_token::Verifier>> = signing_key.as_ref().map(|sk| {
+        let current = sk.verifying_key();
+        let verifier = match prev_signing_key.as_ref() {
+            Some(prev) => session_token::Verifier::with_previous(
+                &current,
+                &prev.verifying_key(),
+                public_url.clone(),
+            ),
+            None => session_token::Verifier::new(&current, public_url.clone()),
+        };
+        Arc::new(verifier)
     });
 
     if cli.check_config {
@@ -395,6 +526,13 @@ fn main() -> std::io::Result<()> {
         report.field(
             "signing_key_configured",
             CheckValue::Secret(!signing_key_path.is_empty()),
+        );
+        // Report whether the OPERATOR explicitly supplied a salt (pre-dev-
+        // default), matching control — so a dev run with no salt reads "(unset)"
+        // rather than masking the missing config behind the dev default.
+        report.field(
+            "pairwise_salt_configured",
+            CheckValue::Secret(!pairwise_salt.is_empty()),
         );
         let fmt = if cli.check_config_format == "json" {
             CheckFormat::Json
@@ -443,46 +581,94 @@ fn main() -> std::io::Result<()> {
 
     let hash_ring = proxy::HashRing::new(worker_urls.clone(), max_per_worker);
 
-    // Postgres client for the per-origin session store. The binary
-    // accepts an empty DSN (`--db ""`) for dev / smoke modes that don't
-    // exercise the OIDC RP path; downstream handlers gracefully return
-    // 401 when `db` is None instead of panicking.
-    let db: Option<Arc<compio_postgres::Client>> = if pg_dsn.is_empty() {
+    // Postgres connection config for the per-origin session store and the
+    // anchor/revocation read/write paths. The binary accepts an empty
+    // DSN (`--db ""`) for dev / smoke modes that don't exercise the OIDC
+    // RP path; downstream handlers gracefully return 401 when `db` is
+    // None instead of panicking.
+    //
+    // `GateState.db` carries only the `Send + Sync` connection params: the
+    // compio-postgres `Pool` is `!Send`, so the real pool is built lazily
+    // **per ntex worker thread** in a thread-local (see `crate::db`).
+    // Every per-request DB touch checks out a pooled connection for ONE
+    // operation and releases it on drop, so no single shared connection
+    // serializes gateway DB work.
+    //
+    // `dpop_jti_cache` keeps its own dedicated single connection: the
+    // `PgJtiCache` type (in zeroship-core) owns an `Arc<Client>` (which
+    // *is* `Send + Sync`), and its DPoP replay-insert path is unchanged
+    // by this slice — so it stays exactly as it was before the pool
+    // migration.
+    let (db, dpop_jti_cache): (
+        Option<zeroship_gateway::db::DbConfig>,
+        zeroship_core::dpop::TieredJtiCache,
+    ) = if pg_dsn.is_empty() {
         tracing::warn!(
             "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
         );
-        None
+        (None, zeroship_core::dpop::TieredJtiCache::default())
     } else {
-        let (pg_client, pg_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
+        let db_cfg = zeroship_gateway::db::DbConfig::new(pg_dsn.clone(), db_pool_size);
+        tracing::info!(
+            db_pool_size = db_cfg.pool_size(),
+            "gateway pg connection pool configured (per-worker)"
+        );
+
+        // Dedicated single connection for the DPoP jti replay cache.
+        let (jti_client, jti_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
             .await
-            .expect("gateway: pg connect");
+            .expect("gateway: pg connect (dpop jti cache)");
         compio::runtime::spawn(async move {
-            if let Err(e) = pg_conn.run().await {
-                tracing::error!(error = %e, "gateway/pg connection ended");
+            if let Err(e) = jti_conn.run().await {
+                tracing::error!(error = %e, "gateway/pg dpop-jti connection ended");
             }
         })
         .detach();
-        Some(Arc::new(pg_client))
+        let pg = zeroship_core::dpop::PgJtiCache::new(Arc::new(jti_client));
+        let dpop_jti_cache = zeroship_core::dpop::TieredJtiCache::with_pg(pg);
+
+        (Some(db_cfg), dpop_jti_cache)
     };
 
     // OIDC RP — services every `{app}.zeroship.ai` host. The
     // `client_id` matches the entry registered in
     // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
     // built at the dispatch site.
+    let stash_signing_key_bytes = stash_signing_key.into_bytes();
+
+    // auth-sdk Slice 1b-anchors — AES-256-GCM key for the server-held refresh
+    // family at rest in `zeroship.app_session_anchors.refresh_token_enc` (§8.1).
+    // Derived from the (server-only) stash signing key via
+    // `core::crypto::derive_key` so no new CLI flag is needed and the
+    // refresh family never sits in PG in plaintext. Domain-separated by the
+    // derive prefix; rotating the stash key rotates this key too (acceptable
+    // pre-launch — a roll just forces re-login, which the anchor design
+    // already tolerates via Hydra invalid_grant → login_required).
+    let anchor_enc_key = {
+        let seed = format!(
+            "anchor-refresh-enc:{}",
+            String::from_utf8_lossy(&stash_signing_key_bytes)
+        );
+        zeroship_core::crypto::derive_key(&seed)
+    };
+
+    // auth-sdk §6.2 — platform-wide pairwise salt for the per-app `pws_…`
+    // subject projection. Derived via the SHARED helper so the gateway and the
+    // control plane (which revokes the per-app token family on a dashboard
+    // "disconnect app", Batch A fix 4) produce byte-identical `pws_…` subjects.
+    // Seeded from the DEDICATED `PAIRWISE_SALT` secret (NOT the rotatable stash
+    // key): `pws_` is the PERMANENT per-app identity anchor that apps store as a
+    // user FK, so its seed must be independent of operational-key rotation. The
+    // SAME `PAIRWISE_SALT` value must be configured on gateway + control.
+    // Domain-separated from `anchor_enc_key` by the helper's distinct prefix.
+    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
+
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,
         "gateway",
         oidc_client_secret,
-        stash_signing_key.into_bytes(),
+        stash_signing_key_bytes,
     ));
-
-    let dpop_jti_cache = db
-        .as_ref()
-        .map(|client| {
-            let pg = zeroship_core::dpop::PgJtiCache::new(client.clone());
-            zeroship_core::dpop::TieredJtiCache::with_pg(pg)
-        })
-        .unwrap_or_default();
 
     let state = Arc::new(GateState {
         config: GateConfig {
@@ -510,9 +696,13 @@ fn main() -> std::io::Result<()> {
         db,
         dpop_jti_cache: Arc::new(dpop_jti_cache),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
         signing_key,
-        wrapper_issuer,
-        wrapper_verifier,
+        prev_signing_key,
+        session_issuer,
+        session_verifier,
+        anchor_enc_key,
+        pairwise_salt,
     });
 
     sync::start_sync(state.clone());
@@ -540,15 +730,36 @@ fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
-            // Phase 8 U3 — DPoP token exchange. Registered BEFORE
-            // the subdomain catch-all so the path lands on the
-            // dedicated handler rather than being dispatched as a
-            // creator-app route. `cache-control: no-store` is set on
-            // every response so intermediaries don't keep wrapper
-            // tokens around.
+            // auth-sdk BFF redesign slice R1b — the ONE identity-session
+            // resource. `/token` is GONE (merged here); both methods live on
+            // `/__zeroship/auth/session`:
+            //   - POST = code→token exchange + create anchor + ISSUE the signed
+            //     session cookie + return `{ user, expires_at }`.
+            //   - GET[?mint=1] = decode the live signed cookie, or (expired /
+            //     `mint=1`) re-sign a fresh cookie from the server-held anchor.
+            // Registered BEFORE the subdomain catch-all. Same-origin-only (no
+            // CORS); `?mint=1` + POST additionally require `X-ZS-Auth`.
             .service(
-                web::resource("/__zs/auth/dpop-exchange")
-                    .route(web::post().to(dpop_exchange::handle)),
+                web::resource("/__zeroship/auth/session")
+                    .route(web::post().to(auth_token::session_post))
+                    .route(web::get().to(auth_token::session)),
+            )
+            // auth-sdk Slice 1b-browser — the browser-facing auth HTTP
+            // surface. Same mounting discipline (BEFORE the subdomain
+            // catch-all). `/authorize` 302s to Hydra (the one cross-site
+            // hop); `/popup-callback` serves the same-origin relay page;
+            // `/signout` revokes + clears (fixes the live bug).
+            .service(
+                web::resource("/__zeroship/auth/authorize")
+                    .route(web::get().to(browser_auth::authorize)),
+            )
+            .service(
+                web::resource("/__zeroship/auth/popup-callback")
+                    .route(web::get().to(browser_auth::popup_callback)),
+            )
+            .service(
+                web::resource("/__zeroship/auth/signout")
+                    .route(web::post().to(browser_auth::signout)),
             )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the
@@ -795,7 +1006,7 @@ mod tests {
     #[test]
     fn secrets_file_tier_used_when_cli_empty() {
         // Empty CLI + a `[secrets]` env-reference => the reference resolves.
-        let var = format!("ZS_GW_SECRETS_TIER_{}", std::process::id());
+        let var = format!("ZEROSHIP_GW_SECRETS_TIER_{}", std::process::id());
         std::env::set_var(&var, "resolved-from-secrets-file");
         let reference = format!("urn:zeroship:env:{var}");
         let out = zeroship_core::config::obtain_secret(
@@ -820,7 +1031,7 @@ mod tests {
         let out = zeroship_core::config::obtain_secret(
             "MASTER_KEY",
             "literal-from-cli",
-            Some("urn:zeroship:env:ZS_GW_SECRETS_TIER_NEVER_SET"),
+            Some("urn:zeroship:env:ZEROSHIP_GW_SECRETS_TIER_NEVER_SET"),
             false,
         );
         assert_eq!(

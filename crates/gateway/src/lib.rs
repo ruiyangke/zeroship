@@ -3,29 +3,35 @@
 //! The gateway binary (`main.rs`) is a thin entry point: it parses
 //! flags, constructs [`GateState`], registers ntex routes, and starts
 //! the server. Everything else — routing, auth, proxy, blob cache,
-//! sessions, signing, wrapper-token issuance — lives in this library
+//! sessions, signing, session-cookie issuance — lives in this library
 //! so integration tests under `tests/` can drive the handlers without
 //! reaching through the binary.
 //!
 //! [`GateConfig`] and [`GateState`] live here (not in `main.rs`) for
 //! the same reason: tests construct fixtures directly.
 
+pub mod anchors;
 pub mod auth;
+pub mod auth_token;
 pub mod backchannel_logout;
 pub mod blob_cache;
+pub mod browser_auth;
 pub mod compiled;
+pub mod db;
 pub mod dispatch;
-pub mod dpop_exchange;
 pub mod enforce;
 pub mod error;
+pub mod hydra_client;
+pub mod identities;
 pub mod idempotency;
 pub mod oidc_rp;
 pub mod proxy;
+pub mod rls;
 pub mod router;
+pub mod session_token;
 pub mod sessions;
 pub mod signing;
 pub mod sync;
-pub mod wrapper_token;
 
 use std::sync::Arc;
 
@@ -109,11 +115,27 @@ pub struct GateState {
     /// `{app}.zeroship.ai` host — the per-app `redirect_uri` is the
     /// only thing that changes per request.
     pub oidc_rp: Arc<oidc_rp::OidcRp>,
-    /// Postgres client used by the gateway's per-origin session store
-    /// (`auth.gateway_sessions`). `Option` because the binary supports
-    /// a dev "no-DB" mode (when `--db` is empty); test fixtures also
-    /// rely on `None` to construct `GateState` without a live PG.
-    pub db: Option<Arc<compio_postgres::Client>>,
+    /// Postgres connection-**pool** handle for the gateway's per-origin
+    /// session store (`zeroship.gateway_sessions`) and the anchor/revocation
+    /// read/write paths.
+    ///
+    /// The compio-postgres [`Pool`](compio_postgres::Pool) is `!Send`
+    /// (single-threaded, `Rc`/`Cell` internals), so it cannot live in the
+    /// `Arc<GateState>` shared across ntex's worker arbiter threads.
+    /// Instead `GateState.db` carries only the connection *parameters*
+    /// (DSN + max size, both `Send + Sync`); the actual `Pool` is built
+    /// lazily **per worker thread**, wrapped in an `Rc`, and stashed in a
+    /// thread-local — the same pattern the sandbox controller uses for
+    /// its per-compio-worker pool (`crates/sandbox/src/db.rs`). Handlers
+    /// reach a checked-out connection via
+    /// [`db::checkout`](crate::db::checkout); each checkout covers ONE
+    /// operation and releases on drop, so no single shared connection
+    /// serializes gateway DB work.
+    ///
+    /// `Option` because the binary supports a dev "no-DB" mode (when
+    /// `--db` is empty); test fixtures also rely on `None` to construct
+    /// `GateState` without a live PG.
+    pub db: Option<db::DbConfig>,
     /// Tiered replay cache for `DPoP` proof `jti` claims (RFC 9449
     /// §11.1). The local tier rejects hot repeats without a DB round-trip;
     /// the PG tier rejects replays that land on a sibling gateway process.
@@ -122,27 +144,58 @@ pub struct GateState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
-    /// Gateway-issued wrapper-token signing key (Phase 8 U1). Loaded
-    /// from a PKCS#8 PEM/DER file at boot via `--signing-key-file`.
-    /// `None` when the operator runs without the flag — DPoP-exchange
-    /// endpoints return 503 in that mode, but every other gateway path
-    /// keeps working.
+    /// Short-TTL read-through cache for the per-app family-marker revocation
+    /// read (BFF reshape R1d). The cookie / Bearer / DPoP-introspect arms each
+    /// run one per-request `is_family_revoked_since` DB read after the local
+    /// token verify; this cache makes the steady-state (no-revocation) hit
+    /// fully DB-free. It stores the family's latest `revoked_after`
+    /// (`Option<i64>` epoch seconds, `None` = no marker — negative caching is
+    /// mandatory) and the hot path re-judges `> iat` LOCALLY per request, so
+    /// one entry serves every cookie in the family. A cross-node revocation is
+    /// honored within `<= REVOCATION_CACHE_TTL_SECS` on a cache-warm node; a
+    /// SAME-NODE writer (`/signout`, back-channel logout) busts the entry
+    /// immediately via `invalidate`. Fail-closed is preserved: a cache MISS
+    /// followed by a DB error rejects, exactly as the un-cached read did.
+    pub revocation_cache: Arc<zeroship_core::wrapper_revocation::RevocationCache>,
+    /// Gateway session-cookie signing key. Loaded from a PKCS#8 PEM/DER file
+    /// at boot via `--signing-key-file`. `None` when the operator runs without
+    /// the flag — the signed session cookie cannot be issued/verified, so the
+    /// cookie auth arm fails closed, but every other gateway path keeps working.
     pub signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-    /// Wrapper-token issuer (Phase 8 U3). Materialised at boot from
-    /// `signing_key` + `config.public_url`; `None` exactly when
-    /// `signing_key` is `None`. The `/__zs/auth/dpop-exchange` handler
-    /// short-circuits to 503 when this is absent so the rest of the
-    /// gateway can keep serving traffic during the `DPoP` rollout.
-    pub wrapper_issuer: Option<Arc<wrapper_token::Issuer>>,
-    /// Wrapper-token verifier (Phase 8 U4). Built in lockstep with
-    /// `wrapper_issuer` from the public half of the same signing key.
-    /// The dispatch path (`router::auth::resolve_dpop_user_header`)
-    /// consults this BEFORE falling back to hydra introspection — a
-    /// `DPoP` request whose access token verifies as a wrapper gets
-    /// the strict `cnf.jkt ↔ proof jkt` binding check; a request whose
-    /// token is a raw hydra opaque token falls through to the P7-U5
-    /// introspection path (no binding). `None` means "wrapper-token
-    /// verification is disabled" — every DPoP request falls through
-    /// to introspection.
-    pub wrapper_verifier: Option<Arc<wrapper_token::Verifier>>,
+    /// PREVIOUS session-cookie signing key (auth-sdk Slice 1b-browser,
+    /// rotation overlap §8.5). Loaded from `--prev-signing-key-file` /
+    /// `GATEWAY_PREV_SIGNING_KEY_FILE` when an operator is mid-roll. `Some`
+    /// only during the overlap window; `None` in steady state. The Issuer
+    /// NEVER signs with this — it is for `session_token::Verifier::with_previous`
+    /// (so a session cookie minted just before the roll still verifies).
+    pub prev_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    /// Signed-session-cookie issuer (BFF redesign slice R1b). Mints the
+    /// gateway-signed `zeroship-sess+jwt` written into `__Host-zeroship_app_session`,
+    /// stamping the `zeroship-sess+jwt` typ. `None` exactly when `signing_key` is
+    /// `None` (no signing key ⇒ no signed cookie ⇒ the cookie arm fails closed).
+    pub session_issuer: Option<Arc<session_token::Issuer>>,
+    /// Signed-session-cookie verifier (BFF redesign slice R1b). The cookie arm
+    /// (`router::auth::resolve_app_session_user_header_inner`) verifies the
+    /// `__Host-zeroship_app_session` token with this LOCALLY on every request — no
+    /// per-request DB/session-store read. Built in lockstep with
+    /// `session_issuer` from the same key, with the previous key folded in via
+    /// `Verifier::with_previous` during a rotation overlap.
+    pub session_verifier: Option<Arc<session_token::Verifier>>,
+    /// AES-256-GCM key encrypting the server-held refresh family at rest in
+    /// `zeroship.app_session_anchors.refresh_token_enc` (auth-sdk Slice
+    /// 1b-anchors, §8.1/§8.5). A `[u8; 32]` (so `Send + Sync`, unlike the
+    /// `!Send` pool / single-flight), derived once at boot from a stable
+    /// server secret via `zeroship_core::crypto::derive_key`. The refresh
+    /// family never leaves the gateway in plaintext — neither to the
+    /// browser nor at rest in PG.
+    pub anchor_enc_key: [u8; 32],
+    /// Platform-wide pairwise salt for the per-app `pws_…` subject
+    /// projection (auth-sdk §6.2, F4-B). The browser-held wrapper's `sub`
+    /// is `derive_pairwise(global_user_id, route.sector_identifier)` keyed
+    /// on THIS salt, so app JS decoding its own access token reads a
+    /// per-app pseudonym, never the global user UUID (G4). A `[u8; 32]`
+    /// (Send + Sync), derived once at boot from a stable server secret via
+    /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
+    /// subjects (a deliberate break-glass).
+    pub pairwise_salt: [u8; 32],
 }

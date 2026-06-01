@@ -7,14 +7,14 @@
 #
 # Usage:
 #   bash scripts/smoke.sh                # uses http://localhost:3001
-#   ZS_URL=http://... bash scripts/smoke.sh
+#   ZEROSHIP_URL=http://... bash scripts/smoke.sh
 #
 # Prereqs: `pnpm dev` already running in another shell. By default the
 # vite-plugin dev runtime uses project-local SQLite at .zeroship/dev.sqlite.
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3001}"
-RPC="${URL}/_zs/v1"
+URL="${ZEROSHIP_URL:-http://localhost:3001}"
+RPC="${URL}/__zeroship/v1"
 FAILED=0
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ check "error mentions foreign key or violation" \
 echo "[check 3] capability enforcement — wrapper kinds resolve"
 
 # Capability enforcement (B3) is verified by the unit/integration
-# tests in plugin-db. The dev runtime doesn't expose `/_zs/manifest`,
+# tests in plugin-db. The dev runtime doesn't expose `/__zeroship/manifest`,
 # so we probe a known wrapped procedure instead: a 405 / 404 would
 # indicate the wrapper was lost; a 200 with the platform's `{json: ...}`
 # envelope confirms `query()` resolved at registration time.
@@ -230,14 +230,14 @@ check "joined user row carries Alice's email" \
 
 echo "[check 6] schema audit endpoint is reachable"
 
-AUDIT=$(curl -sS "${URL}/_zs/db/audit/todos" 2>/dev/null || echo '[]')
+AUDIT=$(curl -sS "${URL}/__zeroship/db/audit/todos" 2>/dev/null || echo '[]')
 check "audit endpoint reachable" bash -c "[ -n '$AUDIT' ]"
 
 # ---------------------------------------------------------------------------
 # Check 7: E2E live-query stream smoke
 #
 # This exercises the full reactive path:
-#   1. Open `/_zs/v1/todos.subscribe` as an SSE stream.
+#   1. Open `/__zeroship/v1/todos.subscribe` as an SSE stream.
 #   2. The server procedure uses the creator-facing `db.live(queryFn)`
 #      API to stream snapshots for Alice's todos.
 #   3. While the stream is open, POST a createTodo mutation.

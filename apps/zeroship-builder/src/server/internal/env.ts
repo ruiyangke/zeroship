@@ -7,8 +7,6 @@
 // zeroship vite-plugin reads from the host's process env.
 
 declare const env: {
-  ZEROSHIP_CONTROL_URL?: string;
-  CONTROL_URL?: string;
   SANDBOX_URL?: string;
   SANDBOX_TOKEN?: string;
   ZEROSHIP_SDK_REGISTRY?: string;
@@ -28,11 +26,6 @@ function readEnv(key: string, fallback: string): string {
   if (e && typeof e[key] === "string" && e[key]) return e[key];
   return fallback;
 }
-
-export const CONTROL_URL = () => readEnv(
-  "ZEROSHIP_CONTROL_URL",
-  readEnv("CONTROL_URL", "http://localhost:9090"),
-);
 
 export const SANDBOX_URL  = () => readEnv("SANDBOX_URL",  "http://localhost:9091");
 

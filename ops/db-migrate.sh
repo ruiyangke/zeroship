@@ -21,18 +21,18 @@
 #
 # Targets the compose Postgres on its host-mapped port by default. Override the
 # connection with env vars:
-#   ZS_DB_JDBC   (default jdbc:postgresql://localhost:5440/zeroship)
-#   ZS_DB_USER   (default postgres)
-#   ZS_DB_PASS   (default zeroship)
-#   ZS_LIQUIBASE_IMAGE (default liquibase/liquibase:4.31)
+#   ZEROSHIP_DB_JDBC   (default jdbc:postgresql://localhost:5440/zeroship)
+#   ZEROSHIP_DB_USER   (default postgres)
+#   ZEROSHIP_DB_PASS   (default zeroship)
+#   ZEROSHIP_LIQUIBASE_IMAGE (default liquibase/liquibase:4.31)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHANGELOG_DIR="${ZS_CHANGELOG_DIR:-$ROOT/db/changelog}"
-JDBC="${ZS_DB_JDBC:-jdbc:postgresql://localhost:5440/zeroship}"
-DB_USER="${ZS_DB_USER:-postgres}"
-DB_PASS="${ZS_DB_PASS:-zeroship}"
-IMAGE="${ZS_LIQUIBASE_IMAGE:-liquibase/liquibase:4.31}"
+CHANGELOG_DIR="${ZEROSHIP_CHANGELOG_DIR:-$ROOT/db/changelog}"
+JDBC="${ZEROSHIP_DB_JDBC:-jdbc:postgresql://localhost:5440/zeroship}"
+DB_USER="${ZEROSHIP_DB_USER:-postgres}"
+DB_PASS="${ZEROSHIP_DB_PASS:-zeroship}"
+IMAGE="${ZEROSHIP_LIQUIBASE_IMAGE:-liquibase/liquibase:4.31}"
 
 if [ "$#" -eq 0 ]; then
   echo "usage: $(basename "$0") <liquibase-command> [args...]" >&2

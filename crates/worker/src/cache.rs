@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -22,27 +23,93 @@ struct AppCache {
 thread_local! {
     static CACHE: RefCell<Option<AppCache>> = const { RefCell::new(None) };
     static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Redis connection URL for the multi-node KV backend. Held per-thread
+    /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvPlugin`
+    /// backed by `Redis` (shared across every worker node — see the
+    /// backend-choice rationale on `init_cache`). When `None`, the `kv`
+    /// namespace is simply absent (degrade, don't panic).
+    static KV_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Root directory for the multi-node object-storage `LocalFs` backend.
+    /// Held per-thread like `DB_URL`. When `Some`, `create_plugins` mints a
+    /// `StoragePlugin` rooted here; in the real stack the path is a SHARED
+    /// volume (the same multi-node pattern the deploy blob store uses), so
+    /// a put on node A is readable on node B. When `None`, the `storage`
+    /// namespace is absent.
+    static STORAGE_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
-pub fn init_cache(max_size: usize, db_url: Option<String>) {
+/// Per-thread runtime-kernel config the worker threads each install.
+///
+/// All four backend handles degrade independently: an absent `db_url` /
+/// `kv_url` / `storage_root` means that `env.*` namespace is simply not
+/// registered (matching the long-standing DB behaviour), never a panic.
+/// The real multi-node stack SHOULD set all of them so deployed apps get
+/// the complete `env.{db,kv,storage,auth}` kernel.
+pub struct KernelConfig {
+    pub db_url: Option<String>,
+    pub kv_url: Option<String>,
+    pub storage_root: Option<PathBuf>,
+}
+
+pub fn init_cache(max_size: usize, kernel: KernelConfig) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
             isolates: HashMap::new(),
             max_size,
         });
     });
-    if let Some(url) = db_url {
+    if let Some(url) = kernel.db_url {
         DB_URL.with(|u| *u.borrow_mut() = Some(url));
+    }
+    if let Some(url) = kernel.kv_url {
+        KV_URL.with(|u| *u.borrow_mut() = Some(url));
+    }
+    if let Some(root) = kernel.storage_root {
+        STORAGE_ROOT.with(|s| *s.borrow_mut() = Some(root));
     }
 }
 
-/// Create plugins for a new Runtime.
+/// Create plugins for a new Runtime — the kernel every deployed app boots
+/// against. This is the SINGLE source of truth for the multi-node `env.*`
+/// surface; the CLI `zeroship serve` vector (`crates/cli/src/main.rs`)
+/// mirrors it for the single-tenant dev path.
+///
+/// Namespaces and their multi-node backend choices:
+/// - `auth` — pushed unconditionally. Stateless (callbacks read the
+///   per-request user from `RuntimeState`), so every app gets a working
+///   `env.auth.getUser()` / `env.auth.requireUser()`.
+/// - `db` — pushed when a DB URL is configured. Postgres is inherently
+///   shared across nodes.
+/// - `kv` — pushed when a KV (Redis) URL is configured, backed by the
+///   `Redis` backend. **Redis is chosen, NOT the single-tenant embedded
+///   `redb` backend**: redb is a per-process file lock, so on an N-node
+///   worker pool each node would hold its own divergent KV (a `set` on
+///   node A invisible on node B). Redis is a shared network store — one
+///   logical keyspace across every node — so KV stays consistent. The
+///   `Redis` backend's URL transparently selects single-node
+///   (`redis://host`) or cluster (`?cluster=true`) mode.
+/// - `storage` — pushed when a storage root is configured, backed by
+///   `LocalFs`. Multi-node consistency comes from rooting that path on a
+///   SHARED volume — the exact pattern the deploy blob store already uses
+///   (control/gateway/worker all mount the same `bundles` volume). An
+///   object written on node A is then readable on node B. (S3/R2 is the
+///   prod backend and slots in behind the same `Backend` trait once the
+///   `s3` feature is implemented; today only `LocalFs` exists.)
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
+    let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
-        vec![Arc::new(zeroship_plugin_db::DbPlugin::new(url))]
-    } else {
-        vec![]
+        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url)));
     }
+    if let Some(url) = KV_URL.with(|u| u.borrow().clone()) {
+        plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::with_backend(
+            Arc::new(zeroship_plugin_kv::Redis::new(url)),
+        )));
+    }
+    if let Some(root) = STORAGE_ROOT.with(|s| s.borrow().clone()) {
+        plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::local(root)));
+    }
+    plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
+    plugins
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
@@ -229,5 +296,93 @@ fn evict_lru(cache: &mut AppCache) {
         // by other threads — DON'T evict it here. The version_poll_loop
         // GCs SharedEnvs against the known-app set every cycle, so an
         // app deleted from control plane gets cleaned up there.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Slice 1a regression guard: every Runtime the worker builds must
+    /// carry the `auth` namespace so `env.auth.getUser()` resolves for
+    /// production end-user apps. The faithful e2e drives `env.auth`
+    /// through this very vector — assert it's present here so a future
+    /// edit that drops `AuthPlugin` from `create_plugins()` fails loudly,
+    /// not just under `zeroship serve` (the CLI vector). `AuthPlugin` is
+    /// stateless, so it is pushed even when no DB URL is configured.
+    #[test]
+    fn create_plugins_registers_auth_namespace() {
+        let plugins = create_plugins();
+        assert!(
+            plugins.iter().any(|p| p.namespace() == "auth"),
+            "worker create_plugins() must include the auth namespace; got: {:?}",
+            plugins.iter().map(|p| p.namespace()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Phase-2 structural guard (no external services): when the kernel
+    /// config carries a DB URL, a KV URL, and a storage root, the SAME
+    /// `create_plugins()` a deployed app boots against installs all four
+    /// `env.{db,kv,storage,auth}` namespaces. This is the always-runnable
+    /// complement to the redis-gated faithful dispatch test in
+    /// `handler.rs` — it asserts the plugin VECTOR, the latter asserts the
+    /// JS namespaces resolve + round-trip end-to-end.
+    ///
+    /// Pre-Phase-2 this FAILS: `create_plugins()` ignored kv/storage
+    /// entirely, so `kv` and `storage` were never in the vector. Runs on a
+    /// fresh thread so the kernel thread-locals don't leak into other
+    /// tests sharing this thread.
+    #[test]
+    fn create_plugins_registers_full_kernel_when_configured() {
+        std::thread::spawn(|| {
+            init_cache(
+                4,
+                KernelConfig {
+                    db_url: Some("postgres://localhost/zs_unused".to_string()),
+                    kv_url: Some("redis://127.0.0.1:6379".to_string()),
+                    storage_root: Some(PathBuf::from("/tmp/zs-cache-test-storage")),
+                },
+            );
+            let plugins = create_plugins();
+            let namespaces: Vec<String> =
+                plugins.iter().map(|p| p.namespace().to_string()).collect();
+            for expected in ["db", "kv", "storage", "auth"] {
+                assert!(
+                    namespaces.iter().any(|n| n == expected),
+                    "create_plugins() must register the '{expected}' namespace when configured; got: {namespaces:?}"
+                );
+            }
+        })
+        .join()
+        .expect("kernel-config plugin guard thread panicked");
+    }
+
+    /// Degrade-don't-panic: with no kv/storage configured (only db), the
+    /// kv + storage namespaces are simply absent — `create_plugins()`
+    /// never panics. Mirrors the long-standing DB behaviour. Fresh thread
+    /// keeps the empty kernel thread-locals isolated.
+    #[test]
+    fn create_plugins_omits_kv_storage_when_unconfigured() {
+        std::thread::spawn(|| {
+            init_cache(
+                4,
+                KernelConfig {
+                    db_url: None,
+                    kv_url: None,
+                    storage_root: None,
+                },
+            );
+            let plugins = create_plugins();
+            let namespaces: Vec<String> =
+                plugins.iter().map(|p| p.namespace().to_string()).collect();
+            let has = |n: &str| namespaces.iter().any(|x| x == n);
+            // auth is unconditional; kv/storage/db must NOT appear.
+            assert!(has("auth"));
+            assert!(!has("kv"), "kv absent when unconfigured");
+            assert!(!has("storage"), "storage absent when unconfigured");
+            assert!(!has("db"), "db absent when unconfigured");
+        })
+        .join()
+        .expect("degrade guard thread panicked");
     }
 }

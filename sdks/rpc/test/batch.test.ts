@@ -7,7 +7,7 @@
  *     rpc.call("listUsers", null, { kind: "query" }),
  *     rpc.call("getMe",     null, { kind: "query" }),
  *   ]);
- *   // → ONE POST /_zs/v1/_batch with three entries.
+ *   // → ONE POST /__zeroship/v1/_batch with three entries.
  *
  * Mutations and streams never batch.
  */
@@ -86,7 +86,7 @@ describe("auto-batching — opt-in", () => {
     // Exactly one HTTP request — the batch endpoint.
     assert.equal(spy.calls.length, 1, "one batched request");
     assert.equal(spy.calls[0].method, "POST");
-    assert.equal(spy.calls[0].url, "https://api.test/_zs/v1/_batch");
+    assert.equal(spy.calls[0].url, "https://api.test/__zeroship/v1/_batch");
     assert.equal(
       spy.calls[0].headers["content-type"],
       "application/zs-batch+json",

@@ -21,7 +21,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   listSandboxFiles,
   listIssues,
-  getAppLogs,
+  getLogs,
   type FileEntry,
   type Issue,
 } from "../../api";
@@ -124,7 +124,7 @@ export function MentionDropdown({
           // recent — peek at the latest log lines and pick the first
           // error-flavoured one. Falls back to the most recent line if
           // nothing matches.
-          const lines = await getAppLogs(appId);
+          const lines = await getLogs(appId);
           const errored = lines.find((l) => /error|fail|panic|exception/i.test(l));
           const pick = errored ?? lines[lines.length - 1];
           if (pick) {

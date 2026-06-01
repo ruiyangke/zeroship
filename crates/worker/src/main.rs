@@ -84,6 +84,32 @@ struct WorkerCli {
     #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
     blob_store: String,
 
+    /// Redis connection URL for the app `env.kv` namespace.
+    ///
+    /// Multi-node KV MUST be a SHARED store so a `set` on one worker node
+    /// is visible on another — Redis is that store (the bespoke
+    /// compio-redis driver; zero tokio). The URL selects single-node
+    /// (`redis://host:port`) or cluster (`redis://seed/?cluster=true&seeds=...`)
+    /// mode. When empty the `env.kv` namespace is absent (apps using
+    /// `@zeroship/kv` then fail loudly rather than silently diverging on a
+    /// per-process embedded store). The single-tenant CLI's per-process
+    /// `redb` backend is deliberately NOT used here — it can't stay
+    /// consistent across a worker fleet.
+    #[arg(long = "kv-url", env = "ZEROSHIP_KV_URL", default_value = "", hide_env_values = true)]
+    kv_url: String,
+
+    /// Root directory for the app `env.storage` object store (`LocalFs`).
+    ///
+    /// Multi-node storage MUST be a SHARED location so an object `put` on
+    /// one worker node is readable on another. In dev/single-host this is a
+    /// shared Docker volume mounted at the same path on every worker
+    /// replica — the same pattern the deploy blob store uses. (S3/R2 is the
+    /// prod backend and slots in behind the same `Backend` trait once the
+    /// storage crate's `s3` feature ships.) When empty the `env.storage`
+    /// namespace is absent.
+    #[arg(long = "storage-root", env = "ZEROSHIP_STORAGE_ROOT", default_value = "")]
+    storage_root: String,
+
     /// HTTP bind host.
     #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
     bind: String,
@@ -131,6 +157,9 @@ impl std::fmt::Debug for WorkerCli {
             .field("worker_key", &"<redacted>")
             .field("shutdown_timeout", &self.shutdown_timeout)
             .field("blob_store", &self.blob_store)
+            // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
+            .field("kv_url", &"<redacted>")
+            .field("storage_root", &self.storage_root)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
             .field("config_path", &self.config_path)
@@ -155,6 +184,13 @@ pub struct WorkerConfig {
     pub control_url: String,
     pub control_key: String,
     pub db_url: Option<String>,
+    /// Redis URL for the app `env.kv` namespace. `None` ⇒ namespace absent.
+    /// Shared across worker nodes — see `WorkerCli::kv_url`.
+    pub kv_url: Option<String>,
+    /// Root dir for the app `env.storage` (`LocalFs`) namespace. `None` ⇒
+    /// namespace absent. A shared volume across nodes — see
+    /// `WorkerCli::storage_root`.
+    pub storage_root: Option<PathBuf>,
     pub max_isolates: usize,
     pub poll_interval_secs: u64,
     /// Shared secret with the gateway. When non-empty, every /dispatch call
@@ -225,6 +261,17 @@ fn main() -> std::io::Result<()> {
     );
     let shutdown_timeout = cli.shutdown_timeout;
     let blob_store_root = cli.blob_store;
+    // KV URL may embed credentials (`redis://user:pass@host`), so resolve it
+    // through the secret indirection like the DSNs (env:/file:/vault: refs +
+    // `[secrets]` overlay tier). The overlay's `kv_url` slot back-fills an
+    // empty CLI/env value; CLI/env still wins.
+    let kv_url = zeroship_core::config::obtain_secret(
+        "ZEROSHIP_KV_URL / --kv-url",
+        &cli.kv_url,
+        file_secrets.kv_url.as_deref(),
+        cli.check_config,
+    );
+    let storage_root = cli.storage_root;
     let bind_host = cli.bind;
     let socket_path = cli.socket;
 
@@ -278,6 +325,13 @@ fn main() -> std::io::Result<()> {
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
         report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
+        // Surface the kernel-namespace wiring without leaking the KV URL
+        // (it may carry credentials) — booleans only, like `db_configured`.
+        report.field("kv_configured", CheckValue::Flag(!kv_url.is_empty()));
+        report.field(
+            "storage_configured",
+            CheckValue::Flag(!storage_root.is_empty()),
+        );
 
         let fmt = if cli.check_config_format == "json" {
             CheckFormat::Json
@@ -300,10 +354,30 @@ fn main() -> std::io::Result<()> {
     );
     tracing::info!(blob_store_root = %blob_store_root, "worker blob store configured");
 
+    let kv_url_opt = if kv_url.is_empty() { None } else { Some(kv_url) };
+    let storage_root_opt = if storage_root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(&storage_root))
+    };
+    // Announce the resolved app-kernel namespace surface so a deployment
+    // that forgot to wire kv/storage is visible in the worker's boot log
+    // (rather than only surfacing as a runtime "env.kv is undefined" in a
+    // creator app). `auth` is always on; `db`/`kv`/`storage` track config.
+    tracing::info!(
+        db = !db_url.is_empty(),
+        kv = kv_url_opt.is_some(),
+        storage = storage_root_opt.is_some(),
+        auth = true,
+        "worker app-kernel namespaces"
+    );
+
     let config = Arc::new(WorkerConfig {
         control_url,
         control_key,
         db_url: if db_url.is_empty() { None } else { Some(db_url) },
+        kv_url: kv_url_opt,
+        storage_root: storage_root_opt,
         max_isolates,
         poll_interval_secs: poll_interval,
         worker_key,
@@ -354,7 +428,14 @@ fn main() -> std::io::Result<()> {
         let shared = shared_versions.clone();
         let envs = shared_envs.clone();
         let logs = shared_logs.clone();
-        cache::init_cache(config.max_isolates, config.db_url.clone());
+        cache::init_cache(
+            config.max_isolates,
+            cache::KernelConfig {
+                db_url: config.db_url.clone(),
+                kv_url: config.kv_url.clone(),
+                storage_root: config.storage_root.clone(),
+            },
+        );
         // Per-thread reconcile loop — reads from the shared version map,
         // writes env into the process-wide env cache.
         sync::start_sync(config.clone(), shared, envs.clone());

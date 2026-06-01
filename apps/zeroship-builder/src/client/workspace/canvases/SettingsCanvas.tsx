@@ -1,70 +1,58 @@
-// ─── SettingsCanvas — identity, plan, danger zone (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.7) ───
+// ─── SettingsCanvas — identity, archive, danger zone (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.7) ───
 //
-// Three sections.
-//   • Identity: app name (read-only V1), app id (copyable),
-//     URL preview ({slug}.zeroship.app).
-//   • Plan: current plan with chip + Free/Maker/Pro upgrade buttons.
-//   • Danger zone: typed-confirmation delete. Type the exact app
-//     name to enable the red Delete button. On confirm, deleteApp
-//     then navigate("/").
+// The console is a PURE creator app: a project is a KV-local per-thread
+// sandbox session. There is no plan / billing (no control plane) and no
+// deployed-app concepts. Three sections.
+//   • Identity: project name (read-only V1), project id (copyable).
+//   • Archive: KV-local soft-delete toggle.
+//   • Danger zone: typed-confirmation delete (KV-local). Type the exact
+//     project name to enable the red Delete button; on confirm,
+//     deleteProject then navigate home.
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertDialog, Badge, Button, Card, Input } from "@zeroship/ui";
+import { AlertDialog, Button, Card, Input } from "@zeroship/ui";
 import {
-  archiveApp,
-  deleteApp,
-  unarchiveApp,
-  updatePlan,
-  type AppRecord,
+  archiveProject,
+  deleteProject,
+  unarchiveProject,
+  type ProjectRecord,
 } from "../../api";
 
 export interface SettingsCanvasProps {
   appId: string;
-  app?: AppRecord;
+  app?: ProjectRecord;
 }
-
-const PLANS: ReadonlyArray<{
-  id: string;
-  label: string;
-  description: string;
-}> = [
-  { id: "free",   label: "Free",   description: "For poking around. Limited compute." },
-  { id: "maker",  label: "Maker",  description: "For real projects. Real CPU budget." },
-  { id: "pro",    label: "Pro",    description: "For traffic that grows. Higher quotas." },
-];
 
 export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const upgrade = useMutation({
-    mutationFn: async (plan: string) => updatePlan({ appId, plan_id: plan }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["app", appId] }),
-  });
   const del = useMutation({
-    mutationFn: async () => deleteApp(appId),
-    onSuccess: () => navigate("/", { replace: true }),
+    mutationFn: async () => deleteProject(appId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      navigate("/home", { replace: true });
+    },
   });
   const archive = useMutation({
-    mutationFn: async () => archiveApp({ appId }),
+    mutationFn: async () => archiveProject({ appId }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["apps"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["app", appId] });
       navigate("/home", { replace: true });
     },
   });
   const unarchive = useMutation({
-    mutationFn: async () => unarchiveApp({ appId }),
+    mutationFn: async () => unarchiveProject({ appId }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["apps"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
       qc.invalidateQueries({ queryKey: ["app", appId] });
     },
   });
 
-  const currentPlan = app?.plan_id ?? "free";
   const isArchived = app?.archived === true;
 
   return (
@@ -72,66 +60,10 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
       <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
         <Section
           title="Identity"
-          helper="The name and address your project lives at."
+          helper="The name and id your project lives under."
         >
           <Field label="Project name" value={app?.name ?? "—"} readOnly />
           <CopyField label="Project id" value={appId} />
-          <Field
-            label="URL"
-            value={app ? `${app.name}.zeroship.app` : "—"}
-            readOnly
-          />
-        </Section>
-
-        <Section
-          title="Plan"
-          helper="What you're paying for. Upgrade when traffic grows."
-        >
-          <div className="grid gap-3" data-testid="settings-plans">
-            {PLANS.map((plan) => {
-              const active = plan.id === currentPlan;
-              return (
-                <Card
-                  key={plan.id}
-                  data-testid={`settings-plan:${plan.id}`}
-                  variant={active ? "elevated" : "outline"}
-                  interactive={!active}
-                  className="grid items-center gap-4 px-5 py-4"
-                  style={{ gridTemplateColumns: "1fr auto" }}
-                >
-                  <div>
-                    <div className="font-serif italic font-medium text-[18px] flex items-baseline gap-2">
-                      <span>{plan.label}</span>
-                      {active && (
-                        <Badge
-                          data-testid="settings-plan-current"
-                          intent="info"
-                        >
-                          current
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="font-serif text-[13px] text-ink-soft mt-0.5">
-                      {plan.description}
-                    </div>
-                  </div>
-                  {active ? (
-                    <span className="font-serif italic text-[13px] text-pencil">
-                      —
-                    </span>
-                  ) : (
-                    <Button
-                      onClick={() => upgrade.mutate(plan.id)}
-                      loading={upgrade.isPending && upgrade.variables === plan.id}
-                      data-testid={`settings-plan-upgrade:${plan.id}`}
-                    >
-                      Choose {plan.label}
-                    </Button>
-                  )}
-                </Card>
-              );
-            })}
-          </div>
         </Section>
 
         <Section
@@ -148,7 +80,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
             <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] mb-4">
               {isArchived
                 ? "It's hidden from the default Home view but everything's intact. Restore to bring it back."
-                : "Hide it from the default Home view. Code, settings, and deploys stay put. You can restore it later."}
+                : "Hide it from the default Home view. Your code and settings stay put. You can restore it later."}
             </p>
             {isArchived ? (
               <Button
@@ -185,8 +117,8 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
               Delete this project
             </div>
             <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] mb-4">
-              The project, its database, all secrets, deploys, and logs go
-              away. This can't be undone.
+              The project and its sandbox workspace go away. This can't be
+              undone.
             </p>
             <Button
               variant="filled"
@@ -246,8 +178,8 @@ function DeleteConfirm({
           <AlertDialog.Header>
             <AlertDialog.Title>Delete project?</AlertDialog.Title>
             <AlertDialog.Description>
-              This permanently deletes the project, database, secrets, and all
-              deploys. Type{" "}
+              This permanently deletes the project and its sandbox
+              workspace. Type{" "}
               <code className="font-mono text-[12.5px] bg-paper-2 px-1.5 py-0.5 rounded-[2px] border border-rule text-ink">
                 {appName || "—"}
               </code>{" "}

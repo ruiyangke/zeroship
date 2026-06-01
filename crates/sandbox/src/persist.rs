@@ -92,7 +92,7 @@ use zeroship_sandbox_agent::sig;
 ///
 /// **v1 → v2 (legacy).** v2 added `preview_secrets` + `preview_audit`.
 /// v3 keeps `preview_secrets` (it's secret) and drops `preview_audit`
-/// (now a pg row in `sandbox.shares`). The v1 reader stayed in v2 for
+/// (now a pg row in `zeroship.shares`). The v1 reader stayed in v2 for
 /// back-compat; this keeps that compat one more step (v1 + v2
 /// records both deserialize through the v3 struct).
 pub const SEAL_VERSION: u8 = 3;
@@ -186,7 +186,7 @@ pub struct SealedPreviewSecrets {
 
 /// On-disk audit-log entry per minted share token. **No longer carried
 /// inside `SealedAuth`** — share-token audit metadata
-/// is now a `sandbox.shares` row in pg. The struct is retained for
+/// is now a `zeroship.shares` row in pg. The struct is retained for
 /// v2-record back-compat (the v2 deserializer would otherwise refuse
 /// to round-trip records that carried `preview_audit`) and for the
 /// share-list internal helper that adapts the pg row shape into the

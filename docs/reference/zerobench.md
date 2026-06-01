@@ -33,7 +33,7 @@ By default it expects `zerobench` at `~/Projects/zerobench/target/release/zerobe
 
 The shared plan is [`zeroship-bench.rhai`](../../crates/runtime/benches/zeroship-bench.rhai). It currently drives:
 
-- RPC over `POST /_zs/v1/<id>`
+- RPC over `POST /__zeroship/v1/<id>`
 - HTTP fetch over `GET /hello`
 - SSE over `GET /sse?...`
 - WebSocket RTT over `ws://.../`

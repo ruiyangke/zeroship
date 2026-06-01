@@ -14,7 +14,7 @@
 //!     NOT run.
 //!
 //! Tests drive the kernel via `call_fetch_handler` against the spec
-//! wire (`POST /_zs/v1/<id>` with `{"json":<input>}`) so the full
+//! wire (`POST /__zeroship/v1/<id>` with `{"json":<input>}`) so the full
 //! dispatch path — including the Rust-side fast path that reads
 //! `default.rpc` off the bootstrap module's namespace — is exercised.
 
@@ -63,7 +63,7 @@ fn unwrap_json_envelope(body: &str) -> String {
 fn dispatch(runtime: &Runtime, name: &str, body: &str) -> (u16, String) {
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
-    let url = format!("http://localhost/_zs/v1/{}", name);
+    let url = format!("http://localhost/__zeroship/v1/{}", name);
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
