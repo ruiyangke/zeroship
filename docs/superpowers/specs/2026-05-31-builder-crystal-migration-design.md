@@ -1,7 +1,17 @@
 # zeroship-builder → @zeroship/ui crystal migration (+ control-surface removal)
 
-**Status:** approved (interactive, 2026-05-31). Branch `builder/ui-crystal-migration`
+**Status:** IMPLEMENTED (2026-06-01). Branch `builder/ui-crystal-migration`
 (worktree `.worktrees/builder-ui-crystal`). Commit-only, **never push**.
+
+All phases landed: 0 prune (`6f85880a` chain) · 1 composites (`57556080`/`7e746c09`) ·
+2 shells+pages (`caaff530`) · 3 workspace+canvases (`2cf6e07e`) · 4 chat (`bf2d3220`) ·
+5 primitive-delete + Tailwind teardown + theme fix (`6f85880a`). Gates green
+(`tsc -b` 0, `vite build`, `vitest` 22/22); built artifact is pure crystal
+(`[data-theme=crystal]` + ~4.8k `--zs-*` usages, zero editorial residue);
+`public-pages` e2e 11/11 pass against the built app in real Chromium. Full
+interactive e2e (workspace/chat/auth flows) needs the live dev runtime + backend
+(the `zeroship` CLI + sandbox) — not runnable in the offline worktree; those
+specs target the dev-only `/__test/workspace` route + a dev-auth session.
 
 Sibling of the approved [`2026-05-31-console-pure-creator-app-design.md`] — this
 spec finishes the *control-surface removal* that doc mandates (its locked
