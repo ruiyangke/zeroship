@@ -495,7 +495,7 @@ async fn admin_gdpr_delete_removes_all_user_data() {
     // Audit row written under the gdpr role for the same TX.
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM zeroship.events \
+            "SELECT count(*)::BIGINT FROM zeroship.sandbox_events \
               WHERE user_id = $1::TEXT AND kind = 'gdpr.delete_user'",
             &[&user_a],
         )
@@ -510,7 +510,7 @@ async fn admin_gdpr_delete_removes_all_user_data() {
     // user_b's events untouched.
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM zeroship.events WHERE user_id = $1::TEXT",
+            "SELECT count(*)::BIGINT FROM zeroship.sandbox_events WHERE user_id = $1::TEXT",
             &[&user_b],
         )
         .await
@@ -638,7 +638,7 @@ async fn admin_user_export_after_gdpr_delete_excludes_audit_row() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Now export the (now-erased) user. The audit row exists in
-    // zeroship.events but must be hidden from the export.
+    // zeroship.sandbox_events but must be hidden from the export.
     let req = test::TestRequest::default()
         .uri(&format!("/admin/users/{user_a}/export"))
         .header("authorization", &format!("Bearer {token}"))
@@ -665,9 +665,9 @@ async fn admin_user_export_after_gdpr_delete_excludes_audit_row() {
 
 /// Regression test: `DELETE /admin/users/{user_id}`
 /// for a user with ZERO sandboxes must not write a synthetic
-/// `sbx_<random>` id into `zeroship.events`. Pre-fix, the audit row
-/// minted a never-existed typed-id and inserted it as `events.sandbox_id`,
-/// polluting `idx_events_sandbox_ts` with an unmatchable key. Post-fix
+/// `sbx_<random>` id into `zeroship.sandbox_events`. Pre-fix, the audit row
+/// minted a never-existed typed-id and inserted it as `sandbox_events.sandbox_id`,
+/// polluting `idx_sandbox_events_sandbox_ts` with an unmatchable key. Post-fix
 /// (migration 0005) the column is NULLable and the audit row writes NULL.
 #[ntex::test]
 #[ignore = "needs Postgres; no synthetic sandbox_id"]
@@ -691,7 +691,7 @@ async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["sandboxes_tombstoned"].as_i64().unwrap(), 0);
 
-    // Inspect zeroship.events directly. The audit row must exist
+    // Inspect zeroship.sandbox_events directly. The audit row must exist
     // (Art. 30 RoPA) but its sandbox_id must be NULL — not a
     // synthetic typed-id. Pre-fix, every zero-sandbox GDPR delete
     // produced exactly one polluted index entry per call.
@@ -703,7 +703,7 @@ async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
 
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM zeroship.events \
+            "SELECT count(*)::BIGINT FROM zeroship.sandbox_events \
               WHERE user_id = $1::TEXT \
                 AND kind = 'gdpr.delete_user' \
                 AND sandbox_id IS NULL",
@@ -721,7 +721,7 @@ async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
     // sandbox_id for this user. (Pre-fix this was 1.)
     let row = client
         .query_one(
-            "SELECT count(*)::BIGINT FROM zeroship.events \
+            "SELECT count(*)::BIGINT FROM zeroship.sandbox_events \
               WHERE user_id = $1::TEXT \
                 AND kind = 'gdpr.delete_user' \
                 AND sandbox_id IS NOT NULL",

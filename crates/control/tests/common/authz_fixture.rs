@@ -18,7 +18,7 @@ impl AdminPat {
         let _ = state
             .auth_pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR user_id = $2",
+                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
@@ -31,7 +31,7 @@ impl AdminPat {
             .await;
         let _ = state
             .auth_pg
-            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = state
             .auth_pg
@@ -73,7 +73,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
         state
             .auth_pg
             .execute(
-                "INSERT INTO zeroship.roles (user_id, role, granted_by) \
+                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
                  VALUES ($1, 'admin', $1)",
                 &[&user_id],
             )

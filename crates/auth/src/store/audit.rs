@@ -25,7 +25,7 @@ pub async fn insert(
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO zeroship.audit_events \
-            (event_type, outcome, user_id, client_id, request_id, ip, user_agent, auth_method, detail) \
+            (event_type, outcome, actor_user_id, client_id, request_id, ip, user_agent, auth_method, detail) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         &[
             &event_type,

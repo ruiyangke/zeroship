@@ -200,7 +200,7 @@ impl Fixture {
         if let Some(role) = platform_role {
             auth_pg
                 .execute(
-                    "INSERT INTO zeroship.roles (user_id, role) VALUES ($1, $2)",
+                    "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, $2)",
                     &[&user_id, &role],
                 )
                 .await
@@ -272,7 +272,7 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -295,7 +295,7 @@ impl Fixture {
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .state
@@ -329,7 +329,7 @@ async fn audit_event_count(state: &AppState, user_id: Uuid, event_type: &str) ->
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
-             WHERE user_id = $1 AND event_type = $2",
+             WHERE actor_user_id = $1 AND event_type = $2",
             &[&user_id, &event_type],
         )
         .await

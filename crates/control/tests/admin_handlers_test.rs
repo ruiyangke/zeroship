@@ -127,7 +127,7 @@ async fn insert_user(pg: &Client, label: &str) -> Uuid {
 async fn count_role(pg: &Client, user_id: Uuid, role: &str) -> i64 {
     let rows = pg
         .query(
-            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.roles \
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.platform_admin_roles \
              WHERE user_id = $1 AND role = $2",
             &[&user_id, &role],
         )
@@ -164,12 +164,12 @@ async fn app_flag(pg: &Client, app_id: Uuid, column: &str) -> bool {
 async fn cleanup_user(pg: &Client, user_id: Uuid) {
     let _ = pg
         .execute(
-            "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
+            "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user_id])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
@@ -275,7 +275,7 @@ async fn admin_can_revoke_platform_role() {
     fx.state
         .auth_pg
         .execute(
-            "INSERT INTO zeroship.roles (user_id, role, granted_by) \
+            "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
              VALUES ($1, 'support', $2)",
             &[&target, &pat.user_id],
         )

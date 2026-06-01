@@ -406,7 +406,7 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         let conn = self.conn().await?;
         conn.execute(
-            "INSERT INTO zeroship.usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.app_usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
              ON CONFLICT (app_id, resource) DO UPDATE SET value = u.value + EXCLUDED.value",
             &[app_id, &resource, &delta],
         )
@@ -422,7 +422,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT resource, value FROM zeroship.usage WHERE app_id = $1",
+                "SELECT resource, value FROM zeroship.app_usage WHERE app_id = $1",
                 &[app_id],
             )
             .await?;

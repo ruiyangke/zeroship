@@ -513,7 +513,7 @@ mod tests {
         let found = found.expect("identity should exist");
         assert_eq!(found.user_id, user_id);
 
-        // Cleanup — FK cascade on zeroship.identities.user_id catches the link.
+        // Cleanup — FK cascade on zeroship.federated_identities.user_id catches the link.
         client
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
             .await
@@ -625,7 +625,7 @@ mod tests {
 
         let identity_rows = client
             .query(
-                "SELECT id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+                "SELECT id FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
                 &[&"google", &subject.as_str()],
             )
             .await

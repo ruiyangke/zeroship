@@ -234,7 +234,7 @@ async fn audit_decision(
     if let Err(err) = pg
         .execute(
             "INSERT INTO zeroship.authz_decisions \
-                (user_id, token_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
+                (actor_user_id, token_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             &[
                 &ctx.principal_id,

@@ -254,11 +254,11 @@ pub async fn fresh_login_challenge(
 /// Delete sessions + user row for `email`. CITEXT columns require an explicit
 /// `text→citext` cast for the bind (compio-postgres binds `&str` as TEXT; PG
 /// won't auto-cast in a WHERE). Sessions are deleted first to avoid tripping
-/// the FK from `zeroship.sessions.user_id`. Errors are swallowed (best-effort).
+/// the FK from `zeroship.idp_sessions.user_id`. Errors are swallowed (best-effort).
 pub async fn cleanup_user(pg: &compio_postgres::Client, email: &str) {
     let _ = pg
         .execute(
-            "DELETE FROM zeroship.sessions WHERE user_id IN \
+            "DELETE FROM zeroship.idp_sessions WHERE user_id IN \
              (SELECT id FROM zeroship.users WHERE email = $1::citext)",
             &[&email],
         )

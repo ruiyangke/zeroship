@@ -94,7 +94,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
         .expect("unlink again");
     assert!(!removed_again, "second unlink must report no rows deleted");
 
-    // Cleanup. ON DELETE CASCADE on zeroship.identities.user_id would have caught
+    // Cleanup. ON DELETE CASCADE on zeroship.federated_identities.user_id would have caught
     // any stray row; we still drop the user explicitly to leave the schema
     // clean for the next test run.
     client

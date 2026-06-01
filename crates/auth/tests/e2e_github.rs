@@ -301,7 +301,7 @@ async fn github_federation_creates_new_user() {
     let identity_rows = fx
         .pg
         .query(
-            "SELECT user_id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+            "SELECT user_id FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
             &[&"github", &mock_user.subject.as_str()],
         )
         .await
@@ -313,14 +313,14 @@ async fn github_federation_creates_new_user() {
     // 5. Cleanup.
     fx.pg
         .execute(
-            "DELETE FROM zeroship.identities WHERE user_id = $1",
+            "DELETE FROM zeroship.federated_identities WHERE user_id = $1",
             &[&user_id],
         )
         .await
         .ok();
     fx.pg
         .execute(
-            "DELETE FROM zeroship.sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
             &[&user_id],
         )
         .await
@@ -406,7 +406,7 @@ async fn github_callback_invalid_hydra_challenge_has_no_local_side_effects() {
     let identity_count: i64 = fx
         .pg
         .query_one(
-            "SELECT COUNT(*) FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+            "SELECT COUNT(*) FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
             &[&"github", &mock_user.subject.as_str()],
         )
         .await
@@ -550,7 +550,7 @@ async fn github_federation_rejects_noreply_only_email() {
     let identity_rows = fx
         .pg
         .query(
-            "SELECT id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+            "SELECT id FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
             &[&"github", &mock_user.subject.as_str()],
         )
         .await
@@ -663,7 +663,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     let identity_rows = fx
         .pg
         .query(
-            "SELECT id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+            "SELECT id FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
             &[&"github", &mock_user.subject.as_str()],
         )
         .await

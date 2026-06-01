@@ -31,8 +31,8 @@ async fn registry_core_tables_live_in_control_schema() {
 
     for table in [
         "apps",
-        "usage",
-        "usage_history",
+        "app_usage",
+        "app_usage_history",
         "app_vars",
         "app_secrets",
         "app_env_expose",

@@ -215,7 +215,7 @@ async fn auth_login_throughput() {
     for email in &emails {
         let _ = pg
             .execute(
-                "DELETE FROM zeroship.sessions WHERE user_id IN \
+                "DELETE FROM zeroship.idp_sessions WHERE user_id IN \
                  (SELECT id FROM zeroship.users WHERE email = $1::citext)",
                 &[&email.as_str()],
             )

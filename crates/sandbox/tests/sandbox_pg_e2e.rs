@@ -74,18 +74,18 @@ async fn migrated_schema_is_present_and_controller_boots() {
     let ty: &str = row.get(0);
     assert_eq!(ty, "bigint", "generation must be BIGINT");
 
-    // events is partitioned + has the BRIN index.
+    // sandbox_events is partitioned + has the BRIN index.
     let row = client
         .query_one(
             "SELECT count(*)::INTEGER FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'zeroship' AND c.relname = 'events_default'",
+              WHERE n.nspname = 'zeroship' AND c.relname = 'sandbox_events_default'",
             &[],
         )
         .await
         .unwrap();
     let n: i32 = row.get(0);
-    assert_eq!(n, 1, "events_default partition must exist");
+    assert_eq!(n, 1, "sandbox_events_default partition must exist");
 
     // Six monthly partitions. relkind='r' filters indexes /
     // sequences off pg_class; we want only the six partition tables.
@@ -95,25 +95,25 @@ async fn migrated_schema_is_present_and_controller_boots() {
               JOIN pg_namespace n ON n.oid = c.relnamespace
               WHERE n.nspname = 'zeroship'
                 AND c.relkind = 'r'
-                AND c.relname LIKE 'events\\_2026\\_%'",
+                AND c.relname LIKE 'sandbox\\_events\\_2026\\_%'",
             &[],
         )
         .await
         .unwrap();
     let n: i32 = row.get(0);
-    assert_eq!(n, 6, "expected 6 monthly events partitions, got {n}");
+    assert_eq!(n, 6, "expected 6 monthly sandbox_events partitions, got {n}");
 
-    // BRIN index on events.ts.
+    // BRIN index on sandbox_events.ts.
     let row = client
         .query_one(
             "SELECT count(*)::INTEGER FROM pg_indexes
-              WHERE schemaname = 'zeroship' AND indexname = 'idx_events_ts_brin'",
+              WHERE schemaname = 'zeroship' AND indexname = 'idx_sandbox_events_ts_brin'",
             &[],
         )
         .await
         .unwrap();
     let n: i32 = row.get(0);
-    assert_eq!(n, 1, "BRIN index on events.ts must exist");
+    assert_eq!(n, 1, "BRIN index on sandbox_events.ts must exist");
 
     // deleted_sandboxes tombstone table.
     let row = client
@@ -1611,12 +1611,12 @@ async fn takeover_includes_unreachable_status() {
 // promote the three runtime roles to LOGIN with a known password and
 // connect as each role to assert its capability matrix:
 //
-//   1. sandbox_app DELETE FROM events             → SQLSTATE 42501
+//   1. sandbox_app DELETE FROM sandbox_events     → SQLSTATE 42501
 //   2. sandbox_app DELETE FROM sandboxes          → succeeds
 //      (the controller's stop flow needs this; the design's NO-DELETE
 //      invariant applies only to the audit table, not to live state.)
-//   3. sandbox_audit SELECT FROM events           → SQLSTATE 42501
-//   4. sandbox_audit INSERT INTO events           → succeeds
+//   3. sandbox_audit SELECT FROM sandbox_events   → SQLSTATE 42501
+//   4. sandbox_audit INSERT INTO sandbox_events   → succeeds
 //   5. sandbox_gdpr SELECT FROM sandboxes         → succeeds
 //      (needs SELECT for the cascade WHERE chain)
 //   6. sandbox_gdpr INSERT INTO sandboxes         → SQLSTATE 42501
@@ -1680,8 +1680,8 @@ async fn role_sandbox_app_cannot_delete_events() {
     let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
     let client = pool.get().await.unwrap();
 
-    assert_sqlstate_42501("sandbox_app DELETE FROM events", || async {
-        client.execute("DELETE FROM zeroship.events", &[]).await
+    assert_sqlstate_42501("sandbox_app DELETE FROM sandbox_events", || async {
+        client.execute("DELETE FROM zeroship.sandbox_events", &[]).await
     })
     .await;
 }
@@ -1702,9 +1702,9 @@ async fn role_sandbox_audit_cannot_select_events() {
     // SELECT returns query results; pg returns the SQLSTATE on the
     // wire when the role lacks privilege. compio-postgres surfaces
     // it via Error::code().
-    let res = client.query("SELECT * FROM zeroship.events", &[]).await;
+    let res = client.query("SELECT * FROM zeroship.sandbox_events", &[]).await;
     match res {
-        Ok(_) => panic!("sandbox_audit SELECT FROM events: expected 42501, got Ok"),
+        Ok(_) => panic!("sandbox_audit SELECT FROM sandbox_events: expected 42501, got Ok"),
         Err(e) => {
             let code = e.code().map(|c| c.code()).unwrap_or("");
             assert_eq!(code, "42501", "expected 42501, got {code:?} ({e})");
@@ -1736,7 +1736,7 @@ async fn role_sandbox_audit_can_insert_events() {
     let event_id = typed_id("evt");
     let n = client
         .execute(
-            "INSERT INTO zeroship.events (event_id, sandbox_id, user_id, kind, ts, data) \
+            "INSERT INTO zeroship.sandbox_events (event_id, sandbox_id, user_id, kind, ts, data) \
              VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'role_perm_test', now(), '{}'::jsonb)",
             &[&event_id, &info.sandbox_id, &info.user_id],
         )

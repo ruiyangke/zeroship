@@ -16,7 +16,7 @@
 //!      token signed with the mock's key.
 //!   4. The auth server verifies that JWT against the mock's JWKS
 //!      (live network fetch via `JwksCache`).
-//!   5. The linker creates a fresh `zeroship.users` row + an `zeroship.identities`
+//!   5. The linker creates a fresh `zeroship.users` row + an `zeroship.federated_identities`
 //!      row for `(google, mock_user.subject)`.
 //!   6. The handler calls hydra's `accept_login` and is given a redirect
 //!      back to the RP — proving the dance closed cleanly.
@@ -298,7 +298,7 @@ async fn google_federation_creates_new_user() {
 
     let identity_rows = pg
         .query(
-            "SELECT user_id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+            "SELECT user_id FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
             &[&"google", &mock_user.subject.as_str()],
         )
         .await
@@ -306,7 +306,7 @@ async fn google_federation_creates_new_user() {
     assert_eq!(
         identity_rows.len(),
         1,
-        "exactly one zeroship.identities row for (google, sub)"
+        "exactly one zeroship.federated_identities row for (google, sub)"
     );
     let identity_user_id: uuid::Uuid = identity_rows[0].get("user_id");
     assert_eq!(identity_user_id, user_id, "identity points at the new user");
@@ -314,13 +314,13 @@ async fn google_federation_creates_new_user() {
     // 10. Cleanup.
     admin.delete_client(&test_client_id).await.ok();
     pg.execute(
-        "DELETE FROM zeroship.identities WHERE user_id = $1",
+        "DELETE FROM zeroship.federated_identities WHERE user_id = $1",
         &[&user_id],
     )
     .await
     .ok();
     pg.execute(
-        "DELETE FROM zeroship.sessions WHERE user_id = $1",
+        "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
         &[&user_id],
     )
     .await
@@ -522,7 +522,7 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
 
     let identity_rows = pg
         .query(
-            "SELECT user_id FROM zeroship.identities WHERE provider = $1 AND subject = $2",
+            "SELECT user_id FROM zeroship.federated_identities WHERE provider = $1 AND subject = $2",
             &[&"google", &mock_user.subject.as_str()],
         )
         .await

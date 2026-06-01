@@ -1,4 +1,4 @@
-//! `zeroship.identities` CRUD — OAuth/OIDC provider linkages keyed on (provider, subject).
+//! `zeroship.federated_identities` CRUD — OAuth/OIDC provider linkages keyed on (provider, subject).
 //!
 //! Each row represents one external identity (Google/GitHub/etc.) bound to a
 //! local `zeroship.users` row. The `(provider, subject)` pair is `UNIQUE` —
@@ -40,7 +40,7 @@ pub async fn find_by_provider_subject(
     let rows = conn
         .query(
             "SELECT id, user_id, provider, subject, email_at_link::text \
-             FROM zeroship.identities \
+             FROM zeroship.federated_identities \
              WHERE provider = $1 AND subject = $2",
             &[&provider, &subject],
         )
@@ -72,7 +72,7 @@ pub async fn link(
 ) -> Result<Identity> {
     let rows = conn
         .query(
-            "INSERT INTO zeroship.identities (user_id, provider, subject, email_at_link, raw_profile) \
+            "INSERT INTO zeroship.federated_identities (user_id, provider, subject, email_at_link, raw_profile) \
              VALUES ($1, $2, $3, $4::citext, $5) \
              RETURNING id, user_id, provider, subject, email_at_link::text",
             &[&user_id, &provider, &subject, &email_at_link, &raw_profile],
@@ -94,7 +94,7 @@ pub async fn list_for_user(conn: &Client, user_id: Uuid) -> Result<Vec<Identity>
     let rows = conn
         .query(
             "SELECT id, user_id, provider, subject, email_at_link::text \
-             FROM zeroship.identities WHERE user_id = $1 \
+             FROM zeroship.federated_identities WHERE user_id = $1 \
              ORDER BY linked_at",
             &[&user_id],
         )
@@ -112,7 +112,7 @@ pub async fn list_for_user(conn: &Client, user_id: Uuid) -> Result<Vec<Identity>
 pub async fn unlink(conn: &Client, user_id: Uuid, provider: &str) -> Result<bool> {
     let affected = conn
         .execute(
-            "DELETE FROM zeroship.identities WHERE user_id = $1 AND provider = $2",
+            "DELETE FROM zeroship.federated_identities WHERE user_id = $1 AND provider = $2",
             &[&user_id, &provider],
         )
         .await
@@ -125,7 +125,7 @@ pub async fn unlink(conn: &Client, user_id: Uuid, provider: &str) -> Result<bool
 /// Concurrent unlinks against *different* providers on a no-password,
 /// two-identity user must not both succeed (that would orphan the account).
 /// A single auto-commit statement can't guarantee this under READ COMMITTED:
-/// the orphan-check read of `zeroship.identities` uses the statement's snapshot,
+/// the orphan-check read of `zeroship.federated_identities` uses the statement's snapshot,
 /// which is taken *before* it blocks on `zeroship.users FOR UPDATE`, so the loser
 /// still sees the winner's not-yet-deleted identity and deletes its own too.
 ///
@@ -167,14 +167,14 @@ async fn unlink_preserving_credential_locked(
              target AS MATERIALIZED ( \
                  SELECT EXISTS ( \
                      SELECT 1 \
-                     FROM zeroship.identities i \
+                     FROM zeroship.federated_identities i \
                      WHERE i.user_id = $1 \
                        AND i.provider = $2 \
                  ) AS had_target \
                  FROM locked_user \
              ), \
              deleted AS ( \
-                 DELETE FROM zeroship.identities i \
+                 DELETE FROM zeroship.federated_identities i \
                  USING locked_user u, target t \
                  WHERE i.user_id = $1 \
                    AND i.provider = $2 \
@@ -183,7 +183,7 @@ async fn unlink_preserving_credential_locked(
                        u.has_password \
                        OR EXISTS ( \
                            SELECT 1 \
-                           FROM zeroship.identities other \
+                           FROM zeroship.federated_identities other \
                            WHERE other.user_id = $1 \
                              AND other.provider <> $2 \
                        ) \

@@ -9,7 +9,7 @@
 //!   2. **callback** — `?code=…&state=…` arrives back. We re-read the
 //!      stash, verify state, exchange the code for an ID token, verify
 //!      that against Google's JWKS, resolve / create the local user via
-//!      [`identity::linker`], create an `zeroship.sessions` row, and finally
+//!      [`identity::linker`], create an `zeroship.idp_sessions` row, and finally
 //!      call hydra's `accept_login` to hand control back to the OIDC
 //!      pipeline. The `IdP` session cookie is dropped on the same
 //!      response so subsequent SSO requests skip the login form.

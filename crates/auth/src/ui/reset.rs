@@ -137,7 +137,6 @@ pub async fn post(
         user_id = %completed.user_id,
         idp_sessions = revoked.idp_sessions,
         gateway_sessions = revoked.gateway_sessions,
-        console_sessions = revoked.console_sessions,
         magic_tokens = revoked.magic_tokens,
         magic_completions = revoked.magic_completions,
         "password_reset revoked sessions and stale tokens"
@@ -177,7 +176,6 @@ pub async fn post(
 struct ResetRevocationCounts {
     idp_sessions: u64,
     gateway_sessions: u64,
-    console_sessions: u64,
     magic_tokens: u64,
     magic_completions: u64,
 }
@@ -246,11 +244,11 @@ async fn complete_password_reset_tx(
 
     let idp_sessions = conn
         .execute(
-            "DELETE FROM zeroship.sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
             &[&completed.user_id],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("password_reset delete zeroship.sessions: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("password_reset delete zeroship.idp_sessions: {e}")))?;
 
     let gateway_sessions = conn
         .execute(
@@ -259,14 +257,6 @@ async fn complete_password_reset_tx(
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete gateway_sessions: {e}")))?;
-
-    let console_sessions = conn
-        .execute(
-            "DELETE FROM zeroship.console_sessions WHERE user_id = $1",
-            &[&completed.user_id],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("password_reset delete console_sessions: {e}")))?;
 
     let magic_tokens = conn
         .execute(
@@ -290,7 +280,6 @@ async fn complete_password_reset_tx(
     let counts = ResetRevocationCounts {
         idp_sessions,
         gateway_sessions,
-        console_sessions,
         magic_tokens,
         magic_completions,
     };
@@ -305,7 +294,6 @@ async fn complete_password_reset_tx(
             detail: serde_json::json!({
                 "idp_sessions": counts.idp_sessions,
                 "gateway_sessions": counts.gateway_sessions,
-                "console_sessions": counts.console_sessions,
                 "magic_tokens": counts.magic_tokens,
                 "magic_completions": counts.magic_completions,
             }),

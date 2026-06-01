@@ -583,7 +583,7 @@ async fn gateway_oidc_rp_full_dance() {
         .await;
     let _ = pg_client
         .execute(
-            "DELETE FROM zeroship.sessions WHERE user_id = $1",
+            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
             &[&user_id],
         )
         .await;

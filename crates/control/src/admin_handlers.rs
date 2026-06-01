@@ -105,7 +105,7 @@ pub async fn grant_platform_role(
     if let Err(err) = state
         .auth_pg
         .execute(
-            "INSERT INTO zeroship.roles (user_id, role, granted_by) \
+            "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
              VALUES ($1, $2, $3) \
              ON CONFLICT (user_id) DO UPDATE \
              SET role = $2, granted_by = $3, granted_at = NOW()",
@@ -154,7 +154,7 @@ pub async fn revoke_platform_role(
 
     if let Err(err) = state
         .auth_pg
-        .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&target])
+        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&target])
         .await
     {
         tracing::error!(error = %err, "control: platform role revoke failed");
@@ -559,7 +559,7 @@ async fn platform_role(
 ) -> Result<Option<String>, web::HttpResponse> {
     let rows = state
         .auth_pg
-        .query("SELECT role FROM zeroship.roles WHERE user_id = $1", &[&user_id])
+        .query("SELECT role FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&user_id])
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "control: platform role lookup failed");

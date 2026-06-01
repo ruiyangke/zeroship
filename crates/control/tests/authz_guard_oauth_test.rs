@@ -158,7 +158,7 @@ impl Fixture {
             .state
             .auth_pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -181,7 +181,7 @@ impl Fixture {
         let _ = self
             .state
             .auth_pg
-            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .state
@@ -277,7 +277,7 @@ async fn grant_platform_role(state: &AppState, user_id: Uuid, role: &str) {
     state
         .auth_pg
         .execute(
-            "INSERT INTO zeroship.roles (user_id, role, granted_by) VALUES ($1, $2, $1)",
+            "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) VALUES ($1, $2, $1)",
             &[&user_id, &role],
         )
         .await
@@ -383,7 +383,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         .query(
             "SELECT request_id \
              FROM zeroship.authz_decisions \
-             WHERE user_id = $1 AND action = 'apps:read' \
+             WHERE actor_user_id = $1 AND action = 'apps:read' \
              ORDER BY occurred_at DESC \
              LIMIT 1",
             &[&user_id],

@@ -363,7 +363,7 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
         .await
         .ok();
     pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])

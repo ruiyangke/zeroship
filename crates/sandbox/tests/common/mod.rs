@@ -45,7 +45,7 @@ const CHANGESETS: &[&str] = &[
     ),
 ];
 
-/// Drop the sandbox tables (CASCADE pulls the `events` partitions,
+/// Drop the sandbox tables (CASCADE pulls the `sandbox_events` partitions,
 /// indexes, and FKs) so each test starts clean, then re-apply the
 /// sandbox changesets into the `zeroship` schema. The `zeroship` schema
 /// itself is preserved — it also holds the auth/control tables, which
@@ -69,14 +69,14 @@ pub async fn reset_and_migrate(url: &str) {
         .await
         .expect("create zeroship schema");
 
-    // Drop only the sandbox tables. CASCADE removes the events
+    // Drop only the sandbox tables. CASCADE removes the sandbox_events
     // partitions and every dependent index / FK.
     client
         .batch_execute(
             "DROP TABLE IF EXISTS \
                  zeroship.wake_jobs, \
                  zeroship.deleted_sandboxes, \
-                 zeroship.events, \
+                 zeroship.sandbox_events, \
                  zeroship.shares, \
                  zeroship.sandboxes, \
                  zeroship.hosts \

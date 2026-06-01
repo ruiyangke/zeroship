@@ -46,8 +46,8 @@ BEGIN
     -- on events (no DELETE — the controller must not tombstone its
     -- own audit log).
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_app') THEN
-        EXECUTE 'REVOKE ALL ON zeroship.events FROM sandbox_app';
-        EXECUTE 'GRANT SELECT, INSERT ON zeroship.events TO sandbox_app';
+        EXECUTE 'REVOKE ALL ON zeroship.sandbox_events FROM sandbox_app';
+        EXECUTE 'GRANT SELECT, INSERT ON zeroship.sandbox_events TO sandbox_app';
         -- Ensure the non-events grants are present (idempotent —
         -- 0011 already granted these).
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON
@@ -63,7 +63,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_audit') THEN
         EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA zeroship FROM sandbox_audit';
         EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_audit';
-        EXECUTE 'GRANT INSERT ON zeroship.events TO sandbox_audit';
+        EXECUTE 'GRANT INSERT ON zeroship.sandbox_events TO sandbox_audit';
     END IF;
 
     -- ─── sandbox_gdpr ───────────────────────────────────────────
@@ -75,10 +75,10 @@ BEGIN
         EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA zeroship FROM sandbox_gdpr';
         EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_gdpr';
         EXECUTE 'GRANT SELECT, DELETE ON
-                    zeroship.sandboxes, zeroship.shares, zeroship.events,
+                    zeroship.sandboxes, zeroship.shares, zeroship.sandbox_events,
                     zeroship.deleted_sandboxes
                     TO sandbox_gdpr';
-        EXECUTE 'GRANT INSERT ON zeroship.deleted_sandboxes, zeroship.events TO sandbox_gdpr';
+        EXECUTE 'GRANT INSERT ON zeroship.deleted_sandboxes, zeroship.sandbox_events TO sandbox_gdpr';
     END IF;
 
     -- ─── sandbox_admin ──────────────────────────────────────────

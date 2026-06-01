@@ -718,7 +718,7 @@ pub async fn list_user_shares(
     let out: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|r| {
-            let port: i16 = r.get("port");
+            let port: i32 = r.get("port");
             serde_json::json!({
                 "token_id": r.get::<_, String>("token_id"),
                 "sandbox_id": r.get::<_, String>("sandbox_id"),
@@ -881,7 +881,7 @@ pub async fn export_user(
     //
     // Filter out `kind = 'gdpr.delete_user'` from the user-facing
     // export. These rows are operator-side
-    // records — they live in `zeroship.events` because the gdpr-role
+    // records — they live in `zeroship.sandbox_events` because the gdpr-role
     // INSERT grant runs through that table, but they are NOT user
     // data. They document who/when erased the user (GDPR Art. 30
     // Records of Processing Activities) and surfacing them on a
@@ -894,7 +894,7 @@ pub async fn export_user(
     let events_json = match tx
         .query_one(
             "WITH capped AS ( \
-               SELECT * FROM zeroship.events \
+               SELECT * FROM zeroship.sandbox_events \
                  WHERE user_id = $1::TEXT \
                    AND kind <> 'gdpr.delete_user' \
                  ORDER BY ts DESC \
@@ -911,7 +911,7 @@ pub async fn export_user(
     };
     let events_count: i64 = match tx
         .query_one(
-            "SELECT count(*)::BIGINT FROM zeroship.events \
+            "SELECT count(*)::BIGINT FROM zeroship.sandbox_events \
               WHERE user_id = $1::TEXT \
                 AND kind <> 'gdpr.delete_user'",
             &[&user_id],
@@ -1036,7 +1036,7 @@ pub async fn delete_user(
 
     let events_deleted: i64 = match tx
         .execute(
-            "DELETE FROM zeroship.events WHERE user_id = $1::TEXT",
+            "DELETE FROM zeroship.sandbox_events WHERE user_id = $1::TEXT",
             &[&user_id],
         )
         .await
@@ -1096,11 +1096,11 @@ pub async fn delete_user(
         "shares_deleted": shares_deleted,
     })
     .to_string();
-    // After migration 0005, `zeroship.events.sandbox_id` is nullable.
+    // After migration 0005, `zeroship.sandbox_events.sandbox_id` is nullable.
     // The GDPR audit row
     // isn't tied to any specific sandbox; we write `sandbox_id = NULL`
     // rather than synthesizing a never-existed `sbx_…` (which used
-    // to pollute `idx_events_sandbox_ts` with unmatchable keys when
+    // to pollute `idx_sandbox_events_sandbox_ts` with unmatchable keys when
     // the user had zero sandboxes). The pre-existing CHECK
     // constraint accepts NULL by default.
     //
@@ -1110,7 +1110,7 @@ pub async fn delete_user(
     let audit_sandbox_id: Option<String> = None;
     if let Err(e) = tx
         .execute(
-            "INSERT INTO zeroship.events (event_id, sandbox_id, user_id, kind, ts, data) \
+            "INSERT INTO zeroship.sandbox_events (event_id, sandbox_id, user_id, kind, ts, data) \
              VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'gdpr.delete_user', now(), \
                      CAST($4::TEXT AS JSONB))",
             &[&audit_event_id, &audit_sandbox_id, &user_id, &audit_data],

@@ -200,7 +200,7 @@ fn entity_cache_invalidation_refreshes_platform_role() {
         assert_eq!(denied, AuthzDecision::Deny);
 
         pg.execute(
-            "INSERT INTO zeroship.roles (user_id, role) VALUES ($1, 'admin')",
+            "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, 'admin')",
             &[&fixture.user_id],
         )
         .await
@@ -228,7 +228,7 @@ fn audit_decision_recorded() {
             .query(
                 "SELECT action, resource_type, resource_id, decision, matched_policies \
              FROM zeroship.authz_decisions \
-             WHERE user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
+             WHERE actor_user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
              ORDER BY occurred_at DESC \
              LIMIT 1",
                 &[
@@ -310,7 +310,7 @@ impl Fixture {
 
         if let Some(role) = platform_role {
             pg.execute(
-                "INSERT INTO zeroship.roles (user_id, role) VALUES ($1, $2)",
+                "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, $2)",
                 &[&user_id, &role],
             )
             .await
@@ -437,7 +437,7 @@ impl Fixture {
     async fn cleanup(&self, pg: &Client) {
         let _ = pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -453,7 +453,7 @@ impl Fixture {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         if let Some(app_db_id) = self.app_db_id {
             let _ = pg

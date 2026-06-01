@@ -38,23 +38,24 @@ CREATE TABLE zeroship.apps (
 --rollback DROP TABLE zeroship.apps;
 
 --changeset zeroship:control-usage splitStatements:true
-CREATE TABLE zeroship.usage (
+CREATE TABLE zeroship.app_usage (
     app_id UUID NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
     resource TEXT NOT NULL,
     value BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (app_id, resource)
 );
---rollback DROP TABLE zeroship.usage;
+--rollback DROP TABLE zeroship.app_usage;
 
 --changeset zeroship:control-usage-history splitStatements:true
-CREATE TABLE zeroship.usage_history (
+CREATE TABLE zeroship.app_usage_history (
     app_id UUID NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
     period TEXT NOT NULL,
     counters JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (app_id, period)
 );
-CREATE INDEX idx_usage_history_app ON zeroship.usage_history(app_id, period);
---rollback DROP TABLE zeroship.usage_history;
+CREATE INDEX idx_app_usage_history_app ON zeroship.app_usage_history(app_id, period);
+--rollback DROP TABLE zeroship.app_usage_history;
 
 --changeset zeroship:control-app-vars splitStatements:true
 CREATE TABLE zeroship.app_vars (
@@ -87,7 +88,7 @@ CREATE TABLE zeroship.app_env_expose (
 
 --changeset zeroship:control-creator-accounts splitStatements:true
 CREATE TABLE zeroship.creator_accounts (
-    creator_id UUID PRIMARY KEY,
+    creator_id UUID PRIMARY KEY REFERENCES zeroship.users(id),
     stripe_account_id TEXT NOT NULL,
     onboarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     unlinked_at TIMESTAMPTZ
@@ -141,19 +142,20 @@ CREATE TABLE zeroship.app_audit (
     actor_token_id UUID,
     action TEXT NOT NULL,
     resource TEXT,
-    source_ip TEXT,
+    source_ip INET,
     detail JSONB,
-    at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_app_audit_app_at ON zeroship.app_audit(app_id, at DESC);
-CREATE INDEX idx_app_audit_creator_at ON zeroship.app_audit(creator_id, at DESC);
+CREATE INDEX idx_app_audit_app_at ON zeroship.app_audit(app_id, occurred_at DESC);
+CREATE INDEX idx_app_audit_creator_at ON zeroship.app_audit(creator_id, occurred_at DESC);
 --rollback DROP TABLE zeroship.app_audit;
 
 -- Append-only guard for zeroship.app_audit. The trigger function lives in the
--- public schema (matching registry.rs). splitStatements:false because the
+-- zeroship schema (uniform with audit_events_block_tamper /
+-- authz_decisions_block_tamper). splitStatements:false because the
 -- function body and the DO block contain `;` inside `$$`.
 --changeset zeroship:control-app-audit-guard splitStatements:false
-CREATE OR REPLACE FUNCTION public.app_audit_block_tamper()
+CREATE OR REPLACE FUNCTION zeroship.app_audit_block_tamper()
  RETURNS trigger AS $$
  BEGIN
      RAISE EXCEPTION 'app_audit is append-only'
@@ -163,15 +165,15 @@ CREATE OR REPLACE FUNCTION public.app_audit_block_tamper()
 DROP TRIGGER IF EXISTS app_audit_block_update ON zeroship.app_audit;
 CREATE TRIGGER app_audit_block_update
     BEFORE UPDATE ON zeroship.app_audit
-    FOR EACH ROW EXECUTE FUNCTION public.app_audit_block_tamper();
+    FOR EACH ROW EXECUTE FUNCTION zeroship.app_audit_block_tamper();
 DROP TRIGGER IF EXISTS app_audit_block_delete ON zeroship.app_audit;
 CREATE TRIGGER app_audit_block_delete
     BEFORE DELETE ON zeroship.app_audit
-    FOR EACH ROW EXECUTE FUNCTION public.app_audit_block_tamper();
+    FOR EACH ROW EXECUTE FUNCTION zeroship.app_audit_block_tamper();
 DROP TRIGGER IF EXISTS app_audit_block_truncate ON zeroship.app_audit;
 CREATE TRIGGER app_audit_block_truncate
     BEFORE TRUNCATE ON zeroship.app_audit
-    FOR EACH STATEMENT EXECUTE FUNCTION public.app_audit_block_tamper();
+    FOR EACH STATEMENT EXECUTE FUNCTION zeroship.app_audit_block_tamper();
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE zeroship.app_audit FROM PUBLIC;
 DO $$
  DECLARE
@@ -182,9 +184,7 @@ DO $$
          'zeroship_control',
          'zeroship_gateway',
          'zeroship_worker',
-         'zeroship_app',
-         'auth',
-         'control'
+         'zeroship_app'
      ] LOOP
          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
              EXECUTE format(
@@ -198,7 +198,7 @@ DO $$
 --rollback DROP TRIGGER IF EXISTS app_audit_block_truncate ON zeroship.app_audit;
 --rollback DROP TRIGGER IF EXISTS app_audit_block_delete ON zeroship.app_audit;
 --rollback DROP TRIGGER IF EXISTS app_audit_block_update ON zeroship.app_audit;
---rollback DROP FUNCTION IF EXISTS public.app_audit_block_tamper();
+--rollback DROP FUNCTION IF EXISTS zeroship.app_audit_block_tamper();
 
 --changeset zeroship:control-app-members splitStatements:true
 CREATE TABLE zeroship.app_members (
@@ -277,7 +277,7 @@ CREATE INDEX oauth_grants_client_idx
 CREATE TABLE zeroship.authz_decisions (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     occurred_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    user_id          UUID,
+    actor_user_id    UUID,
     token_id         UUID,
     action           TEXT NOT NULL,
     resource_type    TEXT NOT NULL,
@@ -290,7 +290,7 @@ CREATE TABLE zeroship.authz_decisions (
 CREATE INDEX authz_decisions_occurred_idx
     ON zeroship.authz_decisions (occurred_at DESC);
 CREATE INDEX authz_decisions_user_idx
-    ON zeroship.authz_decisions (user_id) WHERE user_id IS NOT NULL;
+    ON zeroship.authz_decisions (actor_user_id) WHERE actor_user_id IS NOT NULL;
 --rollback DROP TABLE zeroship.authz_decisions;
 
 -- Append-only guard for zeroship.authz_decisions. splitStatements:false because
@@ -325,9 +325,7 @@ DO $$
          'zeroship_control',
          'zeroship_gateway',
          'zeroship_worker',
-         'zeroship_app',
-         'auth',
-         'control'
+         'zeroship_app'
      ] LOOP
          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
              EXECUTE format(

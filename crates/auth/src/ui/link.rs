@@ -14,7 +14,7 @@
 //!      and `provider`.
 //!   2. POST `/link` — verify CSRF, re-decode the token, run the
 //!      Argon2id verify in `spawn_blocking`. On match: insert the
-//!      `zeroship.identities` row, create an `zeroship.sessions` row, and call
+//!      `zeroship.federated_identities` row, create an `zeroship.idp_sessions` row, and call
 //!      hydra's `accept_login(login_challenge)` (the SAME challenge the
 //!      original `/oauth/<provider>/start` stashed — hydra has been waiting
 //!      all along). On mismatch: re-render the form with an error banner
@@ -130,7 +130,7 @@ pub struct LinkForm {
 ///      Argon2 against the dummy hash so the wall-clock matches a real
 ///      verify (account-enumeration defense, mirroring `/login`).
 ///   4. Argon2id verify in `spawn_blocking` (~100ms).
-///   5. On success: insert `zeroship.identities`, create an `zeroship.sessions`
+///   5. On success: insert `zeroship.federated_identities`, create an `zeroship.idp_sessions`
 ///      row, accept the (still-pending) hydra `login_challenge`, audit
 ///      `oauth_link_success`, 302 to hydra's `redirect_to` with the
 ///      session cookie.

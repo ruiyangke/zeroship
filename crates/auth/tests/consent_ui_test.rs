@@ -129,7 +129,7 @@ impl ConsentTestApp {
         .expect("insert consent test user");
         if let Some(role) = platform_role {
             pg.execute(
-                "INSERT INTO zeroship.roles (user_id, role, granted_by) \
+                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
                  VALUES ($1, $2, $1)",
                 &[&user_id, &role],
             )
@@ -258,7 +258,7 @@ impl ConsentTestApp {
         let _ = self
             .pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE user_id = $1",
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
             )
             .await;
@@ -271,7 +271,7 @@ impl ConsentTestApp {
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM zeroship.roles WHERE user_id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .pg
@@ -411,7 +411,7 @@ impl ConsentTestApp {
             .query_one(
                 "SELECT COUNT(*)::BIGINT AS n \
                  FROM zeroship.audit_events \
-                 WHERE user_id = $1 AND event_type = $2",
+                 WHERE actor_user_id = $1 AND event_type = $2",
                 &[&self.user_id, &event_type],
             )
             .await

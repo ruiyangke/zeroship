@@ -129,7 +129,7 @@ pub struct DbConfig {
     /// allow-list or `sslmode=verify-full` is still separate work.
     pub dsn: String,
     /// Audit-role DSN. Connects as `sandbox_audit` and is used
-    /// exclusively for `INSERT INTO zeroship.events`. Falls back to
+    /// exclusively for `INSERT INTO zeroship.sandbox_events`. Falls back to
     /// `dsn` (the app role) when `SANDBOX_DATABASE_URL_AUDIT` is unset
     /// — the dev-convenience shape per § 13.2 last paragraph.
     pub dsn_audit: String,
@@ -1065,7 +1065,7 @@ pub struct ShareMetadata {
     pub use_count: i64,
 }
 
-/// One row's-worth of audit material destined for `zeroship.events`.
+/// One row's-worth of audit material destined for `zeroship.sandbox_events`.
 /// `kind` follows the open-enum convention from § 6.5; the `data`
 /// JSONB payload is enforced ≤ 8 KiB by a CHECK constraint on the
 /// table.
@@ -2109,8 +2109,7 @@ impl Database {
             .map_err(|e| DatabaseError::Validation(e.to_string()))?;
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        let port_i16 = i16::try_from(share.port)
-            .map_err(|e| DatabaseError::Validation(format!("port out of range: {e}")))?;
+        let port_i32 = i32::from(share.port);
         let issued_at_secs = i64::try_from(share.issued_at_secs)
             .map_err(|e| DatabaseError::Validation(format!("issued_at overflow: {e}")))?;
         let expires_at_secs = i64::try_from(share.expires_at_secs)
@@ -2120,12 +2119,12 @@ impl Database {
                 "INSERT INTO zeroship.shares \
                     (token_id, sandbox_id, port, scope, secret_version, \
                      issued_at, expires_at, iss) \
-                 VALUES ($1::TEXT, $2::TEXT, $3::SMALLINT, $4::TEXT, $5::INTEGER, \
+                 VALUES ($1::TEXT, $2::TEXT, $3::INTEGER, $4::TEXT, $5::INTEGER, \
                          to_timestamp($6::BIGINT), to_timestamp($7::BIGINT), $8::TEXT)",
                 &[
                     &share.token_id,
                     &share.sandbox_id,
-                    &port_i16,
+                    &port_i32,
                     &share.scope,
                     &share.secret_version,
                     &issued_at_secs,
@@ -2152,8 +2151,7 @@ impl Database {
             "sbx_{}",
             zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
         );
-        let port_i16 = i16::try_from(port)
-            .map_err(|e| DatabaseError::Validation(format!("port out of range: {e}")))?;
+        let port_i32 = i32::from(port);
         let rows = client
             .query(
                 "SELECT token_id, port, scope, secret_version, \
@@ -2164,18 +2162,18 @@ impl Database {
                         use_count \
                    FROM zeroship.shares \
                   WHERE sandbox_id = $1::TEXT \
-                    AND port = $2::SMALLINT \
+                    AND port = $2::INTEGER \
                     AND deleted_at IS NULL",
-                &[&sandbox_id_typed, &port_i16],
+                &[&sandbox_id_typed, &port_i32],
             )
             .await
             .map_err(DatabaseError::Pg)?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
-            let port_i: i16 = r.get("port");
+            let port_i: i32 = r.get("port");
             out.push(ShareMetadata {
                 token_id: r.get("token_id"),
-                port: port_i.max(0) as u16,
+                port: port_i.clamp(0, u16::MAX as i32) as u16,
                 scope: r.get("scope"),
                 secret_version: r.get::<_, i32>("secret_version"),
                 issued_at_secs: r.get::<_, i64>("issued_at_secs").max(0) as u64,
@@ -3110,7 +3108,7 @@ impl Database {
         // we can keep the `String` parameter binding.
         client
             .execute(
-                "INSERT INTO zeroship.events \
+                "INSERT INTO zeroship.sandbox_events \
                     (event_id, sandbox_id, user_id, kind, ts, data) \
                  VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, now(), \
                          CAST($5::TEXT AS JSONB))",

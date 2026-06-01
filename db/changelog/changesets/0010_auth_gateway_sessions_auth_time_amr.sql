@@ -7,7 +7,7 @@
 -- The BFF redesign holds NO JWT in the browser: the SPA learns identity via
 -- the { user, expires_at, auth_time, amr } projection from
 -- GET /__zs/auth/session, and the step-up gate needs a fresh auth_time. Both
--- live on zeroship.users/zeroship.sessions today (0002_auth.sql) but the gateway
+-- live on zeroship.users/zeroship.idp_sessions today (0002_auth.sql) but the gateway
 -- cookie path never reads those tables — it reads zeroship.gateway_sessions. So
 -- the two values must live on the row the gateway path actually loads.
 --

@@ -307,7 +307,7 @@ async fn password_login_rejects_locked_user_without_session() {
 
     let session_count: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM zeroship.sessions WHERE user_id = $1",
+            "SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = $1",
             &[&user.id],
         )
         .await
@@ -315,7 +315,7 @@ async fn password_login_rejects_locked_user_without_session() {
         .get(0);
     assert_eq!(session_count, 0, "locked password login must not create a session");
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
         .await
         .ok();
     pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])

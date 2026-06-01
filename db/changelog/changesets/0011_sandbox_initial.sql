@@ -99,8 +99,8 @@ CREATE TABLE zeroship.shares (
                                  CHECK (token_id ~ '^tok_[0-9A-Za-z]{20,40}$'),
     sandbox_id      TEXT         NOT NULL
                                  REFERENCES zeroship.sandboxes(sandbox_id) ON DELETE CASCADE,
-    port            SMALLINT     NOT NULL
-                                 CHECK (port BETWEEN 1 AND 32767),
+    port            INTEGER      NOT NULL
+                                 CHECK (port BETWEEN 1 AND 65535),
     scope           TEXT         NOT NULL
                                  CHECK (scope IN ('ro', 'rw')),
     secret_version  INTEGER      NOT NULL
@@ -124,12 +124,12 @@ CREATE INDEX idx_shares_expires_at
     ON zeroship.shares (expires_at) WHERE deleted_at IS NULL AND revoked_at IS NULL;
 --rollback DROP TABLE zeroship.shares;
 
--- ─── 6.5 zeroship.events (PARTITION BY RANGE (ts)) ───────────────────
+-- ─── 6.5 zeroship.sandbox_events (PARTITION BY RANGE (ts)) ───────────
 -- splitStatements:false: the partitioned parent + DEFAULT + monthly
 -- partitions + indexes ship as one logical unit (mirrors how the
 -- platform changesets group a table with its indexes).
 --changeset zeroship-sandbox:sandbox-events splitStatements:false
-CREATE TABLE zeroship.events (
+CREATE TABLE zeroship.sandbox_events (
     event_id    TEXT         NOT NULL
                              CHECK (event_id ~ '^evt_[0-9A-Za-z]{20,40}$'),
     sandbox_id  TEXT         NOT NULL
@@ -145,43 +145,43 @@ CREATE TABLE zeroship.events (
 -- Round-1 fix (C3): DEFAULT partition catches any INSERT outside the
 -- pre-provisioned window so the live path never sees the
 -- "no partition of relation" error.
-CREATE TABLE zeroship.events_default
-    PARTITION OF zeroship.events DEFAULT;
+CREATE TABLE zeroship.sandbox_events_default
+    PARTITION OF zeroship.sandbox_events DEFAULT;
 -- Six monthly partitions starting from the design's reference date
 -- (2026-05). The controller-side `ensure_window` task (Phase 1+)
 -- provisions forward partitions on a 1h cadence; this changeset covers
 -- the initial six-month window.
-CREATE TABLE zeroship.events_2026_05
-    PARTITION OF zeroship.events
+CREATE TABLE zeroship.sandbox_events_2026_05
+    PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
-CREATE TABLE zeroship.events_2026_06
-    PARTITION OF zeroship.events
+CREATE TABLE zeroship.sandbox_events_2026_06
+    PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
-CREATE TABLE zeroship.events_2026_07
-    PARTITION OF zeroship.events
+CREATE TABLE zeroship.sandbox_events_2026_07
+    PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-07-01') TO ('2026-08-01');
-CREATE TABLE zeroship.events_2026_08
-    PARTITION OF zeroship.events
+CREATE TABLE zeroship.sandbox_events_2026_08
+    PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
-CREATE TABLE zeroship.events_2026_09
-    PARTITION OF zeroship.events
+CREATE TABLE zeroship.sandbox_events_2026_09
+    PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
-CREATE TABLE zeroship.events_2026_10
-    PARTITION OF zeroship.events
+CREATE TABLE zeroship.sandbox_events_2026_10
+    PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
 -- Round-4 index strategy (PERF-C1, PERF-C2): two BTREEs + BRIN + a
 -- partial covering index on the metering hot kinds.
-CREATE INDEX idx_events_user_id_ts
-    ON zeroship.events (user_id, ts);
-CREATE INDEX idx_events_sandbox_ts
-    ON zeroship.events (sandbox_id, ts);
-CREATE INDEX idx_events_ts_brin
-    ON zeroship.events USING BRIN (ts) WITH (pages_per_range = 32);
-CREATE INDEX idx_events_metering
-    ON zeroship.events (ts)
+CREATE INDEX idx_sandbox_events_user_id_ts
+    ON zeroship.sandbox_events (user_id, ts);
+CREATE INDEX idx_sandbox_events_sandbox_ts
+    ON zeroship.sandbox_events (sandbox_id, ts);
+CREATE INDEX idx_sandbox_events_ts_brin
+    ON zeroship.sandbox_events USING BRIN (ts) WITH (pages_per_range = 32);
+CREATE INDEX idx_sandbox_events_metering
+    ON zeroship.sandbox_events (ts)
     INCLUDE (sandbox_id, user_id, data)
     WHERE kind IN ('compute_seconds', 'share.used', 'preview_egress');
---rollback DROP TABLE zeroship.events;
+--rollback DROP TABLE zeroship.sandbox_events;
 
 -- ─── 6.6 zeroship.deleted_sandboxes (tombstone) ──────────────────────
 --changeset zeroship-sandbox:sandbox-deleted-sandboxes splitStatements:true
@@ -245,23 +245,23 @@ BEGIN
                     zeroship.deleted_sandboxes
                     TO sandbox_app';
         -- Read-only on events: the controller cannot tamper with audit.
-        EXECUTE 'GRANT SELECT ON zeroship.events TO sandbox_app';
+        EXECUTE 'GRANT SELECT ON zeroship.sandbox_events TO sandbox_app';
     END IF;
 
     -- INSERT-only audit role.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_audit') THEN
         EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_audit';
-        EXECUTE 'GRANT INSERT ON zeroship.events TO sandbox_audit';
+        EXECUTE 'GRANT INSERT ON zeroship.sandbox_events TO sandbox_audit';
     END IF;
 
     -- GDPR scoped DELETE role.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_gdpr') THEN
         EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO sandbox_gdpr';
         EXECUTE 'GRANT SELECT, DELETE ON
-                    zeroship.sandboxes, zeroship.shares, zeroship.events,
+                    zeroship.sandboxes, zeroship.shares, zeroship.sandbox_events,
                     zeroship.deleted_sandboxes
                     TO sandbox_gdpr';
-        EXECUTE 'GRANT INSERT ON zeroship.deleted_sandboxes, zeroship.events TO sandbox_gdpr';
+        EXECUTE 'GRANT INSERT ON zeroship.deleted_sandboxes, zeroship.sandbox_events TO sandbox_gdpr';
     END IF;
 EXCEPTION
     -- Restricted CI Postgres: silently degrade. The integration tests

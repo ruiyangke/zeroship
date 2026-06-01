@@ -87,6 +87,22 @@ BEGIN
     END IF;
 END $$;
 
+-- sandbox_id CHECK — enforce the typed-id shape (matches zeroship.sandboxes
+-- and zeroship.sandbox_events). Rejects a malformed sandbox_id at INSERT time.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.constraint_column_usage
+        WHERE table_schema = 'zeroship'
+          AND table_name = 'wake_jobs'
+          AND constraint_name = 'wake_jobs_sandbox_id_check'
+    ) THEN
+        ALTER TABLE zeroship.wake_jobs
+            ADD CONSTRAINT wake_jobs_sandbox_id_check
+            CHECK (sandbox_id ~ '^sbx_[0-9A-Za-z]{20,40}$');
+    END IF;
+END $$;
+
 -- Idempotency lookup: "does this sandbox already have a pending wake?"
 CREATE INDEX IF NOT EXISTS wake_jobs_sandbox_idx
     ON zeroship.wake_jobs (sandbox_id);

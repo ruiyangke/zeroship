@@ -190,15 +190,6 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         )
         .await
         .expect("seed gateway session");
-    client
-        .execute(
-            "INSERT INTO zeroship.console_sessions \
-                (user_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
-             VALUES ($1, $2::citext, $3, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
-            &[&user.id, &email, &"Test"],
-        )
-        .await
-        .expect("seed console session");
 
     let issued = password_reset::issue(&client, &email)
         .await
@@ -266,7 +257,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 
     let idp_count: i64 = pg
         .query_one(
-            "SELECT COUNT(*) FROM zeroship.sessions WHERE user_id = $1",
+            "SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = $1",
             &[&user.id],
         )
         .await
@@ -280,22 +271,13 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .await
         .expect("count gateway sessions")
         .get(0);
-    let console_count: i64 = pg
-        .query_one(
-            "SELECT COUNT(*) FROM zeroship.console_sessions WHERE user_id = $1",
-            &[&user.id],
-        )
-        .await
-        .expect("count console sessions")
-        .get(0);
     assert_eq!(idp_count, 0, "IdP sessions must be deleted");
     assert_eq!(gateway_count, 0, "gateway sessions must be deleted");
-    assert_eq!(console_count, 0, "console sessions must be deleted");
 
     let password_changed: i64 = pg
         .query_one(
             "SELECT COUNT(*) FROM zeroship.audit_events \
-             WHERE user_id = $1 AND event_type = 'password_changed' AND outcome = 'success'",
+             WHERE actor_user_id = $1 AND event_type = 'password_changed' AND outcome = 'success'",
             &[&user.id],
         )
         .await
@@ -304,7 +286,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let sessions_revoked: i64 = pg
         .query_one(
             "SELECT COUNT(*) FROM zeroship.audit_events \
-             WHERE user_id = $1 AND event_type = 'sessions_revoked_after_password_reset' \
+             WHERE actor_user_id = $1 AND event_type = 'sessions_revoked_after_password_reset' \
                AND outcome = 'success'",
             &[&user.id],
         )
@@ -314,7 +296,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     assert_eq!(password_changed, 1);
     assert_eq!(sessions_revoked, 1);
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
         .await
         .ok();
     pg.execute(
@@ -440,7 +422,7 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
         "password reset must clear cross-device magic completions for the email"
     );
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
         .await
         .ok();
     pg.execute(

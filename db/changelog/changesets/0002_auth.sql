@@ -25,7 +25,7 @@ CREATE TABLE zeroship.users (
 --rollback DROP TABLE zeroship.users;
 
 --changeset zeroship:auth-identities splitStatements:true
-CREATE TABLE zeroship.identities (
+CREATE TABLE zeroship.federated_identities (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id       UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
     provider      TEXT NOT NULL,
@@ -35,12 +35,12 @@ CREATE TABLE zeroship.identities (
     linked_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (provider, subject)
 );
---rollback DROP TABLE zeroship.identities;
+--rollback DROP TABLE zeroship.federated_identities;
 
 --changeset zeroship:auth-sessions splitStatements:true
-CREATE TABLE zeroship.sessions (
+CREATE TABLE zeroship.idp_sessions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         UUID NOT NULL REFERENCES zeroship.users(id),
+    user_id         UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
     auth_method     TEXT NOT NULL,
     amr             TEXT[] NOT NULL,
     acr             TEXT,
@@ -50,7 +50,7 @@ CREATE TABLE zeroship.sessions (
     abs_expires_at  TIMESTAMPTZ NOT NULL,
     revoked_at      TIMESTAMPTZ
 );
---rollback DROP TABLE zeroship.sessions;
+--rollback DROP TABLE zeroship.idp_sessions;
 
 --changeset zeroship:auth-magic-links splitStatements:true
 CREATE TABLE zeroship.magic_links (
@@ -113,19 +113,19 @@ CREATE TABLE zeroship.rate_limits (
 
 --changeset zeroship:auth-audit-events splitStatements:true
 CREATE TABLE zeroship.audit_events (
-    id          BIGSERIAL PRIMARY KEY,
-    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    event_type  TEXT NOT NULL,
-    outcome     TEXT NOT NULL,
-    user_id     UUID,
-    client_id   TEXT,
-    request_id  TEXT,
-    ip          INET,
-    user_agent  TEXT,
-    auth_method TEXT,
-    detail      JSONB
+    id            BIGSERIAL PRIMARY KEY,
+    occurred_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_type    TEXT NOT NULL,
+    outcome       TEXT NOT NULL,
+    actor_user_id UUID,
+    client_id     TEXT,
+    request_id    TEXT,
+    ip            INET,
+    user_agent    TEXT,
+    auth_method   TEXT,
+    detail        JSONB
 );
-CREATE INDEX auth_audit_user_idx  ON zeroship.audit_events (user_id, occurred_at);
+CREATE INDEX auth_audit_user_idx  ON zeroship.audit_events (actor_user_id, occurred_at);
 CREATE INDEX auth_audit_event_idx ON zeroship.audit_events (event_type, occurred_at);
 --rollback DROP TABLE zeroship.audit_events;
 
@@ -173,9 +173,7 @@ DO $$
          'zeroship_control',
          'zeroship_gateway',
          'zeroship_worker',
-         'zeroship_app',
-         'auth',
-         'control'
+         'zeroship_app'
      ] LOOP
          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
              EXECUTE format(
@@ -220,25 +218,6 @@ CREATE INDEX auth_dpop_jti_inserted_idx
     ON zeroship.dpop_jti (inserted_at);
 --rollback DROP TABLE zeroship.dpop_jti;
 
---changeset zeroship:auth-console-sessions splitStatements:true
-CREATE TABLE zeroship.console_sessions (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- The console-session store (control::console_sessions) parses the OIDC
-    -- subject into a Uuid and binds/reads it as UUID, so the column is UUID.
-    user_id         UUID NOT NULL,
-    email           CITEXT,
-    name            TEXT,
-    avatar_url      TEXT,
-    email_verified  BOOLEAN NOT NULL DEFAULT FALSE,
-    issued_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    idle_expires_at TIMESTAMPTZ NOT NULL,
-    abs_expires_at  TIMESTAMPTZ NOT NULL,
-    revoked_at      TIMESTAMPTZ
-);
-CREATE INDEX auth_console_sessions_user_idx ON zeroship.console_sessions (user_id);
-CREATE INDEX auth_console_sessions_idle_idx ON zeroship.console_sessions (idle_expires_at) WHERE revoked_at IS NULL;
---rollback DROP TABLE zeroship.console_sessions;
-
 --changeset zeroship:auth-cron-state splitStatements:true
 CREATE TABLE zeroship.cron_state (
     key             TEXT PRIMARY KEY,
@@ -278,4 +257,6 @@ CREATE TABLE zeroship.token_revocations (
     revoked_after TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (client_id, sub)
 );
+CREATE INDEX auth_token_revocations_revoked_after_idx
+    ON zeroship.token_revocations (revoked_after);
 --rollback DROP TABLE zeroship.token_revocations;

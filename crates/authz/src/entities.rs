@@ -147,7 +147,7 @@ async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzEr
                 (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked, \
                 COALESCE(r.role, 'readonly') AS platform_role \
              FROM zeroship.users u \
-             LEFT JOIN zeroship.roles r ON r.user_id = u.id \
+             LEFT JOIN zeroship.platform_admin_roles r ON r.user_id = u.id \
              WHERE u.id = $1",
             &[&principal_id],
         )

@@ -271,7 +271,7 @@ impl NonAdminPat {
         let _ = state
             .auth_pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR user_id = $2",
+                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
@@ -377,7 +377,7 @@ async fn audit_event_count(
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
-             WHERE user_id = $1 AND event_type = $2 AND client_id = $3",
+             WHERE actor_user_id = $1 AND event_type = $2 AND client_id = $3",
             &[&user_id, &event_type, &client_id],
         )
         .await
