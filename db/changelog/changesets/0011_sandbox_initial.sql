@@ -128,6 +128,17 @@ CREATE INDEX idx_shares_expires_at
 -- splitStatements:false: the partitioned parent + DEFAULT + monthly
 -- partitions + indexes ship as one logical unit (mirrors how the
 -- platform changesets group a table with its indexes).
+--
+-- Typed-id seam (DELIBERATE — no FK): user_id/sandbox_id here (and the
+-- matching user_id/sandbox_id columns on zeroship.sandboxes above) are
+-- sandbox typed-id TEXT (usr_/sbx_ base62), NOT the platform's UUID
+-- zeroship.users(id)/zeroship.apps(id). There is intentionally NO FK
+-- bridging the sandbox typed-id world to the platform UUID world: the two
+-- identity spaces are kept decoupled on purpose. GDPR erasure of a user's
+-- sandbox rows is driven by the sandbox_gdpr role's scoped DELETE cascade
+-- (see § 13.2 grants below), not by a referential-integrity FK back into
+-- zeroship.users.
+-- Full rationale: docs/decisions/2026-05-31-sandbox-typed-id-platform-uuid-seam.md
 --changeset zeroship-sandbox:sandbox-events splitStatements:false
 CREATE TABLE zeroship.sandbox_events (
     event_id    TEXT         NOT NULL
@@ -148,9 +159,18 @@ CREATE TABLE zeroship.sandbox_events (
 CREATE TABLE zeroship.sandbox_events_default
     PARTITION OF zeroship.sandbox_events DEFAULT;
 -- Six monthly partitions starting from the design's reference date
--- (2026-05). The controller-side `ensure_window` task (Phase 1+)
--- provisions forward partitions on a 1h cadence; this changeset covers
--- the initial six-month window.
+-- (2026-05) as a bootstrap window. In PG-backed mode the controller's
+-- partition provisioner (`crates/sandbox/src/sweep.rs`:
+-- `ensure_event_partitions`, spawned from `AppState::from_config` and
+-- gated like the other pg-only sweeps) takes over from here: on a
+-- periodic cadence (default 1h, `SANDBOX_EVENT_PARTITION_SWEEP_SECS`)
+-- it CREATEs the current month + the next 3 months
+-- (`SANDBOX_EVENT_PARTITION_AHEAD_MONTHS`, so `sandbox_events_default`
+-- stays empty in steady state) and DROPs monthly partitions whose entire
+-- range is older than 12 months
+-- (`SANDBOX_EVENT_PARTITION_RETENTION_MONTHS`; `sandbox_events_default`
+-- is never dropped). In dev compose the sandbox is PG-less, so the
+-- provisioner does not run and this six-month window is what dev uses.
 CREATE TABLE zeroship.sandbox_events_2026_05
     PARTITION OF zeroship.sandbox_events
     FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');

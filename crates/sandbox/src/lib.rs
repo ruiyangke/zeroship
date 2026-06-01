@@ -206,6 +206,14 @@ pub struct AppState {
     /// every iteration. Static at runtime (env reload not supported).
     pub wake_lifecycle: crate::config::WakeLifecycleConfig,
 
+    /// P1: `sandbox_events` partition provisioner configuration.
+    /// Resolved at boot from env
+    /// (`SANDBOX_EVENT_PARTITION_{AHEAD_MONTHS,RETENTION_MONTHS,SWEEP_SECS}`).
+    /// The provisioner sweep (`sweep::ensure_event_partitions`) reads
+    /// `ahead_months` / `retention_months` at every tick. Static at
+    /// runtime (env reload not supported).
+    pub event_partition: crate::config::EventPartitionConfig,
+
     /// r3-A (T-8b-stress-r3 fix): the local Nomad agent's node ID,
     /// fetched once at boot via `GET /v1/agent/self`. When `Some`, the
     /// jobspec builders emit a `Constraints` block pinning every
@@ -627,6 +635,7 @@ impl AppState {
             // assignment on `let mut state = new_fixture(...)`.
             wake_response_mode: crate::config::WakeResponseMode::Sync,
             wake_lifecycle: crate::config::WakeLifecycleConfig::default(),
+            event_partition: crate::config::EventPartitionConfig::default(),
             // r3-A: fixtures get `None` — no boot-time /v1/agent/self
             // lookup happens for in-process tests, so the produced
             // jobspecs omit the Constraints block (matches pre-r3-A
@@ -994,6 +1003,17 @@ impl AppState {
             wake_jobs_gc_retention_secs = wake_lifecycle.wake_jobs_gc_retention_secs,
             "sandbox wake-response: contract mode + lifecycle resolved"
         );
+        // P1: sandbox_events partition provisioner config. Resolved at
+        // boot; propagates to `sweep::ensure_event_partitions` via
+        // `AppState::event_partition`.
+        let event_partition = crate::config::EventPartitionConfig::from_env()
+            .map_err(|e| format!("EventPartitionConfig::from_env: {e}"))?;
+        tracing::info!(
+            ahead_months = event_partition.ahead_months,
+            retention_months = event_partition.retention_months,
+            sweep_secs = event_partition.sweep_secs,
+            "sandbox event-partitions: provisioner config resolved"
+        );
 
         // Phase-A snapshot/restore wiring. When `snapshot_enabled =
         // true`, construct the production trio:
@@ -1193,6 +1213,7 @@ impl AppState {
             restore_backend,
             wake_response_mode,
             wake_lifecycle,
+            event_partition,
             local_nomad_node_id,
             nomad_stop_permits,
             // R33-I1: same `Arc` installed on the inner NomadCHBackend
@@ -1301,6 +1322,20 @@ impl AppState {
         // sweeps; single-tenant deploys keep the operator-wipe story.
         if state.database.is_some() {
             sweep::spawn_host_dir_gc(state.clone());
+        }
+        // P1: sandbox_events partition provisioner. Monthly partitions,
+        // provisioned `ahead_months` ahead (default 3) so the `default`
+        // catch-all stays empty in steady state, with `retention_months`
+        // (default 12) of history retained — partitions whose entire
+        // range is past the horizon are dropped. Runs the DDL on the
+        // admin/migrator pool (`Database::pool_admin`). Gated on
+        // `database.is_some()` like every other pg-only sweep — in dev
+        // compose the sandbox is PG-less so this simply does not run
+        // (the 0011-shipped six-month window covers dev). 0011 falsely
+        // claimed an `ensure_window` controller task already did this;
+        // THIS is that task, now real.
+        if state.database.is_some() {
+            sweep::spawn_event_partition_provisioner(state.clone());
         }
         // T6: auto-spawn idle eviction sweep. Production now has all
         // deps wired (snapshot_store + ch_remote + restore_backend

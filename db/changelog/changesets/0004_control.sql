@@ -54,7 +54,9 @@ CREATE TABLE zeroship.app_usage_history (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (app_id, period)
 );
-CREATE INDEX idx_app_usage_history_app ON zeroship.app_usage_history(app_id, period);
+-- No separate (app_id, period) btree: the UNIQUE (app_id, period) constraint
+-- above already materialises that index, so a non-unique idx_app_usage_history_app
+-- on the same columns would be redundant (dropped per P7).
 --rollback DROP TABLE zeroship.app_usage_history;
 
 --changeset zeroship:control-app-vars splitStatements:true
@@ -158,6 +160,16 @@ CREATE INDEX idx_app_audit_creator_at ON zeroship.app_audit(creator_id, occurred
 CREATE OR REPLACE FUNCTION zeroship.app_audit_block_tamper()
  RETURNS trigger AS $$
  BEGIN
+     -- Append-only: UPDATE and TRUNCATE are always rejected. The one sanctioned
+     -- DELETE is the retention sweep (control::cron::audit_retention), which flags
+     -- its connection with `SET zeroship.audit_retention = 'on'` before deleting
+     -- expired rows. App handlers never set that GUC (and can't via a
+     -- parameterised query), so the tamper guard still holds against application
+     -- code and SQL injection.
+     IF TG_OP = 'DELETE'
+        AND current_setting('zeroship.audit_retention', true) = 'on' THEN
+         RETURN OLD;
+     END IF;
      RAISE EXCEPTION 'app_audit is append-only'
          USING ERRCODE = 'insufficient_privilege';
  END
@@ -302,6 +314,16 @@ CREATE INDEX authz_decisions_user_idx
 CREATE OR REPLACE FUNCTION zeroship.authz_decisions_block_tamper()
  RETURNS trigger AS $$
  BEGIN
+     -- Append-only: UPDATE and TRUNCATE are always rejected. The one sanctioned
+     -- DELETE is the retention sweep (control::cron::audit_retention), which flags
+     -- its connection with `SET zeroship.audit_retention = 'on'` before deleting
+     -- expired rows. App handlers never set that GUC (and can't via a
+     -- parameterised query), so the tamper guard still holds against application
+     -- code and SQL injection.
+     IF TG_OP = 'DELETE'
+        AND current_setting('zeroship.audit_retention', true) = 'on' THEN
+         RETURN OLD;
+     END IF;
      RAISE EXCEPTION 'zeroship.authz_decisions is append-only'
          USING ERRCODE = 'insufficient_privilege';
  END

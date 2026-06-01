@@ -1288,6 +1288,334 @@ pub(crate) fn spawn_host_dir_gc(state: Arc<AppState>) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// P1: sandbox_events partition provisioner
+// ────────────────────────────────────────────────────────────────────
+//
+// `zeroship.sandbox_events` is `PARTITION BY RANGE (ts)` with monthly
+// partitions `sandbox_events_YYYY_MM` + a `sandbox_events_default`
+// catch-all (migration 0011). 0011's comment historically claimed a
+// controller `ensure_window` task provisioned forward partitions — it
+// never existed. THIS is that task, now real.
+//
+// Each tick (default hourly), `ensure_event_partitions`:
+//   (a) PROVISIONS the current month + the next `ahead_months` (default
+//       3) — `CREATE TABLE IF NOT EXISTS ... PARTITION OF ... FOR
+//       VALUES FROM (<month-start>) TO (<next-month-start>)`. Three
+//       months ahead means an INSERT for "now" always finds a real
+//       monthly partition, so `sandbox_events_default` stays EMPTY in
+//       steady state. Duplicate-table + overlaps-default cases are
+//       caught and ignored gracefully (see `Database::ensure_event_partition`).
+//   (b) RETENTION: DROPs monthly partitions whose entire range is older
+//       than `retention_months` (default 12) before the current month.
+//       `sandbox_events_default` is never dropped.
+//
+// All DDL runs on the admin/migrator pool (`Database::pool_admin` — the
+// `sandbox_admin`-equivalent role granted CREATE on `zeroship`). The
+// task is gated on `state.database.is_some()` like every other pg-only
+// sweep; in dev compose the sandbox is PG-less so it simply never runs.
+
+/// A civil year-month, the unit the partition provisioner reasons in.
+/// `month` is 1..=12. Comparable / orderable so retention can ask
+/// "is this partition's month strictly before the horizon?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct YearMonth {
+    pub year: i32,
+    /// 1..=12.
+    pub month: u32,
+}
+
+impl YearMonth {
+    /// Total months since year 0 — the linear coordinate that makes
+    /// add/sub and ordering trivial. (`year * 12 + (month - 1)`.)
+    fn index(self) -> i64 {
+        self.year as i64 * 12 + (self.month as i64 - 1)
+    }
+
+    /// Inverse of [`index`].
+    fn from_index(idx: i64) -> Self {
+        let year = idx.div_euclid(12) as i32;
+        let month = idx.rem_euclid(12) as u32 + 1;
+        Self { year, month }
+    }
+
+    /// This month shifted by `delta` months (may be negative).
+    pub fn add_months(self, delta: i64) -> Self {
+        Self::from_index(self.index() + delta)
+    }
+
+    /// The next month (wraps the year at December).
+    pub fn next(self) -> Self {
+        self.add_months(1)
+    }
+
+    /// Partition table-name suffix, `YYYY_MM` (zero-padded month).
+    pub fn suffix(self) -> String {
+        format!("{:04}_{:02}", self.year, self.month)
+    }
+
+    /// First-of-month date literal, `YYYY-MM-DD` → `YYYY-MM-01`. The
+    /// inclusive lower bound of the partition's `FOR VALUES FROM`.
+    pub fn start_date(self) -> String {
+        format!("{:04}-{:02}-01", self.year, self.month)
+    }
+}
+
+/// Convert unix seconds (UTC) to the civil `YearMonth`. Uses Howard
+/// Hinnant's `civil_from_days` algorithm (proleptic Gregorian, correct
+/// across leap years and century boundaries) on the day count; the
+/// intra-day seconds are irrelevant to the month. Pure — the
+/// provisioner passes `SystemTime::now()`-derived seconds in
+/// production and the test passes a pinned value.
+pub fn year_month_from_unix_secs(unix_secs: i64) -> YearMonth {
+    // Days since the unix epoch (1970-01-01). Floor-divide so negative
+    // (pre-epoch) timestamps still map to the correct civil day.
+    let days = unix_secs.div_euclid(86_400);
+    // civil_from_days: shift the epoch to 0000-03-01 to make leap-day
+    // handling uniform, then unwind. Reference:
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = (if m <= 2 { y + 1 } else { y }) as i32;
+    YearMonth {
+        year,
+        month: m as u32,
+    }
+}
+
+/// The civil `YearMonth` of `now`. Production reads the system clock;
+/// the test injects a pinned `SystemTime`.
+pub fn current_year_month(now: std::time::SystemTime) -> YearMonth {
+    let secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        // A clock before the epoch is nonsensical for this fleet; clamp
+        // to the epoch rather than panicking.
+        .unwrap_or(0);
+    year_month_from_unix_secs(secs)
+}
+
+/// Pure planner for the PROVISION step: the inclusive list of months to
+/// ensure, given `now`'s month and `ahead_months`. Returns
+/// `[current, current+1, …, current+ahead_months]` — `ahead_months + 1`
+/// entries. Extracted so the unit test pins the window without a DB.
+pub fn months_to_provision(now: YearMonth, ahead_months: u32) -> Vec<YearMonth> {
+    (0..=ahead_months as i64)
+        .map(|d| now.add_months(d))
+        .collect()
+}
+
+/// Pure predicate for the RETENTION step: is the partition named by
+/// `suffix` (a `YYYY_MM` string) strictly older than the retention
+/// horizon? A partition for month `M` is dropped iff its ENTIRE range
+/// (`[M, M+1)`) ends at-or-before the horizon's first day, i.e. iff
+/// `M < now - retention_months`. Unparseable suffixes return `false`
+/// (never drop something we can't classify).
+///
+/// Worked example (now = 2026-05, retention = 12): horizon =
+/// 2025-05. A 2025-04 partition (range ends 2025-05-01) is dropped;
+/// 2025-05 (range ends 2025-06-01) is kept.
+pub fn partition_is_past_retention(
+    suffix: &str,
+    now: YearMonth,
+    retention_months: u32,
+) -> bool {
+    let Some(part_month) = parse_suffix(suffix) else {
+        return false;
+    };
+    let horizon = now.add_months(-(retention_months as i64));
+    part_month < horizon
+}
+
+/// Parse a `YYYY_MM` partition suffix back to a `YearMonth`. Returns
+/// `None` for anything that isn't exactly four digits, `_`, two digits
+/// with a month in 1..=12 — including the literal `default`.
+fn parse_suffix(suffix: &str) -> Option<YearMonth> {
+    let (y, m) = suffix.split_once('_')?;
+    if y.len() != 4 || m.len() != 2 {
+        return None;
+    }
+    let year: i32 = y.parse().ok()?;
+    let month: u32 = m.parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    Some(YearMonth { year, month })
+}
+
+/// Run a single iteration of the partition provisioner against a pinned
+/// `now`. Public so the pg-gated test can drive one pass with a fixed
+/// clock. Returns `(provisioned, dropped)` — counts of partitions whose
+/// CREATE was issued (newly created OR already present) and partitions
+/// dropped by retention.
+///
+/// Idempotent: provisioning uses `CREATE TABLE IF NOT EXISTS`, dropping
+/// uses `DROP TABLE IF EXISTS`. Every DDL error except the gracefully-
+/// ignored duplicate/overlap cases is logged-and-continued so one bad
+/// month never aborts the sweep.
+pub async fn run_event_partition_provision_once(
+    state: &Arc<AppState>,
+    now: std::time::SystemTime,
+) -> (usize, usize) {
+    let Some(db) = state.database.as_ref() else {
+        return (0, 0);
+    };
+    let cfg = state.event_partition;
+    let now_ym = current_year_month(now);
+
+    // (a) PROVISION current + next `ahead_months`.
+    let mut provisioned = 0usize;
+    for ym in months_to_provision(now_ym, cfg.ahead_months) {
+        let suffix = ym.suffix();
+        let start = ym.start_date();
+        let end = ym.next().start_date();
+        match db.ensure_event_partition(&suffix, &start, &end).await {
+            Ok(_) => {
+                provisioned += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox::event_partitions",
+                    suffix,
+                    start,
+                    end,
+                    error = %e,
+                    "sandbox event-partition provision: ensure failed \
+                     (next tick retries)"
+                );
+            }
+        }
+    }
+
+    // (b) RETENTION: drop monthly partitions past the horizon. Read the
+    // live catalog so a partition created out-of-band still ages out.
+    let mut dropped = 0usize;
+    match db.list_event_partition_suffixes().await {
+        Ok(suffixes) => {
+            for suffix in suffixes {
+                if state.shutdown_requested() {
+                    break;
+                }
+                if partition_is_past_retention(&suffix, now_ym, cfg.retention_months) {
+                    match db.drop_event_partition(&suffix).await {
+                        Ok(_) => {
+                            dropped += 1;
+                            tracing::info!(
+                                target: "sandbox::event_partitions",
+                                suffix,
+                                retention_months = cfg.retention_months,
+                                "sandbox event-partition retention: dropped \
+                                 partition past horizon"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "sandbox::event_partitions",
+                                suffix,
+                                error = %e,
+                                "sandbox event-partition retention: drop failed \
+                                 (next tick retries)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::event_partitions",
+                error = %e,
+                "sandbox event-partition retention: list partitions failed \
+                 (skipping retention this tick)"
+            );
+        }
+    }
+
+    (provisioned, dropped)
+}
+
+/// Convenience alias matching the task name in the design / 0011
+/// comment. Provisions ahead + applies retention against the current
+/// system clock.
+pub async fn ensure_event_partitions(state: &Arc<AppState>) -> (usize, usize) {
+    run_event_partition_provision_once(state, std::time::SystemTime::now()).await
+}
+
+/// Spawn the partition provisioner loop. Runs on its own dedicated OS
+/// thread with a private compio runtime (`detach_isolated`) — the DDL
+/// (`CREATE`/`DROP TABLE` on `zeroship`) acquires brief catalog locks
+/// and we keep it off the shared ntex worker runtime so a stalled DDL
+/// cannot starve sibling handlers. Lives for the process lifetime,
+/// observes `state.shutdown_requested()` between iterations.
+///
+/// Skipped when `state.database` is `None` — without pg there is no
+/// partitioned table to provision. Single-tenant / dev-compose deploys
+/// keep the 0011-shipped six-month window (no live provisioner).
+///
+/// The loop provisions once IMMEDIATELY on start (before the first
+/// sleep) so a controller that boots near a month boundary doesn't wait
+/// a full cadence before the new month's partition exists — the default
+/// catch-all would otherwise absorb early-month INSERTs until the first
+/// tick. Subsequent ticks fire every `sweep_secs`.
+pub(crate) fn spawn_event_partition_provisioner(state: Arc<AppState>) {
+    if state.database.is_none() {
+        tracing::info!(
+            target: "sandbox::event_partitions",
+            "sandbox event-partitions: skipped (no database wired — \
+             dev/single-tenant keeps the 0011-shipped six-month window)"
+        );
+        return;
+    }
+    crate::detach::detach_isolated("event-partitions", move || async move {
+        let interval = Duration::from_secs(state.event_partition.sweep_secs);
+        tracing::info!(
+            target: "sandbox::event_partitions",
+            sweep_secs = state.event_partition.sweep_secs,
+            ahead_months = state.event_partition.ahead_months,
+            retention_months = state.event_partition.retention_months,
+            "sandbox event-partitions: provisioner loop started"
+        );
+        // Provision immediately on start (don't wait a full cadence).
+        if !state.shutdown_requested() {
+            let (prov, dropped) = ensure_event_partitions(&state).await;
+            tracing::debug!(
+                target: "sandbox::event_partitions",
+                provisioned = prov,
+                dropped,
+                "sandbox event-partitions: initial provision tick"
+            );
+        }
+        loop {
+            if state.shutdown_requested() {
+                tracing::info!(
+                    target: "sandbox::event_partitions",
+                    "sandbox event-partitions: shutdown"
+                );
+                break;
+            }
+            compio::time::sleep(interval).await;
+            if state.shutdown_requested() {
+                break;
+            }
+            let (prov, dropped) = ensure_event_partitions(&state).await;
+            if dropped > 0 {
+                tracing::debug!(
+                    target: "sandbox::event_partitions",
+                    provisioned = prov,
+                    dropped,
+                    "sandbox event-partitions: tick"
+                );
+            }
+        }
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
@@ -1850,6 +2178,129 @@ mod unit_tests {
             HOST_DIR_GC_GRACE_SECS >= HOST_DIR_GC_GRACE_FLOOR_SECS,
             "default must satisfy the minimum it enforces \
              (default={HOST_DIR_GC_GRACE_SECS}, floor={HOST_DIR_GC_GRACE_FLOOR_SECS})"
+        );
+    }
+
+    // ─── P1: sandbox_events partition month-math ────────────────────
+    //
+    // The provisioner's PROVISION window + RETENTION horizon are pure
+    // `YearMonth` arithmetic. These tests pin the calendar logic with a
+    // fixed `now` so a refactor can't silently shift the window or the
+    // drop horizon. The end-to-end SQL path (CREATE/DROP PARTITION OF,
+    // pg_inherits listing) is covered by the pg-gated regression test in
+    // `tests/sandbox_pg_e2e.rs`.
+
+    /// unix → civil YearMonth, pinned against a few known instants.
+    /// 2026-05-15T12:00:00Z = 1_778_846_400; 2026-01-01T00:00:00Z =
+    /// 1_767_225_600; 1970-01-01 = 0.
+    #[test]
+    fn year_month_from_unix_secs_known_instants() {
+        assert_eq!(
+            year_month_from_unix_secs(0),
+            YearMonth { year: 1970, month: 1 }
+        );
+        // 2026-05-15T12:00:00Z
+        assert_eq!(
+            year_month_from_unix_secs(1_778_846_400 + 12 * 3600),
+            YearMonth { year: 2026, month: 5 }
+        );
+        // Last second of 2026-12 (2026-12-31T23:59:59Z = 1_798_761_599).
+        assert_eq!(
+            year_month_from_unix_secs(1_798_761_599),
+            YearMonth { year: 2026, month: 12 }
+        );
+        // First second of 2027-01 (2027-01-01T00:00:00Z = 1_798_761_600).
+        assert_eq!(
+            year_month_from_unix_secs(1_798_761_600),
+            YearMonth { year: 2027, month: 1 }
+        );
+    }
+
+    /// add_months / next must roll the year correctly in both
+    /// directions across the December/January boundary.
+    #[test]
+    fn year_month_arithmetic_rolls_the_year() {
+        let dec = YearMonth { year: 2026, month: 12 };
+        assert_eq!(dec.next(), YearMonth { year: 2027, month: 1 });
+        let jan = YearMonth { year: 2026, month: 1 };
+        assert_eq!(jan.add_months(-1), YearMonth { year: 2025, month: 12 });
+        assert_eq!(jan.add_months(-13), YearMonth { year: 2024, month: 12 });
+        assert_eq!(jan.add_months(14), YearMonth { year: 2027, month: 3 });
+    }
+
+    /// suffix / start_date formatting is zero-padded and matches the
+    /// 0011 partition-name convention (`sandbox_events_YYYY_MM`).
+    #[test]
+    fn year_month_suffix_and_date_formatting() {
+        let ym = YearMonth { year: 2026, month: 5 };
+        assert_eq!(ym.suffix(), "2026_05");
+        assert_eq!(ym.start_date(), "2026-05-01");
+        assert_eq!(ym.next().start_date(), "2026-06-01");
+        let dec = YearMonth { year: 2026, month: 12 };
+        assert_eq!(dec.next().start_date(), "2027-01-01");
+    }
+
+    /// PROVISION window: current + next `ahead_months` (inclusive), so
+    /// `ahead_months + 1` entries. Pinned at now=2026-05, ahead=3.
+    #[test]
+    fn provision_window_is_current_plus_ahead() {
+        let now = YearMonth { year: 2026, month: 5 };
+        let months = months_to_provision(now, 3);
+        let suffixes: Vec<String> = months.iter().map(|m| m.suffix()).collect();
+        assert_eq!(
+            suffixes,
+            vec!["2026_05", "2026_06", "2026_07", "2026_08"],
+            "ahead=3 must provision the current month + 3 ahead (4 total)"
+        );
+        // ahead=0 → just the current month.
+        let just_now = months_to_provision(now, 0);
+        assert_eq!(just_now, vec![now]);
+        // Window straddling a year boundary.
+        let nov = YearMonth { year: 2026, month: 11 };
+        let across: Vec<String> =
+            months_to_provision(nov, 3).iter().map(|m| m.suffix()).collect();
+        assert_eq!(across, vec!["2026_11", "2026_12", "2027_01", "2027_02"]);
+    }
+
+    /// RETENTION horizon: a partition is dropped iff its month is
+    /// strictly before `now - retention_months`. Pinned now=2026-05,
+    /// retention=12 → horizon=2025-05. 2025-04 drops, 2025-05 stays,
+    /// the current + future months stay.
+    #[test]
+    fn retention_horizon_drops_only_strictly_older() {
+        let now = YearMonth { year: 2026, month: 5 };
+        // Strictly older than the horizon (2025-05) → drop.
+        assert!(partition_is_past_retention("2025_04", now, 12));
+        assert!(partition_is_past_retention("2024_05", now, 12));
+        assert!(partition_is_past_retention("2020_01", now, 12));
+        // Exactly the horizon month (its range ends 2025-06-01, after
+        // the 2025-05-01 horizon start) → keep.
+        assert!(!partition_is_past_retention("2025_05", now, 12));
+        // Within the window / current / future → keep.
+        assert!(!partition_is_past_retention("2025_12", now, 12));
+        assert!(!partition_is_past_retention("2026_05", now, 12));
+        assert!(!partition_is_past_retention("2026_08", now, 12));
+        // The catch-all default must never be classified as droppable.
+        assert!(!partition_is_past_retention("default", now, 12));
+        // Garbage / out-of-range months are never droppable.
+        assert!(!partition_is_past_retention("2025_13", now, 12));
+        assert!(!partition_is_past_retention("not_a_month", now, 12));
+        assert!(!partition_is_past_retention("2025", now, 12));
+    }
+
+    /// EventPartitionConfig defaults are the task-mandated 3 ahead / 12
+    /// retention. Pin them so a silent drift forces a test update.
+    #[test]
+    fn event_partition_config_defaults_pinned() {
+        use crate::config::EventPartitionConfig;
+        assert_eq!(EventPartitionConfig::DEFAULT_AHEAD_MONTHS, 3);
+        assert_eq!(EventPartitionConfig::DEFAULT_RETENTION_MONTHS, 12);
+        let d = EventPartitionConfig::default();
+        assert_eq!(d.ahead_months, 3);
+        assert_eq!(d.retention_months, 12);
+        assert!(
+            d.retention_months >= EventPartitionConfig::MIN_RETENTION_MONTHS,
+            "default retention must satisfy the minimum it enforces"
         );
     }
 }

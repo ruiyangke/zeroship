@@ -55,6 +55,12 @@ use uuid::Uuid;
 thread_local! {
     static POOL_APP_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
     static POOL_AUDIT_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
+    /// DDL/migrator role pool. Cached like the app/audit pools — the
+    /// only consumer today is the `sandbox_events` partition
+    /// provisioner sweep (`sweep::ensure_event_partitions`), which runs
+    /// on a long cadence but reuses the connection across the
+    /// provision + retention DDL within a single tick.
+    static POOL_ADMIN_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
 }
 
 /// Try a thread-local cache read. Returns `Some(Rc<Pool>)` if the
@@ -138,6 +144,18 @@ pub struct DbConfig {
     /// request time, not at boot. Falls back to `dsn` when
     /// `SANDBOX_DATABASE_URL_GDPR` is unset.
     pub dsn_gdpr: String,
+    /// DDL / migrator-role DSN. Connects as the schema-owning role
+    /// (`sandbox_admin`-equivalent — the role granted `CREATE, USAGE
+    /// ON SCHEMA zeroship` in 0011) and is used exclusively to run the
+    /// `sandbox_events` partition DDL (`sweep::ensure_event_partitions`):
+    /// `CREATE TABLE ... PARTITION OF` ahead of time and `DROP TABLE`
+    /// past the retention horizon. Falls back to `dsn` (the app role)
+    /// when `SANDBOX_DATABASE_URL_ADMIN` is unset — the single-role dev
+    /// convenience (CI runs as `postgres`, which owns everything),
+    /// matching the `dsn_audit` / `dsn_gdpr` fallback shape. In
+    /// production the operator sets it to the `sandbox_admin` DSN so
+    /// the runtime app role never holds DDL privilege.
+    pub dsn_admin: String,
     /// Stable controller identity (`hst_<base62>`-derived UUID).
     /// Generated once and persisted at `<state_dir>/host_id` so the
     /// identity survives restarts; an operator who wants a fresh
@@ -153,6 +171,7 @@ impl std::fmt::Debug for DbConfig {
             .field("dsn", &redact_dsn_for_debug(&self.dsn))
             .field("dsn_audit", &redact_dsn_for_debug(&self.dsn_audit))
             .field("dsn_gdpr", &redact_dsn_for_debug(&self.dsn_gdpr))
+            .field("dsn_admin", &redact_dsn_for_debug(&self.dsn_admin))
             .field("host_id", &self.host_id)
             .field("pool_max", &self.pool_max)
             .finish()
@@ -349,11 +368,13 @@ impl Database {
         // § 13.2 last paragraph; production sets all three.
         let dsn_audit = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_AUDIT", &dsn)?;
         let dsn_gdpr = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_GDPR", &dsn)?;
+        let dsn_admin = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_ADMIN", &dsn)?;
 
         let config = DbConfig {
             dsn,
             dsn_audit,
             dsn_gdpr,
+            dsn_admin,
             host_id,
             pool_max,
         };
@@ -386,10 +407,12 @@ impl Database {
         drop(pool);
         let dsn_audit = dsn.clone();
         let dsn_gdpr = dsn.clone();
+        let dsn_admin = dsn.clone();
         let config = DbConfig {
             dsn,
             dsn_audit,
             dsn_gdpr,
+            dsn_admin,
             host_id: Uuid::now_v7(),
             pool_max: 4,
         };
@@ -410,7 +433,8 @@ impl Database {
             config: DbConfig {
                 dsn: dsn.clone(),
                 dsn_audit: dsn.clone(),
-                dsn_gdpr: dsn,
+                dsn_gdpr: dsn.clone(),
+                dsn_admin: dsn,
                 host_id: Uuid::now_v7(),
                 pool_max: 4,
             },
@@ -507,6 +531,34 @@ impl Database {
         // r7-C-followup: see `open_pool` for the rationale.
         pool.start_housekeeper();
         Ok(install_pool(&POOL_AUDIT_CELL, dsn.clone(), pool))
+    }
+
+    /// Pool authenticated as the DDL / migrator role
+    /// (`sandbox_admin`-equivalent). Used by the `sandbox_events`
+    /// partition provisioner (`sweep::ensure_event_partitions`) to run
+    /// `CREATE TABLE ... PARTITION OF` / `DROP TABLE` against the
+    /// `zeroship` schema. Falls back to `SANDBOX_DATABASE_URL` when
+    /// `SANDBOX_DATABASE_URL_ADMIN` is unset (single-role dev). Cached
+    /// per-compio-worker (R26-C1) — the provisioner runs on a long
+    /// cadence but issues several DDL statements per tick on the same
+    /// thread, so reusing the connection avoids a fresh handshake per
+    /// statement.
+    pub async fn pool_admin(&self) -> Result<Rc<Pool>> {
+        let dsn = &self.config.dsn_admin;
+        if let Some(pool) = cached_pool(&POOL_ADMIN_CELL, dsn) {
+            return Ok(pool);
+        }
+        let mut cfg = PoolConfig::default();
+        // DDL is light + serial; a small pool is plenty.
+        cfg.max_size = 2;
+        let pool = Rc::new(
+            Pool::connect_with_config(dsn, cfg)
+                .await
+                .map_err(DatabaseError::Pg)?,
+        );
+        // r7-C-followup: see `open_pool` for the rationale.
+        pool.start_housekeeper();
+        Ok(install_pool(&POOL_ADMIN_CELL, dsn.clone(), pool))
     }
 
     /// Open a transient pool authenticated as the
@@ -3124,6 +3176,158 @@ impl Database {
             .map_err(DatabaseError::Pg)?;
         Ok(())
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // sandbox_events partition provisioner (P1)
+    // ────────────────────────────────────────────────────────────────
+    //
+    // `zeroship.sandbox_events` is `PARTITION BY RANGE (ts)` with
+    // monthly partitions `sandbox_events_YYYY_MM` plus a
+    // `sandbox_events_default` catch-all (0011). These methods are the
+    // DDL primitives the `sweep::ensure_event_partitions` task drives
+    // on a periodic cadence: provision the current + next-N months
+    // ahead (so the default stays empty in steady state) and drop
+    // partitions whose entire range is past the retention horizon.
+    //
+    // All DDL runs on the admin/migrator pool (`pool_admin`) — the
+    // schema-owning role granted `CREATE` on `zeroship` (0011 § 13.2).
+
+    /// Ensure a single monthly partition exists. Runs
+    /// `CREATE TABLE IF NOT EXISTS zeroship.sandbox_events_<YYYY_MM>
+    ///  PARTITION OF zeroship.sandbox_events
+    ///  FOR VALUES FROM (<start>) TO (<end>)`.
+    ///
+    /// `start` / `end` are `YYYY-MM-DD` month boundaries (the first of
+    /// the month and the first of the next month). `suffix` is the
+    /// `YYYY_MM` table-name suffix.
+    ///
+    /// Idempotent + race-tolerant. Returns `Ok(true)` when the
+    /// partition was created (or already present), `Ok(false)` when a
+    /// concurrent provisioner / a non-empty default partition made the
+    /// CREATE a graceful no-op:
+    ///   - `42P07` duplicate_table — a peer created the same partition
+    ///     between our `IF NOT EXISTS` plan and execute (the IF NOT
+    ///     EXISTS suppresses the common case; this catches the narrow
+    ///     concurrent-DDL race).
+    ///   - `23514` check_violation / `42P17` invalid_object_definition
+    ///     — the DEFAULT partition holds rows that would belong to this
+    ///     month (only possible if the default ever caught an INSERT,
+    ///     i.e. we fell behind). Attaching the partition would require
+    ///     moving those rows; PG refuses. We log + skip so the sweep
+    ///     stays non-fatal; the rows remain queryable in the default
+    ///     partition. Provisioning ≥1 month ahead keeps this off the
+    ///     steady-state path.
+    pub async fn ensure_event_partition(
+        &self,
+        suffix: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<bool> {
+        let pool = self.pool_admin().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        // Identifiers are derived from the system clock (YYYY_MM /
+        // YYYY-MM-DD), never user input — safe to interpolate. The
+        // partition-bound literals are not bindable parameters in DDL.
+        let stmt = format!(
+            "CREATE TABLE IF NOT EXISTS zeroship.sandbox_events_{suffix} \
+             PARTITION OF zeroship.sandbox_events \
+             FOR VALUES FROM ('{start}') TO ('{end}')"
+        );
+        match client.execute(&stmt, &[]).await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let code = e.code();
+                if code == Some(&compio_postgres::error::SqlState::DUPLICATE_TABLE) {
+                    // Lost a concurrent-DDL race; the partition exists.
+                    Ok(false)
+                } else if code
+                    == Some(&compio_postgres::error::SqlState::CHECK_VIOLATION)
+                    || code
+                        == Some(
+                            &compio_postgres::error::SqlState::INVALID_OBJECT_DEFINITION,
+                        )
+                {
+                    tracing::warn!(
+                        target: "sandbox::event_partitions",
+                        suffix,
+                        start,
+                        end,
+                        error = %e,
+                        "sandbox event-partition provision: default partition \
+                         holds overlapping rows; skipping (rows stay queryable \
+                         in sandbox_events_default until the next provision \
+                         tick catches up)"
+                    );
+                    Ok(false)
+                } else {
+                    Err(DatabaseError::Pg(e))
+                }
+            }
+        }
+    }
+
+    /// Drop a single monthly partition by suffix:
+    /// `DROP TABLE IF EXISTS zeroship.sandbox_events_<YYYY_MM>`.
+    ///
+    /// Refuses to touch `sandbox_events_default` defensively — the
+    /// retention sweep only ever passes `YYYY_MM` suffixes, but a
+    /// guard here means a future caller bug can never drop the
+    /// catch-all. Returns `Ok(true)` if a DROP statement was issued.
+    pub async fn drop_event_partition(&self, suffix: &str) -> Result<bool> {
+        if suffix == "default" {
+            return Err(DatabaseError::Validation(
+                "refusing to drop sandbox_events_default (the catch-all \
+                 partition is never a retention target)"
+                    .into(),
+            ));
+        }
+        let pool = self.pool_admin().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let stmt =
+            format!("DROP TABLE IF EXISTS zeroship.sandbox_events_{suffix}");
+        client.execute(&stmt, &[]).await.map_err(DatabaseError::Pg)?;
+        Ok(true)
+    }
+
+    /// List the monthly `sandbox_events_YYYY_MM` partition suffixes
+    /// currently attached to `zeroship.sandbox_events`, in ascending
+    /// order. Excludes `sandbox_events_default`. Used by the retention
+    /// sweep to find partitions past the horizon without re-deriving
+    /// every historical month name.
+    ///
+    /// Reads `pg_inherits` joined to `pg_class` — the authoritative
+    /// catalog for "which tables are partitions of this parent" — so a
+    /// partition created out-of-band still gets retention applied.
+    pub async fn list_event_partition_suffixes(&self) -> Result<Vec<String>> {
+        let pool = self.pool_admin().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let rows = client
+            .query(
+                "SELECT c.relname \
+                   FROM pg_inherits i \
+                   JOIN pg_class c       ON c.oid = i.inhrelid \
+                   JOIN pg_class parent  ON parent.oid = i.inhparent \
+                   JOIN pg_namespace n   ON n.oid = parent.relnamespace \
+                  WHERE n.nspname = 'zeroship' \
+                    AND parent.relname = 'sandbox_events' \
+                    AND c.relname ~ '^sandbox_events_[0-9]{4}_[0-9]{2}$' \
+                  ORDER BY c.relname ASC",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let relname: String = r.get(0);
+                // Strip the `sandbox_events_` prefix → `YYYY_MM`.
+                relname
+                    .strip_prefix("sandbox_events_")
+                    .unwrap_or(&relname)
+                    .to_string()
+            })
+            .collect())
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -3665,6 +3869,7 @@ mod tests {
             dsn: "postgres://alice:supers3cret@db.example/zs".into(),
             dsn_audit: "postgres://audit:audsec@db.example/zs".into(),
             dsn_gdpr: "postgres://gdpr:gdsec@db.example/zs".into(),
+            dsn_admin: "postgres://admin:admsec@db.example/zs".into(),
             host_id: uuid::Uuid::nil(),
             pool_max: 16,
         };
@@ -3672,9 +3877,11 @@ mod tests {
         assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
         assert!(!s.contains("audsec"), "audit password must NOT appear in Debug; got {s}");
         assert!(!s.contains("gdsec"), "gdpr password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("admsec"), "admin password must NOT appear in Debug; got {s}");
         assert!(s.contains("alice"), "user must remain visible: {s}");
         assert!(s.contains("audit"), "audit user must remain visible: {s}");
         assert!(s.contains("gdpr"), "gdpr user must remain visible: {s}");
+        assert!(s.contains("admin"), "admin user must remain visible: {s}");
         assert!(s.contains("<redacted>"), "redaction marker missing: {s}");
     }
 
@@ -3684,6 +3891,7 @@ mod tests {
             dsn: "postgres://db.example/zs?sslmode=require&password=supers3cret".into(),
             dsn_audit: "postgres://db.example/zs?sslmode=require&password=audsec".into(),
             dsn_gdpr: "postgres://db.example/zs?sslmode=require&password=gdsec".into(),
+            dsn_admin: "postgres://db.example/zs?sslmode=require&password=admsec".into(),
             host_id: uuid::Uuid::nil(),
             pool_max: 16,
         };
@@ -3691,6 +3899,7 @@ mod tests {
         assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
         assert!(!s.contains("audsec"), "audit query password must NOT appear in Debug; got {s}");
         assert!(!s.contains("gdsec"), "gdpr query password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("admsec"), "admin query password must NOT appear in Debug; got {s}");
         assert!(s.contains("sslmode=require"), "non-secret query params must remain: {s}");
     }
 

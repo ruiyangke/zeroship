@@ -5796,3 +5796,210 @@ mod r26_c1_pool_cache {
         );
     }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// P1: sandbox_events partition provisioner — end-to-end DDL path
+// ────────────────────────────────────────────────────────────────────
+//
+// The pure month-math (provision window, retention horizon, suffix
+// formatting, unix→YearMonth) is pinned in `sweep::unit_tests`. THIS
+// suite exercises the real SQL path: `CREATE TABLE ... PARTITION OF`,
+// `DROP TABLE`, and the `pg_inherits`/`pg_class` partition listing,
+// against a freshly-migrated `zeroship.sandbox_events`.
+mod event_partition_provisioner {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use zeroship_sandbox::sweep::run_event_partition_provision_once;
+
+    /// A pinned `SystemTime` for a given `YYYY-MM` (the 15th, noon UTC)
+    /// so the provisioner's month math is deterministic. Built from the
+    /// known unix seconds for the first of the month plus a mid-month
+    /// offset — the day/time within the month is irrelevant to the
+    /// partition selection, but we keep it mid-month to avoid any
+    /// boundary ambiguity.
+    fn pinned_now(unix_secs_first_of_month: u64) -> SystemTime {
+        // +14 days + 12h, comfortably inside the month.
+        UNIX_EPOCH + Duration::from_secs(unix_secs_first_of_month + 14 * 86_400 + 12 * 3_600)
+    }
+
+    /// Does a monthly partition `sandbox_events_<suffix>` currently
+    /// exist as a partition of `zeroship.sandbox_events`? Reads the
+    /// authoritative catalog (`pg_inherits` ⨝ `pg_class`).
+    async fn partition_exists(pool: &Pool, suffix: &str) -> bool {
+        let client = pool.get().await.expect("client");
+        let relname = format!("sandbox_events_{suffix}");
+        let rows = client
+            .query(
+                "SELECT 1 \
+                   FROM pg_inherits i \
+                   JOIN pg_class c      ON c.oid = i.inhrelid \
+                   JOIN pg_class parent ON parent.oid = i.inhparent \
+                   JOIN pg_namespace n  ON n.oid = parent.relnamespace \
+                  WHERE n.nspname = 'zeroship' \
+                    AND parent.relname = 'sandbox_events' \
+                    AND c.relname = $1::text",
+                &[&relname],
+            )
+            .await
+            .expect("query partition existence");
+        !rows.is_empty()
+    }
+
+    /// Attach a monthly partition out-of-band (as the test fixture
+    /// would, simulating an old partition the retention sweep must
+    /// reap). Idempotent via `IF NOT EXISTS`.
+    async fn attach_partition(pool: &Pool, suffix: &str, start: &str, end: &str) {
+        let client = pool.get().await.expect("client");
+        let stmt = format!(
+            "CREATE TABLE IF NOT EXISTS zeroship.sandbox_events_{suffix} \
+             PARTITION OF zeroship.sandbox_events \
+             FOR VALUES FROM ('{start}') TO ('{end}')"
+        );
+        client.execute(&stmt, &[]).await.expect("attach partition");
+    }
+
+    #[compio::test]
+    #[ignore = "needs Postgres; P1 sandbox_events partition provisioner — provision-ahead + 12-month retention"]
+    async fn provisions_ahead_drops_past_retention_and_is_idempotent() {
+        let url = test_url();
+        let db = migrated_db().await;
+
+        let pool = {
+            let mut cfg = PoolConfig::default();
+            cfg.max_size = 2;
+            Pool::connect_with_config(&url, cfg).await.unwrap()
+        };
+
+        // Pin "now" = 2026-10-15T12:00:00Z. First-of-month
+        // (2026-10-01T00:00:00Z) = 1_790_812_800 unix seconds.
+        //   - Default config: ahead=3, retention=12.
+        //   - Provision window: 2026_10, 2026_11, 2026_12, 2027_01.
+        //   - Retention horizon: 2026-10 minus 12 months = 2025-10.
+        //     Anything strictly before 2025-10 must be dropped.
+        let now = pinned_now(1_790_812_800);
+
+        // 0011 ships partitions 2026_05 .. 2026_10 + default. None of
+        // 2026_11 / 2026_12 / 2027_01 exist yet — the provisioner must
+        // create them. Confirm the pre-state.
+        assert!(
+            partition_exists(&pool, "2026_10").await,
+            "0011 should have shipped the 2026_10 partition"
+        );
+        for s in ["2026_11", "2026_12", "2027_01"] {
+            assert!(
+                !partition_exists(&pool, s).await,
+                "partition {s} must NOT exist before the first provision tick"
+            );
+        }
+
+        // Attach two partitions that are past the 2025-10 retention
+        // horizon (entire range older than the horizon) — these must be
+        // dropped by retention:
+        //   2024_01 (range 2024-01..2024-02) — far past.
+        //   2025_09 (range 2025-09..2025-10) — ends exactly at the
+        //            horizon start (2025-10-01), so strictly older → drop.
+        attach_partition(&pool, "2024_01", "2024-01-01", "2024-02-01").await;
+        attach_partition(&pool, "2025_09", "2025-09-01", "2025-10-01").await;
+        // And one partition AT the horizon month — its range
+        // (2025-10..2025-11) extends past the horizon start, so it must
+        // be KEPT.
+        attach_partition(&pool, "2025_10", "2025-10-01", "2025-11-01").await;
+        for s in ["2024_01", "2025_09", "2025_10"] {
+            assert!(
+                partition_exists(&pool, s).await,
+                "fixture partition {s} should be attached pre-sweep"
+            );
+        }
+
+        // Build the sweep state (database wired, default
+        // EventPartitionConfig: ahead=3, retention=12).
+        let state = build_sweep_state(db, /* snapshot_enabled */ false);
+
+        // ── First tick ──────────────────────────────────────────────
+        let (provisioned, dropped) =
+            run_event_partition_provision_once(&state, now).await;
+
+        // (i) current + next-3 partitions now exist.
+        for s in ["2026_10", "2026_11", "2026_12", "2027_01"] {
+            assert!(
+                partition_exists(&pool, s).await,
+                "partition {s} must exist after the provision tick"
+            );
+        }
+        // The provisioner issued a CREATE-IF-NOT-EXISTS for all 4
+        // window months (2026_10 already existed → still counted as
+        // provisioned/ensured).
+        assert_eq!(
+            provisioned, 4,
+            "ahead=3 ⇒ current + 3 ahead = 4 ensured partitions"
+        );
+
+        // (ii) partitions older than 12 months are dropped; the horizon
+        // month is kept.
+        assert!(
+            !partition_exists(&pool, "2024_01").await,
+            "2024_01 (far past retention) must be dropped"
+        );
+        assert!(
+            !partition_exists(&pool, "2025_09").await,
+            "2025_09 (range ends at the horizon start) must be dropped"
+        );
+        assert!(
+            partition_exists(&pool, "2025_10").await,
+            "2025_10 (the horizon month; range extends past the horizon) \
+             must be KEPT"
+        );
+        assert_eq!(
+            dropped, 2,
+            "exactly the two past-horizon partitions (2024_01, 2025_09) \
+             must be dropped"
+        );
+
+        // The catch-all default partition must NEVER be dropped.
+        let client = pool.get().await.unwrap();
+        let default_rows = client
+            .query(
+                "SELECT 1 FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE n.nspname = 'zeroship' \
+                    AND c.relname = 'sandbox_events_default'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !default_rows.is_empty(),
+            "sandbox_events_default must survive every retention sweep"
+        );
+        drop(client);
+
+        // ── Second tick: must be a pure no-op ───────────────────────
+        let (provisioned2, dropped2) =
+            run_event_partition_provision_once(&state, now).await;
+        assert_eq!(
+            provisioned2, 4,
+            "re-running ensures the same 4 window partitions (all already \
+             present → CREATE IF NOT EXISTS no-ops)"
+        );
+        assert_eq!(
+            dropped2, 0,
+            "second tick drops nothing — the past-horizon partitions are \
+             already gone; the provisioner is idempotent"
+        );
+
+        // Final state: window partitions present, horizon month present,
+        // past-horizon partitions absent — unchanged from the first tick.
+        for s in ["2026_10", "2026_11", "2026_12", "2027_01", "2025_10"] {
+            assert!(
+                partition_exists(&pool, s).await,
+                "partition {s} must still exist after the idempotent re-run"
+            );
+        }
+        for s in ["2024_01", "2025_09"] {
+            assert!(
+                !partition_exists(&pool, s).await,
+                "partition {s} must remain dropped after the idempotent re-run"
+            );
+        }
+    }
+}

@@ -226,6 +226,28 @@ struct ControlCli {
     /// `zeroship.localhost`.
     #[arg(long = "app-base-domain", env = "APP_BASE_DOMAIN", default_value = "zeroship.ai")]
     app_base_domain: String,
+
+    /// Retention horizon (months) for the append-only audit tables
+    /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this
+    /// are swept by the in-process retention cron — the sanctioned deleter for
+    /// those tables (peer of the auth `audit_events` sweep). Default 12 months
+    /// matches the events-retention default.
+    #[arg(
+        long = "audit-retention-months",
+        env = "CONTROL_AUDIT_RETENTION_MONTHS",
+        default_value_t = zeroship_control::cron::audit_retention::DEFAULT_RETENTION_MONTHS
+    )]
+    audit_retention_months: u32,
+
+    /// Tick interval (seconds) for the audit-retention cron. Default 3600
+    /// (hourly). Operators can drop this for tests; production should leave the
+    /// default.
+    #[arg(
+        long = "audit-retention-check-secs",
+        env = "CONTROL_AUDIT_RETENTION_CHECK_SECS",
+        default_value_t = zeroship_control::cron::audit_retention::DEFAULT_CHECK_SECS
+    )]
+    audit_retention_check_secs: u64,
 }
 
 impl ControlCli {
@@ -272,6 +294,8 @@ impl std::fmt::Debug for ControlCli {
             .field("pairwise_salt_file", &self.pairwise_salt_file)
             .field("oauth_audience", &self.oauth_audience)
             .field("app_base_domain", &self.app_base_domain)
+            .field("audit_retention_months", &self.audit_retention_months)
+            .field("audit_retention_check_secs", &self.audit_retention_check_secs)
             .finish()
     }
 }
@@ -477,6 +501,8 @@ fn main() -> std::io::Result<()> {
     );
     let expected_oauth_audience = cli.oauth_audience;
     let app_base_domain = cli.app_base_domain;
+    let audit_retention_months = cli.audit_retention_months;
+    let audit_retention_check_secs = cli.audit_retention_check_secs;
 
     // Pure path resolution only — the writability PROBE (create_dir_all + probe
     // file) is deferred to the real startup path (M1) so `--check-config`
@@ -892,6 +918,24 @@ fn main() -> std::io::Result<()> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         pairwise_salt,
     });
+
+    // Spawn the in-process retention cron. It is the sanctioned deleter for the
+    // append-only `zeroship.app_audit` + `zeroship.authz_decisions` tables —
+    // without it they would grow unbounded with no deleter. Peer of the auth
+    // `audit_events` sweep; both flag their connection with the shared
+    // `zeroship.audit_retention` GUC the tamper triggers honor. The cron holds
+    // its own `Arc<Registry>` (cheap String clone of the one in `AppState`) and
+    // opens a fresh connection per tick.
+    zeroship_control::cron::spawn_all(
+        Arc::new(state.registry.clone()),
+        audit_retention_months,
+        audit_retention_check_secs,
+    );
+    tracing::info!(
+        retention_months = audit_retention_months,
+        check_secs = audit_retention_check_secs,
+        "control: audit-retention cron spawned"
+    );
 
     let bind_addr = format!("{bind_host}:{port}");
     if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {

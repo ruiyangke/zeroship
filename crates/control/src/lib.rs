@@ -12,6 +12,7 @@ pub mod auth_audit;
 pub mod authz_guard;
 pub mod bootstrap_builder;
 pub mod bootstrap_console;
+pub mod cron;
 pub mod deploy;
 pub mod env_handlers;
 pub mod env_store;
