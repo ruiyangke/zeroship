@@ -1,6 +1,6 @@
 // ─── OnboardingIntent — first-run intent picker (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1) ─────
 //
-// One screen, one question, six chip answers, and a skip link. Runs
+// One screen, one question, six choice tiles, and a skip link. Runs
 // after Signup before the first /home visit. The chosen intent is
 // stashed in `localStorage.zeroship_intent` so /home can seed example
 // chips and template suggestions later. Skip leaves it unset — the
@@ -9,10 +9,18 @@
 // Public route on purpose: signup forwards to /onboarding/intent
 // even before any session is fully reflected, and we don't want a
 // guard race to bounce the user back to /login mid-flow.
+//
+// Crystal: a Center-anchored column (Stack) of headline + subtitle,
+// a Grid of interactive Card choice tiles, and a plain Button skip
+// link. Single step, so no Stepper. The eyebrow / headline emphasis /
+// quote-glyph styling lives in the co-located stylesheet over --zs-*
+// tokens; the public exports + data hooks are unchanged.
 
 import { useNavigate } from "react-router-dom";
+import { Button, Card, Center, Grid, Stack } from "@zeroship/ui";
 import { lsSet } from "../lib/storage";
 import { track } from "../lib/analytics";
+import "./OnboardingIntent.css";
 
 const INTENT_KEY = "zeroship_intent";
 
@@ -45,52 +53,63 @@ export function OnboardingIntent() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-5 bg-paper">
-      <div
+    <Center minHeight="100dvh" className="zb-onboarding-intent">
+      <Stack
+        gap={8}
+        align="center"
         data-testid="onboarding-intent-page"
-        className="w-[640px] max-w-full px-10 py-14 reveal text-center"
+        className="zb-onboarding-intent__panel"
       >
-        <div className="mb-3 font-sans text-[10px] uppercase tracking-[0.22em] text-tomato">
-          a quick question
-        </div>
-        <h1 className="font-serif font-medium text-[44px] leading-[1.05] -tracking-[0.02em] mb-4">
-          What kind of thing are you here to{" "}
-          <em className="italic text-tomato">make</em>?
-        </h1>
-        <p className="font-serif text-[15.5px] text-ink-soft leading-[1.55] max-w-[480px] mx-auto mb-10">
-          We'll use this to tailor examples and templates. No wrong answer —
-          you can always change your mind later.
-        </p>
+        <Stack gap={4} align="center" className="zb-onboarding-intent__intro">
+          <span className="zb-onboarding-intent__eyebrow">a quick question</span>
+          <h1 className="zb-onboarding-intent__title">
+            What kind of thing are you here to{" "}
+            <em className="zb-onboarding-intent__emphasis">make</em>?
+          </h1>
+          <p className="zb-onboarding-intent__lede">
+            We'll use this to tailor examples and templates. No wrong answer —
+            you can always change your mind later.
+          </p>
+        </Stack>
 
-        <div
-          className="flex flex-wrap justify-center gap-2.5 mb-8"
+        <Grid
+          minColWidth="13rem"
+          gap={3}
           data-testid="onboarding-intent-choices"
+          className="zb-onboarding-intent__choices"
         >
           {CHOICES.map((c) => (
-            <button
+            <Card
               key={c.id}
-              type="button"
+              variant="outline"
+              interactive
               onClick={() => choose(c.id)}
               data-testid={`onboarding-intent-choice:${c.id}`}
-              className="bg-white border border-rule rounded-full px-5 py-2.5 font-serif italic text-[15px] text-ink hover:border-ink hover:bg-paper-2 transition-colors cursor-pointer"
+              className="zb-onboarding-intent__choice"
             >
-              <span className="text-pencil">"</span>
-              {c.label}
-              <span className="text-pencil">"</span>
-            </button>
+              <Card.Content className="zb-onboarding-intent__choice-body">
+                <span className="zb-onboarding-intent__quote" aria-hidden="true">
+                  "
+                </span>
+                {c.label}
+                <span className="zb-onboarding-intent__quote" aria-hidden="true">
+                  "
+                </span>
+              </Card.Content>
+            </Card>
           ))}
-        </div>
+        </Grid>
 
-        <button
-          type="button"
+        <Button
+          variant="plain"
           onClick={skip}
           data-testid="onboarding-intent-skip"
-          className="font-serif italic text-[14px] text-pencil hover:text-ink bg-transparent border-0 cursor-pointer"
+          className="zb-onboarding-intent__skip"
         >
           Skip — I'll figure it out →
-        </button>
-      </div>
-    </div>
+        </Button>
+      </Stack>
+    </Center>
   );
 }
 

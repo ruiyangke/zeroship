@@ -1,0 +1,279 @@
+/*
+ * Pricing — crystal skin for the public pricing surface (`/pricing`).
+ *
+ * The page column comes from a DS Container; the tier band is a DS
+ * Grid of DS Cards (the same primitives @zeroship/ui's PricingTable
+ * section composes), so the load-bearing per-card test hooks ride on
+ * real card elements. This sheet only paints the bespoke editorial
+ * chrome that has no direct DS component: the eyebrow caption with a
+ * leading rule, the big display price type, the accented "Most chosen"
+ * flag on the featured tier, the dotted bullet list, the worked-example
+ * note, and the lower-caption footer. Everything reads --zs-* tokens —
+ * no Tailwind, no editorial tokens, no raw hex/px (0.0625rem hairline
+ * only, oklch/rem elsewhere via tokens).
+ */
+
+/* ─── page shell ───────────────────────────────────────────────────── */
+.zs-pricing-page {
+  min-block-size: 100vh;
+  background-color: var(--zs-surface-bg);
+  color: var(--zs-label);
+}
+
+.zs-pricing-page__main {
+  padding-block: var(--zs-space-8) var(--zs-space-10);
+}
+
+/* ─── shared eyebrow caption ───────────────────────────────────────── */
+.zs-pricing-page__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  margin-block-end: var(--zs-space-4);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+.zs-pricing-page__eyebrow-rule {
+  display: inline-block;
+  inline-size: var(--zs-space-3);
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* ─── lede ─────────────────────────────────────────────────────────── */
+.zs-pricing-page__lede {
+  max-inline-size: 43.75rem;
+  margin-block-end: var(--zs-space-9);
+}
+.zs-pricing-page__title {
+  margin: 0 0 var(--zs-space-5);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-display-1-size);
+  line-height: var(--zs-text-display-1-line);
+  letter-spacing: var(--zs-text-display-1-tracking);
+  font-weight: var(--zs-text-display-1-weight);
+  color: var(--zs-label);
+}
+.zs-pricing-page__title em {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+.zs-pricing-page__lede-lead {
+  margin: 0 0 var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  color: var(--zs-label-secondary);
+}
+.zs-pricing-page__lede-note {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label-tertiary);
+}
+.zs-pricing-page__lede-note strong {
+  font-style: normal;
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+}
+
+/* ─── plan cards ───────────────────────────────────────────────────── */
+.zs-pricing-page__plans-section {
+  margin-block-end: var(--zs-space-9);
+}
+
+/* Each tier is a DS Card; this turns it into a column flexbox so the
+ * feature list grows and the CTA pins to the card bottom — CTAs align
+ * across tiers of differing feature counts. */
+.zs-pricing-page__plan {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+/* The featured tier gets an accent ring on top of the elevated Card. */
+.zs-pricing-page__plan[data-featured] {
+  outline: 0.125rem solid var(--zs-accent);
+  outline-offset: calc(-1 * 0.125rem);
+}
+
+/* The "Most chosen" flag — the accent badge on the featured tier. */
+.zs-pricing-page__plan-badge {
+  position: absolute;
+  inset-block-start: calc(-1 * var(--zs-space-3));
+  inset-inline-start: var(--zs-space-5);
+  padding: var(--zs-space-half) var(--zs-space-2);
+  background-color: var(--zs-accent);
+  color: var(--zs-accent-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  border-radius: var(--zs-radius-1);
+}
+
+.zs-pricing-page__plan-name {
+  margin: 0 0 var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-accent);
+}
+
+.zs-pricing-page__plan-price {
+  display: flex;
+  align-items: baseline;
+  gap: var(--zs-space-2);
+  margin: 0 0 var(--zs-space-1);
+}
+.zs-pricing-page__plan-amount {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-display-3-size);
+  line-height: var(--zs-text-display-3-line);
+  letter-spacing: var(--zs-text-display-3-tracking);
+  font-weight: var(--zs-text-display-3-weight);
+  color: var(--zs-label);
+}
+.zs-pricing-page__plan-cadence {
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+.zs-pricing-page__plan-tagline {
+  margin: 0 0 var(--zs-space-5);
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+.zs-pricing-page__plan-features {
+  flex: 1;
+  list-style: none;
+  margin: 0 0 var(--zs-space-6);
+  padding: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label);
+}
+.zs-pricing-page__plan-feature {
+  padding-block: var(--zs-space-half);
+}
+.zs-pricing-page__plan-feature::before {
+  content: "·";
+  margin-inline-end: var(--zs-space-2);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-accent);
+}
+
+/* CTA pinned to the card bottom; the Button fills the row width. */
+.zs-pricing-page__plan-cta {
+  margin-block-start: auto;
+}
+.zs-pricing-page__plan-cta .zs-button {
+  inline-size: 100%;
+}
+
+/* ─── 15 % share band ──────────────────────────────────────────────── */
+.zs-pricing-page__share {
+  max-inline-size: 47.5rem;
+  margin-block-end: var(--zs-space-9);
+  padding: var(--zs-space-8) var(--zs-space-9);
+  background-color: var(--zs-surface-sunken);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-3);
+}
+.zs-pricing-page__share-title {
+  margin: 0 0 var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+  letter-spacing: var(--zs-text-title-2-tracking);
+  font-weight: var(--zs-text-title-2-weight);
+  color: var(--zs-label);
+}
+.zs-pricing-page__share-body {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-label-secondary);
+}
+.zs-pricing-page__share-body em {
+  font-style: italic;
+}
+
+/* ─── enterprise note ──────────────────────────────────────────────── */
+.zs-pricing-page__enterprise {
+  max-inline-size: 43.75rem;
+  margin-block-end: var(--zs-space-8);
+}
+.zs-pricing-page__enterprise-note {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label-secondary);
+}
+.zs-pricing-page__inline-link {
+  color: var(--zs-accent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  transition: opacity 120ms ease;
+}
+.zs-pricing-page__inline-link:hover {
+  opacity: 0.8;
+}
+
+/* ─── rule + footer ────────────────────────────────────────────────── */
+.zs-pricing-page__rule {
+  margin: 0 0 var(--zs-space-7);
+  border: none;
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+.zs-pricing-page__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-3) var(--zs-space-7);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-tertiary);
+}
+.zs-pricing-page__footer-link {
+  color: inherit;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-pricing-page__footer-link:hover {
+  color: var(--zs-label);
+}
+.zs-pricing-page__footer-mark {
+  margin-inline-start: auto;
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--zs-label-tertiary);
+}
+.zs-pricing-page__footer-dot {
+  color: var(--zs-accent);
+}

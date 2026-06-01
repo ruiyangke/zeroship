@@ -3,144 +3,179 @@
 // Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.3. Filter pills at the top, grid of skill cards
 // underneath. "Add to project" is greyed out / "Coming soon" — the
 // install action and skill registry are not wired yet.
+//
+// Crystal skin: PublicNav band, then a Container holding a PageHeader
+// lede (eyebrow → display title → description), a ToggleGroup filter
+// row (replacing the editorial FilterPill), and a fluid Grid of DS
+// Cards (replacing the bespoke <article> cards). The empty-state uses
+// the EmptyState block; the registry note is a tinted Card. Bespoke
+// chrome (the eyebrow rule, the display-scale title, the card
+// number/icon/footer treatment, the footer link row) lives in the
+// co-located Skills.css reading only --zs-* tokens. Props, state,
+// routing, and every data-testid are preserved exactly — only the
+// presentation changed.
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  Button,
+  Card,
+  Cluster,
+  Container,
+  EmptyState,
+  Grid,
+  PageHeader,
+  Separator,
+  Stack,
+  ToggleGroup,
+  Toggle,
+} from "@zeroship/ui";
 import { PublicNav } from "../components/PublicNav";
-import { FilterPill } from "../components/FilterPill";
 import { SKILLS, SKILL_CATEGORIES, type SkillCategory, type Skill } from "../lib/skills";
+import "./Skills.css";
 
 export function Skills() {
   const [filter, setFilter] = useState<"all" | SkillCategory>("all");
   const visible = filter === "all" ? SKILLS : SKILLS.filter((s) => s.category === filter);
 
   return (
-    <div className="min-h-screen bg-paper" data-testid="skills-page">
+    <div className="zs-skills" data-testid="skills-page">
       <PublicNav />
 
-      <main className="mx-auto px-6 pt-14 pb-24" style={{ maxWidth: 960 }}>
-        {/* ─── Lede ─────────────────────────────────────────────── */}
-        <section className="reveal mb-10 max-w-[680px]">
-          <div className="label-uc mb-4 flex items-center gap-2">
-            <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-            Skills catalogue
-          </div>
-          <h1
-            className="font-serif font-medium leading-[0.98] -tracking-[0.02em] mb-5"
-            style={{ fontSize: "clamp(48px, 7vw, 80px)" }}
-          >
-            What your app can <em className="italic text-tomato">do</em>.
-          </h1>
-          <p className="font-serif text-[18px] leading-[1.55] text-ink-soft m-0">
-            Skills are the building blocks: auth, payments, search, AI,
-            realtime. Add them to a project and the agents wire them in for
-            you. No SDKs to read, no API keys to copy.
-          </p>
-        </section>
+      <Container asChild size="md" padX={6}>
+        <main className="zs-skills__main">
+          {/* ─── Lede ─────────────────────────────────────────────── */}
+          <PageHeader className="zs-skills__lede">
+            <PageHeader.Text>
+              <span className="zs-skills__eyebrow">
+                <span className="zs-skills__eyebrow-rule" aria-hidden="true" />
+                Skills catalogue
+              </span>
+              <PageHeader.Title className="zs-skills__title">
+                What your app can <em className="zs-skills__title-em">do</em>.
+              </PageHeader.Title>
+              <PageHeader.Description className="zs-skills__lede-copy">
+                Skills are the building blocks: auth, payments, search, AI,
+                realtime. Add them to a project and the agents wire them in for
+                you. No SDKs to read, no API keys to copy.
+              </PageHeader.Description>
+            </PageHeader.Text>
+          </PageHeader>
 
-        {/* ─── Filter pills ─────────────────────────────────────── */}
-        <div className="flex flex-wrap gap-2.5 mb-8" data-testid="skills-filters">
-          {SKILL_CATEGORIES.map(({ key, label }) => (
-            <FilterPill
-              key={key}
-              active={filter === key}
-              onClick={() => setFilter(key as any)}
-              data-testid={`skills-filter:${key}`}
+          {/* ─── Filter pills ─────────────────────────────────────── */}
+          <ToggleGroup
+            className="zs-skills__filters"
+            value={filter}
+            onValueChange={(next) => setFilter((next ?? "all") as "all" | SkillCategory)}
+            variant="plain"
+            equalWidth={false}
+            aria-label="Filter skills by category"
+            data-testid="skills-filters"
+          >
+            {SKILL_CATEGORIES.map(({ key, label }) => (
+              <Toggle
+                key={key}
+                value={key}
+                className="zs-skills__filter"
+                data-testid={`skills-filter:${key}`}
+              >
+                {label}
+              </Toggle>
+            ))}
+          </ToggleGroup>
+
+          {/* ─── Skill cards ──────────────────────────────────────── */}
+          {visible.length === 0 ? (
+            <EmptyState
+              className="zs-skills__empty"
+              data-testid="skills-empty"
+              title={
+                <>
+                  No skills in <em>{filter}</em> yet — the catalogue&rsquo;s still wiring up.
+                </>
+              }
+              action={
+                <Button variant="plain" onClick={() => setFilter("all")}>
+                  ← Show all skills
+                </Button>
+              }
+            />
+          ) : (
+            <Grid
+              className="zs-skills__grid"
+              minColWidth="16.25rem"
+              gap={5}
+              data-testid="skills-grid"
             >
-              {label}
-            </FilterPill>
-          ))}
-        </div>
+              {visible.map((s) => <SkillCard key={s.slug} skill={s} />)}
+            </Grid>
+          )}
 
-        {/* ─── Skill cards ──────────────────────────────────────── */}
-        {visible.length === 0 ? (
-          <div
-            data-testid="skills-empty"
-            className="border border-dashed border-rule p-10 text-center mb-14"
-          >
-            <p className="font-serif italic text-ink-soft text-[15px] mb-1">
-              No skills in <em>{filter}</em> yet — the catalogue's still wiring up.
-            </p>
-            <button
-              type="button"
-              onClick={() => setFilter("all")}
-              className="font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 mt-2 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
-            >
-              ← Show all skills
-            </button>
-          </div>
-        ) : (
-          <div
-            className="grid gap-5 mb-14"
-            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
-            data-testid="skills-grid"
-          >
-            {visible.map((s) => <SkillCard key={s.slug} skill={s} />)}
-          </div>
-        )}
+          {/* ─── Note about the registry ──────────────────────────── */}
+          <Card variant="outline" className="zs-skills__note">
+            <Card.Header>
+              <Card.Title asChild className="zs-skills__note-title">
+                <h2>A note</h2>
+              </Card.Title>
+            </Card.Header>
+            <Card.Content className="zs-skills__note-copy">
+              The skill registry is wiring up. For now this page lists what&rsquo;s
+              on the roadmap; &ldquo;Add to project&rdquo; lights up once the install
+              action ships.
+            </Card.Content>
+          </Card>
 
-        {/* ─── Note about the registry ──────────────────────────── */}
-        <section className="reveal mb-14 bg-paper-2 border border-rule px-7 py-6 max-w-[680px]">
-          <div className="label-uc mb-2">A note</div>
-          <p className="font-serif italic text-[15px] text-ink-soft m-0 leading-[1.55]">
-            The skill registry is wiring up. For now this page lists what's
-            on the roadmap; "Add to project" lights up once the install
-            action ships.
-          </p>
-        </section>
+          <Separator className="zs-skills__rule" />
 
-        <hr className="hairline mb-10" />
-
-        <footer className="font-sans text-[11px] uppercase tracking-[0.2em] text-pencil flex flex-wrap gap-x-7 gap-y-3 items-center">
-          <Link to="/" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Home</Link>
-          <Link to="/pricing" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Pricing</Link>
-          <Link to="/templates" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Templates</Link>
-          <Link to="/about" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>About</Link>
-          <span className="ml-auto font-serif italic text-[12px] tracking-normal normal-case text-pencil">
-            zeroship<span className="text-tomato">.</span> &copy; 2026
-          </span>
-        </footer>
-      </main>
+          <footer className="zs-skills__footer">
+            <Cluster gap={7} className="zs-skills__footer-links">
+              <Link to="/" className="zs-skills__footer-link">Home</Link>
+              <Link to="/pricing" className="zs-skills__footer-link">Pricing</Link>
+              <Link to="/templates" className="zs-skills__footer-link">Templates</Link>
+              <Link to="/about" className="zs-skills__footer-link">About</Link>
+              <span className="zs-skills__footer-mark">
+                zeroship<span className="zs-skills__footer-dot">.</span> &copy; 2026
+              </span>
+            </Cluster>
+          </footer>
+        </main>
+      </Container>
     </div>
   );
 }
 
 function SkillCard({ skill }: { skill: Skill }) {
   return (
-    <article
+    <Card
+      variant="outline"
+      className="zs-skill-card"
       data-testid={`skill-card:${skill.slug}`}
-      className="bg-white border border-rule px-6 pt-5 pb-4 transition-all duration-300 hover:-translate-y-[2px] hover:shadow-[0_24px_28px_-20px_rgba(34,22,12,0.16)]"
     >
-      <div
-        className="font-serif italic text-[11.5px] text-tomato tracking-wide mb-2"
-        style={{ fontFeatureSettings: '"lnum" 1' }}
-      >
-        № {skill.num} · <span className="capitalize">{skill.category}</span>
-      </div>
-      <div className="flex items-center gap-3 mb-2">
-        <span aria-hidden="true" className="text-[26px] leading-none select-none">
-          {skill.icon}
+      <Stack gap={2}>
+        <span className="zs-skill-card__num">
+          № {skill.num} · <span className="zs-skill-card__cat">{skill.category}</span>
         </span>
-        <h3 className="font-serif font-medium text-[22px] -tracking-[0.015em] leading-tight m-0">
-          {skill.name}
-        </h3>
-      </div>
-      <p className="font-serif italic text-[14px] text-ink-soft mb-5 leading-snug">
-        {skill.tagline}
-      </p>
-      <div className="flex justify-between items-baseline pt-3 border-t border-dashed border-rule">
-        <span className="font-sans text-[10px] uppercase tracking-[0.16em] text-pencil">
-          Coming soon
-        </span>
+        <Cluster gap={3} align="center">
+          <span aria-hidden="true" className="zs-skill-card__icon">
+            {skill.icon}
+          </span>
+          <Card.Title asChild className="zs-skill-card__name">
+            <h3>{skill.name}</h3>
+          </Card.Title>
+        </Cluster>
+        <p className="zs-skill-card__tagline">{skill.tagline}</p>
+      </Stack>
+      <Card.Footer divider="top" align="between" className="zs-skill-card__footer">
+        <span className="zs-skill-card__soon">Coming soon</span>
         <button
           type="button"
           disabled
-          className="font-serif italic text-[13px] text-pencil cursor-not-allowed bg-transparent border-0 p-0"
+          className="zs-skill-card__add"
           data-testid={`skill-add:${skill.slug}`}
         >
           Add to project →
         </button>
-      </div>
-    </article>
+      </Card.Footer>
+    </Card>
   );
 }

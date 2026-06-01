@@ -1,0 +1,103 @@
+/*
+ * Account — crystal.
+ *
+ * Co-located bespoke styling for the account page. Only the things the
+ * DS components don't already express live here: the large display name
+ * with an accent-emphasised surname, the email subline, the plan-card
+ * usage caption, the "coming soon" deferred panels, and the accent-toned
+ * sign-out / danger section titles. Everything reads from --zs-* tokens
+ * (oklch / rem via the token layer); no raw hex/px beyond the hairline
+ * convention.
+ */
+
+/* ─── Identity header ──────────────────────────────────────────────── */
+
+.account__name {
+  margin: 0 0 var(--zs-space-1);
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  font-weight: var(--zs-text-large-title-weight);
+  color: var(--zs-label);
+}
+
+/* Accent emphasis on the surname — replaces the editorial italic tomato. */
+.account__name-rest {
+  color: var(--zs-accent);
+}
+
+.account__email {
+  margin: 0 0 var(--zs-space-8);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Plan card ────────────────────────────────────────────────────── */
+
+.account__plan-name {
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  color: var(--zs-label);
+}
+
+.account__plan-name em {
+  font-style: normal;
+  color: var(--zs-accent);
+}
+
+.account__plan-usage {
+  margin-top: var(--zs-space-half);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+}
+
+.account__plan-meter {
+  margin-top: var(--zs-space-2);
+}
+
+/* ─── Sessions ─────────────────────────────────────────────────────── */
+
+.account__session-title {
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: var(--zs-text-headline-weight);
+  color: var(--zs-label);
+}
+
+.account__session-sub {
+  margin-top: var(--zs-space-half);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-secondary);
+}
+
+.account__session-note {
+  margin-top: var(--zs-space-2);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── Deferred ("coming soon") panels ──────────────────────────────── */
+
+.account__deferred {
+  border: 0.0625rem dashed var(--zs-separator);
+  border-radius: var(--zs-radius-3);
+  background: var(--zs-surface-sunken);
+  padding: var(--zs-space-3) var(--zs-space-4);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Danger / sign-out accents ────────────────────────────────────── */
+
+/* Tints a FormSection title to the destructive system palette so the
+ * Delete + Sign-out sections read as charged without a bespoke heading. */
+.account__danger-title {
+  color: var(--zs-system-red);
+}

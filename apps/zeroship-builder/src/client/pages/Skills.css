@@ -1,0 +1,218 @@
+/*
+ * Skills — crystal skin for the public skill catalogue (`/skills`).
+ *
+ * The structure (PublicNav + Container + PageHeader + ToggleGroup +
+ * Grid of Cards + EmptyState + outline Card note) comes from the DS
+ * components and layout primitives. This sheet only paints the bespoke
+ * chrome with no direct DS analogue: the page surface, the eyebrow
+ * caption + its rule, the display-scale marketing title + accent
+ * emphasis, the per-card number/icon/footer treatment, the filter-pill
+ * sizing, and the thin footer link row. Everything reads --zs-* tokens
+ * — no raw hex/px (0.0625rem hairlines only), no Tailwind, no editorial
+ * tokens.
+ */
+
+/* ─── page surface ─────────────────────────────────────────────────── */
+.zs-skills {
+  min-block-size: 100vh;
+  background-color: var(--zs-surface-bg);
+  color: var(--zs-label);
+}
+
+.zs-skills__main {
+  padding-block: var(--zs-space-9) var(--zs-space-10);
+}
+
+/* ─── lede ─────────────────────────────────────────────────────────── */
+.zs-skills__lede {
+  margin-block-end: var(--zs-space-8);
+}
+
+/* The eyebrow caption — uppercase, letter-spaced, with a short leading
+ * rule. Crystal analogue of the old `.label-uc` + hairline tick. */
+.zs-skills__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  margin-block-end: var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+.zs-skills__eyebrow-rule {
+  inline-size: 0.875rem;
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* The marketing title — promote PageHeader's title-1 default up to a
+ * fluid display scale to keep the lede's visual weight. */
+.zs-skills__title {
+  font-size: clamp(
+    var(--zs-text-title-1-size),
+    7vw,
+    var(--zs-text-display-1-size)
+  );
+  line-height: var(--zs-text-display-1-line);
+  letter-spacing: var(--zs-text-display-1-tracking);
+  font-weight: var(--zs-text-display-1-weight);
+}
+/* The accent emphasis — crystal analogue of the old tomato <em>. */
+.zs-skills__title-em {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+
+.zs-skills__lede-copy {
+  max-inline-size: 42.5rem;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+}
+
+/* ─── filter pills ─────────────────────────────────────────────────── */
+.zs-skills__filters {
+  flex-wrap: wrap;
+  margin-block-end: var(--zs-space-7);
+}
+/* Lower-case category labels read as quiet pills, matching the source. */
+.zs-skills__filter {
+  text-transform: lowercase;
+}
+
+/* ─── empty state ──────────────────────────────────────────────────── */
+.zs-skills__empty {
+  margin-block-end: var(--zs-space-9);
+}
+
+/* ─── card grid ────────────────────────────────────────────────────── */
+.zs-skills__grid {
+  margin-block-end: var(--zs-space-9);
+}
+
+/* ─── skill card ───────────────────────────────────────────────────── */
+.zs-skill-card {
+  transition:
+    transform var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-skill-card:hover {
+  transform: translateY(-0.125rem);
+  box-shadow: var(--zs-shadow-3);
+}
+
+/* The "№ NN · category" caption. */
+.zs-skill-card__num {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.04em;
+  color: var(--zs-accent);
+}
+.zs-skill-card__cat {
+  text-transform: capitalize;
+}
+
+.zs-skill-card__icon {
+  font-size: var(--zs-text-title-1-size);
+  line-height: 1;
+  user-select: none;
+}
+
+.zs-skill-card__name {
+  margin: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  font-weight: var(--zs-text-title-3-weight);
+  color: var(--zs-label);
+}
+
+.zs-skill-card__tagline {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+/* The footer band — "Coming soon" caption at the start, the disabled
+ * "Add to project" affordance at the end. Card.Footer owns the divider
+ * + the space-between layout; this sheet only paints the two labels. */
+.zs-skill-card__footer {
+  margin-block-start: var(--zs-space-4);
+}
+.zs-skill-card__soon {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--zs-label-tertiary);
+}
+.zs-skill-card__add {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+/* ─── registry note ────────────────────────────────────────────────── */
+.zs-skills__note {
+  max-inline-size: 42.5rem;
+  margin-block-end: var(--zs-space-9);
+}
+.zs-skills__note-title {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-weight: var(--zs-text-caption-1-weight);
+  color: var(--zs-label-secondary);
+}
+.zs-skills__note-copy {
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── footer ───────────────────────────────────────────────────────── */
+.zs-skills__rule {
+  margin-block-end: var(--zs-space-7);
+}
+.zs-skills__footer-links {
+  flex-wrap: wrap;
+  row-gap: var(--zs-space-3);
+}
+.zs-skills__footer-link {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-tertiary);
+  text-decoration: none;
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-skills__footer-link:hover {
+  color: var(--zs-label);
+}
+.zs-skills__footer-mark {
+  margin-inline-start: auto;
+  font-family: var(--zs-font-system);
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+}
+.zs-skills__footer-dot {
+  color: var(--zs-accent);
+}

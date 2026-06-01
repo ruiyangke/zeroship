@@ -14,18 +14,28 @@
 //   3. stash the brief in sessionStorage under `zeroship_pending_brief`,
 //   4. navigate to /p/<project.id>/preview where WorkspaceShell consumes
 //      the stash and seeds ChatRail with a synthesised first message.
+//
+// Crystal: the inline minimal frame (kept — see the PageFrame note
+// below) is rebuilt over @zeroship/ui Container + Stack/Cluster layout
+// primitives, Card surfaces, and Button. Bespoke editorial bits (the
+// crumbs eyebrow, the display title with its accent "make", the lede,
+// the validation/stuck/error bands) live in the co-located
+// WizardWorkspace.css reading --zs-* tokens. The already-migrated
+// NotebookPrompt / ChatMessages are reused as-is. Public component
+// interface, data hooks, routing, and test hooks are unchanged.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useChat } from "@ai-sdk/react";
 import { useMutation } from "@tanstack/react-query";
+import { Button, Card, Cluster, Container, Stack } from "@zeroship/ui";
 import { createProject, rpc, wizardTransport } from "../api";
 import { NotebookPrompt, CmdEnterHint } from "../components/NotebookPrompt";
-import { Button } from "../components/Button";
 import { ChatMessages } from "../workspace/chat/ChatMessages";
 import type { Brief, Survey, SurveyResponse } from "../types/chat";
 import { lsGet, lsSet } from "../lib/storage";
 import { track } from "../lib/analytics";
+import "./WizardWorkspace.css";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
 const PENDING_PROMPT_KEY = "zeroship_pending_prompt";
@@ -290,136 +300,148 @@ export function WizardWorkspace() {
   }
 
   return (
-    <div className="min-h-screen bg-paper">
-      <div className="mx-auto px-6 py-12" style={{ maxWidth: 760 }}>
-        <nav className="mb-10 font-sans text-[10px] uppercase tracking-[0.2em] text-pencil">
-          <span className="opacity-60">studio</span>
-          <span className="mx-2 opacity-40">/</span>
-          <span className="text-ink">begin a project</span>
-        </nav>
+    <div className="zb-wizard">
+      <Container size="md" className="zb-wizard__column">
+        <Stack gap={8}>
+          <Stack gap={6}>
+            <Cluster gap={2} className="zb-wizard__crumbs" aria-label="Breadcrumb">
+              <span className="zb-wizard__crumb-muted">studio</span>
+              <span className="zb-wizard__crumb-sep" aria-hidden="true">
+                /
+              </span>
+              <span className="zb-wizard__crumb-current">begin a project</span>
+            </Cluster>
 
-        <header className="mb-8">
-          <h1 className="font-serif font-medium text-[40px] leading-[0.98] -tracking-[0.02em] mb-3">
-            Tell me what you want to <em className="italic text-tomato">make</em>.
-          </h1>
-          <p className="font-serif text-[16px] text-ink-soft max-w-[560px] leading-[1.55]">
-            A sentence or two is plenty. I'll ask 1–3 quick questions, then
-            start coding it. Skip any question and I'll guess.
-          </p>
-        </header>
+            <Stack gap={3} asChild>
+              <header>
+                <h1 className="zb-wizard__title">
+                  Tell me what you want to{" "}
+                  <em className="zb-wizard__title-em">make</em>.
+                </h1>
+                <p className="zb-wizard__lede">
+                  A sentence or two is plenty. I'll ask 1–3 quick questions, then
+                  start coding it. Skip any question and I'll guess.
+                </p>
+              </header>
+            </Stack>
+          </Stack>
 
-        {showFirstRunHint && !wizardStarted && (
-          <aside
-            data-testid="wizard-first-run-hint"
-            className="mb-6 px-5 py-4 bg-paper-2 border border-rule rounded-md"
-          >
-            <div className="font-sans text-[10px] uppercase tracking-[0.22em] text-tomato mb-1.5">
-              first project? here's what to expect
-            </div>
-            <p className="font-serif text-[14px] text-ink-soft leading-[1.55] m-0">
-              Type your idea below in plain English. I'll ask a couple of
-              quick questions to make sure we're on the same page, then I'll
-              start coding. Most projects ship in under a minute.
-            </p>
-          </aside>
-        )}
-
-      {!wizardStarted && (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSendIdea();
-          }}
-          className="mb-8"
-        >
-          <NotebookPrompt
-            label="Idea"
-            value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              if (validationHint) setValidationHint(null);
-            }}
-            onCmdEnter={handleSendIdea}
-            rows={4}
-            placeholder="A recipe sharing space for my supper club where guests can sign in, post photos, and vote on who hosts next…"
-            hint={<CmdEnterHint />}
-            action={
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={!draft.trim() || busy}
-                data-testid="wizard-send-idea"
-              >
-                Begin →
-              </Button>
-            }
-            data-testid="wizard-prompt"
-          />
-          {validationHint && (
-            <div
-              data-testid="wizard-validation-hint"
-              className="mt-2 font-serif italic text-[13px] text-pencil"
+          {showFirstRunHint && !wizardStarted && (
+            <Card
+              variant="outline"
+              data-testid="wizard-first-run-hint"
+              className="zb-wizard__first-run"
             >
-              {validationHint}
+              <Stack gap={2}>
+                <span className="zb-wizard__first-run-eyebrow">
+                  first project? here's what to expect
+                </span>
+                <p className="zb-wizard__first-run-body">
+                  Type your idea below in plain English. I'll ask a couple of
+                  quick questions to make sure we're on the same page, then I'll
+                  start coding. Most projects ship in under a minute.
+                </p>
+              </Stack>
+            </Card>
+          )}
+
+          {!wizardStarted && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSendIdea();
+              }}
+            >
+              <Stack gap={2}>
+                <NotebookPrompt
+                  label="Idea"
+                  value={draft}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    if (validationHint) setValidationHint(null);
+                  }}
+                  onCmdEnter={handleSendIdea}
+                  rows={4}
+                  placeholder="A recipe sharing space for my supper club where guests can sign in, post photos, and vote on who hosts next…"
+                  hint={<CmdEnterHint />}
+                  action={
+                    <Button
+                      type="submit"
+                      variant="filled"
+                      disabled={!draft.trim() || busy}
+                      data-testid="wizard-send-idea"
+                    >
+                      Begin →
+                    </Button>
+                  }
+                  data-testid="wizard-prompt"
+                />
+                {validationHint && (
+                  <div
+                    data-testid="wizard-validation-hint"
+                    className="zb-wizard__validation"
+                  >
+                    {validationHint}
+                  </div>
+                )}
+              </Stack>
+            </form>
+          )}
+
+          {wizardStarted && (
+            <Card
+              variant="outline"
+              data-testid="wizard-transcript"
+              className="zb-wizard__transcript"
+            >
+              <ChatMessages
+                messages={messages}
+                busy={busy}
+                onSubmitSurvey={submitSurvey}
+                answeredSurveys={answeredSurveys}
+                onBeginBrief={handleBegin}
+                briefCommitted={committedBrief != null}
+                briefBusy={createMutation.isPending}
+              />
+            </Card>
+          )}
+
+          {stuck && busy && (
+            <Cluster
+              justify="between"
+              gap={3}
+              data-testid="wizard-stuck"
+              className="zb-wizard__band"
+            >
+              <span className="zb-wizard__band-text">
+                Builder seems stuck. Want to try again?
+              </span>
+              <Button
+                type="button"
+                variant="gray"
+                size="small"
+                onClick={handleRetryStuck}
+                data-testid="wizard-retry"
+              >
+                Retry
+              </Button>
+            </Cluster>
+          )}
+
+          {error && (
+            <div className="zb-wizard__error">{error.message}</div>
+          )}
+          {createMutation.error && (
+            <div data-testid="wizard-create-error" className="zb-wizard__error">
+              Couldn't create the project — please try again. (
+              {createMutation.error instanceof Error
+                ? createMutation.error.message
+                : String(createMutation.error)}
+              )
             </div>
           )}
-        </form>
-      )}
-
-      {wizardStarted && (
-        <div
-          data-testid="wizard-transcript"
-          className="bg-paper-2 border border-rule rounded-md min-h-[400px] flex flex-col"
-        >
-          <ChatMessages
-            messages={messages}
-            busy={busy}
-            onSubmitSurvey={submitSurvey}
-            answeredSurveys={answeredSurveys}
-            onBeginBrief={handleBegin}
-            briefCommitted={committedBrief != null}
-            briefBusy={createMutation.isPending}
-          />
-        </div>
-      )}
-
-      {stuck && busy && (
-        <div
-          data-testid="wizard-stuck"
-          className="mt-4 px-4 py-3 border border-rule bg-paper-2 rounded-md flex items-center justify-between"
-        >
-          <span className="font-serif italic text-[13.5px] text-ink-soft">
-            Builder seems stuck. Want to try again?
-          </span>
-          <button
-            type="button"
-            onClick={handleRetryStuck}
-            data-testid="wizard-retry"
-            className="font-sans text-[10.5px] uppercase tracking-[0.18em] px-3 py-1.5 border border-ink bg-transparent text-ink hover:bg-ink hover:text-paper transition-colors cursor-pointer"
-          >
-            retry
-          </button>
-        </div>
-      )}
-
-        {error && (
-          <div className="mt-4 px-4 py-3 border border-blood/30 bg-blood/5 font-sans text-[12px] text-blood rounded-md">
-            {error.message}
-          </div>
-        )}
-        {createMutation.error && (
-          <div
-            data-testid="wizard-create-error"
-            className="mt-4 px-4 py-3 border border-blood/30 bg-blood/5 font-sans text-[12px] text-blood rounded-md"
-          >
-            Couldn't create the project — please try again. (
-            {createMutation.error instanceof Error
-              ? createMutation.error.message
-              : String(createMutation.error)}
-            )
-          </div>
-        )}
-      </div>
+        </Stack>
+      </Container>
     </div>
   );
 }

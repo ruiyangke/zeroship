@@ -1,13 +1,18 @@
-// ─── TopBar — atelier header bar ────────────────────────────────
+// ─── TopBar — crystal header bar ────────────────────────────────
 //
-// One row, hairline rule below. Wordmark on the left (or a crumb
-// when inside a project), optional center status, account dot on
-// the right. Used on every authed page.
+// One row, separator rule below. Wordmark on the left (or a crumb
+// when inside a project), optional center status, account avatar on
+// the right. Used on every authed page (via PageFrame).
+//
+// Built over @zeroship/ui: a Cluster-based three-zone header with the
+// account dot rendered as a DS Avatar wrapped in a react-router Link.
+// Bespoke type/positioning lives in TopBar.css against --zs-* tokens.
 
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
+import { Avatar, Cluster } from "@zeroship/ui";
 import { useAuth } from "../auth/AuthContext";
-import { cn } from "../lib/utils";
+import "./TopBar.css";
 
 export interface TopBarProps {
   /** Project name when inside /p/:appId/* — renders as a crumb. */
@@ -27,72 +32,69 @@ export function TopBar({ projectName, center, right, admin, crumb }: TopBarProps
   const initials = (user?.name || user?.email || "·").slice(0, 2).toUpperCase();
 
   return (
-    <header
-      // Tablet+ keeps the original 280px brand column; phones drop to
-      // an auto-sized brand so the title doesn't get crowded out.
-      className="grid items-center gap-2 sm:gap-4 border-b border-rule bg-paper px-3 sm:px-6 py-3 grid-cols-[auto_1fr_auto] md:grid-cols-[minmax(280px,auto)_1fr_auto]"
-      data-testid="topbar"
-    >
-      <div className="flex items-baseline gap-3 min-w-0">
+    <header className="topbar" data-testid="topbar">
+      <Cluster gap={3} align="center" className="topbar__brand">
         {admin ? (
-          <Link
-            to="/admin"
-            className="font-sans text-[9.5px] uppercase tracking-[0.22em] text-tomato hover:opacity-80"
-            data-testid="topbar-admin"
-          >
+          <Link to="/admin" className="topbar__admin" data-testid="topbar-admin">
             ADMIN
           </Link>
         ) : (
           // Authed wordmark routes to /home (the gallery). The public
           // marketing page lives at `/` and is shown to unauthed
           // visitors only.
-          <Link to="/home" aria-label="zeroship home" className="font-serif italic text-[18px] font-medium text-ink hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2 rounded-sm" data-testid="topbar-logo">
-            zeroship<span className="text-tomato">.</span>
+          <Link to="/home" aria-label="zeroship home" className="topbar__logo" data-testid="topbar-logo">
+            zeroship<span className="topbar__logo-dot">.</span>
           </Link>
         )}
 
         {crumb?.map((c, i) => (
-          <span key={i} className="flex items-baseline gap-3">
-            <span className="text-rule">/</span>
+          <span key={i} className="topbar__crumb">
+            <span className="topbar__sep" aria-hidden="true">/</span>
             {c.to ? (
-              <Link to={c.to} className="font-serif italic text-[13px] text-ink-soft hover:text-ink hover:underline">
+              <Link to={c.to} className="topbar__crumb-link">
                 {c.label}
               </Link>
             ) : (
-              <span className="font-serif italic text-[13px] text-ink truncate">{c.label}</span>
+              <span className="topbar__crumb-current">{c.label}</span>
             )}
           </span>
         ))}
 
         {projectName && (
-          <>
-            <span className="text-rule">/</span>
-            <span className="font-serif text-[16px] font-medium text-ink truncate" data-testid="topbar-project">
+          <span className="topbar__crumb">
+            <span className="topbar__sep" aria-hidden="true">/</span>
+            <span className="topbar__project" data-testid="topbar-project">
               {projectName}
             </span>
-          </>
+          </span>
         )}
-      </div>
+      </Cluster>
 
-      <div className="flex items-center justify-center min-w-0">
-        {center}
-      </div>
+      <div className="topbar__center">{center}</div>
 
-      <div className="flex items-center gap-3">
+      <Cluster gap={3} align="center" justify="end" className="topbar__right">
         {right}
         <Link
           to="/account"
           title={user?.email ?? "account"}
           aria-label="Account"
           data-testid="topbar-account"
-          className={cn(
-            "inline-flex h-7 w-7 items-center justify-center rounded-full font-sans text-[10.5px] font-semibold leading-none focus:outline-2 focus:outline-tomato focus:outline-offset-2",
-            admin ? "bg-tomato text-paper" : "bg-ink text-paper"
-          )}
+          className="topbar__account"
+          data-admin={admin ? "true" : undefined}
         >
-          {initials}
+          {user?.avatar_url ? (
+            <Avatar
+              size="sm"
+              shape="circle"
+              src={user.avatar_url}
+              alt={user.name || user.email || "account"}
+              fallback={initials}
+            />
+          ) : (
+            <Avatar size="sm" shape="circle" fallback={initials} />
+          )}
         </Link>
-      </div>
+      </Cluster>
     </header>
   );
 }

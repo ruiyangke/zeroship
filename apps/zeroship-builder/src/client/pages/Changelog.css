@@ -1,0 +1,130 @@
+/*
+ * Changelog — crystal skin for the public chronology (`/changelog`).
+ *
+ * The page structure (PublicNav + Container + PageHeader + a Stack of
+ * Card + DescriptionList) comes from the DS layout primitives, blocks,
+ * and components. This sheet only paints the bespoke chrome that has no
+ * direct DS surface: the page band background, the eyebrow caption rule
+ * + accent, the per-entry date/tag meta type, the entry title/body
+ * voice, the closing hairline, and the muted uppercase footer links.
+ *
+ * Everything reads --zs-* tokens — no raw hex/px (0.0625rem hairlines
+ * only), no Tailwind, no editorial tokens.
+ */
+
+/* ─── page band ────────────────────────────────────────────────────── */
+.zs-changelog {
+  min-block-size: 100vh;
+  background-color: var(--zs-surface-bg);
+}
+
+/* The content column. Container owns max-width + inline padding; this
+ * adds the vertical rhythm the old `pt-14 pb-24` band carried plus the
+ * block flow between the header band, entry list, rule, and footer. */
+.zs-changelog__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-8);
+  padding-block: var(--zs-space-9) var(--zs-space-10);
+}
+
+/* The entries <ol> is the Stack's render-as target — strip the list
+ * chrome so the DS Cards read as a clean column. */
+.zs-changelog__entries {
+  margin-block: 0;
+  padding-inline-start: 0;
+  list-style: none;
+}
+
+/* ─── eyebrow caption — small rule + uppercase label ───────────────── */
+.zs-changelog__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+/* The short leading rule — crystal analogue of the old ink dash. */
+.zs-changelog__eyebrow-rule {
+  display: inline-block;
+  inline-size: var(--zs-space-3);
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* The accented full-stop after "changes" in the page title — crystal
+ * analogue of the old tomato emphasis. */
+.zs-changelog__accent {
+  color: var(--zs-accent);
+}
+
+/* ─── per-entry meta column (date + tag) ───────────────────────────── */
+.zs-changelog__date {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  letter-spacing: 0.04em;
+  color: var(--zs-label-secondary);
+}
+
+/* ─── entry title + body ───────────────────────────────────────────── */
+.zs-changelog__entry-title {
+  margin-block: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+.zs-changelog__entry-body {
+  margin-block: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  font-weight: var(--zs-text-body-weight);
+  letter-spacing: var(--zs-text-body-tracking);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── closing hairline ─────────────────────────────────────────────── */
+.zs-changelog__rule {
+  inline-size: 100%;
+  block-size: 0.0625rem;
+  border: 0;
+  margin-block: 0;
+  background-color: var(--zs-separator);
+}
+
+/* ─── footer — muted uppercase links + wordmark ────────────────────── */
+.zs-changelog__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-3) var(--zs-space-7);
+}
+.zs-changelog__footer-link {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-tertiary);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-changelog__footer-link:hover {
+  color: var(--zs-label);
+}
+.zs-changelog__footer-wordmark {
+  margin-inline-start: auto;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-style: italic;
+  color: var(--zs-label-tertiary);
+}

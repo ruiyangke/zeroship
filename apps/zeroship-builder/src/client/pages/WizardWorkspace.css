@@ -1,0 +1,125 @@
+/*
+ * WizardWorkspace — crystal page styling.
+ *
+ * The page keeps its inline minimal frame (NOT PageFrame — see the
+ * component header). Layout (Container / Stack / Cluster) handles the
+ * column, width, and arrangement; this sheet owns only the bespoke
+ * editorial bits the DS doesn't carry: the page background + vertical
+ * rhythm, the crumbs eyebrow, the display title with its accent "make",
+ * the lede, the first-run hint copy, the transcript surface min-height,
+ * and the validation / stuck / error bands. Everything reads --zs-*
+ * tokens — no raw hex, no px (0.0625rem hairlines), no editorial tokens.
+ */
+
+/* ─── page frame ─────────────────────────────────────────────────── */
+.zb-wizard {
+  min-block-size: 100vh;
+  background: var(--zs-surface-bg);
+}
+.zb-wizard__column {
+  padding-block: var(--zs-space-10);
+}
+
+/* ─── crumbs eyebrow ─────────────────────────────────────────────── */
+.zb-wizard__crumbs {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-tertiary);
+}
+.zb-wizard__crumb-muted {
+  opacity: 0.6;
+}
+.zb-wizard__crumb-sep {
+  opacity: 0.4;
+}
+.zb-wizard__crumb-current {
+  color: var(--zs-label);
+}
+
+/* ─── hero ───────────────────────────────────────────────────────── */
+.zb-wizard__title {
+  margin: 0;
+  font-size: var(--zs-text-display-1-size);
+  line-height: var(--zs-text-display-1-line);
+  font-weight: var(--zs-text-display-1-weight);
+  letter-spacing: var(--zs-text-display-1-tracking);
+  color: var(--zs-label);
+}
+.zb-wizard__title-em {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+.zb-wizard__lede {
+  margin: 0;
+  max-inline-size: 35rem;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── first-run hint ─────────────────────────────────────────────── */
+.zb-wizard__first-run-eyebrow {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--zs-accent);
+}
+.zb-wizard__first-run-body {
+  margin: 0;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── transcript surface ─────────────────────────────────────────── */
+/* Card paints the surface + outline; we only set the column behaviour
+ * and a min-height so the rail reads as a settled panel even empty. */
+.zb-wizard__transcript {
+  display: flex;
+  flex-direction: column;
+  min-block-size: 25rem;
+}
+
+/* ─── states / bands ─────────────────────────────────────────────── */
+.zb-wizard__validation {
+  font-style: italic;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* "Builder seems stuck" recovery band — neutral surface, hairline rule. */
+.zb-wizard__band {
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-3);
+  background: var(--zs-surface-sunken);
+}
+.zb-wizard__band-text {
+  font-style: italic;
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  color: var(--zs-label-secondary);
+}
+
+/* Destructive error band — tinted from the system-red token so it reads
+ * as charged without a bespoke color. color-mix keeps the tint on the
+ * oklch token (no raw hex). */
+.zb-wizard__error {
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+  border: 0.0625rem solid color-mix(in oklab, var(--zs-system-red) 30%, transparent);
+  border-radius: var(--zs-radius-3);
+  background: color-mix(in oklab, var(--zs-system-red) 6%, transparent);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-system-red);
+}

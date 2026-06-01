@@ -1,0 +1,114 @@
+/*
+ * Login — crystal auth page.
+ *
+ * Arrangement (Center / Card / Stack) and the buttons (DS Button via
+ * asChild over @zeroship/auth's SignInButton) come from @zeroship/ui.
+ * This sheet only adds the bits no DS component carries: the full-bleed
+ * viewport floor under the centered Card, the wordmark lockup, and the
+ * "or" rule that brackets a label between two DS Separators. Everything
+ * reads `--zs-*` tokens — no raw hex/px, no editorial tokens.
+ */
+
+/* Give the Center a full-viewport floor so the Card sits dead-centre. */
+.zb-login {
+  min-block-size: 100dvh;
+  padding-inline: var(--zs-space-4);
+  padding-block: var(--zs-space-8);
+}
+
+/* Cap the card width so the auth column doesn't sprawl on wide screens.
+ * The Card owns its own surface, padding, radius and shadow. */
+.zb-login__card {
+  inline-size: 27.5rem;
+  max-inline-size: 100%;
+}
+
+/* Wordmark lockup — links back to the marketing root. */
+.zb-login__brand {
+  align-self: flex-start;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+  text-decoration: none;
+}
+.zb-login__brand:hover {
+  opacity: 0.8;
+}
+.zb-login__brand-dot {
+  color: var(--zs-accent);
+}
+
+/* Headline + supporting copy. */
+.zb-login__title {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  font-weight: var(--zs-text-large-title-weight);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  color: var(--zs-label);
+}
+.zb-login__title em {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+.zb-login__lede {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: var(--zs-text-callout-weight);
+  color: var(--zs-label-secondary);
+}
+
+/* Full-width auth buttons — the DS Button paints the chrome; this only
+ * stretches it to the column edges. */
+.zb-login__button {
+  inline-size: 100%;
+}
+
+/* "or" rule — a label bracketed by two DS Separators, mirroring the
+ * AuthForm block's divider. */
+.zb-login__or {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-3);
+}
+.zb-login__or-line {
+  flex: 1 1 0;
+}
+.zb-login__or-label {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--zs-label-tertiary);
+}
+
+/* Footer prompt — the "no account?" mode-switch row. */
+.zb-login__footer {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: var(--zs-text-subheadline-weight);
+  color: var(--zs-label-secondary);
+  text-align: center;
+}
+.zb-login__footer-link {
+  color: var(--zs-accent);
+  text-decoration: none;
+}
+.zb-login__footer-link:hover {
+  opacity: 0.8;
+}
+
+/* Brand mark sits beside the button label; size against the type scale. */
+.zb-login__google-mark {
+  inline-size: var(--zs-space-4);
+  block-size: var(--zs-space-4);
+}

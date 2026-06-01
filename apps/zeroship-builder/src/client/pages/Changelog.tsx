@@ -3,9 +3,26 @@
 // Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.5. A static, editorial list of recent changes. Entries
 // are dated and described in the same voice as the app. New entries
 // go on top.
+//
+// Crystal skin: PublicNav + a constrained Container holding a PageHeader
+// band, then the entries as a Stack of DS Cards. Each entry is a Card
+// whose body is a DescriptionList — the date/tag meta as the term column
+// and the title/body as the detail. Bespoke type + chrome live in the
+// co-located Changelog.css (all --zs-* tokens). The Entry shape, the
+// ENTRIES data, the public `Changelog` export, routing, and every
+// data-testid are preserved exactly — only the presentation changed.
 
 import { Link } from "react-router-dom";
+import {
+  Card,
+  Container,
+  DescriptionList,
+  PageHeader,
+  Stack,
+  Tag,
+} from "@zeroship/ui";
 import { PublicNav } from "../components/PublicNav";
+import "./Changelog.css";
 
 interface Entry {
   date: string;
@@ -61,67 +78,91 @@ const ENTRIES: Entry[] = [
 
 export function Changelog() {
   return (
-    <div className="min-h-screen bg-paper" data-testid="changelog-page">
+    <div className="zs-changelog" data-testid="changelog-page">
       <PublicNav />
 
-      <main className="mx-auto px-6 pt-14 pb-24" style={{ maxWidth: 760 }}>
-        <section className="reveal mb-10 max-w-[680px]">
-          <div className="label-uc mb-4 flex items-center gap-2">
-            <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-            Changelog
-          </div>
-          <h1
-            className="font-serif font-medium leading-[0.98] -tracking-[0.02em] mb-3"
-            style={{ fontSize: "clamp(46px, 6vw, 72px)" }}
-          >
-            Latest <em className="italic text-tomato">changes</em>.
-          </h1>
-          <p className="font-serif text-[18px] leading-[1.55] text-ink-soft m-0">
-            What's new, what's fixed, what's polished. New entries go on top.
-          </p>
-        </section>
+      <Container size="sm" asChild>
+        <main className="zs-changelog__main">
+          <PageHeader>
+            <PageHeader.Text>
+              <div className="zs-changelog__eyebrow">
+                <span
+                  className="zs-changelog__eyebrow-rule"
+                  aria-hidden="true"
+                />
+                Changelog
+              </div>
+              <PageHeader.Title>
+                Latest changes
+                <span className="zs-changelog__accent">.</span>
+              </PageHeader.Title>
+              <PageHeader.Description>
+                What's new, what's fixed, what's polished. New entries go on
+                top.
+              </PageHeader.Description>
+            </PageHeader.Text>
+          </PageHeader>
 
-        <ol className="m-0 p-0 list-none mb-14" data-testid="changelog-entries">
-          {ENTRIES.map((e) => (
-            <li
-              key={e.date + e.title}
-              className="grid gap-6 py-7 border-t border-rule"
-              style={{ gridTemplateColumns: "120px 1fr" }}
+          <Stack gap={4} asChild>
+            <ol
+              className="zs-changelog__entries"
+              data-testid="changelog-entries"
             >
-              <div>
-                <div className="font-mono text-[12px] text-ink-soft tracking-wide">
-                  {e.date}
-                </div>
-                {e.tag && (
-                  <div className="mt-2 font-sans text-[10px] uppercase tracking-[0.2em] text-tomato">
-                    {e.tag}
-                  </div>
-                )}
-              </div>
-              <div>
-                <h3 className="font-serif font-medium text-[22px] -tracking-[0.012em] leading-tight mb-2">
-                  {e.title}
-                </h3>
-                <p className="font-serif text-[16px] leading-[1.55] text-ink-soft m-0">
-                  {e.body}
-                </p>
-              </div>
-            </li>
-          ))}
-        </ol>
+              {ENTRIES.map((e) => (
+                <Card asChild key={e.date + e.title} variant="outline">
+                  <li>
+                    <Card.Content>
+                      <DescriptionList orientation="horizontal">
+                        <DescriptionList.Item>
+                          <DescriptionList.Term>
+                            <Stack gap={2} align="start">
+                              <span className="zs-changelog__date">
+                                {e.date}
+                              </span>
+                              {e.tag && <Tag size="sm">{e.tag}</Tag>}
+                            </Stack>
+                          </DescriptionList.Term>
+                          <DescriptionList.Detail>
+                            <Stack gap={2}>
+                              <h3 className="zs-changelog__entry-title">
+                                {e.title}
+                              </h3>
+                              <p className="zs-changelog__entry-body">
+                                {e.body}
+                              </p>
+                            </Stack>
+                          </DescriptionList.Detail>
+                        </DescriptionList.Item>
+                      </DescriptionList>
+                    </Card.Content>
+                  </li>
+                </Card>
+              ))}
+            </ol>
+          </Stack>
 
-        <hr className="hairline mb-10" />
+          <hr className="zs-changelog__rule" />
 
-        <footer className="font-sans text-[11px] uppercase tracking-[0.2em] text-pencil flex flex-wrap gap-x-7 gap-y-3 items-center">
-          <Link to="/" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Home</Link>
-          <Link to="/pricing" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Pricing</Link>
-          <Link to="/templates" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Templates</Link>
-          <Link to="/about" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>About</Link>
-          <span className="ml-auto font-serif italic text-[12px] tracking-normal normal-case text-pencil">
-            zeroship<span className="text-tomato">.</span> &copy; 2026
-          </span>
-        </footer>
-      </main>
+          <footer className="zs-changelog__footer">
+            <Link to="/" className="zs-changelog__footer-link">
+              Home
+            </Link>
+            <Link to="/pricing" className="zs-changelog__footer-link">
+              Pricing
+            </Link>
+            <Link to="/templates" className="zs-changelog__footer-link">
+              Templates
+            </Link>
+            <Link to="/about" className="zs-changelog__footer-link">
+              About
+            </Link>
+            <span className="zs-changelog__footer-wordmark">
+              zeroship<span className="zs-changelog__accent">.</span> &copy;
+              2026
+            </span>
+          </footer>
+        </main>
+      </Container>
     </div>
   );
 }

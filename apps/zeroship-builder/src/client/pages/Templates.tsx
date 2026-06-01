@@ -4,102 +4,139 @@
 // Public route — uses PublicNav (not TopBar/PageFrame which expect
 // an authed user). Click any card → /new?template=<slug>; the
 // wizard reads the param and pre-fills the brief.
+//
+// Crystal skin: a DS Container (rendered as <main>) holds an intro
+// section, a single-selection Toggle.Group for the category filter, a
+// fluid Grid of (already-crystal) TemplateCards, and a footer. Bespoke
+// chrome — the page canvas, the display heading, the eyebrow rule, the
+// "describe your own" link, and the footer caption type — lives in the
+// co-located Templates.css, all --zs-* tokens. Props, exports, the
+// useState filter hook, routing, and every data-testid are preserved
+// exactly; only the presentation changed.
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  Button,
+  Container,
+  EmptyState,
+  Grid,
+  Separator,
+  Stack,
+  Toggle,
+  ToggleGroup,
+} from "@zeroship/ui";
 import { PublicNav } from "../components/PublicNav";
-import { FilterPill } from "../components/FilterPill";
 import { TemplateCard } from "../components/TemplateCard";
 import { TEMPLATES, TEMPLATE_CATEGORIES, type TemplateCategory } from "../lib/templates";
+import "./Templates.css";
+
+type Filter = "all" | TemplateCategory;
+
+const FOOTER_LINKS: { to: string; label: string }[] = [
+  { to: "/", label: "Home" },
+  { to: "/pricing", label: "Pricing" },
+  { to: "/skills", label: "Skills" },
+  { to: "/about", label: "About" },
+];
 
 export function Templates() {
-  const [filter, setFilter] = useState<"all" | TemplateCategory>("all");
+  const [filter, setFilter] = useState<Filter>("all");
   const visible = filter === "all" ? TEMPLATES : TEMPLATES.filter((t) => t.category === filter);
 
   return (
-    <div className="min-h-screen bg-paper" data-testid="templates-page">
+    <div className="zs-templates-page" data-testid="templates-page">
       <PublicNav />
 
-      <main className="mx-auto px-6 pt-14 pb-24" style={{ maxWidth: 960 }}>
-        <section className="reveal mb-8 max-w-[680px]">
-          <div className="label-uc mb-4 flex items-center gap-2">
-            <span className="inline-block h-px w-3.5 bg-ink" aria-hidden="true" />
-            Templates
-          </div>
-          <h1
-            className="font-serif font-medium leading-[0.98] -tracking-[0.02em] mb-3"
-            style={{ fontSize: "clamp(48px, 7vw, 80px)" }}
-          >
-            Pick a <em className="italic text-tomato">starting point</em>.
-          </h1>
-          <p className="font-serif text-[18px] leading-[1.55] text-ink-soft m-0">
-            A dozen templates organised by what you're trying to do — share,
-            collect, sell, show. Or describe your own.
-          </p>
-        </section>
+      <Container asChild size="lg" padX={6}>
+        <main className="zs-templates__main">
+          <Stack asChild gap={3} className="zs-templates__intro">
+            <section>
+              <div className="zs-templates__eyebrow">
+                <span className="zs-templates__eyebrow-rule" aria-hidden="true" />
+                Templates
+              </div>
+              <h1 className="zs-templates__title">
+                Pick a <em className="zs-templates__title-accent">starting point</em>.
+              </h1>
+              <p className="zs-templates__lede">
+                A dozen templates organised by what you're trying to do — share,
+                collect, sell, show. Or describe your own.
+              </p>
+            </section>
+          </Stack>
 
-        <div className="flex flex-wrap gap-2.5 mb-8" data-testid="templates-filters">
-          {TEMPLATE_CATEGORIES.map(({ key, label }) => (
-            <FilterPill
-              key={key}
-              active={filter === key}
-              onClick={() => setFilter(key as any)}
-              data-testid={`filter:${key}`}
+          <ToggleGroup
+            value={filter}
+            onValueChange={(next) => setFilter((next ?? "all") as Filter)}
+            equalWidth={false}
+            aria-label="Filter templates by category"
+            className="zs-templates__filters"
+            data-testid="templates-filters"
+          >
+            {TEMPLATE_CATEGORIES.map(({ key, label }) => (
+              <Toggle key={key} value={key} data-testid={`filter:${key}`}>
+                {label}
+              </Toggle>
+            ))}
+          </ToggleGroup>
+
+          {visible.length === 0 ? (
+            <EmptyState
+              data-testid="templates-empty"
+              className="zs-templates__empty"
+              title={
+                <span className="zs-templates__empty-title">
+                  Nothing in <em>{filter}</em> yet — that shelf is still being stocked.
+                </span>
+              }
+              action={
+                <Button
+                  type="button"
+                  variant="plain"
+                  onClick={() => setFilter("all")}
+                >
+                  ← Show all templates
+                </Button>
+              }
+            />
+          ) : (
+            <Grid
+              minColWidth="16rem"
+              gap={5}
+              className="zs-templates__grid"
+              data-testid="templates-grid"
             >
-              {label}
-            </FilterPill>
-          ))}
-        </div>
+              {visible.map((t) => (
+                <TemplateCard key={t.slug} template={t} />
+              ))}
+            </Grid>
+          )}
 
-        {visible.length === 0 ? (
-          <div
-            data-testid="templates-empty"
-            className="border border-dashed border-rule p-10 text-center"
-          >
-            <p className="font-serif italic text-ink-soft text-[15px] mb-1">
-              Nothing in <em>{filter}</em> yet — that shelf is still being stocked.
-            </p>
-            <button
-              type="button"
-              onClick={() => setFilter("all")}
-              className="font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 mt-2 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+          <div className="zs-templates__blank">
+            <Link
+              to="/new"
+              className="zs-templates__blank-link"
+              data-testid="templates-blank"
             >
-              ← Show all templates
-            </button>
+              Or describe your own →
+            </Link>
           </div>
-        ) : (
-          <div
-            className="grid gap-5"
-            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
-            data-testid="templates-grid"
-          >
-            {visible.map((t) => <TemplateCard key={t.slug} template={t} />)}
-          </div>
-        )}
 
-        <div className="mt-12 mb-14">
-          <Link
-            to="/new"
-            className="inline-block font-serif italic text-[16px] text-ink border-b border-rule hover:text-tomato hover:border-tomato py-3"
-            style={{ textDecoration: "none" }}
-            data-testid="templates-blank"
-          >
-            Or describe your own →
-          </Link>
-        </div>
+          <Separator className="zs-templates__rule" />
 
-        <hr className="hairline mb-10" />
-
-        <footer className="font-sans text-[11px] uppercase tracking-[0.2em] text-pencil flex flex-wrap gap-x-7 gap-y-3 items-center">
-          <Link to="/" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Home</Link>
-          <Link to="/pricing" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Pricing</Link>
-          <Link to="/skills" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>Skills</Link>
-          <Link to="/about" className="hover:text-ink transition-colors" style={{ textDecoration: "none", color: "inherit" }}>About</Link>
-          <span className="ml-auto font-serif italic text-[12px] tracking-normal normal-case text-pencil">
-            zeroship<span className="text-tomato">.</span> &copy; 2026
-          </span>
-        </footer>
-      </main>
+          <footer className="zs-templates__footer">
+            {FOOTER_LINKS.map((l) => (
+              <Link key={l.to} to={l.to} className="zs-templates__footer-link">
+                {l.label}
+              </Link>
+            ))}
+            <span className="zs-templates__footer-mark">
+              zeroship<span className="zs-templates__footer-dot">.</span> &copy; 2026
+            </span>
+          </footer>
+        </main>
+      </Container>
     </div>
   );
 }

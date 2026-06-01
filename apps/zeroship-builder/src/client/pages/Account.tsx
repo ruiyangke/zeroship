@@ -7,13 +7,28 @@
 //   · Two-factor   — TOTP enrollment (not wired yet).
 //   · Delete       — wipe the account (not wired yet).
 //   · Sign out     — calls AuthContext.logout, redirects to /login.
+//
+// Crystal: built over @zeroship/ui — FormSection (aside layout) for the
+// settings sections, Card for the plan/sessions surfaces, Input
+// (read-only, combined-shorthand label) for the identity fields, Meter
+// for the usage gauge, Button for every action. Bespoke type/panels live
+// in the co-located Account.css.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
+import {
+  Badge,
+  Button,
+  Card,
+  Cluster,
+  FormSection,
+  Input,
+  Meter,
+  Stack,
+} from "@zeroship/ui";
 import { useAuth } from "../auth/AuthContext";
 import { PageFrame } from "../components/PageFrame";
-import { GhostButton } from "../components/GhostButton";
-import { StampButton } from "../components/StampButton";
+import "./Account.css";
 
 const SESSION_START_KEY = "zeroship_session_started_at";
 
@@ -36,31 +51,56 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
       maxWidth={760}
       showMarginalia={false}
     >
-      <section className="reveal" data-testid="account-page">
-        <h1 className="font-serif font-medium text-[56px] leading-[0.98] -tracking-[0.02em] mb-1">
-          {firstWord} {rest && <em className="italic text-tomato">{rest}</em>}
-        </h1>
-        <div className="font-serif text-[16px] text-ink-soft mb-9">
-          <em className="italic">{user?.email ?? "—"}</em>
-        </div>
+      <Stack gap={8} data-testid="account-page">
+        <header>
+          <h1 className="account__name">
+            {firstWord}{" "}
+            {rest && <span className="account__name-rest">{rest}</span>}
+          </h1>
+          <div className="account__email">{user?.email ?? "—"}</div>
 
-        <div className="bg-paper-2 border border-rule px-5 sm:px-7 py-6 grid items-center gap-6 mb-8 grid-cols-1 sm:grid-cols-[2fr_1fr]">
-          <div>
-            <div className="font-serif italic text-[24px]"><em className="italic text-tomato">Free</em> plan</div>
-            <div className="font-mono text-[12px] text-ink-soft mt-1.5">412 requests this week · 2 of 3 apps deployed</div>
-            <div className="h-1.5 bg-paper-3 rounded-full overflow-hidden mt-2">
-              <div className="bg-tomato h-full" style={{ width: "32%" }} />
-            </div>
-          </div>
-          <div className="text-right">
-            <StampButton>Upgrade</StampButton>
-          </div>
-        </div>
+          <Card variant="surface">
+            <Card.Content>
+              <Cluster justify="between" align="center" gap={4}>
+                <div>
+                  <div className="account__plan-name">
+                    <em>Free</em> plan
+                  </div>
+                  <div className="account__plan-usage">
+                    412 requests this week · 2 of 3 apps deployed
+                  </div>
+                  <Meter
+                    className="account__plan-meter"
+                    value={32}
+                    intent="neutral"
+                    size="sm"
+                    aria-label="Plan usage"
+                  />
+                </div>
+                <Button>Upgrade</Button>
+              </Cluster>
+            </Card.Content>
+          </Card>
+        </header>
 
-        <Section title="Identity" helper="Read-only for now — name + email come from your sign-up.">
-          <Field label="Display name" value={user?.name ?? ""} readOnly testId="account-name" />
-          <Field label="Email" value={user?.email ?? ""} readOnly testId="account-email" />
-        </Section>
+        <FormSection
+          orientation="aside"
+          title="Identity"
+          description="Read-only for now — name + email come from your sign-up."
+        >
+          <Input
+            label="Display name"
+            value={user?.name ?? ""}
+            readOnly
+            data-testid="account-name"
+          />
+          <Input
+            label="Email"
+            value={user?.email ?? ""}
+            readOnly
+            data-testid="account-email"
+          />
+        </FormSection>
 
         <SessionsSection />
 
@@ -79,12 +119,22 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
           tone="danger"
         />
 
-        <Section title={<span className="text-tomato">Sign out</span>} helper="" lastSection>
-          <GhostButton danger onClick={handleLogout} data-testid="account-logout">
-            Sign out of zeroship
-          </GhostButton>
-        </Section>
-      </section>
+        <FormSection
+          orientation="aside"
+          title={<span className="account__danger-title">Sign out</span>}
+        >
+          <div>
+            <Button
+              variant="plain"
+              intent="destructive"
+              onClick={handleLogout}
+              data-testid="account-logout"
+            >
+              Sign out of zeroship
+            </Button>
+          </div>
+        </FormSection>
+      </Stack>
     </PageFrame>
   );
 }
@@ -92,7 +142,7 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
 /**
  * Sessions block — V1 client-only view of "this browser's session".
  * Reads (or seeds) a localStorage timestamp for the start of the
- * current session and renders a single-row table per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §6.5. The
+ * current session and renders a single-row card per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §6.5. The
  * "sign out everywhere" affordance is wired to the same logout path
  * AuthContext exposes (in dev that's a no-op; in prod it'll revoke
  * once the control-plane sessions endpoint lands and the SDK switches to
@@ -129,43 +179,51 @@ function SessionsSection() {
   }
 
   return (
-    <Section title="Sessions" helper="Where you're signed in — V1 shows this browser only.">
-      <div
-        data-testid="account-sessions"
-        className="border border-rule bg-paper-2/40 px-4 py-3"
-      >
-        <div className="grid items-baseline gap-3" style={{ gridTemplateColumns: "1fr auto" }}>
-          <div>
-            <div className="font-serif italic font-medium text-[15px] text-ink">
-              {ua} · this browser
+    <FormSection
+      orientation="aside"
+      title="Sessions"
+      description="Where you're signed in — V1 shows this browser only."
+    >
+      <Card variant="outline" data-testid="account-sessions">
+        <Card.Content>
+          <Stack gap={3}>
+            <Cluster justify="between" align="start" gap={3}>
+              <div>
+                <div className="account__session-title">
+                  {ua} · this browser
+                </div>
+                <div className="account__session-sub">
+                  Signed in {startedAt ? relativeTime(startedAt) : "just now"}.
+                </div>
+              </div>
+              <Badge
+                intent="success"
+                variant="soft"
+                size="sm"
+                data-testid="account-sessions-current-pill"
+              >
+                current
+              </Badge>
+            </Cluster>
+            <div>
+              <Button
+                variant="plain"
+                size="small"
+                onClick={handleRevokeAll}
+                data-testid="account-sessions-revoke-all"
+                endSlot={<span aria-hidden="true">→</span>}
+              >
+                Sign out everywhere
+              </Button>
             </div>
-            <div className="font-serif text-[13px] text-ink-soft">
-              Signed in {startedAt ? relativeTime(startedAt) : "just now"}.
+            <div className="account__session-note">
+              Extra devices will appear here once the control plane exposes
+              a real sessions list.
             </div>
-          </div>
-          <span
-            data-testid="account-sessions-current-pill"
-            className="font-sans text-[10px] uppercase tracking-[0.18em] text-ivy border border-ivy/40 rounded-full px-2 py-0.5"
-          >
-            current
-          </span>
-        </div>
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={handleRevokeAll}
-            data-testid="account-sessions-revoke-all"
-            className="font-serif italic text-[13px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80"
-          >
-            Sign out everywhere →
-          </button>
-        </div>
-        <div className="mt-2 font-serif italic text-[12px] text-pencil">
-          Extra devices will appear here once the control plane exposes
-          a real sessions list.
-        </div>
-      </div>
-    </Section>
+          </Stack>
+        </Card.Content>
+      </Card>
+    </FormSection>
   );
 }
 
@@ -197,53 +255,20 @@ function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-function Section({
-  title, helper, children, lastSection,
-}: {
-  title: React.ReactNode; helper: React.ReactNode; children: React.ReactNode; lastSection?: boolean;
-}) {
-  return (
-    <div className={"grid gap-6 sm:gap-12 py-6 grid-cols-1 sm:grid-cols-[280px_1fr] " + (lastSection ? "" : "border-b border-rule")}>
-      <div>
-        <h3 className="font-serif italic font-medium text-[22px] mb-1.5">{title}</h3>
-        {helper && <p className="font-serif text-[13.5px] text-ink-soft leading-[1.5]">{helper}</p>}
-      </div>
-      <div className="min-w-0">{children}</div>
-    </div>
-  );
-}
-
 function DeferredSection({
   title, helper, pendingMessage, testId, tone,
 }: {
   title: string; helper: string; pendingMessage: string; testId: string; tone?: "danger";
 }) {
+  const heading: ReactNode =
+    tone === "danger"
+      ? <span className="account__danger-title">{title}</span>
+      : title;
   return (
-    <Section
-      title={tone === "danger" ? <span className="text-tomato">{title}</span> : title}
-      helper={helper}
-    >
-      <div
-        className="border border-dashed border-rule bg-paper-2 px-4 py-3 font-serif italic text-[13.5px] text-ink-soft leading-[1.55]"
-        data-testid={testId}
-      >
+    <FormSection orientation="aside" title={heading} description={helper}>
+      <div className="account__deferred" data-testid={testId}>
         Coming soon — {pendingMessage}
       </div>
-    </Section>
-  );
-}
-
-function Field({
-  label, testId, ...rest
-}: { label: string; testId?: string } & React.InputHTMLAttributes<HTMLInputElement>) {
-  return (
-    <label className="block mb-3.5">
-      <span className="block label-uc mb-1">{label}</span>
-      <input
-        {...rest}
-        data-testid={testId}
-        className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink read-only:bg-paper-2"
-      />
-    </label>
+    </FormSection>
   );
 }

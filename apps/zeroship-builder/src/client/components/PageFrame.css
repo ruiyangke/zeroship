@@ -1,0 +1,37 @@
+/*
+ * PageFrame — authed page shell.
+ *
+ * A full-height column: the TopBar pins at the top, a scrolling <main>
+ * fills the rest, and a centered DS Container holds the page content.
+ * These rules only own the shell mechanics (min-height column, scroll
+ * region, vertical rhythm) — width + centering + inline padding live in
+ * the Container primitive. The page backdrop reads from --zs-surface-bg
+ * so the frame tracks the active theme.
+ */
+
+.page-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--zs-surface-bg);
+}
+
+/* Scroll region below the (non-scrolling) TopBar. */
+.page-frame__main {
+  flex: 1;
+  overflow: auto;
+}
+
+/* Vertical rhythm around the content column. The Container owns the
+ * horizontal padding + max-width + centering; we add the block padding
+ * here so the content breathes top/bottom. */
+.page-frame__column {
+  padding-block: var(--zs-space-8);
+}
+
+@media (min-width: 40rem) {
+  .page-frame__column {
+    padding-block: var(--zs-space-9);
+  }
+}

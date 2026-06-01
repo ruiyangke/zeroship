@@ -1,0 +1,131 @@
+/*
+ * About — crystal skin for the public manifesto (`/about`).
+ *
+ * Structure (PublicNav + Container + Stack + PageHeader + Card +
+ * Separator + Cluster) comes from the DS primitives. This sheet only
+ * paints the bespoke editorial bits the DS has no direct component for:
+ * the page band, the eyebrow caption + its short rule, the oversized
+ * manifesto display heading with its accented word, the prose reading
+ * rhythm (body type, inline em / code / link), and the uppercase
+ * letter-spaced footer links + accented wordmark. Everything reads
+ * --zs-* tokens — no raw hex/px (0.0625rem hairline only), no Tailwind,
+ * no editorial tokens.
+ */
+
+/* ─── page band ────────────────────────────────────────────────────── */
+.zs-about {
+  min-block-size: 100vh;
+  background-color: var(--zs-surface-bg);
+}
+
+/* Vertical breathing room for the reading column. Container owns the
+ * width + inline padding; we only add the top/bottom rhythm. */
+.zs-about__main {
+  padding-block: var(--zs-space-9) var(--zs-space-10);
+}
+
+/* ─── eyebrow ──────────────────────────────────────────────────────── */
+.zs-about__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  margin-block-end: var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+}
+/* The short rule that leads the eyebrow — crystal analogue of the old
+ * editorial hairline tick. */
+.zs-about__eyebrow-rule {
+  display: inline-block;
+  inline-size: var(--zs-space-4);
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* ─── display heading ──────────────────────────────────────────────── */
+/* Override PageHeader's title-1 scale with the larger editorial display
+ * size so the manifesto opens with a statement, not a section header. */
+.zs-about__title.zs-about__title {
+  font-size: var(--zs-text-large-title-size);
+  line-height: var(--zs-text-large-title-line);
+  font-weight: var(--zs-text-large-title-weight);
+  letter-spacing: var(--zs-text-large-title-tracking);
+  color: var(--zs-label);
+}
+/* The accented word — crystal analogue of the old tomato emphasis. */
+.zs-about__accent {
+  font-style: italic;
+  color: var(--zs-accent);
+}
+
+/* ─── manifesto prose ──────────────────────────────────────────────── */
+/* The Card is ghost (transparent) so the prose reads as a column on the
+ * page, not a boxed surface. We only set the reading type + rhythm; the
+ * Stack gap inside owns paragraph spacing. */
+.zs-about__prose {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  letter-spacing: var(--zs-text-body-tracking);
+  color: var(--zs-label);
+}
+.zs-about__prose p {
+  margin: 0;
+}
+.zs-about__prose em {
+  font-style: italic;
+}
+/* Inline monospace token for the `.zship` reference. */
+.zs-about__code {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-callout-size);
+  color: var(--zs-label);
+}
+/* In-prose router link — accented with a subtle underline that recedes
+ * on hover. */
+.zs-about__inline-link {
+  color: var(--zs-accent);
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 0.15em;
+  transition: opacity 120ms ease;
+}
+.zs-about__inline-link:hover {
+  opacity: 0.8;
+}
+
+/* ─── footer ───────────────────────────────────────────────────────── */
+.zs-about__footer {
+  font-family: var(--zs-font-system);
+}
+/* Push the wordmark to the far end when the row has room; it drops below
+ * the links when the Cluster wraps. */
+.zs-about__footer-links {
+  flex: 1 1 auto;
+}
+.zs-about__footer-link {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--zs-label-secondary);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+.zs-about__footer-link:hover {
+  color: var(--zs-label);
+}
+/* Italic wordmark caption with the accented full-stop. */
+.zs-about__wordmark {
+  font-style: italic;
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-tertiary);
+}
+.zs-about__wordmark-dot {
+  color: var(--zs-accent);
+}
