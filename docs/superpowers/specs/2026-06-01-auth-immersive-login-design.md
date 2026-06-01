@@ -10,7 +10,26 @@ fetch-binding fix) · `218e14d2` (2B Phase 0 refactors) · `<phase1>` (2B Phase 
 credential endpoint) · `<phase2>` (2B Phase 2 gateway endpoint). All security reviews APPROVED;
 crate chain builds; offline + unit tests green.
 
+**LIVE E2E — auth credential core VERIFIED ✅ (2026-06-01).** `cargo test -p zeroship-auth
+--test e2e_password_grant` PASSES against real Hydra v25.4.0 + Postgres 16 (booted via
+`docker compose up -d postgres migrate hydra` — schema migrates clean, 68 changesets):
+the POST /password shared-secret gate → constant-time verify → headless Hydra replay
+(`accept_login` `amr=[pwd]` → silent consent → `?code=`) → `/oauth2/token` exchange round-trips
+with `amr=[pwd]` + nonce/state + single-use code; negatives (wrong-pw 401, locked 403,
+rate-limit 429, missing/bad internal-secret 401/403) all hold.
+RUN RECIPE: the e2e SEEDS `zeroship.oauth_clients` (a `zeroship_control`-owned table; the
+`zeroship_auth` runtime role has only SELECT per `0025_roles_rls.sql`), so it needs a
+PRIVILEGED connection — `AUTH_DB_URL=postgres://postgres:zeroship@localhost:5440/zeroship
+HYDRA_ADMIN_URL=http://localhost:4445 HYDRA_PUBLIC_URL=http://localhost:4444`.
+First-party-console gating fix landed (commit `8a55b130`): console `skip_consent=true`,
+trusted-set fail-closed default, console `oac_` id wired in `ops/zeroship.toml` + compose.
+
 **REMAINING (human-run — not offline-doable):**
+0. **Full-stack browser e2e** — the GATEWAY half (browser → `POST /__zeroship/auth/password`
+   → gateway first-party gate → auth `/password` → BFF cookie, no window) needs the whole
+   platform up (build `zeroship-platform:dev` + Caddy + control-seeded console worker). The
+   gateway logic is offline-tested (`browser_auth_test`: gate-fails-closed + ordering) and
+   reuses the audited `mint_session_from_code` tail; the auth half is now live-verified above.
 1. **Live e2e (Part 2B Phase 3):** run `crates/auth/tests/e2e_password_grant.rs` against a live
    Hydra+Postgres (`AUTH_DB_URL`+`HYDRA_ADMIN_URL`), and a full-stack browser→gateway→auth→Hydra
    pass (docker-compose: Caddy + auth + hydra + gateway) confirming in-page password login mints
