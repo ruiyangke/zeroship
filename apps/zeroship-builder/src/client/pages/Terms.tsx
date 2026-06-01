@@ -69,12 +69,15 @@ export function Terms() {
                 </p>
               </Section>
 
-              <Section title="Payments and the 15&nbsp;% share">
+              <Section title="Payments and payouts">
                 <p>
-                  When you charge for your app, Stripe handles the transaction.
-                  We retain 15&nbsp;% of the post-Stripe-fees revenue as our
-                  platform share. The remainder is yours, paid out to your
-                  connected Stripe account on Stripe's standard schedule.
+                  When you charge for your app, payments are processed by Stripe
+                  under Stripe's own terms, and amounts you earn are paid out to
+                  your connected Stripe account on Stripe's standard schedule.
+                  The specific terms that apply to your payouts — including any
+                  applicable platform charges and processing fees — are
+                  presented to you separately before you enable payments, and
+                  form part of these Terms once accepted.
                 </p>
               </Section>
 

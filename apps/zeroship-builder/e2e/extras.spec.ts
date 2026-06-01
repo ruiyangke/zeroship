@@ -5,16 +5,7 @@ import { test, expect } from "@playwright/test";
 
 const SHELL_PATH = "/__test/workspace";
 
-test.describe("Pricing + 15% share band", () => {
-  test("revenue example renders with the right numbers", async ({ page }) => {
-    await page.goto("/pricing");
-    // Worked example: $100 → Stripe $3.20 → zeroship $15.00 → keep $81.80.
-    await expect(page.getByTestId("pricing-page")).toContainText("$100");
-    await expect(page.getByTestId("pricing-page")).toContainText("$3.20");
-    await expect(page.getByTestId("pricing-page")).toContainText("$15.00");
-    await expect(page.getByTestId("pricing-page")).toContainText("$81.80");
-  });
-
+test.describe("Pricing plans", () => {
   test("Maker plan is emphasised with 'Most chosen' tag", async ({ page }) => {
     await page.goto("/pricing");
     await expect(page.getByTestId("pricing-plan-maker")).toContainText("Most chosen");

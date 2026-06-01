@@ -66,24 +66,24 @@ export function About() {
 
                     <p>
                       <em>zeroship</em> is the bet that this changes now.
-                      Describe what you want in a sentence. A fleet of agents —
-                      a Builder, a Critic, a Reviewer, a PM, an SRE — writes
-                      the code, reviews the code, deploys it, monitors it, and
-                      helps you charge for it when you're ready. The platform
-                      takes 15&nbsp;%. You keep the rest. You also keep the
-                      code: it exports as a{" "}
-                      <code className="zs-about__code">.zship</code> bundle,
-                      anywhere, anytime.
+                      Describe what you want in a sentence. A fleet of agents
+                      writes the code, reads it back to catch what's off, locks
+                      it down, ships it to a real, live URL, and keeps watching
+                      how it runs — refining the rough edges long after launch
+                      and reshaping the whole thing whenever you ask. Every app
+                      is private and protected from the very first line, never
+                      bolted on later. And the work is always yours: you can
+                      export your code and run it anywhere, anytime, with
+                      nothing holding it hostage.
                     </p>
 
                     <p>
                       The aesthetic is editorial because tools deserve more
                       than the chrome of dashboards. The infrastructure is
-                      bespoke — a V8 runtime on io_uring, no tokio in the
-                      stack, native primitives small and stable on purpose —
-                      because economics matter. A creator's app costs us about
-                      twelve cents a month to host. Their app should pay them,
-                      not us.
+                      bespoke — built from the ground up for speed and
+                      cost — because the maths has to work for the people who
+                      build here. Running an app costs us almost nothing, so a
+                      creator's idea can stand on its own from the start.
                     </p>
 
                     <p>

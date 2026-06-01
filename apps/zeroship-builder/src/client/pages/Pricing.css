@@ -7,8 +7,8 @@
  * real card elements. This sheet only paints the bespoke editorial
  * chrome that has no direct DS component: the eyebrow caption with a
  * leading rule, the big display price type, the accented "Most chosen"
- * flag on the featured tier, the dotted bullet list, the worked-example
- * note, and the lower-caption footer. Everything reads --zs-* tokens —
+ * flag on the featured tier, the dotted bullet list, and the
+ * lower-caption footer. Everything reads --zs-* tokens —
  * no Tailwind, no editorial tokens, no raw hex/px (0.0625rem hairline
  * only, oklch/rem elsewhere via tokens).
  */
@@ -63,24 +63,11 @@
   color: var(--zs-accent);
 }
 .zs-pricing-page__lede-lead {
-  margin: 0 0 var(--zs-space-3);
+  margin: 0;
   font-family: var(--zs-font-system);
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
   color: var(--zs-label-secondary);
-}
-.zs-pricing-page__lede-note {
-  margin: 0;
-  font-family: var(--zs-font-system);
-  font-style: italic;
-  font-size: var(--zs-text-callout-size);
-  line-height: var(--zs-text-callout-line);
-  color: var(--zs-label-tertiary);
-}
-.zs-pricing-page__lede-note strong {
-  font-style: normal;
-  font-weight: var(--zs-text-headline-weight);
-  color: var(--zs-label);
 }
 
 /* ─── plan cards ───────────────────────────────────────────────────── */
@@ -184,35 +171,6 @@
 }
 .zs-pricing-page__plan-cta .zs-button {
   inline-size: 100%;
-}
-
-/* ─── 15 % share band ──────────────────────────────────────────────── */
-.zs-pricing-page__share {
-  max-inline-size: 47.5rem;
-  margin-block-end: var(--zs-space-9);
-  padding: var(--zs-space-8) var(--zs-space-9);
-  background-color: var(--zs-surface-sunken);
-  border: 0.0625rem solid var(--zs-separator);
-  border-radius: var(--zs-radius-3);
-}
-.zs-pricing-page__share-title {
-  margin: 0 0 var(--zs-space-3);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-title-2-size);
-  line-height: var(--zs-text-title-2-line);
-  letter-spacing: var(--zs-text-title-2-tracking);
-  font-weight: var(--zs-text-title-2-weight);
-  color: var(--zs-label);
-}
-.zs-pricing-page__share-body {
-  margin: 0;
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  color: var(--zs-label-secondary);
-}
-.zs-pricing-page__share-body em {
-  font-style: italic;
 }
 
 /* ─── enterprise note ──────────────────────────────────────────────── */

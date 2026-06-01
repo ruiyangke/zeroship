@@ -4,9 +4,9 @@
 // with title, big price, tagline, bullet list, and a primary "Choose"
 // button that routes to /signup?plan=<tier>.
 //
-// Top of page: the "Earn, keep most of it" lede explaining the
-// 15 % platform share + Stripe fees, with a worked example mirroring
-// the AGENTS.md revenue model.
+// Top of page: a "Simple plans. Everything included." lede — start free,
+// step up when you're ready, with database / sign-in / payments / hosting /
+// scaling included at every tier.
 //
 // Crystal skin: PublicNav + a DS Container holds the page column. The
 // tier band is composed from the same DS primitives the @zeroship/ui
@@ -46,8 +46,8 @@ const PLANS: Plan[] = [
       "1 active project",
       "5,000 requests / month",
       "zeroship.app subdomain",
-      "Maker mode (Ali) UX",
-      "Basic agent fleet (Builder + Critic)",
+      "Friendly guided builder",
+      "Agents that write and double-check your app",
     ],
     cta: "Start free",
   },
@@ -62,8 +62,8 @@ const PLANS: Plan[] = [
       "100,000 requests / month",
       "Custom domain",
       "Priority build queue",
-      "All canvases (Logs, Health, Data)",
-      "PM + SRE agents enabled",
+      "Live dashboards (logs, health, data)",
+      "Agents that keep watch and refine it after launch",
     ],
     cta: "Choose Maker",
     emphasised: true,
@@ -108,17 +108,13 @@ export function Pricing() {
               Pricing
             </div>
             <h1 className="zs-pricing-page__title">
-              Earn, keep <em>most</em> of it.
+              Simple plans. <em>Everything</em> included.
             </h1>
             <p className="zs-pricing-page__lede-lead">
-              Subscriptions to zeroship are simple — but the real arithmetic is
-              that we earn a 15&nbsp;% share of what your apps make. Nothing
-              until you do.
-            </p>
-            <p className="zs-pricing-page__lede-note">
-              A worked example: a creator's app earns $100/mo. Stripe takes
-              ≈$3.20. zeroship takes $15.00. The creator keeps{" "}
-              <strong>$81.80</strong>.
+              Start free and build for as long as you like. When you're ready
+              for a custom domain, more room to grow, or a team beside you, step
+              up to a plan that fits — database, sign-in, payments, hosting, and
+              scaling are included at every tier, with nothing to wire up.
             </p>
           </section>
 
@@ -172,24 +168,6 @@ export function Pricing() {
                 </Card>
               ))}
             </Grid>
-          </section>
-
-          {/* ─── 15 % share band ──────────────────────────────────── */}
-          <section className="zs-pricing-page__share">
-            <div className="zs-pricing-page__eyebrow">
-              <span className="zs-pricing-page__eyebrow-rule" aria-hidden="true" />
-              The 15&nbsp;% share, plainly
-            </div>
-            <h2 className="zs-pricing-page__share-title">
-              Aligned incentives, no platform fee until you sell.
-            </h2>
-            <p className="zs-pricing-page__share-body">
-              zeroship makes money <em>only</em> when your apps make money. Run
-              a free side project — the platform takes nothing. Charge for it —
-              Stripe takes its standard fees and we take 15&nbsp;% of what's
-              left. Infrastructure, agents, hosting, scaling, monitoring: all
-              included.
-            </p>
           </section>
 
           {/* ─── Enterprise note ──────────────────────────────────── */}
