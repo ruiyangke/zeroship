@@ -215,10 +215,6 @@ struct ControlCli {
     #[arg(long = "pairwise-salt-file", env = "PAIRWISE_SALT_FILE", default_value = "")]
     pairwise_salt_file: String,
 
-    /// PostgreSQL DSN for auth/console session tables.
-    #[arg(long = "auth-db", env = "AUTH_DB_URL", default_value = "", hide_env_values = true)]
-    auth_db_url: String,
-
     /// Expected OAuth access-token audience for control bearer auth.
     #[arg(long = "oauth-audience", env = "OAUTH_AUDIENCE", default_value = "control.zeroship.ai")]
     oauth_audience: String,
@@ -274,7 +270,6 @@ impl std::fmt::Debug for ControlCli {
             .field("stash_signing_key", &"<redacted>")
             .field("pairwise_salt", &"<redacted>")
             .field("pairwise_salt_file", &self.pairwise_salt_file)
-            .field("auth_db_url", &"<redacted>")
             .field("oauth_audience", &self.oauth_audience)
             .field("app_base_domain", &self.app_base_domain)
             .finish()
@@ -378,7 +373,7 @@ fn main() -> std::io::Result<()> {
     // dereferenced to its value; under `--check-config` only the reference FORMAT
     // is validated (no env/file/network side effects) and the raw ref string is
     // kept for the read-only report. A literal secret passes through byte-for-byte
-    // in both modes. DSN fields (`--db`, `--auth-db`) carry passwords, so they go
+    // in both modes. The DSN field (`--db`) carries a password, so it goes
     // through the same path. Pure file-PATH fields (`--signing-key-file`,
     // `--builder-client-secret-file`) name a file to read and are NOT resolved here.
     let db_url = zeroship_core::config::obtain_secret(
@@ -478,12 +473,6 @@ fn main() -> std::io::Result<()> {
         &cli.pairwise_salt_file,
         &cli.pairwise_salt,
         file_secrets.pairwise_salt.as_deref(),
-        cli.check_config,
-    );
-    let auth_db_url = zeroship_core::config::obtain_secret(
-        "AUTH_DB_URL / --auth-db",
-        &cli.auth_db_url,
-        file_secrets.auth_db_url.as_deref(),
         cli.check_config,
     );
     let expected_oauth_audience = cli.oauth_audience;
@@ -586,10 +575,11 @@ fn main() -> std::io::Result<()> {
     // Control plane resource-server prerequisites. The console is now a
     // gateway-fronted regular app authenticated via `@zeroship/auth` (BFF) —
     // control has NO OIDC RP of its own anymore. It still needs: the stash
-    // signing key (shared OIDC stash MAC), the auth DB (the `AuthzGuard`
-    // bearer path + audit), and the hydra public/admin URLs (OAuth bearer
-    // introspection + issuer). Refuses to boot unless these are configured
-    // (`--dev-insecure` permits localhost defaults only).
+    // signing key (shared OIDC stash MAC) and the hydra public/admin URLs
+    // (OAuth bearer introspection + issuer). The `AuthzGuard` bearer path +
+    // audit run on the SINGLE `--db` connection (there is no separate auth DB
+    // any more). Refuses to boot unless these are configured (`--dev-insecure`
+    // permits localhost defaults only).
     if !insecure_dev {
         let mut missing = Vec::new();
         if hydra_public_url.is_empty() {
@@ -597,9 +587,6 @@ fn main() -> std::io::Result<()> {
         }
         if stash_signing_key.is_empty() {
             missing.push("--stash-signing-key / STASH_SIGNING_KEY");
-        }
-        if auth_db_url.is_empty() {
-            missing.push("--auth-db / AUTH_DB_URL");
         }
         if hydra_admin_url.is_empty() {
             missing.push("--hydra-admin-url / HYDRA_ADMIN_URL");
@@ -673,10 +660,6 @@ fn main() -> std::io::Result<()> {
         report.field(
             "deploy_tmp_dir",
             CheckValue::Plain(deploy_tmp_dir.display().to_string()),
-        );
-        report.field(
-            "auth_db_configured",
-            CheckValue::Flag(!auth_db_url.is_empty()),
         );
         report.field(
             "pairwise_salt_configured",
@@ -802,23 +785,19 @@ fn main() -> std::io::Result<()> {
         &hydra_admin_url,
     ));
 
-    let auth_db_url_resolved = if auth_db_url.is_empty() {
-        // Dev fallback: reuse the control DB URL so the auth-schema
-        // bearer path (permission_tokens lookup + Cedar enforcement in
-        // AuthzGuard) works against a single local Postgres without
-        // operator ceremony. Production refused to start without --auth-db
-        // above.
-        db_url.clone()
-    } else {
-        auth_db_url
-    };
-    let auth_pg: Arc<compio_postgres::Client> = {
-        let (pg_client, pg_conn) = compio_postgres::connect(&auth_db_url_resolved, compio_postgres::NoTls)
+    // Single shared long-lived connection on the one physical `zeroship` DB
+    // (`--db`). There is no separate auth database any more — the former
+    // `--auth-db` was only ever a config capability that compose already
+    // pointed at this same DB. The `AuthzGuard` bearer path, audit emitter, and
+    // OAuth-grant handlers pipeline onto this handle; anything needing a
+    // transaction opens its own owned connection via `registry.conn()`.
+    let control_pg: Arc<compio_postgres::Client> = {
+        let (pg_client, pg_conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
-            .expect("control: auth-pg connect");
+            .expect("control: control-pg connect");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_conn.run().await {
-                tracing::error!(error = %e, "control/auth-pg connection ended");
+                tracing::error!(error = %e, "control/control-pg connection ended");
             }
         })
         .detach();
@@ -901,8 +880,7 @@ fn main() -> std::io::Result<()> {
         insecure_dev,
         trust_proxy,
         deploy_tmp_dir,
-        auth_pg,
-        auth_db_url: auth_db_url_resolved,
+        control_pg,
         hydra_admin_url,
         app_base_domain,
         trusted_oauth_clients,

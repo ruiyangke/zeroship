@@ -16,25 +16,25 @@ impl AdminPat {
 
     pub async fn cleanup(&self, state: &AppState) {
         let _ = state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
                 &[&self.token_id, &self.user_id],
             )
             .await;
         let _ = state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.permission_tokens WHERE id = $1",
                 &[&self.token_id],
             )
             .await;
         let _ = state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
@@ -61,7 +61,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
     let user_id = Uuid::new_v4();
     let email = format!("pat-{user_id}@zeroship.test");
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'PAT Test User', NOW())",
@@ -71,7 +71,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
         .expect("insert PAT user");
     if admin {
         state
-            .auth_pg
+            .control_pg
             .execute(
                 "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
                  VALUES ($1, 'admin', $1)",
@@ -91,7 +91,7 @@ async fn issue_pat(state: &AppState, admin: bool, policy: Policy) -> AdminPat {
         .expect("issue PAT");
 
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \

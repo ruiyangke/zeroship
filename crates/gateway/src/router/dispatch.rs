@@ -1314,10 +1314,9 @@ async fn handle_auth_callback(
     // Resolve the app by subdomain — same logic the manifest dispatcher uses
     // for normal requests — then key the gateway_sessions row by the app's
     // STABLE UUID (`app_uuid`), NOT the slug. This is the canonical session
-    // key the live per-request dispatch arm (`router/auth.rs`) validates
-    // against (`app_id.to_string()`); a slug-keyed row would never match on
-    // the real SPA→app request path. The slug can be renamed; the UUID is the
-    // immutable identity.
+    // key (the `app_id` column is UUID, bound natively); a slug-keyed row
+    // would never match on the real SPA→app request path. The slug can be
+    // renamed; the UUID is the immutable identity.
     let Some(app_name) = extract_app_name(&req, None) else {
         return render_callback_error(
             state.config.insecure_dev,
@@ -1330,7 +1329,6 @@ async fn handle_auth_callback(
             "app not found for this host",
         );
     };
-    let app_id = app_uuid.to_string();
     // The interactive flow now issues the SAME signed `zeroship-sess+jwt` cookie the
     // SDK popup flow does (BFF slice R1b) — so the cookie arm has ONE
     // local-verify path. We need the route's per-app `oauth_client_id` (the
@@ -1421,7 +1419,7 @@ async fn handle_auth_callback(
         &conn,
         &crate::sessions::NewSession {
             user_id: &claims.sub,
-            app_id: &app_id,
+            app_id: app_uuid,
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),

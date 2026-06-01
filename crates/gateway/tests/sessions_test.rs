@@ -30,8 +30,9 @@ async fn create_validate_revoke_roundtrip() {
     // boot sequence, but running this test on a fresh DB should still
     // work standalone.
 
-    // Random ids — keeps the test repeatable on a shared DB.
-    let app_id = format!("app-{}", Uuid::new_v4().simple());
+    // Random ids — keeps the test repeatable on a shared DB. `app_id` is the
+    // app's stable UUID (the column is UUID, bound natively).
+    let app_id = Uuid::new_v4();
     let user_id = insert_user(&client, "gateway-session").await;
     let user_id_text = user_id.to_string();
 
@@ -39,7 +40,7 @@ async fn create_validate_revoke_roundtrip() {
         &client,
         &NewSession {
             user_id: &user_id_text,
-            app_id: &app_id,
+            app_id,
             email: Some("test@zeroship.test"),
             name: Some("Test User"),
             avatar_url: None,
@@ -72,7 +73,7 @@ async fn create_validate_revoke_roundtrip() {
     // after creation, and the returned idle_expires_at should be
     // >= the value we got from create() (NOW() advanced between the
     // two statements, so the inequality is non-strict).
-    let valid = validate(&client, session.id, &app_id)
+    let valid = validate(&client, session.id, app_id)
         .await
         .expect("validate");
     let valid = valid.expect("session must validate immediately after creation");
@@ -87,20 +88,20 @@ async fn create_validate_revoke_roundtrip() {
 
     // Wrong app_id → None (defends against confused-deputy across apps
     // sharing the gateway PG instance).
-    let invalid = validate(&client, session.id, "wrong-app")
+    let invalid = validate(&client, session.id, Uuid::new_v4())
         .await
         .expect("validate wrong app");
     assert!(invalid.is_none(), "app mismatch must fail validation");
 
     // Wrong session id → None.
-    let bogus = validate(&client, Uuid::new_v4(), &app_id)
+    let bogus = validate(&client, Uuid::new_v4(), app_id)
         .await
         .expect("validate bogus id");
     assert!(bogus.is_none(), "unknown id must fail validation");
 
     // Revoke and confirm validate now returns None.
     revoke(&client, session.id).await.expect("revoke");
-    let post_revoke = validate(&client, session.id, &app_id)
+    let post_revoke = validate(&client, session.id, app_id)
         .await
         .expect("validate post revoke");
     assert!(

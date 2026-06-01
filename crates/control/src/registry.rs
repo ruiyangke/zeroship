@@ -201,12 +201,45 @@ impl Registry {
         Ok(rows.iter().map(row_to_record).collect())
     }
 
-    /// Delete an app by id. Returns true if a row was deleted.
+    /// Delete an app by id. Returns true if the app row was deleted.
+    ///
+    /// ATOMIC: deletes the `zeroship.apps` row AND the per-app
+    /// `zeroship.oauth_clients` row (`client_id = client_id_for_app(id)`) in ONE
+    /// transaction, so the real FK chain cascades every dependent row in the
+    /// single `zeroship` schema in one shot:
+    ///   - apps          → {gateway_sessions, app_members, app_session_anchors
+    ///                       (by app_id), app_oauth_clients, app_usage,
+    ///                       app_vars, app_secrets, …}
+    ///   - oauth_clients → {oauth_grants, app_user_identities,
+    ///                       app_session_anchors (by client_id)}
+    ///
+    /// Deleting the per-app oauth_clients row is what closes the relay arm:
+    /// `app_user_identities.app_client_id` FKs into `oauth_clients(client_id)`
+    /// ON DELETE CASCADE, so this single txn replaces the former best-effort
+    /// alias-revoke companion UPDATE (no orphaned live aliases possible).
+    ///
+    /// Runs on a DEDICATED owned connection (`conn()` → fresh mutable `Client`)
+    /// so the RAII `transaction()` guard owns it; an aborted txn never poisons a
+    /// shared handle.
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
-        let conn = self.conn().await?;
-        let n = conn
+        let client_id = crate::app_oauth_client::client_id_for_app(id);
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        let n = tx
             .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
             .await?;
+        // Delete the per-app oauth_clients row in the SAME txn. Its FK children
+        // (oauth_grants, app_user_identities, app_session_anchors-by-client_id)
+        // cascade. Keyed on the deterministic `client_id_for_app(id)` — the same
+        // value `provision_app_oauth_client` wrote — so no extension-table read
+        // is needed (and the app_oauth_clients row is already cascade-gone with
+        // the apps row above; this targets the shared oauth_clients row).
+        tx.execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await?;
+        tx.commit().await?;
         Ok(n > 0)
     }
 

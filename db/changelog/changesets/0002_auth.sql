@@ -195,7 +195,13 @@ CREATE TABLE zeroship.gateway_sessions (
     -- The gateway session store (gateway::sessions) parses the subject into a
     -- Uuid and binds/reads it as UUID, so the column is UUID (not TEXT).
     user_id         UUID NOT NULL,
-    app_id          TEXT NOT NULL,
+    -- app_id is UUID. The FK into zeroship.apps(id) ON DELETE CASCADE is added
+    -- in 0004_control.sql (changeset control-apps-cascade-fks) — NOT here —
+    -- because zeroship.apps is created there (0004 > 0002 lexicographically), so
+    -- the constraint can only resolve once apps exists. Deleting an app then
+    -- atomically tears down its gateway sessions via that real FK (single
+    -- physical DB, one `zeroship` schema — no companion sweep).
+    app_id          UUID NOT NULL,
     email           CITEXT,
     name            TEXT,
     avatar_url      TEXT,

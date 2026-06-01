@@ -80,7 +80,7 @@ impl AuthzGuard {
             request_id: Some(self.request_id.as_str()),
         };
 
-        match authz::enforce(&state.auth_pg, &state.static_policies, &ctx).await {
+        match authz::enforce(&state.control_pg, &state.static_policies, &ctx).await {
             Ok(AuthzDecision::Allow) => Ok(()),
             Ok(AuthzDecision::Deny) => Err(
                 HttpResponse::Forbidden().json(&json!({"error": "forbidden"})),
@@ -121,7 +121,7 @@ async fn guard_from_bearer(
         .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
 
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT owner_id FROM zeroship.permission_tokens \
              WHERE id = $1 \
@@ -143,7 +143,7 @@ async fn guard_from_bearer(
     let principal_id: Uuid = row.get("owner_id");
 
     if let Err(err) = state
-        .auth_pg
+        .control_pg
         .execute(
             "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
             &[&token_id],

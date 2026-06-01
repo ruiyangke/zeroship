@@ -305,7 +305,7 @@ const CLIENT_ID: &str = "oac_myapp";
 /// live-dispatch regression test can assert that the `/token`-minted
 /// `gateway_sessions` row is keyed by THIS UUID (not the `myapp` slug), which
 /// is exactly what lets the cookie validate on the real SPA→app dispatch arm
-/// (`router/auth.rs` keys sessions by `app_id.to_string()`).
+/// (the `app_id` column is UUID, bound natively).
 const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
 
 /// Build a `GateState` whose `OidcRp` dials the loopback mock Hydra and
@@ -1133,7 +1133,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
             .query(
                 "SELECT user_id, app_id FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2",
-                &[&user_id, &APP_UUID.to_string()],
+                &[&user_id, &Uuid::parse_str(APP_UUID).expect("fixed app uuid")],
             )
             .await
             .expect("audit row query");
@@ -1269,7 +1269,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     let anchor = anchors::create(
         &conn,
         &anchors::NewAnchor {
-            app_id: APP_NAME,
+            app_id: Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
             client_id: CLIENT_ID,
             global_user_id: user_id,
             refresh_token_enc: &refresh_enc,
@@ -1426,7 +1426,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
                 "SELECT name, avatar_url FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                &[&user_id, &APP_UUID.to_string()],
+                &[&user_id, &Uuid::parse_str(APP_UUID).expect("fixed app uuid")],
             )
             .await
             .expect("audit row query");

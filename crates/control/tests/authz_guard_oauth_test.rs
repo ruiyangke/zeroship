@@ -156,7 +156,7 @@ impl Fixture {
     async fn cleanup(&self) {
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
@@ -166,7 +166,7 @@ impl Fixture {
             let app_id_text = app_id.to_string();
             let _ = self
                 .state
-                .auth_pg
+                .control_pg
                 .execute(
                     "DELETE FROM zeroship.app_members WHERE app_id = $1 OR user_id = $2",
                     &[&app_id_text, &self.user_id],
@@ -174,18 +174,18 @@ impl Fixture {
                 .await;
             let _ = self
                 .state
-                .auth_pg
+                .control_pg
                 .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
                 .await;
         }
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
@@ -204,9 +204,9 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         return None;
     };
 
-    let (auth_pg_client, auth_pg_conn) = connect(&db_url, NoTls).await.expect("auth-pg connect");
+    let (control_pg_client, control_pg_conn) = connect(&db_url, NoTls).await.expect("control-pg connect");
     compio::runtime::spawn(async move {
-        let _ = auth_pg_conn.run().await;
+        let _ = control_pg_conn.run().await;
     })
     .detach();
 
@@ -236,8 +236,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
-        auth_pg: Arc::new(auth_pg_client),
-        auth_db_url: db_url.to_string(),
+        control_pg: Arc::new(control_pg_client),
         hydra_admin_url: hydra.base.clone(),
         app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
@@ -263,7 +262,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
 async fn insert_user(state: &AppState, user_id: Uuid, label: &str) {
     let email = format!("{label}-{user_id}@zeroship.test");
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
@@ -275,7 +274,7 @@ async fn insert_user(state: &AppState, user_id: Uuid, label: &str) {
 
 async fn grant_platform_role(state: &AppState, user_id: Uuid, role: &str) {
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) VALUES ($1, $2, $1)",
             &[&user_id, &role],
@@ -299,7 +298,7 @@ async fn create_app(fx: &mut Fixture, label: &str) -> Uuid {
 async fn grant_app_member(state: &AppState, app_id: Uuid, user_id: Uuid, role: &str) {
     let app_id = app_id.to_string();
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
             &[&app_id, &user_id, &role],
@@ -379,7 +378,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
     assert_eq!(resp.status(), StatusCode::OK);
     let rows = fx
         .state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT request_id \
              FROM zeroship.authz_decisions \

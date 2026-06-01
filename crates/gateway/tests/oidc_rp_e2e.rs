@@ -531,12 +531,12 @@ async fn gateway_oidc_rp_full_dance() {
 
     // 14. Mint a per-origin gateway session against those claims and
     //     drive validate → revoke → validate (no-op).
-    let app_id = format!("e2e-app-{}.zeroship.test", Uuid::new_v4().simple());
+    let app_id = Uuid::new_v4();
     let session = create(
         &pg_client,
         &NewSession {
             user_id: &claims.sub,
-            app_id: &app_id,
+            app_id,
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
@@ -551,7 +551,7 @@ async fn gateway_oidc_rp_full_dance() {
     .await
     .expect("session create");
 
-    let validated = validate(&pg_client, session.id, &app_id)
+    let validated = validate(&pg_client, session.id, app_id)
         .await
         .expect("validate");
     let validated = validated.expect("session must validate immediately after creation");
@@ -565,7 +565,7 @@ async fn gateway_oidc_rp_full_dance() {
     );
 
     revoke(&pg_client, session.id).await.expect("revoke");
-    let after_revoke = validate(&pg_client, session.id, &app_id)
+    let after_revoke = validate(&pg_client, session.id, app_id)
         .await
         .expect("validate post-revoke");
     assert!(

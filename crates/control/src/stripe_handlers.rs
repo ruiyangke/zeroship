@@ -37,7 +37,7 @@ async fn rate_limit(
 ) -> Option<web::HttpResponse> {
     http_util::rate_limit(
         req,
-        state.auth_pg.as_ref(),
+        state.control_pg.as_ref(),
         namespace,
         limiter.quota(),
         state.trust_proxy,

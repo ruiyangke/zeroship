@@ -176,21 +176,21 @@ impl Fixture {
             LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
         );
 
-        let (auth_pg_client, auth_pg_conn) =
+        let (control_pg_client, control_pg_conn) =
             compio_postgres::connect(db_url, compio_postgres::NoTls)
                 .await
-                .expect("auth-pg connect");
+                .expect("control-pg connect");
         compio::runtime::spawn(async move {
-            let _ = auth_pg_conn.run().await;
+            let _ = control_pg_conn.run().await;
         })
         .detach();
-        let auth_pg = Arc::new(auth_pg_client);
+        let control_pg = Arc::new(control_pg_client);
 
         // The acting creator. Created BEFORE the mock introspector so its `sub`
         // resolves to this user; its platform role drives the grant ceiling.
         let user_id = Uuid::new_v4();
         let email = format!("{label}-{user_id}@zeroship.test");
-        auth_pg
+        control_pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
                 &[&user_id, &email, &label],
@@ -198,7 +198,7 @@ impl Fixture {
             .await
             .expect("insert user");
         if let Some(role) = platform_role {
-            auth_pg
+            control_pg
                 .execute(
                     "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, $2)",
                     &[&user_id, &role],
@@ -225,8 +225,7 @@ impl Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            auth_pg,
-            auth_db_url: db_url.to_string(),
+            control_pg,
             hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
@@ -253,7 +252,7 @@ impl Fixture {
     async fn cleanup(&self) {
         let token_rows = self
             .state
-            .auth_pg
+            .control_pg
             .query(
                 "SELECT id FROM zeroship.permission_tokens WHERE owner_id = $1",
                 &[&self.user_id],
@@ -264,13 +263,13 @@ impl Fixture {
             let id: Uuid = row.get("id");
             let _ = self
                 .state
-                .auth_pg
+                .control_pg
                 .execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&id])
                 .await;
         }
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&self.user_id],
@@ -278,7 +277,7 @@ impl Fixture {
             .await;
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
                 &[&self.user_id],
@@ -286,7 +285,7 @@ impl Fixture {
             .await;
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.app_members WHERE user_id = $1",
                 &[&self.user_id],
@@ -294,12 +293,12 @@ impl Fixture {
             .await;
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
@@ -325,7 +324,7 @@ fn deploy_policy() -> Value {
 
 async fn audit_event_count(state: &AppState, user_id: Uuid, event_type: &str) -> i64 {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
@@ -437,7 +436,7 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
     let fx = Fixture::new(&db_url, "owner-any", None).await;
     let app_id = format!("app-{}", Uuid::new_v4().simple());
     fx.state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
             &[&app_id, &fx.user_id],
@@ -708,7 +707,7 @@ async fn using_revoked_pat_returns_401() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     fx.state
-        .auth_pg
+        .control_pg
         .execute(
             "UPDATE zeroship.permission_tokens SET revoked_at = NOW() WHERE id = $1",
             &[&pat.token_id],

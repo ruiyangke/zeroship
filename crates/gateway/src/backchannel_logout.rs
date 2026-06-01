@@ -64,8 +64,9 @@ pub async fn handle(
     // (`state.oidc_rp.client_id`) still revokes across the subject's gateway
     // sessions for that aud.
     //
-    // `revoke_scope` carries the app subdomain when a per-app client matched
-    // (revoke only that app), or `None` for the shared-client all-apps path.
+    // `revoke_scope` carries the app's STABLE UUID (`apps.id`) when a per-app
+    // client matched (revoke only that app — the canonical session/anchor
+    // key), or `None` for the shared-client all-apps path.
     // `revoke_sector` carries that app's `sector_identifier` so the per-app
     // branch can derive the same `pws_…` the gateway projects, to write the
     // PER-APP token-family marker (Batch A fix 4) — a per-app BCL must kill the
@@ -74,19 +75,21 @@ pub async fn handle(
     // wrapper to revoke without a sector).
     let aud_candidates =
         zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
-    let (aud, revoke_scope, revoke_sector): (String, Option<String>, Option<String>) =
-        aud_candidates
-            .iter()
-            .find_map(|cand| {
-                state.routes.lookup_by_oauth_client_id(cand).map(|(_id, route)| {
-                    (
-                        cand.clone(),
-                        Some(route.entry.name.clone()),
-                        route.entry.sector_identifier.clone(),
-                    )
-                })
+    let (aud, revoke_scope, revoke_sector): (
+        String,
+        Option<uuid::Uuid>,
+        Option<String>,
+    ) = aud_candidates
+        .iter()
+        .find_map(|cand| {
+            // The per-app session/anchor rows are keyed by the app's STABLE
+            // UUID (`apps.id`), not the renameable subdomain slug — so the
+            // per-app revoke scope carries the app id, never `route.entry.name`.
+            state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
+                (cand.clone(), Some(id), route.entry.sector_identifier.clone())
             })
-            .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None, None));
+        })
+        .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None, None));
 
     let token = match zeroship_core::logout_token::verify(
         &state.oidc_rp.jwks,
@@ -156,13 +159,14 @@ pub async fn handle(
     if let Some(conn) = conn.as_deref() {
         match token.sub.as_deref() {
             Some(sub) => {
-                let revoked = match revoke_scope.as_deref() {
+                let revoked = match revoke_scope {
                     // Per-app client matched (Slice 1d §1.2): revoke ONLY this
                     // app's sessions for the subject. We do NOT push the subject
                     // into the global wrapper denylist — that is a cross-app
                     // nuke; a per-app BCL must not log the user out of other
-                    // apps.
-                    Some(app_name) => {
+                    // apps. `app_id` is the app's STABLE UUID — the canonical
+                    // session/anchor key.
+                    Some(app_id) => {
                         // PER-APP token-family marker (Batch A fix 4): write
                         // `zeroship.token_revocations` on the SAME `(client_id,
                         // pws_)` key the gateway arms read, so the user's live
@@ -198,17 +202,17 @@ pub async fn handle(
                             state.revocation_cache.invalidate(&aud, &pws);
                         } else {
                             tracing::warn!(
-                                app_id = %app_name,
+                                app_id = %app_id,
                                 "backchannel_logout: per-app BCL has no sector_identifier; \
                                  skipping token-family marker (sessions still revoked)"
                             );
                         }
-                        sessions::revoke_app_sessions_for_user(conn, app_name, sub)
+                        sessions::revoke_app_sessions_for_user(conn, app_id, sub)
                             .await
                             .unwrap_or_else(|e| {
                                 tracing::error!(
                                     error = %e,
-                                    app_id = %app_name,
+                                    app_id = %app_id,
                                     "backchannel_logout: revoke_app_sessions_for_user failed"
                                 );
                                 0

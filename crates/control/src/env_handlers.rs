@@ -28,7 +28,7 @@ fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
 async fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
     http_util::rate_limit(
         req,
-        state.auth_pg.as_ref(),
+        state.control_pg.as_ref(),
         "admin",
         state.admin_limiter.quota(),
         state.trust_proxy,

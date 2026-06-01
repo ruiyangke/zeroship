@@ -331,10 +331,10 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     std::fs::create_dir_all(&blob_root).expect("mkdir blob root");
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    // A connection to assert the ABSENCE of any console PAT row (the console is a
-    // pure creator app — the seed mints none). `permission_tokens` lives in the
-    // control schema; in dev both DSNs point at one database.
-    let auth_pg = pg(&url).await;
+    // One connection on the single `zeroship` DB — used both to drive the seed
+    // and to assert the ABSENCE of any console PAT row (the console is a pure
+    // creator app — the seed mints none). `permission_tokens` lives in the same
+    // `zeroship` schema; there is no separate auth DB any more.
     let mut control_pg = pg(&url).await;
 
     let hydra = MockHydra::start();
@@ -472,7 +472,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     //      and — since the seed creates no `auth.users`/`platform.roles` service
     //      principal at all — none of those rows exist for this host either.
     let console_user_email = format!("console-service@{host}");
-    let svc_users = auth_pg
+    let svc_users = control_pg
         .query(
             "SELECT id FROM zeroship.users WHERE email = $1",
             &[&console_user_email],
@@ -484,7 +484,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         "pure creator console seeds NO service principal (zeroship.users) — found {} row(s)",
         svc_users.len()
     );
-    let n_pat: i64 = auth_pg
+    let n_pat: i64 = control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.permission_tokens pt \
              JOIN zeroship.users u ON u.id = pt.owner_id \
@@ -653,7 +653,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .get("n");
     assert_eq!(n_ext, 1, "no duplicate app_oauth_clients row");
     // Still no PAT and no service-token secret after the re-run.
-    let n_pat: i64 = auth_pg
+    let n_pat: i64 = control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.permission_tokens pt \
              JOIN zeroship.users u ON u.id = pt.owner_id \

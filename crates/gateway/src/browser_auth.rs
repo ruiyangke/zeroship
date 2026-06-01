@@ -316,7 +316,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
     // without touching the foreign anchor. NB: anchors are keyed by the app
     // UUID (`route.app_id`), NOT the subdomain slug `app_name` — matching the
     // /token + /session create path and the live dispatch arm (see RouteCtx).
-    if anchor.app_id != route.app_id.to_string() {
+    if anchor.app_id != route.app_id {
         return signout_cleared(&route.host, state.config.insecure_dev);
     }
 
@@ -378,7 +378,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // (c) Delete the anchor row(s) and collect the family ciphertexts
         //     for the (best-effort) Hydra revoke fan-out.
         if want_global {
-            match anchors::delete_all_for_user(&conn, &route.app_id.to_string(), anchor.global_user_id)
+            match anchors::delete_all_for_user(&conn, route.app_id, anchor.global_user_id)
                 .await
             {
                 Ok(deleted) => {

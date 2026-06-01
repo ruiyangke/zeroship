@@ -202,7 +202,10 @@ DO $$
 
 --changeset zeroship:control-app-members splitStatements:true
 CREATE TABLE zeroship.app_members (
-    app_id   TEXT NOT NULL,
+    -- app_id is UUID and FKs into zeroship.apps(id) ON DELETE CASCADE (apps is
+    -- created earlier in THIS file, so the inline FK resolves): deleting an app
+    -- atomically drops its membership rows.
+    app_id   UUID NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
     user_id  UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
     role     TEXT NOT NULL CHECK (role IN ('owner','editor','viewer')),
     added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -340,3 +343,15 @@ DO $$
 --rollback DROP TRIGGER IF EXISTS authz_decisions_block_delete ON zeroship.authz_decisions;
 --rollback DROP TRIGGER IF EXISTS authz_decisions_block_update ON zeroship.authz_decisions;
 --rollback DROP FUNCTION IF EXISTS zeroship.authz_decisions_block_tamper();
+
+-- Deferred FK: zeroship.gateway_sessions.app_id → zeroship.apps(id) ON DELETE
+-- CASCADE. The column is declared UUID in 0002_auth.sql, but the constraint
+-- can only be added once zeroship.apps exists — which is HERE (0004 > 0002),
+-- and after the apps table is created at the top of this file. With this FK,
+-- deleting an app atomically tears down its gateway sessions (no companion
+-- sweep, single physical DB / one `zeroship` schema).
+--changeset zeroship:control-gateway-sessions-app-fk splitStatements:true
+ALTER TABLE zeroship.gateway_sessions
+    ADD CONSTRAINT gateway_sessions_app_id_fkey
+    FOREIGN KEY (app_id) REFERENCES zeroship.apps(id) ON DELETE CASCADE;
+--rollback ALTER TABLE zeroship.gateway_sessions DROP CONSTRAINT gateway_sessions_app_id_fkey;

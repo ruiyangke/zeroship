@@ -298,7 +298,7 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> =
         Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
-    let auth_pg = Arc::new(pg(db_url).await);
+    let control_pg = Arc::new(pg(db_url).await);
 
     Arc::new(AppState {
         registry,
@@ -316,8 +316,7 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
         insecure_dev: true,
         trust_proxy: false,
         deploy_tmp_dir: blob_root.clone(),
-        auth_pg,
-        auth_db_url: db_url.to_string(),
+        control_pg,
         hydra_admin_url: hydra_admin_url.to_string(),
         app_base_domain: app_base_domain.to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),

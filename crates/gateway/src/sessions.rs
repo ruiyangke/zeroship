@@ -21,7 +21,10 @@ use crate::error::{GatewayError, Result};
 pub struct AppSession {
     pub id: Uuid,
     pub user_id: String,
-    pub app_id: String,
+    /// The app's stable UUID (`apps.id`). The `zeroship.gateway_sessions.app_id`
+    /// column is UUID and bound natively — the canonical session key is the
+    /// immutable app id, never the renameable subdomain slug.
+    pub app_id: Uuid,
     pub email: Option<String>,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
@@ -47,7 +50,10 @@ pub struct AppSession {
 #[derive(Debug)]
 pub struct NewSession<'a> {
     pub user_id: &'a str,
-    pub app_id: &'a str,
+    /// The app's stable UUID (`apps.id`), bound natively into the UUID
+    /// `app_id` column. Keyed on the immutable app id (the subdomain slug can
+    /// be renamed), matching the live per-request dispatch arm.
+    pub app_id: Uuid,
     pub email: Option<&'a str>,
     pub name: Option<&'a str>,
     pub avatar_url: Option<&'a str>,
@@ -130,7 +136,7 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
 /// # Errors
 ///
 /// [`GatewayError::Db`] on PG failure.
-pub async fn validate(conn: &Client, id: Uuid, app_id: &str) -> Result<Option<AppSession>> {
+pub async fn validate(conn: &Client, id: Uuid, app_id: Uuid) -> Result<Option<AppSession>> {
     let rows = conn
         .query(
             "UPDATE zeroship.gateway_sessions \
@@ -218,7 +224,7 @@ pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
 /// [`GatewayError::Db`] on PG failure (including an unparseable `user_id`).
 pub async fn revoke_app_sessions_for_user(
     conn: &Client,
-    app_id: &str,
+    app_id: Uuid,
     user_id: &str,
 ) -> Result<u64> {
     let user_id = Uuid::parse_str(user_id).map_err(|e| {

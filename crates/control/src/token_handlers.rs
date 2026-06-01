@@ -266,7 +266,7 @@ pub async fn create_token(
     };
 
     match state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
@@ -318,7 +318,7 @@ pub async fn list_tokens(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT id, name, created_at, expires_at, last_used_at, revoked_at \
              FROM zeroship.permission_tokens \
@@ -364,7 +364,7 @@ pub async fn delete_token(
     };
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "UPDATE zeroship.permission_tokens \
              SET revoked_at = COALESCE(revoked_at, NOW()) \
@@ -461,10 +461,10 @@ async fn validate_grant_subset(
                 };
 
                 let authorized = if matches!(resource, Resource::Any) {
-                    authz::is_authorized_anywhere(&state.auth_pg, &state.static_policies, &ctx)
+                    authz::is_authorized_anywhere(&state.control_pg, &state.static_policies, &ctx)
                         .await
                 } else {
-                    authz::enforce(&state.auth_pg, &state.static_policies, &ctx)
+                    authz::enforce(&state.control_pg, &state.static_policies, &ctx)
                         .await
                         .map(|decision| decision == AuthzDecision::Allow)
                 };

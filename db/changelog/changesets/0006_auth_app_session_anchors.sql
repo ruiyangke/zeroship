@@ -26,8 +26,13 @@
 --changeset zeroship:auth-app-session-anchors splitStatements:true
 CREATE TABLE zeroship.app_session_anchors (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),  -- the __Host-zs_app_session cookie value
-    app_id              TEXT        NOT NULL,            -- TEXT, consistent with gateway_sessions/app_user_identities
-    client_id           TEXT        NOT NULL,            -- the per-app OAuth client_id (oac_<base62>) bound at mint time
+    -- app_id is UUID + FK into zeroship.apps(id) ON DELETE CASCADE: deleting an
+    -- app atomically drops its reload-recovery anchors. (apps exists by 0006.)
+    app_id              UUID        NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
+    -- client_id FKs into zeroship.oauth_clients(client_id) ON DELETE CASCADE:
+    -- deleting the per-app oauth_clients row (app-delete does this in the same
+    -- txn) also reaches anchors via this path. (oauth_clients exists by 0006.)
+    client_id           TEXT        NOT NULL REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE,  -- the per-app OAuth client_id (oac_<base62>) bound at mint time
     global_user_id      UUID        NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,  -- the GLOBAL user (pws_ is a projection, never stored)
     refresh_token_enc   BYTEA       NOT NULL,            -- AES-256-GCM encrypted server-held rotating refresh family
     refresh_family_id   TEXT        NOT NULL,            -- gateway-generated lineage id (rfam_<base62>), set ONCE at create and carried verbatim across every rotation; Hydra exposes no usable family-lineage field (§1.2)

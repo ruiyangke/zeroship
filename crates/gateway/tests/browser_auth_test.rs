@@ -534,7 +534,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
         let a = anchors::create(
             &conn,
             &anchors::NewAnchor {
-                app_id: APP_UUID,
+                app_id: Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
                 client_id: CLIENT_ID,
                 global_user_id,
                 refresh_token_enc: &refresh_enc,

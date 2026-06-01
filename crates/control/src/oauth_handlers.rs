@@ -178,7 +178,7 @@ pub async fn list_oauth_clients(
     }
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                     skip_consent, created_at, created_by, hydra_client_id \
@@ -220,7 +220,7 @@ pub async fn delete_oauth_client(
     }
 
     match state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
@@ -315,7 +315,7 @@ async fn ensure_client_absent(
     client_id: &str,
 ) -> Result<(), web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT 1 FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
@@ -340,7 +340,7 @@ async fn ensure_client_present(
     client_id: &str,
 ) -> Result<(), web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT 1 FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
@@ -370,7 +370,7 @@ async fn insert_oauth_client(
     let redirect_uris: Vec<&str> = body.redirect_uris.iter().map(String::as_str).collect();
     let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \

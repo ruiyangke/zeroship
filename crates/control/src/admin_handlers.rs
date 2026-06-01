@@ -103,7 +103,7 @@ pub async fn grant_platform_role(
     }
 
     if let Err(err) = state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
              VALUES ($1, $2, $3) \
@@ -153,7 +153,7 @@ pub async fn revoke_platform_role(
     };
 
     if let Err(err) = state
-        .auth_pg
+        .control_pg
         .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&target])
         .await
     {
@@ -225,7 +225,7 @@ pub async fn set_app_audit_lock(
     };
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "UPDATE apps SET audit_locked = $1, updated_at = NOW() \
              WHERE id = $2 \
@@ -286,7 +286,7 @@ pub async fn set_app_suspension(
     };
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "UPDATE apps SET suspended = $1, updated_at = NOW() \
              WHERE id = $2 \
@@ -352,7 +352,7 @@ pub async fn upsert_platform_policy(
     };
 
     if let Err(err) = state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.platform_policies (id, cedar_source, enabled, updated_by) \
              VALUES ($1, $2, $3, $4) \
@@ -403,7 +403,7 @@ pub async fn delete_platform_policy(
 
     let policy_id = id.into_inner();
     if let Err(err) = state
-        .auth_pg
+        .control_pg
         .execute("DELETE FROM zeroship.platform_policies WHERE id = $1", &[&policy_id])
         .await
     {
@@ -440,7 +440,7 @@ pub async fn list_platform_policies(
     let include_source = caller_role == ROLE_ADMIN;
 
     let rows = match state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT id, cedar_source, enabled, updated_at, updated_by \
              FROM zeroship.platform_policies \
@@ -543,7 +543,7 @@ fn validate_role(role: &str) -> Option<&'static str> {
 
 async fn user_exists(state: &AppState, user_id: Uuid) -> Result<bool, web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user_id])
         .await
         .map_err(|err| {
@@ -558,7 +558,7 @@ async fn platform_role(
     user_id: Uuid,
 ) -> Result<Option<String>, web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query("SELECT role FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&user_id])
         .await
         .map_err(|err| {
@@ -578,7 +578,7 @@ async fn load_platform_policy(
     id: &str,
 ) -> Result<Option<ExistingPlatformPolicy>, web::HttpResponse> {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT cedar_source, enabled FROM zeroship.platform_policies WHERE id = $1",
             &[&id],
@@ -619,7 +619,7 @@ async fn audit_event(
         ..Default::default()
     };
 
-    if let Err(err) = auth_audit::emit_strict(state.auth_pg.as_ref(), &ev)
+    if let Err(err) = auth_audit::emit_strict(state.control_pg.as_ref(), &ev)
         .await
     {
         tracing::error!(error = %err, event_type, "control: platform admin audit insert failed");

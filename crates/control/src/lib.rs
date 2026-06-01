@@ -22,7 +22,6 @@ pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod rate_limit;
 pub mod registry;
-pub mod relay_revoke;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod token_handlers;
@@ -147,29 +146,24 @@ pub struct AppState {
     /// type. Files are unlinked immediately after ingest (success or
     /// failure).
     pub deploy_tmp_dir: std::path::PathBuf,
-    /// Postgres client pointed at the `auth` schema, used by the
-    /// `AuthzGuard` bearer path (`control.permission_tokens` lookup +
-    /// Cedar enforcement against `auth.*`) and the audit emitter.
-    /// Distinct from the `registry` PG client (which talks to the
-    /// control schema) because in multi-DB deployments the auth tables
-    /// may live in a separate cluster.
+    /// Shared long-lived Postgres client on the SINGLE physical `zeroship`
+    /// database — the same DB the `registry` opens per-query connections on.
+    /// Used by the `AuthzGuard` bearer path (`zeroship.permission_tokens`
+    /// lookup + Cedar enforcement against `zeroship.*`), the audit emitter,
+    /// and the connected-app OAuth grant handlers.
     ///
-    /// The console is now a regular gateway-fronted app authenticated via
+    /// There is no separate auth database any more: control's former
+    /// `--auth-db` was only ever a config capability (compose always pointed
+    /// it at the same DB), and every system table lives in the one `zeroship`
+    /// schema. Handlers that need a transaction-capable owned connection open a
+    /// fresh one via `registry.conn()` (mutable `&mut self`); `control_pg` is
+    /// the pipelined shared handle for autocommit reads/writes.
+    ///
+    /// The console is a regular gateway-fronted app authenticated via
     /// `@zeroship/auth` (BFF); the control plane is a pure API resource
     /// server with NO OIDC RP of its own — the bespoke `ConsoleOidcRp` +
     /// `console_sessions` surface was removed in the R5 cutover.
-    pub auth_pg: Arc<compio_postgres::Client>,
-    /// Connection URL for the auth/control auth schema, used to open
-    /// short-lived DEDICATED sessions for work that must not run on the shared
-    /// `auth_pg` connection. The relay revoke cascade
-    /// (`relay_revoke::{revoke_grant_cascade,revoke_all_aliases_for_client}`)
-    /// reads this to open an owned `Client` per cascade: a multi-statement
-    /// `BEGIN…COMMIT` cannot be multiplexed onto `auth_pg` (every other handler
-    /// pipelines onto it with no transaction isolation), and an aborted
-    /// transaction must not poison the shared handle — so the cascade gets its
-    /// own throwaway connection that carries the transaction's
-    /// snapshot/locks/abort-state and is dropped at the end of the call.
-    pub auth_db_url: String,
+    pub control_pg: Arc<compio_postgres::Client>,
     /// Hydra admin API base URL. Control uses this for admin-owned OAuth
     /// client registration/deletion; Hydra remains the source of truth for
     /// generated client secrets.

@@ -64,14 +64,14 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     // handler revokes ACROSS apps for the same sub.
     let target_user_id = insert_user(&client, "gateway-bcl-target").await;
     let target_user = target_user_id.to_string();
-    let app_a = format!("app-a-{}", Uuid::new_v4().simple());
-    let app_b = format!("app-b-{}", Uuid::new_v4().simple());
+    let app_a = Uuid::new_v4();
+    let app_b = Uuid::new_v4();
 
     let s_a = create(
         &client,
         &NewSession {
             user_id: &target_user,
-            app_id: &app_a,
+            app_id: app_a,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
             avatar_url: None,
@@ -88,7 +88,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
         &client,
         &NewSession {
             user_id: &target_user,
-            app_id: &app_b,
+            app_id: app_b,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
             avatar_url: None,
@@ -108,7 +108,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
         &client,
         &NewSession {
             user_id: &other_user,
-            app_id: &app_a,
+            app_id: app_a,
             email: Some("bob@zeroship.test"),
             name: Some("Bob"),
             avatar_url: None,
@@ -122,15 +122,15 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     .expect("create s_other");
 
     // Sanity: all three validate before we revoke.
-    assert!(validate(&client, s_a.id, &app_a)
+    assert!(validate(&client, s_a.id, app_a)
         .await
         .expect("pre validate s_a")
         .is_some());
-    assert!(validate(&client, s_b.id, &app_b)
+    assert!(validate(&client, s_b.id, app_b)
         .await
         .expect("pre validate s_b")
         .is_some());
-    assert!(validate(&client, s_other.id, &app_a)
+    assert!(validate(&client, s_other.id, app_a)
         .await
         .expect("pre validate s_other")
         .is_some());
@@ -143,14 +143,14 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
 
     // Both target sessions must now fail validation.
     assert!(
-        validate(&client, s_a.id, &app_a)
+        validate(&client, s_a.id, app_a)
             .await
             .expect("post validate s_a")
             .is_none(),
         "s_a must be revoked"
     );
     assert!(
-        validate(&client, s_b.id, &app_b)
+        validate(&client, s_b.id, app_b)
             .await
             .expect("post validate s_b")
             .is_none(),
@@ -159,7 +159,7 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
 
     // The unrelated user's session must still validate.
     assert!(
-        validate(&client, s_other.id, &app_a)
+        validate(&client, s_other.id, app_a)
             .await
             .expect("post validate s_other")
             .is_some(),
@@ -418,12 +418,12 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 
     let target_user = insert_user(&db, "gateway-bcl-handler-target").await;
     let target_user_string = target_user.to_string();
-    let app_id = format!("app-bcl-{}", Uuid::new_v4().simple());
+    let app_id = Uuid::new_v4();
     let session = create(
         &db,
         &NewSession {
             user_id: &target_user_string,
-            app_id: &app_id,
+            app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
             avatar_url: None,
@@ -457,7 +457,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let first_resp = test::call_service(&app, first).await;
     assert_eq!(first_resp.status(), StatusCode::OK);
     assert!(
-        validate(&db, session.id, &app_id)
+        validate(&db, session.id, app_id)
             .await
             .expect("validate after first logout")
             .is_none(),
@@ -545,6 +545,7 @@ fn sign_logout_token_with_aud(
 fn build_handler_state_with_route(
     db: DbConfig,
     auth_base: &str,
+    app_id: Uuid,
     name: &str,
     oauth_client_id: &str,
     sector: &str,
@@ -553,8 +554,12 @@ fn build_handler_state_with_route(
     let state = build_handler_state(db, auth_base);
     let mut map: std::collections::HashMap<Uuid, zeroship_core::types::RouteEntry> =
         std::collections::HashMap::new();
+    // Register the route under the SAME stable app UUID the seeded
+    // gateway_sessions row uses — the per-app BCL handler resolves the revoke
+    // scope to this id (via lookup_by_oauth_client_id), so a fresh random id
+    // here would never match the seeded session.
     map.insert(
-        Uuid::new_v4(),
+        app_id,
         zeroship_core::types::RouteEntry {
             name: name.to_string(),
             plan_id: "free".to_string(),
@@ -612,15 +617,18 @@ async fn per_app_bcl_writes_token_family_marker() {
 
     let target_user = insert_user(&db, "gateway-bcl-perapp").await;
     let target_user_string = target_user.to_string();
+    let app_id = Uuid::new_v4();
     let app_name = format!("perapp-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_perappbcl_{}", Uuid::new_v4().simple());
     let sector = format!("https://{app_name}.zeroship.localhost");
     // A gateway session so the per-app `revoke_app_sessions_for_user` has a row.
+    // Keyed by the app's stable UUID — the SAME id the route is registered
+    // under below, so the handler's UUID-keyed per-app revoke matches it.
     create(
         &db,
         &NewSession {
             user_id: &target_user_string,
-            app_id: &app_name,
+            app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
             avatar_url: None,
@@ -663,6 +671,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     let state = build_handler_state_with_route(
         db_cfg,
         &auth_base,
+        app_id,
         &app_name,
         &oauth_client_id,
         &sector,
@@ -764,6 +773,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         canonical_sub, uppercase_sub,
         "fixture must actually exercise a spelling difference"
     );
+    let app_id = Uuid::new_v4();
     let app_name = format!("noncanon-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_noncanonbcl_{}", Uuid::new_v4().simple());
     let sector = format!("https://{app_name}.zeroship.localhost");
@@ -771,7 +781,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         &db,
         &NewSession {
             user_id: &canonical_sub,
-            app_id: &app_name,
+            app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
             avatar_url: None,
@@ -815,6 +825,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     let state = build_handler_state_with_route(
         db_cfg,
         &auth_base,
+        app_id,
         &app_name,
         &oauth_client_id,
         &sector,

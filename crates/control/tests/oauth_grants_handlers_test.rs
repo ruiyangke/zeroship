@@ -47,22 +47,15 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Build a fixture on the single physical `zeroship` DB. `registry`,
+    /// `control_pg`, and every handler share that one database — there is no
+    /// separate auth DB any more (the former `--auth-db` was config-only).
     async fn new(db_url: &str, label: &str) -> Self {
-        Self::new_with_auth_db_url(db_url, db_url, label).await
-    }
-
-    /// Build a fixture whose `registry` + `auth_pg` use the real `db_url` but
-    /// whose `auth_db_url` (the URL the relay cascade opens a DEDICATED client
-    /// on) is `auth_db_url`. Pointing `auth_db_url` at an unreachable address
-    /// lets a test exercise the cascade's FAILURE arm in isolation — only the
-    /// dedicated relay connection fails, while authz/registry/`auth_pg` keep
-    /// using the real DB and succeed. This is exactly the seam the dedicated
-    /// (non-shared) connection design restores.
-    async fn new_with_auth_db_url(db_url: &str, auth_db_url: &str, label: &str) -> Self {
         let hydra = MockHydra::start();
-        let (auth_pg_client, auth_pg_conn) = connect(db_url, NoTls).await.expect("auth-pg connect");
+        let (control_pg_client, control_pg_conn) =
+            connect(db_url, NoTls).await.expect("control-pg connect");
         compio::runtime::spawn(async move {
-            let _ = auth_pg_conn.run().await;
+            let _ = control_pg_conn.run().await;
         })
         .detach();
 
@@ -93,8 +86,7 @@ impl Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            auth_pg: Arc::new(auth_pg_client),
-            auth_db_url: auth_db_url.to_string(),
+            control_pg: Arc::new(control_pg_client),
             hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
@@ -127,7 +119,7 @@ impl Fixture {
         let ids = client_ids.iter().map(String::as_str).collect::<Vec<_>>();
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.oauth_grants WHERE client_id = ANY($1)",
                 &[&ids],
@@ -135,7 +127,7 @@ impl Fixture {
             .await;
         let _ = self
             .state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.oauth_clients WHERE client_id = ANY($1)",
                 &[&ids],
@@ -272,7 +264,7 @@ async fn account_pat(state: &AppState, label: &str) -> AccountPat {
         .expect("issue account PAT");
 
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.permission_tokens \
                 (id, owner_id, kind, name, policies, policy_hash, expires_at) \
@@ -304,7 +296,7 @@ async fn insert_user(state: &AppState, label: &str) -> Uuid {
     let user_id = Uuid::new_v4();
     let email = format!("{label}-{user_id}@zeroship.test");
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
@@ -317,32 +309,32 @@ async fn insert_user(state: &AppState, label: &str) -> Uuid {
 
 async fn cleanup_user(state: &AppState, user_id: Uuid) {
     let _ = state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
             &[&user_id],
         )
         .await;
     let _ = state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.oauth_grants WHERE user_id = $1",
             &[&user_id],
         )
         .await;
     let _ = state
-        .auth_pg
+        .control_pg
         .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&user_id])
         .await;
     let _ = state
-        .auth_pg
+        .control_pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
 }
@@ -352,7 +344,7 @@ async fn insert_client(state: &AppState, client_id: &str, created_by: Uuid) {
     let redirect_uris = vec![redirect_uri.as_str()];
     let scopes = vec!["apps:read", "env:read"];
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
@@ -375,7 +367,7 @@ async fn insert_client(state: &AppState, client_id: &str, created_by: Uuid) {
 async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: &[&str]) {
     let granted_scopes = scopes.to_vec();
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.oauth_grants \
                 (user_id, client_id, granted_scopes, granted_at, last_used_at) \
@@ -397,7 +389,7 @@ async fn insert_identity_with_alias(
 ) {
     let pairwise_sub = format!("pws_test_{}", Uuid::new_v4().simple());
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub, relay_email) \
@@ -413,7 +405,7 @@ async fn insert_identity_with_alias(
 /// bounce + 200 (the revoked/unknown-alias branch). We assert against the REAL
 /// auth-store gate, not a stub, so this is the faithful cross-service seam.
 async fn alias_is_active(state: &AppState, relay_email: &str) -> bool {
-    zeroship_auth::store::relay::resolve_active_alias(state.auth_pg.as_ref(), relay_email)
+    zeroship_auth::store::relay::resolve_active_alias(state.control_pg.as_ref(), relay_email)
         .await
         .expect("resolve_active_alias")
         .is_some()
@@ -421,7 +413,7 @@ async fn alias_is_active(state: &AppState, relay_email: &str) -> bool {
 
 async fn identity_revoked_at_is_set(state: &AppState, client_id: &str, user_id: Uuid) -> bool {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT revoked_at FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
@@ -434,9 +426,22 @@ async fn identity_revoked_at_is_set(state: &AppState, client_id: &str, user_id: 
         .is_some()
 }
 
+async fn identity_row_count(state: &AppState, client_id: &str) -> i64 {
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_user_identities \
+             WHERE app_client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .expect("count app_user_identities");
+    rows[0].get("n")
+}
+
 async fn cleanup_identities(state: &AppState, client_id: &str) {
     let _ = state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
             &[&client_id],
@@ -446,7 +451,7 @@ async fn cleanup_identities(state: &AppState, client_id: &str) {
 
 async fn count_grant(state: &AppState, user_id: Uuid, client_id: &str) -> i64 {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.oauth_grants \
@@ -465,7 +470,7 @@ async fn audit_event_count(
     client_id: &str,
 ) -> i64 {
     let rows = state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
@@ -708,7 +713,7 @@ async fn revoke_does_not_affect_other_users() {
 /// `app_user_identities.revoked_at` AND a subsequent inbound to that alias
 /// bounces (the real 5b `resolve_active_alias` gate now returns `None`). The
 /// DELETE + UPDATE commit atomically (BEGIN/COMMIT) on control's existing
-/// `auth_pg` connection — no per-call connect. This is the full faithful loop:
+/// `control_pg` connection — no per-call connect. This is the full faithful loop:
 /// the relay alias was forwarding (active) → revoke → it bounces (inactive).
 #[compio::test]
 async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
@@ -765,7 +770,7 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
 async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> Uuid {
     let app_id = Uuid::new_v4();
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
             &[
@@ -777,7 +782,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
         .await
         .expect("insert apps row");
     state
-        .auth_pg
+        .control_pg
         .execute(
             "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
              VALUES ($1, $2, $3)",
@@ -834,7 +839,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // Pre-condition: no marker yet ⇒ the live token is NOT revoked.
     assert!(
         !zeroship_core::wrapper_revocation::is_family_revoked_since(
-            fx.state.auth_pg.as_ref(),
+            fx.state.control_pg.as_ref(),
             &client_id,
             &pws,
             live_token_iat,
@@ -855,7 +860,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // The marker row exists for (client_id, pws_).
     let marker_rows = fx
         .state
-        .auth_pg
+        .control_pg
         .query(
             "SELECT 1 FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
             &[&client_id, &pws],
@@ -873,7 +878,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // keyed it on the global UUID) would leave the live token accepted here.
     assert!(
         zeroship_core::wrapper_revocation::is_family_revoked_since(
-            fx.state.auth_pg.as_ref(),
+            fx.state.control_pg.as_ref(),
             &client_id,
             &pws,
             live_token_iat,
@@ -885,7 +890,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
 
     // Cleanup.
     fx.state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
             &[&client_id],
@@ -893,7 +898,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
         .await
         .ok();
     fx.state
-        .auth_pg
+        .control_pg
         .execute(
             "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
             &[&client_id],
@@ -904,7 +909,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     fx.cleanup_clients(&[client_id]).await;
     // The apps row FKs app_oauth_clients (deleted above) — drop it last.
     fx.state
-        .auth_pg
+        .control_pg
         .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
         .await
         .ok();
@@ -951,7 +956,7 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     // point and is asserted by the §10 race test.)
     insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
     let reused = zeroship_auth::store::relay::mint_alias_at_consent(
-        fx.state.auth_pg.as_ref(),
+        fx.state.control_pg.as_ref(),
         &client_id,
         pat.user_id,
         "relay.zeroship.localhost",
@@ -1019,7 +1024,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     async fn reconsent(state: &AppState, client_id: &str, user_id: Uuid, relay_domain: &str) {
         // grant upsert (the ledger write accept_consent performs under its lock)
         state
-            .auth_pg
+            .control_pg
             .execute(
                 "INSERT INTO zeroship.oauth_grants \
                     (user_id, client_id, granted_scopes, granted_at, updated_at) \
@@ -1032,7 +1037,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .expect("reconsent grant upsert");
         // alias un-revoke (the REAL auth-side writer)
         zeroship_auth::store::relay::mint_alias_at_consent(
-            state.auth_pg.as_ref(),
+            state.control_pg.as_ref(),
             client_id,
             user_id,
             relay_domain,
@@ -1091,7 +1096,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         );
 
         fx.state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
                 &[&client_id],
@@ -1101,7 +1106,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         cleanup_identities(&fx.state, &client_id).await;
         fx.cleanup_clients(&[client_id.clone()]).await;
         fx.state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
                 &[&client_id],
@@ -1109,7 +1114,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .await
             .ok();
         fx.state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
             .await
             .ok();
@@ -1148,7 +1153,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         // with NO live grant — the terminal state the structural gate must
         // neutralize.
         zeroship_auth::store::relay::mint_alias_at_consent(
-            fx.state.auth_pg.as_ref(),
+            fx.state.control_pg.as_ref(),
             &client_id,
             pat.user_id,
             "relay.zeroship.localhost",
@@ -1171,7 +1176,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         );
 
         fx.state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
                 &[&client_id],
@@ -1181,7 +1186,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         cleanup_identities(&fx.state, &client_id).await;
         fx.cleanup_clients(&[client_id.clone()]).await;
         fx.state
-            .auth_pg
+            .control_pg
             .execute(
                 "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
                 &[&client_id],
@@ -1189,7 +1194,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .await
             .ok();
         fx.state
-            .auth_pg
+            .control_pg
             .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
             .await
             .ok();
@@ -1198,22 +1203,25 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     pat.cleanup(&fx.state).await;
 }
 
-/// 5c §6 — the app-delete companion revokes ALL of an app's aliases. There is
-/// NO cross-schema FK from `auth.app_user_identities` to control, so this
-/// companion UPDATE (keyed on `client_id_for_app(uuid)`) is the SOLE guard
-/// against orphaned live aliases. A dropped companion statement fails this test.
+/// Atomic app-delete cascade (new FK design): deleting an app drops the per-app
+/// `zeroship.oauth_clients` row in the SAME transaction as the `apps` row, so
+/// `zeroship.app_user_identities` (FK `app_client_id` → `oauth_clients(client_id)`
+/// ON DELETE CASCADE) is REMOVED — not merely flagged `revoked_at`. With the
+/// rows gone there are no orphaned live aliases to forward, which is exactly the
+/// guarantee the old best-effort companion UPDATE tried (and could fail) to
+/// provide. This test would fail if `delete_app` skipped the oauth_clients
+/// delete or the FK lost its ON DELETE CASCADE.
 #[compio::test]
-async fn app_delete_revokes_all_relay_aliases() {
+async fn app_delete_cascades_away_relay_identities() {
     let Some(db_url) = db_url() else {
         eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
         return;
     };
     let fx = Fixture::new(&db_url, "appdel").await;
     // Two users with aliases on the SAME app (same client_id). Both also hold an
-    // active grant — the structural revoke-coherence gate (BLOCKER fix) requires
-    // a live `control.oauth_grants` row for the alias to forward, so "active
-    // before" only holds with the grant present (this is the realistic state for
-    // a deployed app whose aliases are about to be orphaned by an app delete).
+    // active grant — the structural revoke-coherence gate requires a live
+    // `oauth_grants` row for the alias to forward, so "active before" only holds
+    // with the grant present (the realistic deployed-app state).
     let user_a = insert_user(&fx.state, "appdel-a").await;
     let user_b = insert_user(&fx.state, "appdel-b").await;
     let app_uuid = Uuid::new_v4();
@@ -1229,263 +1237,51 @@ async fn app_delete_revokes_all_relay_aliases() {
     assert!(alias_is_active(&fx.state, &alias_a).await);
     assert!(alias_is_active(&fx.state, &alias_b).await);
 
-    // Drive the companion directly (the same call delete_app makes after the
-    // control-schema cascade — keyed on the deterministic oac_ client_id).
-    let revoked = zeroship_control::relay_revoke::revoke_all_aliases_for_client(
-        &fx.state.auth_db_url,
-        &client_id,
-    )
-    .await
-    .expect("app-delete companion");
-    assert_eq!(revoked, 2, "must revoke BOTH users' aliases for the app");
+    // Atomic delete: drops the apps row (none here — random uuid) AND the per-app
+    // oauth_clients row in one txn, cascading away the identity rows.
+    fx.state
+        .registry
+        .delete_app(&app_uuid)
+        .await
+        .expect("atomic delete_app");
 
+    // The per-app oauth_clients row is gone, so its app_user_identities children
+    // cascade-deleted — both aliases are now unknown, the strongest possible
+    // "no longer forwarding" state (no row at all, not just revoked_at set).
     assert!(
         !alias_is_active(&fx.state, &alias_a).await,
-        "user A's alias must bounce after app delete"
+        "user A's alias must not resolve after the app is deleted"
     );
     assert!(
         !alias_is_active(&fx.state, &alias_b).await,
-        "user B's alias must bounce after app delete"
+        "user B's alias must not resolve after the app is deleted"
     );
+    assert_eq!(
+        identity_row_count(&fx.state, &client_id).await,
+        0,
+        "all app_user_identities rows for the app's client_id cascade-deleted"
+    );
+    // The grants cascade-deleted with the oauth_clients row too.
+    assert_eq!(count_grant(&fx.state, user_a, &client_id).await, 0);
+    assert_eq!(count_grant(&fx.state, user_b, &client_id).await, 0);
 
-    cleanup_identities(&fx.state, &client_id).await;
-    // Drop the oauth_clients row (created_by FKs users.id, no cascade) and the
-    // grants BEFORE the users.
-    fx.cleanup_clients(&[client_id]).await;
     cleanup_user(&fx.state, user_a).await;
     cleanup_user(&fx.state, user_b).await;
 }
 
-/// Isolation regression (review BLOCKER + MAJOR finding 2) — the relay cascade
-/// must run its `BEGIN…COMMIT` on a DEDICATED connection, never on the shared
-/// `auth_pg`. The rejected design multiplexed the transaction onto `auth_pg`,
-/// the single `Arc<Client>` every other control handler pipelines onto with NO
-/// transaction isolation. That had two fatal symptoms this test pins:
-///
-///   1. **Head-of-line blocking.** While the cascade transaction is open, a
-///      concurrent statement on `auth_pg` sits behind it in the connection's
-///      FIFO — on the shared design the bystander write below would BLOCK until
-///      the cascade's transaction resolved. On the dedicated design it returns
-///      immediately.
-///   2. **Transactional capture.** A bystander autocommit write physically
-///      written between the cascade's BEGIN and its COMMIT/ROLLBACK would be
-///      committed/rolled-back WITH the cascade. On the dedicated design it is
-///      its own autocommit and survives the cascade's outcome unconditionally.
-///
-/// We hold the cascade transaction open deterministically by pre-locking (from
-/// a third connection) the `control.oauth_grants` row the cascade's first
-/// statement (DELETE) must touch, so the cascade blocks mid-transaction. While
-/// it is blocked we issue a bystander write on `auth_pg` and assert it returns
-/// promptly and persists — then release the lock and let the cascade finish.
-/// On the shared-connection design this test deadlocks/blocks (symptom 1) and
-/// the bystander write would be inside the cascade transaction (symptom 2).
+/// App-delete happy path: the handler returns 200 `{deleted: true}`. Deletion is
+/// now atomic at the DB layer (registry deletes apps + per-app oauth_clients in
+/// one txn, FK cascades the rest), so there is no best-effort companion and no
+/// failure arm to surface — just a clean 200.
 #[compio::test]
-async fn cascade_does_not_block_or_capture_concurrent_auth_pg_writes() {
+async fn app_delete_returns_200_atomic() {
     let Some(db_url) = db_url() else {
         eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
         return;
     };
-    let fx = Fixture::new(&db_url, "isolation-regress").await;
+    let fx = Fixture::new(&db_url, "atomic-ok").await;
 
-    // The user whose grant the cascade revokes, plus a seeded grant row + alias.
-    let user = insert_user(&fx.state, "isolation-cascade").await;
-    let app_uuid = Uuid::new_v4();
-    let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_uuid);
-    insert_client(&fx.state, &client_id, user).await;
-    insert_grant(&fx.state, user, &client_id, &["email"]).await;
-    let alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, user, &alias).await;
-
-    // An independent bystander identity + active alias the bystander write
-    // (issued on the SHARED auth_pg) will revoke. Distinct row from the
-    // cascade's — so the only way it could be affected is transactional capture.
-    // Seed its grant + client so it is GENUINELY active before the write (the
-    // structural revoke-coherence gate requires a live grant to forward).
-    let bystander_user = insert_user(&fx.state, "isolation-bystander").await;
-    let bystander_client = zeroship_control::app_oauth_client::client_id_for_app(&Uuid::new_v4());
-    insert_client(&fx.state, &bystander_client, bystander_user).await;
-    insert_grant(&fx.state, bystander_user, &bystander_client, &["email"]).await;
-    let bystander_alias = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &bystander_client, bystander_user, &bystander_alias)
-        .await;
-    assert!(
-        alias_is_active(&fx.state, &bystander_alias).await,
-        "bystander alias must be active (grant present) before the bystander revoke"
-    );
-
-    // Third connection: hold a lock on the cascade's target grant row so the
-    // cascade's DELETE blocks, keeping its transaction OPEN for the window
-    // below. (A separate client, NOT auth_pg.)
-    let (locker, locker_conn) = connect(&db_url, NoTls).await.expect("locker connect");
-    compio::runtime::spawn(async move {
-        let _ = locker_conn.run().await;
-    })
-    .detach();
-    locker.execute("BEGIN", &[]).await.expect("locker begin");
-    locker
-        .execute(
-            "SELECT 1 FROM zeroship.oauth_grants \
-             WHERE user_id = $1 AND client_id = $2 FOR UPDATE",
-            &[&user, &client_id],
-        )
-        .await
-        .expect("locker holds the grant row");
-
-    // Kick off the cascade on its DEDICATED connection. It will BEGIN then block
-    // on DELETE (the row is locked). We do NOT await it yet.
-    let auth_db_url = fx.state.auth_db_url.clone();
-    let cascade_client_id = client_id.clone();
-    let cascade_salt = fx.state.pairwise_salt;
-    let cascade = compio::runtime::spawn(async move {
-        zeroship_control::relay_revoke::revoke_grant_cascade(
-            &auth_db_url,
-            &user,
-            &cascade_client_id,
-            &cascade_salt,
-        )
-        .await
-    });
-
-    // Give the cascade a moment to open its transaction and block on the lock.
-    compio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // While the cascade transaction is OPEN (blocked), a bystander write on the
-    // SHARED auth_pg must return PROMPTLY (no head-of-line blocking) — on the
-    // rejected shared-connection design this would deadlock behind the cascade.
-    let bystander = compio::time::timeout(
-        std::time::Duration::from_secs(5),
-        fx.state.auth_pg.execute(
-            "UPDATE zeroship.app_user_identities SET revoked_at = now() \
-             WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&bystander_client, &bystander_user],
-        ),
-    )
-    .await
-    .expect("bystander write must NOT block behind the cascade transaction")
-    .expect("bystander autocommit write on auth_pg");
-    assert_eq!(bystander, 1, "bystander revoked exactly its own alias row");
-
-    // Release the lock so the cascade can complete.
-    locker.execute("COMMIT", &[]).await.expect("locker commit");
-    let revoked = cascade.await.expect("cascade joins");
-    revoked.expect("cascade succeeds once the lock is released");
-
-    // The bystander write was its own autocommit on auth_pg — it is committed
-    // and visible REGARDLESS of the cascade's transaction. (Transactional
-    // capture on the shared design would have tied it to the cascade.)
-    assert!(
-        !alias_is_active(&fx.state, &bystander_alias).await,
-        "the bystander's autocommit revoke must persist independently of the cascade"
-    );
-    // And the cascade revoked its OWN alias (its transaction committed cleanly).
-    assert!(
-        !alias_is_active(&fx.state, &alias).await,
-        "the cascade revoked its own alias after the lock released"
-    );
-
-    drop(locker);
-    cleanup_identities(&fx.state, &client_id).await;
-    cleanup_identities(&fx.state, &bystander_client).await;
-    // Drop the oauth_clients rows BEFORE the users: `oauth_clients.created_by`
-    // is a plain FK to `users.id` (no ON DELETE CASCADE), so a user can only be
-    // deleted after its client. cleanup_clients also clears the grants.
-    fx.cleanup_clients(&[client_id, bystander_client]).await;
-    cleanup_user(&fx.state, user).await;
-    cleanup_user(&fx.state, bystander_user).await;
-}
-
-/// 5c §6 (review MAJOR) — when the app-delete relay companion FAILS, `delete_app`
-/// must NOT silently return 200: the app row is already gone (a retry is a 404
-/// no-op) and there is no background sweep, so a swallowed failure permanently
-/// strands LIVE aliases forwarding real mail. The handler surfaces the failure
-/// as a 500 carrying `{deleted: true, aliases_revoked: false, client_id}` so the
-/// operator can retry the revoke out-of-band. Pre-fix this returned 200.
-///
-/// We force ONLY the companion to fail by pointing the fixture's `auth_db_url`
-/// (the URL the DEDICATED relay client connects on) at an unreachable address,
-/// while the registry + `auth_pg` keep using the real DB so the authz guard and
-/// the control-schema delete still succeed. This HTTP-level failure-arm
-/// assertion is possible precisely because the cascade uses a dedicated
-/// connection — killing it does not also kill the guard's `auth_pg`.
-#[compio::test]
-async fn app_delete_surfaces_companion_failure_as_500() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
-    // Registry/auth_pg = real DB; auth_db_url = unreachable ⇒ companion connect fails.
-    let fx = Fixture::new_with_auth_db_url(
-        &db_url,
-        "postgres://nobody@127.0.0.1:1/nodb",
-        "companion-fail",
-    )
-    .await;
-
-    // A real app row so the registry cascade succeeds (delete returns Ok(true)).
-    let app_name = format!("companionfail{}", Uuid::new_v4().simple());
-    let record = fx
-        .state
-        .registry
-        .create_app(&app_name, "free")
-        .await
-        .expect("create app");
-    let app_id = record.id;
-    let client_id = zeroship_control::app_oauth_client::client_id_for_app(&app_id);
-
-    let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .service(web::resource("/api/apps/{id}").route(web::delete().to(api::delete_app))),
-    )
-    .await;
-
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
-    let req = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{app_id}"))
-        .header("authorization", pat.bearer())
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-
-    // The privacy-critical assertion: a failed companion is NOT a 200.
-    assert_eq!(
-        resp.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a failed relay-alias companion must surface as 500, not a silent 200"
-    );
-    let body: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("delete body json");
-    assert_eq!(
-        body.get("deleted").and_then(Value::as_bool),
-        Some(true),
-        "the app IS deleted (registry cascade succeeded)"
-    );
-    assert_eq!(
-        body.get("aliases_revoked").and_then(Value::as_bool),
-        Some(false),
-        "aliases were NOT revoked — caller must know they may still forward"
-    );
-    assert_eq!(
-        body.get("client_id").and_then(Value::as_str),
-        Some(client_id.as_str()),
-        "the deterministic client_id is returned so the operator can retry out-of-band"
-    );
-
-    pat.cleanup(&fx.state).await;
-}
-
-/// 5c §6 (review MAJOR, success arm) — the happy path still returns 200
-/// `{deleted: true}` when the companion succeeds (no aliases to revoke is also
-/// success). This pins the 500 above to the FAILURE arm only.
-#[compio::test]
-async fn app_delete_returns_200_when_companion_succeeds() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
-    // auth_db_url == real DB ⇒ companion connects + runs (revokes 0 rows = ok).
-    let fx = Fixture::new(&db_url, "companion-ok").await;
-
-    let app_name = format!("companionok{}", Uuid::new_v4().simple());
+    let app_name = format!("atomicok{}", Uuid::new_v4().simple());
     let record = fx
         .state
         .registry
@@ -1511,7 +1307,7 @@ async fn app_delete_returns_200_when_companion_succeeds() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "companion success ⇒ 200 (the 500 is the failure arm only)"
+        "atomic delete returns a clean 200 {{deleted: true}}"
     );
     let body: Value =
         serde_json::from_slice(&test::read_body(resp).await).expect("delete body json");

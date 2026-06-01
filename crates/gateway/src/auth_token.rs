@@ -68,11 +68,10 @@ pub(crate) struct RouteCtx {
     pub(crate) app_name: String,
     /// The app's stable UUID (the `RouteMap` key from `lookup_by_name`). This —
     /// NOT the subdomain slug `app_name` — is the CANONICAL key for the
-    /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows, matching the
-    /// live per-request dispatch arm (`router/auth.rs` keys sessions by
-    /// `app_id.to_string()`). Keying on the immutable UUID (the slug can be
-    /// renamed) is what lets a `/token`-minted cookie validate on the real
-    /// SPA→app dispatch path.
+    /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows, whose
+    /// `app_id` columns are UUID and bound natively. Keying on the immutable
+    /// UUID (the slug can be renamed) is what lets a `/token`-minted cookie
+    /// validate on the real SPA→app dispatch path.
     pub(crate) app_id: Uuid,
     pub(crate) host: String,
     pub(crate) client_id: String,
@@ -465,7 +464,8 @@ pub async fn session_post(
     //    across any outbound call (the Hydra exchange already completed).
     let family_id = zeroship_core::typed_id::generate("rfam");
     // CANONICAL session/anchor key: the app UUID, NOT the subdomain slug.
-    let app_key = route.app_id.to_string();
+    // Bound natively into the UUID `app_id` columns.
+    let app_key = route.app_id;
     let anchor_id = {
         let pool = match crate::db::checkout(db_cfg).await {
             Ok(p) => p,
@@ -483,7 +483,7 @@ pub async fn session_post(
             &conn,
             &crate::sessions::NewSession {
                 user_id: &global_user_id.to_string(),
-                app_id: &app_key,
+                app_id: app_key,
                 // The REAL email is stored on the row (CITEXT); it is
                 // relay-swapped only on the READ path (the `{ user }` body
                 // below + /session), never emitted to the browser.
@@ -516,7 +516,7 @@ pub async fn session_post(
         let anchor = match anchors::create(
             &conn,
             &anchors::NewAnchor {
-                app_id: &app_key,
+                app_id: app_key,
                 client_id: &route.client_id,
                 global_user_id,
                 refresh_token_enc: &refresh_enc,
@@ -722,7 +722,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     // Bind the anchor to this host's app (defense in depth — the cookie is
     // __Host- so it cannot have come from another host, but the app_id must
     // still match the resolved route). Both are now the canonical app UUID.
-    if anchor.app_id != route.app_id.to_string() {
+    if anchor.app_id != route.app_id {
         return login_required(&route.host, state.config.insecure_dev);
     }
 
@@ -761,7 +761,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     &conn,
                     &crate::sessions::NewSession {
                         user_id: &rotated.global_user_id.to_string(),
-                        app_id: &route.app_id.to_string(),
+                        app_id: route.app_id,
                         // Real email stored on the audit row; never read back to
                         // the browser. The rotated raw access JWT does not always
                         // carry the email — leave it `None` when absent.

@@ -142,7 +142,12 @@ pub fn clear_breadcrumb_cookie(host: &str, insecure_dev: bool) -> String {
 #[derive(Debug, Clone)]
 pub struct Anchor {
     pub id: Uuid,
-    pub app_id: String,
+    /// The app's stable UUID (`apps.id`). The
+    /// `zeroship.app_session_anchors.app_id` column is UUID and bound natively —
+    /// the same canonical key the gateway session uses, so the
+    /// `anchor.app_id == route.app_id` self-consistency check is never
+    /// slug-vs-UUID skewed.
+    pub app_id: Uuid,
     pub client_id: String,
     pub global_user_id: Uuid,
     /// AES-256-GCM ciphertext of the server-held refresh family.
@@ -156,7 +161,9 @@ pub struct Anchor {
 /// Args for [`create`].
 #[derive(Debug)]
 pub struct NewAnchor<'a> {
-    pub app_id: &'a str,
+    /// The app's stable UUID (`apps.id`), bound natively into the UUID
+    /// `app_id` column — the SAME canonical key the gateway session row uses.
+    pub app_id: Uuid,
     pub client_id: &'a str,
     pub global_user_id: Uuid,
     pub refresh_token_enc: &'a [u8],
@@ -279,7 +286,7 @@ pub async fn delete(conn: &Client, id: Uuid) -> Result<()> {
 /// [`GatewayError::Db`] on PG failure.
 pub async fn delete_all_for_user(
     conn: &Client,
-    app_id: &str,
+    app_id: Uuid,
     global_user_id: Uuid,
 ) -> Result<Vec<DeletedFamily>> {
     let rows = conn
