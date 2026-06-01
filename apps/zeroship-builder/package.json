@@ -38,7 +38,6 @@
     "@langchain/langgraph": "^1.2.9",
     "@langchain/langgraph-checkpoint": "^1.0.1",
     "@langchain/openai": "^1.4.5",
-    "@tailwindcss/vite": "catalog:",
     "@tanstack/react-query": "catalog:",
     "@uiw/react-codemirror": "^4.25.9",
     "@zeroship/ui": "workspace:*",
@@ -52,8 +51,6 @@
     "react-markdown": "^9.0.0",
     "react-router-dom": "catalog:",
     "remark-gfm": "^4.0.0",
-    "tailwind-merge": "catalog:",
-    "tailwindcss": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {

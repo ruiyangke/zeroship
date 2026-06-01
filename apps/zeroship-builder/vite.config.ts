@@ -10,13 +10,12 @@
 //   - build mode: emits dist/ + zeroship.appbundle.
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
 import { zeroship } from "@zeroship/vite-plugin";
 
 const devServerPort = Number(process.env.ZEROSHIP_BUILDER_API_PORT ?? "3002");
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), zeroship({ devServerPort })],
+  plugins: [react(), zeroship({ devServerPort })],
   server: {
     // The docker-compose stack serves the console behind Caddy at
     // console.zeroship.localhost. Vite's dev server rejects requests whose
