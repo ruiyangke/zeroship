@@ -198,4 +198,12 @@ pub struct GateState {
     /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
     /// subjects (a deliberate break-glass).
     pub pairwise_salt: [u8; 32],
+    /// First-party OAuth clients that skip Hydra consent (e.g. the builder).
+    /// Resolved at boot from the shared `[auth].trusted_oauth_clients` file
+    /// overlay via `zeroship_core::auth::resolve_trusted_oauth_clients`,
+    /// falling back to the compiled default set when the key is absent. A
+    /// later phase gates trusted-client behaviour on membership in this set;
+    /// the gateway shares the same byte-identical resolution as the control
+    /// plane so the two services never disagree on which clients are trusted.
+    pub trusted_oauth_clients: std::collections::HashSet<String>,
 }

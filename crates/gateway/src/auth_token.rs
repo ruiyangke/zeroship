@@ -316,13 +316,16 @@ pub async fn session_post(
         );
     }
 
-    let Some(db_cfg) = state.db.as_ref() else {
+    // Fail fast on a missing DB before parsing/exchange. `mint_session_from_code`
+    // re-checks (and is the one that consumes `db_cfg`); this preserves the
+    // original ordering where `db_unavailable` precedes grant validation.
+    if state.db.is_none() {
         return error_response(
             HttpResponse::ServiceUnavailable(),
             "db_unavailable",
             "no database configured",
         );
-    };
+    }
 
     let parsed = parse_token_request(&req, &body);
     let grant = parsed.grant_type.as_deref().unwrap_or("authorization_code");
@@ -351,10 +354,46 @@ pub async fn session_post(
     let default_redirect = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
     let redirect_uri = parsed.redirect_uri.as_deref().unwrap_or(&default_redirect);
 
+    // Hand off to the shared session-mint tail (code→token exchange →
+    // id_token verify → anchor encrypt → pairwise/relay projection →
+    // gateway_sessions + anchor write → signed cookie → identity response).
+    mint_session_from_code(&state, &route, code, verifier, redirect_uri).await
+}
+
+/// Mint a gateway session from a freshly obtained `{ code, code_verifier }`
+/// pair: the session-mint TAIL of `POST /__zeroship/auth/session`.
+///
+/// Runs the PKCE code→token exchange (public client; gateway injects
+/// `client_id`), validates the id_token, derives the per-app pairwise `pws_`
+/// subject + relay email alias, writes the `gateway_sessions` audit row + the
+/// encrypted reload-recovery anchor, signs the `__Host-zeroship_app_session`
+/// cookie, and returns the identity-only `{ user, expires_at }` response with
+/// the anchor + breadcrumb cookies set.
+///
+/// `pub(crate)` so other code→session mint vectors share the EXACT same tail
+/// rather than duplicate it. The caller is responsible for the same-origin
+/// guard and the `session_signing_unavailable` fail-fast; this tail re-derives
+/// `db_cfg` from `state.db` (503 `db_unavailable` if absent).
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+pub(crate) async fn mint_session_from_code(
+    state: &Arc<GateState>,
+    route: &RouteCtx,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> HttpResponse {
+    let Some(db_cfg) = state.db.as_ref() else {
+        return error_response(
+            HttpResponse::ServiceUnavailable(),
+            "db_unavailable",
+            "no database configured",
+        );
+    };
+
     // 1. Code→token exchange (public PKCE client; gateway injects client_id).
     let tokens = match state
         .oidc_rp
-        .exchange_code_public(&route.client_id, code, verifier, redirect_uri)
+        .exchange_code_public(&route.client_id, code, code_verifier, redirect_uri)
         .await
     {
         Ok(t) => t,
@@ -439,7 +478,7 @@ pub async fn session_post(
     //    identity. Derive on the CANONICAL UUID string. Fail closed (503) when
     //    the route has no `sector_identifier` yet rather than ever project the
     //    global UUID to the browser.
-    let Some(pws_sub) = pairwise_sub(&state, &route, &global_user_id.to_string()) else {
+    let Some(pws_sub) = pairwise_sub(state, route, &global_user_id.to_string()) else {
         return error_response(
             HttpResponse::ServiceUnavailable(),
             "client_not_provisioned",
@@ -551,7 +590,7 @@ pub async fn session_post(
     //    expires_at }` with the relay-swapped email and the `pws_` id. NO
     //    `access_token`, NO `scope`, NO `id_token`, NO `token_type`.
     let session_cookie = match sign_session_cookie(
-        &state,
+        state,
         &route.client_id,
         &pws_sub,
         relay_email.as_deref(),

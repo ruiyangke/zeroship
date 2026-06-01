@@ -10,7 +10,10 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroship_authz::Scope;
 
-pub const BUILDER_CLIENT_ID: &str = "zeroship-builder";
+// Defined in `zeroship-core` so the compiled default trusted-client set can
+// reference it without a control → core dependency cycle. Re-exported here to
+// keep every `bootstrap_builder::BUILDER_CLIENT_ID` call site unchanged.
+pub use zeroship_core::auth::trusted_clients::BUILDER_CLIENT_ID;
 pub const BUILDER_CLIENT_NAME: &str = "zeroship builder";
 pub const DEFAULT_BUILDER_REDIRECT_URI: &str = "http://localhost:3001/auth/callback";
 pub const DEFAULT_BUILDER_CLIENT_SECRET_PATH: &str = "data/builder-client-secret";

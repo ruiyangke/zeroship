@@ -264,6 +264,12 @@ fn main() -> std::io::Result<()> {
     // reference-only file tier > default, applied by `obtain_secret`.
     let file_secrets = &file.secrets;
 
+    // First-party OAuth clients that skip Hydra consent (e.g. the builder).
+    // Resolved from the shared `[auth].trusted_oauth_clients` overlay via the
+    // core helper so the gateway and control plane agree byte-for-byte on the
+    // trusted set; a later phase gates on membership in `GateState`.
+    let trusted_oauth_clients = zeroship_core::auth::resolve_trusted_oauth_clients(&file.auth);
+
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
     let hydra_public_url = resolve_overlay_string(
@@ -703,6 +709,7 @@ fn main() -> std::io::Result<()> {
         session_verifier,
         anchor_enc_key,
         pairwise_salt,
+        trusted_oauth_clients,
     });
 
     sync::start_sync(state.clone());
