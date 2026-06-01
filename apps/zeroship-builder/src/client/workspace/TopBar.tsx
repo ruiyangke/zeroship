@@ -1,5 +1,20 @@
+// ─── Workspace TopBar — crystal header bar ──────────────────────────
+//
+// The WORKSPACE top bar (distinct from components/TopBar). Three zones:
+// brand/crumb (start), an optional center status strip, and a right
+// zone for workspace actions (tier toggle, tour button, live-URL chip
+// — all supplied by WorkspaceShell via the `right` slot) plus the
+// account dot.
+//
+// Built over @zeroship/ui: a Cluster-based three-zone header, the brand
+// trail expressed as DS Breadcrumbs (wordmark → project), and the
+// account dot as a DS Avatar wrapped in a react-router Link. Bespoke
+// type / positioning lives in TopBar.css against --zs-* tokens.
+
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { Avatar, Breadcrumbs, Cluster } from "@zeroship/ui";
+import "./TopBar.css";
 
 export interface TopBarProps {
   projectName?: string | null;
@@ -21,49 +36,52 @@ export function TopBar({
   accountInitials = "·",
 }: TopBarProps) {
   return (
-    <header
-      data-testid="topbar"
-      // Three slots: brand, center (canvas pills / status), right
-      // (actions). On phones we collapse the brand column and let the
-      // center slot scroll horizontally if it overflows. On desktop
-      // the original 280px brand column returns.
-      className="grid items-center gap-2 sm:gap-4 border-b border-rule bg-paper px-3 sm:px-6 h-12 grid-cols-[auto_1fr_auto] md:grid-cols-[minmax(280px,auto)_1fr_auto]"
-    >
-      <div className="flex items-baseline gap-2 sm:gap-3 min-w-0">
-        <Link
-          to={homeHref}
-          data-testid="topbar-logo"
-          aria-label="zeroship home"
-          className="font-display italic text-lg font-medium text-ink hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2 rounded-sm"
-        >
-          zeroship<span className="text-tomato">.</span>
-        </Link>
-        {projectName && (
-          <>
-            <span className="text-rule hidden sm:inline">/</span>
-            <span
+    // Three zones: brand, center (canvas pills / status), right
+    // (actions). On phones the brand column collapses and the center
+    // slot scrolls horizontally if it overflows; the wider brand column
+    // returns on desktop (handled in TopBar.css).
+    <header data-testid="topbar" className="ws-topbar">
+      <Breadcrumbs
+        className="ws-topbar__brand"
+        separator={<span className="ws-topbar__sep">/</span>}
+      >
+        <Breadcrumbs.Item>
+          <Breadcrumbs.Link asChild>
+            <Link
+              to={homeHref}
+              data-testid="topbar-logo"
+              aria-label="zeroship home"
+              className="ws-topbar__logo"
+            >
+              zeroship<span className="ws-topbar__logo-dot">.</span>
+            </Link>
+          </Breadcrumbs.Link>
+        </Breadcrumbs.Item>
+        {projectName ? (
+          <Breadcrumbs.Item className="ws-topbar__project-item">
+            <Breadcrumbs.Page
               data-testid="topbar-project"
-              className="font-sans text-sm font-medium text-ink truncate hidden sm:inline"
+              className="ws-topbar__project"
             >
               {projectName}
-            </span>
-          </>
-        )}
-      </div>
+            </Breadcrumbs.Page>
+          </Breadcrumbs.Item>
+        ) : null}
+      </Breadcrumbs>
 
-      <div className="flex items-center justify-center min-w-0 overflow-x-auto">{center}</div>
+      <div className="ws-topbar__center">{center}</div>
 
-      <div className="flex items-center gap-2 sm:gap-3">
+      <Cluster gap={3} align="center" justify="end" className="ws-topbar__right">
         {right}
         <Link
           to="/account"
           data-testid="topbar-account"
           aria-label="Account"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-ink text-paper font-sans text-xs font-semibold leading-none focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+          className="ws-topbar__account"
         >
-          {accountInitials}
+          <Avatar size="sm" shape="circle" fallback={accountInitials} />
         </Link>
-      </div>
+      </Cluster>
     </header>
   );
 }

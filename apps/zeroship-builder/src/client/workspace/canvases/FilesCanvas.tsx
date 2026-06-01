@@ -1,43 +1,60 @@
 // ─── FilesCanvas — read-only manuscript view (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.2) ────────
 //
-// 3-column layout:
-//   [ tree (260px) | content (flex-1) | metadata (200px) ]
+// Crystal: rebuilt over @zeroship/ui. The two-region layout (file tree |
+// viewer) rides the DS `Split` primitive (fixed 16rem rail + fluid viewer,
+// collapsing to a stacked column on phones); the metadata that used to
+// live in a third rail folds into the viewer footer as a DS
+// `DescriptionList`.
 //
 // The tree is sourced from `listSandboxFiles({appId})` which proxies
 // to the same sandbox Builder writes into via `getOrCreateSandboxFor`.
-// The center pane shows the currently-selected file via
+// The viewer shows the currently-selected file via
 // `readSandboxFile({appId, path})` — read-only by design (Builder is
-// the only writer; users edit by talking to the chat rail).
+// the only writer; users edit by talking to the chat rail). The code is
+// rendered with an app-local CodeMirror 6 view themed to crystal tokens.
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import CodeMirror, { EditorView, type Extension } from "@uiw/react-codemirror";
+import { javascript } from "@codemirror/lang-javascript";
+import { json } from "@codemirror/lang-json";
+import { css as cssLang } from "@codemirror/lang-css";
+import { html } from "@codemirror/lang-html";
+import {
+  Banner,
+  DescriptionList,
+  EmptyState,
+  ScrollArea,
+  Spinner,
+  Split,
+} from "@zeroship/ui";
 import { listSandboxFiles, readSandboxFile, type FileEntry } from "../../api";
+import "./FilesCanvas.css";
 
-const EXT_TO_LANG: Record<string, string> = {
-  ts: "typescript",
-  tsx: "typescript",
-  js: "javascript",
-  jsx: "javascript",
-  mjs: "javascript",
-  cjs: "javascript",
-  py: "python",
-  rs: "rust",
-  md: "markdown",
-  mdx: "markdown",
-  json: "json",
-  css: "css",
-  html: "html",
-  htm: "html",
-  yml: "yaml",
-  yaml: "yaml",
-  toml: "toml",
-  sh: "shell",
-  bash: "shell",
-};
-
-function langFromPath(path: string): string {
+// Language extensions for the CodeMirror viewer. Only the four installed
+// `@codemirror/lang-*` packages are wired; everything else renders as
+// plain text (still syntax-neutral but with line numbers + theming).
+function langExtension(path: string): Extension[] {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return EXT_TO_LANG[ext] ?? "text";
+  switch (ext) {
+    case "ts":
+    case "tsx":
+      return [javascript({ jsx: true, typescript: true })];
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return [javascript({ jsx: true })];
+    case "json":
+      return [json()];
+    case "css":
+      return [cssLang()];
+    case "html":
+    case "htm":
+      return [html()];
+    default:
+      return [];
+  }
 }
 
 export interface FilesCanvasProps {
@@ -71,54 +88,55 @@ export function FilesCanvas({ appId }: FilesCanvasProps) {
     if (first) setSelected(first.path);
   }, [selected, tree.data]);
 
-  // Sandbox unreachable → editorial empty state. The proc itself
-  // throws when the controller isn't running; surface that as a
-  // gentle nudge rather than a red error band.
+  // Sandbox unreachable → gentle empty state. The proc itself throws
+  // when the controller isn't running; surface that as a nudge rather
+  // than a red error band.
   if (tree.error) {
     return (
       <div
         data-testid="files-canvas"
-        className="h-full flex items-center justify-center bg-paper-2"
+        className="zs-files zs-files--empty"
       >
-        <div className="max-w-md text-center px-6">
-          <h3 className="font-display text-2xl font-medium text-ink mb-2">
-            <em className="italic">Sandbox not running.</em>
-          </h3>
-          <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-            The sandbox controller isn't reachable. Start it with{" "}
-            <code className="font-mono text-[12px] bg-paper px-1 py-0.5 rounded-[2px] border border-rule">
-              cd crates/sandbox && cargo run
-            </code>{" "}
-            and refresh this canvas.
-          </p>
-        </div>
+        <EmptyState
+          className="zs-files__sandbox-down"
+          title="Sandbox not running."
+          description={
+            <>
+              The sandbox controller isn't reachable. Start it with{" "}
+              <code className="zs-files__code">cd crates/sandbox &amp;&amp; cargo run</code>{" "}
+              and refresh this canvas.
+            </>
+          }
+        />
       </div>
     );
   }
 
   return (
-    <div
-      data-testid="files-canvas"
-      // Phone: stack tree on top of viewer, hide meta rail (the same
-      // info is visible in the file's first lines + footer copy).
-      // Tablet+: 2-col tree + viewer. Desktop (lg+): full 3-col with meta.
-      className="h-full grid min-h-0 bg-paper grid-cols-1 md:grid-cols-[220px_1fr] lg:grid-cols-[260px_1fr_200px]"
-    >
-      <FileTree
-        entries={tree.data ?? []}
-        selected={selected}
-        onSelect={setSelected}
-        loading={tree.isLoading}
-      />
-      <FileViewer
-        path={selected}
-        content={file.data}
-        loading={file.isLoading}
-        error={file.error}
-      />
-      <div className="hidden lg:block">
-        <FileMeta path={selected} content={file.data} />
-      </div>
+    <div data-testid="files-canvas" className="zs-files">
+      <Split
+        side="start"
+        sideWidth="16rem"
+        collapseBelow="md"
+        className="zs-files__split"
+      >
+        <Split.Side className="zs-files__side">
+          <FileTree
+            entries={tree.data ?? []}
+            selected={selected}
+            onSelect={setSelected}
+            loading={tree.isLoading}
+          />
+        </Split.Side>
+        <Split.Main className="zs-files__main">
+          <FileViewer
+            path={selected}
+            content={file.data}
+            loading={file.isLoading}
+            error={file.error}
+          />
+        </Split.Main>
+      </Split>
     </div>
   );
 }
@@ -197,31 +215,36 @@ function FileTree({
   const tree = useMemo(() => buildTree(entries), [entries]);
 
   return (
-    <aside className="border-r border-rule bg-paper-2 overflow-auto p-4">
-      <div className="label-uc mb-3">Manuscript</div>
-      {loading && (
-        <div className="font-serif italic text-pencil text-[13px]">loading…</div>
-      )}
-      {!loading && entries.length === 0 && (
-        <div
-          data-testid="files-empty"
-          className="font-serif italic text-pencil text-[13px] leading-[1.55]"
-        >
-          Builder hasn't written anything yet — start a turn in the chat
-          and the manuscript will fill in here.
-        </div>
-      )}
-      <ul className="list-none p-0 m-0 font-serif text-[13.5px]">
-        {tree.map((node) => (
-          <TreeRow
-            key={node.path}
-            node={node}
-            depth={0}
-            selected={selected}
-            onSelect={onSelect}
-          />
-        ))}
-      </ul>
+    <aside className="zs-files__tree">
+      <div className="zs-files__tree-label">Manuscript</div>
+      <ScrollArea className="zs-files__tree-scroll">
+        {loading && (
+          <div className="zs-files__hint zs-files__tree-hint">
+            <Spinner size="sm" />
+            <span>loading…</span>
+          </div>
+        )}
+        {!loading && entries.length === 0 && (
+          <div
+            data-testid="files-empty"
+            className="zs-files__hint zs-files__tree-hint"
+          >
+            Builder hasn't written anything yet — start a turn in the chat
+            and the manuscript will fill in here.
+          </div>
+        )}
+        <ul className="zs-files__list">
+          {tree.map((node) => (
+            <TreeRow
+              key={node.path}
+              node={node}
+              depth={0}
+              selected={selected}
+              onSelect={onSelect}
+            />
+          ))}
+        </ul>
+      </ScrollArea>
     </aside>
   );
 }
@@ -243,7 +266,9 @@ function TreeRow({
   // noise, but defence-in-depth.)
   const [open, setOpen] = useState(depth === 0);
   const isActive = node.path === selected;
-  const indent = { paddingLeft: `${depth * 12 + 4}px` };
+  // Indent is driven by an inline custom property the .css multiplies
+  // against the per-step indent token — no raw px in the markup.
+  const indentVar = { "--zs-files-depth": String(depth) } as React.CSSProperties;
 
   if (node.kind === "dir") {
     return (
@@ -252,16 +277,17 @@ function TreeRow({
           type="button"
           onClick={() => setOpen(!open)}
           data-testid={`file-tree-item:${node.path}`}
-          className="w-full text-left bg-transparent border-0 cursor-pointer py-0.5 text-ink-soft hover:text-ink font-serif"
-          style={indent}
+          className="zs-files__row zs-files__row--dir"
+          style={indentVar}
+          aria-expanded={open}
         >
-          <span className="inline-block w-3 text-pencil text-[10px]">
+          <span className="zs-files__chevron" aria-hidden="true">
             {open ? "▾" : "▸"}
-          </span>{" "}
-          {node.name}
+          </span>
+          <span className="zs-files__row-name">{node.name}</span>
         </button>
         {open && node.children.length > 0 && (
-          <ul className="list-none p-0 m-0">
+          <ul className="zs-files__list">
             {node.children.map((c) => (
               <TreeRow
                 key={c.path}
@@ -283,21 +309,13 @@ function TreeRow({
         type="button"
         onClick={() => onSelect(node.path)}
         data-testid={`file-tree-item:${node.path}`}
-        className={
-          "w-full text-left bg-transparent border-0 cursor-pointer py-0.5 font-serif " +
-          (isActive ? "text-ink font-medium" : "text-ink-soft hover:text-ink")
-        }
-        style={
-          isActive
-            ? {
-                ...indent,
-                borderLeft: "2px solid var(--color-tomato)",
-                paddingLeft: `${depth * 12 + 2}px`,
-              }
-            : indent
-        }
+        className="zs-files__row zs-files__row--file"
+        data-active={isActive ? "" : undefined}
+        aria-current={isActive ? "true" : undefined}
+        style={indentVar}
       >
-        <span className="inline-block w-3" /> {node.name}
+        <span className="zs-files__chevron" aria-hidden="true" />
+        <span className="zs-files__row-name">{node.name}</span>
       </button>
     </li>
   );
@@ -316,66 +334,98 @@ function FileViewer({
   loading: boolean;
   error: unknown;
 }) {
-  // `min-w-0` is the key to making this column shrinkable inside the
-  // grid; without it, long source lines force the column past its `1fr`
-  // share and clip the metadata rail.
   return (
-    <div className="bg-white flex flex-col min-h-0 min-w-0 overflow-hidden">
-      <div className="border-b border-rule px-5 py-2.5 flex items-center justify-between bg-white">
-        <span className="font-mono text-[12px] text-ink-soft truncate">
-          {path ?? "—"}
-        </span>
-        <span className="font-serif italic text-[11.5px] text-pencil shrink-0 ml-3">
-          read-only
-        </span>
+    <div className="zs-files__viewer">
+      <div className="zs-files__viewer-head">
+        <span className="zs-files__viewer-path">{path ?? "—"}</span>
+        <span className="zs-files__viewer-tag">read-only</span>
       </div>
-      <div
-        className="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-4 font-mono text-[12.5px] leading-[1.65]"
-        data-testid="files-viewer"
-      >
+      <div className="zs-files__viewer-body" data-testid="files-viewer">
         {!path ? (
-          <div className="font-serif italic text-pencil text-[14px]">
-            Pick a file to read it.
-          </div>
+          <div className="zs-files__hint">Pick a file to read it.</div>
         ) : loading && !content ? (
-          <div className="font-serif italic text-pencil text-[14px]">
-            loading…
+          <div className="zs-files__hint">
+            <Spinner size="sm" />
+            <span>loading…</span>
           </div>
         ) : error ? (
-          <div className="font-serif italic text-tomato text-[14px]">
-            couldn't read file
-          </div>
+          <Banner intent="danger" className="zs-files__error">
+            <Banner.Description>couldn't read file</Banner.Description>
+          </Banner>
         ) : (
           <CodeView code={content ?? ""} path={path} />
         )}
       </div>
-      <div className="border-t border-rule px-5 py-2 font-serif italic text-[12px] text-pencil shrink-0">
-        Builder is the only writer. Tell the chat what to change.
-      </div>
+      <FileMeta path={path} content={content} />
     </div>
   );
 }
+
+// Crystal CodeMirror theme — values reference `--zs-*` tokens directly;
+// the runtime resolves the custom properties through the injected
+// stylesheet, so the editor tracks the active crystal theme. System
+// colors / token vars only — no raw hex.
+const crystalEditorTheme = EditorView.theme({
+  "&": {
+    backgroundColor: "transparent",
+    color: "var(--zs-label)",
+    fontSize: "var(--zs-text-footnote-size)",
+    height: "100%",
+  },
+  ".cm-scroller": {
+    fontFamily: "var(--zs-font-mono)",
+    lineHeight: "1.65",
+  },
+  ".cm-content": {
+    caretColor: "var(--zs-accent)",
+  },
+  ".cm-gutters": {
+    backgroundColor: "transparent",
+    color: "var(--zs-label-quaternary)",
+    border: "none",
+  },
+  ".cm-lineNumbers .cm-gutterElement": {
+    color: "var(--zs-label-quaternary)",
+    padding: "0 var(--zs-space-3) 0 var(--zs-space-1)",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "var(--zs-fill-quaternary)",
+  },
+  ".cm-activeLineGutter": {
+    backgroundColor: "transparent",
+    color: "var(--zs-label-secondary)",
+  },
+  "&.cm-focused": {
+    outline: "none",
+  },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
+    backgroundColor: "var(--zs-fill)",
+  },
+});
 
 function CodeView({ code, path }: { code: string; path: string }) {
-  const lang = useMemo(() => langFromPath(path), [path]);
+  const extensions = useMemo(() => langExtension(path), [path]);
   return (
-    <div>
-      {code.split("\n").map((line, i) => (
-        <div key={i} className="whitespace-pre" data-lang={lang}>
-          <span
-            className="inline-block w-9 pr-3 text-right select-none font-mono text-[11px]"
-            style={{ color: "var(--color-tomato)", opacity: 0.5 }}
-          >
-            {i + 1}
-          </span>
-          {line || " "}
-        </div>
-      ))}
-    </div>
+    <CodeMirror
+      value={code}
+      readOnly
+      editable={false}
+      theme={crystalEditorTheme}
+      extensions={extensions}
+      className="zs-files__codemirror"
+      basicSetup={{
+        lineNumbers: true,
+        foldGutter: false,
+        highlightActiveLine: false,
+        highlightActiveLineGutter: false,
+        searchKeymap: false,
+        autocompletion: false,
+      }}
+    />
   );
 }
 
-// ─── meta (right rail) ───────────────────────────────────────────
+// ─── meta (viewer footer) ────────────────────────────────────────
 
 function FileMeta({
   path,
@@ -387,40 +437,20 @@ function FileMeta({
   const size = content ? `${content.length} chars` : "—";
   const lines = content ? `${content.split("\n").length} lines` : "—";
   return (
-    <aside className="border-l border-rule bg-paper p-5 overflow-auto">
-      <div className="label-uc mb-2">Currently open</div>
-      <dl className="m-0 space-y-3">
-        <DlRow label="Path" value={path ?? "—"} mono />
-        <DlRow label="Size" value={size} />
-        <DlRow label="Lines" value={lines} />
-        <DlRow label="Modified" value={<em className="italic">just now</em>} />
-      </dl>
-    </aside>
-  );
-}
-
-function DlRow({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-}) {
-  return (
-    <div>
-      <dt className="font-sans text-[10px] uppercase tracking-[0.16em] text-pencil">
-        {label}
-      </dt>
-      <dd
-        className={
-          "mt-0.5 m-0 break-words " +
-          (mono ? "font-mono text-[11.5px] text-ink" : "font-serif text-[13px] text-ink")
-        }
-      >
-        {value}
-      </dd>
+    <div className="zs-files__meta">
+      <DescriptionList orientation="horizontal" className="zs-files__meta-list">
+        <DescriptionList.Item>
+          <DescriptionList.Term>Size</DescriptionList.Term>
+          <DescriptionList.Detail>{size}</DescriptionList.Detail>
+        </DescriptionList.Item>
+        <DescriptionList.Item>
+          <DescriptionList.Term>Lines</DescriptionList.Term>
+          <DescriptionList.Detail>{lines}</DescriptionList.Detail>
+        </DescriptionList.Item>
+      </DescriptionList>
+      <span className="zs-files__meta-note">
+        Builder is the only writer. Tell the chat what to change.
+      </span>
     </div>
   );
 }

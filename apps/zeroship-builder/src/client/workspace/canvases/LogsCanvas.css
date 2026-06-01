@@ -1,0 +1,144 @@
+/*
+ * LogsCanvas — crystal log viewer.
+ *
+ * The DS Card frames the stream; the bespoke rules below are limited to
+ * the things the catalog doesn't carry: the full-height column shell,
+ * the inner scroll region, and the monospace log-line grid (timestamp ·
+ * level · message) with per-level ink. Everything reads from --zs-*
+ * tokens so the viewer tracks the active theme.
+ */
+
+/* Full-height column: a header bar over a flexible body. */
+.logs-canvas {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  min-block-size: 0;
+  background: var(--zs-surface-sunken);
+}
+
+/* Header bar — filter segment + search + follow toggle, on a hairline. */
+.logs-canvas__bar {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  padding-block: var(--zs-space-4);
+  padding-inline: var(--zs-space-4);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+
+@media (min-width: 40rem) {
+  .logs-canvas__bar {
+    padding-block-start: var(--zs-space-5);
+    padding-inline: var(--zs-space-7);
+  }
+}
+
+/* The search field pushes itself (and the follow toggle) to the
+ * inline-end edge; collapses gracefully when the row wraps. */
+.logs-canvas__search {
+  margin-inline-start: auto;
+  min-inline-size: 11.25rem;
+}
+
+/* Follow toggle — quiet label next to the switch. */
+.logs-canvas__follow {
+  flex: 0 0 auto;
+  color: var(--zs-label-secondary);
+}
+
+/* Body — flexible region that holds the framed stream. */
+.logs-canvas__body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  padding: var(--zs-space-4);
+}
+
+@media (min-width: 40rem) {
+  .logs-canvas__body {
+    padding: var(--zs-space-7);
+  }
+}
+
+/* The Card frame fills the body and clips its inner scroll region. */
+.logs-canvas__frame {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Inner scroll region — the sticky-bottom scroller (ref + onScroll). */
+.logs-canvas__scroll {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow: auto;
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+}
+
+.logs-canvas__error {
+  margin-block-end: var(--zs-space-3);
+}
+
+.logs-canvas__empty {
+  padding-block: var(--zs-space-8);
+}
+
+/* ─── log lines — monospace timestamp · level · message grid ─────── */
+
+.logs-line {
+  display: grid;
+  grid-template-columns: 6.25rem 4.375rem 1fr;
+  gap: var(--zs-space-3);
+  align-items: baseline;
+  padding-block: var(--zs-space-1);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+}
+
+.logs-line:last-child {
+  border-block-end: none;
+}
+
+.logs-line__ts {
+  color: var(--zs-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Level tag — small uppercase eyebrow; ink set per data-level below. */
+.logs-line__level {
+  align-self: center;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--zs-label-secondary);
+}
+
+.logs-line__msg {
+  color: var(--zs-label);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Per-level ink. Position (the column) already carries the level; color
+ * is the secondary signal. */
+.logs-line[data-level="error"] .logs-line__level {
+  color: var(--zs-system-red);
+  font-weight: 700;
+}
+
+.logs-line[data-level="warn"] .logs-line__level {
+  color: var(--zs-system-orange);
+  font-weight: 600;
+}
+
+.logs-line[data-level="request"] .logs-line__level,
+.logs-line[data-level="info"] .logs-line__level {
+  color: var(--zs-label-secondary);
+}

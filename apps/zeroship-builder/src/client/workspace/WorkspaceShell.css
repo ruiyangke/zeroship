@@ -1,0 +1,247 @@
+/*
+ * WorkspaceShell — crystal workspace frame styling.
+ *
+ * The DS AppShell / Split (via AppShell.Body) own the frame geometry;
+ * this sheet owns only the bespoke bits the DS doesn't carry:
+ *   - neutralising AppShell.Header so the workspace TopBar (which renders
+ *     its OWN <header> bar) is the visible chrome,
+ *   - making Main a scroll column so canvases fill the region,
+ *   - stripping the sidebar rail's default sunken padding so the ChatRail
+ *     fills it edge-to-edge (the divider hairline AppShell paints on the
+ *     end-edge rail is kept),
+ *   - the header chip controls (chat toggle / tour glyph), the live-URL
+ *     pill with its pulsing status dot, and the tier-toggle text button,
+ *   - the loading / error / not-found gate states,
+ *   - the phone chat Drawer surface.
+ * Every value reads --zs-* tokens — no raw hex, no px (0.0625rem
+ * hairlines), no editorial tokens.
+ */
+
+/* ─── header — TopBar owns the bar; neutralise the AppShell band ──────── */
+.zb-ws__header {
+  /* AppShell.Header paints a raised surface + min-height + padding for a
+   * default bar. Here the nested TopBar IS the bar, so collapse the
+   * wrapper to a transparent pass-through that lets TopBar paint flush. */
+  min-block-size: 0;
+  padding: 0;
+  background: transparent;
+  border-block-end: none;
+}
+/* TopBar's <header class="ws-topbar"> spans the full inline-size of the
+ * neutralised band. */
+.zb-ws__header > .ws-topbar {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+/* ─── canvas main — scrollable column so canvases fill the region ─────── */
+.zb-ws__canvas {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+/* ─── chat rail — let ChatRail fill the rail edge-to-edge ─────────────── */
+.zb-ws__rail {
+  /* AppShell.Sidebar adds sunken-surface padding for a nav column; the
+   * ChatRail manages its own internal padding + surface, so strip the
+   * rail padding and keep it on the canvas plane. The end-edge divider
+   * hairline AppShell paints is kept (it mirrors the old border-l). */
+  padding: 0;
+  background: var(--zs-surface);
+  display: flex;
+  flex-direction: column;
+  min-block-size: 0;
+}
+
+/* ─── header chips — chat toggle (phone) + tour glyph ─────────────────── */
+.zb-ws__chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--zs-space-7);
+  block-size: var(--zs-space-7);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-full);
+  background: var(--zs-surface-raised);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease),
+    border-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zb-ws__chip:hover {
+  border-color: var(--zs-label);
+  color: var(--zs-label);
+}
+.zb-ws__chip:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── live-URL pill — monospace host + pulsing status dot ─────────────── */
+.zb-ws__url {
+  display: none;
+  align-items: center;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-full);
+  background: var(--zs-surface-raised);
+  color: var(--zs-label-secondary);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: 1;
+  text-decoration: none;
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease),
+    border-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+/* `sm` breakpoint — show the URL pill on tablet+ (was `hidden sm:inline-flex`).
+ * 40rem names --zs-bp-sm (custom props can't appear in @media conditions). */
+@media (min-width: 40rem) {
+  .zb-ws__url {
+    display: inline-flex;
+  }
+}
+.zb-ws__url:hover {
+  border-color: var(--zs-label);
+  color: var(--zs-label);
+}
+.zb-ws__url:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+.zb-ws__url-dot {
+  inline-size: 0.3125rem;
+  block-size: 0.3125rem;
+  border-radius: var(--zs-radius-full);
+  background: var(--zs-system-green);
+  animation: zb-ws-pulse 1.5s ease-in-out infinite;
+}
+@keyframes zb-ws-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--zs-system-green) 50%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 0.4375rem color-mix(in oklab, var(--zs-system-green) 0%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .zb-ws__url-dot {
+    animation: none;
+  }
+}
+
+/* ─── tier toggle — quiet text button cycling maker / ops / code ──────── */
+.zb-ws__tier-toggle {
+  display: none;
+  border: 0;
+  background: transparent;
+  padding-inline: var(--zs-space-1);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-caption-1-size);
+  font-style: italic;
+  cursor: pointer;
+  transition: color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+@media (min-width: 40rem) {
+  .zb-ws__tier-toggle {
+    display: inline-flex;
+  }
+}
+.zb-ws__tier-toggle:hover {
+  color: var(--zs-label);
+}
+.zb-ws__tier-toggle:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── gate states — loading / error / not-found (full-viewport Center) ── */
+.zb-ws__gate {
+  background: var(--zs-surface);
+  padding: var(--zs-space-6);
+}
+.zb-ws__gate-loading {
+  color: var(--zs-label-secondary);
+  font-style: italic;
+  font-size: var(--zs-text-body-size);
+}
+.zb-ws__gate-body {
+  max-inline-size: 28rem; /* readable column for the gate copy */
+  text-align: center;
+}
+.zb-ws__gate-title {
+  margin: 0 0 var(--zs-space-2);
+  color: var(--zs-label);
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+  font-weight: var(--zs-text-title-2-weight);
+  font-style: italic;
+}
+.zb-ws__gate-lede {
+  margin: 0 0 var(--zs-space-4);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+.zb-ws__gate-link {
+  color: var(--zs-accent);
+  font-style: italic;
+  text-decoration: none;
+  border-radius: var(--zs-radius-1);
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zb-ws__gate-link:hover {
+  opacity: 0.8;
+}
+.zb-ws__gate-link:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── no-project fallback inside Main ─────────────────────────────────── */
+.zb-ws__no-project {
+  padding-inline: var(--zs-space-6);
+  color: var(--zs-label-secondary);
+  font-style: italic;
+  text-align: center;
+}
+
+/* ─── phone chat Drawer — full-screen takeover hosting the ChatRail ───── */
+.zb-ws__drawer {
+  display: flex;
+  flex-direction: column;
+}
+.zb-ws__drawer-head {
+  flex: 0 0 auto;
+}
+/* Title (start) + close (end) on one baseline. The DS header nests both
+ * inside .zs-drawer__header-content (a column) when the auto-X is off;
+ * flip that wrapper to a space-between row so the close sits trailing
+ * like the original. */
+.zb-ws__drawer-head .zs-drawer__header-content {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.zb-ws__drawer-title {
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--zs-text-body-size);
+}
+.zb-ws__drawer-close {
+  flex: 0 0 auto;
+}
+/* The Drawer.Body hosts the ChatRail, which manages its own scroll +
+ * padding; let it own the full remaining height with no inset. */
+.zb-ws__drawer-body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}

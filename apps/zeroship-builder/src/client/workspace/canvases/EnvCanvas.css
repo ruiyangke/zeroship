@@ -1,0 +1,139 @@
+/*
+ * EnvCanvas — crystal styling for the project `.env` editor.
+ *
+ * Presentation only. The DS owns the FormSection / Field / Input / Button
+ * chrome; these rules add the env-specific bits the DS doesn't carry: the
+ * scroll shell, the page width, the monospace key/value variable rows, the
+ * inline add-row grid, and the quiet status copy. Everything reads from
+ * --zs-* tokens so the canvas tracks the active theme.
+ */
+
+/* Scroll shell — fills the canvas slot and paints the page background. */
+.env-canvas {
+  block-size: 100%;
+  overflow: auto;
+  background: var(--zs-surface-bg);
+}
+
+/* Page column — centered, padded, capped at a comfortable reading width
+ * (matches the legacy 860px feel). Inline padding steps up at the medium
+ * breakpoint the way the old responsive paddings did. */
+.env-canvas__page {
+  max-inline-size: 53.75rem;
+  margin-inline: auto;
+  padding-inline: var(--zs-space-4);
+  padding-block: var(--zs-space-6);
+}
+@media (min-width: 40rem) {
+  .env-canvas__page {
+    padding-inline: var(--zs-space-7);
+    padding-block: var(--zs-space-8);
+  }
+}
+
+/* Inline `.env` mention in the description copy. */
+.env-canvas__code {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+}
+
+/* ─── variable rows ──────────────────────────────────────────────────
+ * A vertical list of `KEY  value  [delete]` rows separated by hairlines.
+ * Phone: key on top, value below spanning, delete right-aligned. Tablet+:
+ * the original three-track layout returns. */
+.env-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.env-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-3);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+@media (min-width: 40rem) {
+  .env-row {
+    grid-template-columns: 12.5rem 1fr auto;
+    gap: var(--zs-space-4);
+  }
+}
+
+.env-row__key {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-row__value {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Phone: drop to a third full-width row under the key. */
+  grid-column: 1 / -1;
+  order: 3;
+}
+@media (min-width: 40rem) {
+  .env-row__value {
+    grid-column: auto;
+    order: 0;
+  }
+}
+
+.env-row__action {
+  justify-self: end;
+}
+
+/* ─── inline add row ─────────────────────────────────────────────────
+ * Key + value inputs side by side on tablet+, stacked on phone, with the
+ * Save / Cancel actions trailing. */
+.env-add {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: end;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-3);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+@media (min-width: 40rem) {
+  .env-add {
+    grid-template-columns: 12.5rem 1fr auto;
+    gap: var(--zs-space-3);
+  }
+}
+
+.env-add__actions {
+  display: flex;
+  gap: var(--zs-space-2);
+  justify-content: flex-end;
+}
+
+/* Monospace the env-key/value inputs so they read like the rows. The
+ * Input `className` lands on the inner `<input class="zs-input__control">`,
+ * so target the element directly (not a descendant). */
+.env-add__input.zs-input__control {
+  font-family: var(--zs-font-mono);
+}
+
+/* ─── status copy (loading / empty) ──────────────────────────────────── */
+.env-status {
+  padding-block: var(--zs-space-3);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* Add-a-variable affordance row spacing. */
+.env-add-trigger {
+  margin-block-start: var(--zs-space-3);
+}

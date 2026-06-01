@@ -1,7 +1,9 @@
 // ─── LogsCanvas — the ledger (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.5) ────────────────────────
 //
-// Header: filter pills + search box + auto-scroll toggle.
-// Body: virtualized-ish list of log lines (timestamp · level · msg).
+// Header: level filter (segmented Toggle.Group) + search box + follow
+// (Switch) auto-scroll toggle.
+// Body: a Card-framed, app-local log stream — a list of log lines
+// (timestamp · level · msg) rendered in the monospace face.
 // Polls getLogs(appId) every 2s — it tails the sandbox's
 // `.zeroship/dev.log` (the preview-start command redirects the
 // dev-server stdout/stderr there). Sticky-bottom unless the user has
@@ -9,8 +11,17 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Banner,
+  Card,
+  Cluster,
+  EmptyState,
+  Input,
+  Switch,
+  Toggle,
+} from "@zeroship/ui";
 import { getLogs } from "../../api";
-import { FilterPill } from "../../components/FilterPill";
+import "./LogsCanvas.css";
 
 export interface LogsCanvasProps {
   appId: string;
@@ -28,6 +39,8 @@ interface ParsedLine {
 
 const POLL_MS = 2000;
 const STICKY_THRESHOLD_PX = 60;
+
+const FILTERS: Filter[] = ["all", "error", "warn", "info", "request"];
 
 export function LogsCanvas({ appId }: LogsCanvasProps) {
   const [filter, setFilter] = useState<Filter>("all");
@@ -73,107 +86,93 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
   }
 
   return (
-    <div
-      data-testid="logs-canvas"
-      className="h-full flex flex-col bg-paper"
-    >
-      <div className="px-4 sm:px-8 pt-4 sm:pt-6 pb-3 border-b border-rule flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2">
-          <FilterPill active={filter === "all"} onClick={() => setFilter("all")}>
-            all
-          </FilterPill>
-          <FilterPill active={filter === "error"} onClick={() => setFilter("error")}>
-            error
-          </FilterPill>
-          <FilterPill active={filter === "warn"} onClick={() => setFilter("warn")}>
-            warn
-          </FilterPill>
-          <FilterPill active={filter === "info"} onClick={() => setFilter("info")}>
-            info
-          </FilterPill>
-          <FilterPill active={filter === "request"} onClick={() => setFilter("request")}>
-            request
-          </FilterPill>
-        </div>
-        <input
+    <div data-testid="logs-canvas" className="logs-canvas">
+      <Cluster
+        className="logs-canvas__bar"
+        gap={3}
+        align="center"
+        justify="start"
+      >
+        <Toggle.Group
+          aria-label="Filter logs by level"
+          value={filter}
+          onValueChange={(next) => setFilter(next ?? "all")}
+          size="sm"
+        >
+          {FILTERS.map((f) => (
+            <Toggle key={f} value={f}>
+              {f}
+            </Toggle>
+          ))}
+        </Toggle.Group>
+
+        <Input
+          type="search"
           data-testid="logs-search"
           aria-label="Search logs"
           placeholder="search…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="ml-auto px-2.5 py-1 border border-rule bg-white font-mono text-[12px] outline-none focus:border-ink min-w-[180px]"
+          size="sm"
+          className="logs-canvas__search"
         />
-        <label className="flex items-center gap-1.5 font-serif italic text-[12.5px] text-ink-soft cursor-pointer">
-          <input
-            type="checkbox"
-            checked={autoScroll}
-            onChange={(e) => setAutoScroll(e.target.checked)}
-            data-testid="logs-autoscroll"
-          />
-          follow
-        </label>
-      </div>
 
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="flex-1 overflow-auto px-4 sm:px-8 py-4 min-h-0"
-      >
-        {error && (
-          <div className="font-serif italic text-tomato">
-            couldn't load logs
-          </div>
-        )}
-        {!error && visible.length === 0 && (
+        <Switch
+          checked={autoScroll}
+          onCheckedChange={(checked) => setAutoScroll(checked)}
+          data-testid="logs-autoscroll"
+          label="follow"
+          size="sm"
+          fieldClassName="logs-canvas__follow"
+        />
+      </Cluster>
+
+      <div className="logs-canvas__body">
+        <Card variant="outline" className="logs-canvas__frame">
           <div
-            data-testid="logs-empty"
-            className="font-serif italic text-pencil py-8 text-center"
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="logs-canvas__scroll"
           >
-            {search || filter !== "all"
-              ? "Quiet on this front — no lines match that filter."
-              : "Quiet on this front — open the preview to start the dev server."}
+            {error && (
+              <Banner
+                intent="danger"
+                title="Couldn't load logs"
+                className="logs-canvas__error"
+              />
+            )}
+            {!error && visible.length === 0 && (
+              <div data-testid="logs-empty" className="logs-canvas__empty">
+                <EmptyState
+                  title="Quiet on this front"
+                  description={
+                    search || filter !== "all"
+                      ? "No lines match that filter."
+                      : "Open the preview to start the dev server."
+                  }
+                />
+              </div>
+            )}
+            <div data-testid="logs-list" className="logs-canvas__list">
+              {visible.map((line, i) => (
+                <LogLine key={i} line={line} />
+              ))}
+            </div>
           </div>
-        )}
-        <div data-testid="logs-list">
-          {visible.map((line, i) => (
-            <LogLine key={i} line={line} />
-          ))}
-        </div>
+        </Card>
       </div>
     </div>
   );
 }
 
 function LogLine({ line }: { line: ParsedLine }) {
-  const tone = toneFor(line.level);
   return (
-    <div
-      className="grid items-baseline gap-3 py-1 border-b border-rule-2 font-mono text-[12px]"
-      style={{ gridTemplateColumns: "100px 70px 1fr" }}
-    >
-      <span className="text-ink-soft">{line.ts}</span>
-      <span
-        className={
-          "font-sans text-[9.5px] uppercase tracking-[0.18em] self-center " +
-          tone
-        }
-      >
-        {line.level}
-      </span>
-      <span className="text-ink whitespace-pre-wrap break-words">
-        {line.message}
-      </span>
+    <div className="logs-line" data-level={line.level}>
+      <span className="logs-line__ts">{line.ts}</span>
+      <span className="logs-line__level">{line.level}</span>
+      <span className="logs-line__msg">{line.message}</span>
     </div>
   );
-}
-
-function toneFor(l: Level): string {
-  switch (l) {
-    case "error":   return "text-tomato font-bold";
-    case "warn":    return "text-tomato font-semibold";
-    case "request": return "text-ink-soft";
-    default:        return "text-ink-soft";
-  }
 }
 
 function parseLine(raw: string): ParsedLine {
@@ -195,7 +194,7 @@ function parseLine(raw: string): ParsedLine {
 
 function formatTs(iso: string): string {
   // Compact HH:MM:SS suffix — full ISO timestamps are too wide for
-  // the 100px column.
+  // the timestamp column.
   const m = iso.match(/(\d{2}:\d{2}:\d{2})/);
   return m ? m[1]! : iso;
 }

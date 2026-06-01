@@ -1,6 +1,25 @@
+// ─── WorkspaceShell — crystal workspace frame ─────────────────────
+//
+// The main app shell for /p/:appId/*. Rebuilt over the @zeroship/ui
+// AppShell: a Header (the workspace TopBar with canvas pills + tier
+// toggle) and a Body whose Main is the canvas area and whose end-side
+// Sidebar rail is the chat. On phones the rail drops out of the layout
+// and the chat re-mounts as a full-screen DS Drawer.
+//
+// Crystal: AppShell / Split (via AppShell.Body) own the frame; Center
+// arranges the loading / error / not-found states; Button + Drawer
+// replace the hand-rolled controls; the few bespoke bits (the chat
+// toggle / tour glyph chips, the live-URL pill, the phone-drawer chat
+// surface) live in the co-located WorkspaceShell.css against --zs-*
+// tokens. The public component interface, URL-suffix canvas routing,
+// the maker/ops/code tier system + persistence, the per-canvas
+// ErrorBoundary wrappers, every data hook, and ALL data-testid hooks
+// are unchanged — only presentation moved to crystal.
+
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { AppShell, Button, Center, Cluster, Drawer } from "@zeroship/ui";
 import { getProject } from "../api";
 import { TopBar } from "./TopBar";
 import { CanvasPills, pillsForTier, type CanvasPillId, type CanvasTier } from "./CanvasPills";
@@ -15,6 +34,7 @@ import { ProductTour } from "../components/ProductTour";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { lsGet, lsSet } from "../lib/storage";
 import { useMediaQuery } from "../lib/useMediaQuery";
+import "./WorkspaceShell.css";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
 const TIER_KEY = "zeroship_canvas_tier";
@@ -79,7 +99,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
     }
   }
   // Phone breakpoint: < 768px. The chat rail collapses out of the
-  // grid and becomes a togglable full-screen drawer. Tablet and up
+  // layout and becomes a togglable full-screen drawer. Tablet and up
   // keep the 320px sidebar.
   const isPhone = useMediaQuery("(max-width: 767px)");
   const [chatOpen, setChatOpen] = useState(false);
@@ -112,31 +132,27 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   // without an appId bypass them and render the local shell.
   if (appId && appQuery.isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-paper">
-        <div data-testid="workspace-loading" className="font-serif italic text-ink-soft">
+      <Center minHeight="100dvh" className="zb-ws__gate">
+        <span data-testid="workspace-loading" className="zb-ws__gate-loading">
           loading…
-        </div>
-      </div>
+        </span>
+      </Center>
     );
   }
 
   if (appId && appQuery.error) {
     return (
-      <div className="h-screen flex items-center justify-center bg-paper p-6">
-        <div data-testid="workspace-error" className="text-center max-w-md">
-          <h1 className="font-serif italic text-2xl text-ink mb-2">Project not found</h1>
-          <p className="font-serif text-ink-soft mb-4">
+      <Center minHeight="100dvh" className="zb-ws__gate">
+        <div data-testid="workspace-error" className="zb-ws__gate-body">
+          <h1 className="zb-ws__gate-title">Project not found</h1>
+          <p className="zb-ws__gate-lede">
             We couldn't load that project. It may have been deleted or you don't have access.
           </p>
-          <Link
-            to="/home"
-            data-testid="workspace-error-home"
-            className="font-serif italic text-tomato hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2 rounded-sm"
-          >
+          <Link to="/home" data-testid="workspace-error-home" className="zb-ws__gate-link">
             ← Back to home
           </Link>
         </div>
-      </div>
+      </Center>
     );
   }
 
@@ -144,21 +160,15 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
 
   if (hasInvalidCanvasPath) {
     return (
-      <div className="h-screen flex items-center justify-center bg-paper p-6">
-        <div className="text-center max-w-md">
-          <h1 className="font-serif italic text-2xl text-ink mb-2">Canvas not found</h1>
-          <p className="font-serif text-ink-soft mb-4">
-            That workspace view does not exist.
-          </p>
-          <button
-            type="button"
-            onClick={() => setActive("preview")}
-            className="font-serif italic text-tomato hover:opacity-80 bg-transparent border-0 cursor-pointer"
-          >
+      <Center minHeight="100dvh" className="zb-ws__gate">
+        <div className="zb-ws__gate-body">
+          <h1 className="zb-ws__gate-title">Canvas not found</h1>
+          <p className="zb-ws__gate-lede">That workspace view does not exist.</p>
+          <Button variant="plain" onClick={() => setActive("preview")}>
             Back to preview
-          </button>
+          </Button>
         </div>
-      </div>
+      </Center>
     );
   }
 
@@ -168,96 +178,107 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
     navigate(`/p/${encodeURIComponent(appId)}/${next}`, { replace: false });
   }
 
+  // Each canvas is wrapped in its own ErrorBoundary so a render crash in
+  // one pane does not blank the whole workspace. The fallback at the
+  // bottom keeps each pill clickable when an appId is not available.
+  const canvasContent = (
+    <>
+      {active === "preview" && (
+        <ErrorBoundary label="the preview"><PreviewCanvas appId={appId} /></ErrorBoundary>
+      )}
+      {active === "files" && appId && (
+        <ErrorBoundary label="the files canvas"><FilesCanvas appId={appId} /></ErrorBoundary>
+      )}
+      {active === "logs" && appId && (
+        <ErrorBoundary label="the logs canvas"><LogsCanvas appId={appId} /></ErrorBoundary>
+      )}
+      {active === "env" && appId && (
+        <ErrorBoundary label="the env canvas"><EnvCanvas appId={appId} /></ErrorBoundary>
+      )}
+      {active === "settings" && appId && (
+        <ErrorBoundary label="settings">
+          <SettingsCanvas appId={appId} app={appQuery.data} />
+        </ErrorBoundary>
+      )}
+      {!appId && active !== "preview" && (
+        <Center inline minHeight="100%" className="zb-ws__no-project">
+          No project selected.
+        </Center>
+      )}
+    </>
+  );
+
   return (
-    <div className="h-screen flex flex-col bg-paper">
-      <TopBar
-        projectName={projectName}
-        center={
-          <div className="flex items-center gap-3">
-            <CanvasPills active={active} onChange={setActive} tier={tier} />
-            <TierToggle tier={tier} onChange={setTier} />
-          </div>
-        }
-        right={
-          <div className="flex items-center gap-2">
-            {isPhone && (
+    // The chat rail lives on the end edge. On phones it drops out of the
+    // layout (`sidebarOpen={false}` collapses the rail to zero width) and
+    // we render the rail content only on desktop so the chat's one-shot
+    // seed effect doesn't fire in a hidden rail — phone gets the Drawer.
+    <AppShell
+      sidebarSide="end"
+      sidebarWidth="20rem"
+      sidebarOpen={!isPhone}
+      className="zb-ws"
+    >
+      {/* AppShell.Header is a <header> banner; TopBar renders its own
+          <header>, so drop this wrapper's banner role to keep a single
+          banner landmark. The wrapper is neutralised in CSS — TopBar owns
+          the bar's chrome. */}
+      <AppShell.Header role="none" className="zb-ws__header">
+        <TopBar
+          projectName={projectName}
+          center={
+            <Cluster gap={3} align="center">
+              <CanvasPills active={active} onChange={setActive} tier={tier} />
+              <TierToggle tier={tier} onChange={setTier} />
+            </Cluster>
+          }
+          right={
+            <Cluster gap={2} align="center">
+              {isPhone && (
+                <button
+                  type="button"
+                  onClick={() => setChatOpen((v) => !v)}
+                  data-testid="topbar-chat-toggle"
+                  aria-label={chatOpen ? "Close chat" : "Open chat"}
+                  aria-expanded={chatOpen}
+                  title={chatOpen ? "Close chat" : "Open chat"}
+                  className="zb-ws__chip"
+                >
+                  {/* Speech-bubble glyph; reads as chat at any size. */}
+                  <span aria-hidden="true">≡</span>
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => setChatOpen((v) => !v)}
-                data-testid="topbar-chat-toggle"
-                aria-label={chatOpen ? "Close chat" : "Open chat"}
-                aria-expanded={chatOpen}
-                title={chatOpen ? "Close chat" : "Open chat"}
-                className="inline-flex items-center justify-center size-7 border border-rule rounded-full bg-paper-2 font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+                onClick={() => setTourOpen(true)}
+                data-testid="topbar-tour"
+                aria-label="Take the tour"
+                title="Take the tour"
+                className="zb-ws__chip"
               >
-                {/* Speech-bubble glyph; reads as chat at any size. */}
-                <span aria-hidden="true">≡</span>
+                ?
               </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setTourOpen(true)}
-              data-testid="topbar-tour"
-              aria-label="Take the tour"
-              title="Take the tour"
-              className="inline-flex items-center justify-center size-7 border border-rule rounded-full bg-paper-2 font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer focus:outline-2 focus:outline-tomato focus:outline-offset-2"
-            >
-              ?
-            </button>
-            <a
-              href="#"
-              data-testid="topbar-url"
-              aria-label={`Live URL: ${projectName}.zeroship.app`}
-              className="hidden sm:inline-flex items-center gap-2 px-3 py-1.5 border border-rule rounded-full bg-paper-2 font-mono text-[11px] text-ink-soft hover:border-ink hover:text-ink focus:outline-2 focus:outline-tomato focus:outline-offset-2"
-              style={{ textDecoration: "none" }}
-            >
-              <span className="size-[5px] rounded-full bg-ivy pulse-dot" aria-hidden="true" />
-              {projectName}.zeroship.app
-            </a>
-          </div>
-        }
-        accountInitials="ZS"
-      />
+              <a
+                href="#"
+                data-testid="topbar-url"
+                aria-label={`Live URL: ${projectName}.zeroship.app`}
+                className="zb-ws__url"
+              >
+                <span className="zb-ws__url-dot" aria-hidden="true" />
+                {projectName}.zeroship.app
+              </a>
+            </Cluster>
+          }
+          accountInitials="ZS"
+        />
+      </AppShell.Header>
 
-      <div
-        className="flex-1 grid min-h-0"
-        style={{
-          // On phones, the chat collapses out of the layout entirely
-          // and re-mounts as a drawer below; the main column claims
-          // 100% of the width.
-          gridTemplateColumns: isPhone ? "1fr" : "1fr 320px",
-        }}
-      >
-        <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-y-auto flex flex-col">
-          {/* Each canvas is wrapped in its own ErrorBoundary so a render
-              crash in one pane does not blank the whole workspace.
-              The fallback at the bottom keeps each pill clickable
-              when an appId is not available. */}
-          {active === "preview" && (
-            <ErrorBoundary label="the preview"><PreviewCanvas appId={appId} /></ErrorBoundary>
-          )}
-          {active === "files" && appId && (
-            <ErrorBoundary label="the files canvas"><FilesCanvas appId={appId} /></ErrorBoundary>
-          )}
-          {active === "logs" && appId && (
-            <ErrorBoundary label="the logs canvas"><LogsCanvas appId={appId} /></ErrorBoundary>
-          )}
-          {active === "env" && appId && (
-            <ErrorBoundary label="the env canvas"><EnvCanvas appId={appId} /></ErrorBoundary>
-          )}
-          {active === "settings" && appId && (
-            <ErrorBoundary label="settings">
-              <SettingsCanvas appId={appId} app={appQuery.data} />
-            </ErrorBoundary>
-          )}
-          {!appId && active !== "preview" && (
-            <div className="h-full flex items-center justify-center text-ink-soft font-serif italic px-6 text-center">
-              No project selected.
-            </div>
-          )}
-        </main>
+      <AppShell.Body>
+        <AppShell.Main data-testid="canvas-area" className="zb-ws__canvas">
+          {canvasContent}
+        </AppShell.Main>
         {!isPhone && (
-          <aside className="border-l border-rule min-h-0 min-w-0 overflow-hidden flex flex-col">
+          <AppShell.Sidebar className="zb-ws__rail">
             <ErrorBoundary label="the chat rail">
               <ChatRail
                 appName={projectName}
@@ -265,47 +286,55 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
                 seedBrief={seedBrief ?? undefined}
               />
             </ErrorBoundary>
-          </aside>
+          </AppShell.Sidebar>
         )}
-      </div>
+      </AppShell.Body>
 
-      {/* Phone drawer: full-screen chat overlay. Mounted only while
-          open so the rail's onMount seedBrief effect fires correctly,
-          and a backdrop-click closes it. */}
-      {isPhone && chatOpen && (
-        <div
-          data-testid="chat-drawer"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Chat"
-          className="fixed inset-0 z-40 flex flex-col bg-paper-2"
-        >
-          <div className="flex items-center justify-between px-4 py-2 border-b border-rule bg-paper">
-            <span className="font-display italic font-medium text-base">Notes &amp; thoughts</span>
-            <button
-              type="button"
-              onClick={() => setChatOpen(false)}
-              data-testid="chat-drawer-close"
-              aria-label="Close chat"
-              className="font-serif italic text-[13px] text-ink-soft hover:text-ink bg-transparent border-0 cursor-pointer px-2 py-1 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+      {/* Phone drawer: full-screen chat overlay. Mounted only while open
+          so the rail's onMount seedBrief effect fires correctly, and a
+          backdrop-click closes it. */}
+      {isPhone && (
+        <Drawer open={chatOpen} onOpenChange={setChatOpen}>
+          <Drawer.Portal>
+            <Drawer.Backdrop />
+            <Drawer.Content
+              side="end"
+              size="full"
+              data-testid="chat-drawer"
+              aria-label="Chat"
+              aria-modal="true"
+              className="zb-ws__drawer"
             >
-              close
-            </button>
-          </div>
-          <div className="flex-1 min-h-0">
-            <ErrorBoundary label="the chat rail">
-              <ChatRail
-                appName={projectName}
-                appId={appId}
-                seedBrief={seedBrief ?? undefined}
-              />
-            </ErrorBoundary>
-          </div>
-        </div>
+              <Drawer.Header showClose={false} className="zb-ws__drawer-head">
+                <Drawer.Title className="zb-ws__drawer-title">Notes &amp; thoughts</Drawer.Title>
+                {/* Explicit close so the `chat-drawer-close` testid +
+                    aria-label survive (the auto-X carries neither). */}
+                <Drawer.Close
+                  variant="plain"
+                  size="small"
+                  data-testid="chat-drawer-close"
+                  aria-label="Close chat"
+                  className="zb-ws__drawer-close"
+                >
+                  close
+                </Drawer.Close>
+              </Drawer.Header>
+              <Drawer.Body className="zb-ws__drawer-body">
+                <ErrorBoundary label="the chat rail">
+                  <ChatRail
+                    appName={projectName}
+                    appId={appId}
+                    seedBrief={seedBrief ?? undefined}
+                  />
+                </ErrorBoundary>
+              </Drawer.Body>
+            </Drawer.Content>
+          </Drawer.Portal>
+        </Drawer>
       )}
 
       <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
-    </div>
+    </AppShell>
   );
 }
 
@@ -355,7 +384,7 @@ function TierToggle({
       data-tier={tier}
       aria-label={`Tier: ${tier}. Click to switch to ${next}.`}
       title={`Tier: ${tier}. Click to switch to ${next}.`}
-      className="hidden sm:inline-flex font-serif italic text-[12px] text-ink-soft hover:text-ink bg-transparent border-0 cursor-pointer pl-1 pr-1 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+      className="zb-ws__tier-toggle"
     >
       {label}
     </button>

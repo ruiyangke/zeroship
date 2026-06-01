@@ -1,0 +1,136 @@
+/*
+ * Workspace TopBar — crystal header bar.
+ *
+ * Three-zone header: brand/crumb (start), an optional status strip
+ * (center), and the workspace actions + account avatar (end). The DS
+ * Breadcrumbs owns the brand trail (wordmark → project) and the DS
+ * Cluster owns the right zone's inline arrangement; these rules own the
+ * header grid, the translucent surface + separator rule, the fixed bar
+ * height, and the bespoke editorial-leaning type for the wordmark and
+ * project crumb. Every value reads from --zs-* tokens so the bar tracks
+ * the active theme.
+ */
+
+.ws-topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--zs-space-2);
+  block-size: 3rem;
+  padding-inline: var(--zs-space-3);
+  background: var(--zs-surface-raised);
+  border-bottom: var(--zs-separator-weight, 0.0625rem) solid var(--zs-separator);
+  backdrop-filter: var(--zs-material-regular, none);
+}
+
+@media (min-width: 40rem) {
+  .ws-topbar {
+    gap: var(--zs-space-4);
+    padding-inline: var(--zs-space-6);
+  }
+}
+
+@media (min-width: 48rem) {
+  .ws-topbar {
+    grid-template-columns: minmax(17.5rem, auto) 1fr auto;
+  }
+}
+
+/* ─── Brand zone — DS Breadcrumbs (wordmark → project). The trail sits
+ * on a shared baseline so the italic wordmark and the project crumb
+ * align; Breadcrumbs' own list is flex, so we only nudge alignment and
+ * min-width here. */
+.ws-topbar .ws-topbar__brand {
+  min-width: 0;
+}
+.ws-topbar .ws-topbar__brand .zs-breadcrumbs__list {
+  align-items: baseline;
+  gap: var(--zs-space-3);
+  min-width: 0;
+}
+
+/* Wordmark — the editorial italic lockup, expressed through the crystal
+ * type + accent tokens (no font-serif / paper / ink names). Overrides
+ * the default breadcrumb-link type to the title scale. */
+.ws-topbar__logo.zs-breadcrumbs__link {
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1;
+  color: var(--zs-label);
+  border-radius: var(--zs-radius-2);
+  text-decoration: none;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.ws-topbar__logo.zs-breadcrumbs__link:hover {
+  opacity: 0.8;
+  text-decoration: none;
+  color: var(--zs-label);
+}
+.ws-topbar__logo:focus-visible {
+  outline: 0.125rem solid var(--zs-focus);
+  outline-offset: 0.125rem;
+}
+.ws-topbar__logo-dot {
+  color: var(--zs-accent);
+}
+
+/* Separator glyph between wordmark and project crumb. */
+.ws-topbar__sep {
+  color: var(--zs-separator-strong);
+}
+
+/* Project name crumb — italic, headline scale, truncates. */
+.ws-topbar__project.zs-breadcrumbs__page {
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  color: var(--zs-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Phones collapse the brand to the wordmark only — hide the project
+ * crumb and the auto-inserted separator that precedes it. */
+.ws-topbar__project-item,
+.ws-topbar__project-item ~ .zs-breadcrumbs__separator,
+.zs-breadcrumbs__separator:has(+ .ws-topbar__project-item) {
+  display: none;
+}
+@media (min-width: 40rem) {
+  .ws-topbar__project-item {
+    display: inline-flex;
+  }
+  .zs-breadcrumbs__separator:has(+ .ws-topbar__project-item) {
+    display: inline-flex;
+  }
+}
+
+/* ─── Center zone — optional status strip, centered, scrolls if it
+ * overflows on narrow viewports. */
+.ws-topbar__center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* ─── Right zone — workspace actions + account avatar. */
+.ws-topbar__right {
+  min-width: 0;
+}
+
+/* Account avatar lockup — the Link is the interactive wrapper; the DS
+ * Avatar paints the lockup. */
+.ws-topbar__account {
+  display: inline-flex;
+  border-radius: var(--zs-radius-full);
+  text-decoration: none;
+}
+.ws-topbar__account:focus-visible {
+  outline: 0.125rem solid var(--zs-focus);
+  outline-offset: 0.125rem;
+}

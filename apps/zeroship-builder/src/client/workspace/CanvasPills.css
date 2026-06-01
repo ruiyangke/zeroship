@@ -1,0 +1,32 @@
+/*
+ * CanvasPills — compact canvas tab switcher.
+ *
+ * Built over @zeroship/ui Toggle.Group (the segmented-control track) +
+ * Toggle segments. This file only tunes the DENSITY of the switcher:
+ * the workspace top strip is tight, so the segments shrink below the DS
+ * `sm` default to an 11px caption with a shorter control height. Colors,
+ * pressed-pill fill, focus ring, and forced-colors behavior all stay on
+ * the DS Toggle styling — we never re-paint them here.
+ *
+ * Scoped to `.canvas-pills` (the className on the Toggle.Group root) so
+ * nothing leaks to other Toggle.Groups in the app. Tokens only —
+ * --zs-* throughout; hairlines at 0.0625rem.
+ */
+
+.canvas-pills {
+  /* The switcher hugs its content on the left of the canvas strip; the
+   * DS default already lays out as an inline-grid, so we just keep the
+   * compact rail padding. */
+  padding: 0.0625rem;
+}
+
+/* Compact segments — step the DS `sm` segment down to the original
+ * pill rhythm (11px caption, shorter height, tighter inline padding).
+ * `data-size="sm"` is stamped by the DS Toggle on every render path. */
+.canvas-pills .zs-toggle[data-size="sm"] {
+  block-size: 1.5rem;                         /* 24 — tighter than DS sm (32) */
+  padding-inline: var(--zs-space-2);          /* 8 */
+  font-size: var(--zs-text-caption-2-size);   /* 11 */
+  line-height: var(--zs-text-caption-2-line); /* 13 */
+  font-weight: 500;
+}

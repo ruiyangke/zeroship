@@ -12,13 +12,21 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertDialog, Button, Card, Input } from "@zeroship/ui";
+import {
+  AlertDialog,
+  Button,
+  Card,
+  Container,
+  FormSection,
+  Input,
+} from "@zeroship/ui";
 import {
   archiveProject,
   deleteProject,
   unarchiveProject,
   type ProjectRecord,
 } from "../../api";
+import "./SettingsCanvas.css";
 
 export interface SettingsCanvasProps {
   appId: string;
@@ -56,28 +64,29 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
   const isArchived = app?.archived === true;
 
   return (
-    <div data-testid="settings-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
-        <Section
+    <div data-testid="settings-canvas" className="settings-canvas">
+      <Container size="md" padX={6} className="settings-canvas__sections">
+        <FormSection
+          orientation="aside"
           title="Identity"
-          helper="The name and id your project lives under."
+          description="The name and id your project lives under."
         >
-          <Field label="Project name" value={app?.name ?? "—"} readOnly />
+          <Input label="Project name" value={app?.name ?? "—"} readOnly />
           <CopyField label="Project id" value={appId} />
-        </Section>
+        </FormSection>
 
-        <Section
+        <FormSection
+          orientation="aside"
           title="Archive"
-          helper="Tuck a project away without losing it. Reversible — restore any time from the Archived view on Home."
+          description="Tuck a project away without losing it. Reversible — restore any time from the Archived view on Home."
         >
-          <Card
-            data-testid="settings-archive"
-            className="p-5"
-          >
-            <div className="font-serif italic font-medium text-[16px] mb-1.5 text-ink">
-              {isArchived ? "This project is archived" : "Archive this project"}
-            </div>
-            <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] mb-4">
+          <Card data-testid="settings-archive">
+            <p className="settings-canvas__card-title">
+              {isArchived
+                ? "This project is archived"
+                : "Archive this project"}
+            </p>
+            <p className="settings-canvas__card-copy">
               {isArchived
                 ? "It's hidden from the default Home view but everything's intact. Restore to bring it back."
                 : "Hide it from the default Home view. Your code and settings stay put. You can restore it later."}
@@ -104,19 +113,18 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
               </Button>
             )}
           </Card>
-        </Section>
+        </FormSection>
 
-        <Section
-          title={<span className="text-tomato">Danger zone</span>}
-          helper="Permanent operations. Take a moment."
-          last
-          danger
+        <FormSection
+          orientation="aside"
+          title={<span className="settings-canvas__danger-title">Danger zone</span>}
+          description="Permanent operations. Take a moment."
         >
-          <Card variant="outline" className="p-5">
-            <div className="font-serif italic font-medium text-[16px] mb-1.5 text-ink">
+          <Card variant="outline">
+            <p className="settings-canvas__card-title settings-canvas__danger-title">
               Delete this project
-            </div>
-            <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] mb-4">
+            </p>
+            <p className="settings-canvas__card-copy">
               The project and its sandbox workspace go away. This can't be
               undone.
             </p>
@@ -129,8 +137,8 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
               Delete project
             </Button>
           </Card>
-        </Section>
-      </div>
+        </FormSection>
+      </Container>
 
       <DeleteConfirm
         open={confirmOpen}
@@ -180,9 +188,7 @@ function DeleteConfirm({
             <AlertDialog.Description>
               This permanently deletes the project and its sandbox
               workspace. Type{" "}
-              <code className="font-mono text-[12.5px] bg-paper-2 px-1.5 py-0.5 rounded-[2px] border border-rule text-ink">
-                {appName || "—"}
-              </code>{" "}
+              <code className="settings-canvas__code">{appName || "—"}</code>{" "}
               to confirm.
             </AlertDialog.Description>
           </AlertDialog.Header>
@@ -217,57 +223,7 @@ function DeleteConfirm({
   );
 }
 
-// ─── reusable section / field primitives ────────────────────────
-
-function Section({
-  title,
-  helper,
-  children,
-  last,
-  danger,
-}: {
-  title: React.ReactNode;
-  helper?: React.ReactNode;
-  children: React.ReactNode;
-  last?: boolean;
-  danger?: boolean;
-}) {
-  void danger;
-  return (
-    <div
-      className={"grid gap-12 py-6 " + (last ? "" : "border-b border-rule")}
-      style={{ gridTemplateColumns: "260px 1fr" }}
-    >
-      <div>
-        <h3 className="font-serif italic font-medium text-[22px] m-0 mb-1.5">
-          {title}
-        </h3>
-        {helper && (
-          <p className="font-serif text-[13.5px] text-ink-soft leading-[1.5]">
-            {helper}
-          </p>
-        )}
-      </div>
-      <div>{children}</div>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  readOnly,
-}: {
-  label: string;
-  value: string;
-  readOnly?: boolean;
-}) {
-  return (
-    <div className="mb-3.5">
-      <Input label={label} value={value} readOnly={readOnly} />
-    </div>
-  );
-}
+// ─── copy-id field: read-only mono value + copy button ──────────
 
 function CopyField({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
@@ -278,13 +234,16 @@ function CopyField({ label, value }: { label: string; value: string }) {
     });
   }
   return (
-    <div className="block mb-3.5">
-      <span className="block label-uc mb-1">{label}</span>
-      <div className="flex gap-2">
-        <input
+    <div className="settings-canvas__copy-field">
+      <span className="settings-canvas__copy-label">{label}</span>
+      <div className="settings-canvas__copy-row">
+        <Input
           value={value}
           readOnly
-          className="flex-1 px-3 py-2.5 border border-rule bg-paper-2 font-mono text-[12.5px] text-ink-soft outline-none"
+          variant="filled"
+          aria-label={label}
+          className="settings-canvas__copy-input"
+          wrapperProps={{ className: "settings-canvas__copy-input-wrap" }}
           data-testid="settings-copy-id"
         />
         <Button
