@@ -86,6 +86,7 @@ async fn provision_asserts_hydra_db_and_routes() {
         scheme,
         &[apex.clone()],
         &declared,
+        false, // creator app — never first-party
     )
     .await
     .expect("ensure_app_client");
@@ -192,7 +193,7 @@ async fn provision_asserts_hydra_db_and_routes() {
 
     // 6. Idempotent re-provision, same host + same declared scope → no drift.
     app_oauth_client::ensure_app_client(
-        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &declared,
+        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &declared, false,
     )
     .await
     .expect("re-ensure is idempotent");
@@ -211,7 +212,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     //     the Hydra allowlist reverts to baseline (registry tracks the manifest
     //     exactly, delete-then-insert in one txn).
     app_oauth_client::ensure_app_client(
-        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &[],
+        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &[], false,
     )
     .await
     .expect("re-ensure with no scopes");

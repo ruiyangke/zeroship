@@ -252,7 +252,8 @@ impl AppState {
             .await
             .map_err(|e| format!("control db conn: {e}"))?;
         app_oauth_client::ensure_app_client(
-            &mut conn, &hydra, app_id, name, scheme, &hosts, declared_scopes,
+            // Creator apps are NEVER first-party (spec §5.2): skip_consent=false.
+            &mut conn, &hydra, app_id, name, scheme, &hosts, declared_scopes, false,
         )
         .await
         .map_err(|e| e.to_string())

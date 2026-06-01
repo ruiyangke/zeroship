@@ -90,7 +90,11 @@ impl Fixture {
             control_pg: Arc::new(control_pg_client),
             hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
-            trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
+            // The compiled default is now EMPTY (fail-closed), so seed an
+            // explicit trusted client id for the "skip_consent derived from
+            // whitelist" test. `acme-ci` is intentionally NOT listed, so the
+            // untrusted-client test still gets skip_consent=false.
+            trusted_oauth_clients: ["zeroship-builder".to_string()].into_iter().collect(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),

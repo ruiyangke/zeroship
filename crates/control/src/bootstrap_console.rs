@@ -291,6 +291,16 @@ pub async fn bootstrap_console(
     //    app_oauth_clients) + the baseline audience. The console host is passed
     //    VERBATIM as the apex host, so the sector_identifier becomes
     //    `{scheme}://{console_host}` — explicit, NOT derived `{name}.{base}`.
+    //
+    //    `first_party = true`: the console IS the platform's own first-party
+    //    app, so its oac_ client gets `skip_consent = true` — an owner-approved,
+    //    narrow exception to spec §5.2 (a consent prompt for the platform's own
+    //    console is meaningless). This applies ONLY to the console; every
+    //    creator-app call passes `first_party = false`. The deployment MUST ALSO
+    //    name this client id in `[auth].trusted_oauth_clients` so the gateway's
+    //    first-party password gate + the headless consent dance honour it (the
+    //    `oac_<base62>` id is printed by `--bootstrap-console`; see
+    //    `zeroship_core::auth::trusted_clients`).
     let hydra = zeroship_auth::hydra_client::HydraAdmin::new(cfg.hydra_admin_url.clone());
     let hosts = vec![cfg.console_host.clone()];
     app_oauth_client::ensure_app_client(
@@ -300,7 +310,8 @@ pub async fn bootstrap_console(
         &app_name,
         &cfg.scheme,
         &hosts,
-        &[], // console declares no custom scopes via this seed
+        &[],  // console declares no custom scopes via this seed
+        true, // first-party console → skip_consent = true (narrow §5.2 exception)
     )
     .await
     .map_err(|e| ConsoleBootstrapError::OauthClient(e.to_string()))?;

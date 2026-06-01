@@ -25,13 +25,19 @@ hydra_admin_url = "http://hydra:4445"
 # Precedence: CLI flag > env > this file > default.
 hydra_public_url = "https://auth.zeroship.ai"
 
-# First-party OAuth client IDs that skip Hydra consent screens.
-# Option<Vec<String>> semantics: OMIT this key entirely => the platform's
-# compiled default set is used; a PRESENT list => exactly that set (no merge
-# with the default); a present-but-EMPTY list (`trusted_oauth_clients = []`)
-# => no trusted clients at all. This key is file/default ONLY — there is no
-# CLI flag or env var that overrides it.
-trusted_oauth_clients = ["zeroship-builder"]
+# First-party OAuth client IDs that are trusted for the gateway's in-page
+# password login (POST /__zeroship/auth/password) AND skip Hydra consent.
+# Option<Vec<String>> semantics: OMIT this key => the compiled default, which
+# is now EMPTY (fail-closed: NO client is trusted unless listed here); a
+# PRESENT list => exactly that set; `[]` => none. File/default ONLY — no CLI
+# flag or env var override.
+#
+# To enable the console's in-page login, set this to the console's per-app
+# PKCE client id, which `zeroship-control --bootstrap-console` prints:
+#   client_id_for_app(console_app_id(console_host))  => "oac_<base62>"
+# e.g. for console.zeroship.ai:
+# trusted_oauth_clients = ["oac_<your-console-client-id>"]
+trusted_oauth_clients = []
 
 [observability]
 # Tracing filter passed to Rust tracing subscribers, equivalent to RUST_LOG.

@@ -5,7 +5,6 @@ pub mod trusted_clients;
 
 pub use trusted_clients::{
     default_trusted_oauth_clients, is_trusted_client_id, resolve_trusted_oauth_clients,
-    BUILDER_CLIENT_ID,
 };
 
 use std::time::{SystemTime, UNIX_EPOCH};

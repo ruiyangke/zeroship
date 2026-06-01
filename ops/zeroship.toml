@@ -12,7 +12,22 @@ hydra_admin_url       = "http://hydra:4445"
 # from the old compose value (http://hydra:4444). One file per environment —
 # do not copy this value into a prod overlay.
 hydra_public_url      = "http://auth.zeroship.localhost"
-trusted_oauth_clients = ["zeroship-builder"]
+# First-party trusted OAuth client(s) that skip Hydra consent AND are admitted by
+# the gateway's POST /__zeroship/auth/password first-party gate. This is the
+# FIRST-PARTY CONSOLE only — a deliberate, narrow exception to the spec rule that
+# per-app (THIRD-PARTY creator) clients NEVER skip consent. A consent prompt for
+# the platform's OWN console is meaningless.
+#
+# Value = client_id_for_app(console_app_id("console.zeroship.localhost")), the
+# deterministic per-app PKCE client id for THIS compose's --console-host
+# (docker-compose.yml: control `--console-host console.zeroship.localhost`).
+# Derivation (crates/control/src/{bootstrap_console.rs,app_oauth_client.rs}):
+#   console_app_id(host)   = uuid8(SHA-256("zeroship:console:app:v1\0" || host))
+#                          = 5819848e-dc81-819a-bb81-7ef736a413d5
+#   client_id_for_app(uuid)= "oac_" + base62(uuid) = oac_2gEz9tHlodeyWPNRtQsLsT
+# Verify against control's `--bootstrap-console` log line (it prints the seeded
+# console client_id). If --console-host changes, recompute this value.
+trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
 
 [observability]
 rust_log   = "info,zeroship_=debug"

@@ -203,6 +203,25 @@ anchors+sessions::create → sign_session_cookie → 3 cookies → {user,expires
   (re-export from control); extract gateway mint tail (`auth_token.rs:354-586`) →
   `pub(crate) mint_session_from_code` and rewire `session_post`; add
   `trusted_oauth_clients: HashSet<String>` to `GateState` (populate in `main.rs` from `file.auth`).
+- **Phase 0b (control+core — the console must be usable for in-page login):**
+  - `ensure_app_client` (`crates/control/src/app_oauth_client.rs`) gains a `first_party: bool`
+    param. Creator apps pass `false` ⇒ `skip_consent=false` (spec §5.2 — per-app clients NEVER
+    skip consent; this targets THIRD-PARTY creator apps). The console passes `true` ⇒
+    `skip_consent=true` (`bootstrap_console.rs`) — an **owner-approved, narrow exception**: a
+    consent prompt for the platform's OWN console is meaningless. The flag is mirrored to
+    `control.oauth_clients.skip_consent` in the same txn so the DB and the live Hydra client never
+    disagree. The exception applies ONLY to the console, never to creator apps.
+  - `default_trusted_oauth_clients()` (`crates/core/src/auth/trusted_clients.rs`) now returns the
+    **EMPTY set (fail-closed)** — the retired `BUILDER_CLIENT_ID="zeroship-builder"` default is
+    removed. No client is trusted unless `[auth].trusted_oauth_clients` explicitly names it. The
+    constant `BUILDER_CLIENT_ID` (if still needed) moves to its sole consumer
+    `crates/control/src/bootstrap_builder.rs`.
+  - **Deployment requirement (load-bearing).** Core has no console host, so it CANNOT derive the
+    console's `oac_` client id. The deployment MUST set `[auth].trusted_oauth_clients` to the
+    console's client id = `client_id_for_app(console_app_id(console_host))`, which
+    `zeroship-control --bootstrap-console` prints at boot. The gateway reads this overlay into
+    `GateState.trusted_oauth_clients`; until it names the console client, the first-party password
+    gate fails closed and in-page console login is locked out (the secure default).
 - **Phase 1 (`crates/auth`):** extract `verify_password_credentials` from `ui/login.rs`;
   promote the cookie-jar dance (`tests/common`) → `oauth/headless.rs::mint_code_for_subject`;
   add `ui/password.rs` + route + the **shared-secret gate**; `e2e_password_grant` test.
