@@ -1,5 +1,20 @@
+// Receipt — chat-stream tool-call receipt (distinct from components/Receipt).
+//
+// A compact card noting a tool invocation: a status glyph (running spinner /
+// done check / error cross), the human summary with the raw tool name beneath,
+// and an optional details toggle that reveals the input/output JSON.
+//
+// Crystal: a DS Card (variant="outline") frames the receipt. The expandable
+// details use a DS DescriptionList (input → <pre>, output → <pre>) so the
+// labels read as semantic terms. The "details"/"hide" toggle is a DS Button
+// (variant="plain"); the running state uses the DS Spinner. Bespoke bits — the
+// status glyph circles and the JSON code blocks — live in Receipt.css over
+// --zs-* tokens. The public props, behaviour, and the `receipt` /
+// `data-status` test hooks are preserved exactly.
+
 import { useState } from "react";
-import { Spinner } from "../../components/Spinner";
+import { Button, Card, DescriptionList, Spinner } from "@zeroship/ui";
+import "./Receipt.css";
 
 export interface ReceiptProps {
   toolName: string;
@@ -14,59 +29,63 @@ export function Receipt({ toolName, status, summary, inputJson, outputJson }: Re
   const showDetails = inputJson !== undefined || outputJson !== undefined;
 
   return (
-    <div
+    <Card
+      variant="outline"
+      size="sm"
       data-testid="receipt"
       data-status={status}
-      className="mt-2 bg-paper border border-rule-2 rounded px-3 py-2.5"
+      className="receipt"
     >
-      <div className="flex items-start gap-3">
-        <span aria-hidden="true" className="flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center mt-0.5">
+      <div className="receipt__head">
+        <span aria-hidden="true" className="receipt__status">
           {status === "done" && (
-            <span className="inline-block size-[14px] rounded-full bg-ivy text-paper text-[10px] font-semibold leading-none flex items-center justify-center">
-              ✓
-            </span>
+            <span className="receipt__glyph receipt__glyph--done">✓</span>
           )}
           {status === "error" && (
-            <span className="inline-block size-[14px] rounded-full bg-blood text-paper text-[10px] font-semibold leading-none flex items-center justify-center">
-              ✕
-            </span>
+            <span className="receipt__glyph receipt__glyph--error">✕</span>
           )}
-          {status === "running" && <Spinner size={14} />}
+          {status === "running" && <Spinner size="sm" />}
         </span>
-        <div className="flex-1 min-w-0 font-serif text-[13.5px] leading-snug text-ink">
+        <div className="receipt__text">
           {summary ?? toolName}
-          <div className="font-mono text-[10px] text-pencil mt-0.5">{toolName}</div>
+          <div className="receipt__tool">{toolName}</div>
         </div>
         {showDetails && (
-          <button
+          <Button
             type="button"
+            variant="plain"
+            size="small"
+            className="receipt__toggle"
             onClick={() => setOpen((v) => !v)}
-            className="self-center font-sans text-[11px] text-pencil hover:text-ink cursor-pointer"
           >
             {open ? "hide" : "details"}
-          </button>
+          </Button>
         )}
       </div>
       {open && (
-        <div className="mt-2 pt-2 border-t border-rule-2 space-y-2">
+        <DescriptionList orientation="vertical" className="receipt__details">
           {inputJson !== undefined && (
-            <div>
-              <div className="font-sans text-[10px] uppercase tracking-wider text-pencil mb-0.5">input</div>
-              <pre className="font-mono text-[10.5px] whitespace-pre-wrap break-all max-h-32 overflow-auto bg-paper-2 px-2 py-1 border border-rule-2 rounded">
-                {JSON.stringify(inputJson, null, 2)}
-              </pre>
-            </div>
+            <DescriptionList.Item>
+              <DescriptionList.Term>input</DescriptionList.Term>
+              <DescriptionList.Detail>
+                <pre className="receipt__json">{JSON.stringify(inputJson, null, 2)}</pre>
+              </DescriptionList.Detail>
+            </DescriptionList.Item>
           )}
           {outputJson !== undefined && (
-            <div>
-              <div className="font-sans text-[10px] uppercase tracking-wider text-pencil mb-0.5">output</div>
-              <pre className="font-mono text-[10.5px] whitespace-pre-wrap break-all max-h-32 overflow-auto bg-paper-2 px-2 py-1 border border-rule-2 rounded">
-                {typeof outputJson === "string" ? outputJson : JSON.stringify(outputJson, null, 2)}
-              </pre>
-            </div>
+            <DescriptionList.Item>
+              <DescriptionList.Term>output</DescriptionList.Term>
+              <DescriptionList.Detail>
+                <pre className="receipt__json">
+                  {typeof outputJson === "string"
+                    ? outputJson
+                    : JSON.stringify(outputJson, null, 2)}
+                </pre>
+              </DescriptionList.Detail>
+            </DescriptionList.Item>
           )}
-        </div>
+        </DescriptionList>
       )}
-    </div>
+    </Card>
   );
 }

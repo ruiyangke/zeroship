@@ -1,0 +1,70 @@
+/*
+ * MessageUser — crystal presentation for the user-turn bubble.
+ *
+ * The Stack root arranges the eyebrow label, the body (or edit field),
+ * and the hover-revealed MessageActions row. The bespoke rules below
+ * carry what the catalog doesn't: the accent left-rule that marks a
+ * user turn, the serif-free body type, and the inline edit textarea.
+ * Every value reads a --zs-* token — no raw hex/px (the accent rule and
+ * focus ring are rem), no Tailwind utilities, no editorial tokens.
+ *
+ * `.group` is retained on the root (set in the TSX) so MessageActions
+ * can reveal its row via the shared group-hover state.
+ */
+
+/* ─── Eyebrow label — "You · 12:04" ─────────────────────────────────── */
+
+.msg-user__label {
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ─── Body — the user's prose, marked by an accent left-rule ─────────── */
+
+.msg-user__body {
+  border-inline-start: 0.125rem solid var(--zs-accent);
+  padding-inline-start: var(--zs-space-3);
+  color: var(--zs-label);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msg-user__attachments {
+  padding-inline-start: var(--zs-space-3);
+}
+
+/* ─── Edit mode — same accent rule, hosting the textarea + actions ───── */
+
+.msg-user__edit {
+  border-inline-start: 0.125rem solid var(--zs-accent);
+  padding-inline-start: var(--zs-space-3);
+}
+
+.msg-user__textarea {
+  inline-size: 100%;
+  resize: none;
+  box-sizing: border-box;
+  padding: var(--zs-space-2) var(--zs-space-3);
+  background: var(--zs-surface-sunken);
+  color: var(--zs-label);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-2);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+.msg-user__textarea:focus {
+  outline: none;
+  border-color: var(--zs-accent);
+}
+
+.msg-user__edit-actions {
+  margin-block-start: var(--zs-space-2);
+}

@@ -4,114 +4,91 @@
 // normaliseSREFinding) and emits `data-sre-finding` which ChatMessages
 // dispatches here.
 //
+// Crystal migration: the card frames on the DS Card (outline), the
+// severity word rides a DS Badge, and the related-logs disclosure is a
+// DS Collapsible. Severity also drives a bespoke left-edge tone bar via
+// --zs-system-* tokens (see SREFindingCard.css). The public interface
+// (the `finding` prop, the `SREFindingCard` export), the diagnosis /
+// recommendation / logs rendering, the expand-collapse behaviour, and
+// the data-testid hooks (`sre-finding-card`, `sre-logs-toggle`) are
+// preserved exactly.
+//
 // Visual contract:
-//  - Severity drives the left-edge tone bar:
-//      info     → ink   (just FYI)
-//      warning  → amber (degraded but live)
-//      error    → blood (broken for some users)
-//      critical → blood w/ extra emphasis (broken for all / data loss)
+//  - Severity drives the left-edge tone bar AND the Badge intent:
+//      info     → neutral (just FYI)
+//      warning  → warning (degraded but live)
+//      error    → danger  (broken for some users)
+//      critical → danger, solid (broken for all / data loss)
 //  - Diagnosis = headline / first thing the user reads.
 //  - Recommendation = the actionable bit.
 //  - related_logs = optional, collapsed by default to keep the card
 //    compact when SRE doesn't ground in logs.
 
-import { useState } from "react";
+import { Badge, Card, Collapsible } from "@zeroship/ui";
+import type { BadgeIntent, BadgeVariant } from "@zeroship/ui";
 import type { SREFinding } from "../../types/chat";
+import "./SREFindingCard.css";
 
-const SEVERITY_TONE: Record<
+const SEVERITY_BADGE: Record<
   string,
-  { label: string; pill: string; bar: string }
+  { label: string; intent: BadgeIntent; variant: BadgeVariant }
 > = {
-  info: {
-    label: "info",
-    pill: "text-pencil bg-paper-2 border-rule-2",
-    bar: "bg-rule",
-  },
-  warning: {
-    label: "warning",
-    pill: "text-amber bg-paper-2 border-amber/40",
-    bar: "bg-amber",
-  },
-  error: {
-    label: "error",
-    pill: "text-blood bg-paper-2 border-blood/40",
-    bar: "bg-blood",
-  },
-  critical: {
-    label: "critical",
-    pill: "text-paper bg-blood border-blood font-medium",
-    bar: "bg-blood",
-  },
+  info: { label: "info", intent: "neutral", variant: "soft" },
+  warning: { label: "warning", intent: "warning", variant: "soft" },
+  error: { label: "error", intent: "danger", variant: "soft" },
+  critical: { label: "critical", intent: "danger", variant: "solid" },
 };
 
 export function SREFindingCard({ finding }: { finding: SREFinding }) {
-  const [logsOpen, setLogsOpen] = useState(false);
-  const tone = SEVERITY_TONE[finding.severity] ?? SEVERITY_TONE.info;
+  const severity = SEVERITY_BADGE[finding.severity] ?? SEVERITY_BADGE.info!;
   const logs = finding.related_logs ?? [];
 
   return (
-    <div
+    <Card
+      variant="outline"
       data-testid="sre-finding-card"
-      className="mt-2 bg-paper border border-rule-2 rounded overflow-hidden flex"
+      data-severity={finding.severity}
+      className="sre-finding"
     >
-      <div className={"w-1 shrink-0 " + tone.bar} aria-hidden />
-      <div className="flex-1 min-w-0">
-        <div className="px-3 py-1.5 border-b border-rule-2 flex items-center justify-between">
-          <span className="font-sans text-[10px] uppercase tracking-wider text-pencil">
-            sre · finding
-          </span>
-          <span
-            className={
-              "font-sans text-[9px] uppercase tracking-wider px-1.5 py-0.5 border rounded " +
-              tone.pill
-            }
-          >
-            {tone.label}
-          </span>
-        </div>
+      <span className="sre-finding__bar" aria-hidden />
 
-        <div className="px-3 py-2.5 space-y-1.5">
-          <div className="font-sans text-[13px] text-ink leading-snug">
-            {finding.diagnosis}
-          </div>
-          {finding.recommendation && (
-            <div className="font-serif italic text-[12px] text-ink-soft leading-snug">
-              <span className="not-italic font-sans uppercase tracking-wider text-[9px] text-pencil mr-1.5">
-                fix
-              </span>
-              {finding.recommendation}
-            </div>
-          )}
-        </div>
+      <div className="sre-finding__header">
+        <span className="sre-finding__eyebrow">sre · finding</span>
+        <Badge intent={severity.intent} variant={severity.variant} size="sm">
+          {severity.label}
+        </Badge>
+      </div>
 
-        {logs.length > 0 && (
-          <div className="border-t border-rule-2">
-            <button
-              type="button"
-              data-testid="sre-logs-toggle"
-              onClick={() => setLogsOpen((v) => !v)}
-              className="w-full px-3 py-1.5 font-sans text-[10px] uppercase tracking-wider text-pencil hover:text-ink text-left flex items-center justify-between"
-            >
-              <span>related logs ({logs.length})</span>
-              <span aria-hidden>{logsOpen ? "−" : "+"}</span>
-            </button>
-            {logsOpen && (
-              <div className="px-3 pb-2.5 border-t border-rule-2 pt-2 space-y-1.5">
-                {logs.map((l, i) => (
-                  <div key={i}>
-                    <div className="font-sans text-[10px] text-pencil">
-                      {l.source}
-                    </div>
-                    <pre className="font-mono text-[11px] text-ink-soft whitespace-pre-wrap leading-snug">
-                      {l.excerpt}
-                    </pre>
-                  </div>
-                ))}
-              </div>
-            )}
+      <div className="sre-finding__body">
+        <div className="sre-finding__diagnosis">{finding.diagnosis}</div>
+        {finding.recommendation && (
+          <div className="sre-finding__recommendation">
+            <span className="sre-finding__fix-eyebrow">fix</span>
+            {finding.recommendation}
           </div>
         )}
       </div>
-    </div>
+
+      {logs.length > 0 && (
+        <Collapsible className="sre-finding__logs" defaultOpen={false}>
+          <Collapsible.Trigger
+            data-testid="sre-logs-toggle"
+            className="sre-finding__logs-trigger"
+          >
+            related logs ({logs.length})
+          </Collapsible.Trigger>
+          <Collapsible.Panel>
+            <div className="sre-finding__logs-list">
+              {logs.map((l, i) => (
+                <div key={i}>
+                  <div className="sre-finding__log-source">{l.source}</div>
+                  <pre className="sre-finding__log-excerpt">{l.excerpt}</pre>
+                </div>
+              ))}
+            </div>
+          </Collapsible.Panel>
+        </Collapsible>
+      )}
+    </Card>
   );
 }

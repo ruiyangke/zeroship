@@ -1,0 +1,143 @@
+/*
+ * MentionDropdown — crystal skin for the ChatComposer's `@`-mention
+ * autocomplete (file / issue / recent-error suggestions).
+ *
+ * Why bespoke CSS rather than DS Popover/Combobox/Autocomplete: those
+ * primitives are trigger-driven (Base UI Trigger + portaled Popup, own
+ * internal open-state + keyboard rover). This dropdown is the opposite
+ * shape — the parent composer owns open-state, the `@…` query, the
+ * active index, mousedown selection, and forwards ↑/↓/Enter/Tab/Esc
+ * itself, and positions the panel absolutely above its own textarea.
+ * Routing that through a self-contained DS popover would break the
+ * controlled public contract (activeIndex / onActiveIndexChange /
+ * onSelect-on-mousedown) and the data-testids. So we keep the
+ * controlled listbox markup and re-skin it here, modelling the panel +
+ * option rows on the DS Menu popup idiom (opaque --zs-surface sheet,
+ * --zs-shadow-popover elevation, --zs-fill-tertiary highlight). Every
+ * value reads a `--zs-*` crystal token — no editorial tokens, no
+ * Tailwind, no raw hex/px (rem + 0.0625rem hairlines + system tokens).
+ */
+
+/* ─── panel ──────────────────────────────────────────────────────── *
+ * The composer absolutely positions us above its textarea (left/right
+ * inset to the composer gutter, pinned to its top edge) so the panel
+ * tracks the textarea on resize/scroll. */
+
+.zs-mention {
+  position: absolute;
+  inset-inline: var(--zs-space-3);
+  inset-block-end: 100%;
+  margin-block-end: var(--zs-space-1);
+  z-index: var(--zs-z-modal);
+
+  max-block-size: 14rem;
+  overflow-y: auto;
+
+  /* Opaque sheet — mirrors the DS Menu/Popover popup invariant. */
+  background-color: var(--zs-surface);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-5);
+  box-shadow: var(--zs-shadow-popover);
+}
+
+/* ─── header (kind label + the @file·@issue·@recent legend) ───────── */
+
+.zs-mention__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-space-3);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+.zs-mention__legend {
+  color: var(--zs-label-quaternary);
+}
+
+/* ─── hint rows (searching… / no matches) ────────────────────────── */
+
+.zs-mention__hint {
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-style: italic;
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── option list ────────────────────────────────────────────────── */
+
+.zs-mention__list {
+  list-style: none;
+  margin: 0;
+  padding-block: var(--zs-space-1);
+  padding-inline: 0;
+}
+
+.zs-mention__item {
+  inline-size: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-space-3);
+  text-align: start;
+  cursor: pointer;
+
+  background-color: transparent;
+  border: 0;
+  border-inline-start: 0.125rem solid transparent;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+
+  transition:
+    color var(--zs-motion-fast) var(--zs-motion-ease),
+    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Active row — the composer drives `aria-selected` via activeIndex.
+ * A quiet accent-tinted fill + accent rail, matching the DS active-row
+ * idiom (color-mix tints are how the DS itself derives soft accent
+ * surfaces). */
+.zs-mention__item[aria-selected="true"] {
+  color: var(--zs-label);
+  background-color: color-mix(in oklch, var(--zs-accent) 12%, transparent);
+  border-inline-start-color: var(--zs-accent);
+}
+
+.zs-mention__item:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: calc(var(--zs-focus-ring-offset) * -1);
+}
+
+.zs-mention__label {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The right-hand sub tag (directory / size / status / error kind). */
+.zs-mention__sub {
+  flex: 0 0 auto;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}

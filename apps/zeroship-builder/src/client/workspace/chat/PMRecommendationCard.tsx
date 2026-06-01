@@ -4,20 +4,31 @@
 // and emits `data-pm-recommendation` which ChatMessages dispatches here.
 //
 // Visual contract:
-//  - Headline = the primary recommendation's title + urgency pill.
+//  - Headline = the primary recommendation's title + urgency badge.
 //  - Body    = the `why` for the primary.
 //  - Disclosure expandable with up to 2 alternatives.
+//
+// Crystal: built on @zeroship/ui Card + Collapsible + Badge over the
+// Stack / Cluster layout primitives. Bespoke type ramp + the issue-id
+// mono chip live in the co-located PMRecommendationCard.css over --zs-*
+// tokens.
 
-import { useState } from "react";
+import { Badge, Card, Cluster, Collapsible, Stack } from "@zeroship/ui";
+import type { BadgeIntent } from "@zeroship/ui";
 import type { PMRecommendation, PMRecommendationItem } from "../../types/chat";
+import "./PMRecommendationCard.css";
 
-const URGENCY_TONE: Record<string, string> = {
-  low: "text-pencil bg-paper-2 border-rule-2",
-  medium: "text-amber bg-paper-2 border-rule-2",
-  // "high" lands on ivy not blood — high-urgency for PM means
-  // "unblocks the next milestone", which is positive momentum, not
-  // failure. Blood is reserved for SRE/Reviewer destructive cases.
-  high: "text-ivy bg-ivy-3 border-ivy/30",
+// Urgency → Badge intent.
+//   low    → neutral (a quiet, non-semantic chip)
+//   medium → warning (caution / amber)
+//   high   → success — high-urgency for PM means "unblocks the next
+//            milestone", which is positive momentum, not failure. The
+//            danger intent stays reserved for SRE/Reviewer destructive
+//            cases.
+const URGENCY_INTENT: Record<string, BadgeIntent> = {
+  low: "neutral",
+  medium: "warning",
+  high: "success",
 };
 
 export function PMRecommendationCard({
@@ -25,89 +36,75 @@ export function PMRecommendationCard({
 }: {
   recommendation: PMRecommendation;
 }) {
-  const [open, setOpen] = useState(false);
   const alts = recommendation.alternatives;
   const primary = recommendation.recommendation;
 
   return (
-    <div
+    <Card
       data-testid="pm-recommendation-card"
-      className="mt-2 bg-paper border border-rule-2 rounded"
+      variant="outline"
+      className="pm-rec"
     >
-      <div className="px-3 py-1.5 border-b border-rule-2 flex items-center justify-between">
-        <span className="font-sans text-[10px] uppercase tracking-wider text-pencil">
-          pm · what to build next
-        </span>
-        <UrgencyPill urgency={primary.urgency} />
-      </div>
+      <Card.Header className="pm-rec__header">
+        <Cluster justify="between" align="center">
+          <span className="pm-rec__eyebrow">pm · what to build next</span>
+          <UrgencyBadge urgency={primary.urgency} />
+        </Cluster>
+      </Card.Header>
 
-      <div className="px-3 py-2.5">
-        <div className="font-sans text-[13px] text-ink leading-snug">
-          {primary.title}
-        </div>
-        <div className="font-serif italic text-[12px] text-ink-soft mt-1 leading-snug">
-          {primary.why}
-        </div>
-        {primary.issueId && (
-          <div className="mt-1 font-mono text-[10px] text-pencil">
-            #{primary.issueId}
-          </div>
-        )}
-      </div>
+      <Card.Content className="pm-rec__body">
+        <Stack gap="half">
+          <div className="pm-rec__title">{primary.title}</div>
+          <div className="pm-rec__why">{primary.why}</div>
+          {primary.issueId && (
+            <div className="pm-rec__issue">#{primary.issueId}</div>
+          )}
+        </Stack>
+      </Card.Content>
 
       {alts.length > 0 && (
-        <div className="border-t border-rule-2">
-          <button
-            type="button"
+        <Collapsible className="pm-rec__disclosure">
+          <Collapsible.Trigger
             data-testid="pm-alternatives-toggle"
-            onClick={() => setOpen((v) => !v)}
-            className="w-full px-3 py-1.5 font-sans text-[10px] uppercase tracking-wider text-pencil hover:text-ink text-left flex items-center justify-between"
+            className="pm-rec__toggle"
+            asChild
           >
-            <span>see alternatives ({alts.length})</span>
-            <span aria-hidden>{open ? "−" : "+"}</span>
-          </button>
-          {open && (
-            <ul className="px-3 pb-2.5 space-y-2 border-t border-rule-2 pt-2">
+            <button type="button">
+              <span>see alternatives ({alts.length})</span>
+              <span aria-hidden className="pm-rec__toggle-glyph" />
+            </button>
+          </Collapsible.Trigger>
+          <Collapsible.Panel className="pm-rec__panel">
+            <ul className="pm-rec__alts">
               {alts.map((a, i) => (
                 <AltRow key={i} alt={a} />
               ))}
             </ul>
-          )}
-        </div>
+          </Collapsible.Panel>
+        </Collapsible>
       )}
-    </div>
+    </Card>
   );
 }
 
 function AltRow({ alt }: { alt: PMRecommendationItem }) {
   return (
-    <li>
-      <div className="flex items-start justify-between gap-2">
-        <div className="font-sans text-[12px] text-ink leading-snug min-w-0">
-          {alt.title}
-        </div>
-        <UrgencyPill urgency={alt.urgency} />
-      </div>
-      <div className="font-serif italic text-[11px] text-ink-soft leading-snug">
-        {alt.why}
-      </div>
-      {alt.issueId && (
-        <div className="font-mono text-[10px] text-pencil">#{alt.issueId}</div>
-      )}
+    <li className="pm-rec__alt">
+      <Cluster justify="between" align="start" gap={2}>
+        <div className="pm-rec__alt-title">{alt.title}</div>
+        <UrgencyBadge urgency={alt.urgency} />
+      </Cluster>
+      <div className="pm-rec__alt-why">{alt.why}</div>
+      {alt.issueId && <div className="pm-rec__issue">#{alt.issueId}</div>}
     </li>
   );
 }
 
-function UrgencyPill({ urgency }: { urgency: string }) {
-  const tone = URGENCY_TONE[urgency] ?? URGENCY_TONE.medium;
+function UrgencyBadge({ urgency }: { urgency: string }) {
+  const intent = URGENCY_INTENT[urgency] ?? URGENCY_INTENT.medium;
   return (
-    <span
-      className={
-        "shrink-0 font-sans text-[9px] uppercase tracking-wider px-1.5 py-0.5 border rounded " +
-        tone
-      }
-    >
+    <Badge intent={intent} variant="soft" size="sm" className="pm-rec__urgency">
       {urgency}
-    </span>
+    </Badge>
   );
 }

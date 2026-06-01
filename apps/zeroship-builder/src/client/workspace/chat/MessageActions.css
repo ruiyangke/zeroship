@@ -1,0 +1,67 @@
+/*
+ * MessageActions — hover-revealed per-message action row.
+ *
+ * Presentation rides on @zeroship/ui: the row is a `Cluster` and each
+ * action is a `Button variant="plain" size="small"`. This file only
+ * carries the two bespoke behaviors the DS doesn't express:
+ *
+ *   1. Hover-reveal — the row reserves one caption line of vertical
+ *      space even when hidden (so revealing it on hover never shifts the
+ *      bubble layout), and fades in when the surrounding message bubble
+ *      (`.group`, set by MessageUser / MessageAssistant) is hovered or
+ *      holds focus. This reproduces the original Tailwind
+ *      `opacity-0 group-hover:opacity-100 focus-within:opacity-100`
+ *      transition in plain CSS so no Tailwind utility is needed here.
+ *
+ *   2. Micro-caption — the actions render as a tiny uppercase tracked
+ *      caption, denser than the DS `small` button default, matching the
+ *      original 10px pencil-grey treatment.
+ *
+ * Tokens only — --zs-* throughout; hairline-grade values in rem.
+ */
+
+.msg-actions {
+  margin-block-start: var(--zs-space-1); /* 2 — was Tailwind mt-1 */
+  /* Reserve one caption line so the row occupies vertical space even
+   * while hidden; the original fixed h-5 (20px) becomes the caption-2
+   * line metric so the reserved strip tracks the action text. */
+  min-block-size: var(--zs-text-caption-2-line);
+  opacity: 0;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Reveal when the surrounding bubble is hovered or holds focus. `.group`
+ * is the bubble wrapper class set by MessageUser / MessageAssistant. */
+.group:hover .msg-actions,
+.group:focus-within .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-actions {
+    transition: none;
+  }
+}
+
+/* Micro-caption action buttons. The DS `plain` Button already drops all
+ * chrome and uses accent/label text + hover; we only tighten it into the
+ * compact uppercase caption the row calls for. Scoped to `.msg-action`
+ * (the className on each Button) so nothing leaks to other plain buttons. */
+.msg-action.zs-button {
+  --zs-hit-min: auto; /* release the 44px hit-target floor for the inline row */
+  min-block-size: 0;
+  block-size: auto;
+  padding-block: 0;
+  padding-inline: 0;
+  font-size: var(--zs-text-caption-2-size); /* 11 — was text-[10px] */
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: 500;
+  letter-spacing: 0.04em; /* tracking-wider */
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary); /* pencil-grey at rest */
+}
+
+.msg-action.zs-button:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  color: var(--zs-label); /* ink on hover */
+}

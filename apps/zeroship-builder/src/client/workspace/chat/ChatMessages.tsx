@@ -1,5 +1,14 @@
 // Chat messages renderer for the workspace ChatRail.
 //
+// Crystal: the scroll surface rides the DS `ScrollArea` (compound API,
+// so the stick-to-bottom logic can attach its ref + onScroll to the
+// Viewport — which IS the real overflow container in Base UI's
+// ScrollArea, so `scrollTop`/`scrollHeight` behave exactly as they did
+// on the old hand-rolled `overflow-y-auto` div). Message rows are
+// arranged with the DS `Stack` primitive; the empty-state and inner
+// spacing chrome the DS doesn't cover live in ChatMessages.css over
+// `--zs-*` tokens. The assistant/user renderers + cards are unchanged.
+//
 // The assistant renderer dispatches several families of v6 message parts:
 //   - text                       → MessageAssistant text (concatenated)
 //   - tool-<name> / dynamic-tool → <Receipt> (one per toolCallId)
@@ -24,6 +33,7 @@
 
 import { useEffect, useRef, type ReactNode } from "react";
 import type { UIMessage } from "ai";
+import { ScrollArea, Stack } from "@zeroship/ui";
 import { MessageUser } from "./MessageUser";
 import { MessageAssistant } from "./MessageAssistant";
 import { Receipt } from "./Receipt";
@@ -44,6 +54,7 @@ import type {
   Survey,
   SurveyResponse,
 } from "../../types/chat";
+import "./ChatMessages.css";
 
 export interface ChatMessagesProps {
   messages: UIMessage[];
@@ -89,6 +100,12 @@ export function ChatMessages({
   onRegenerate,
   onEditUser,
 }: ChatMessagesProps) {
+  // The ref lands on the DS ScrollArea Viewport — which is the real
+  // overflow container in Base UI's ScrollArea (it carries the inline
+  // `overflow: scroll` and is the element whose `scrollTop` /
+  // `scrollHeight` Base UI itself reads). So the stick-to-bottom math
+  // below operates on the actual scroller, exactly as the old
+  // hand-rolled `overflow-y-auto` div did.
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -106,73 +123,85 @@ export function ChatMessages({
   }
 
   return (
-    <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      data-testid="chat-messages"
-      className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-5 min-h-0"
-    >
-      {messages.length === 0 && !busy && (
-        <div
-          data-testid="chat-empty"
-          className="flex flex-col gap-2 text-ink-soft"
-        >
-          <div className="font-display italic text-[18px] text-ink leading-tight">
-            What shall we make?
-          </div>
-          <div className="font-serif text-[13.5px] italic text-pencil leading-snug">
-            Describe an app, paste a screenshot, or sketch a feature.
-            Type{" "}
-            <span className="font-mono not-italic text-[12px]">@</span>{" "}
-            to mention a file, an issue, or a recent error.
-          </div>
-        </div>
-      )}
+    <ScrollArea.Root type="hover" className="zs-chat-messages">
+      <ScrollArea.Viewport
+        ref={scrollRef}
+        onScroll={onScroll}
+        data-testid="chat-messages"
+        className="zs-chat-messages__viewport"
+      >
+        <ScrollArea.Content className="zs-chat-messages__content">
+          <Stack gap={5} className="zs-chat-messages__stack">
+            {messages.length === 0 && !busy && (
+              <Stack
+                gap={2}
+                data-testid="chat-empty"
+                className="zs-chat-messages__empty"
+              >
+                <div className="zs-chat-messages__empty-title">
+                  What shall we make?
+                </div>
+                <div className="zs-chat-messages__empty-body">
+                  Describe an app, paste a screenshot, or sketch a feature.
+                  Type{" "}
+                  <span className="zs-chat-messages__empty-key">@</span>{" "}
+                  to mention a file, an issue, or a recent error.
+                </div>
+              </Stack>
+            )}
 
-      {messages.map((m, idx) => {
-        const text = (m.parts as Array<{ type: string; text?: string }>)
-          .filter((p) => p.type === "text")
-          .map((p) => p.text ?? "")
-          .join("");
+            {messages.map((m, idx) => {
+              const text = (m.parts as Array<{ type: string; text?: string }>)
+                .filter((p) => p.type === "text")
+                .map((p) => p.text ?? "")
+                .join("");
 
-        if (m.role === "user") {
-          return (
-            <MessageUser
-              key={m.id}
-              text={text}
-              onEdit={
-                onEditUser ? (newText) => onEditUser(m.id, newText) : undefined
+              if (m.role === "user") {
+                return (
+                  <MessageUser
+                    key={m.id}
+                    text={text}
+                    onEdit={
+                      onEditUser
+                        ? (newText) => onEditUser(m.id, newText)
+                        : undefined
+                    }
+                  />
+                );
               }
-            />
-          );
-        }
 
-        const isLast = idx === messages.length - 1;
-        const renderedParts = renderAssistantParts(m, {
-          onSubmitSurvey,
-          answeredSurveys,
-          onBeginBrief,
-          briefCommitted,
-          briefBusy,
-        });
-        return (
-          <MessageAssistant
-            key={m.id}
-            text={text}
-            streaming={isLast && busy}
-            parts={renderedParts}
-            // Only the latest assistant turn gets a regenerate button.
-            // Regenerating a mid-history turn would require truncating
-            // forward and replaying — the AI SDK's regenerate() always
-            // operates on the tail, so only expose it where it matches
-            // user intent.
-            onRegenerate={
-              onRegenerate && isLast && !busy ? onRegenerate : undefined
-            }
-          />
-        );
-      })}
-    </div>
+              const isLast = idx === messages.length - 1;
+              const renderedParts = renderAssistantParts(m, {
+                onSubmitSurvey,
+                answeredSurveys,
+                onBeginBrief,
+                briefCommitted,
+                briefBusy,
+              });
+              return (
+                <MessageAssistant
+                  key={m.id}
+                  text={text}
+                  streaming={isLast && busy}
+                  parts={renderedParts}
+                  // Only the latest assistant turn gets a regenerate button.
+                  // Regenerating a mid-history turn would require truncating
+                  // forward and replaying — the AI SDK's regenerate() always
+                  // operates on the tail, so only expose it where it matches
+                  // user intent.
+                  onRegenerate={
+                    onRegenerate && isLast && !busy ? onRegenerate : undefined
+                  }
+                />
+              );
+            })}
+          </Stack>
+        </ScrollArea.Content>
+      </ScrollArea.Viewport>
+      <ScrollArea.Scrollbar orientation="vertical">
+        <ScrollArea.Thumb />
+      </ScrollArea.Scrollbar>
+    </ScrollArea.Root>
   );
 }
 

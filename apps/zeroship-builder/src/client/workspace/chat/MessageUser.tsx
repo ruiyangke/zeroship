@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Button } from "../../components/Button";
-import { cn } from "../../lib/utils";
+import { Button, Stack } from "@zeroship/ui";
 import { MessageActions } from "./MessageActions";
+import "./MessageUser.css";
 
 export interface MessageUserProps {
   text: string;
@@ -57,13 +57,16 @@ export function MessageUser({ text, time, attachments, onEdit }: MessageUserProp
     setEditing(false);
   }
 
+  // `group` stays on the root: MessageActions reveals its hover row via
+  // the parent group-hover state. Crystal presentation lives in the
+  // co-located CSS keyed off `.msg-user`.
   return (
-    <div data-testid="msg-user" className="group">
-      <div className="font-sans text-[10px] uppercase tracking-wider text-pencil mb-1">
+    <Stack data-testid="msg-user" className="group msg-user" gap={1}>
+      <div className="msg-user__label">
         You{time ? ` · ${time}` : ""}
       </div>
       {editing ? (
-        <div className="border-l-2 border-tomato pl-3.5">
+        <div className="msg-user__edit">
           <textarea
             ref={textareaRef}
             data-testid="msg-edit-textarea"
@@ -79,17 +82,18 @@ export function MessageUser({ text, time, attachments, onEdit }: MessageUserProp
               }
             }}
             rows={Math.min(10, Math.max(2, draft.split("\n").length))}
-            className={cn(
-              "w-full resize-none bg-paper-2 border border-rule rounded",
-              "px-3 py-2 font-serif text-[15px] leading-snug text-ink",
-              "focus:outline-none focus:border-ink",
-            )}
+            className="msg-user__textarea"
           />
-          <div className="mt-2 flex items-center gap-2">
+          <Stack
+            direction="row"
+            gap={2}
+            align="center"
+            className="msg-user__edit-actions"
+          >
             <Button
               type="button"
-              variant="primary"
-              size="sm"
+              variant="filled"
+              size="small"
               data-testid="msg-edit-save"
               onClick={save}
               disabled={!draft.trim() || draft.trim() === text.trim()}
@@ -98,27 +102,27 @@ export function MessageUser({ text, time, attachments, onEdit }: MessageUserProp
             </Button>
             <Button
               type="button"
-              variant="ghost"
-              size="sm"
+              variant="plain"
+              size="small"
               data-testid="msg-edit-cancel"
               onClick={cancel}
             >
               Cancel
             </Button>
-          </div>
+          </Stack>
         </div>
       ) : (
         <>
-          <div className="font-serif text-[15px] leading-snug text-ink border-l-2 border-tomato pl-3.5 whitespace-pre-wrap break-words">
-            {text}
-          </div>
-          {attachments && <div className="mt-1 pl-3.5">{attachments}</div>}
+          <div className="msg-user__body">{text}</div>
+          {attachments && (
+            <div className="msg-user__attachments">{attachments}</div>
+          )}
           <MessageActions
             copyText={text}
             onEdit={onEdit ? startEdit : undefined}
           />
         </>
       )}
-    </div>
+    </Stack>
   );
 }

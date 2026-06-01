@@ -7,9 +7,9 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { Button } from "../../components/Button";
-import { cn } from "../../lib/utils";
+import { Button, Cluster } from "@zeroship/ui";
 import { MentionDropdown, type MentionItem } from "./MentionDropdown";
+import "./ChatComposer.css";
 
 export interface ChatComposerProps {
   value: string;
@@ -217,33 +217,23 @@ export function ChatComposer({
   }
 
   return (
-    <form
-      onSubmit={submit}
-      data-testid="chat-composer"
-      className={cn(
-        "border-t border-rule bg-paper",
-        "px-4 pt-3 pb-3 relative",
-      )}
-    >
+    <form onSubmit={submit} data-testid="chat-composer" className="chat-composer">
       {attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-2">
+        <Cluster gap={2} className="chat-composer__attachments">
           {attachments.map((f, i) => (
-            <div
-              key={i}
-              className="inline-flex items-center gap-1 px-2 py-1 bg-paper-2 border border-rule rounded text-[11px]"
-            >
-              <span className="font-mono">{f.name}</span>
+            <span key={i} className="chat-composer__chip">
+              <span className="chat-composer__chip-name">{f.name}</span>
               <button
                 type="button"
                 aria-label={`Remove ${f.name}`}
                 onClick={() => removeAttachment(i)}
-                className="text-ink-soft hover:text-blood cursor-pointer"
+                className="chat-composer__chip-remove"
               >
                 ✕
               </button>
-            </div>
+            </span>
           ))}
-        </div>
+        </Cluster>
       )}
 
       {mention && (
@@ -270,32 +260,26 @@ export function ChatComposer({
         onKeyDown={onKey}
         placeholder={busy ? "thinking…" : placeholder}
         data-testid="chat-input"
-        className={cn(
-          "w-full resize-none bg-paper-2 border border-rule rounded",
-          "px-3 py-2.5 font-serif text-[14.5px] leading-snug text-ink",
-          "placeholder:text-pencil placeholder:italic",
-          "focus:outline-none focus:border-ink",
-          "disabled:opacity-50",
-        )}
+        className="chat-composer__textarea"
       />
 
-      <div className="flex items-center justify-between mt-2">
-        <div className="flex items-center gap-2 text-[10.5px] text-pencil font-sans uppercase tracking-wider">
-          <span>⌘ ↵ to send · ↵ for newline · @ to mention</span>
-        </div>
-        <div className="flex items-center gap-2">
+      <Cluster justify="between" className="chat-composer__footer">
+        <span className="chat-composer__hint">
+          ⌘ ↵ to send · ↵ for newline · @ to mention
+        </span>
+        <Cluster gap={2}>
           <input
             ref={fileInputRef}
             type="file"
             multiple
             accept="image/*,.pdf,.json,.txt,.md"
             onChange={onPickFiles}
-            className="hidden"
+            className="chat-composer__file-input"
           />
           <Button
             type="button"
-            variant="ghost"
-            size="sm"
+            variant="plain"
+            size="small"
             onClick={() => fileInputRef.current?.click()}
             aria-label="Attach files"
           >
@@ -304,8 +288,9 @@ export function ChatComposer({
           {busy ? (
             <Button
               type="button"
-              variant="destructive"
-              size="sm"
+              variant="filled"
+              intent="destructive"
+              size="small"
               data-testid="chat-stop"
               onClick={onStop}
             >
@@ -314,16 +299,16 @@ export function ChatComposer({
           ) : (
             <Button
               type="submit"
-              variant="primary"
-              size="sm"
+              variant="filled"
+              size="small"
               data-testid="chat-send"
               disabled={!value.trim() && attachments.length === 0}
             >
               Send →
             </Button>
           )}
-        </div>
-      </div>
+        </Cluster>
+      </Cluster>
     </form>
   );
 }

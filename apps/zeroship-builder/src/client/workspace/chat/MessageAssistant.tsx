@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Stack } from "@zeroship/ui";
 import { MessageActions } from "./MessageActions";
+import "./MessageAssistant.css";
 
 export interface MessageAssistantProps {
   text: string;
@@ -21,44 +23,41 @@ export function MessageAssistant({
   parts,
   onRegenerate,
 }: MessageAssistantProps) {
+  // `group` stays on the root: MessageActions reveals its hover row via
+  // the parent group-hover state. Crystal presentation lives in the
+  // co-located CSS keyed off `.msg-assistant`.
   return (
-    <div data-testid="msg-assistant" className="group">
-      <div className="font-sans text-[10px] uppercase tracking-wider text-ink-soft mb-1">
-        Builder
-      </div>
-      <div className="font-serif text-[14.5px] leading-snug text-ink prose-headings:font-display prose-code:font-mono prose-code:text-[13px] prose-pre:bg-paper-2 prose-pre:border prose-pre:border-rule prose-pre:rounded prose-pre:p-2.5 prose-pre:text-[12.5px] prose-a:text-cobalt">
+    <Stack
+      data-testid="msg-assistant"
+      className="group msg-assistant"
+      gap={1}
+    >
+      <div className="msg-assistant__label">Builder</div>
+      <div className="msg-assistant__prose">
         {text ? (
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
               // Tables get a thin rule + small mono digits so they
-              // read in the narrow rail without breaking the editorial
+              // read in the narrow rail without breaking the prose
               // typography elsewhere.
               table: ({ children }) => (
-                <table className="border-collapse text-[12.5px] my-2">
-                  {children}
-                </table>
+                <table className="msg-assistant__table">{children}</table>
               ),
               th: ({ children }) => (
-                <th className="border border-rule px-2 py-1 text-left font-sans font-medium">
-                  {children}
-                </th>
+                <th className="msg-assistant__th">{children}</th>
               ),
               td: ({ children }) => (
-                <td className="border border-rule px-2 py-1 align-top">{children}</td>
+                <td className="msg-assistant__td">{children}</td>
               ),
-              // Inline `code` stays subtle; block code uses `pre` from
-              // the prose styles above.
+              // Inline `code` stays subtle; block code keeps its
+              // language-* class so the `pre` styles in the CSS apply.
               code: ({ children, className }) => {
                 const isBlock = (className ?? "").startsWith("language-");
                 if (isBlock) {
                   return <code className={className}>{children}</code>;
                 }
-                return (
-                  <code className="px-1 py-[1px] bg-paper-2 border border-rule rounded text-[12.5px]">
-                    {children}
-                  </code>
-                );
+                return <code className="msg-assistant__code">{children}</code>;
               },
               a: ({ href, children }) => (
                 <a href={href} target="_blank" rel="noreferrer noopener">
@@ -70,16 +69,13 @@ export function MessageAssistant({
             {text}
           </ReactMarkdown>
         ) : streaming ? (
-          <span className="italic text-pencil">thinking…</span>
+          <span className="msg-assistant__thinking">thinking…</span>
         ) : null}
         {streaming && text && (
-          <span
-            aria-hidden="true"
-            className="inline-block ml-0.5 w-[6px] h-[14px] bg-ink/70 align-middle"
-          />
+          <span aria-hidden="true" className="msg-assistant__cursor" />
         )}
       </div>
-      {parts && <div className="mt-1">{parts}</div>}
+      {parts && <div>{parts}</div>}
       {text && (
         <MessageActions
           copyText={text}
@@ -87,6 +83,6 @@ export function MessageAssistant({
           busy={streaming}
         />
       )}
-    </div>
+    </Stack>
   );
 }

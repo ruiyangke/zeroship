@@ -1,0 +1,54 @@
+/*
+ * CriticRoundCard — bespoke styling over @zeroship/ui tokens.
+ *
+ * The DS Card supplies the outline surface; we tighten it to a compact
+ * inline chip (auto width, small padding, no gap) so it sits unobtrusively
+ * in the chat stream next to the diff cards it annotates. Inside, a
+ * horizontal DescriptionList lays out the two term/detail pairs in one
+ * tight row; the term reads as a quiet uppercase caption, the detail and
+ * status Badge carry the value.
+ */
+
+.zs-critic-round.zs-critic-round {
+  display: inline-block;
+  width: auto;
+  margin-block-start: var(--zs-space-2);
+  padding: var(--zs-space-1) var(--zs-space-3);
+}
+
+.zs-critic-round__list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-1) var(--zs-space-4);
+}
+
+/* Each term/detail pair becomes a tight inline "label value" cluster
+ * rather than the DescriptionList's default two-column grid — keeps the
+ * chip narrow and horizontal. */
+.zs-critic-round__list [data-slot="description-list-item"] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+}
+
+.zs-critic-round__list [data-slot="description-list-term"] {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+.zs-critic-round__list [data-slot="description-list-detail"] {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+}

@@ -1,0 +1,95 @@
+/*
+ * BriefCard — component-scoped styling.
+ *
+ * Crystal-only: every value reads a --zs-* token (or an em letter-
+ * spacing / 0.0625rem hairline). No raw hex/px, no Tailwind utilities,
+ * no editorial tokens. The Card / DescriptionList / Tag / Button chrome
+ * comes from @zeroship/ui; this file only sets the card's outer margin +
+ * committed dim, the eyebrow's uppercase footnote treatment, the brief's
+ * reading type, and the accent bullet on each answer pair.
+ */
+
+.zs-brief-card {
+  margin-block-start: var(--zs-space-3);
+}
+
+/* Once Begin has fired the card stays as a record but dims so the user
+   reads the action as in-flight / already-fired. */
+.zs-brief-card[data-committed] {
+  opacity: 0.7;
+}
+
+/* ─── Eyebrow — "Brief ready" / "What you told me" ──────────────────── */
+
+/* The Tag chrome carries the chip shell; here we override it to read as
+   a quiet uppercase caption rather than a filled pill. */
+.zs-brief-card__eyebrow.zs-tag {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  padding-inline: 0;
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ─── Summary — the LLM's refined brief ─────────────────────────────── */
+
+.zs-brief-card__summary {
+  margin: 0;
+  color: var(--zs-label);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+/* ─── Answer trail — question → answer pairs ────────────────────────── */
+
+/* A hairline rule above the trail so it reads as a distinct band, the
+   way the former editorial border-top did. */
+.zs-brief-card__answers {
+  padding-block-start: var(--zs-space-3);
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+.zs-brief-card__trail {
+  margin: 0;
+}
+
+/* Accent bullet leading each pair — the former tomato `·` marker. */
+.zs-brief-card__pair {
+  position: relative;
+  padding-inline-start: var(--zs-space-3);
+}
+
+.zs-brief-card__pair::before {
+  content: "·";
+  position: absolute;
+  inset-inline-start: 0;
+  color: var(--zs-accent);
+  font-weight: 700;
+}
+
+.zs-brief-card__question {
+  color: var(--zs-label);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+.zs-brief-card__answer {
+  margin-inline-start: 0;
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+/* ─── Footer note ───────────────────────────────────────────────────── */
+
+.zs-brief-card__note {
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-style: italic;
+}

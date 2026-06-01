@@ -1,0 +1,120 @@
+/*
+ * Receipt — bespoke styling over @zeroship/ui tokens.
+ *
+ * The DS Card (variant="outline") supplies the framed surface; the rules
+ * below carry what the catalog doesn't: the head row (status glyph · summary
+ * stack · details toggle), the success/error glyph circles, and the expanded
+ * input/output code blocks. Everything reads from --zs-* tokens so the
+ * receipt tracks the active theme.
+ */
+
+/* Card frame — small top margin so it sits in the chat stream, own padding. */
+.receipt.receipt {
+  margin-block-start: var(--zs-space-2);
+  padding: var(--zs-space-2) var(--zs-space-3);
+}
+
+/* Head row — status glyph, summary stack, trailing toggle. */
+.receipt__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--zs-space-3);
+}
+
+/* Status slot — fixed box so the glyph / spinner never shifts the text. */
+.receipt__status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.125rem;
+  block-size: 1.125rem;
+  margin-block-start: 0.0625rem;
+}
+
+/* Success / error glyph — a small filled circle carrying a contrasting mark. */
+.receipt__glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+  border-radius: var(--zs-radius-full);
+  color: var(--zs-surface);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: 1;
+  font-weight: var(--zs-text-caption-1-weight);
+}
+
+.receipt__glyph--done {
+  background: var(--zs-system-green);
+}
+
+.receipt__glyph--error {
+  background: var(--zs-system-red);
+}
+
+/* Summary stack — body summary over a quiet monospace tool name. */
+.receipt__text {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-label);
+}
+
+.receipt__tool {
+  margin-block-start: 0.0625rem;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* Details toggle — center it against the summary; compact link-style button. */
+.receipt__toggle.receipt__toggle {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* Expanded details — input/output pairs stacked above their code blocks,
+ * separated from the head by a hairline. */
+.receipt__details.receipt__details {
+  margin-block-start: var(--zs-space-2);
+  padding-block-start: var(--zs-space-2);
+  border-block-start: 0.0625rem solid var(--zs-separator);
+  gap: var(--zs-space-2);
+}
+
+.receipt__details [data-slot="description-list-term"] {
+  margin: 0;
+  margin-block-end: 0.0625rem;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+.receipt__details [data-slot="description-list-detail"] {
+  margin: 0;
+}
+
+/* JSON code block — monospace, height-capped, scrollable, soft inset fill. */
+.receipt__json {
+  margin: 0;
+  max-block-size: 8rem;
+  overflow: auto;
+  padding: var(--zs-space-1) var(--zs-space-2);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-2);
+  background: var(--zs-fill-tertiary);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

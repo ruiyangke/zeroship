@@ -1,0 +1,155 @@
+/*
+ * SREFindingCard — crystal SRE finding.
+ *
+ * The DS Card frames the finding and the DS Badge carries the severity
+ * word; the bespoke rules below are limited to the things the catalog
+ * doesn't carry: the severity-toned left-edge bar, the eyebrow header
+ * row, the "fix" recommendation line with its inline eyebrow, and the
+ * monospace related-logs block. Everything reads from --zs-* tokens so
+ * the card tracks the active theme.
+ *
+ * Severity → tone bar ink (the left edge mirrors the Badge intent):
+ *   info     → separator-strong (quiet FYI)
+ *   warning  → system-orange    (degraded but live)
+ *   error    → system-red       (broken for some)
+ *   critical → system-red       (broken for all / data loss)
+ */
+
+/* Root — Card with a severity tone bar pulled to the inline-start edge. */
+.sre-finding {
+  margin-block-start: var(--zs-space-2);
+  /* Tone bar via a left inset border; the Card root clips it to the
+   * card radius. Width matches the original 1px rule scaled to a token. */
+  position: relative;
+  overflow: hidden;
+  padding: 0;
+}
+
+/* The tone bar — an absolutely-positioned inline-start ribbon so it
+ * spans the full card height regardless of content. */
+.sre-finding::after {
+  content: none;
+}
+
+.sre-finding__bar {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 0.1875rem;
+  background: var(--zs-separator-strong);
+}
+
+.sre-finding[data-severity="warning"] .sre-finding__bar {
+  background: var(--zs-system-orange);
+}
+
+.sre-finding[data-severity="error"] .sre-finding__bar,
+.sre-finding[data-severity="critical"] .sre-finding__bar {
+  background: var(--zs-system-red);
+}
+
+/* Header row — eyebrow on the inline-start, severity Badge on the end,
+ * on a hairline divider. */
+.sre-finding__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-4);
+  padding-inline-start: var(--zs-space-4);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+
+/* Small uppercase eyebrow — "sre · finding". */
+.sre-finding__eyebrow {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+/* Body — diagnosis headline + recommendation. */
+.sre-finding__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+}
+
+.sre-finding__diagnosis {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label);
+}
+
+/* Recommendation — the actionable bit, with an inline "fix" eyebrow. */
+.sre-finding__recommendation {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+}
+
+.sre-finding__fix-eyebrow {
+  font-size: var(--zs-text-caption-2-size);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+  margin-inline-end: var(--zs-space-2);
+}
+
+/* ─── related logs disclosure ──────────────────────────────────────── */
+
+.sre-finding__logs {
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+/* The Collapsible trigger sits flush in the card; the DS chevron rides
+ * at inset-inline-end. Quiet eyebrow ink that brightens on hover. */
+.sre-finding__logs-trigger {
+  inline-size: 100%;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-4);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}
+
+.sre-finding__logs-trigger:hover {
+  color: var(--zs-label);
+}
+
+/* Panel content — per-log source eyebrow over a monospace excerpt. */
+.sre-finding__logs-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  padding-block-start: var(--zs-space-3);
+  padding-block-end: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+  border-block-start: 0.0625rem solid var(--zs-separator);
+}
+
+.sre-finding__log-source {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-tertiary);
+}
+
+.sre-finding__log-excerpt {
+  margin: 0;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
