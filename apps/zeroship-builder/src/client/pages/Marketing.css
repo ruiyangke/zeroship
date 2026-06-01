@@ -1,89 +1,881 @@
 /*
- * Marketing — crystal skin for the public landing page.
+ * Marketing — "Sun-Warmed Riso on a fine small-press chase."
  *
- * The page is built on the @zeroship/ui `sections/` layer (Hero,
- * FeatureGrid, StatsBand, Cta, Footer): each is a full-bleed band that
- * owns its own inner Container measure + vertical rhythm, so this sheet
- * paints only the bits the DS doesn't ship as a section:
- *   - the page backdrop + min-height column;
- *   - the bespoke "featured templates" gallery band (a DS section doesn't
- *     cover a card-gallery, so it's a hand-composed Container + Grid band
- *     that matches the surrounding band rhythm);
- *   - the № step-number lead-in on the "how it works" feature titles;
- *   - the footer brand wordmark + accent dot.
+ * A bespoke warm-tactile skin for the public landing page. The DS section
+ * bands are gone; this sheet hand-builds an editorial, left-aligned zine:
+ * warm cream paper, a single confident terracotta second-ink pass, Fraunces
+ * set SOFT + high-opsz for every display heading, an offset-print grain over
+ * everything, and warm-brown rules-and-frames as first-class texture.
  *
- * Everything reads --zs-* tokens — no raw hex/px (0.0625rem hairline
- * only), no Tailwind, no editorial tokens.
+ * PALETTE DISCIPLINE: every raw warm value lives ONLY in the --mk-* custom
+ * properties declared on .zs-marketing — scoped, never global, no Tailwind.
+ * The crystal --zs-accent / --zs-accent-ink / --zs-surface-bg / --zs-label
+ * are deliberately REMAPPED inside that scope so the DS Button, the shared
+ * PublicNav "Sign up", and any DS internals inherit the warmth with zero
+ * markup forks and zero global leak. Rhythm reuses the --zs-space / --zs-radius
+ * scale; the type scale tokens drive body/caption sizing.
+ *
+ * MOTION: "ink doesn't bounce" — fades + small upward settles + press/lift,
+ * ≤620ms, decelerating ease. Every animated element's static end-state is
+ * fully present, so reduced-motion users (and a never-firing observer) get a
+ * complete page. The grain is static in all modes.
  */
 
-/* ─── page shell ───────────────────────────────────────────────────── */
+/* ─── scoped warm palette + crystal-token remap ────────────────────────── */
 .zs-marketing {
+  /* paper + ink (warm cream stock; never pure #fff/#000) */
+  --mk-paper: #f4ece0;        /* base sun-faded wheat — page backdrop */
+  --mk-paper-sunlit: #faf3e6; /* lighter cream — top-right hero sun-pool */
+  --mk-paper-kraft: #ece0cf;  /* deeper kraft — muted bands, footer */
+  --mk-ink: #2e2114;          /* warm espresso-brown — headings + lead body */
+  --mk-ink-soft: #6b5946;     /* warm taupe-brown — descriptions, secondary */
+  --mk-ink-faint: #9c8a73;    /* warm sand-gray — eyebrows, captions */
+
+  /* accent — the second Riso ink pass (terracotta → ochre), used sparingly */
+  --mk-accent: #c4622d;       /* terracotta — CTA fill, dot, large display */
+  --mk-accent-deep: #a64a1f;  /* burnt-sienna — hover/active + accent base + small text */
+  --mk-accent-ochre: #d98a3d; /* warm ochre — sun-pool tint + the № folios */
+  --mk-accent-ink: #fbf4e8;   /* warm cream type on the terracotta field */
+  --mk-accent-wash: rgba(196, 98, 45, 0.08); /* faint terracotta hover wash */
+
+  /* structure: warm hairlines + plate frames (brown-tinted, never gray) */
+  --mk-card: #fbf5ea;
+  --mk-hairline: rgba(46, 33, 20, 0.12);
+  --mk-hairline-strong: rgba(46, 33, 20, 0.30);
+  --mk-hairline-faint: rgba(46, 33, 20, 0.07);
+
+  /* warm two-layer shadows (contact + wide warm-brown ambient) */
+  --mk-shadow:
+    0 1px 2px rgba(46, 33, 20, 0.04),
+    0 12px 28px -10px rgba(120, 70, 30, 0.16);
+  --mk-shadow-lift:
+    0 1px 2px rgba(46, 33, 20, 0.05),
+    0 20px 40px -12px rgba(120, 70, 30, 0.22);
+  --mk-shadow-stamp:
+    inset 0 1px 0 rgba(251, 244, 232, 0.28),
+    0 2px 6px rgba(120, 70, 30, 0.22);
+
+  /* the warm paper-physical reveal ease — decelerates like paper settling */
+  --mk-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* === remap crystal tokens to warm so DS surfaces inherit warmth === */
+  --zs-accent: var(--mk-accent);
+  --zs-accent-active: var(--mk-accent-deep);
+  --zs-accent-ink: var(--mk-accent-ink);
+  --zs-surface-bg: var(--mk-paper);
+  --zs-label: var(--mk-ink);
+
+  position: relative;
   min-height: 100vh;
   min-height: 100dvh;
-  background-color: var(--zs-surface-bg);
-  color: var(--zs-label);
+  color: var(--mk-ink);
+  font-family: var(--zs-font-system);
+
+  /* (2) SUN-POOL WASH — light through a studio window, pooled top-right */
+  background:
+    radial-gradient(
+      120% 90% at 88% -10%,
+      var(--mk-paper-sunlit) 0%,
+      rgba(250, 243, 230, 0) 55%
+    ),
+    radial-gradient(
+      90% 70% at 8% 4%,
+      rgba(217, 138, 61, 0.06) 0%,
+      rgba(217, 138, 61, 0) 50%
+    ),
+    var(--mk-paper);
 }
 
+/* (1) OFFSET-PRINT GRAIN — full-page fixed overlay, multiply-blended so it
+ * soaks INTO the cream like ink on uncoated stock (reads as fibre). */
+.zs-marketing::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 220px 220px;
+}
+
+/* All content sits above the grain. */
 .zs-marketing__main {
+  position: relative;
+  z-index: 1;
   display: block;
 }
 
-/* ─── "how it works" — the № step lead-in ──────────────────────────── */
-/* The feature title is a heading; the № prefix is a small accent caption
- * stacked above the step name so the four steps read as a numbered run. */
-.zs-marketing__step-num {
-  display: block;
-  margin-block-end: var(--zs-space-1);
+/* ─── PublicNav harmonized to a printed masthead (scoped override) ─────── */
+/* DO NOT edit PublicNav.css — only scope-override it here so the cool
+ * default band reads as a warm page rule on the paper. */
+.zs-marketing .zs-public-nav {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  border-block-end: 0.0625rem solid var(--mk-hairline);
+}
+.zs-marketing .zs-public-nav__brand {
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-style: normal;
+  font-weight: 500;
+  font-variation-settings: "opsz" 40, "SOFT" 50;
+  letter-spacing: -0.01em;
+  color: var(--mk-ink);
+}
+.zs-marketing .zs-public-nav__brand-dot {
+  color: var(--mk-accent);
+}
+.zs-marketing .zs-public-nav__link {
+  color: var(--mk-ink-faint);
+}
+.zs-marketing .zs-public-nav__link:hover {
+  color: var(--mk-accent-deep);
+}
+.zs-marketing .zs-public-nav__link--active {
+  color: var(--mk-ink);
+}
+
+/* ─── shared editorial atoms ───────────────────────────────────────────── */
+
+/* Eyebrow — uppercase letter-spaced caption in faint sand-gray. */
+.zs-mk-eyebrow {
+  margin: 0;
   font-size: var(--zs-text-caption-1-size);
   line-height: var(--zs-text-caption-1-line);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--zs-accent-active);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--mk-ink-faint);
+}
+/* A short masthead rule beneath the issue-tag eyebrow. */
+.zs-mk-eyebrow--rule {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+}
+.zs-mk-eyebrow--rule::after {
+  content: "";
+  display: block;
+  inline-size: 3.5rem;
+  block-size: 0.0625rem;
+  background: var(--mk-hairline);
+}
+.zs-mk-eyebrow--accent {
+  color: var(--mk-accent-ink);
+  opacity: 0.85;
 }
 
-/* ─── featured templates — bespoke gallery band ────────────────────── */
-/* Mirrors the DS section block rhythm (cf. Hero/FeatureGrid padding-block:
- * var(--zs-space-10)) so the gallery sits in the same cadence as the bands
- * above and below it. Full-bleed width with the inner Container owning the
- * readable measure. */
-.zs-marketing__templates {
-  inline-size: 100%;
-  padding-block: var(--zs-space-10);
-}
-
-/* The band header: eyebrow + title at the inline-start, a "See all" action
- * at the inline-end; wraps gracefully on narrow widths. */
-.zs-marketing__templates-head {
+/* Section header — start-aligned, capped to a readable measure. */
+.zs-mk-head {
   display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+  max-inline-size: 44rem;
+  margin-block-end: var(--zs-space-9);
+}
+.zs-mk-head__title {
+  margin: 0;
+  font-family: "Fraunces Variable", Georgia, serif;
+  /* opsz tracks the rendered px (~28–42px): feeding the display opsz 64 to a
+   * ~34px glyph over-applies thin-thick contrast. ~44 matches the size, and
+   * the clamp enlarges the interior voice so it doesn't read a step too quiet
+   * against the hero (opsz 128) and CTA (opsz 96). */
+  font-variation-settings: "opsz" 44, "wght" 440, "SOFT" 55;
+  font-size: clamp(1.75rem, 3.2vw, 2.625rem);
+  line-height: 1.08;
+  letter-spacing: -0.014em;
+  color: var(--mk-ink);
+}
+.zs-mk-head__sub {
+  margin: 0;
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--mk-ink-soft);
+}
+/* Header with a trailing action at the inline-end (templates band). */
+.zs-mk-head--row {
+  flex-direction: row;
   flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--zs-space-4);
+  max-inline-size: none;
 }
-
-.zs-marketing__templates-title {
-  margin-block: 0;
-  font-size: var(--zs-text-title-1-size);
-  line-height: var(--zs-text-title-1-line);
-  font-weight: var(--zs-text-title-1-weight);
-  letter-spacing: var(--zs-text-title-1-tracking);
-  color: var(--zs-label);
+.zs-mk-head__lead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
 }
+/* NOTE: no centered section-header modifier — the page is editorial
+ * left-aligned THROUGHOUT (honouring Hero align=start). Centering is reserved
+ * exclusively for the one CTA seal (.zs-mk-cta__cartouche). */
 
-/* ─── footer brand wordmark ────────────────────────────────────────── */
-.zs-marketing__footer-brand {
+/* Plain warm draw-on link — a 1px accent rule drawn from the left on hover,
+ * with the trailing → nudging right. Never a default underline. */
+.zs-mk-link {
+  /* A11y tap-target floor: inline-flex + centered content + min-block-size
+   * inflates the hit box to >=32px without moving the ink baseline. The
+   * draw-on rule is anchored just under the TEXT line (50% + ~0.62em), not the
+   * box bottom, so the taller hit box never detaches the underline. */
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 2rem;
+  gap: var(--zs-space-1);
   font-family: var(--zs-font-system);
-  font-size: var(--zs-text-headline-size);
-  line-height: var(--zs-text-headline-line);
-  font-style: italic;
-  font-weight: var(--zs-text-headline-weight);
-  color: var(--zs-label);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+  font-weight: 560;
+  color: var(--mk-ink-soft);
   text-decoration: none;
-  transition: opacity 120ms ease;
+  background-image: linear-gradient(var(--mk-accent), var(--mk-accent));
+  background-repeat: no-repeat;
+  background-position: 0 calc(50% + 0.62em);
+  background-size: 0% 0.0625rem;
+  transition:
+    color 120ms var(--mk-ease),
+    background-size 200ms var(--mk-ease);
+}
+.zs-mk-link:hover,
+.zs-mk-link:focus-visible {
+  color: var(--mk-accent-deep);
+  background-size: 100% 0.0625rem;
+}
+.zs-mk-link span[aria-hidden] {
+  transition: transform 160ms var(--mk-ease);
+}
+.zs-mk-link:hover span[aria-hidden],
+.zs-mk-link:focus-visible span[aria-hidden] {
+  transform: translateX(3px);
+}
+.zs-mk-link--lg {
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+/* On the terracotta seal: cream ink + cream draw-on rule. */
+.zs-mk-link--on-accent {
+  color: var(--mk-accent-ink);
+  background-image: linear-gradient(var(--mk-accent-ink), var(--mk-accent-ink));
+}
+.zs-mk-link--on-accent:hover,
+.zs-mk-link--on-accent:focus-visible {
+  color: var(--mk-accent-ink);
+  opacity: 0.92;
+}
+.zs-mk-link--footer {
+  /* The footnote-line (18px) footer links get a little vertical padding so the
+   * dense column clears the 32px tap-target floor comfortably. */
+  padding-block: var(--zs-space-1);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: 500;
+}
+
+/* Ink-stamp primary button — debossed top highlight + warm drop; on :active
+ * the drop collapses to just the inset highlight (pressed into paper). */
+.zs-mk-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 2.875rem;
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-7);
+  border: none;
+  border-radius: var(--zs-radius-full);
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 28, "wght" 500, "SOFT" 40;
+  font-size: var(--zs-text-callout-size);
+  line-height: 1;
+  letter-spacing: -0.005em;
+  cursor: pointer;
+}
+.zs-mk-btn--stamp {
+  background: var(--mk-accent);
+  color: var(--mk-accent-ink);
+  box-shadow: var(--mk-shadow-stamp);
+  transition:
+    transform 140ms var(--mk-ease),
+    background-color 140ms var(--mk-ease),
+    box-shadow 140ms var(--mk-ease);
+}
+.zs-mk-btn--stamp:hover {
+  background: var(--mk-accent-deep);
+  box-shadow: var(--mk-shadow-lift);
+  transform: translateY(-1px);
+}
+.zs-mk-btn--stamp:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 0 rgba(251, 244, 232, 0.28);
+}
+/* On the terracotta band the stamp inverts: cream field, terracotta ink. */
+.zs-mk-btn--on-accent {
+  background: var(--mk-accent-ink);
+  color: var(--mk-accent-deep);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 2px 8px rgba(60, 25, 5, 0.28);
+}
+.zs-mk-btn--on-accent:hover {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(46, 33, 20, 0.05), 0 16px 30px -10px rgba(60, 25, 5, 0.34);
+  transform: translateY(-1px);
+}
+.zs-mk-btn--on-accent:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+/* Visible warm focus ring everywhere — never removed. */
+.zs-marketing :focus-visible {
+  outline: 0.125rem solid var(--mk-accent);
+  outline-offset: 0.1875rem;
+  border-radius: 0.0625rem;
+}
+.zs-mk-cta :focus-visible {
+  outline-color: var(--mk-accent-ink);
+}
+
+/* ─── band rhythm ──────────────────────────────────────────────────────── */
+.zs-mk-band {
+  position: relative;
+  inline-size: 100%;
+  padding-block: var(--zs-space-10);
+}
+/* Muted kraft recess bands carry a top/bottom hairline + faint laid striae
+ * (mould-lines) under the panel fill so they read as their own zine spread. */
+.zs-mk-band--kraft {
+  background-color: var(--mk-paper-kraft);
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0 6px,
+    rgba(46, 33, 20, 0.018) 6px 7px
+  );
+  border-block: 0.0625rem solid var(--mk-hairline);
+}
+
+/* ─── Hero ─────────────────────────────────────────────────────────────── */
+.zs-mk-hero {
+  position: relative;
+  z-index: 1;
+  padding-block: clamp(var(--zs-space-10), 12vh, 9rem) var(--zs-space-10);
+}
+.zs-mk-hero__col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--zs-space-6);
+}
+.zs-mk-hero__title {
+  margin: 0;
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 128, "wght" 380, "SOFT" 60;
+  font-size: clamp(2.75rem, 8.5vw, 5.75rem);
+  line-height: 0.98;
+  letter-spacing: -0.018em;
+  color: var(--mk-ink);
+  text-wrap: balance;
+}
+.zs-mk-hero__lede {
+  margin: 0;
+  max-inline-size: 62ch;
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1.5;
+  color: var(--mk-ink-soft);
+}
+.zs-mk-hero__lede strong {
+  font-weight: 560;
+  color: var(--mk-ink);
+}
+.zs-mk-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-5);
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── How it works — typographer's table of contents ───────────────────── */
+.zs-mk-toc {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-block-start: 0.0625rem solid var(--mk-hairline-faint);
+}
+.zs-mk-toc__row {
+  display: grid;
+  grid-template-columns: minmax(4.5rem, auto) 1fr;
+  gap: var(--zs-space-5);
+  align-items: baseline;
+  padding-block: var(--zs-space-6);
+  padding-inline: var(--zs-space-3);
+  border-block-end: 0.0625rem solid var(--mk-hairline-faint);
+  border-radius: var(--zs-radius-3);
+  transition: background-color 160ms var(--mk-ease);
+}
+.zs-mk-toc__row:hover {
+  background-color: var(--mk-accent-wash);
+}
+.zs-mk-toc__folio {
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 40, "wght" 460, "SOFT" 40;
+  font-size: var(--zs-text-title-2-size);
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--mk-accent-ochre);
+  white-space: nowrap;
+  transition: color 160ms var(--mk-ease);
+}
+.zs-mk-toc__row:hover .zs-mk-toc__folio {
+  color: var(--mk-accent-deep);
+}
+.zs-mk-toc__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+}
+.zs-mk-toc__title {
+  margin: 0;
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 44, "wght" 480, "SOFT" 32;
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1.15;
+  letter-spacing: -0.008em;
+  color: var(--mk-ink);
+}
+.zs-mk-toc__body {
+  margin: 0;
+  max-inline-size: 54ch;
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--mk-ink-soft);
+}
+
+/* ─── Featured templates — engraved calling-card plates ────────────────── */
+.zs-marketing__templates {
+  background: transparent;
+}
+.zs-mk-plates {
+  margin-block-start: var(--zs-space-9);
+}
+/* Each plate: the wrapper carries the warm shadow + inner ::before frame so
+ * the TemplateCard reads as a bordered ex-libris plate, not a UI tile. The
+ * card itself keeps its DS markup; we warm + frame it from the outside. */
+.zs-mk-plate {
+  position: relative;
+  block-size: 100%;
+  border-radius: var(--zs-radius-7);
+  box-shadow: var(--mk-shadow);
+  transition:
+    transform 180ms var(--mk-ease),
+    box-shadow 180ms var(--mk-ease);
+}
+/* Inner engraved frame — a rule inset ~5px inside the plate edge, drawn at
+ * full warm-hairline strength AT REST so the ex-libris double-rule reads as a
+ * framed plate before the cursor ever touches it. Hover only deepens the rule
+ * (→ strong) to confirm the lift; the plate never depends on interaction to
+ * read as a plate. */
+.zs-mk-plate::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  z-index: 2;
+  border: 0.0625rem solid var(--mk-hairline);
+  border-radius: calc(var(--zs-radius-7) - 5px);
+  pointer-events: none;
+  transition: border-color 180ms var(--mk-ease);
+}
+.zs-mk-plate:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--mk-shadow-lift);
+}
+.zs-mk-plate:hover::before {
+  border-color: var(--mk-hairline-strong);
+}
+/* Warm the DS Card surface that TemplateCard renders inside the plate. */
+.zs-mk-plate .zs-template-card {
+  block-size: 100%;
+  background: var(--mk-card);
+  border: 0.0625rem solid var(--mk-hairline);
+  border-radius: var(--zs-radius-7);
+  box-shadow: none;
+}
+
+/* ─── Why it's different — warm-badge feature run ──────────────────────── */
+.zs-mk-feature {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--zs-space-3);
+}
+.zs-mk-feature__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 3rem;
+  block-size: 3rem;
+  margin-block-end: var(--zs-space-2);
+  border-radius: var(--zs-radius-5);
+  background: var(--mk-accent-wash);
+  color: var(--mk-accent-deep);
+  transition: background-color 160ms var(--mk-ease);
+}
+.zs-mk-feature:hover .zs-mk-feature__badge {
+  background: rgba(196, 98, 45, 0.14);
+}
+.zs-mk-feature__title {
+  margin: 0;
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 36, "wght" 500, "SOFT" 36;
+  font-size: var(--zs-text-headline-size);
+  line-height: 1.2;
+  letter-spacing: -0.006em;
+  color: var(--mk-ink);
+}
+.zs-mk-feature__body {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: 1.5;
+  color: var(--mk-ink-soft);
+}
+
+/* ─── Proof bar — scotch-rule framed catalogue prices ──────────────────── */
+/* Scotch rule = a thick member with a thin sibling rule a few px away. The
+ * wrapper top edge is the thick member; ::before/::after are the thin pair. */
+.zs-mk-scotch {
+  position: relative;
+  border-block: 0.125rem solid var(--mk-hairline-strong);
+  padding-block: var(--zs-space-9);
+}
+.zs-mk-scotch::before,
+.zs-mk-scotch::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  block-size: 0.0625rem;
+  background: var(--mk-hairline);
+}
+.zs-mk-scotch::before {
+  inset-block-start: 3px;
+}
+.zs-mk-scotch::after {
+  inset-block-end: 3px;
+}
+/* Left-justified catalogue price table — figures sit at the inline-start
+ * within the scotch frame (a typographer's price list), NOT a centered 3-up
+ * stat strip. Columns size to content so the run reads left-to-right; the
+ * vertical printer's rules sit between figures with symmetric breathing room. */
+.zs-mk-stats__row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, max-content));
+  justify-content: start;
+  margin: 0;
+}
+.zs-mk-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--zs-space-3);
+  padding-inline-end: var(--zs-space-8);
+  text-align: start;
+}
+/* Tall thin vertical printer's rules between the three figures, with matching
+ * inline padding on each side so the rule reads as a centered gutter divider. */
+.zs-mk-stat + .zs-mk-stat {
+  padding-inline-start: var(--zs-space-8);
+  border-inline-start: 0.0625rem solid var(--mk-hairline);
+}
+.zs-mk-stat__value {
+  margin: 0;
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 90, "wght" 460, "SOFT" 40;
+  /* oldstyle figures — big warm catalogue prices */
+  font-feature-settings: "onum" 1;
+  font-size: clamp(2.25rem, 6vw, 3.5rem);
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--mk-ink);
+}
+.zs-mk-stat__label {
+  margin: 0;
+  max-inline-size: 18ch;
+  font-size: var(--zs-text-footnote-size);
+  line-height: 1.45;
+  color: var(--mk-ink-soft);
+}
+
+/* ─── Closing CTA — printed terracotta seal ────────────────────────────── */
+.zs-mk-cta {
+  background: transparent;
+}
+.zs-mk-cta__cartouche {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--zs-space-5);
+  padding: clamp(var(--zs-space-8), 6vw, var(--zs-space-10));
+  border-radius: var(--zs-radius-6);
+  text-align: center;
+  background: var(--mk-accent);
+  color: var(--mk-accent-ink);
+  box-shadow: var(--mk-shadow-lift);
+  overflow: hidden;
+}
+/* Bump the band grain here so the terracotta reads as ink on stock. */
+.zs-mk-cta__cartouche::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+  opacity: 0.08;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 220px 220px;
+}
+/* A fine inner double-rule cartouche frame — the seal's printed border. */
+.zs-mk-cta__cartouche::before {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  z-index: 1;
+  border: 0.0625rem solid rgba(251, 244, 232, 0.45);
+  border-radius: var(--zs-radius-6);
+  pointer-events: none;
+}
+.zs-mk-cta__cartouche > * {
+  position: relative;
+  z-index: 2;
+}
+.zs-mk-cta__title {
+  margin: 0;
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-variation-settings: "opsz" 96, "wght" 460, "SOFT" 55;
+  font-size: clamp(2rem, 5.5vw, 3.25rem);
+  line-height: 1.05;
+  letter-spacing: -0.014em;
+  color: var(--mk-accent-ink);
+  text-wrap: balance;
+}
+.zs-mk-cta__desc {
+  margin: 0;
+  max-inline-size: 52ch;
+  font-size: var(--zs-text-body-size);
+  line-height: 1.55;
+  color: var(--mk-accent-ink);
+  opacity: 0.9;
+}
+.zs-mk-cta__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-5);
+  margin-block-start: var(--zs-space-2);
+}
+
+/* ─── Footer — deepest kraft, italic wordmark ──────────────────────────── */
+.zs-mk-footer {
+  border-block-start: 0.0625rem solid var(--mk-hairline);
+  border-block-end: none;
+}
+.zs-mk-footer__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--zs-space-9);
+  padding-block-end: var(--zs-space-9);
+}
+.zs-mk-footer__brand-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+  max-inline-size: 22rem;
+}
+.zs-mk-footer__blurb {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: 1.5;
+  color: var(--mk-ink-soft);
+}
+.zs-mk-footer__cols {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(7rem, auto));
+  gap: var(--zs-space-9);
+}
+.zs-mk-footer__col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+}
+.zs-mk-footer__col-title {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--mk-ink-faint);
+}
+.zs-mk-footer__col-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+}
+.zs-mk-footer__bottom {
+  padding-block-start: var(--zs-space-6);
+  border-block-start: 0.0625rem solid var(--mk-hairline-faint);
+}
+.zs-mk-footer__copy {
+  margin: 0;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--mk-ink-faint);
+}
+
+/* ─── footer brand wordmark — Fraunces italic, registration-mark dot ───── */
+.zs-marketing__footer-brand {
+  font-family: "Fraunces Variable", Georgia, serif;
+  font-style: italic;
+  font-weight: 500;
+  font-variation-settings: "opsz" 40, "SOFT" 50;
+  font-size: var(--zs-text-title-3-size);
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--mk-ink);
+  text-decoration: none;
 }
 .zs-marketing__footer-brand:hover {
-  opacity: 0.8;
+  opacity: 0.85;
 }
 .zs-marketing__footer-dot {
-  color: var(--zs-accent);
+  display: inline-block;
+  color: var(--mk-accent);
+  transition: transform 150ms var(--mk-ease);
+}
+.zs-marketing__footer-brand:hover .zs-marketing__footer-dot {
+  transform: scale(1.18);
+}
+
+/* ─── responsive ───────────────────────────────────────────────────────── */
+@media (max-width: 52rem) {
+  .zs-mk-footer__top {
+    gap: var(--zs-space-7);
+  }
+  .zs-mk-footer__cols {
+    gap: var(--zs-space-7);
+  }
+}
+@media (max-width: 40rem) {
+  .zs-mk-toc__row {
+    grid-template-columns: 1fr;
+    gap: var(--zs-space-2);
+  }
+  .zs-mk-stats__row {
+    grid-template-columns: 1fr;
+    gap: var(--zs-space-8);
+  }
+  .zs-mk-stat + .zs-mk-stat {
+    border-inline-start: none;
+    border-block-start: 0.0625rem solid var(--mk-hairline);
+    padding-block-start: var(--zs-space-8);
+  }
+  .zs-mk-footer__cols {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* ─── motion — "ink doesn't bounce": settle, press, lift ───────────────── */
+/* All reveal motion is opt-in via prefers-reduced-motion: no-preference, so
+ * the static end-state (opacity:1 / transform:none — the default below) is
+ * the universal fallback. Nothing is ever hidden without motion. */
+@media (prefers-reduced-motion: no-preference) {
+  /* Band-level reveal: fade + small upward settle when .is-in lands. */
+  .zs-marketing [data-reveal] {
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+      opacity 620ms var(--mk-ease),
+      transform 620ms var(--mk-ease);
+    /* inter-band stagger (~90ms per band index) */
+    transition-delay: calc(var(--i, 0) * 90ms);
+  }
+  .zs-marketing [data-reveal].is-in {
+    opacity: 1;
+    transform: none;
+  }
+
+  /* Hero internals write themselves in top→bottom (child micro-stagger). */
+  .zs-mk-hero__col > * {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  .zs-mk-hero.is-in .zs-mk-hero__col > * {
+    opacity: 1;
+    transform: none;
+    transition:
+      opacity 560ms var(--mk-ease),
+      transform 560ms var(--mk-ease),
+      letter-spacing 560ms var(--mk-ease);
+    transition-delay: calc(var(--i, 0) * 80ms);
+  }
+  /* h1 "presses in": letter-spacing tightens as it fades up. */
+  .zs-mk-hero .zs-mk-hero__title {
+    letter-spacing: -0.002em;
+  }
+  .zs-mk-hero.is-in .zs-mk-hero__title {
+    letter-spacing: -0.018em;
+  }
+
+  /* Child micro-stagger inside revealed bands (rows, plates, features, stats). */
+  .zs-marketing [data-reveal] .zs-mk-toc__row,
+  .zs-marketing [data-reveal] .zs-mk-plate,
+  .zs-marketing [data-reveal] .zs-mk-feature,
+  .zs-marketing [data-reveal] .zs-mk-stat {
+    opacity: 0;
+    transform: translateY(12px);
+    transition:
+      opacity 540ms var(--mk-ease),
+      transform 540ms var(--mk-ease);
+  }
+  .zs-marketing [data-reveal].is-in .zs-mk-toc__row,
+  .zs-marketing [data-reveal].is-in .zs-mk-plate,
+  .zs-marketing [data-reveal].is-in .zs-mk-feature,
+  .zs-marketing [data-reveal].is-in .zs-mk-stat {
+    opacity: 1;
+    transform: none;
+    transition-delay: calc(var(--i, 0) * 70ms);
+  }
+  /* The plate's transform on reveal must not fight its hover-lift transform:
+   * once in, the wrapper transform is cleared so :hover translateY owns it. */
+}
+
+/* Reduced motion: nothing moves, nothing waits, everything is present. The
+ * grain pseudo-element is static in all modes regardless. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-marketing [data-reveal],
+  .zs-marketing [data-reveal].is-in,
+  .zs-mk-hero__col > *,
+  .zs-mk-hero.is-in .zs-mk-hero__col > * {
+    opacity: 1;
+    transform: none;
+    transition: none;
+    transition-delay: 0ms;
+  }
+  .zs-mk-link span[aria-hidden],
+  .zs-mk-link:hover span[aria-hidden] {
+    transform: none;
+  }
+  .zs-mk-btn--stamp:hover,
+  .zs-mk-btn--on-accent:hover,
+  .zs-mk-plate:hover {
+    transform: none;
+  }
 }

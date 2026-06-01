@@ -1,37 +1,38 @@
 // ─── Marketing — public landing page (`/`) ──────────────────────
 //
-// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.1.
-// Crystal migration: the editorial single-column page is rebuilt on the
-// @zeroship/ui `sections/` layer — Hero, FeatureGrid (how-it-works steps +
-// the differentiators band), a bespoke template gallery band, StatsBand,
-// Cta, and Footer — wrapped by the migrated PublicNav. Each section is a
-// full-bleed band that owns its own inner Container measure + vertical
-// rhythm; the page only stacks them and paints the backdrop. Bespoke bits
-// (the page backdrop + the template gallery band) live in the co-located
-// Marketing.css, all --zs-* tokens.
+// A bespoke, hand-composed warm-tactile front door — "Sun-Warmed Riso on
+// a fine small-press chase." The page leaves the stock DS section bands
+// behind and hand-builds semantic <section>/<h2>/<p> markup so the warm
+// palette, the offset-print grain, the typographer's rules-and-frames,
+// and the "ink doesn't bounce" reveal can be expressed with intent. The
+// shared chrome that MUST stay stable — PublicNav, TemplateCard, the
+// router Link/useNavigate, the lucide glyphs via the DS <Icon> — is kept
+// exactly as before; only the editorial presentation around them is new.
 //
-// The page tells two headline stories — secure from day one, and a
-// self-evolving loop that keeps improving the app after it ships — in
-// plain, non-technical language. No money mechanics anywhere.
+// All raw warm colour lives in scoped --mk-* custom properties declared
+// ON .zs-marketing in the co-located Marketing.css (never global, no
+// Tailwind); the crystal --zs-accent / --zs-surface-bg / --zs-label are
+// deliberately remapped inside that scope so the nav button + every
+// filled Button inherit terracotta with zero markup forks.
+//
+// Two headline promises stay prominent: safe from day one, and a
+// self-evolving loop that keeps improving the app after it ships. No
+// money mechanics anywhere; the voice is calm and human.
 //
 // PUBLIC — no AuthGuard. The "Begin" CTA shoots the visitor at /new
 // (the wizard) which itself is public; createApp is the gate that
 // triggers a 401 → /login redirect when the visitor isn't signed in.
 
+import { useEffect, useRef, type CSSProperties } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import {
-  Button,
-  Container,
-  Cta,
-  FeatureGrid,
-  Footer,
-  Grid,
-  Hero,
-  Icon,
-  Stack,
-  StatsBand,
-} from "@zeroship/ui";
+import { Container, Grid, Icon } from "@zeroship/ui";
 import { Package, RefreshCw, ShieldCheck, Zap } from "lucide-react";
+// Load Fraunces with ALL axes (opsz + SOFT + WONK) so the display
+// headings can be set soft + high optical-size via font-variation-settings.
+// The bare package import resolves to the opsz-only file, which renders the
+// SOFT axis dead — the `full` (+ italic) subset entries carry every axis.
+import "@fontsource-variable/fraunces/full.css";
+import "@fontsource-variable/fraunces/full-italic.css";
 import { PublicNav } from "../components/PublicNav";
 import { TemplateCard } from "../components/TemplateCard";
 import { TEMPLATES } from "../lib/templates";
@@ -44,167 +45,339 @@ const FEATURED_TEMPLATE_SLUGS = [
   "subscription",
 ];
 
+/** Allow CSS custom properties (--i band/child stagger index) on style. */
+type IndexStyle = CSSProperties & { "--i"?: number };
+
 export function Marketing() {
   const navigate = useNavigate();
   const featured = FEATURED_TEMPLATE_SLUGS
     .map((slug) => TEMPLATES.find((t) => t.slug === slug))
     .filter((t): t is (typeof TEMPLATES)[number] => Boolean(t));
 
+  // Below-the-fold bands fade up as they enter the viewport. The static
+  // end-state (.is-in / no class) is fully present, so reduced-motion and
+  // a never-firing observer both leave a complete, readable page.
+  const revealRoot = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const root = revealRoot.current;
+    if (!root) return;
+    const targets = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-reveal]"),
+    );
+    // Hero + nav animate on mount; mark them in immediately.
+    const onMount = targets.filter((el) => el.dataset.reveal === "mount");
+    onMount.forEach((el) => el.classList.add("is-in"));
+
+    const deferred = targets.filter((el) => el.dataset.reveal === "scroll");
+    if (deferred.length === 0) return;
+
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || typeof IntersectionObserver === "undefined") {
+      deferred.forEach((el) => el.classList.add("is-in"));
+      return;
+    }
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("is-in");
+            io.unobserve(entry.target);
+          }
+        }
+      },
+      { rootMargin: "0px 0px -12% 0px", threshold: 0.12 },
+    );
+    deferred.forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, []);
+
   return (
     <div className="zs-marketing" data-testid="marketing-page">
       <PublicNav />
 
-      <main className="zs-marketing__main">
-        {/* ─── Hero ─────────────────────────────────────────────── */}
-        <Hero
-          align="start"
-          backdrop
-          eyebrow="Vol. I · Issue 05 · 2026"
-          title="Anyone can ship software."
-          description="Describe the thing you want in a plain sentence — a recipe journal, a tip jar, a booking page, anything — and a fleet of agents writes it, ships it to a real, live URL, and keeps making it better. Sign-in, privacy, and the careful safety work are built in from the very first line, so your data and your people are protected without you ever having to think about it."
-          actions={
-            <>
-              <Button
-                variant="filled"
-                size="large"
-                onClick={() => navigate("/new")}
-                data-testid="marketing-begin"
-              >
-                Begin your project
-              </Button>
-              <Button asChild variant="plain" size="large">
-                <Link to="/templates">See an example →</Link>
-              </Button>
-            </>
-          }
-        />
-
-        {/* ─── How it works ─────────────────────────────────────── */}
-        <FeatureGrid
-          align="start"
-          columns={4}
-          eyebrow="How it works"
-          title="From a sentence to a living app"
-          description="Usually live in under a minute — and it keeps growing from there."
-          features={STEPS.map((s, i) => ({
-            id: s.title,
-            title: (
-              <>
-                <span className="zs-marketing__step-num">
-                  № {String(i + 1).padStart(2, "0")}
-                </span>
-                {s.title}
-              </>
-            ),
-            description: s.body,
-          }))}
-        />
-
-        {/* ─── Featured templates ───────────────────────────────── */}
+      <main className="zs-marketing__main" ref={revealRoot}>
+        {/* ─── Hero — the one <h1> masthead ─────────────────────── */}
         <section
-          className="zs-marketing__templates"
-          data-testid="marketing-templates"
-          aria-labelledby="marketing-templates-title"
+          className="zs-mk-hero"
+          data-reveal="mount"
+          aria-labelledby="mk-hero-title"
         >
-          <Container size="lg">
-            <Stack gap={6}>
-              <div className="zs-marketing__templates-head">
-                <Stack gap={2}>
-                  <p className="zs-section-eyebrow">Starting points</p>
-                  <h2
-                    id="marketing-templates-title"
-                    className="zs-marketing__templates-title"
-                  >
-                    Or begin from a template.
-                  </h2>
-                </Stack>
-                <Button asChild variant="plain" size="small">
-                  <Link to="/templates">See all →</Link>
-                </Button>
+          <Container size="md" padX={6}>
+            <div className="zs-mk-hero__col">
+              <p
+                className="zs-mk-eyebrow zs-mk-eyebrow--rule"
+                style={{ "--i": 0 } as IndexStyle}
+              >
+                Vol. I · Issue 05 · 2026
+              </p>
+              <h1
+                id="mk-hero-title"
+                className="zs-mk-hero__title"
+                style={{ "--i": 1 } as IndexStyle}
+              >
+                Anyone can ship software.
+              </h1>
+              <p
+                className="zs-mk-hero__lede"
+                style={{ "--i": 2 } as IndexStyle}
+              >
+                Describe the thing you'd like to make in one plain sentence —
+                a recipe journal, a tip jar, a booking page, anything at all —
+                and a quiet fleet of agents writes it, ships it to a real,
+                living URL, and keeps making it better. Sign-in, privacy, and
+                the careful safety work are{" "}
+                <strong>woven in from the very first line</strong>, so your
+                data and the people who trust you are looked after without you
+                ever having to think about it.
+              </p>
+              <div
+                className="zs-mk-hero__actions"
+                style={{ "--i": 3 } as IndexStyle}
+              >
+                <button
+                  type="button"
+                  className="zs-mk-btn zs-mk-btn--stamp"
+                  onClick={() => navigate("/new")}
+                  data-testid="marketing-begin"
+                >
+                  Begin your project
+                </button>
+                <Link to="/templates" className="zs-mk-link zs-mk-link--lg">
+                  See an example <span aria-hidden="true">→</span>
+                </Link>
               </div>
-
-              <Grid columns={{ sm: 2, lg: 4 }} gap={5}>
-                {featured.map((t) => (
-                  <TemplateCard key={t.slug} template={t} />
-                ))}
-              </Grid>
-            </Stack>
+            </div>
           </Container>
         </section>
 
-        {/* ─── Why it holds — the two headline ideas + supporting ─ */}
-        <FeatureGrid
-          align="start"
-          columns={2}
-          tone="muted"
-          eyebrow="Why it holds"
-          title="Two promises, built in — not bolted on."
-          description="Your app keeps improving long after it ships, and it's safe and private the whole way through."
-          features={DIFFERENTIATORS.map((d) => ({
-            id: d.title,
-            icon: <Icon as={d.icon} size="lg" />,
-            title: d.title,
-            description: d.body,
-          }))}
-        />
+        {/* ─── How it works — a typographer's table of contents ─── */}
+        <section
+          className="zs-mk-band zs-mk-band--kraft zs-mk-steps"
+          data-reveal="scroll"
+          aria-labelledby="mk-steps-title"
+          style={{ "--i": 0 } as IndexStyle}
+        >
+          <Container size="md" padX={6}>
+            <header className="zs-mk-head">
+              <p className="zs-mk-eyebrow">How it works</p>
+              <h2 id="mk-steps-title" className="zs-mk-head__title">
+                From a sentence to a living app.
+              </h2>
+              <p className="zs-mk-head__sub">
+                Usually live in under a minute — and it keeps growing from
+                there.
+              </p>
+            </header>
 
-        {/* ─── Proof bar — safety / speed / ownership (no money) ── */}
-        <StatsBand
-          align="center"
-          eyebrow="In short"
-          title="Safe, fast, and yours."
-          stats={[
-            {
-              id: "secure",
-              value: "Day one",
-              label: "Locked down and private — never bolted on",
-            },
-            {
-              id: "fast",
-              value: "< 1 min",
-              label: "From a sentence to a live URL",
-            },
-            {
-              id: "yours",
-              value: "100%",
-              label: "Your code, yours to export",
-            },
-          ]}
-        />
+            <ol className="zs-mk-toc">
+              {STEPS.map((s, i) => (
+                <li
+                  key={s.title}
+                  className="zs-mk-toc__row"
+                  style={{ "--i": i } as IndexStyle}
+                >
+                  <span className="zs-mk-toc__folio" aria-hidden="true">
+                    № {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <div className="zs-mk-toc__text">
+                    <h3 className="zs-mk-toc__title">{s.title}</h3>
+                    <p className="zs-mk-toc__body">{s.body}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </Container>
+        </section>
 
-        {/* ─── Final CTA ────────────────────────────────────────── */}
-        <Cta
-          tone="accent"
-          eyebrow="Begin"
-          title="Tell us what you'd like to make."
-          description="Start with one sentence and watch the agents turn it into something real, safe, and live — usually in under a minute. And they don't stop when it ships: change anything, anytime, just by asking."
-          actions={
-            <>
-              <Button
-                variant="filled"
-                size="large"
-                onClick={() => navigate("/new")}
-              >
-                Begin your project
-              </Button>
-              <Button asChild variant="plain" size="large">
-                <Link to="/templates">Browse templates →</Link>
-              </Button>
-            </>
-          }
-        />
+        {/* ─── Featured templates — engraved calling-card plates ── */}
+        <section
+          className="zs-mk-band zs-marketing__templates"
+          data-testid="marketing-templates"
+          data-reveal="scroll"
+          aria-labelledby="marketing-templates-title"
+          style={{ "--i": 0 } as IndexStyle}
+        >
+          <Container size="lg" padX={6}>
+            <header className="zs-mk-head zs-mk-head--row">
+              <div className="zs-mk-head__lead">
+                <p className="zs-mk-eyebrow">Starting points</p>
+                <h2
+                  id="marketing-templates-title"
+                  className="zs-mk-head__title"
+                >
+                  Or begin from a template.
+                </h2>
+              </div>
+              <Link to="/templates" className="zs-mk-link">
+                See all <span aria-hidden="true">→</span>
+              </Link>
+            </header>
 
-        {/* ─── Footer ───────────────────────────────────────────── */}
-        <Footer
-          brand={
-            <Link to="/" className="zs-marketing__footer-brand">
-              zeroship<span className="zs-marketing__footer-dot">.</span>
-            </Link>
-          }
-          description="Anyone can ship software."
-          columns={FOOTER_COLUMNS}
-          copyright={<>&copy; 2026 zeroship</>}
-        />
+            <div className="zs-mk-plates">
+              <Grid columns={{ sm: 2, lg: 4 }} gap={5}>
+                {featured.map((t, i) => (
+                  <div
+                    key={t.slug}
+                    className="zs-mk-plate"
+                    style={{ "--i": i } as IndexStyle}
+                  >
+                    <TemplateCard template={t} />
+                  </div>
+                ))}
+              </Grid>
+            </div>
+          </Container>
+        </section>
+
+        {/* ─── Why it's different — the four warm-badge promises ── */}
+        <section
+          className="zs-mk-band zs-mk-diff"
+          data-reveal="scroll"
+          aria-labelledby="mk-diff-title"
+          style={{ "--i": 0 } as IndexStyle}
+        >
+          <Container size="lg" padX={6}>
+            <header className="zs-mk-head">
+              <p className="zs-mk-eyebrow">Why it's different</p>
+              <h2 id="mk-diff-title" className="zs-mk-head__title">
+                Built to be trusted with your livelihood.
+              </h2>
+              <p className="zs-mk-head__sub">
+                Your app keeps improving long after it ships, and it stays
+                safe and private the whole way through.
+              </p>
+            </header>
+
+            <Grid columns={{ sm: 2, lg: 4 }} gap={7}>
+              {DIFFERENTIATORS.map((d, i) => (
+                <article
+                  key={d.title}
+                  className="zs-mk-feature"
+                  style={{ "--i": i } as IndexStyle}
+                >
+                  <span className="zs-mk-feature__badge" aria-hidden="true">
+                    <Icon as={d.icon} size="lg" />
+                  </span>
+                  <h3 className="zs-mk-feature__title">{d.title}</h3>
+                  <p className="zs-mk-feature__body">{d.body}</p>
+                </article>
+              ))}
+            </Grid>
+          </Container>
+        </section>
+
+        {/* ─── Proof bar — safe / fast / yours, framed in scotch rules ─ */}
+        <section
+          className="zs-mk-band zs-mk-band--kraft zs-mk-stats"
+          data-reveal="scroll"
+          aria-labelledby="mk-stats-title"
+          style={{ "--i": 0 } as IndexStyle}
+        >
+          <Container size="md" padX={6}>
+            <header className="zs-mk-head">
+              <p className="zs-mk-eyebrow">In short</p>
+              <h2 id="mk-stats-title" className="zs-mk-head__title">
+                Safe, fast, and yours.
+              </h2>
+            </header>
+
+            <div className="zs-mk-scotch">
+              <dl className="zs-mk-stats__row">
+                {STATS.map((stat, i) => (
+                  <div
+                    key={stat.id}
+                    className="zs-mk-stat"
+                    style={{ "--i": i } as IndexStyle}
+                  >
+                    <dt className="zs-mk-stat__value">{stat.value}</dt>
+                    <dd className="zs-mk-stat__label">{stat.label}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          </Container>
+        </section>
+
+        {/* ─── Closing CTA — a printed terracotta seal ──────────── */}
+        <section
+          className="zs-mk-band zs-mk-cta"
+          data-reveal="scroll"
+          aria-labelledby="mk-cta-title"
+          style={{ "--i": 0 } as IndexStyle}
+        >
+          <Container size="md" padX={6}>
+            <div className="zs-mk-cta__cartouche">
+              <p className="zs-mk-eyebrow zs-mk-eyebrow--accent">Begin</p>
+              <h2 id="mk-cta-title" className="zs-mk-cta__title">
+                Tell us what you'd like to make.
+              </h2>
+              <p className="zs-mk-cta__desc">
+                Start with a single sentence and watch the agents turn it into
+                something real, safe, and live — usually in under a minute.
+                And they don't stop the moment it ships: change anything,
+                anytime, just by asking.
+              </p>
+              <div className="zs-mk-cta__actions">
+                <button
+                  type="button"
+                  className="zs-mk-btn zs-mk-btn--stamp zs-mk-btn--on-accent"
+                  onClick={() => navigate("/new")}
+                >
+                  Begin your project
+                </button>
+                <Link
+                  to="/templates"
+                  className="zs-mk-link zs-mk-link--lg zs-mk-link--on-accent"
+                >
+                  Browse templates <span aria-hidden="true">→</span>
+                </Link>
+              </div>
+            </div>
+          </Container>
+        </section>
+
+        {/* ─── Footer — deepest kraft, italic wordmark ──────────── */}
+        <footer
+          className="zs-mk-band zs-mk-footer"
+          data-reveal="scroll"
+          aria-label="Site"
+        >
+          <Container size="lg" padX={6}>
+            <div className="zs-mk-footer__top">
+              <div className="zs-mk-footer__brand-block">
+                <Link to="/" className="zs-marketing__footer-brand">
+                  zeroship
+                  <span className="zs-marketing__footer-dot">.</span>
+                </Link>
+                <p className="zs-mk-footer__blurb">Anyone can ship software.</p>
+              </div>
+
+              <nav className="zs-mk-footer__cols" aria-label="Footer">
+                {FOOTER_COLUMNS.map((col) => (
+                  <div key={col.id} className="zs-mk-footer__col">
+                    <h2 className="zs-mk-footer__col-title">{col.title}</h2>
+                    <ul className="zs-mk-footer__col-list">
+                      {col.links.map((l) => (
+                        <li key={l.href}>
+                          <Link to={l.href} className="zs-mk-link zs-mk-link--footer">
+                            {l.label}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </nav>
+            </div>
+
+            <div className="zs-mk-footer__bottom">
+              <p className="zs-mk-footer__copy">&copy; 2026 zeroship</p>
+            </div>
+          </Container>
+        </footer>
       </main>
     </div>
   );
@@ -248,19 +421,37 @@ const DIFFERENTIATORS: {
     title: "A living loop, not a one-time build.",
     icon: RefreshCw,
     body:
-      "Your app isn't frozen the day it ships. The agents stay on the job — watching how it runs, catching the small things before you'd ever notice, and refining the rough edges — and when you want something changed, you just say so.",
+      "Your app isn't frozen the day it ships. The agents stay on the job — watching how it runs, catching the small things before you'd ever notice, and smoothing the rough edges — and when you want something changed, you just say so.",
   },
   {
     title: "Live in under a minute.",
     icon: Zap,
     body:
-      "From a single sentence to a working link you can open and share, usually before your coffee cools. No accounts to wire up, no servers to rent, nothing to configure — you describe, it appears.",
+      "From a single sentence to a working link you can open and share, usually before your coffee cools. No accounts to wire up, no servers to rent, nothing to configure — you describe it, it appears.",
   },
   {
     title: "Your code is yours.",
     icon: Package,
     body:
       "Everything the agents write belongs to you, and you can take it with you whenever you like. Database, sign-in, payments, and scaling are all included — we host it and keep it running, but you're never locked in.",
+  },
+];
+
+const STATS: { id: string; value: string; label: string }[] = [
+  {
+    id: "secure",
+    value: "Day one",
+    label: "Locked down and private — never bolted on",
+  },
+  {
+    id: "fast",
+    value: "< 1 min",
+    label: "From a sentence to a live URL",
+  },
+  {
+    id: "yours",
+    value: "Yours",
+    label: "Every line, yours to keep and export",
   },
 ];
 
