@@ -1,11 +1,14 @@
-// ─── ProjectCard — letterhead-style ─────────────────────────────
+// ─── ProjectCard — crystal ──────────────────────────────────────
 //
-// One project on the home gallery. № in tomato italic, big serif
-// title, italic tagline (the project's prompt or description), a
-// dashed footing rule with status + last-update meta.
+// One project tile on the home gallery. Built over the @zeroship/ui
+// Card: a whole-card-clickable surface (Card asChild → react-router
+// <Link>) carrying an index eyebrow, the project title, a tagline
+// description, and a footer band with status + last-update meta.
 
 import { Link } from "react-router-dom";
+import { Badge, Card } from "@zeroship/ui";
 import type { ProjectRecord } from "../api";
+import "./ProjectCard.css";
 
 export interface ProjectCardProps {
   app: ProjectRecord;
@@ -19,38 +22,32 @@ export function ProjectCard({ app, num, tagline }: ProjectCardProps) {
   const display = tagline ?? `An app called ${app.name}.`;
 
   return (
-    <Link
-      to={`/p/${app.id}/preview`}
-      data-testid={`project-card:${app.name}`}
-      className="pcard group relative bg-white border border-rule p-6 pb-4 transition-all duration-300 hover:-translate-y-[3px] hover:shadow-[0_28px_32px_-20px_rgba(34,22,12,0.18),0_6px_12px_-8px_rgba(34,22,12,0.08)]"
-      style={{ textDecoration: "none", color: "var(--color-ink)" }}
-    >
-      {/* paper-fold corner */}
-      <span
-        className="absolute top-0 right-0 transition-all duration-300 group-hover:w-8 group-hover:h-8"
-        style={{
-          width: "22px",
-          height: "22px",
-          background: "linear-gradient(225deg, var(--color-paper) 50%, transparent 50%)",
-          borderLeft: "1px solid var(--color-rule)",
-          borderBottom: "1px solid var(--color-rule)",
-        }}
-        aria-hidden="true"
-      />
-      <div className="font-serif italic text-[12px] text-tomato mb-3 tracking-wide" style={{ fontFeatureSettings: '"lnum" 1' }}>
-        № {num}
-      </div>
-      <h4 className="font-serif font-medium text-[22px] leading-[1.05] mb-2 -tracking-[0.015em] truncate">
-        {app.name}
-      </h4>
-      <p className="font-serif italic text-[14px] text-ink-soft leading-snug mb-5 line-clamp-2">
-        {display}
-      </p>
-      <div className="flex justify-between items-baseline pt-3 border-t border-dashed border-rule font-sans text-[10.5px] uppercase tracking-[0.16em] text-pencil">
-        <span>{app.archived ? "Archived" : "Draft"}</span>
-        <span>upd. {updated}</span>
-      </div>
-    </Link>
+    <Card variant="surface" interactive asChild className="pcard">
+      <Link
+        to={`/p/${app.id}/preview`}
+        data-testid={`project-card:${app.name}`}
+      >
+        <Card.Header>
+          <span className="pcard__num" aria-hidden="true">
+            № {num}
+          </span>
+          <Card.Title className="pcard__title">{app.name}</Card.Title>
+          <Card.Description className="pcard__tagline">
+            {display}
+          </Card.Description>
+        </Card.Header>
+        <Card.Footer align="between" divider="top" className="pcard__footer">
+          <Badge
+            intent={app.archived ? "neutral" : "info"}
+            variant="soft"
+            size="sm"
+          >
+            {app.archived ? "Archived" : "Draft"}
+          </Badge>
+          <span className="pcard__updated">upd. {updated}</span>
+        </Card.Footer>
+      </Link>
+    </Card>
   );
 }
 

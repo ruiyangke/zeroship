@@ -1,0 +1,26 @@
+/*
+ * ErrorBoundary — fallback-only styling.
+ *
+ * The boundary's fallback reuses the DS ErrorState block for the
+ * icon/title/description/action column. The only bespoke piece is the
+ * raw caught-error message, rendered as a monospace "what we logged"
+ * line beneath the human copy. It reads --zs-* tokens only; no raw
+ * hex/px, no Tailwind, no editorial tokens.
+ */
+
+.zs-builder-error-boundary__message {
+  margin: 0;
+  display: inline-block;
+  max-inline-size: 100%;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  border-radius: var(--zs-radius-2);
+  background: var(--zs-fill-tertiary);
+  color: var(--zs-label-secondary);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  /* Long stack-free messages or URLs shouldn't blow out the column. */
+  overflow-wrap: anywhere;
+  text-align: start;
+}

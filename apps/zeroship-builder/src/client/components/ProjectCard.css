@@ -1,0 +1,73 @@
+/*
+ * ProjectCard — crystal tile.
+ *
+ * Layout + type come from the @zeroship/ui Card; these rules only add
+ * the project-tile specifics the DS Card doesn't carry: the index
+ * eyebrow, single-line title truncation, a two-line tagline clamp, and
+ * the quiet uppercase "upd." meta. Everything reads from --zs-* tokens
+ * so the tile tracks the active theme.
+ */
+
+/* Lift on hover — a slightly deeper translation than the Card's default
+ * interactive press, matching the gallery tile feel. The Card already
+ * owns cursor / hover-tint / focus-ring / active-press; we only add the
+ * vertical lift here. */
+.pcard {
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-spring),
+    box-shadow var(--zs-motion-base) var(--zs-motion-ease);
+}
+@media (hover: hover) {
+  .pcard:hover {
+    transform: translateY(-0.1875rem);
+    box-shadow: var(--zs-shadow-3);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pcard,
+  .pcard:hover {
+    transform: none;
+    transition: none;
+  }
+}
+
+/* Index eyebrow — sits above the title inside Card.Header. */
+.pcard__num {
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-weight: var(--zs-text-caption-1-weight);
+  letter-spacing: 0.06em;
+  color: var(--zs-accent);
+  font-variant-numeric: lining-nums;
+}
+
+/* Title — clamp to a single line so long names don't reflow the grid. */
+.pcard__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tagline — recede below the title and clamp to two lines. */
+.pcard__tagline {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Meta band: keep the status chip and date on a shared baseline. */
+.pcard__footer {
+  align-items: baseline;
+}
+
+/* Last-updated meta — the quietest text on the tile. */
+.pcard__updated {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--zs-label-tertiary);
+}

@@ -1,0 +1,146 @@
+/*
+ * DevEventsBadge — crystal styling for the dev-only telemetry inspector.
+ *
+ * The component is built over the @zeroship/ui Popover + Badge primitives,
+ * so the surface chrome (popup background, shadow, radius, anchoring) comes
+ * for free from the DS. This stylesheet only owns the bits the DS does not:
+ *   - the fixed bottom-left anchor of the whole inspector,
+ *   - the compact "ev N" toggle button look,
+ *   - the popover header / list / row / props rhythm.
+ *
+ * Every value reads a --zs-* token (no raw hex/px). The component is gated to
+ * dev builds in TSX, so this CSS only ever paints in development.
+ */
+
+/* ─── fixed anchor ──────────────────────────────────────────────────── *
+ * Bottom-LEFT so the chip never overlaps the chat composer's Send / Stop
+ * buttons (bottom-right). z-modal keeps it above app chrome; the portaled
+ * popup itself stacks higher (Popover uses --zs-z-modal + 10). */
+.zs-dev-events {
+  position: fixed;
+  inset-block-end: var(--zs-space-3);
+  inset-inline-start: var(--zs-space-3);
+  z-index: var(--zs-z-modal);
+  font-family: var(--zs-font-mono);
+}
+
+/* ─── toggle ───────────────────────────────────────────────────────── *
+ * A compact monospace count chip. Reuses the DS Button (gray/small) for
+ * focus ring + press feedback, then tightens it into a pill that reads as
+ * "ev N". The Badge inside carries the running count. */
+.zs-dev-events__toggle.zs-dev-events__toggle {
+  gap: var(--zs-space-1);
+  border-radius: var(--zs-radius-full);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+}
+
+.zs-dev-events__toggle-label {
+  letter-spacing: 0.04em;
+}
+
+/* The count Badge sits flush against the label; keep it monospace so the
+ * digit width matches the "ev" glyphs. */
+.zs-dev-events__count {
+  font-family: var(--zs-font-mono);
+}
+
+/* ─── popup body ───────────────────────────────────────────────────── *
+ * The Popover.Popup already paints the opaque surface, shadow, and radius.
+ * We constrain its width and let the inner ScrollArea own the height cap so
+ * a long event list scrolls inside the popup instead of overflowing it.
+ * Zero the popup's own padding — the header and rows carry their own inset
+ * so the header border and row dividers span the full width. */
+.zs-dev-events__popup.zs-dev-events__popup {
+  inline-size: 20rem;
+  max-inline-size: min(20rem, calc(100dvw - var(--zs-space-6) * 2));
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.zs-dev-events__header {
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+  border-block-end: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+
+.zs-dev-events__header-label {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--zs-label-secondary);
+}
+
+.zs-dev-events__header-count {
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── empty state ──────────────────────────────────────────────────── */
+.zs-dev-events__empty {
+  padding-block: var(--zs-space-4);
+  padding-inline: var(--zs-space-3);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── scroll region + list ─────────────────────────────────────────── *
+ * Cap the scroll viewport height; ScrollArea paints the bar chrome. */
+.zs-dev-events__scroll {
+  max-block-size: 60vh;
+}
+
+.zs-dev-events__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.zs-dev-events__row {
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-3);
+}
+
+.zs-dev-events__row + .zs-dev-events__row {
+  border-block-start: var(--zs-selection-hairline) solid var(--zs-separator);
+}
+
+.zs-dev-events__row-name {
+  /* min-inline-size:0 lets this flex child shrink so the ellipsis engages
+   * instead of pushing the relative-time stamp off the row. */
+  min-inline-size: 0;
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zs-dev-events__row-time {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-tertiary);
+  white-space: nowrap;
+}
+
+.zs-dev-events__row-props {
+  margin: 0;
+  margin-block-start: var(--zs-space-half);
+  font-family: var(--zs-font-mono);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  color: var(--zs-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

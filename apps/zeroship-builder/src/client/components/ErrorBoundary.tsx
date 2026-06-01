@@ -9,12 +9,13 @@
 //      blank the whole workspace; the chat rail keeps working.
 //
 // The `fallback` prop is consulted first; otherwise we render a
-// centered editorial error card with a "Reload" affordance. We keep
-// state minimal — the goal is to present a humane wall, not to invent
-// recovery semantics. Hard reload is the right escape hatch.
+// centered crystal ErrorState band with a "Try again" affordance. We
+// keep state minimal — the goal is to present a humane wall, not to
+// invent recovery semantics. Hard reload is the right escape hatch.
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { ErrorState } from "./ErrorState";
+import { Button, Center, ErrorState } from "@zeroship/ui";
+import "./ErrorBoundary.css";
 
 export interface ErrorBoundaryProps {
   children: ReactNode;
@@ -62,25 +63,22 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
     const where = this.props.label ? ` in ${this.props.label}` : "";
     return (
-      <div
-        data-testid="error-boundary"
-        className="h-full min-h-[200px] flex items-center justify-center p-6 bg-paper"
-      >
-        <div className="max-w-md w-full">
-          <h3 className="font-display italic text-2xl font-medium text-ink mb-2">
-            Something went sideways{where}.
-          </h3>
-          <p className="font-serif text-sm text-ink-soft mb-4">
-            We've logged it. Try the action below — if it keeps happening,
-            a refresh usually clears it.
-          </p>
-          <ErrorState
-            message={this.state.error.message || "Unknown error"}
-            onRetry={this.reset}
-            retryLabel="Try again"
-          />
-        </div>
-      </div>
+      <Center data-testid="error-boundary" minHeight="12.5rem">
+        <ErrorState
+          live
+          title={`Something went sideways${where}.`}
+          description="We've logged it. Try the action below — if it keeps happening, a refresh usually clears it."
+        >
+          <ErrorState.Description className="zs-builder-error-boundary__message">
+            {this.state.error.message || "Unknown error"}
+          </ErrorState.Description>
+          <ErrorState.Actions>
+            <Button variant="filled" onClick={this.reset}>
+              Try again
+            </Button>
+          </ErrorState.Actions>
+        </ErrorState>
+      </Center>
     );
   }
 }

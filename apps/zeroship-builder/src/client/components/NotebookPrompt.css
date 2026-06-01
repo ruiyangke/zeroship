@@ -1,0 +1,103 @@
+/*
+ * NotebookPrompt — crystal implementation.
+ *
+ * The component is a Card (outline variant) acting as an editorial
+ * prompt block: an eyebrow label, a large textarea, an ink underline
+ * that draws on focus, and a footer row (hint left, action right).
+ *
+ * Everything here reads `--zs-*` tokens — no raw hex/px, no editorial
+ * tokens. Layout (Stack/Cluster) handles arrangement; this sheet owns
+ * the textarea's typographic surface and the focus-underline motion,
+ * which no DS component covers.
+ */
+
+.zb-notebook-prompt {
+  /* The Card already paints the surface + outline. We position
+   * relative so the leading accent ruler can pin to the inset edge. */
+  position: relative;
+}
+
+/* The accent ruler line down the left inset — the editorial "margin
+ * rule" reinterpreted as a crystal accent hairline. */
+.zb-notebook-prompt__rule {
+  position: absolute;
+  inset-block: var(--zs-space-3);
+  inset-inline-start: var(--zs-space-2);
+  inline-size: 0.0625rem;
+  background-color: var(--zs-accent);
+  opacity: 0.35;
+  border-radius: var(--zs-radius-full);
+}
+
+/* Eyebrow label — small uppercase caps lead-in. */
+.zb-notebook-prompt__eyebrow {
+  font-size: var(--zs-text-caption-2-size);
+  line-height: var(--zs-text-caption-2-line);
+  font-weight: var(--zs-text-caption-2-weight);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--zs-label-secondary);
+}
+.zb-notebook-prompt__eyebrow-tick {
+  display: inline-block;
+  inline-size: var(--zs-space-3);
+  block-size: 0.0625rem;
+  background-color: var(--zs-label);
+}
+
+/* Textarea — the writing surface. No DS textarea exists (Input is an
+ * <input>), so we style the native control against the input tokens. */
+.zb-notebook-prompt__textarea {
+  inline-size: 100%;
+  resize: none;
+  border: 0;
+  background: transparent;
+  outline: none;
+  padding: 0;
+  margin: 0;
+  color: var(--zs-input-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+}
+.zb-notebook-prompt__textarea::placeholder {
+  color: var(--zs-input-placeholder);
+}
+
+/* The ink underline that draws under the field on focus. */
+.zb-notebook-prompt__underline {
+  block-size: 0.125rem;
+  transform: scaleX(0);
+  transform-origin: left;
+  background-color: var(--zs-accent);
+  transition: transform var(--zs-motion-slow) var(--zs-motion-spring);
+}
+.zb-notebook-prompt:focus-within .zb-notebook-prompt__underline {
+  transform: scaleX(1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .zb-notebook-prompt__underline {
+    transition: none;
+  }
+}
+
+/* Footer hint — quiet metadata row. */
+.zb-notebook-prompt__hint {
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-tertiary);
+  letter-spacing: 0.01em;
+}
+
+/* CmdEnterHint kbd chips. */
+.zb-cmd-enter-hint__key {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-caption-2-size);
+  line-height: 1;
+  padding-block: var(--zs-space-half);
+  padding-inline: var(--zs-space-1);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-1);
+  background-color: var(--zs-fill-tertiary);
+  color: var(--zs-label-secondary);
+}
