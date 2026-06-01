@@ -24,9 +24,11 @@ import * as React from "react";
 import { act, render, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 
 import {
+  AuthModal,
   AuthProvider,
   SignIn,
   SignInButton,
+  SignInForm,
   SignOutButton,
   SignedIn,
   SignedOut,
@@ -63,7 +65,7 @@ type Listener = (event: AuthChangeEvent, session: Session | null) => void;
 
 interface CallLog {
   signInWithOAuth: unknown[][];
-  signInWithPassword: unknown[][];
+  signInWithCredentials: unknown[][];
   signOut: unknown[][];
   checkSession: number;
   exchangeCodeForSession: Array<[string, string | undefined]>;
@@ -80,6 +82,8 @@ interface FakeClient extends AuthClient {
   checkSessionResult: Session | null;
   /** When set, `signInWithOAuth` rejects with this instead of resolving. */
   signInError: AuthError | null;
+  /** When set, `signInWithCredentials` rejects with this instead of resolving. */
+  credentialsError: AuthError | null;
   /** When set, `exchangeCodeForSession` rejects with this. */
   exchangeError: AuthError | null;
   /** When set, `checkSession` (the mount recovery probe) rejects with this. */
@@ -90,7 +94,7 @@ function makeFakeClient(): FakeClient {
   const listeners = new Set<Listener>();
   const calls: CallLog = {
     signInWithOAuth: [],
-    signInWithPassword: [],
+    signInWithCredentials: [],
     signOut: [],
     checkSession: 0,
     exchangeCodeForSession: [],
@@ -102,6 +106,7 @@ function makeFakeClient(): FakeClient {
     calls,
     checkSessionResult: null,
     signInError: null,
+    credentialsError: null,
     exchangeError: null,
     checkSessionReject: null,
 
@@ -125,9 +130,12 @@ function makeFakeClient(): FakeClient {
       if (client.signInError) throw client.signInError;
       return makeSession();
     },
-    async signInWithPassword(opts) {
-      calls.signInWithPassword.push([opts]);
-      return makeSession();
+    async signInWithCredentials(input) {
+      calls.signInWithCredentials.push([input]);
+      if (client.credentialsError) throw client.credentialsError;
+      const s = makeSession();
+      // A real in-page credential sign-in emits SIGNED_IN as it stores the session.
+      client.emit("SIGNED_IN", s);
     },
     async exchangeCodeForSession(code, state) {
       calls.exchangeCodeForSession.push([code, state]);
@@ -459,6 +467,208 @@ describe("requestScopes — interactive step-up (NO token to the browser)", () =
       "access_token" in (observed?.session as unknown as Record<string, unknown>),
       false,
       "BFF model: no token on the upgraded session",
+    );
+  });
+});
+
+describe("signInWithCredentials — in-page password sign-in (NO popup)", () => {
+  test("useAuth().signInWithCredentials success emits SIGNED_IN and authenticates the snapshot", async () => {
+    const client = makeFakeClient();
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(Probe, null)),
+      );
+    });
+    assert.equal(observed?.isAuthenticated, false, "anonymous before the credential sign-in");
+    assert.equal(typeof observed?.signInWithCredentials, "function", "exposed on the context value");
+
+    await act(async () => {
+      await observed!.signInWithCredentials({ email: "alice@relay.zeroship.test", password: "pw" });
+    });
+
+    // It routed through the headless credential path (no popup window).
+    assert.equal(client.calls.signInWithCredentials.length, 1, "drives the in-page credential path");
+    assert.deepEqual(client.calls.signInWithCredentials[0], [
+      { email: "alice@relay.zeroship.test", password: "pw" },
+    ]);
+    // The fake emitted SIGNED_IN as a real client would → authenticated snapshot, no token.
+    assert.equal(observed?.isAuthenticated, true);
+    assert.equal(observed?.user?.id, "pws_alice");
+    assert.equal(
+      "access_token" in (observed?.session as unknown as Record<string, unknown>),
+      false,
+      "BFF model: the credential session carries no token",
+    );
+  });
+
+  test("a credential failure surfaces the error on the context snapshot", async () => {
+    const client = makeFakeClient();
+    client.credentialsError = new AuthError("invalid_credentials", "wrong email or password");
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(Probe, null)),
+      );
+    });
+
+    await act(async () => {
+      await observed!
+        .signInWithCredentials({ email: "alice@relay.zeroship.test", password: "bad" })
+        .catch(() => {});
+    });
+
+    assert.equal(client.calls.signInWithCredentials.length, 1);
+    assert.equal(observed?.error?.code, "invalid_credentials", "the failure lands on state.error");
+    assert.equal(observed?.isAuthenticated, false, "no session on a failed sign-in");
+  });
+});
+
+describe("<SignInForm> — in-page email + password", () => {
+  test("submitting calls signInWithCredentials with the typed fields and fires onSuccess", async () => {
+    const client = makeFakeClient();
+    let succeeded = false;
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          { client },
+          React.createElement(SignInForm, { onSuccess: () => (succeeded = true) }),
+        ),
+      );
+    });
+
+    const email = screen.getByLabelText("Email") as HTMLInputElement;
+    const password = screen.getByLabelText("Password") as HTMLInputElement;
+    const submit = screen.getByRole("button", { name: "Sign in" });
+
+    await act(async () => {
+      fireEvent.change(email, { target: { value: "alice@relay.zeroship.test" } });
+      fireEvent.change(password, { target: { value: "s3cret" } });
+    });
+
+    // No popup window is ever opened by the credential form.
+    fireEvent.click(submit);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    assert.equal(client.calls.signInWithCredentials.length, 1, "submit drives signInWithCredentials");
+    assert.deepEqual(client.calls.signInWithCredentials[0], [
+      { email: "alice@relay.zeroship.test", password: "s3cret" },
+    ]);
+    await waitFor(() => assert.equal(succeeded, true, "onSuccess fires after SIGNED_IN settles"));
+    assert.equal(observed === null, true, "no Probe rendered (form-only tree)");
+  });
+
+  test("threads emailTestId/passwordTestId/submitTestId/errorTestId onto the rendered nodes", async () => {
+    // Regression: the builder Login/Signup pages preserve their stable testids
+    // (login-email / login-password / login-submit / login-error) by passing
+    // them through to the SDK form — the form must land them on the matching
+    // <input>/<button>/<p role="alert"> nodes, not drop them.
+    const client = makeFakeClient();
+    client.credentialsError = new AuthError("invalid_credentials", "wrong email or password");
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          { client },
+          React.createElement(SignInForm, {
+            emailTestId: "login-email",
+            passwordTestId: "login-password",
+            submitTestId: "login-submit",
+            errorTestId: "login-error",
+          }),
+        ),
+      );
+    });
+
+    // The hooks are present on the email/password/submit nodes up front.
+    assert.equal(screen.getByTestId("login-email").tagName, "INPUT");
+    assert.equal(screen.getByTestId("login-password").tagName, "INPUT");
+    assert.equal(screen.getByTestId("login-submit").tagName, "BUTTON");
+    // The error hook only appears once a submit fails (it is conditionally rendered).
+    assert.equal(screen.queryByTestId("login-error"), null, "no error node before a failure");
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("login-email"), {
+        target: { value: "alice@relay.zeroship.test" },
+      });
+      fireEvent.change(screen.getByTestId("login-password"), { target: { value: "bad" } });
+      fireEvent.click(screen.getByTestId("login-submit"));
+    });
+
+    await waitFor(() => {
+      const err = screen.getByTestId("login-error");
+      assert.equal(err.getAttribute("role"), "alert", "the testid lands on the role=alert node");
+      assert.equal(err.textContent, "wrong email or password");
+    });
+  });
+
+  test("a rejected submit shows an inline AuthError and does not throw", async () => {
+    const client = makeFakeClient();
+    client.credentialsError = new AuthError("invalid_credentials", "wrong email or password");
+    let onErrorCode: string | null = null;
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          { client },
+          React.createElement(SignInForm, { onError: (e) => (onErrorCode = e.code) }),
+        ),
+      );
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Email"), {
+        target: { value: "alice@relay.zeroship.test" },
+      });
+      fireEvent.change(screen.getByLabelText("Password"), { target: { value: "bad" } });
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    });
+
+    await waitFor(() => {
+      assert.ok(screen.getByRole("alert"), "an inline error is shown on failure");
+    });
+    assert.equal(screen.getByRole("alert").textContent, "wrong email or password");
+    assert.equal(onErrorCode, "invalid_credentials", "onError also receives the typed error");
+  });
+});
+
+describe("<AuthModal> — overlay wrapping SignInForm + Continue with Google", () => {
+  test("renders the form + a Google button; Google launches the popup OAuth path", async () => {
+    const client = makeFakeClient();
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(AuthModal, { open: true })),
+      );
+    });
+
+    // The in-page form is present.
+    assert.ok(screen.getByLabelText("Email"), "modal embeds the email field");
+    assert.ok(screen.getByLabelText("Password"), "modal embeds the password field");
+
+    const google = screen.getByRole("button", { name: "Continue with Google" });
+    fireEvent.click(google);
+
+    assert.equal(client.calls.signInWithOAuth.length, 1, "Google routes through the popup OAuth path");
+    assert.deepEqual(client.calls.signInWithOAuth[0][0], { provider: "google" });
+    // The password path itself never opened a window.
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
+
+  test("open=false renders nothing", async () => {
+    const client = makeFakeClient();
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(AuthModal, { open: false })),
+      );
+    });
+    assert.equal(screen.queryByLabelText("Email"), null, "closed modal renders no form");
+    assert.equal(
+      screen.queryByRole("button", { name: "Continue with Google" }),
+      null,
+      "closed modal renders no Google button",
     );
   });
 });

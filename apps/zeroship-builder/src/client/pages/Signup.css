@@ -81,12 +81,12 @@
   color: var(--zs-label-tertiary);
 }
 
-/* ── SignInButton launchers ─────────────────────────────────────────
+/* ── Google SignInButton launcher ───────────────────────────────────
  * `@zeroship/auth` SignInButton renders a plain <button> (no asChild),
- * so we style it here to read as a crystal Button. Shared chrome first,
- * then the two variants: Google = gray/outline-ish, email = filled. */
-.signup-oauth-btn,
-.signup-email-btn {
+ * so we style it here to read as a crystal Button variant="gray". The
+ * email/password path is no longer a button — it's the in-page
+ * <SignInForm> below. */
+.signup-oauth-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -96,6 +96,8 @@
   padding-inline: var(--zs-space-4);
   border: none;
   border-radius: var(--zs-control-radius-md);
+  background-color: var(--zs-fill-secondary);
+  color: var(--zs-label);
   font-family: var(--zs-font-system);
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
@@ -106,12 +108,6 @@
     box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
     opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
-
-/* Google — neutral gray fill (mirrors Button variant="gray"). */
-.signup-oauth-btn {
-  background-color: var(--zs-fill-secondary);
-  color: var(--zs-label);
-}
 @media (hover: hover) {
   .signup-oauth-btn:hover {
     background-color: var(--zs-fill);
@@ -120,24 +116,81 @@
 .signup-oauth-btn:active {
   background-color: var(--zs-fill-tertiary);
 }
+.signup-oauth-btn:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-accent);
+  outline-offset: var(--zs-focus-ring-offset);
+}
 
-/* Email — accent fill (mirrors Button variant="filled"). */
-.signup-email-btn {
+/* ── In-page credential form (@zeroship/auth <SignInForm>) ──────────
+ * The SDK form ships override-friendly `zs-auth-*` class hooks + a
+ * minimal injected default stylesheet. We re-declare those hooks here,
+ * SCOPED under the page's `signup-form` root (added alongside
+ * `zs-auth-form` on the <form>), so the form reads as a crystal column:
+ * token-driven labels, DS-field-idiom inputs, an inline danger message,
+ * and a full-width accent submit (mirrors Button variant="filled"). The
+ * higher specificity wins over the SDK defaults regardless of order. */
+.signup-form {
+  gap: var(--zs-space-3);
+}
+.signup-form .zs-auth-field {
+  gap: var(--zs-space-1);
+}
+.signup-form .zs-auth-field label {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 590;
+  color: var(--zs-label);
+}
+.signup-form .zs-auth-field input {
+  block-size: 2.75rem;
+  padding-inline: var(--zs-space-3);
+  border: 1px solid var(--zs-input-border);
+  border-radius: var(--zs-control-radius-md);
+  background-color: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+.signup-form .zs-auth-field input:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-input-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+  border-color: var(--zs-input-border-focus);
+}
+.signup-form .zs-auth-error {
+  margin: 0;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-field-error-ink);
+}
+.signup-form .zs-auth-submit {
+  inline-size: 100%;
+  block-size: 2.75rem;
+  margin-block-start: var(--zs-space-1);
+  border: none;
+  border-radius: var(--zs-control-radius-md);
   background-color: var(--zs-accent);
   color: var(--zs-accent-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  font-weight: 590;
+  cursor: pointer;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
 @media (hover: hover) {
-  .signup-email-btn:hover {
+  .signup-form .zs-auth-submit:not([disabled]):hover {
     background-color: var(--zs-accent-hover);
   }
 }
-.signup-email-btn:active {
+.signup-form .zs-auth-submit:not([disabled]):active {
   background-color: var(--zs-accent-active);
 }
-
-/* Shared focus ring — crystal focus-visible affordance. */
-.signup-oauth-btn:focus-visible,
-.signup-email-btn:focus-visible {
+.signup-form .zs-auth-submit:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-accent);
   outline-offset: var(--zs-focus-ring-offset);
 }
@@ -170,7 +223,7 @@
 @media (prefers-reduced-motion: reduce) {
   .signup-brand,
   .signup-oauth-btn,
-  .signup-email-btn,
+  .signup-form .zs-auth-submit,
   .signup-footer__link {
     transition: none;
   }

@@ -31,6 +31,9 @@ session cookie + an identity projection, never a token. Two surfaces:
    - `POST /__zeroship/auth/session`       → code→session exchange; sets the session
      cookie; returns `{ user, expires_at }` (NO token in the body).
    - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; `{ user, expires_at }`.
+   - `POST /__zeroship/auth/password`      → in-page credential sign-in; JSON
+     `{ email, password }`; sets the session cookie; returns `{ user, expires_at }`
+     (NO token). Bad credentials → `401 { error: "invalid_credentials" }`.
    - `POST /__zeroship/auth/signout`       → revoke + clear; `204`.
 
    The `user` projection is `{ id, email, emailVerified, name, avatar, scopes }`
@@ -68,6 +71,12 @@ from inside the dev runtime — no gateway, no Hydra:
 - `session` (POST) → spends the dev code, mints the `__zeroship_dev_session` cookie,
   returns `{ user, expires_at }`.
 - `session` (GET / `?mint=1`) → read / re-mint, or `401 { error: "login_required" }`.
+- `password` (POST) → **frictionless in-page credential sign-in**: resolves the
+  seeded user by `email` (the password is accepted-and-ignored, like the dev
+  PKCE verifier — there is no credential store in dev), mints the
+  `__zeroship_dev_session` cookie and returns `{ user, expires_at }`. An unknown
+  email is rejected with `401 { error: "invalid_credentials" }` (no silent
+  default), mirroring `exchange()`'s unknown-code rejection.
 - `signout` → clears the cookie; `204` (idempotent).
 
 Every wire shape is identical to prod, so the `@zeroship/auth` client is

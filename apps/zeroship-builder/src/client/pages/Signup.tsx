@@ -1,24 +1,25 @@
-// ─── Signup — crystal auth (BFF popup) ──────────────────────────
+// ─── Signup — crystal auth (BFF: in-page password + Google popup) ─
 //
-// Account creation is a hosted flow: the same `@zeroship/auth` popup
-// as Login, against the seeded per-app public PKCE client. The IdP's
-// hosted-password screen handles register-or-sign-in; the retired
-// bespoke `/auth/register` endpoint is gone. On first authentication
-// we route into the onboarding intent flow.
+// Account creation shares the platform BFF with Login. The same
+// identity-only session + HttpOnly cookie is established two ways:
+//   • Email/password — IN-PAGE via the SDK `<SignInForm>`, POSTing
+//     `{email,password}` same-origin to `/__zeroship/auth/password`
+//     (`signInWithCredentials`); NO popup. The dev/IdP provider does
+//     register-or-sign-in; on SIGNED_IN the provider snapshot flips and
+//     the `useEffect` below routes into the onboarding intent flow.
+//   • Google — the federated `SignInButton(provider="google")` popup.
 //
 // Presentation rides the @zeroship/ui crystal surface: a `Center`d
 // elevated `Card` carries the brand mark, a title + description, an
-// optional danger `Banner`, the two `SignInButton` launchers (Google /
-// email, styled via the co-located .css to read as crystal buttons),
-// an "or" `Separator`, and a footer link back to /login. The
-// `@zeroship/auth` SignInButton + react-router nav are preserved
-// exactly — only the markup/styling changed.
+// optional danger `Banner`, the Google launcher, an "or" `Separator`,
+// the in-page `<SignInForm>` (themed via the co-located .css `zs-auth-*`
+// overrides), and a footer link back to /login.
 
 import { useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Banner, Card, Center, Separator, Stack } from "@zeroship/ui";
 import { useAuth } from "../auth/AuthContext";
-import { SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
+import { SignInButton, SignInForm, useAuth as useSdkAuth } from "@zeroship/auth/react";
 import "./Signup.css";
 
 export default function Signup() {
@@ -82,13 +83,21 @@ export default function Signup() {
               <Separator className="signup-or__line" />
             </div>
 
-            <SignInButton
-              provider="password"
-              data-testid="signup-submit"
-              className="signup-email-btn"
-            >
-              Sign up with email
-            </SignInButton>
+            {/* In-page email + password — the SDK form POSTs same-origin to
+                `/__zeroship/auth/password` (no popup). The dev/IdP provider
+                does register-or-sign-in; on SIGNED_IN the provider snapshot
+                flips and the `useEffect` above routes to /onboarding/intent.
+                The form shows its own inline AuthError. Themed via the
+                `signup-form` class + the `zs-auth-*` overrides in Signup.css;
+                testids are preserved through the SDK form. */}
+            <SignInForm
+              className="signup-form"
+              submitLabel="Sign up"
+              emailTestId="signup-email"
+              passwordTestId="signup-password"
+              submitTestId="signup-submit"
+              errorTestId="signup-error"
+            />
           </Stack>
 
           <p className="signup-footer">

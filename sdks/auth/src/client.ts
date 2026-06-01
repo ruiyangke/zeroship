@@ -29,6 +29,7 @@ import {
   AuthError,
   type AuthChangeEvent,
   type AuthClientOptions,
+  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,
@@ -50,10 +51,15 @@ const PROVISIONING_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 type Listener = (event: AuthChangeEvent, session: Session | null) => void;
 
 export interface AuthClient {
-  /** Interactive sign-in. Resolves with the Session on success. */
+  /** Interactive popup sign-in (federated providers, e.g. Google). Resolves with the Session on success. */
   signInWithOAuth(opts?: SignInOptions): Promise<Session>;
-  /** Phase-1: launches the popup to the hosted password page. */
-  signInWithPassword(opts?: { scopes?: string[]; popup?: boolean }): Promise<Session>;
+  /**
+   * In-page password sign-in — POSTs `{email, password}` same-origin to
+   * `POST /__zeroship/auth/password`, stores the returned identity-only session,
+   * and emits `SIGNED_IN`. NO popup, NO window. Throws a typed {@link AuthError}
+   * (e.g. `invalid_credentials`) on failure.
+   */
+  signInWithCredentials(input: CredentialsInput): Promise<void>;
 
   /** Exchange an authorization code (popup relay / redirect callback) for a session. */
   exchangeCodeForSession(code: string, state?: string): Promise<Session>;
@@ -200,10 +206,17 @@ class AuthClientImpl implements AuthClient {
     return this.completeFlow(response.code, response.state, response.error, response.error_description, txn);
   }
 
-  async signInWithPassword(opts: { scopes?: string[]; popup?: boolean } = {}): Promise<Session> {
-    // Phase-1: the hosted page handles the password form; the popup flow is
-    // identical to OAuth with provider=password.
-    return this.signInWithOAuth({ provider: "password", scopes: opts.scopes, popup: opts.popup });
+  async signInWithCredentials(input: CredentialsInput): Promise<void> {
+    // In-page credential sign-in: POST {email, password} same-origin (no popup,
+    // no auth-code dance). The gateway/dev provider verifies the credentials,
+    // mints the BFF session cookie, and returns identity ONLY. We store the
+    // identity-only Session + emit SIGNED_IN exactly like exchangeCodeForSession.
+    // A rejected pair surfaces as a typed AuthError (`invalid_credentials`).
+    const session = await this.transport.passwordLogin({
+      email: input.email,
+      password: input.password,
+    });
+    this.store(session, "SIGNED_IN");
   }
 
   async requestScopes(scopes: string[]): Promise<Session> {
@@ -482,6 +495,7 @@ export {
   type AuthChangeEvent,
   type AuthClientOptions,
   type AuthErrorCode,
+  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,

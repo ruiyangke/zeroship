@@ -20,10 +20,13 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type FormEvent,
+  type FormHTMLAttributes,
   type ReactNode,
 } from "react";
 
@@ -32,6 +35,7 @@ import {
   AuthError,
   type AuthChangeEvent,
   type AuthClientOptions,
+  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,
@@ -56,10 +60,10 @@ export interface AuthContextValue {
   /** The live session, or null when anonymous. */
   session: Session | null;
 
-  /** Interactive popup sign-in (gesture-safe when called from a click handler). */
+  /** Interactive popup sign-in for federated providers (gesture-safe when called from a click handler). */
   signInWithOAuth(opts?: SignInOptions): Promise<void>;
-  /** Phase-1 hosted-password sign-in (popup flow with `provider=password`). */
-  signInWithPassword(opts?: { scopes?: string[]; popup?: boolean }): Promise<void>;
+  /** In-page password sign-in — POSTs `{email, password}` same-origin; NO popup. */
+  signInWithCredentials(input: CredentialsInput): Promise<void>;
   /** Local (default) or global sign-out. */
   signOut(opts?: SignOutOptions): Promise<void>;
   /** Step-up: re-consent additional scopes via interactive popup (server-side grant; no token to the browser). */
@@ -244,9 +248,9 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
     };
   }, [client]);
 
-  // Bound methods. `void`-returning wrappers (signInWithOAuth / signInWithPassword
-  // / signOut) surface their own errors into `state.error` so a fire-and-forget
-  // onClick caller doesn't leave an unhandled rejection.
+  // Bound methods. `void`-returning wrappers (signInWithOAuth /
+  // signInWithCredentials / signOut) surface their own errors into `state.error`
+  // so a fire-and-forget onClick caller doesn't leave an unhandled rejection.
   const signInWithOAuth = useCallback(
     async (opts?: SignInOptions): Promise<void> => {
       try {
@@ -259,10 +263,10 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
     [client],
   );
 
-  const signInWithPassword = useCallback(
-    async (opts?: { scopes?: string[]; popup?: boolean }): Promise<void> => {
+  const signInWithCredentials = useCallback(
+    async (input: CredentialsInput): Promise<void> => {
       try {
-        await client.signInWithPassword(opts);
+        await client.signInWithCredentials(input);
       } catch (e) {
         if (mountedRef.current) setState((prev) => ({ ...prev, error: toAuthError(e) }));
         throw toAuthError(e);
@@ -311,7 +315,7 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
       user: state.user,
       session: state.session,
       signInWithOAuth,
-      signInWithPassword,
+      signInWithCredentials,
       signOut,
       requestScopes,
       hasScope,
@@ -319,7 +323,7 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
     [
       state,
       signInWithOAuth,
-      signInWithPassword,
+      signInWithCredentials,
       signOut,
       requestScopes,
       hasScope,
@@ -432,6 +436,265 @@ export function SignIn(props: SignInProps): ReactNode {
   return createElement(SignInButton, { scopes: props.scopes });
 }
 
+// ── in-page credential sign-in (no popup) ────────────────────────────────────
+
+// The SDK can't depend on @zeroship/ui (it's framework-agnostic), so the form
+// ships unstyled-but-structured: stable class hooks (`zs-auth-*`) + a tiny
+// scoped stylesheet a consumer fully overrides by re-declaring those classes,
+// or replaces wholesale via `className` on the root. The builder themes these
+// with its crystal tokens; a bare consumer still gets a usable, accessible form.
+
+/** Minimal, override-friendly default styling for the credential form/modal. */
+const FORM_STYLE = `
+.zs-auth-form{display:flex;flex-direction:column;gap:.75rem;width:100%}
+.zs-auth-field{display:flex;flex-direction:column;gap:.25rem}
+.zs-auth-field label{font-size:.875rem;font-weight:500}
+.zs-auth-field input{padding:.5rem .625rem;border:1px solid currentColor;border-radius:.375rem;font:inherit}
+.zs-auth-error{color:#b00020;font-size:.875rem}
+.zs-auth-submit{padding:.5rem .75rem;border-radius:.375rem;cursor:pointer;font:inherit}
+.zs-auth-submit[disabled]{opacity:.6;cursor:progress}
+.zs-auth-modal-backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}
+.zs-auth-modal{background:#fff;color:#111;padding:1.5rem;border-radius:.75rem;max-width:22rem;width:100%;display:flex;flex-direction:column;gap:1rem}
+.zs-auth-divider{display:flex;align-items:center;gap:.5rem;font-size:.75rem;opacity:.7}
+.zs-auth-divider::before,.zs-auth-divider::after{content:"";flex:1;height:1px;background:currentColor;opacity:.3}
+.zs-auth-oauth{padding:.5rem .75rem;border-radius:.375rem;cursor:pointer;font:inherit;width:100%}
+`;
+
+/** Inject the default stylesheet once per document (no-op when already present / no DOM). */
+function useFormStyles(): void {
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const ID = "zs-auth-form-styles";
+    if (document.getElementById(ID)) return;
+    const el = document.createElement("style");
+    el.id = ID;
+    el.textContent = FORM_STYLE;
+    document.head.appendChild(el);
+  }, []);
+}
+
+// Drop the native `onSubmit` (we own it) and `onError` (re-typed to an AuthError).
+type FormBaseProps = Omit<FormHTMLAttributes<HTMLFormElement>, "onSubmit" | "onError">;
+
+export interface SignInFormProps extends FormBaseProps {
+  /** Called after a successful in-page sign-in (SIGNED_IN already emitted). */
+  onSuccess?: () => void;
+  /** Called if `signInWithCredentials` rejects (in addition to the inline error). */
+  onError?: (error: AuthError) => void;
+  /** Submit-button label. Default `"Sign in"`. */
+  submitLabel?: ReactNode;
+  /** Label for the email field. Default `"Email"`. */
+  emailLabel?: ReactNode;
+  /** Label for the password field. Default `"Password"`. */
+  passwordLabel?: ReactNode;
+  /** `data-testid` for the email `<input>`. */
+  emailTestId?: string;
+  /** `data-testid` for the password `<input>`. */
+  passwordTestId?: string;
+  /** `data-testid` for the submit `<button>`. */
+  submitTestId?: string;
+  /** `data-testid` for the inline error `<p role="alert">` (rendered only on failure). */
+  errorTestId?: string;
+}
+
+/**
+ * In-page email + password sign-in form. Submitting calls
+ * `useAuth().signInWithCredentials({email,password})` (a same-origin POST — NO
+ * popup, NO window), shows an inline {@link AuthError} on failure, and invokes
+ * `onSuccess` once SIGNED_IN settles. Themeable: pass `className` for the root
+ * `<form>` (added alongside the `zs-auth-form` hook) or override the `zs-auth-*`
+ * classes; any extra `<form>` props pass through.
+ */
+export function SignInForm(props: SignInFormProps): ReactNode {
+  const {
+    onSuccess,
+    onError,
+    submitLabel,
+    emailLabel,
+    passwordLabel,
+    emailTestId,
+    passwordTestId,
+    submitTestId,
+    errorTestId,
+    className,
+    ...formProps
+  } = props;
+  const { signInWithCredentials } = useAuth();
+  useFormStyles();
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<AuthError | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const baseId = useId();
+  const emailId = `${baseId}-email`;
+  const passwordId = `${baseId}-password`;
+
+  const onSubmit = useCallback(
+    (e: FormEvent<HTMLFormElement>) => {
+      e.preventDefault();
+      if (submitting) return;
+      setError(null);
+      setSubmitting(true);
+      signInWithCredentials({ email, password })
+        .then(() => {
+          if (!mountedRef.current) return;
+          setSubmitting(false);
+          onSuccess?.();
+        })
+        .catch((err: unknown) => {
+          const ae = toAuthError(err);
+          if (mountedRef.current) {
+            setError(ae);
+            setSubmitting(false);
+          }
+          onError?.(ae);
+        });
+    },
+    [signInWithCredentials, email, password, submitting, onSuccess, onError],
+  );
+
+  return createElement(
+    "form",
+    {
+      ...formProps,
+      className: className ? `zs-auth-form ${className}` : "zs-auth-form",
+      onSubmit,
+      noValidate: true,
+    },
+    createElement(
+      "div",
+      { className: "zs-auth-field", key: "email" },
+      createElement("label", { htmlFor: emailId }, emailLabel ?? "Email"),
+      createElement("input", {
+        id: emailId,
+        type: "email",
+        name: "email",
+        autoComplete: "email",
+        required: true,
+        value: email,
+        disabled: submitting,
+        "data-testid": emailTestId,
+        onChange: (ev: React.ChangeEvent<HTMLInputElement>) => setEmail(ev.target.value),
+      }),
+    ),
+    createElement(
+      "div",
+      { className: "zs-auth-field", key: "password" },
+      createElement("label", { htmlFor: passwordId }, passwordLabel ?? "Password"),
+      createElement("input", {
+        id: passwordId,
+        type: "password",
+        name: "password",
+        autoComplete: "current-password",
+        required: true,
+        value: password,
+        disabled: submitting,
+        "data-testid": passwordTestId,
+        onChange: (ev: React.ChangeEvent<HTMLInputElement>) => setPassword(ev.target.value),
+      }),
+    ),
+    error
+      ? createElement(
+          "p",
+          { className: "zs-auth-error", role: "alert", key: "error", "data-testid": errorTestId },
+          error.message,
+        )
+      : null,
+    createElement(
+      "button",
+      {
+        type: "submit",
+        className: "zs-auth-submit",
+        disabled: submitting,
+        key: "submit",
+        "data-testid": submitTestId,
+      },
+      submitting ? "Signing in…" : (submitLabel ?? "Sign in"),
+    ),
+  );
+}
+
+export interface AuthModalProps {
+  /** Render the overlay only when true. Default `true` (caller can keep it mounted-but-hidden). */
+  open?: boolean;
+  /** Called when the backdrop is clicked (caller closes the modal). */
+  onClose?: () => void;
+  /** Forwarded to the inner {@link SignInForm}; fired after a successful in-page sign-in. */
+  onSuccess?: () => void;
+  /** Heading rendered above the form. Default `"Sign in"`. */
+  title?: ReactNode;
+  /** Hide the "Continue with Google" federated button. Default `false`. */
+  hideOAuth?: boolean;
+  /** Class added to the modal panel (alongside `zs-auth-modal`). */
+  className?: string;
+  /** Extra content rendered below the form (e.g. a "sign up" link). */
+  children?: ReactNode;
+}
+
+/**
+ * An overlay dialog wrapping {@link SignInForm} plus a "Continue with Google"
+ * button. The password path is fully in-page (no `window.open`); ONLY the
+ * federated button spawns a popup (`signInWithOAuth({provider:"google"})`),
+ * fired synchronously in the click handler so the browser does not block it.
+ * Themeable via `className` (panel) + the `zs-auth-*` classes.
+ */
+export function AuthModal(props: AuthModalProps): ReactNode {
+  const { open = true, onClose, onSuccess, title, hideOAuth, className, children } = props;
+  const { signInWithOAuth } = useAuth();
+  useFormStyles();
+
+  if (!open) return null;
+
+  const onGoogle = () => {
+    // Inside the gesture so the client opens the popup synchronously (unblocked).
+    signInWithOAuth({ provider: "google" }).catch(() => {
+      // Errors surface via useAuth().error; nothing to do here.
+    });
+  };
+
+  const panel = createElement(
+    "div",
+    {
+      className: className ? `zs-auth-modal ${className}` : "zs-auth-modal",
+      role: "dialog",
+      "aria-modal": true,
+      // Stop a click inside the panel from bubbling to the backdrop's onClose.
+      onClick: (e: React.MouseEvent) => e.stopPropagation(),
+    },
+    createElement("h2", { key: "title", className: "zs-auth-title" }, title ?? "Sign in"),
+    createElement(SignInForm, { key: "form", onSuccess }),
+    hideOAuth
+      ? null
+      : createElement("div", { key: "divider", className: "zs-auth-divider" }, "or"),
+    hideOAuth
+      ? null
+      : createElement(
+          "button",
+          { key: "google", type: "button", className: "zs-auth-oauth", onClick: onGoogle },
+          "Continue with Google",
+        ),
+    children ?? null,
+  );
+
+  return createElement(
+    "div",
+    {
+      className: "zs-auth-modal-backdrop",
+      onClick: () => onClose?.(),
+    },
+    panel,
+  );
+}
+
 /** Renders `children` only when authenticated. Headless (no markup of its own). */
 export function SignedIn(props: { children?: ReactNode }): ReactNode {
   return useAuth().isAuthenticated ? props.children : null;
@@ -451,6 +714,7 @@ export {
   type AuthChangeEvent,
   type AuthClientOptions,
   type AuthErrorCode,
+  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,

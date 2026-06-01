@@ -1,25 +1,29 @@
-// ─── Login — crystal auth (BFF popup) ───────────────────────────
+// ─── Login — crystal auth (BFF: in-page password + Google popup) ──
 //
-// The console authenticates creators through the platform BFF popup
-// flow (`@zeroship/auth/react`): clicking sign-in opens the gateway's
-// `/__zeroship/auth/authorize` popup against the seeded per-app public PKCE
-// client; on success the gateway sets the HttpOnly session cookie and
-// the SDK publishes the authenticated snapshot. There is NO password
-// form here anymore — the retired bespoke `/auth/{login,register}`
-// endpoints are gone (design
-// docs/superpowers/specs/2026-05-30-console-as-regular-app-design.md).
+// The console authenticates creators through the platform BFF
+// (`@zeroship/auth/react`). Two paths share one identity-only session +
+// HttpOnly cookie:
+//   • Email/password — IN-PAGE via the SDK `<SignInForm>`, which POSTs
+//     `{email,password}` same-origin to `/__zeroship/auth/password`
+//     (`signInWithCredentials`); NO popup, NO window. On success the SDK
+//     emits SIGNED_IN and the provider publishes the authenticated
+//     snapshot — the `useEffect` below then bounces to `/home`.
+//   • Google — the federated `SignInButton(provider="google")` popup,
+//     wrapped in a DS Button via `asChild` (the SDK button owns the
+//     gesture click that opens the popup; the DS Button lends it crystal
+//     chrome). Its error (popup_blocked / popup_closed) surfaces inline.
 //
 // Crystal: a centered Card (Center + Card) holds a Stack of the wordmark,
-// headline, optional error Banner, and the two SignInButton launchers
-// wrapped in DS Buttons via `asChild` (the SDK button owns the click that
-// opens the popup; the DS Button lends it the crystal chrome). Bespoke
-// type/lockup styling reads `--zs-*` tokens from the co-located Login.css.
+// headline, optional error Banner, the Google launcher, an "or" rule, and
+// the in-page `<SignInForm>` (themed via the co-located Login.css, which
+// re-declares the SDK's `zs-auth-*` hooks against `--zs-*` tokens). All
+// type/lockup/form styling reads `--zs-*` tokens — no raw hex/px.
 
 import { useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Banner, Button, Card, Center, Separator, Stack } from "@zeroship/ui";
 import { useAuth } from "../auth/AuthContext";
-import { SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
+import { SignInButton, SignInForm, useAuth as useSdkAuth } from "@zeroship/auth/react";
 import "./Login.css";
 
 export default function Login() {
@@ -85,12 +89,20 @@ export default function Login() {
               <Separator className="zb-login__or-line" />
             </div>
 
-            {/* Hosted-password sign-in — Phase-1 popup flow (provider=password). */}
-            <Button variant="filled" size="large" className="zb-login__button" asChild>
-              <SignInButton provider="password" data-testid="login-submit">
-                Sign in with email
-              </SignInButton>
-            </Button>
+            {/* In-page email + password — the SDK form POSTs same-origin to
+                `/__zeroship/auth/password` (no popup). On SIGNED_IN the
+                provider snapshot flips and the `useEffect` above navigates;
+                the form shows its own inline AuthError on a bad pair. Themed
+                via the `zb-login__form` class + the `zs-auth-*` overrides in
+                Login.css. testids are preserved through the SDK form. */}
+            <SignInForm
+              className="zb-login__form"
+              submitLabel="Sign in"
+              emailTestId="login-email"
+              passwordTestId="login-password"
+              submitTestId="login-submit"
+              errorTestId="login-error"
+            />
           </Stack>
 
           <p className="zb-login__footer">

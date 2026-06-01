@@ -213,15 +213,53 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await signIn.catch(() => {});
   });
 
-  test("signInWithPassword threads provider=password as idp_hint (Fix 5)", async () => {
+  test("signInWithCredentials POSTs {email,password} same-origin (no popup) and emits SIGNED_IN", async () => {
     const h = makeHarness();
+    h.fetch.on(
+      (u, m) => m === "POST" && u.includes("/__zeroship/auth/password"),
+      () => jsonResponse(200, tokenSuccessBody()),
+    );
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
-    const signIn = client.signInWithPassword();
-    await awaitReady(h);
-    const q = new URL(h.window.lastOpened!.location.href).searchParams;
-    assert.equal(q.get("idp_hint"), "password", "signInWithPassword routes to the password IdP");
-    h.window.lastOpened!.close();
-    await signIn.catch(() => {});
+    const events: AuthChangeEvent[] = [];
+    client.onAuthStateChange((e) => events.push(e));
+
+    await client.signInWithCredentials({ email: "alice@relay.zeroship.ai", password: "hunter2" });
+
+    // NO popup for the password path.
+    assert.equal(h.window.lastOpened, undefined, "the credential path must not open a window");
+
+    const req = h.fetch.requests.find((r) => r.url.includes("/__zeroship/auth/password"));
+    assert.ok(req, "POST /__zeroship/auth/password was issued");
+    assert.equal(req!.method, "POST");
+    assert.equal(req!.headers["x-zs-auth"], "1", "X-ZS-Auth same-origin header is set");
+    assert.equal(req!.headers["content-type"], "application/json");
+    assert.deepEqual(req!.body, { email: "alice@relay.zeroship.ai", password: "hunter2" });
+
+    assert.deepEqual(events, ["SIGNED_IN"], "a successful in-page sign-in emits SIGNED_IN");
+    assert.equal(client.isAuthenticated(), true);
+  });
+
+  test("signInWithCredentials surfaces a typed invalid_credentials AuthError on 401", async () => {
+    const h = makeHarness();
+    h.fetch.on(
+      (u, m) => m === "POST" && u.includes("/__zeroship/auth/password"),
+      () => jsonResponse(401, { error: "invalid_credentials", error_description: "wrong password" }),
+    );
+    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
+    const events: AuthChangeEvent[] = [];
+    client.onAuthStateChange((e) => events.push(e));
+
+    await assert.rejects(
+      () => client.signInWithCredentials({ email: "alice@relay.zeroship.ai", password: "wrong" }),
+      (e: unknown) => {
+        assert.ok(e instanceof AuthError);
+        assert.equal((e as AuthError).code, "invalid_credentials");
+        assert.equal((e as AuthError).status, 401);
+        return true;
+      },
+    );
+    assert.deepEqual(events, [], "a rejected sign-in emits no state change");
+    assert.equal(client.isAuthenticated(), false);
   });
 
   test("requestScopes steps up with prompt=consent so new scopes are granted", async () => {

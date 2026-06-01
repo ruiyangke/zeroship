@@ -25,6 +25,10 @@
  *       mints the local `__zeroship_dev_session` cookie and returns `{user, expires_at}`.
  *   - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; returns `{user,
  *       expires_at}` or a `401 {error:"login_required"}` envelope.
+ *   - `POST /__zeroship/auth/password`      → in-page credential sign-in (no popup):
+ *       JSON `{email, password}`; resolves the seeded user by email (password
+ *       accepted-and-ignored in dev), mints the cookie and returns `{user,
+ *       expires_at}`; unknown email → `401 {error:"invalid_credentials"}`.
  *   - `POST /__zeroship/auth/signout`       → clears the cookie; `204`.
  *
  * Every wire shape — request params, the `{user, expires_at}` body with
@@ -449,6 +453,7 @@ export function createDevAuthProvider(
     if (path === "/__zeroship/auth/session") {
       return request.method === "POST" ? exchange(request) : sessionProbe(request, url);
     }
+    if (path === "/__zeroship/auth/password") return passwordLogin(request);
     if (path === "/__zeroship/auth/signout") return signout();
 
     return errorEnvelope(404, "not_found", `no dev-auth route for ${path}`);
@@ -491,6 +496,27 @@ export function createDevAuthProvider(
     const userId = spendCode(code);
     if (!userId) return errorEnvelope(400, "invalid_grant", "unknown or expired dev code");
     const user = userById.get(userId) ?? config!.users[0];
+    const token = await signDevSession(secret!, JSON.stringify(user));
+    return json(200, sessionBody(user), { "set-cookie": setCookieHeader(token) });
+  }
+
+  async function passwordLogin(request: Request): Promise<Response> {
+    // Frictionless in-page password sign-in. The browser POSTs {email, password}
+    // (no popup hop, no auth-code dance). We resolve the seeded dev user by email
+    // and — like the dev tier's PKCE verifier — accept-and-ignore the password
+    // (there is no credential store in dev). An UNKNOWN email is rejected
+    // exactly like exchange()'s unknown-code path (no silent default), so the
+    // SDK surfaces a real AuthError instead of logging in as a phantom user.
+    let body: { email?: string; password?: string } = {};
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return errorEnvelope(400, "invalid_request", "malformed password body");
+    }
+    const email = body.email;
+    if (!email) return errorEnvelope(400, "invalid_request", "missing email");
+    const user = config!.users.find((u) => u.email === email);
+    if (!user) return errorEnvelope(401, "invalid_credentials", "unknown email");
     const token = await signDevSession(secret!, JSON.stringify(user));
     return json(200, sessionBody(user), { "set-cookie": setCookieHeader(token) });
   }

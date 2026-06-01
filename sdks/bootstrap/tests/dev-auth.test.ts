@@ -130,6 +130,44 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.ok(cookieTokenFrom(res), "exchange sets the __zeroship_dev_session cookie");
   });
 
+  test("password login: seeded email → 200 { user, expires_at } + cookie; unknown email → 401 invalid_credentials", async () => {
+    const p = makeProvider();
+
+    // Seeded email (the built-in dev user) → 200 + identity-only body + cookie.
+    const ok = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/password", {
+        method: "POST",
+        headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
+        body: JSON.stringify({ email: "dev@localhost", password: "anything-goes-in-dev" }),
+      }),
+    );
+    assert.equal(ok.status, 200);
+    const body = (await ok.json()) as {
+      user: { id: string; email: string; email_verified: boolean; scopes: string[] };
+      expires_at: number;
+    };
+    // Same canonical ZeroShip-User wire shape as exchange(): snake_case email_verified, pws_ id, scopes.
+    assert.equal(body.user.id.startsWith("pws_"), true);
+    assert.equal(body.user.email, "dev@localhost");
+    assert.equal(body.user.email_verified, true);
+    assert.deepEqual(body.user.scopes, ["openid", "profile", "email"]);
+    assert.equal(typeof body.expires_at, "number");
+    assert.ok(cookieTokenFrom(ok), "password login sets the __zeroship_dev_session cookie");
+
+    // Unknown email → 401 invalid_credentials (no silent default), mirroring
+    // exchange()'s unknown-code rejection.
+    const bad = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/password", {
+        method: "POST",
+        headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
+        body: JSON.stringify({ email: "nobody@localhost", password: "x" }),
+      }),
+    );
+    assert.equal(bad.status, 401);
+    assert.equal(((await bad.json()) as { error: string }).error, "invalid_credentials");
+    assert.equal(bad.headers.get("set-cookie"), null, "a rejected login sets no cookie");
+  });
+
   test("session probe with the cookie returns the user; without it → 401 login_required", async () => {
     const p = makeProvider();
     const authRes = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));

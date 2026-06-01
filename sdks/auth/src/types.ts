@@ -74,6 +74,14 @@ export type AuthErrorCode =
   | "consent_required"
   | "interaction_required"
   | "invalid_grant"
+  /**
+   * `401` from `POST /__zeroship/auth/password` when the supplied email/password
+   * pair is rejected. The in-page {@link Session} sign-in surfaces this so the
+   * form can show an inline "wrong email or password" message.
+   */
+  | "invalid_credentials"
+  /** `400` from a credential POST with a malformed/missing field. */
+  | "invalid_request"
   | "missing_code_verifier"
   | "popup_closed"
   | "popup_blocked"
@@ -130,7 +138,12 @@ export interface AuthClientOptions {
 }
 
 export interface SignInOptions {
-  provider?: "google" | "github" | "password";
+  /**
+   * Federated provider hint for the popup OAuth flow (forwarded to Hydra as
+   * `idp_hint`). The password path is now in-page (`signInWithCredentials`) —
+   * NOT a popup provider — so it is no longer a value here.
+   */
+  provider?: "google" | "github";
   scopes?: string[];
   /** Default `true`. Popup vs full-page redirect. */
   popup?: boolean;
@@ -147,6 +160,17 @@ export interface SignInOptions {
 
 export interface SignOutOptions {
   scope?: "local" | "global";
+}
+
+/**
+ * Credentials for the in-page password sign-in
+ * (`AuthClient.signInWithCredentials`). POSTed same-origin to
+ * `POST /__zeroship/auth/password`; the response is identity-only (the HttpOnly
+ * cookie is the credential — no token reaches the browser).
+ */
+export interface CredentialsInput {
+  email: string;
+  password: string;
 }
 
 /** A consent scope descriptor (declared-scope UI, Slice 3). */

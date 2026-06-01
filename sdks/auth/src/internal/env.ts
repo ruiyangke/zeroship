@@ -166,7 +166,11 @@ export function resolveEnv(env?: ClientEnv): ResolvedEnv {
 
   return {
     window: env?.window ?? (g.window as WindowLike),
-    fetch: env?.fetch ?? (g.fetch as typeof fetch),
+    // Bind to the global: the default `fetch` is later invoked as a property
+    // (`transport.fetchImpl(...)`), which would call the platform `fetch` with
+    // `this` = the Transport instance — browsers reject that with a
+    // "TypeError: Illegal invocation". `.bind(g)` pins `this` to the global.
+    fetch: env?.fetch ?? ((g.fetch as typeof fetch | undefined)?.bind(g) as typeof fetch),
     session: env?.session ?? (g.sessionStorage as StorageLike),
     local: env?.local ?? (g.localStorage as StorageLike),
     location: env?.location ?? (g.location as { origin: string }),
