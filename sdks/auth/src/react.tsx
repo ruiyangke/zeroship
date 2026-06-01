@@ -186,9 +186,16 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
       });
     });
 
+    // An active sign-in COMPLETION (redirect/popup exchange landing back with
+    // `?code=&state=` or `?error=`) — its failure is a real, user-facing sign-in
+    // error. A plain recovery probe (`checkSession`) is NOT: it just asks "is
+    // there a session to restore?", and a `login_required` / briefly-unreachable
+    // backend on first paint simply means "signed out" — never a scary banner on
+    // a login page.
+    const isSignInCompletion = hasAuthParams();
     void (async () => {
       try {
-        if (hasAuthParams()) {
+        if (isSignInCompletion) {
           const params = new URLSearchParams(window.location.search);
           const code = params.get("code");
           const state = params.get("state") ?? undefined;
@@ -218,8 +225,15 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
           setState((prev) => (prev.isLoading ? { ...prev, isLoading: false } : prev));
         }
       } catch (e) {
-        if (mountedRef.current) {
+        if (!mountedRef.current) return;
+        if (isSignInCompletion) {
+          // The redirect/popup exchange failed — surface it so the user sees why.
           setState((prev) => ({ ...prev, isLoading: false, error: toAuthError(e) }));
+        } else {
+          // A background recovery probe failed (no session, or the backend was
+          // briefly unreachable on first paint). Settle to a clean signed-out
+          // state — no user-facing error — so the login UI renders normally.
+          setState((prev) => ({ ...prev, isLoading: false, error: null }));
         }
       }
     })();

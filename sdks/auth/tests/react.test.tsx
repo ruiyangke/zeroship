@@ -82,6 +82,8 @@ interface FakeClient extends AuthClient {
   signInError: AuthError | null;
   /** When set, `exchangeCodeForSession` rejects with this. */
   exchangeError: AuthError | null;
+  /** When set, `checkSession` (the mount recovery probe) rejects with this. */
+  checkSessionReject: AuthError | null;
 }
 
 function makeFakeClient(): FakeClient {
@@ -101,6 +103,7 @@ function makeFakeClient(): FakeClient {
     checkSessionResult: null,
     signInError: null,
     exchangeError: null,
+    checkSessionReject: null,
 
     emit(event, session) {
       current = session;
@@ -136,6 +139,7 @@ function makeFakeClient(): FakeClient {
     },
     async checkSession() {
       calls.checkSession += 1;
+      if (client.checkSessionReject) throw client.checkSessionReject;
       if (client.checkSessionResult) client.emit("SIGNED_IN", client.checkSessionResult);
       return client.checkSessionResult;
     },
@@ -214,6 +218,25 @@ describe("AuthProvider mount + reactive state", () => {
     assert.equal(observed?.isLoading, false, "loading must clear after checkSession settles");
     assert.equal(observed?.isAuthenticated, false);
     assert.equal(observed?.user, null);
+  });
+
+  test("a failed recovery probe settles signed-out WITHOUT a user-facing error", async () => {
+    // Regression: a transient mount-time checkSession failure (backend briefly
+    // unreachable on first paint, or a session-mint network_error) must NOT
+    // surface as `error` — that is what put "session mint request failed" on the
+    // login page. Only an active sign-in completion (redirect/popup exchange)
+    // should set `error`; a background recovery probe simply means "signed out".
+    const client = makeFakeClient();
+    client.checkSessionReject = new AuthError("network_error", "session mint request failed");
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(Probe, null)),
+      );
+    });
+    assert.equal(client.calls.checkSession, 1);
+    assert.equal(observed?.isLoading, false, "loading clears even when the probe rejects");
+    assert.equal(observed?.isAuthenticated, false);
+    assert.equal(observed?.error, null, "a background recovery-probe failure is NOT a user-facing error");
   });
 
   test("transitions isLoading → authenticated when the client fires SIGNED_IN", async () => {
