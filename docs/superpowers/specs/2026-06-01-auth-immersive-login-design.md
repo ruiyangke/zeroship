@@ -150,6 +150,48 @@ reusable: `exchange_code_public` → `verify_id_token` → `anchors::create` +
     server-side redirect-follower); reconciling `service.rs::login`'s own JWT with the
     BFF model (no-back-compat → likely collapse).
 
+### Part 2B — concrete design (post Hydra-feasibility, wf wjxxyty1j)
+
+**Mechanism (no security landmine):** Hydra has **no ROPC**, but a code can be minted
+**server-side by replaying the existing, audited authorization_code+PKCE dance with a
+cookie jar** — `crates/auth/tests/e2e_password.rs` already proves this headless flow
+(GET `/oauth2/auth` → `login_challenge` → `accept_login` → consent → `?code=`). Identity
+scopes (openid/profile/email/offline_access) **auto-accept silently** (no UI) even with
+per-app `skip_consent=false`. No new grant, no admin code-minter — reuse audited primitives.
+
+**Flow:** gateway `POST /__zeroship/auth/password` → `resolve_route` → `same_origin_guard(..,true,true)`
+→ **first-party gate** (`route.client_id ∈ trusted_oauth_clients`, fail-CLOSED) → gateway
+generates PKCE verifier+challenge → calls `crates/auth` `POST /password` (JSON
+{email,password,client_id,redirect_uri,scope,nonce,code_challenge}) → gets `{code}` →
+**reuses the extracted `mint_session_from_code`** (exchange_code_public → verify_id_token →
+anchors+sessions::create → sign_session_cookie → 3 cookies → {user,expires_at}). `amr=[pwd]`/
+`acr=urn:zeroship:pwd` flow through `accept_login` into the id_token automatically.
+
+**SECURITY (mandatory — this is a credential→code oracle):**
+1. The `crates/auth` `/password` endpoint MUST require a **gateway↔auth shared secret**
+   (HMAC/bearer header, mirroring the worker/control-key pattern) — `same_origin_guard`
+   lives only on the gateway, so the auth endpoint is otherwise dial-able by anyone. Without
+   this it's a full auth-bypass oracle. **Hard requirement.**
+2. The gateway first-party gate **fails closed** on unknown/empty `client_id` → 403.
+3. `verify_password_credentials` (extracted from `ui/login.rs`, sharing the constant-time
+   argon2/dummy-hash/ratelimit/eligibility/audit path) returns on EVERY failure arm **before**
+   the headless dance — no arm reaches code-mint without a successful verify.
+4. Headless dance only completes for first-party `skip_consent` clients.
+→ Adversarial security-review pass over 1–4.
+
+**Phased build (loop drives these):**
+- **Phase 0 (safe refactors, behavior-preserving, test-verified):** move
+  `resolve_trusted_oauth_clients`/`is_trusted_client_id` `crates/control`→`crates/core`
+  (re-export from control); extract gateway mint tail (`auth_token.rs:354-586`) →
+  `pub(crate) mint_session_from_code` and rewire `session_post`; add
+  `trusted_oauth_clients: HashSet<String>` to `GateState` (populate in `main.rs` from `file.auth`).
+- **Phase 1 (`crates/auth`):** extract `verify_password_credentials` from `ui/login.rs`;
+  promote the cookie-jar dance (`tests/common`) → `oauth/headless.rs::mint_code_for_subject`;
+  add `ui/password.rs` + route + the **shared-secret gate**; `e2e_password_grant` test.
+- **Phase 2 (gateway):** `browser_auth::password` + route reg + first-party-gate & guard
+  regression tests (the gate-fails-closed test is the security-critical one).
+- **Phase 3:** faithful live gateway↔auth e2e (real Hydra) — real `mint_session_from_code`, no shim.
+
 ## Out of scope / risks
 
 - Google/social in-page is impossible (Google blocks framing) — popup retained.
