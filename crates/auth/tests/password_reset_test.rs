@@ -181,12 +181,25 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     .await
     .expect("seed idp session");
 
+    // gateway_sessions.app_id is UUID + FK → apps(id); seed a real app row.
+    let gw_app_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            &[
+                &gw_app_id,
+                &format!("reset-revoke-app-{}", gw_app_id.simple()),
+                &"k",
+            ],
+        )
+        .await
+        .expect("seed app");
     client
         .execute(
             "INSERT INTO zeroship.gateway_sessions \
                 (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
-            &[&user.id, &"app_reset_revoke_test", &email, &"Test"],
+            &[&user.id, &gw_app_id, &email, &"Test"],
         )
         .await
         .expect("seed gateway session");
@@ -306,6 +319,9 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     .await
     .ok();
     pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+    pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&gw_app_id])
         .await
         .ok();
 }
@@ -613,6 +629,266 @@ async fn complete_rolls_back_token_consume_with_transaction() {
         .ok();
     client
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+/// Regression for security finding H1: password reset must DURABLY terminate
+/// the gateway app-session tier, not just the IdP login session.
+///
+/// Before the fix, `complete_password_reset_tx` deleted only `idp_sessions` +
+/// `gateway_sessions` and called Hydra `delete_login_sessions`. It NEVER:
+///   - wrote the `(client_id, pairwise_sub)` family marker into
+///     `zeroship.token_revocations` (the SOLE gate the gateway's stateless
+///     `__Host-zeroship_app_session` cookie consults), so a live app-session
+///     cookie kept validating after the victim's reset; and
+///   - revoked the user's `zeroship.app_session_anchors` rows, so the 30-day
+///     `__Host-zeroship_app_anchor` survived and `GET /session?mint=1` could
+///     re-mint a fresh cookie — resurrecting the session the reset was meant
+///     to kill.
+///
+/// This drives the REAL `/reset` POST handler and asserts the three
+/// teardown invariants the gateway relies on:
+///   1. every anchor for the user is now `revoked_at IS NOT NULL`
+///      (so `anchors::read_live` returns None → `?mint=1` fails closed),
+///   2. a `token_revocations` family marker exists for the app's
+///      `(client_id, pairwise_sub)` (so live cookies are rejected), and
+///   3. `users.credential_version` was bumped (IdP-leg defense in depth).
+///
+/// Pre-fix this FAILS at assertion (1) (anchor stays live).
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
+    let dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(dsn) => dsn,
+        Err(_) => {
+            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!("reset-anchor-{}@zeroship.test", Uuid::new_v4().simple());
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let old_hash = password::hash("old reset password phrase").expect("hash old password");
+    users::update_password_hash(&client, user.id, &old_hash)
+        .await
+        .expect("set old password");
+
+    let cred_version_before: i64 = client
+        .query_one(
+            "SELECT credential_version FROM zeroship.users WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("read credential_version")
+        .get(0);
+
+    // Seed the per-app OAuth client + app the anchor FKs require.
+    let client_id = format!("oac_anchor_{}", Uuid::new_v4().simple());
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, $1)",
+            &[
+                &client_id,
+                &format!("Client {client_id}"),
+                &vec![format!("https://{client_id}.example/cb")],
+                &vec!["openid".to_string()],
+            ],
+        )
+        .await
+        .expect("insert oauth client");
+
+    let app_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            &[&app_id, &format!("anchor-app-{}", app_id.simple()), &"k"],
+        )
+        .await
+        .expect("insert app");
+
+    // The gateway stores the per-app pairwise subject the cookie carries here;
+    // the reset teardown must reuse it as the family-marker `sub`.
+    let pairwise_sub = format!("pws_anchor_{}", Uuid::new_v4().simple());
+    client
+        .execute(
+            "INSERT INTO zeroship.app_user_identities \
+                (app_client_id, global_user_id, pairwise_sub) \
+             VALUES ($1, $2, $3)",
+            &[&client_id, &user.id, &pairwise_sub],
+        )
+        .await
+        .expect("insert app_user_identity");
+
+    // Seed the live 30-day reload-recovery anchor (the attacker's resurrection
+    // credential).
+    let anchor_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO zeroship.app_session_anchors \
+                (id, app_id, client_id, global_user_id, refresh_token_enc, \
+                 refresh_family_id, abs_expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days')",
+            &[
+                &anchor_id,
+                &app_id,
+                &client_id,
+                &user.id,
+                &b"enc-refresh".to_vec(),
+                &format!("rfam_{}", Uuid::new_v4().simple()),
+            ],
+        )
+        .await
+        .expect("insert anchor");
+
+    let issued = password_reset::issue(&client, &email)
+        .await
+        .expect("issue reset token");
+
+    let hydra_state = Arc::new(Mutex::new(MockHydraState::default()));
+    let hydra_state_for_srv = hydra_state.clone();
+    let hydra_srv = web::test::server(move || {
+        let hydra_state = hydra_state_for_srv.clone();
+        async move {
+            web::App::new().state(hydra_state).service(
+                web::resource("/admin/oauth2/auth/sessions/login")
+                    .route(web::delete().to(mock_delete_login_sessions)),
+            )
+        }
+    })
+    .await;
+    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
+
+    let pg = Arc::new(client);
+    let cfg = Arc::new(test_cfg(&dsn));
+    let app = test::init_service(
+        web::App::new()
+            .state(cfg.clone())
+            .state(pg.clone())
+            .state(admin)
+            .service(
+                web::resource("/reset")
+                    .route(web::get().to(zeroship_auth::ui::reset::get))
+                    .route(web::post().to(zeroship_auth::ui::reset::post)),
+            ),
+    )
+    .await;
+
+    let get_req =
+        test::TestRequest::get().uri(&format!("/reset?token={}", issued.raw)).to_request();
+    let get_resp = test::call_service(&app, get_req).await;
+    assert_eq!(get_resp.status().as_u16(), 200);
+    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /reset");
+
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", &csrf)
+        .append_pair("token", &issued.raw)
+        .append_pair("password", "new reset password phrase")
+        .finish();
+    let post_req = test::TestRequest::post()
+        .uri("/reset")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .set_payload(body)
+        .to_request();
+    let post_resp = test::call_service(&app, post_req).await;
+    assert_eq!(post_resp.status().as_u16(), 302);
+
+    // (1) The anchor MUST be revoked — `read_live` requires `revoked_at IS NULL`,
+    //     so this is what makes `?mint=1` fail closed. THIS is the pre-fix break.
+    let live_anchors: i64 = pg
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.app_session_anchors \
+             WHERE global_user_id = $1 AND revoked_at IS NULL",
+            &[&user.id],
+        )
+        .await
+        .expect("count live anchors")
+        .get(0);
+    assert_eq!(
+        live_anchors, 0,
+        "password reset must revoke every app_session_anchor for the user \
+         (else ?mint=1 resurrects the session)"
+    );
+
+    // (2) A family marker must exist for (client_id, pairwise_sub) so any live
+    //     app-session cookie is rejected from now on.
+    let marker_count: i64 = pg
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.token_revocations \
+             WHERE client_id = $1 AND sub = $2",
+            &[&client_id, &pairwise_sub],
+        )
+        .await
+        .expect("count family markers")
+        .get(0);
+    assert_eq!(
+        marker_count, 1,
+        "password reset must write the (client_id, pairwise_sub) family marker"
+    );
+
+    // (3) credential_version bumped — IdP-leg defense in depth.
+    let cred_version_after: i64 = pg
+        .query_one(
+            "SELECT credential_version FROM zeroship.users WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("read credential_version after")
+        .get(0);
+    assert!(
+        cred_version_after > cred_version_before,
+        "password reset must bump credential_version (was {cred_version_before}, \
+         now {cred_version_after})"
+    );
+
+    // Cleanup (children first; anchors/identities also CASCADE off the app).
+    pg.execute(
+        "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
+        &[&client_id],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
+        &[&user.id],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
+        &[&client_id],
+    )
+    .await
+    .ok();
+    pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&client_id],
+    )
+    .await
+    .ok();
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
+        .await
+        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
+        &[&email],
+    )
+    .await
+    .ok();
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

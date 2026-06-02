@@ -190,6 +190,34 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
 /// update fails, PostgreSQL rolls back the token consume as part of that
 /// same statement.
 ///
+/// **Gateway app-session teardown (security finding H1).** A password reset
+/// exists to evict an intruder who knows the old credential, so it MUST
+/// durably terminate the gateway app-session tier — not just the IdP login
+/// session. The gateway's `__Host-zeroship_app_session` cookie is validated
+/// 100% statelessly; its ONLY revocation gate is the per-app family marker in
+/// `zeroship.token_revocations` keyed on `(client_id, pws_)`, and its 30-day
+/// `__Host-zeroship_app_anchor` reload-recovery credential re-mints fresh
+/// cookies via `?mint=1` as long as the `app_session_anchors` row is live. So
+/// this statement, in the SAME transaction as the password change:
+///
+///   1. bumps `users.credential_version` (mirrors `users::update_password_hash`
+///      — defense in depth for the IdP-session credential-version gate);
+///   2. writes a `(client_id, pairwise_sub)` family marker for EVERY app the
+///      user holds an identity with, drawing the `pairwise_sub` the cookie
+///      carries from `app_user_identities` (auth cannot derive `pws_` itself —
+///      it holds neither `pairwise_salt` nor the route sector — but the gateway
+///      persisted it there at projection time). This rejects every already-live
+///      app-session cookie / wrapper token for that family from now on; and
+///   3. revokes (`revoked_at = NOW()`) every `app_session_anchors` row for the
+///      user, so `anchors::read_live` returns `None` and `?mint=1` fails closed
+///      — no fresh cookie can be minted to outrun the family marker.
+///
+/// The Hydra refresh-grant *itself* is left for the gateway/Hydra side to age
+/// out (auth holds no `anchor_enc_key` to decrypt the per-anchor refresh
+/// family), but revoking the anchor means the gateway never touches that
+/// refresh family again, and the family marker rejects any token it could yield
+/// — so the 720h Hydra ceiling is moot.
+///
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure.
@@ -211,7 +239,9 @@ pub async fn complete(
                    AND ml.expires_at > NOW() \
              ), updated_user AS ( \
                  UPDATE zeroship.users u \
-                 SET password_hash = $3, updated_at = NOW() \
+                 SET password_hash = $3, \
+                     credential_version = u.credential_version + 1, \
+                     updated_at = NOW() \
                  FROM candidate c \
                  WHERE u.id = c.user_id \
                  RETURNING u.id, c.email \
@@ -224,6 +254,19 @@ pub async fn complete(
                    AND ml.email = u.email::citext \
                    AND ml.consumed_at IS NULL \
                  RETURNING u.id AS user_id, u.email AS email \
+             ), revoked_families AS ( \
+                 INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+                 SELECT aui.app_client_id, aui.pairwise_sub, NOW() \
+                 FROM zeroship.app_user_identities aui \
+                 JOIN consumed c ON c.user_id = aui.global_user_id \
+                 ON CONFLICT (client_id, sub) \
+                   DO UPDATE SET revoked_after = EXCLUDED.revoked_after \
+             ), revoked_anchors AS ( \
+                 UPDATE zeroship.app_session_anchors a \
+                 SET revoked_at = NOW() \
+                 FROM consumed c \
+                 WHERE a.global_user_id = c.user_id \
+                   AND a.revoked_at IS NULL \
              ) \
              SELECT user_id, email FROM consumed",
             &[&token_hash.as_slice(), &PURPOSE, &password_hash],
