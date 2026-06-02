@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION};
+use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
 use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
+use crate::csrf;
 use crate::hydra_client::types::AcceptDeviceUserCodeRequest;
 use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
@@ -25,11 +26,17 @@ const MAX_USER_CODE_BYTES: usize = 32;
 #[derive(Debug, Deserialize)]
 pub struct DeviceForm {
     pub user_code: String,
+    /// Double-submit CSRF token mirrored from the `__Host-zsidp_csrf` cookie.
+    /// The device-confirmation POST binds an OAuth device challenge to the
+    /// signed-in user — an identity-conferring state change — so it MUST carry
+    /// the same CSRF token the ten sibling form handlers enforce (RFC 8628
+    /// §5.4 names device confirmation as a CSRF target).
+    pub csrf: Option<String>,
 }
 
 #[allow(clippy::future_not_send)]
-pub async fn get() -> HttpResponse {
-    render_form("", None, StatusCode::OK)
+pub async fn get(cfg: ntex::web::types::State<Arc<AuthConfig>>) -> HttpResponse {
+    render_form("", None, StatusCode::OK, cfg.insecure_dev)
 }
 
 /// `/device` POST — validate the typed user code through Hydra's public
@@ -44,16 +51,35 @@ pub async fn post(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
+    let insecure_dev = cfg.insecure_dev;
+
+    // CSRF double-submit — enforced FIRST, before any Hydra round-trip or
+    // state change, exactly like the login/signup/consent/reset siblings.
+    if !csrf_valid(&req, &form, insecure_dev) {
+        return render_form(
+            "",
+            Some("invalid request"),
+            StatusCode::FORBIDDEN,
+            insecure_dev,
+        );
+    }
+
     let user_code = form.user_code.trim();
     if user_code.is_empty() {
         return render_form(
             "",
             Some("enter the code shown on your device"),
             StatusCode::BAD_REQUEST,
+            insecure_dev,
         );
     }
     if !valid_user_code(user_code) {
-        return render_form("", Some("invalid or expired code"), StatusCode::BAD_REQUEST);
+        return render_form(
+            "",
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            insecure_dev,
+        );
     }
 
     let verified = match verify_user_code(cfg.hydra_public_url(), user_code).await {
@@ -63,6 +89,7 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
+                insecure_dev,
             );
         }
         Err(DeviceVerifyError::Hydra(e)) => {
@@ -71,6 +98,7 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
+                insecure_dev,
             );
         }
     };
@@ -84,6 +112,7 @@ pub async fn post(
             user_code,
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
+            insecure_dev,
         );
     };
 
@@ -98,12 +127,14 @@ pub async fn post(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
+                insecure_dev,
             );
         }
         return render_form(
             user_code,
             Some("account temporarily locked"),
             StatusCode::FORBIDDEN,
+            insecure_dev,
         );
     }
 
@@ -130,9 +161,32 @@ pub async fn post(
         }
         Err(e) => {
             tracing::warn!(error = %e, "accept device user code failed");
-            render_form(user_code, Some("invalid or expired code"), StatusCode::BAD_REQUEST)
+            render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                insecure_dev,
+            )
         }
     }
+}
+
+/// Double-submit CSRF check for the device-confirmation POST. Mirrors the
+/// `consent.rs` / `reset.rs` helpers: the form-field token must be present and
+/// byte-equal (constant-time) to the `__Host-zsidp_csrf` cookie token.
+fn csrf_valid(req: &HttpRequest, form: &DeviceForm, insecure_dev: bool) -> bool {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let cookie_token = csrf::parse_cookie(cookie_header, insecure_dev);
+    let Some(form_token) = form.csrf.as_deref() else {
+        return false;
+    };
+    cookie_token
+        .as_deref()
+        .is_some_and(|cookie| csrf::matches(form_token, cookie))
 }
 
 #[derive(Debug)]
@@ -239,13 +293,24 @@ fn redirect(to: &str) -> HttpResponse {
     resp.finish()
 }
 
-fn render_form(user_code: &str, error: Option<&str>, status: StatusCode) -> HttpResponse {
-    let page = DevicePage { user_code, error };
+fn render_form(
+    user_code: &str,
+    error: Option<&str>,
+    status: StatusCode,
+    insecure_dev: bool,
+) -> HttpResponse {
+    let csrf_token = csrf::generate_token();
+    let page = DevicePage {
+        user_code,
+        error,
+        csrf: &csrf_token,
+    };
     let body = page
         .render()
         .unwrap_or_else(|_| "<h1>device authorization</h1>".to_string());
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, insecure_dev));
     resp.body(body)
 }
 

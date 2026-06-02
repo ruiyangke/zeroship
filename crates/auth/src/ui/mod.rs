@@ -184,6 +184,7 @@ pub struct MagicShowCodePage<'a> {
 pub struct DevicePage<'a> {
     pub user_code: &'a str,
     pub error: Option<&'a str>,
+    pub csrf: &'a str,
 }
 
 /// `/verify` GET page (P5-U5) — shown after a successful email-verification
