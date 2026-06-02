@@ -36,9 +36,9 @@ use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_gateway::{
-    backchannel_logout,
+    anchors, backchannel_logout,
     blob_cache::{BlobCache, DiskBlobCache},
-    db::DbConfig,
+    db::{self, DbConfig},
     enforce, idempotency,
     oidc_rp::OidcRp,
     proxy::HashRing,
@@ -203,6 +203,68 @@ async fn insert_user(client: &Client, label: &str) -> Uuid {
         )
         .await
         .expect("insert user");
+    rows[0].get("id")
+}
+
+/// Seed a real `zeroship.apps` row with the given stable UUID so the
+/// `app_session_anchors` / `gateway_sessions` FKs to `apps(id)` are satisfied.
+async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
+             VALUES ($1, $2, 'free', $3, $4)",
+            &[
+                &app_id,
+                &name,
+                &format!("key-{}", Uuid::new_v4().simple()),
+                &format!("hash-{}", Uuid::new_v4().simple()),
+            ],
+        )
+        .await
+        .expect("seed app");
+}
+
+/// Seed a real `zeroship.oauth_clients` row so the `app_session_anchors`
+/// FK to `oauth_clients(client_id)` is satisfied.
+async fn seed_oauth_client(client: &Client, client_id: &str) {
+    let empty: Vec<String> = vec![];
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, $1) \
+             ON CONFLICT (client_id) DO NOTHING",
+            &[&client_id, &"BCL test client", &empty, &empty],
+        )
+        .await
+        .expect("seed oauth_client");
+}
+
+/// Seed one `zeroship.app_session_anchors` row directly (bypassing the enc
+/// machinery — the ciphertext is opaque here; the Hydra revoke fan-out the BCL
+/// performs is best-effort and may fail harmlessly in the test). Returns the
+/// new anchor id.
+async fn seed_anchor(client: &Client, app_id: Uuid, client_id: &str, global_user_id: Uuid) -> Uuid {
+    let scopes: Vec<String> = vec!["openid".into()];
+    let refresh_enc: Vec<u8> = vec![1, 2, 3, 4];
+    let rows = client
+        .query(
+            "INSERT INTO zeroship.app_session_anchors \
+                (app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, \
+                 granted_scopes, abs_expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NOW() + interval '30 days') \
+             RETURNING id",
+            &[
+                &app_id,
+                &client_id,
+                &global_user_id,
+                &refresh_enc,
+                &format!("fam-{}", Uuid::new_v4().simple()),
+                &scopes,
+            ],
+        )
+        .await
+        .expect("seed anchor");
     rows[0].get("id")
 }
 
@@ -898,6 +960,174 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     .await
     .ok();
     db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
+        .await
+        .ok();
+}
+
+// ─── M1 regression: per-app BCL must DELETE the reload-recovery anchor ───────
+
+/// M1 (MEDIUM) regression — a per-app back-channel logout ("sign out
+/// everywhere" for THIS app) must durably terminate the 30-day SDK
+/// reload-recovery anchor, not just the gateway session + the family marker.
+///
+/// Before the fix the per-app BCL branch wrote the `(client_id, pws_)` family
+/// marker and deleted `gateway_sessions`, but NEVER deleted the
+/// `app_session_anchors` row. The family marker rejects only tokens whose
+/// `iat < revoked_after`, so a `GET /__zeroship/auth/session?mint=1` could read
+/// the surviving anchor (`anchors::read_live` ignores the marker), run a Hydra
+/// refresh, and re-mint a fresh cookie whose `iat` post-dates the marker —
+/// silently resurrecting the session the user believed they killed.
+///
+/// We seed a live anchor for the subject + app, POST a real signed per-app
+/// logout_token through the REAL handler, and assert the anchor is no longer
+/// live (`read_live` → None) — i.e. the `?mint=1` resurrection path has nothing
+/// to read. Pre-fix this assertion FAILS (the anchor survives). PG-gated.
+#[ntex::test]
+async fn per_app_bcl_deletes_reload_recovery_anchor() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+    let mut db = client;
+    let db_cfg = DbConfig::new(dsn.clone(), 4);
+
+    let key = make_key();
+    let jwks_key = Arc::new(key.clone());
+    let jwks_server = test::server(move || {
+        let jwks_key = jwks_key.clone();
+        async move {
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/.well-known/jwks.json").route(web::get().to(jwks)))
+        }
+    })
+    .await;
+    let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
+    let issuer = format!("{auth_base}/");
+
+    let target_user = insert_user(&db, "gateway-bcl-anchor").await;
+    let target_user_string = target_user.to_string();
+    let app_id = Uuid::new_v4();
+    let app_name = format!("anchorbcl-{}", Uuid::new_v4().simple());
+    let oauth_client_id = format!("oac_anchorbcl_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{app_name}.zeroship.localhost");
+
+    // The anchor + gateway_session rows FK to apps(id)/oauth_clients(client_id):
+    // seed both real rows so the inserts succeed under the live schema.
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
+
+    create(
+        &mut db,
+        &NewSession {
+            user_id: &target_user_string,
+            app_id,
+            email: Some("alice@zeroship.test"),
+            name: Some("Alice"),
+            avatar_url: None,
+            email_verified: true,
+            granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
+        },
+    )
+    .await
+    .expect("create session");
+
+    // The 30-day reload-recovery anchor that `?mint=1` would resurrect from.
+    let anchor_id = seed_anchor(&db, app_id, &oauth_client_id, target_user).await;
+
+    // Pre: the anchor reads LIVE (this is exactly what `?mint=1` reads).
+    assert!(
+        anchors::read_live(&mut db, app_id, anchor_id)
+            .await
+            .expect("pre-BCL anchor read")
+            .is_some(),
+        "the seeded anchor must be live before the BCL"
+    );
+
+    let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-anchor-stash");
+    let jti = format!("jti-{}", Uuid::new_v4().simple());
+    let token =
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+    let state = build_handler_state_with_route(
+        db_cfg.clone(),
+        &auth_base,
+        app_id,
+        &app_name,
+        &oauth_client_id,
+        &sector,
+        pairwise_salt,
+    );
+    let app = test::init_service(web::App::new().state(state).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={token}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // THE M1 ASSERTION: the per-app BCL must have deleted the anchor, so the
+    // `?mint=1` resurrection path (`read_live`) now finds NOTHING. Pre-fix the
+    // anchor survives and this fails — "sign out everywhere" stays resurrectable.
+    {
+        let pool = db::checkout(&db_cfg).await.expect("checkout");
+        let mut conn = pool.get().await.expect("conn");
+        assert!(
+            anchors::read_live(&mut conn, app_id, anchor_id)
+                .await
+                .expect("post-BCL anchor read")
+                .is_none(),
+            "per-app BCL must delete the reload-recovery anchor so ?mint=1 cannot \
+             resurrect the session (M1)"
+        );
+    }
+
+    // Cleanup.
+    db.execute(
+        "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
+        &[&oauth_client_id],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
+        &[&jti],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.app_session_anchors WHERE app_id = $1",
+        &[&app_id],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
+        &[&target_user_string],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
+        .await
+        .ok();
+    db.execute(
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&oauth_client_id],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
         .await
         .ok();
 }

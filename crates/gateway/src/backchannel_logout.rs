@@ -156,6 +156,12 @@ pub async fn handle(
         },
         None => None,
     };
+    // M1 fix: the anchor refresh families deleted inside the DB block, to be
+    // revoked at Hydra AFTER the connection is released (no conn held across the
+    // outbound HTTP). `anchor_user` is the parsed `sub` UUID used to rebuild the
+    // per-family AEAD AAD for the decrypt.
+    let mut anchor_families: Vec<crate::anchors::DeletedFamily> = Vec::new();
+    let mut anchor_user: Option<uuid::Uuid> = None;
     // `&mut Client`: the RLS-scoped `revoke_app_sessions_for_user` needs it (it
     // opens a tenant-GUC transaction). The non-RLS `wrapper_revocation` +
     // audit-insert calls below reborrow it immutably; every touch is sequential
@@ -211,6 +217,51 @@ pub async fn handle(
                                  skipping token-family marker (sessions still revoked)"
                             );
                         }
+                        // M1 fix: the per-app BCL must ALSO durably terminate the
+                        // 30-day SDK reload-recovery anchor for this `(app_id,
+                        // user)` — otherwise `GET /__zeroship/auth/session?mint=1`
+                        // reads the surviving anchor, runs a Hydra refresh, and
+                        // re-mints a cookie whose `iat` post-dates the family
+                        // marker, silently resurrecting the session the logout
+                        // killed. Delete EVERY anchor row for the user at this app
+                        // ("this app, every device" — the same teardown `/signout
+                        // {scope:'global'}` does) and stash the removed Hydra
+                        // refresh families for the best-effort Hydra revoke AFTER
+                        // the DB block (no conn is held across the outbound HTTP —
+                        // the round-6 BLOCKER invariant this file documents).
+                        //
+                        // `sub` is the global user UUID; parse it once. A non-UUID
+                        // sub (never a real end-user) skips the anchor teardown
+                        // (there is no anchor keyed by it). The anchor delete is the
+                        // authoritative step; the Hydra revoke is defense-in-depth.
+                        match uuid::Uuid::parse_str(sub) {
+                            Ok(global_user_id) => {
+                                match crate::anchors::delete_all_for_user(
+                                    &mut *conn, app_id, global_user_id,
+                                )
+                                .await
+                                {
+                                    Ok(deleted) => {
+                                        anchor_families = deleted;
+                                        anchor_user = Some(global_user_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            error = %e,
+                                            app_id = %app_id,
+                                            "backchannel_logout: anchor delete_all_for_user failed"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    app_id = %app_id,
+                                    "backchannel_logout: sub is not a UUID; skipping anchor teardown"
+                                );
+                            }
+                        }
+
                         sessions::revoke_app_sessions_for_user(&mut *conn, app_id, sub)
                             .await
                             .unwrap_or_else(|e| {
@@ -272,9 +323,53 @@ pub async fn handle(
         );
     }
 
+    // Release the pooled connection BEFORE the outbound Hydra revoke (the
+    // round-6 BLOCKER invariant: no DB conn is ever held across outbound HTTP).
+    drop(conn);
+    drop(pool);
+
+    // M1 fix (best-effort, defense-in-depth): revoke each anchor refresh family
+    // deleted above at Hydra so the rotating refresh grant is killed at the
+    // source, not just locally. The anchor rows are already gone (the
+    // authoritative step); a Hydra hiccup here is logged, never surfaced.
+    if let Some(global_user_id) = anchor_user {
+        let sub_str = global_user_id.to_string();
+        for fam in &anchor_families {
+            let aad = anchor_aad(&fam.client_id, &sub_str);
+            let refresh = match zeroship_core::crypto::decrypt(
+                &state.anchor_enc_key,
+                &aad,
+                &fam.refresh_token_enc,
+            ) {
+                Ok(pt) => String::from_utf8_lossy(&pt).into_owned(),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "backchannel_logout: anchor refresh decrypt failed (skip Hydra revoke)"
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = state.oidc_rp.revoke_token_public(&fam.client_id, &refresh).await {
+                // RFC 7009 §2.2: best-effort — the anchor row is already gone.
+                tracing::warn!(
+                    error = %e,
+                    "backchannel_logout: Hydra refresh revoke best-effort failure"
+                );
+            }
+        }
+    }
+
     HttpResponse::Ok()
         .header("cache-control", "no-store")
         .finish()
+}
+
+/// AEAD additional-authenticated-data for an anchor's server-held refresh
+/// family ciphertext. MUST match the format `browser_auth.rs` uses when it
+/// encrypts (`zs-anchor-refresh:{client_id}:{sub}`), or the decrypt fails.
+fn anchor_aad(client_id: &str, sub: &str) -> Vec<u8> {
+    format!("zs-anchor-refresh:{client_id}:{sub}").into_bytes()
 }
 
 /// Mount the route onto an ntex `App` factory. Registered at
