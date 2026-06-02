@@ -67,6 +67,14 @@ pub struct AuthSection {
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
     /// means exactly that set, where an empty vec is "no trusted clients".
     pub trusted_oauth_clients: Option<Vec<String>>,
+    /// Console origin(s) the auth-service login/signup/consent documents admit
+    /// via CSP `frame-ancestors` so the console's immersive iframe login can
+    /// embed them (design §4.3/§10.1). Deployment-injected, mirroring the
+    /// `trusted_oauth_clients` pattern: core has no console host. `None` (key
+    /// absent) ⇒ the CLI/env tier (`--frame-ancestor-origin` /
+    /// `FRAME_ANCESTOR_ORIGINS`) decides; `Some(vec)` supplies the overlay tier
+    /// when the CLI/env is empty. EXACT origins only — NO wildcards.
+    pub frame_ancestor_origins: Option<Vec<String>>,
 }
 
 /// Secret references that can be supplied by the shared file overlay.
@@ -86,10 +94,6 @@ pub struct SecretSection {
     pub worker_key: Option<String>,
     /// Stash signing key reference.
     pub stash_signing_key: Option<String>,
-    /// Gateway↔auth shared-secret reference gating the headless in-page
-    /// credential endpoint (`POST /password`). Identical value must be
-    /// configured on the gateway (the only legitimate caller).
-    pub auth_internal_key: Option<String>,
     /// Dedicated pairwise-salt secret reference (auth-sdk §6.2). The PERMANENT
     /// per-app `pws_` identity anchor seed — independent of the stash key,
     /// never rotated without a migration. Must be identical on gateway+control.
@@ -201,8 +205,35 @@ mod tests {
         assert!(config.auth.hydra_admin_url.is_none());
         assert!(config.auth.hydra_public_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
+        assert!(config.auth.frame_ancestor_origins.is_none());
         assert!(config.observability.log_filter.is_none());
         assert!(config.observability.log_format.is_none());
+    }
+
+    // Immersive-login pivot (design §4.3/§10.1, §9): `[auth].frame_ancestor_origins`
+    // parses into the matching `AuthSection` field so the auth service can admit
+    // the console origin via CSP `frame-ancestors`.
+    #[test]
+    fn frame_ancestor_origins_parses_from_auth_section() {
+        let file = TempFile::write(
+            "frame-ancestors.toml",
+            r#"
+[auth]
+frame_ancestor_origins = ["https://console.zeroship.ai", "https://staging-console.zeroship.ai"]
+"#,
+        );
+
+        let config = FileConfig::load(Some(&file.path)).expect("load config");
+        assert_eq!(
+            config.auth.frame_ancestor_origins.as_deref(),
+            Some(
+                [
+                    "https://console.zeroship.ai".to_string(),
+                    "https://staging-console.zeroship.ai".to_string(),
+                ]
+                .as_slice()
+            )
+        );
     }
 
     #[test]
@@ -432,6 +463,28 @@ maser_key = "urn:zeroship:vault:secret/x"
         );
 
         let err = FileConfig::load(Some(&file.path)).expect_err("unknown key rejected");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // Immersive-login pivot guardrail (design §4.5/§9, no-back-compat): the
+    // deleted `auth_internal_key` shared secret. A deployment TOML still
+    // carrying `[secrets].auth_internal_key` must now FAIL to parse via
+    // `deny_unknown_fields` — there is no silent-ignore arm, exactly so a stale
+    // overlay surfaces loudly rather than the operator believing the (gone)
+    // credential oracle is still gated. This test would PASS before the field
+    // removal (the key parsed) and FAILs to compile/parse-reject only after.
+    #[test]
+    fn deny_removed_auth_internal_key_in_secrets_section_is_parse_error() {
+        let file = TempFile::write(
+            "removed-auth-internal-key.toml",
+            r#"
+[secrets]
+auth_internal_key = "urn:zeroship:env:AUTH_INTERNAL_KEY"
+"#,
+        );
+
+        let err = FileConfig::load(Some(&file.path))
+            .expect_err("[secrets].auth_internal_key must be rejected (field deleted)");
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 }

@@ -70,76 +70,60 @@
   inline-size: 100%;
 }
 
-/* ── In-page credential form (@zeroship/auth <SignInForm>) ──────────
- * The SDK form is framework-agnostic and ships override-friendly
- * `zs-auth-*` class hooks plus a minimal default stylesheet it injects
- * once. We re-declare those hooks here, SCOPED under the page's
- * `zb-login__form` root (added alongside `zs-auth-form` on the <form>),
- * so the form reads as a crystal column: token-driven field labels,
- * inputs that match the DS field idiom, an inline danger message, and a
- * full-width accent submit mirroring Button variant="filled". The
- * higher specificity (`.zb-login__form .zs-auth-*`) wins over the SDK's
- * single-class defaults regardless of stylesheet order. */
-.zb-login__form {
-  gap: var(--zs-space-3);
+/* ── Immersive login modal chrome (@zeroship/auth <AuthModal>) ──────
+ * `<AuthModal>` hosts the cross-origin, same-site iframe embedding
+ * `auth.zeroship.ai/login` (the credential is typed into the auth-origin
+ * frame; console JS can never read it). The SDK ships override-friendly
+ * `zs-auth-*` class hooks + a minimal default stylesheet it injects once;
+ * we re-declare them here against `--zs-*` tokens so the modal reads as a
+ * crystal surface. The `zb-login__auth-modal` class added to the panel
+ * raises specificity over the SDK defaults regardless of stylesheet
+ * order. The SDK's default iframe factory mounts the frame full-viewport;
+ * these rules theme the modal panel chrome (header, close, divider). */
+.zs-auth-modal-backdrop {
+  background: var(--zs-overlay-scrim, rgba(0, 0, 0, 0.45));
 }
-.zb-login__form .zs-auth-field {
-  gap: var(--zs-space-1);
-}
-.zb-login__form .zs-auth-field label {
+.zb-login__auth-modal.zs-auth-modal {
+  inline-size: 27.5rem;
+  max-inline-size: 100%;
+  gap: var(--zs-space-4);
+  padding: var(--zs-space-5);
+  border-radius: var(--zs-control-radius-lg, 0.75rem);
+  background-color: var(--zs-bg-elevated, var(--zs-bg));
+  color: var(--zs-label);
   font-family: var(--zs-font-system);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: 590;
+}
+.zb-login__auth-modal .zs-auth-title {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
   color: var(--zs-label);
 }
-.zb-login__form .zs-auth-field input {
-  block-size: 2.75rem;
-  padding-inline: var(--zs-space-3);
-  border: 1px solid var(--zs-input-border);
+.zb-login__auth-modal .zs-auth-close {
+  color: var(--zs-label-secondary);
   border-radius: var(--zs-control-radius-md);
-  background-color: var(--zs-input-bg);
-  color: var(--zs-input-ink);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
 }
-.zb-login__form .zs-auth-field input:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-input-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  border-color: var(--zs-input-border-focus);
+.zb-login__auth-modal .zs-auth-close:hover {
+  color: var(--zs-label);
+  background-color: var(--zs-fill-secondary);
 }
-.zb-login__form .zs-auth-error {
-  margin: 0;
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-field-error-ink);
-}
-.zb-login__form .zs-auth-submit {
-  inline-size: 100%;
-  block-size: 2.75rem;
-  margin-block-start: var(--zs-space-1);
-  border: none;
-  border-radius: var(--zs-control-radius-md);
-  background-color: var(--zs-accent);
-  color: var(--zs-accent-ink);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  font-weight: 590;
-}
-@media (hover: hover) {
-  .zb-login__form .zs-auth-submit:not([disabled]):hover {
-    background-color: var(--zs-accent-hover);
-  }
-}
-.zb-login__form .zs-auth-submit:not([disabled]):active {
-  background-color: var(--zs-accent-active);
-}
-.zb-login__form .zs-auth-submit:focus-visible {
+.zb-login__auth-modal .zs-auth-close:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-accent);
   outline-offset: var(--zs-focus-ring-offset);
+}
+/* The iframe host slot — the SDK mounts the cross-origin <iframe> here
+ * (or full-viewport via its default factory); reserve a sensible frame
+ * box when it is mounted in-slot. */
+.zb-login__auth-modal .zs-auth-frame {
+  inline-size: 100%;
+  min-block-size: 22rem;
+}
+.zb-login__auth-modal .zs-auth-frame iframe {
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
 }
 
 /* "or" rule — a label bracketed by two DS Separators, mirroring the

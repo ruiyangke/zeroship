@@ -83,7 +83,10 @@ describe("dev-auth provider — cookie token round-trips (WebCrypto HMAC)", () =
 });
 
 describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
-  test("authorize 302s to popup-callback with a code + state", async () => {
+  test("single-user authorize 302s straight to the callback (no picker, §7 frictionless)", async () => {
+    // The default config has exactly one user → the frictionless path: no
+    // picker render, a direct 302 to the same-origin popup-callback. This is
+    // the leg the immersive iframe drives in-frame when ≤1 dev user.
     const p = makeProvider();
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/authorize?state=st123&scope=openid"),
@@ -103,7 +106,23 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const html = await res.text();
     // The relay envelope the @zeroship/auth client listens for.
     assert.match(html, /zs:authorization_response/);
-    assert.match(html, /postMessage\(msg, location\.origin\)/);
+    assert.match(html, /tgt\.postMessage\(msg, location\.origin\)/);
+  });
+
+  test("popup-callback relay targets opener-OR-parent, pinned to location.origin (never '*')", async () => {
+    // Parity with the gateway relay (browser_auth.rs popup_callback_html): the
+    // dev relay must reach window.parent for the immersive iframe leg, falling
+    // back to window.opener for the popup leg — and NEVER target '*'.
+    const p = makeProvider();
+    const res = await p.handle(new Request("http://localhost:3001/__zeroship/auth/popup-callback?code=c&state=s"));
+    const html = await res.text();
+    // Resolves the launcher window: opener (popup) if present-and-distinct,
+    // else parent (iframe) if present-and-distinct, else none.
+    assert.match(html, /window\.opener && window\.opener !== window/);
+    assert.match(html, /window\.parent\s+&& window\.parent\s+!== window/);
+    assert.match(html, /tgt\.postMessage\(msg, location\.origin\)/);
+    // targetOrigin is pinned to the app origin — a wildcard would leak the code.
+    assert.doesNotMatch(html, /postMessage\([^)]*['"]\*['"]/);
   });
 
   test("exchange mints a session cookie + returns { user, expires_at }", async () => {
@@ -128,44 +147,6 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.deepEqual(body.user.scopes, ["openid", "profile", "email"]);
     assert.equal(typeof body.expires_at, "number");
     assert.ok(cookieTokenFrom(res), "exchange sets the __zeroship_dev_session cookie");
-  });
-
-  test("password login: seeded email → 200 { user, expires_at } + cookie; unknown email → 401 invalid_credentials", async () => {
-    const p = makeProvider();
-
-    // Seeded email (the built-in dev user) → 200 + identity-only body + cookie.
-    const ok = await p.handle(
-      new Request("http://localhost:3001/__zeroship/auth/password", {
-        method: "POST",
-        headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
-        body: JSON.stringify({ email: "dev@localhost", password: "anything-goes-in-dev" }),
-      }),
-    );
-    assert.equal(ok.status, 200);
-    const body = (await ok.json()) as {
-      user: { id: string; email: string; email_verified: boolean; scopes: string[] };
-      expires_at: number;
-    };
-    // Same canonical ZeroShip-User wire shape as exchange(): snake_case email_verified, pws_ id, scopes.
-    assert.equal(body.user.id.startsWith("pws_"), true);
-    assert.equal(body.user.email, "dev@localhost");
-    assert.equal(body.user.email_verified, true);
-    assert.deepEqual(body.user.scopes, ["openid", "profile", "email"]);
-    assert.equal(typeof body.expires_at, "number");
-    assert.ok(cookieTokenFrom(ok), "password login sets the __zeroship_dev_session cookie");
-
-    // Unknown email → 401 invalid_credentials (no silent default), mirroring
-    // exchange()'s unknown-code rejection.
-    const bad = await p.handle(
-      new Request("http://localhost:3001/__zeroship/auth/password", {
-        method: "POST",
-        headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
-        body: JSON.stringify({ email: "nobody@localhost", password: "x" }),
-      }),
-    );
-    assert.equal(bad.status, 401);
-    assert.equal(((await bad.json()) as { error: string }).error, "invalid_credentials");
-    assert.equal(bad.headers.get("set-cookie"), null, "a rejected login sets no cookie");
   });
 
   test("session probe with the cookie returns the user; without it → 401 login_required", async () => {
@@ -223,7 +204,10 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.match(res.headers.get("set-cookie") ?? "", /Max-Age=0/);
   });
 
-  test("multi-user config without a pick renders the dev picker", async () => {
+  test("multi-user authorize renders the picker IN-FRAME, re-submitting to authorize (§7 two-step)", async () => {
+    // >1 dev user + no dev_user param → render the picker (a framed HTML doc).
+    // Its <form action="/__zeroship/auth/authorize"> re-submits within the
+    // frame WITH the chosen dev_user, which then takes the frictionless 302.
     const p = makeProvider(JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }));
     const res = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
     assert.equal(res.status, 200);
@@ -232,6 +216,21 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.match(html, /Choose a dev user/);
     assert.match(html, /pws_a/);
     assert.match(html, /pws_b/);
+    // The picker re-submits in-frame to authorize with the chosen dev_user.
+    assert.match(html, /action="\/__zeroship\/auth\/authorize"/);
+    assert.match(html, /name="dev_user"/);
+  });
+
+  test("multi-user authorize WITH a chosen dev_user 302s straight to the callback (§7 step two)", async () => {
+    const p = makeProvider(JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }));
+    const res = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/authorize?state=s&dev_user=pws_b"),
+    );
+    assert.equal(res.status, 302);
+    const loc = new URL(res.headers.get("location")!);
+    assert.equal(loc.pathname, "/__zeroship/auth/popup-callback");
+    assert.ok(loc.searchParams.get("code"));
+    assert.equal(loc.searchParams.get("state"), "s");
   });
 
   test("disabled when no secret is present", () => {

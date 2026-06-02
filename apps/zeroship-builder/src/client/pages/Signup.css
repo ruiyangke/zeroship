@@ -84,8 +84,7 @@
 /* ── Google SignInButton launcher ───────────────────────────────────
  * `@zeroship/auth` SignInButton renders a plain <button> (no asChild),
  * so we style it here to read as a crystal Button variant="gray". The
- * email/password path is no longer a button — it's the in-page
- * <SignInForm> below. */
+ * email/password path opens the immersive `<AuthModal>` (themed below). */
 .signup-oauth-btn {
   display: inline-flex;
   align-items: center;
@@ -121,78 +120,61 @@
   outline-offset: var(--zs-focus-ring-offset);
 }
 
-/* ── In-page credential form (@zeroship/auth <SignInForm>) ──────────
- * The SDK form ships override-friendly `zs-auth-*` class hooks + a
- * minimal injected default stylesheet. We re-declare those hooks here,
- * SCOPED under the page's `signup-form` root (added alongside
- * `zs-auth-form` on the <form>), so the form reads as a crystal column:
- * token-driven labels, DS-field-idiom inputs, an inline danger message,
- * and a full-width accent submit (mirrors Button variant="filled"). The
- * higher specificity wins over the SDK defaults regardless of order. */
-.signup-form {
-  gap: var(--zs-space-3);
+/* "Sign up with email" trigger — opens the immersive <AuthModal>; full
+ * width to match the Google launcher column. */
+.signup-email-trigger {
+  inline-size: 100%;
 }
-.signup-form .zs-auth-field {
-  gap: var(--zs-space-1);
+
+/* ── Immersive login modal chrome (@zeroship/auth <AuthModal>) ──────
+ * `<AuthModal>` hosts the cross-origin, same-site iframe embedding
+ * `auth.zeroship.ai`'s login (the credential is typed into the
+ * auth-origin frame; console JS can never read it). The SDK ships
+ * override-friendly `zs-auth-*` class hooks + a minimal injected default
+ * stylesheet; we re-declare them here against `--zs-*` tokens so the modal
+ * reads as a crystal surface. The `signup-auth-modal` class added to the
+ * panel raises specificity over the SDK defaults regardless of order. */
+.zs-auth-modal-backdrop {
+  background: var(--zs-overlay-scrim, rgba(0, 0, 0, 0.45));
 }
-.signup-form .zs-auth-field label {
+.signup-auth-modal.zs-auth-modal {
+  inline-size: 27.5rem;
+  max-inline-size: 100%;
+  gap: var(--zs-space-4);
+  padding: var(--zs-space-5);
+  border-radius: var(--zs-control-radius-lg, 0.75rem);
+  background-color: var(--zs-bg-elevated, var(--zs-bg));
+  color: var(--zs-label);
   font-family: var(--zs-font-system);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  font-weight: 590;
+}
+.signup-auth-modal .zs-auth-title {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
   color: var(--zs-label);
 }
-.signup-form .zs-auth-field input {
-  block-size: 2.75rem;
-  padding-inline: var(--zs-space-3);
-  border: 1px solid var(--zs-input-border);
+.signup-auth-modal .zs-auth-close {
+  color: var(--zs-label-secondary);
   border-radius: var(--zs-control-radius-md);
-  background-color: var(--zs-input-bg);
-  color: var(--zs-input-ink);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
 }
-.signup-form .zs-auth-field input:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-input-focus-ring-color);
-  outline-offset: var(--zs-focus-ring-offset);
-  border-color: var(--zs-input-border-focus);
+.signup-auth-modal .zs-auth-close:hover {
+  color: var(--zs-label);
+  background-color: var(--zs-fill-secondary);
 }
-.signup-form .zs-auth-error {
-  margin: 0;
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
-  color: var(--zs-field-error-ink);
-}
-.signup-form .zs-auth-submit {
-  inline-size: 100%;
-  block-size: 2.75rem;
-  margin-block-start: var(--zs-space-1);
-  border: none;
-  border-radius: var(--zs-control-radius-md);
-  background-color: var(--zs-accent);
-  color: var(--zs-accent-ink);
-  font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  font-weight: 590;
-  cursor: pointer;
-  transition:
-    background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    opacity var(--zs-motion-fast) var(--zs-motion-ease);
-}
-@media (hover: hover) {
-  .signup-form .zs-auth-submit:not([disabled]):hover {
-    background-color: var(--zs-accent-hover);
-  }
-}
-.signup-form .zs-auth-submit:not([disabled]):active {
-  background-color: var(--zs-accent-active);
-}
-.signup-form .zs-auth-submit:focus-visible {
+.signup-auth-modal .zs-auth-close:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-accent);
   outline-offset: var(--zs-focus-ring-offset);
+}
+.signup-auth-modal .zs-auth-frame {
+  inline-size: 100%;
+  min-block-size: 22rem;
+}
+.signup-auth-modal .zs-auth-frame iframe {
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
 }
 
 /* Brand glyph — fixed optical size; #EA4335 inside is the official
@@ -223,7 +205,6 @@
 @media (prefers-reduced-motion: reduce) {
   .signup-brand,
   .signup-oauth-btn,
-  .signup-form .zs-auth-submit,
   .signup-footer__link {
     transition: none;
   }

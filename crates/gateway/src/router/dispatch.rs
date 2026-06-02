@@ -1698,7 +1698,6 @@ mod tests {
                 worker_key: String::new(),
                 hydra_public_url: String::new(),
                 auth_ui_url: String::new(),
-                auth_internal_key: String::new(),
                 insecure_dev: true,
                 trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
@@ -1728,7 +1727,6 @@ mod tests {
             session_verifier: None,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
-            trusted_oauth_clients: zeroship_core::auth::default_trusted_oauth_clients(),
         })
     }
 

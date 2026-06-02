@@ -297,9 +297,10 @@ pub async fn bootstrap_console(
     //    narrow exception to spec §5.2 (a consent prompt for the platform's own
     //    console is meaningless). This applies ONLY to the console; every
     //    creator-app call passes `first_party = false`. The deployment MUST ALSO
-    //    name this client id in `[auth].trusted_oauth_clients` so the gateway's
-    //    first-party password gate + the headless consent dance honour it (the
-    //    `oac_<base62>` id is printed by `--bootstrap-console`; see
+    //    name this client id in `[auth].trusted_oauth_clients` so control marks
+    //    it `skip_consent=true` and the immersive framed `/login → /consent`
+    //    dance auto-accepts identity consent for the console (the `oac_<base62>`
+    //    id is printed by `--bootstrap-console`; see
     //    `zeroship_core::auth::trusted_clients`).
     let hydra = zeroship_auth::hydra_client::HydraAdmin::new(cfg.hydra_admin_url.clone());
     let hosts = vec![cfg.console_host.clone()];

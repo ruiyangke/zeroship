@@ -20,13 +20,10 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
   type ButtonHTMLAttributes,
-  type FormEvent,
-  type FormHTMLAttributes,
   type ReactNode,
 } from "react";
 
@@ -35,7 +32,6 @@ import {
   AuthError,
   type AuthChangeEvent,
   type AuthClientOptions,
-  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,
@@ -60,10 +56,13 @@ export interface AuthContextValue {
   /** The live session, or null when anonymous. */
   session: Session | null;
 
-  /** Interactive popup sign-in for federated providers (gesture-safe when called from a click handler). */
+  /**
+   * Interactive sign-in (gesture-safe when called from a click handler).
+   * `provider:'password'` drives the first-party login UI (immersive iframe on
+   * the same-site console, popup elsewhere); `'google'|'github'` are federated
+   * popups.
+   */
   signInWithOAuth(opts?: SignInOptions): Promise<void>;
-  /** In-page password sign-in — POSTs `{email, password}` same-origin; NO popup. */
-  signInWithCredentials(input: CredentialsInput): Promise<void>;
   /** Local (default) or global sign-out. */
   signOut(opts?: SignOutOptions): Promise<void>;
   /** Step-up: re-consent additional scopes via interactive popup (server-side grant; no token to the browser). */
@@ -73,6 +72,26 @@ export interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+// ── immersive-iframe mount controller (internal) ─────────────────────────────
+
+/**
+ * The live mount target + cancel signal for the immersive login iframe, shared
+ * between {@link AuthProvider} (which feeds it to the client's `iframeMount` /
+ * `iframeCancelled` env handles) and {@link AuthModal} (which sets it on open).
+ * Held in a ref so the client's option callbacks — closed over at client
+ * construction — always read the CURRENT open modal's slot, with no client
+ * rebuild (§4.1, §8).
+ */
+interface ModalMount {
+  /** The host slot the iframe mounts INTO; null ⇒ no modal open (overlay fallback). */
+  host: Element | null;
+  /** Resolves when the user dismisses the open modal → `runIframe` rejects `popup_closed`. */
+  cancelled: Promise<void> | undefined;
+}
+
+/** Internal: lets {@link AuthModal} register its slot with {@link AuthProvider}'s client. */
+const ModalMountContext = createContext<{ current: ModalMount } | null>(null);
 
 // ── reactive snapshot ───────────────────────────────────────────────────────
 
@@ -161,12 +180,27 @@ export interface AuthProviderProps {
  *     React state; unsubscribe on unmount.
  */
 export function AuthProvider(props: AuthProviderProps): ReactNode {
+  // The live immersive-iframe mount target + cancel signal. The client's
+  // `iframeMount`/`iframeCancelled` env handles read this ref at flow time, so
+  // an `AuthModal` opened LATER can still steer the iframe into its slot without
+  // rebuilding the client (§4.1, §8). Empty until a modal registers.
+  const modalMountRef = useRef<ModalMount>({ host: null, cancelled: undefined });
+
   // Build the client EXACTLY ONCE. An injected `client` wins (tests/SSR);
   // otherwise `createAuthClient(options)` runs in the lazy initializer so it is
-  // not re-created on every render.
-  const [client] = useState<AuthClient>(
-    () => props.client ?? createAuthClient(props.options),
-  );
+  // not re-created on every render. We merge the modal-mount handles into the
+  // options UNLESS the consumer already supplied their own (explicit wins).
+  const [client] = useState<AuthClient>(() => {
+    if (props.client) return props.client;
+    const options: AuthClientOptions = { ...props.options };
+    if (!options.iframeMount) {
+      options.iframeMount = () => modalMountRef.current.host;
+    }
+    if (!options.iframeCancelled) {
+      options.iframeCancelled = () => modalMountRef.current.cancelled;
+    }
+    return createAuthClient(options);
+  });
 
   const [state, setState] = useState<AuthState>(INITIAL);
   // Guard against a state update after unmount (StrictMode double-invoke / async settle).
@@ -248,25 +282,13 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
     };
   }, [client]);
 
-  // Bound methods. `void`-returning wrappers (signInWithOAuth /
-  // signInWithCredentials / signOut) surface their own errors into `state.error`
-  // so a fire-and-forget onClick caller doesn't leave an unhandled rejection.
+  // Bound methods. `void`-returning wrappers (signInWithOAuth / signOut) surface
+  // their own errors into `state.error` so a fire-and-forget onClick caller
+  // doesn't leave an unhandled rejection.
   const signInWithOAuth = useCallback(
     async (opts?: SignInOptions): Promise<void> => {
       try {
         await client.signInWithOAuth(opts);
-      } catch (e) {
-        if (mountedRef.current) setState((prev) => ({ ...prev, error: toAuthError(e) }));
-        throw toAuthError(e);
-      }
-    },
-    [client],
-  );
-
-  const signInWithCredentials = useCallback(
-    async (input: CredentialsInput): Promise<void> => {
-      try {
-        await client.signInWithCredentials(input);
       } catch (e) {
         if (mountedRef.current) setState((prev) => ({ ...prev, error: toAuthError(e) }));
         throw toAuthError(e);
@@ -315,22 +337,18 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
       user: state.user,
       session: state.session,
       signInWithOAuth,
-      signInWithCredentials,
       signOut,
       requestScopes,
       hasScope,
     }),
-    [
-      state,
-      signInWithOAuth,
-      signInWithCredentials,
-      signOut,
-      requestScopes,
-      hasScope,
-    ],
+    [state, signInWithOAuth, signOut, requestScopes, hasScope],
   );
 
-  return createElement(AuthContext.Provider, { value }, props.children);
+  return createElement(
+    AuthContext.Provider,
+    { value },
+    createElement(ModalMountContext.Provider, { value: modalMountRef }, props.children),
+  );
 }
 
 // ── hook ─────────────────────────────────────────────────────────────────────
@@ -436,221 +454,139 @@ export function SignIn(props: SignInProps): ReactNode {
   return createElement(SignInButton, { scopes: props.scopes });
 }
 
-// ── in-page credential sign-in (no popup) ────────────────────────────────────
+// ── immersive login modal (hosts the cross-origin auth iframe) ───────────────
 
-// The SDK can't depend on @zeroship/ui (it's framework-agnostic), so the form
+// The SDK can't depend on @zeroship/ui (it's framework-agnostic), so the modal
 // ships unstyled-but-structured: stable class hooks (`zs-auth-*`) + a tiny
-// scoped stylesheet a consumer fully overrides by re-declaring those classes,
-// or replaces wholesale via `className` on the root. The builder themes these
-// with its crystal tokens; a bare consumer still gets a usable, accessible form.
+// scoped stylesheet a consumer fully overrides by re-declaring those classes.
+// The modal hosts the cross-origin `auth.zeroship.ai/login` iframe; the
+// password is typed INTO that auth-origin frame, so console JS never sees the
+// credential (SOP, §6.1). The builder themes these with its crystal tokens.
 
-/** Minimal, override-friendly default styling for the credential form/modal. */
-const FORM_STYLE = `
-.zs-auth-form{display:flex;flex-direction:column;gap:.75rem;width:100%}
-.zs-auth-field{display:flex;flex-direction:column;gap:.25rem}
-.zs-auth-field label{font-size:.875rem;font-weight:500}
-.zs-auth-field input{padding:.5rem .625rem;border:1px solid currentColor;border-radius:.375rem;font:inherit}
-.zs-auth-error{color:#b00020;font-size:.875rem}
-.zs-auth-submit{padding:.5rem .75rem;border-radius:.375rem;cursor:pointer;font:inherit}
-.zs-auth-submit[disabled]{opacity:.6;cursor:progress}
+/** Minimal, override-friendly default styling for the login modal chrome. */
+const MODAL_STYLE = `
 .zs-auth-modal-backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}
-.zs-auth-modal{background:#fff;color:#111;padding:1.5rem;border-radius:.75rem;max-width:22rem;width:100%;display:flex;flex-direction:column;gap:1rem}
+.zs-auth-modal{background:#fff;color:#111;padding:1.5rem;border-radius:.75rem;max-width:26rem;width:100%;display:flex;flex-direction:column;gap:1rem;position:relative}
+.zs-auth-modal-header{display:flex;align-items:center;justify-content:space-between;gap:1rem}
+.zs-auth-title{font-size:1.125rem;font-weight:600;margin:0}
+.zs-auth-close{background:none;border:0;font:inherit;font-size:1.25rem;line-height:1;cursor:pointer;padding:.25rem;border-radius:.375rem}
 .zs-auth-divider{display:flex;align-items:center;gap:.5rem;font-size:.75rem;opacity:.7}
 .zs-auth-divider::before,.zs-auth-divider::after{content:"";flex:1;height:1px;background:currentColor;opacity:.3}
 .zs-auth-oauth{padding:.5rem .75rem;border-radius:.375rem;cursor:pointer;font:inherit;width:100%}
+.zs-auth-frame{width:100%;min-height:24rem;display:block}
+.zs-auth-frame iframe{display:block;width:100%;height:100%;min-height:24rem;border:0}
 `;
 
-/** Inject the default stylesheet once per document (no-op when already present / no DOM). */
-function useFormStyles(): void {
+/** Inject the default modal stylesheet once per document (no-op when present / no DOM). */
+function useModalStyles(): void {
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const ID = "zs-auth-form-styles";
+    const ID = "zs-auth-modal-styles";
     if (document.getElementById(ID)) return;
     const el = document.createElement("style");
     el.id = ID;
-    el.textContent = FORM_STYLE;
+    el.textContent = MODAL_STYLE;
     document.head.appendChild(el);
   }, []);
-}
-
-// Drop the native `onSubmit` (we own it) and `onError` (re-typed to an AuthError).
-type FormBaseProps = Omit<FormHTMLAttributes<HTMLFormElement>, "onSubmit" | "onError">;
-
-export interface SignInFormProps extends FormBaseProps {
-  /** Called after a successful in-page sign-in (SIGNED_IN already emitted). */
-  onSuccess?: () => void;
-  /** Called if `signInWithCredentials` rejects (in addition to the inline error). */
-  onError?: (error: AuthError) => void;
-  /** Submit-button label. Default `"Sign in"`. */
-  submitLabel?: ReactNode;
-  /** Label for the email field. Default `"Email"`. */
-  emailLabel?: ReactNode;
-  /** Label for the password field. Default `"Password"`. */
-  passwordLabel?: ReactNode;
-  /** `data-testid` for the email `<input>`. */
-  emailTestId?: string;
-  /** `data-testid` for the password `<input>`. */
-  passwordTestId?: string;
-  /** `data-testid` for the submit `<button>`. */
-  submitTestId?: string;
-  /** `data-testid` for the inline error `<p role="alert">` (rendered only on failure). */
-  errorTestId?: string;
-}
-
-/**
- * In-page email + password sign-in form. Submitting calls
- * `useAuth().signInWithCredentials({email,password})` (a same-origin POST — NO
- * popup, NO window), shows an inline {@link AuthError} on failure, and invokes
- * `onSuccess` once SIGNED_IN settles. Themeable: pass `className` for the root
- * `<form>` (added alongside the `zs-auth-form` hook) or override the `zs-auth-*`
- * classes; any extra `<form>` props pass through.
- */
-export function SignInForm(props: SignInFormProps): ReactNode {
-  const {
-    onSuccess,
-    onError,
-    submitLabel,
-    emailLabel,
-    passwordLabel,
-    emailTestId,
-    passwordTestId,
-    submitTestId,
-    errorTestId,
-    className,
-    ...formProps
-  } = props;
-  const { signInWithCredentials } = useAuth();
-  useFormStyles();
-
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<AuthError | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  const baseId = useId();
-  const emailId = `${baseId}-email`;
-  const passwordId = `${baseId}-password`;
-
-  const onSubmit = useCallback(
-    (e: FormEvent<HTMLFormElement>) => {
-      e.preventDefault();
-      if (submitting) return;
-      setError(null);
-      setSubmitting(true);
-      signInWithCredentials({ email, password })
-        .then(() => {
-          if (!mountedRef.current) return;
-          setSubmitting(false);
-          onSuccess?.();
-        })
-        .catch((err: unknown) => {
-          const ae = toAuthError(err);
-          if (mountedRef.current) {
-            setError(ae);
-            setSubmitting(false);
-          }
-          onError?.(ae);
-        });
-    },
-    [signInWithCredentials, email, password, submitting, onSuccess, onError],
-  );
-
-  return createElement(
-    "form",
-    {
-      ...formProps,
-      className: className ? `zs-auth-form ${className}` : "zs-auth-form",
-      onSubmit,
-      noValidate: true,
-    },
-    createElement(
-      "div",
-      { className: "zs-auth-field", key: "email" },
-      createElement("label", { htmlFor: emailId }, emailLabel ?? "Email"),
-      createElement("input", {
-        id: emailId,
-        type: "email",
-        name: "email",
-        autoComplete: "email",
-        required: true,
-        value: email,
-        disabled: submitting,
-        "data-testid": emailTestId,
-        onChange: (ev: React.ChangeEvent<HTMLInputElement>) => setEmail(ev.target.value),
-      }),
-    ),
-    createElement(
-      "div",
-      { className: "zs-auth-field", key: "password" },
-      createElement("label", { htmlFor: passwordId }, passwordLabel ?? "Password"),
-      createElement("input", {
-        id: passwordId,
-        type: "password",
-        name: "password",
-        autoComplete: "current-password",
-        required: true,
-        value: password,
-        disabled: submitting,
-        "data-testid": passwordTestId,
-        onChange: (ev: React.ChangeEvent<HTMLInputElement>) => setPassword(ev.target.value),
-      }),
-    ),
-    error
-      ? createElement(
-          "p",
-          { className: "zs-auth-error", role: "alert", key: "error", "data-testid": errorTestId },
-          error.message,
-        )
-      : null,
-    createElement(
-      "button",
-      {
-        type: "submit",
-        className: "zs-auth-submit",
-        disabled: submitting,
-        key: "submit",
-        "data-testid": submitTestId,
-      },
-      submitting ? "Signing in…" : (submitLabel ?? "Sign in"),
-    ),
-  );
 }
 
 export interface AuthModalProps {
   /** Render the overlay only when true. Default `true` (caller can keep it mounted-but-hidden). */
   open?: boolean;
-  /** Called when the backdrop is clicked (caller closes the modal). */
+  /**
+   * Called when the user dismisses the modal (the close button or the backdrop).
+   * The caller closes the modal; the in-flight iframe sign-in is cancelled
+   * (rejects `popup_closed`) and the iframe torn down (§8).
+   */
   onClose?: () => void;
-  /** Forwarded to the inner {@link SignInForm}; fired after a successful in-page sign-in. */
+  /** Called after a successful sign-in (SIGNED_IN already emitted). */
   onSuccess?: () => void;
-  /** Heading rendered above the form. Default `"Sign in"`. */
+  /** Heading rendered above the iframe. Default `"Sign in"`. */
   title?: ReactNode;
   /** Hide the "Continue with Google" federated button. Default `false`. */
   hideOAuth?: boolean;
   /** Class added to the modal panel (alongside `zs-auth-modal`). */
   className?: string;
-  /** Extra content rendered below the form (e.g. a "sign up" link). */
+  /** Extra content rendered below the iframe (e.g. a "sign up" link). */
   children?: ReactNode;
 }
 
 /**
- * An overlay dialog wrapping {@link SignInForm} plus a "Continue with Google"
- * button. The password path is fully in-page (no `window.open`); ONLY the
- * federated button spawns a popup (`signInWithOAuth({provider:"google"})`),
- * fired synchronously in the click handler so the browser does not block it.
- * Themeable via `className` (panel) + the `zs-auth-*` classes.
+ * An overlay dialog that hosts the platform's first-party login. Opening the
+ * modal launches `signInWithOAuth({provider:'password'})`, which — on the
+ * same-site console with `immersive` enabled — drives the in-page iframe
+ * embedding `auth.zeroship.ai/login` (the Stripe-Elements model: the credential
+ * is typed into the auth-origin frame, never readable by console JS). The modal
+ * provides the close affordance: dismissing it cancels the relay race
+ * (`popup_closed`) and the SDK tears down the iframe (§8). The "Continue with
+ * Google" button spawns a federated popup, fired synchronously in the click
+ * handler so the browser does not block it. Themeable via `className` (panel) +
+ * the `zs-auth-*` classes.
  */
 export function AuthModal(props: AuthModalProps): ReactNode {
   const { open = true, onClose, onSuccess, title, hideOAuth, className, children } = props;
   const { signInWithOAuth } = useAuth();
-  useFormStyles();
+  // The provider-owned mount controller the client reads at flow time. The
+  // immersive iframe mounts INTO `host` (this modal's slot) and is cancelled by
+  // resolving `cancelled` (§4.1, §8). Absent ⇒ no <AuthProvider> ancestor wired
+  // it; the iframe then falls back to the headless overlay (still functional).
+  const modalMount = useContext(ModalMountContext);
+  useModalStyles();
+
+  // Callback ref: register THIS modal's host slot synchronously as the element
+  // attaches (before the launch effect runs), so the client's `iframeMount`
+  // resolves it the moment the flow calls `createIframe`. Clearing on detach
+  // restores the overlay fallback for any later modal-less flow.
+  const setFrameHost = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (modalMount) modalMount.current.host = el;
+    },
+    [modalMount],
+  );
+
+  // Per-open user-cancel deferred. `onClose`/unmount resolve it → the in-flight
+  // `runIframe` rejects `popup_closed` and tears the frame down (§8). Held in a
+  // ref so the close button can resolve it synchronously.
+  const cancelResolveRef = useRef<(() => void) | null>(null);
+  const resolveCancel = useCallback(() => {
+    cancelResolveRef.current?.();
+    cancelResolveRef.current = null;
+  }, []);
+
+  // Launch the immersive password flow once per open. The SDK mounts the
+  // cross-origin login iframe (its `createIframe`) INTO the host slot above;
+  // when the relay settles it resolves SIGNED_IN and tears the iframe down. A
+  // `popup_closed` (user dismissed) is swallowed here — the error surfaces via
+  // useAuth().error only for real failures.
+  const launchedRef = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      launchedRef.current = false;
+      return;
+    }
+    if (launchedRef.current) return;
+    launchedRef.current = true;
+    // Arm a fresh cancel signal for this open and publish it to the controller
+    // BEFORE launching (the client snapshots `cancelled` inside `createIframe`).
+    const cancelled = new Promise<void>((resolve) => {
+      cancelResolveRef.current = resolve;
+    });
+    if (modalMount) modalMount.current.cancelled = cancelled;
+    signInWithOAuth({ provider: "password" })
+      .then(() => onSuccess?.())
+      .catch(() => {
+        // popup_closed (dismissed) / surfaced via useAuth().error otherwise.
+      });
+    // On close/unmount: resolve the cancel signal (rejects the in-flight flow)
+    // and detach the controller so a later modal-less flow uses the overlay.
+    return () => {
+      resolveCancel();
+      if (modalMount) {
+        modalMount.current.cancelled = undefined;
+        modalMount.current.host = null;
+      }
+    };
+  }, [open, signInWithOAuth, onSuccess, modalMount, resolveCancel]);
 
   if (!open) return null;
 
@@ -659,6 +595,13 @@ export function AuthModal(props: AuthModalProps): ReactNode {
     signInWithOAuth({ provider: "google" }).catch(() => {
       // Errors surface via useAuth().error; nothing to do here.
     });
+  };
+
+  // Dismissal: resolve the in-flight cancel signal first (so `runIframe` rejects
+  // `popup_closed` immediately) THEN notify the caller to close the modal.
+  const dismiss = () => {
+    resolveCancel();
+    onClose?.();
   };
 
   const panel = createElement(
@@ -670,8 +613,33 @@ export function AuthModal(props: AuthModalProps): ReactNode {
       // Stop a click inside the panel from bubbling to the backdrop's onClose.
       onClick: (e: React.MouseEvent) => e.stopPropagation(),
     },
-    createElement("h2", { key: "title", className: "zs-auth-title" }, title ?? "Sign in"),
-    createElement(SignInForm, { key: "form", onSuccess }),
+    createElement(
+      "div",
+      { key: "header", className: "zs-auth-modal-header" },
+      createElement("h2", { key: "title", className: "zs-auth-title" }, title ?? "Sign in"),
+      createElement(
+        "button",
+        {
+          key: "close",
+          type: "button",
+          className: "zs-auth-close",
+          "aria-label": "Close",
+          "data-testid": "auth-modal-close",
+          onClick: dismiss,
+        },
+        "×",
+      ),
+    ),
+    // The cross-origin login iframe is mounted by the SDK (its `createIframe`)
+    // INTO this host slot — it fills the slot, sitting BELOW the modal's own
+    // chrome (title + close button), so the close affordance stays reachable
+    // (§8/§10.5). The callback ref registers the slot with the client.
+    createElement("div", {
+      key: "frame",
+      className: "zs-auth-frame",
+      "data-testid": "auth-iframe-host",
+      ref: setFrameHost,
+    }),
     hideOAuth
       ? null
       : createElement("div", { key: "divider", className: "zs-auth-divider" }, "or"),
@@ -689,7 +657,7 @@ export function AuthModal(props: AuthModalProps): ReactNode {
     "div",
     {
       className: "zs-auth-modal-backdrop",
-      onClick: () => onClose?.(),
+      onClick: dismiss,
     },
     panel,
   );
@@ -714,7 +682,6 @@ export {
   type AuthChangeEvent,
   type AuthClientOptions,
   type AuthErrorCode,
-  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,

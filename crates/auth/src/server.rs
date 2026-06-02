@@ -42,13 +42,6 @@ pub fn configure(
                     .route(web::get().to(ui::login::get))
                     .route(web::post().to(ui::login::post)),
             )
-            // Headless in-page password login (credential→code oracle). JSON
-            // only; gated by the gateway↔auth shared secret (`auth_internal_key`)
-            // — NOT a browser-facing form, so no CSRF cookie / same-origin guard
-            // (the gateway owns those). See `ui::password` module docs.
-            .service(
-                web::resource("/password").route(web::post().to(ui::password::post)),
-            )
             .service(
                 web::resource("/signup")
                     .route(web::get().to(ui::signup::get))
@@ -259,6 +252,10 @@ pub async fn run(
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
     let github_enabled = cfg.github_client_id.is_some();
+    // Console origin(s) the framed login routes admit via `frame-ancestors`
+    // (immersive iframe login, §4.3). Cloned out of the config so the
+    // route-aware `SecurityHeaders` middleware can be rebuilt per worker thread.
+    let frame_ancestor_origins = cfg.frame_ancestor_origins.clone();
 
     web::server(async move || {
         let mut app = web::App::new()
@@ -271,7 +268,7 @@ pub async fn run(
             // transactional `State<Arc<dyn Mailer>>`.
             .state(relay_forward_mailer.clone())
             .middleware(RequestContextMiddleware)
-            .middleware(SecurityHeaders);
+            .middleware(SecurityHeaders::new(frame_ancestor_origins.clone()));
         if let Some(jwks) = google_jwks.clone() {
             app = app.state(jwks);
         }

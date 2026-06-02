@@ -47,6 +47,13 @@ use zeroship_auth::server;
 // stash key. Federation-specific tests build on the returned config by
 // mutating the OAuth fields directly (cheaper than parsing again with
 // 8 more CLI args).
+/// The console origin the test fixture admits via `frame-ancestors` on the
+/// framed login routes (immersive iframe login, design §4.3). The rewritten
+/// clickjacking test reads this from the booted config rather than hard-coding
+/// it, exercising the route-aware `SecurityHeaders` against the live `/login`.
+#[allow(dead_code)]
+pub const TEST_CONSOLE_ORIGIN: &str = "https://console.zeroship.ai";
+
 #[must_use]
 pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> AuthConfig {
     let mut cfg = AuthConfig::parse_from([
@@ -64,6 +71,11 @@ pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> 
         "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
+        // Admit the console origin so the framed login routes (/login, /signup,
+        // /consent) emit the relaxed `frame-ancestors` — the rewritten threat
+        // model test pins this NEW contract.
+        "--frame-ancestor-origin",
+        TEST_CONSOLE_ORIGIN,
         "--mail-from-email",
         "test@zeroship.test",
         "--mail-from-name",
@@ -340,16 +352,21 @@ impl Fixture {
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();
         let db_state = pg.clone();
+        // Thread the configured console origin into the route-aware security
+        // headers exactly as `server::run` does in prod (§4.3), so the booted
+        // fixture serves the relaxed `frame-ancestors` on the framed routes.
+        let frame_ancestor_origins = cfg.frame_ancestor_origins.clone();
         let srv = web::test::server(move || {
             let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();
+            let frame_ancestor_origins = frame_ancestor_origins.clone();
             async move {
                 web::App::new()
                     .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
-                    .middleware(SecurityHeaders)
+                    .middleware(SecurityHeaders::new(frame_ancestor_origins))
                     .configure(server::configure(false, false))
             }
         })

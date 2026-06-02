@@ -72,9 +72,9 @@ function mapError(status: number, body: WireError | null, fallback: string): Aut
     consent_required: "consent_required",
     interaction_required: "interaction_required",
     invalid_grant: "invalid_grant",
-    // The in-page credential POST rejects a bad email/password pair with
-    // `401 {"error":"invalid_credentials"}` and a malformed body with
-    // `400 {"error":"invalid_request"}` (dev tier + gateway contract).
+    // The framed `auth.zeroship.ai/login` rejects a bad password and surfaces
+    // `invalid_credentials` via the relay's `{error,...}` envelope; a malformed
+    // request maps to `invalid_request` (gateway/auth contract).
     invalid_credentials: "invalid_credentials",
     invalid_request: "invalid_request",
     client_not_provisioned: "client_not_provisioned",
@@ -201,38 +201,6 @@ export class Transport {
     );
     if (!res.ok) throw await readError(res, "session exchange failed");
     const body = (await res.json()) as SessionResponse;
-    return this.toSession(body);
-  }
-
-  /**
-   * `POST /__zeroship/auth/password` — the in-page credential sign-in (no popup,
-   * no auth-code dance). The browser POSTs `{email, password}` same-origin; the
-   * gateway (or dev provider) verifies the credentials, mints the BFF session,
-   * ISSUES the signed `__Host-zeroship_app_session` cookie, and returns
-   * `{user, expires_at}` ONLY — no token. The cookie (set on this response,
-   * HttpOnly) is the live credential. A rejected pair returns
-   * `401 {error:"invalid_credentials"}`, mapped to a typed {@link AuthError}.
-   */
-  async passwordLogin(input: { email: string; password: string }): Promise<Session> {
-    const res = await this.fetchJson(
-      "/__zeroship/auth/password",
-      {
-        method: "POST",
-        headers: {
-          [X_ZS_AUTH]: "1",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ email: input.email, password: input.password }),
-      },
-      "password sign-in request failed",
-    );
-    if (!res.ok) throw await readError(res, "password sign-in failed");
-    const body = (await res.json()) as SessionResponse;
-    if (body.expires_at == null || body.user == null) {
-      throw new AuthError("server_error", "password response missing user/expires_at", {
-        status: res.status,
-      });
-    }
     return this.toSession(body);
   }
 

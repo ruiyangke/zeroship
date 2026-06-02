@@ -12,11 +12,14 @@ hydra_admin_url       = "http://hydra:4445"
 # from the old compose value (http://hydra:4444). One file per environment —
 # do not copy this value into a prod overlay.
 hydra_public_url      = "http://auth.zeroship.localhost"
-# First-party trusted OAuth client(s) that skip Hydra consent AND are admitted by
-# the gateway's POST /__zeroship/auth/password first-party gate. This is the
+# First-party trusted OAuth client(s) that skip Hydra consent. This is the
 # FIRST-PARTY CONSOLE only — a deliberate, narrow exception to the spec rule that
 # per-app (THIRD-PARTY creator) clients NEVER skip consent. A consent prompt for
-# the platform's OWN console is meaningless.
+# the platform's OWN console is meaningless, and the immersive iframe login frames
+# the /login dance — a console consent screen would also have to be a framed
+# document. (The old gateway POST /__zeroship/auth/password first-party gate this
+# value also fed is GONE — the anti-clickjacking gate is now the browser-enforced
+# `frame-ancestors` allowlist; see [auth].frame_ancestor_origins below.)
 #
 # Value = client_id_for_app(console_app_id("console.zeroship.localhost")), the
 # deterministic per-app PKCE client id for THIS compose's --console-host
@@ -28,6 +31,12 @@ hydra_public_url      = "http://auth.zeroship.localhost"
 # Verify against control's `--bootstrap-console` log line (it prints the seeded
 # console client_id). If --console-host changes, recompute this value.
 trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
+# Console origin(s) the auth-service login/signup/consent documents admit via CSP
+# `frame-ancestors` so the console's immersive iframe login can embed them
+# (design §4.3/§10.1). Browser-enforced anti-clickjacking: ONLY a listed origin
+# may frame /login; everyone else is blocked and falls back to the popup. EXACT
+# origins only — NO wildcards. This compose serves the console at the Caddy host.
+frame_ancestor_origins = ["http://console.zeroship.localhost"]
 
 [observability]
 rust_log   = "info,zeroship_=debug"

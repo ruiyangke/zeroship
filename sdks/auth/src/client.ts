@@ -5,8 +5,10 @@
  * BFF model) that drives the same-origin gateway endpoints
  * (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`):
  *
- *   signInWithOAuth → openPopup (sync) → GET /__zeroship/auth/authorize →
- *     relay postMessage → exchangeCodeForSession (POST /__zeroship/auth/session)
+ *   signInWithOAuth → popup window (federated / non-same-site) OR an in-page
+ *     iframe (the same-site console password UI, when `immersive`) →
+ *     GET /__zeroship/auth/authorize → relay postMessage →
+ *     exchangeCodeForSession (POST /__zeroship/auth/session)
  *   getSession   — cache only, no network (the in-memory identity snapshot)
  *   getUser      — GET /__zeroship/auth/session (always probes)
  *   refreshSession — GET /__zeroship/auth/session?mint=1 (re-mints the HttpOnly cookie)
@@ -29,7 +31,6 @@ import {
   AuthError,
   type AuthChangeEvent,
   type AuthClientOptions,
-  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,
@@ -40,8 +41,9 @@ import { Transport } from "./internal/transport";
 import { TransactionManager, type Transaction } from "./internal/transaction";
 import { generatePkce } from "./internal/pkce";
 import { openPopup, runPopup } from "./internal/popup";
+import { createIframe, runIframe } from "./internal/iframe";
 import { listenForRelay } from "./internal/relay";
-import { resolveEnv, type ClientEnv, type ResolvedEnv } from "./internal/env";
+import { resolveEnv, sameSite, type ClientEnv, type ResolvedEnv } from "./internal/env";
 
 const DEFAULT_SCOPES = ["openid", "profile", "email"];
 const DEFAULT_REFRESH_SKEW = 60;
@@ -51,17 +53,17 @@ const PROVISIONING_BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 type Listener = (event: AuthChangeEvent, session: Session | null) => void;
 
 export interface AuthClient {
-  /** Interactive popup sign-in (federated providers, e.g. Google). Resolves with the Session on success. */
-  signInWithOAuth(opts?: SignInOptions): Promise<Session>;
   /**
-   * In-page password sign-in — POSTs `{email, password}` same-origin to
-   * `POST /__zeroship/auth/password`, stores the returned identity-only session,
-   * and emits `SIGNED_IN`. NO popup, NO window. Throws a typed {@link AuthError}
-   * (e.g. `invalid_credentials`) on failure.
+   * Interactive sign-in. `provider:'password'` drives the platform's own
+   * first-party login UI — the immersive in-page iframe on the same-site console
+   * (when `immersive` is enabled), a popup window everywhere else;
+   * `provider:'google'|'github'` are federated popup windows. Either way the
+   * credential is isolated inside the auth origin and the SDK only ever receives
+   * the relayed OAuth code. Resolves with the {@link Session} on success.
    */
-  signInWithCredentials(input: CredentialsInput): Promise<void>;
+  signInWithOAuth(opts?: SignInOptions): Promise<Session>;
 
-  /** Exchange an authorization code (popup relay / redirect callback) for a session. */
+  /** Exchange an authorization code (popup/iframe relay / redirect callback) for a session. */
   exchangeCodeForSession(code: string, state?: string): Promise<Session>;
 
   /** Cheap, local. Returns the in-memory identity snapshot or null. No network. */
@@ -92,6 +94,10 @@ function nowSecs(): number {
 class AuthClientImpl implements AuthClient {
   private readonly env: ResolvedEnv;
   private readonly appOrigin: string;
+  /** The auth-service origin (same-site sanity check for the iframe gate). */
+  private readonly authOrigin: string;
+  /** Opt-in to the immersive in-page login iframe for `provider:'password'`. */
+  private readonly immersive: boolean;
   private readonly scope: string[];
   private readonly refreshSkew: number;
   private readonly transport: Transport;
@@ -113,8 +119,25 @@ class AuthClientImpl implements AuthClient {
   private firstProbeDone = false;
 
   constructor(options: AuthClientOptions, injected?: ClientEnv) {
-    this.env = resolveEnv(injected);
+    // `options.iframeMount` / `options.iframeCancelled` (the React `AuthModal`'s
+    // host-slot resolver + close-affordance cancel signal) feed the env's
+    // default iframe factory so the immersive `<iframe>` mounts INSIDE the modal
+    // slot — not as a full-viewport overlay that would cover the close button
+    // (§8/§10.5) — and so dismissing the modal rejects the in-flight flow
+    // (`popup_closed`). An explicitly injected env (tests/SSR) still wins
+    // per-field; the option only supplies a field the injected env did not.
+    this.env = resolveEnv(
+      options.iframeMount || options.iframeCancelled
+        ? {
+            ...injected,
+            iframeMount: injected?.iframeMount ?? options.iframeMount,
+            iframeCancelled: injected?.iframeCancelled ?? options.iframeCancelled,
+          }
+        : injected,
+    );
     this.appOrigin = options.appOrigin ?? this.env.location?.origin ?? "";
+    this.authOrigin = options.authOrigin ?? "";
+    this.immersive = options.immersive ?? false;
     this.scope = options.scope ?? DEFAULT_SCOPES;
     this.refreshSkew = options.refreshSkewSeconds ?? DEFAULT_REFRESH_SKEW;
     this.transport = new Transport(this.appOrigin, this.env.fetch);
@@ -161,7 +184,7 @@ class AuthClientImpl implements AuthClient {
     const usePopup = opts.popup !== false;
     const scopes = opts.scopes ?? this.scope;
     // `prompt` is an OIDC passthrough for step-up (login/consent); the gateway
-    // forwards it to Hydra verbatim. `provider` (google/github/password) is
+    // forwards it to Hydra verbatim. `provider` (password/google/github) is
     // threaded through as the Hydra `idp_hint` so the login UI can route to /
     // pre-select the named upstream IdP (Fix 5 — it is no longer dropped).
     const prompt = opts.prompt;
@@ -176,6 +199,22 @@ class AuthClientImpl implements AuthClient {
       return new Promise<Session>(() => {
         /* navigation in progress */
       });
+    }
+
+    // The immersive iframe is selected — BEFORE the synchronous `openPopup`
+    // gesture dance — ONLY for our first-party password UI, when opted in, AND
+    // when the console is same-site with the auth service (§6.5). A federated
+    // provider, a non-same-site surface, or `immersive:false` falls through to
+    // the popup. The iframe has no popup-blocker constraint, so it does NOT need
+    // the synchronous gesture: build the URL first, then create the frame with
+    // the URL preset as `src`. A missing iframe factory (no DOM) returns
+    // `undefined` here and the flow falls through to the popup.
+    const useImmersive =
+      provider === "password" && this.immersive && sameSite(this.appOrigin, this.authOrigin);
+    if (useImmersive) {
+      const viaFrame = await this.runImmersiveIframe(scopes, prompt, provider);
+      if (viaFrame) return viaFrame;
+      // else: no iframe factory — fall through to the popup launcher below.
     }
 
     // POPUP: open SYNCHRONOUSLY first (before the async URL build) to dodge blockers.
@@ -206,17 +245,40 @@ class AuthClientImpl implements AuthClient {
     return this.completeFlow(response.code, response.state, response.error, response.error_description, txn);
   }
 
-  async signInWithCredentials(input: CredentialsInput): Promise<void> {
-    // In-page credential sign-in: POST {email, password} same-origin (no popup,
-    // no auth-code dance). The gateway/dev provider verifies the credentials,
-    // mints the BFF session cookie, and returns identity ONLY. We store the
-    // identity-only Session + emit SIGNED_IN exactly like exchangeCodeForSession.
-    // A rejected pair surfaces as a typed AuthError (`invalid_credentials`).
-    const session = await this.transport.passwordLogin({
-      email: input.email,
-      password: input.password,
-    });
-    this.store(session, "SIGNED_IN");
+  /**
+   * Drive the immersive in-page login iframe (the same-site console password
+   * path). Builds the authorize URL FIRST (no popup-blocker gesture constraint),
+   * then mounts the iframe with the URL pre-set as `src` and runs the SAME
+   * relay → code-exchange dance as the popup. Returns `null` (no flow started,
+   * the transaction is rolled back) when the environment has no iframe factory
+   * (no DOM) so the caller can fall through to the popup. The `<iframe>` framing
+   * the cross-origin `auth.zeroship.ai/login` keeps the credential out of
+   * console JS.
+   */
+  private async runImmersiveIframe(
+    scopes: string[],
+    prompt: string | undefined,
+    provider: SignInOptions["provider"],
+  ): Promise<Session | null> {
+    const { url, txn } = await this.beginFlow(scopes, undefined, prompt, provider);
+    const frame = createIframe(this.env, url);
+    if (!frame) {
+      // No iframe factory (no DOM) — roll back the txn and let the caller fall
+      // through to the popup launcher (no infinite re-entry into this method).
+      this.txns.remove(txn.state);
+      return null;
+    }
+    // Same origin-shared relay, filtered by THIS flow's state. The app-origin
+    // callback posts to `window.parent` (the console top) inside the frame.
+    const relay = listenForRelay(this.env, this.appOrigin, txn.state);
+    const response = await runIframe(this.env, frame, url, relay);
+    return this.completeFlow(
+      response.code,
+      response.state,
+      response.error,
+      response.error_description,
+      txn,
+    );
   }
 
   async requestScopes(scopes: string[]): Promise<Session> {
@@ -495,7 +557,6 @@ export {
   type AuthChangeEvent,
   type AuthClientOptions,
   type AuthErrorCode,
-  type CredentialsInput,
   type Session,
   type SignInOptions,
   type SignOutOptions,

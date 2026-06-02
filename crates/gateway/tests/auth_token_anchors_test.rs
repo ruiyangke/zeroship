@@ -341,7 +341,6 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
             worker_key: "worker-key".into(),
             hydra_public_url: hydra_base.to_string(),
             auth_ui_url: hydra_base.to_string(),
-            auth_internal_key: String::new(),
             // insecure_dev = false so we exercise the prod __Host- / Strict
             // / Secure cookie attributes and the https Origin compare.
             insecure_dev: false,
@@ -368,7 +367,6 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
         pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
-        trusted_oauth_clients: zeroship_core::auth::default_trusted_oauth_clients(),
     })
 }
 

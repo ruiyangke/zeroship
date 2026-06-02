@@ -132,7 +132,7 @@ async fn login_failure_responses_are_indistinguishable() {
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
-                .middleware(SecurityHeaders)
+                .middleware(SecurityHeaders::default())
                 .configure(server::configure(false, false))
         }
     })

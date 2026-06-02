@@ -5,33 +5,40 @@ import { test, expect } from "@playwright/test";
 // hints, oauth-link state. We avoid hitting any backend by checking
 // disabled state — submit-disabled with empty/partial input is the
 // universal contract these forms expose.
+//
+// IMMERSIVE LOGIN PIVOT. The Login/Signup credential forms are gone: the
+// email/password path is now the SDK `<AuthModal>` hosting a cross-origin,
+// same-site iframe (the real `auth.zeroship.ai/login`). There are no
+// same-origin `login-password`/`signup-password` inputs to fill on the
+// parent page (SOP — the credential is typed into the auth-origin frame).
+// These specs assert the modal-trigger contract instead; the in-frame
+// credential entry is covered by the live full-stack e2e (human-run).
 
-test.describe("Forms — Login", () => {
-  test("submit is disabled until email + password both have content", async ({ page }) => {
+test.describe("Forms — Login (immersive modal)", () => {
+  test("email trigger opens the AuthModal; closing it removes the dialog", async ({ page }) => {
     await page.goto("/login");
-    const submit = page.getByTestId("login-submit");
-    await expect(submit).toBeDisabled();
-    await page.getByTestId("login-email").fill("a@b.co");
-    await expect(submit).toBeDisabled();
-    await page.getByTestId("login-password").fill("x");
-    await expect(submit).toBeEnabled();
+    const trigger = page.getByTestId("login-email-trigger");
+    await expect(trigger).toBeEnabled();
+
+    await trigger.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    // The cross-origin iframe host slot is present; the credential inputs
+    // live inside that frame and are not parent-fillable.
+    await expect(page.getByTestId("auth-iframe-host")).toBeVisible();
+
+    await page.getByTestId("auth-modal-close").click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
-  test("clearing the email re-disables submit", async ({ page }) => {
+  test("the federated Google launcher is a button (popup), not an href link", async ({ page }) => {
     await page.goto("/login");
-    await page.getByTestId("login-email").fill("a@b.co");
-    await page.getByTestId("login-password").fill("x");
-    await expect(page.getByTestId("login-submit")).toBeEnabled();
-    await page.getByTestId("login-email").fill("");
-    await expect(page.getByTestId("login-submit")).toBeDisabled();
-  });
-
-  test("login google href encodes the return param", async ({ page }) => {
-    await page.goto("/login?return=/p/abc/preview");
-    const href = await page.getByTestId("login-google").getAttribute("href");
-    expect(href).toContain("/auth/google/start");
-    // The href should round-trip the return path safely.
-    expect(href).toMatch(/return=/);
+    const google = page.getByTestId("login-google");
+    await expect(google).toBeVisible();
+    // The SDK SignInButton opens the popup INSIDE the click gesture — it is
+    // a <button>, it carries no navigable href.
+    expect(await google.evaluate((el) => el.tagName.toLowerCase())).toBe("button");
+    await expect(google).not.toHaveAttribute("href", /.+/);
   });
 
   test("login renders OAuth error band when ?error=… is present", async ({ page }) => {
@@ -41,30 +48,21 @@ test.describe("Forms — Login", () => {
   });
 });
 
-test.describe("Forms — Signup", () => {
-  test("submit is disabled until email + password + name all filled", async ({ page }) => {
+test.describe("Forms — Signup (immersive modal)", () => {
+  test("email trigger opens the AuthModal", async ({ page }) => {
     await page.goto("/signup");
-    const submit = page.getByTestId("signup-submit");
-    await expect(submit).toBeDisabled();
-    await page.getByTestId("signup-email").fill("a@b.co");
-    await expect(submit).toBeDisabled();
-    await page.getByTestId("signup-password").fill("password123");
-    await expect(submit).toBeDisabled();
-    await page.getByTestId("signup-name").fill("Alice");
-    await expect(submit).toBeEnabled();
+    const trigger = page.getByTestId("signup-email-trigger");
+    await expect(trigger).toBeEnabled();
+
+    await trigger.click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByTestId("auth-iframe-host")).toBeVisible();
   });
 
-  test("name field with only whitespace keeps submit disabled", async ({ page }) => {
-    await page.goto("/signup");
-    await page.getByTestId("signup-email").fill("a@b.co");
-    await page.getByTestId("signup-password").fill("password123");
-    await page.getByTestId("signup-name").fill("   ");
-    await expect(page.getByTestId("signup-submit")).toBeDisabled();
-  });
-
-  test("password help copy is visible", async ({ page }) => {
-    await page.goto("/signup");
-    await expect(page.getByText(/at least 8 characters/i)).toBeVisible();
+  test("signup renders OAuth error band when ?error=… is present", async ({ page }) => {
+    await page.goto("/signup?error=access_denied");
+    await expect(page.getByTestId("signup-oauth-error")).toBeVisible();
+    await expect(page.getByTestId("signup-oauth-error")).toContainText("access_denied");
   });
 });
 

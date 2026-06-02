@@ -31,7 +31,7 @@ macro_rules! init_app {
                 .state($ctx.admin.clone())
                 .state($ctx.cfg.clone())
                 .state($ctx.pg.clone())
-                .middleware(SecurityHeaders)
+                .middleware(SecurityHeaders::default())
                 .configure(server::configure(false, false)),
         )
         .await

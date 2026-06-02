@@ -106,28 +106,25 @@ pub struct AuthConfig {
     )]
     pub stash_signing_key: String,
 
-    /// Gateway↔auth shared secret gating the headless in-page credential
-    /// endpoint (`POST /password`). That endpoint is a credential→authorization-code
-    /// oracle: anyone who can reach it could brute-force passwords and mint codes.
-    /// Unlike the interactive `/login` UI it has no `same_origin_guard` (that lives
-    /// on the gateway), so it MUST authenticate its only legitimate caller — the
-    /// gateway — service-to-service. The gateway presents this value as
-    /// `Authorization: Bearer <key>`; the handler rejects (401/403) before doing
-    /// any work when it is absent or wrong. Mirrors the worker's `worker_key` /
-    /// control's `control_key` pattern (constant-time compare via
-    /// [`zeroship_core::auth::validate_control_key`]).
-    ///
-    /// Empty default keeps any dev sentinel out of `--help`; outside
-    /// `--dev-insecure` an empty key is a fatal startup error (the endpoint
-    /// would be unauthenticated). Under `--dev-insecure` an empty value DISABLES
-    /// the gate (loopback-only dev), matching `worker_key`'s posture.
+    /// Console origin(s) allowed to FRAME the login/signup/consent documents
+    /// via CSP `frame-ancestors` (immersive iframe login, design §4.3/§10.1).
+    /// The framed-route security headers emit
+    /// `frame-ancestors 'self' <these origins>` and DROP `X-Frame-Options`;
+    /// every other route keeps `XFO: DENY` + `frame-ancestors 'none'`. This is
+    /// the browser-enforced anti-clickjacking gate that replaced the deleted
+    /// gateway credential-oracle first-party gate. Each entry is an exact origin
+    /// (`scheme://host[:port]`); NO wildcards (a `https://*.zeroship.ai` would
+    /// re-admit every creator app and defeat the property). Empty (the default)
+    /// ⇒ no origin is admitted, so the framing relax is a no-op and the strict
+    /// `frame-ancestors 'none'` default holds (dev / single-origin deployments).
+    /// Production sets exactly the console origin (e.g.
+    /// `https://console.zeroship.ai`).
     #[arg(
-        long = "internal-key",
-        env = "AUTH_INTERNAL_KEY",
-        default_value = "",
-        hide_env_values = true
+        long = "frame-ancestor-origin",
+        env = "FRAME_ANCESTOR_ORIGINS",
+        value_delimiter = ','
     )]
-    pub auth_internal_key: String,
+    pub frame_ancestor_origins: Vec<String>,
 
     // ─── Google OAuth (optional — federation routes registered only when set) ───
     /// Google OAuth 2.0 client ID. Without it, `/oauth/google/*` routes are
@@ -427,6 +424,51 @@ pub struct AuthConfig {
     pub audit_retention_check_secs: u64,
 }
 
+/// True when `origin` is a CONCRETE, frameable-ancestor origin safe to splice
+/// into a CSP `frame-ancestors` source-list: an exact `scheme://host[:port]`
+/// with no wildcard and no CSP/header-breaking characters (design §6.2 "no
+/// wildcards" + §4.3 fail-closed serialization).
+///
+/// Rejected (so they never widen the allowlist nor break the header value):
+/// - empty / whitespace-only;
+/// - any `*` (e.g. `https://*.zeroship.ai`, the bare `*`) — a wildcard would
+///   re-admit every creator app and defeat the one-embedder property;
+/// - CSP source-list / header-injecting bytes (whitespace inside the token,
+///   `;`, `,`, control chars, non-ASCII);
+/// - the CSP keyword forms (`'self'`, `'none'`, `data:`, `blob:`, …) — those are
+///   not deployment-supplied ancestor origins (`'self'` is added by the builder
+///   itself);
+/// - anything without an explicit `http://` / `https://` scheme.
+///
+/// This is deliberately stricter than a full URL parse: it is an allowlist of
+/// the exact shape we emit. A rejected entry is dropped at config-resolve, so
+/// the live header builder only ever sees concrete origins.
+#[must_use]
+fn is_concrete_frame_ancestor_origin(origin: &str) -> bool {
+    let o = origin.trim();
+    if o.is_empty() {
+        return false;
+    }
+    // Must be an explicit http(s) origin — not a CSP keyword/scheme source.
+    let rest = match o.strip_prefix("https://").or_else(|| o.strip_prefix("http://")) {
+        Some(rest) => rest,
+        None => return false,
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    // No wildcard, no CSP-list / header-injecting bytes anywhere, ASCII-only.
+    !o.chars().any(|c| {
+        c == '*'
+            || c == ';'
+            || c == ','
+            || c == ' '
+            || c == '\t'
+            || c.is_control()
+            || !c.is_ascii()
+    })
+}
+
 impl AuthConfig {
     /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
     /// file overlay.
@@ -444,6 +486,26 @@ impl AuthConfig {
         self.insecure_dev = self.dev_insecure.unwrap_or(false);
         if self.insecure_dev && self.stash_signing_key.is_empty() {
             self.stash_signing_key = DEV_STASH_SIGNING_KEY.to_string();
+        }
+        // Console framing allowlist (immersive iframe login, §4.3/§10.1).
+        // Precedence mirrors the deployment-injection pattern: a non-empty
+        // CLI/env (`--frame-ancestor-origin` / `FRAME_ANCESTOR_ORIGINS`) wins;
+        // otherwise fall back to the shared `[auth].frame_ancestor_origins`
+        // file overlay; otherwise stay empty (relax is a no-op → strict
+        // default). Empty CLI/env entries (a stray trailing comma) are dropped,
+        // and NON-CONCRETE origins (wildcards, bad scheme, control chars) are
+        // rejected here so a misconfiguration can never widen the
+        // `frame-ancestors` allowlist (§6.2) nor produce an un-serializable CSP
+        // header value (§4.3 `static_insert` fallback).
+        self.frame_ancestor_origins
+            .retain(|o| is_concrete_frame_ancestor_origin(o));
+        if self.frame_ancestor_origins.is_empty() {
+            if let Some(origins) = auth.frame_ancestor_origins {
+                self.frame_ancestor_origins = origins
+                    .into_iter()
+                    .filter(|o| is_concrete_frame_ancestor_origin(o))
+                    .collect();
+            }
         }
         self.hydra_admin_url = Some(resolve_overlay_string(
             self.hydra_admin_url.take(),
@@ -498,7 +560,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("dev_insecure", &self.dev_insecure)
             .field("insecure_dev", &self.insecure_dev)
             .field("stash_signing_key", &"<redacted>")
-            .field("auth_internal_key", &"<redacted>")
+            .field("frame_ancestor_origins", &self.frame_ancestor_origins)
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"<redacted>")
             .field("github_client_id", &self.github_client_id)
@@ -804,6 +866,146 @@ mod tests {
         ]);
 
         assert!(cfg.allow_remote_hydra_admin);
+    }
+
+    // Immersive iframe login (design §4.3/§10.1): the `--frame-ancestor-origin`
+    // CLI flag is comma-splittable and repeatable, and a non-empty CLI value
+    // WINS over the `[auth].frame_ancestor_origins` overlay; an empty CLI falls
+    // back to the overlay; empty entries (a stray trailing comma) are dropped.
+    #[test]
+    fn frame_ancestor_origins_cli_comma_split_and_repeatable() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--frame-ancestor-origin",
+            "https://console.zeroship.ai,https://staging.zeroship.ai",
+            "--frame-ancestor-origin",
+            "https://preview.zeroship.ai",
+        ]);
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec![
+                "https://console.zeroship.ai".to_string(),
+                "https://staging.zeroship.ai".to_string(),
+                "https://preview.zeroship.ai".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn frame_ancestor_origins_default_empty() {
+        let cfg = test_config();
+        assert!(cfg.frame_ancestor_origins.is_empty());
+    }
+
+    #[test]
+    fn frame_ancestor_origins_cli_wins_over_overlay() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--frame-ancestor-origin",
+            "https://console.zeroship.ai",
+        ]);
+        cfg.resolve(AuthSection {
+            frame_ancestor_origins: Some(vec!["https://overlay.zeroship.ai".to_string()]),
+            ..AuthSection::default()
+        });
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["https://console.zeroship.ai".to_string()],
+            "a non-empty CLI/env value must win over the [auth] overlay"
+        );
+    }
+
+    // §6.2 "no wildcards": a misconfigured `*` / `https://*.zeroship.ai` (or any
+    // non-concrete origin) must be REJECTED at config-resolve, so it can never
+    // reach the `frame-ancestors` builder and re-admit every creator app, and so
+    // `static_insert` can never hit its un-serializable fallback (§4.3).
+    #[test]
+    fn frame_ancestor_origins_rejects_wildcards_and_non_concrete() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--frame-ancestor-origin",
+            // Mixed: one valid origin + several poison entries.
+            "https://console.zeroship.ai,https://*.zeroship.ai,*,'self',data:,\
+             ftp://console.zeroship.ai,https://a b.zeroship.ai,console.zeroship.ai",
+        ]);
+        cfg.resolve(AuthSection::default());
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["https://console.zeroship.ai".to_string()],
+            "only the concrete http(s) origin survives; wildcards / keywords / \
+             bad schemes / space-bearing tokens are dropped"
+        );
+    }
+
+    #[test]
+    fn frame_ancestor_origins_rejects_wildcards_from_overlay_too() {
+        let mut cfg = test_config(); // no CLI value → overlay path
+        cfg.resolve(AuthSection {
+            frame_ancestor_origins: Some(vec![
+                "https://*.zeroship.ai".to_string(), // wildcard — dropped
+                "https://console.zeroship.ai".to_string(), // kept
+                "'none'".to_string(),                // CSP keyword — dropped
+            ]),
+            ..AuthSection::default()
+        });
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["https://console.zeroship.ai".to_string()],
+            "the overlay path applies the same wildcard/keyword rejection"
+        );
+    }
+
+    #[test]
+    fn concrete_frame_ancestor_origin_predicate() {
+        // Accept exact http(s) origins (with/without port).
+        assert!(is_concrete_frame_ancestor_origin("https://console.zeroship.ai"));
+        assert!(is_concrete_frame_ancestor_origin(
+            "https://console.zeroship.localhost:8443"
+        ));
+        assert!(is_concrete_frame_ancestor_origin("http://localhost:5173"));
+        // Reject every non-concrete / poison form.
+        for bad in [
+            "",
+            "   ",
+            "*",
+            "https://*.zeroship.ai",
+            "'self'",
+            "'none'",
+            "data:",
+            "console.zeroship.ai",                // no scheme
+            "ftp://console.zeroship.ai",          // wrong scheme
+            "https://a.zeroship.ai https://b.ai", // embedded space (two sources)
+            "https://a.zeroship.ai;script-src *", // CSP injection
+            "https://a.zeroship.ai,https://b.ai", // comma (list)
+        ] {
+            assert!(
+                !is_concrete_frame_ancestor_origin(bad),
+                "{bad:?} must be rejected as a frame-ancestor origin"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_ancestor_origins_overlay_used_when_cli_empty() {
+        let mut cfg = test_config(); // no --frame-ancestor-origin
+        cfg.resolve(AuthSection {
+            frame_ancestor_origins: Some(vec![
+                "https://overlay.zeroship.ai".to_string(),
+                String::new(), // dropped
+            ]),
+            ..AuthSection::default()
+        });
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["https://overlay.zeroship.ai".to_string()],
+            "an empty CLI value must fall back to the [auth] overlay (empties dropped)"
+        );
     }
 
     #[test]

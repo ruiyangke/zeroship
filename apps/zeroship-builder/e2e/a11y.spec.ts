@@ -7,6 +7,12 @@ import { test, expect } from "@playwright/test";
 //   - Icon-only buttons have aria-label.
 //   - Modal sets role="dialog" + aria-modal="true".
 //   - ⌘+Enter submits the chat composer (shortcut wired).
+//
+// IMMERSIVE LOGIN PIVOT. The Login/Signup credential inputs are gone — the
+// email/password path is now the SDK `<AuthModal>` (a cross-origin iframe).
+// The a11y assertions that targeted the old `login-email`/`login-password`/
+// `signup-name` form fields are rewritten to cover the modal launcher + the
+// modal dialog semantics (role=dialog, aria-modal, an accessible close).
 
 const SHELL_PATH = "/__test/workspace";
 
@@ -14,7 +20,7 @@ test.describe("a11y — keyboard navigation", () => {
   test("Tab from page top lands on a focusable element", async ({ page }) => {
     await page.goto("/login");
     // Focus the body, then Tab. The first focusable should be inside
-    // the login card (wordmark Link or the email input).
+    // the login card (wordmark Link or the Google launcher).
     await page.evaluate(() => (document.activeElement as HTMLElement)?.blur?.());
     await page.keyboard.press("Tab");
     const tag = await page.evaluate(() =>
@@ -23,48 +29,49 @@ test.describe("a11y — keyboard navigation", () => {
     expect(tag).not.toBeNull();
   });
 
-  test("Tab order on /login: wordmark → email → password → submit", async ({ page }) => {
+  test("Tab order on /login reaches the Google launcher then the email trigger", async ({
+    page,
+  }) => {
     await page.goto("/login");
-    // Place focus before the form by focusing body via .blur().
+    // Place focus before the controls by focusing body via .blur().
     await page.evaluate(() => (document.activeElement as HTMLElement)?.blur?.());
-    // First tab lands on wordmark link.
-    await page.keyboard.press("Tab");
-    let testid = await page.evaluate(() =>
-      document.activeElement?.getAttribute("data-testid") ?? null,
-    );
-    // Tab through until we find login-email.
-    let safety = 8;
-    while (testid !== "login-email" && safety-- > 0) {
+
+    // Tab through until we find the federated Google launcher.
+    let testid: string | null = null;
+    let safety = 10;
+    while (testid !== "login-google" && safety-- > 0) {
       await page.keyboard.press("Tab");
-      testid = await page.evaluate(() =>
-        document.activeElement?.getAttribute("data-testid") ?? null,
+      testid = await page.evaluate(
+        () => document.activeElement?.getAttribute("data-testid") ?? null,
       );
     }
-    expect(testid).toBe("login-email");
+    expect(testid).toBe("login-google");
+
+    // The very next focusable control is the immersive email trigger.
     await page.keyboard.press("Tab");
     expect(
       await page.evaluate(
         () => document.activeElement?.getAttribute("data-testid") ?? null,
       ),
-    ).toBe("login-password");
+    ).toBe("login-email-trigger");
   });
 });
 
 test.describe("a11y — focus-visible ring on Tab", () => {
-  test(":focus-visible outline appears when Tab-focused, not on click", async ({ page }) => {
+  test(":focus-visible holds on the email trigger after a keyboard round-trip", async ({
+    page,
+  }) => {
     await page.goto("/login");
-    // Focus the email input via Tab so :focus-visible matches.
-    const email = page.getByTestId("login-email");
-    await email.focus();
-    // Synchronously dispatch a keyboard event to bump :focus-visible.
+    // Focus the email trigger, then a keyboard round-trip — focus returns.
+    const trigger = page.getByTestId("login-email-trigger");
+    await trigger.focus();
     await page.keyboard.press("Tab");
     await page.keyboard.press("Shift+Tab");
-    // The active element should still be the email input.
     expect(
       await page.evaluate(
         () => document.activeElement?.getAttribute("data-testid") ?? null,
       ),
-    ).toBe("login-email");
+    ).toBe("login-email-trigger");
   });
 });
 
@@ -99,6 +106,14 @@ test.describe("a11y — icon-only buttons have aria-label", () => {
     const attach = page.getByRole("button", { name: /attach files/i });
     await expect(attach).toBeVisible();
   });
+
+  test("the immersive AuthModal close control has an aria-label", async ({ page }) => {
+    await page.goto("/login");
+    await page.getByTestId("login-email-trigger").click();
+    const close = page.getByTestId("auth-modal-close");
+    await expect(close).toBeVisible();
+    await expect(close).toHaveAttribute("aria-label", /close/i);
+  });
 });
 
 test.describe("a11y — modals", () => {
@@ -109,6 +124,14 @@ test.describe("a11y — modals", () => {
     await expect(tour).toHaveAttribute("role", "dialog");
     await expect(tour).toHaveAttribute("aria-modal", "true");
     await expect(tour).toHaveAttribute("aria-label", /product tour/i);
+  });
+
+  test("the immersive AuthModal has role=dialog + aria-modal=true", async ({ page }) => {
+    await page.goto("/login");
+    await page.getByTestId("login-email-trigger").click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
   });
 
   test("phone chat-drawer has role=dialog + aria-modal=true", async ({ page }) => {
@@ -159,29 +182,19 @@ test.describe("a11y — language + headings", () => {
   });
 });
 
-test.describe("a11y — form labels", () => {
-  test("login email + password inputs have associated <label>", async ({ page }) => {
+test.describe("a11y — auth modal launcher labels", () => {
+  test("the login email trigger has an accessible name", async ({ page }) => {
     await page.goto("/login");
-    // Each input has a wrapping <label> with a span label.
-    const emailLabel = await page.evaluate(() => {
-      const el = document.querySelector('[data-testid="login-email"]');
-      return el?.closest("label")?.textContent ?? null;
-    });
-    expect(emailLabel).toMatch(/email/i);
-    const pwLabel = await page.evaluate(() => {
-      const el = document.querySelector('[data-testid="login-password"]');
-      return el?.closest("label")?.textContent ?? null;
-    });
-    expect(pwLabel).toMatch(/password/i);
+    const trigger = page.getByTestId("login-email-trigger");
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveText(/email/i);
   });
 
-  test("signup name input has associated <label>", async ({ page }) => {
+  test("the signup email trigger has an accessible name", async ({ page }) => {
     await page.goto("/signup");
-    const nameLabel = await page.evaluate(() => {
-      const el = document.querySelector('[data-testid="signup-name"]');
-      return el?.closest("label")?.textContent ?? null;
-    });
-    expect(nameLabel).toMatch(/call you/i);
+    const trigger = page.getByTestId("signup-email-trigger");
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveText(/email/i);
   });
 });
 

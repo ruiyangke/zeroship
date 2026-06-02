@@ -1,11 +1,10 @@
 //! Shared constant-time password-credential verification.
 //!
 //! This is the security-critical core lifted verbatim out of
-//! [`crate::ui::login`]'s POST handler so the headless in-page login endpoint
-//! ([`crate::ui::password`]) reuses the *exact same* verification path rather
-//! than a parallel copy. A second copy is the classic way a credential→code
-//! oracle drifts out of constant-time / fail-closed discipline; there is one
-//! body, here.
+//! [`crate::ui::login`]'s POST handler so there is ONE verification body rather
+//! than a parallel copy. A second copy is the classic way a credential check
+//! drifts out of constant-time / fail-closed discipline; there is one body,
+//! here. The interactive `/login` POST is its sole caller.
 //!
 //! Algorithm (proposal §8.1 credential path), in order:
 //!
@@ -31,9 +30,8 @@ use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
 
-/// A successfully-verified local user. Carrying the whole row lets callers mint
-/// a session (login.rs) or a hydra login acceptance (password.rs) without a
-/// second DB round-trip.
+/// A successfully-verified local user. Carrying the whole row lets the caller
+/// mint a session (login.rs) without a second DB round-trip.
 #[derive(Debug, Clone, Copy)]
 pub struct VerifiedUser {
     pub id: uuid::Uuid,
@@ -42,8 +40,8 @@ pub struct VerifiedUser {
 
 /// Why a credential verification was rejected.
 ///
-/// Each variant maps to a public HTTP status + message; callers translate to
-/// HTML (login.rs) or JSON (password.rs). Audit emission for the failure has
+/// Each variant maps to a public HTTP status + message; the caller translates
+/// to HTML (login.rs). Audit emission for the failure has
 /// ALREADY happened inside [`verify_password_credentials`] before the error is
 /// returned (except `Internal`, which is an infrastructure fault, not a
 /// credential decision).

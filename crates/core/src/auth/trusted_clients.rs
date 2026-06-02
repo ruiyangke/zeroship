@@ -15,13 +15,21 @@
 //! console host), so the deployment MUST set `[auth].trusted_oauth_clients` to
 //! the console's `oac_<base62>` client id — i.e.
 //! `client_id_for_app(console_app_id(console_host))`, which
-//! `zeroship-control --bootstrap-console` prints at boot. The gateway reads
-//! this overlay into `GateState.trusted_oauth_clients`; its first-party
-//! password gate ([`is_trusted_client_id`]) and the headless consent dance
-//! both key off that set. Until the overlay names the console client, no
-//! client is trusted and in-page console login is locked out — the secure
-//! default. Creator apps are **never** trusted here (spec §5.2): their
-//! per-app clients always run the consent prompt.
+//! `zeroship-control --bootstrap-console` prints at boot. The **control plane**
+//! resolves this set (via [`resolve_trusted_oauth_clients`] /
+//! [`is_trusted_client_id`]) to mark the first-party console client
+//! `skip_consent=true`, so the immersive framed `/oauth2/auth → /login →
+//! /consent` login dance AUTO-ACCEPTS identity consent — a consent prompt for
+//! the platform's own console is meaningless. Until the overlay names the
+//! console client, no client is trusted and the framed console login would
+//! render a consent screen — the secure default. Creator apps are **never**
+//! trusted here (spec §5.2): their per-app clients always run the consent
+//! prompt.
+//!
+//! The browser-enforced `frame-ancestors` allowlist on the auth login routes is
+//! the separate anti-clickjacking gate (it replaced the deleted gateway
+//! credential-oracle first-party gate); this set is purely about skipping Hydra
+//! consent for the console.
 
 use std::collections::HashSet;
 

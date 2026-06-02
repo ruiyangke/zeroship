@@ -110,7 +110,7 @@ async fn e2e_password_flow() {
                 .state(cfg_state)
                 .state(db_state)
                 .state(mailer_state)
-                .middleware(SecurityHeaders)
+                .middleware(SecurityHeaders::default())
                 .configure(server::configure(false, false))
         }
     })

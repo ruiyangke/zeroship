@@ -203,15 +203,6 @@ services:
       # Tampering is rejected at decode time; rotating this key
       # invalidates any in-flight OIDC dances.
       STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-key-please-rotate}
-      # Gateway↔auth shared secret for the headless in-page password exchange
-      # (POST /__zeroship/auth/password). The gateway sends it to auth as
-      # `Authorization: Bearer <key>` (never to the browser); auth constant-time
-      # matches it. MUST be byte-identical to the auth service's AUTH_INTERNAL_KEY
-      # below. require_unless_dev makes an empty value fatal outside --dev-insecure;
-      # under --dev-insecure an empty value would DISABLE the gate on both sides —
-      # we set a fixed dev value so the in-page login path runs the real bearer-
-      # gated exchange end-to-end. Same plaintext-env pattern as the secrets above.
-      AUTH_INTERNAL_KEY: ${AUTH_INTERNAL_KEY:-dev-auth-internal-key-change-me}
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST equal the
       # control service's PAIRWISE_SALT — both derive the per-app `pws_`. Never
       # rotate without a per-app `pws_` migration.
@@ -331,16 +322,15 @@ services:
         --relay-forward-mailer stdout
         --bootstrap
     environment:
-      # Gateway↔auth shared secret gating the headless in-page password
-      # exchange (POST /password). MUST be byte-identical to the gateway
-      # service's AUTH_INTERNAL_KEY (the gateway is its only legitimate caller,
-      # authenticated by this bearer). require_unless_dev makes an empty value
-      # fatal outside --dev-insecure; under --dev-insecure an empty value
-      # DISABLES the gate — we set a fixed dev value so the in-page login runs
-      # the real bearer-gated credential→code exchange. Same env default expr as
-      # the gateway so a single `AUTH_INTERNAL_KEY=…` in the host shell overrides
-      # BOTH services in lockstep.
-      AUTH_INTERNAL_KEY: ${AUTH_INTERNAL_KEY:-dev-auth-internal-key-change-me}
+      # Console origin(s) the auth login/signup/consent documents admit via CSP
+      # `frame-ancestors` so the console's immersive iframe login can embed them
+      # (design §4.3/§10.1). Browser-enforced anti-clickjacking — ONLY this origin
+      # may frame /login; everyone else is blocked and falls back to the popup.
+      # This dev compose serves the console at the Caddy host
+      # console.zeroship.localhost. A non-empty value here (CLI/env tier) wins
+      # over the [auth].frame_ancestor_origins overlay in ops/zeroship.toml; keep
+      # the two in sync. Comma-separated for multiple origins.
+      FRAME_ANCESTOR_ORIGINS: ${FRAME_ANCESTOR_ORIGINS:-http://console.zeroship.localhost}
     ports:
       - "9092:9092"
     volumes:

@@ -25,16 +25,25 @@ The platform uses the **BFF model**: the browser holds an HttpOnly signed
 session cookie + an identity projection, never a token. Two surfaces:
 
 1. **Browser** — the `@zeroship/auth` client drives same-origin endpoints:
-   - `GET  /__zeroship/auth/authorize`     → the login hop (popup or redirect).
+   - `GET  /__zeroship/auth/authorize`     → the login hop. The first-party
+     password UI renders an **immersive iframe** on the same-site console
+     (`auth.zeroship.ai`'s real `/login` framed in-page — the Stripe-Elements
+     model), and a **popup** everywhere else; federated providers
+     (`google`/`github`) are always a popup. (There is no in-page credential
+     POST: the password is typed into the cross-origin auth iframe, which the
+     SOP forbids console JS from reading.)
    - `GET  /__zeroship/auth/popup-callback`→ same-origin HTML relay; postMessages
-     `{ type: "zs:authorization_response", response: { code, state } }`.
+     `{ type: "zs:authorization_response", response: { code, state } }` to the
+     launcher window — `window.opener` (popup leg) if present-and-distinct, else
+     `window.parent` (iframe leg), pinned to `location.origin` (never `'*'`).
    - `POST /__zeroship/auth/session`       → code→session exchange; sets the session
      cookie; returns `{ user, expires_at }` (NO token in the body).
    - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; `{ user, expires_at }`.
-   - `POST /__zeroship/auth/password`      → in-page credential sign-in; JSON
-     `{ email, password }`; sets the session cookie; returns `{ user, expires_at }`
-     (NO token). Bad credentials → `401 { error: "invalid_credentials" }`.
    - `POST /__zeroship/auth/signout`       → revoke + clear; `204`.
+
+   A failed sign-in surfaces `401 { error: "invalid_credentials" }`: in prod the
+   framed `auth.zeroship.ai/login` re-renders the error in-frame and the relay
+   carries it; the dev tier never reaches it (the dev login is frictionless).
 
    The `user` projection is `{ id, email, emailVerified, name, avatar, scopes }`
    (client camelCase); the wire body uses snake_case `email_verified`. `id` is
@@ -63,25 +72,48 @@ Two pieces, mirroring the two contract surfaces:
 `createDevAuthProvider(getEnv)` serves the same-origin `/__zeroship/auth/*` routes
 from inside the dev runtime — no gateway, no Hydra:
 
-- `authorize` → **frictionless dev login**: picks the configured dev user (or
-  the default) and 302s straight back to `/__zeroship/auth/popup-callback?code&state`
-  with a locally-minted dev code. A multi-user config renders a tiny dev
-  user-picker so you can switch identities / scope sets.
-- `popup-callback` → the **byte-for-byte same** relay page the gateway serves.
+- `authorize` → **frictionless dev login**, with the SAME two documented paths
+  the SDK's immersive iframe drives (§7 of the immersive-login design), both
+  ending at the in-frame callback:
+  - **single-user / default-user (frictionless):** no `dev_user` param and ≤1
+    configured user → 302 **straight** to `/__zeroship/auth/popup-callback?code&state`
+    with a locally-minted dev code. No picker, no second step.
+  - **multi-user picker (two-step):** >1 configured user and no `dev_user` param
+    → render a tiny dev user-picker **in-frame**; its
+    `<form action="/__zeroship/auth/authorize">` re-submits within the frame with
+    the chosen `dev_user`, which then takes the frictionless 302 path.
+- `popup-callback` → the **byte-for-byte same** relay page the gateway serves —
+  including the dual-target postMessage (`window.opener` for the popup leg, else
+  `window.parent` for the immersive iframe leg, pinned to `location.origin`).
 - `session` (POST) → spends the dev code, mints the `__zeroship_dev_session` cookie,
   returns `{ user, expires_at }`.
 - `session` (GET / `?mint=1`) → read / re-mint, or `401 { error: "login_required" }`.
-- `password` (POST) → **frictionless in-page credential sign-in**: resolves the
-  seeded user by `email` (the password is accepted-and-ignored, like the dev
-  PKCE verifier — there is no credential store in dev), mints the
-  `__zeroship_dev_session` cookie and returns `{ user, expires_at }`. An unknown
-  email is rejected with `401 { error: "invalid_credentials" }` (no silent
-  default), mirroring `exchange()`'s unknown-code rejection.
 - `signout` → clears the cookie; `204` (idempotent).
 
 Every wire shape is identical to prod, so the `@zeroship/auth` client is
 unchanged dev↔prod. The provider is wired into the dev fetch handler in
 `dev-entry.ts` (`@zeroship/bootstrap/dev`), ahead of the user module's fetch.
+
+### Framed same-origin dev-login parity
+
+There is **no separate `auth.zeroship.ai` origin in dev** — the dev-auth
+provider IS the auth service, served **same-origin** through the
+`@zeroship/vite-plugin` dev-server proxy (which forwards the whole
+`/__zeroship/auth/*` prefix to the spawned `zeroship serve` child runtime). The
+immersive iframe's `src` is the same `/__zeroship/auth/authorize?…`, which in dev
+is same-origin (localhost), so the iframe loads with no header relax needed:
+
+- The picker/authorize/callback responses set only `content-type` +
+  `cache-control` (no `X-Frame-Options` / `frame-ancestors`), so they are already
+  frameable same-origin. The prod-only framing relax (auth-service
+  `frame-ancestors` allowlisting the console) is **N/A** in dev; the
+  `frame_ancestor_origins` config is a no-op (or set to the dev console origin
+  for symmetry).
+- Isolation is **N/A** in dev (one localhost origin; nothing to isolate), but the
+  **UX/flow is identical**: the SDK opens the in-page iframe, the dev authorize
+  302s (or renders the picker, then 302s) to the in-frame callback, the callback
+  postMessages `{code,state}` to `window.parent`, and the SDK drives
+  `POST /session`.
 
 ### 2. Server-side identity — `__zeroship_dev_session` cookie → `user_json`
 

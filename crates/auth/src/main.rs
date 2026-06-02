@@ -10,8 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, obtain_secret, require_unless_dev, validate_stash_key, CheckConfigReport,
-    CheckFormat, CheckValue, SecretSection,
+    bootstrap_or_exit, obtain_secret, validate_stash_key, CheckConfigReport, CheckFormat,
+    CheckValue, SecretSection,
 };
 use zeroship_core::oidc_verify::JwksCache;
 
@@ -79,21 +79,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // The gateway↔auth shared secret protecting `POST /password` MUST be set
-    // outside dev — otherwise the headless credential→code oracle is dial-able
-    // unauthenticated. Skip during --check-config when the value is still a
-    // secret REFERENCE (presence, not strength, is what we assert here; an
-    // unresolved ref is non-empty so the check would pass anyway, but we keep
-    // the guard symmetric with the stash-key check above).
-    if !cfg.check_config || !zeroship_core::config::is_secret_ref(&cfg.auth_internal_key) {
-        if let Err(message) =
-            require_unless_dev("AUTH_INTERNAL_KEY / --internal-key", &cfg.auth_internal_key, cfg.insecure_dev)
-        {
-            tracing::error!("{message}");
-            std::process::exit(1);
-        }
-    }
-
     // Mailer config validation is cheap and should fail before any DB/Hydra
     // work. The constructed driver is reused below on normal startup.
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
@@ -136,6 +121,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
+        report.field(
+            "frame_ancestor_origins",
+            CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
+        );
         report.field("clients_config", CheckValue::Plain(cfg.clients_config.clone()));
         report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
         report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));
@@ -246,12 +235,6 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
         &cfg.stash_signing_key,
         file_secrets.stash_signing_key.as_deref(),
-        check,
-    );
-    cfg.auth_internal_key = obtain_secret(
-        "AUTH_INTERNAL_KEY / --internal-key",
-        &cfg.auth_internal_key,
-        file_secrets.auth_internal_key.as_deref(),
         check,
     );
 

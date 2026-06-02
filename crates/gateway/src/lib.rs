@@ -62,15 +62,6 @@ pub struct GateConfig {
     /// service; will be wired through once the service joins compose
     /// (Phase 3 Unit U11).
     pub auth_ui_url: String,
-    /// Gateway↔auth shared secret. Sent as `Authorization: Bearer <key>`
-    /// ONLY on the gateway→auth `POST /password` headless credential exchange
-    /// (in-page password login) — never to the browser. Must equal the auth
-    /// service's `auth_internal_key` (the only legitimate caller it
-    /// authenticates). Empty disables the in-page password path (dev only —
-    /// production boot rejects an empty key via `require_unless_dev`); the
-    /// auth side also treats an empty key as "gate disabled", so the two
-    /// agree on the dev-loopback posture.
-    pub auth_internal_key: String,
     /// Dev-only flag. When true the gateway emits cookies without the
     /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
     /// / docker-compose. Production MUST set this to false — the
@@ -207,12 +198,4 @@ pub struct GateState {
     /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
     /// subjects (a deliberate break-glass).
     pub pairwise_salt: [u8; 32],
-    /// First-party OAuth clients that skip Hydra consent (e.g. the builder).
-    /// Resolved at boot from the shared `[auth].trusted_oauth_clients` file
-    /// overlay via `zeroship_core::auth::resolve_trusted_oauth_clients`,
-    /// falling back to the compiled default set when the key is absent. A
-    /// later phase gates trusted-client behaviour on membership in this set;
-    /// the gateway shares the same byte-identical resolution as the control
-    /// plane so the two services never disagree on which clients are trusted.
-    pub trusted_oauth_clients: std::collections::HashSet<String>,
 }

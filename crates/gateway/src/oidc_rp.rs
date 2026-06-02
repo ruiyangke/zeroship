@@ -534,79 +534,6 @@ impl OidcRp {
         Ok(())
     }
 
-    /// Run the headless in-page password exchange against the auth service's
-    /// `POST /password` credential→code oracle (auth-sdk in-page password
-    /// login). This is the gateway → auth service-to-service call: the gateway
-    /// has already generated + is HOLDING the PKCE verifier (only the
-    /// `code_challenge` is sent here), authenticates itself with the
-    /// gateway↔auth shared secret as `Authorization: Bearer <auth_internal_key>`
-    /// (sent to AUTH ONLY, NEVER to the browser), and receives back an
-    /// authorization `code` it then redeems via [`OidcRp::exchange_code_public`].
-    ///
-    /// Dials `auth_ui_url` (the `crates/auth` base URL), NOT the Hydra public
-    /// URL — `/password` is an auth-service endpoint, not an OIDC protocol
-    /// endpoint. Shares the breaker-guarded, bounded-timeout, reused
-    /// per-thread client with every other outbound call.
-    ///
-    /// Returns the FULL upstream answer ([`PasswordLoginOutcome`]: status +
-    /// body) rather than only a parsed success, so the gateway handler can
-    /// propagate auth's `401`/`403`/`429`/`400` verbatim to the browser (the
-    /// credential arm's opaque error messages must reach the SDK unchanged) and
-    /// parse `{ code, state? }` only on a `200`.
-    ///
-    /// # Errors
-    /// [`OidcRpError::UpstreamUnavailable`] when the breaker is open / the
-    /// bounded timeout fires, or [`OidcRpError::TokenExchange`] on a transport
-    /// error or a failure reading the response body. A non-2xx HTTP STATUS is
-    /// NOT an error here — it is returned in the [`PasswordLoginOutcome`] so the
-    /// caller can forward it.
-    pub async fn password_login(
-        &self,
-        auth_internal_key: &str,
-        p: &PasswordLoginParams<'_>,
-    ) -> Result<PasswordLoginOutcome, OidcRpError> {
-        let url = format!("{}/password", self.auth_ui_url.trim_end_matches('/'));
-        // JSON body — the auth `/password` handler deserializes
-        // `PasswordLoginRequest` from JSON. The gateway holds the PKCE verifier;
-        // only the `code_challenge` (S256) crosses to auth.
-        let body = serde_json::to_string(&serde_json::json!({
-            "email": p.email,
-            "password": p.password,
-            "client_id": p.client_id,
-            "redirect_uri": p.redirect_uri,
-            "scope": p.scope,
-            "state": p.state,
-            "nonce": p.nonce,
-            "code_challenge": p.code_challenge,
-            "code_challenge_method": "S256",
-        }))
-        .expect("password_login body serialize");
-        // The gateway↔auth shared secret authenticates the gateway as auth's
-        // only legitimate caller (mirrors the worker_key / control_key
-        // service-to-service pattern). Sent to AUTH ONLY.
-        let bearer = format!("Bearer {auth_internal_key}");
-
-        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
-            client
-                .request(http::Method::POST, &url)?
-                .header("content-type", "application/json")?
-                .header("authorization", &bearer)?
-                .body(body)
-                .send()
-                .await
-        })
-        .await
-        .map_err(|e| OidcRpError::from_hydra(e, "password"))?;
-
-        let status = resp.status().as_u16();
-        let resp_body = resp.text().await.map_err(|e| {
-            // SECURITY: a 2xx body carries the authorization `code`. NEVER embed
-            // it in a logged error — surface the read failure only.
-            OidcRpError::TokenExchange(format!("password read: {e} (body redacted)"))
-        })?;
-        Ok(PasswordLoginOutcome { status, body: resp_body })
-    }
-
     /// Shared `POST /oauth2/token` for the public-client grants above.
     async fn post_token(&self, body: String) -> Result<TokenSet, OidcRpError> {
         let token_url = format!("{}/oauth2/token", self.auth_ui_url.trim_end_matches('/'));
@@ -995,40 +922,6 @@ pub struct BrowserAuthorizeParams<'a> {
     /// upstream IdP (auth-sdk Slice 1b-browser, Phase-1 `SignInOptions.provider`).
     /// Omitted ⇒ Hydra/login-UI shows the default provider picker.
     pub idp_hint: Option<&'a str>,
-}
-
-/// Browser-supplied credentials + PKCE challenge for the gateway → auth
-/// `POST /password` headless in-page exchange ([`OidcRp::password_login`]).
-/// The `email`/`password` come from the SDK's same-origin POST; the gateway
-/// supplies `client_id` (the per-app PUBLIC client), `redirect_uri`, `scope`,
-/// `state`/`nonce`, and the `code_challenge` it derived from the verifier it
-/// is HOLDING (only the challenge crosses to auth).
-#[derive(Debug, Clone)]
-pub struct PasswordLoginParams<'a> {
-    pub email: &'a str,
-    pub password: &'a str,
-    /// Per-app PUBLIC client id (`route.client_id`), gated first-party.
-    pub client_id: &'a str,
-    /// The app's popup-callback (or SDK-supplied, validated) redirect URI.
-    pub redirect_uri: &'a str,
-    /// Space-delimited requested scopes (e.g. `openid profile email offline_access`).
-    pub scope: &'a str,
-    /// `OAuth2` `state` the gateway generated for this exchange.
-    pub state: &'a str,
-    /// OIDC `nonce` the gateway generated for this exchange.
-    pub nonce: &'a str,
-    /// PKCE S256 challenge derived from the gateway-held verifier.
-    pub code_challenge: &'a str,
-}
-
-/// The full upstream answer from auth's `POST /password` ([`OidcRp::password_login`]).
-/// Carries the raw HTTP `status` + `body` so the gateway handler can forward
-/// auth's `401`/`403`/`429`/`400` (and their opaque JSON envelopes) verbatim to
-/// the browser, and parse `{ code, state? }` only on a `200`.
-#[derive(Debug, Clone)]
-pub struct PasswordLoginOutcome {
-    pub status: u16,
-    pub body: String,
 }
 
 /// Server-side state stashed in the signed `__Host-zs_oidc_stash` cookie

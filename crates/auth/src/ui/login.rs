@@ -240,9 +240,9 @@ pub async fn post(
 
     // 3–4 + failure arms: the constant-time, fail-closed credential check
     // (rate-limit → lookup → dummy-hash defense → Argon2 verify → eligibility
-    // → audit) lives in `identity::credentials` so the headless `/password`
-    // endpoint reuses the exact same path. Map its failure classes back to the
-    // form-re-render / opaque-error responses this HTML handler uses.
+    // → audit) lives in `identity::credentials` as the single shared
+    // verification body. Map its failure classes back to the form-re-render /
+    // opaque-error responses this HTML handler uses.
     let verified = match verify_password_credentials(
         db.as_ref(),
         &req,

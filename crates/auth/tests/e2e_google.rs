@@ -154,7 +154,7 @@ async fn google_federation_creates_new_user() {
                 .state(cfg_state)
                 .state(db_state)
                 .state(jwks_state)
-                .middleware(SecurityHeaders)
+                .middleware(SecurityHeaders::default())
                 .configure(server::configure(true, false))
         }
     })
@@ -425,7 +425,7 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
                 .state(cfg_state)
                 .state(db_state)
                 .state(jwks_state)
-                .middleware(SecurityHeaders)
+                .middleware(SecurityHeaders::default())
                 .configure(server::configure(true, false))
         }
     })

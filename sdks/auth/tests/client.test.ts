@@ -50,6 +50,26 @@ async function awaitReadyN(
   throw new Error(`fewer than ${n} concurrent flows became ready`);
 }
 
+/**
+ * Wait until the SDK has created the login iframe AND installed its relay
+ * listener (the iframe analogue of {@link awaitReady}). Returns the flow's
+ * `state` (recovered from the persisted PKCE transaction).
+ */
+async function awaitIframeReady(h: {
+  session: { map: Map<string, string> };
+  window: { messageListenerCount: number };
+  lastIframe?: { src: string };
+}): Promise<string> {
+  const state = await awaitTxnState(h.session);
+  for (let i = 0; i < 50 && (!h.lastIframe || h.window.messageListenerCount === 0); i++) {
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  return state;
+}
+
+const AUTH_ORIGIN_SAME_SITE = "https://auth.zeroship.ai"; // eTLD+1 == zeroship.ai (== APP_ORIGIN's)
+const AUTH_ORIGIN_CROSS_SITE = "https://auth.example.com"; // different eTLD+1 ⇒ popup fallback
+
 describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)", () => {
   test("opens the popup SYNCHRONOUSLY before the async URL build", async () => {
     const h = makeHarness();
@@ -213,55 +233,6 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await signIn.catch(() => {});
   });
 
-  test("signInWithCredentials POSTs {email,password} same-origin (no popup) and emits SIGNED_IN", async () => {
-    const h = makeHarness();
-    h.fetch.on(
-      (u, m) => m === "POST" && u.includes("/__zeroship/auth/password"),
-      () => jsonResponse(200, tokenSuccessBody()),
-    );
-    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
-    const events: AuthChangeEvent[] = [];
-    client.onAuthStateChange((e) => events.push(e));
-
-    await client.signInWithCredentials({ email: "alice@relay.zeroship.ai", password: "hunter2" });
-
-    // NO popup for the password path.
-    assert.equal(h.window.lastOpened, undefined, "the credential path must not open a window");
-
-    const req = h.fetch.requests.find((r) => r.url.includes("/__zeroship/auth/password"));
-    assert.ok(req, "POST /__zeroship/auth/password was issued");
-    assert.equal(req!.method, "POST");
-    assert.equal(req!.headers["x-zs-auth"], "1", "X-ZS-Auth same-origin header is set");
-    assert.equal(req!.headers["content-type"], "application/json");
-    assert.deepEqual(req!.body, { email: "alice@relay.zeroship.ai", password: "hunter2" });
-
-    assert.deepEqual(events, ["SIGNED_IN"], "a successful in-page sign-in emits SIGNED_IN");
-    assert.equal(client.isAuthenticated(), true);
-  });
-
-  test("signInWithCredentials surfaces a typed invalid_credentials AuthError on 401", async () => {
-    const h = makeHarness();
-    h.fetch.on(
-      (u, m) => m === "POST" && u.includes("/__zeroship/auth/password"),
-      () => jsonResponse(401, { error: "invalid_credentials", error_description: "wrong password" }),
-    );
-    const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
-    const events: AuthChangeEvent[] = [];
-    client.onAuthStateChange((e) => events.push(e));
-
-    await assert.rejects(
-      () => client.signInWithCredentials({ email: "alice@relay.zeroship.ai", password: "wrong" }),
-      (e: unknown) => {
-        assert.ok(e instanceof AuthError);
-        assert.equal((e as AuthError).code, "invalid_credentials");
-        assert.equal((e as AuthError).status, 401);
-        return true;
-      },
-    );
-    assert.deepEqual(events, [], "a rejected sign-in emits no state change");
-    assert.equal(client.isAuthenticated(), false);
-  });
-
   test("requestScopes steps up with prompt=consent so new scopes are granted", async () => {
     const h = makeHarness();
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
@@ -414,6 +385,165 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
       assert.equal((e as AuthError).code, "consent_required");
       return true;
     });
+  });
+});
+
+describe("signInWithOAuth({provider:'password'}) → immersive iframe (same-site console)", () => {
+  test("opens the iframe (NOT a popup), sets src to the authorize URL, relays a code, tears down", async () => {
+    const h = makeHarness();
+    h.fetch.on(SESSION_EXCHANGE, () => jsonResponse(200, tokenSuccessBody()));
+    const events: AuthChangeEvent[] = [];
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, immersive: true, authOrigin: AUTH_ORIGIN_SAME_SITE },
+      h.env,
+    );
+    client.onAuthStateChange((e) => events.push(e));
+
+    const signIn = client.signInWithOAuth({ provider: "password" });
+    const state = await awaitIframeReady(h);
+
+    // The iframe was created via the injected factory — NOT window.open.
+    assert.ok(h.lastIframe, "the immersive path must create an iframe via the injected handle");
+    assert.equal(h.window.lastOpened, undefined, "the immersive path must NOT open a popup window");
+
+    // The iframe `src` (the ELEMENT attribute) is the authorize URL with the
+    // S256 PKCE params + the app-origin callback redirect_uri + idp_hint=password.
+    const src = h.lastIframe!.src;
+    assert.ok(src.startsWith(`${APP_ORIGIN}/__zeroship/auth/authorize?`), src);
+    const q = new URL(src).searchParams;
+    assert.equal(q.get("code_challenge_method"), "S256");
+    assert.ok(q.get("code_challenge"), "code_challenge present");
+    assert.equal(q.get("state"), state);
+    assert.equal(q.get("idp_hint"), "password", "the first-party password UI is selected");
+    assert.equal(q.get("redirect_uri"), `${APP_ORIGIN}/__zeroship/auth/popup-callback`);
+    // The driver NEVER re-assigns src (it would mean touching the live frame).
+    assert.equal(h.lastIframe!.srcReassignments, 0, "src is set once on the element, never re-navigated");
+
+    // The app-origin callback posts {code,state} to window.parent (the console top).
+    h.window.dispatchMessage({
+      origin: APP_ORIGIN,
+      data: { type: "zs:authorization_response", response: { code: "iframe-code", state } },
+    });
+
+    const session = await signIn;
+    assert.equal(session.user.id, "pws_alice", "the relayed code drove POST /session → SIGNED_IN");
+    assert.deepEqual(events, ["SIGNED_IN"]);
+    assert.equal(h.lastIframe!.removed, true, "the iframe is torn down on settle");
+
+    // The surviving code-exchange path drove POST /session (no /password call).
+    const exchanged = h.fetch.requests.find(
+      (r) => r.method === "POST" && r.url.includes("/__zeroship/auth/session"),
+    );
+    assert.ok(exchanged, "the iframe drives the surviving POST /session exchange");
+    assert.equal((exchanged!.body as Record<string, string>).code, "iframe-code");
+    assert.ok(
+      !h.fetch.requests.some((r) => r.url.includes("/__zeroship/auth/password")),
+      "no /password endpoint is ever called (it is deleted)",
+    );
+  });
+
+  test("falls back to the POPUP when immersive is false (default)", async () => {
+    const h = makeHarness();
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, authOrigin: AUTH_ORIGIN_SAME_SITE /* immersive omitted ⇒ false */ },
+      h.env,
+    );
+    const signIn = client.signInWithOAuth({ provider: "password" });
+    await awaitReady(h);
+    assert.ok(h.window.lastOpened, "immersive:false ⇒ the popup window opens");
+    assert.equal(h.lastIframe, undefined, "no iframe is created when immersive is off");
+    // The popup was navigated to the authorize URL with idp_hint=password.
+    const q = new URL(h.window.lastOpened!.location.href).searchParams;
+    assert.equal(q.get("idp_hint"), "password");
+    h.window.lastOpened!.close();
+    await signIn.catch(() => {});
+  });
+
+  test("falls back to the POPUP when authOrigin is cross-site (custom-domain console)", async () => {
+    const h = makeHarness();
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, immersive: true, authOrigin: AUTH_ORIGIN_CROSS_SITE },
+      h.env,
+    );
+    const signIn = client.signInWithOAuth({ provider: "password" });
+    await awaitReady(h);
+    assert.ok(h.window.lastOpened, "cross-site authOrigin ⇒ the popup window opens");
+    assert.equal(h.lastIframe, undefined, "no iframe is created when the surface is cross-site");
+    h.window.lastOpened!.close();
+    await signIn.catch(() => {});
+  });
+
+  test("federated providers stay a POPUP even with immersive enabled", async () => {
+    const h = makeHarness();
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, immersive: true, authOrigin: AUTH_ORIGIN_SAME_SITE },
+      h.env,
+    );
+    const signIn = client.signInWithOAuth({ provider: "google" });
+    await awaitReady(h);
+    assert.ok(h.window.lastOpened, "google is federated ⇒ popup, never the iframe");
+    assert.equal(h.lastIframe, undefined, "no iframe for a federated provider");
+    const q = new URL(h.window.lastOpened!.location.href).searchParams;
+    assert.equal(q.get("idp_hint"), "google");
+    h.window.lastOpened!.close();
+    await signIn.catch(() => {});
+  });
+
+  test("falls back to the POPUP when the env has no iframe factory (no DOM)", async () => {
+    const h = makeHarness({ iframe: false });
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, immersive: true, authOrigin: AUTH_ORIGIN_SAME_SITE },
+      h.env,
+    );
+    const signIn = client.signInWithOAuth({ provider: "password" });
+    await awaitReady(h);
+    assert.ok(h.window.lastOpened, "no iframe factory ⇒ graceful popup fallback");
+    assert.equal(h.lastIframe, undefined);
+    // Exactly one pending transaction: the rolled-back iframe txn must not leak.
+    assert.equal(pendingStates(h).length, 1, "the abandoned iframe transaction is rolled back");
+    h.window.lastOpened!.close();
+    await signIn.catch(() => {});
+  });
+
+  test("the modal close affordance cancels the iframe flow (popup_closed) and tears it down", async () => {
+    const h = makeHarness();
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, immersive: true, authOrigin: AUTH_ORIGIN_SAME_SITE },
+      h.env,
+    );
+    const signIn = client.signInWithOAuth({ provider: "password" });
+    await awaitIframeReady(h);
+    assert.ok(h.lastIframe);
+    // User closes the modal → the injected iframe's cancel signal fires.
+    h.lastIframe!.cancel();
+    await assert.rejects(signIn, (e: unknown) => {
+      assert.equal((e as AuthError).code, "popup_closed");
+      return true;
+    });
+    assert.equal(h.lastIframe!.removed, true, "the iframe is torn down on cancel");
+  });
+
+  test("a relay error inside the iframe maps to a typed AuthError (e.g. invalid_credentials)", async () => {
+    const h = makeHarness();
+    const client = createAuthClient(
+      { appOrigin: APP_ORIGIN, immersive: true, authOrigin: AUTH_ORIGIN_SAME_SITE },
+      h.env,
+    );
+    const signIn = client.signInWithOAuth({ provider: "password" });
+    const state = await awaitIframeReady(h);
+    // The framed /login surfaces a rejected password via the relay error envelope.
+    h.window.dispatchMessage({
+      origin: APP_ORIGIN,
+      data: {
+        type: "zs:authorization_response",
+        response: { error: "consent_required", error_description: "needs consent", state },
+      },
+    });
+    await assert.rejects(signIn, (e: unknown) => {
+      assert.equal((e as AuthError).code, "consent_required");
+      return true;
+    });
+    assert.equal(h.lastIframe!.removed, true, "the iframe is torn down on a relay error");
   });
 });
 

@@ -25,7 +25,8 @@ fn omitted_file_list_is_empty_fail_closed() {
     // The compiled default is EMPTY (fail-closed): with no overlay, NO client
     // is trusted — not the retired `zeroship-builder` id, not anything. A
     // deployment MUST name the console's oac_ client id in
-    // `[auth].trusted_oauth_clients` to enable in-page console login.
+    // `[auth].trusted_oauth_clients` to skip Hydra consent for the console (so
+    // the immersive framed login auto-accepts identity consent).
     let file = FileConfig::default();
 
     let trusted = resolve_trusted_oauth_clients(&file.auth);
