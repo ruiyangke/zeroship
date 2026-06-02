@@ -176,7 +176,12 @@ async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships
 
     let mut memberships = Memberships::default();
     for row in rows {
-        let app_id: String = row.get("app_id");
+        // `app_members.app_id` is a `uuid` column (0004_control.sql) — read it
+        // as Uuid, then stringify. Reading it directly as String panics
+        // (WrongType) the moment any membership row exists; this went undetected
+        // because the only covering test is env-gated and never run in CI.
+        let app_id: Uuid = row.get("app_id");
+        let app_id = app_id.to_string();
         let role: String = row.get("role");
         match role.as_str() {
             "owner" => memberships.owner.push(app_id),

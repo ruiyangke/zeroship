@@ -296,7 +296,8 @@ async fn create_app(fx: &mut Fixture, label: &str) -> Uuid {
 }
 
 async fn grant_app_member(state: &AppState, app_id: Uuid, user_id: Uuid, role: &str) {
-    let app_id = app_id.to_string();
+    // app_members.app_id is a uuid column — bind the Uuid directly (binding a
+    // String panics with WrongType against the uuid column).
     state
         .control_pg
         .execute(
