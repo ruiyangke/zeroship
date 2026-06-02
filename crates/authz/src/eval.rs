@@ -121,8 +121,15 @@ async fn load_principal_app_resources(
 
     rows.into_iter()
         .map(|row| {
+            // `app_members.app_id` is a `uuid` column (0004_control.sql) — read
+            // it as `Uuid`, then stringify. Reading it directly as `String`
+            // panics (WrongType) the moment any membership row exists. This is
+            // the sibling of the entities.rs:183 fix; `is_authorized_anywhere`
+            // calls this unconditionally, so the panic gated consent + PAT
+            // minting for any creator with >=1 app membership.
+            let app_id: Uuid = row.get("app_id");
             let resource = Resource::App {
-                id: row.get("app_id"),
+                id: app_id.to_string(),
             };
             resource
                 .validate_ids()

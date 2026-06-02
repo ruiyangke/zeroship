@@ -14,6 +14,16 @@ use crate::{Action, AuthzError, Resource};
 const ENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 const ENTITY_CACHE_CAPACITY: usize = 1024;
 
+/// Platform role assigned to a principal with no row in
+/// `platform_admin_roles`. This is the *default* for every ordinary creator.
+///
+/// It MUST be a true zero-privilege role: no platform Cedar policy matches it,
+/// so an un-roled creator is authorized solely through their `app_members`-bound
+/// creator policies (app_owner / app_editor / app_viewer). Using a privileged
+/// default such as `"readonly"` here is a fleet-wide cross-tenant read IDOR,
+/// because `readonly.cedar` permits reads on an unconstrained resource.
+pub const DEFAULT_PLATFORM_ROLE: &str = "none";
+
 static ENTITY_CACHE: LazyLock<Mutex<LruCache<EntityCacheKey, CacheEntry>>> =
     LazyLock::new(|| {
         Mutex::new(LruCache::new(
@@ -140,16 +150,21 @@ struct UserAttrs {
 }
 
 async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzError> {
+    // `DEFAULT_PLATFORM_ROLE` ("none") is a true zero-privilege role: no
+    // platform Cedar policy matches it, so an un-roled creator is authorized
+    // ONLY through their `app_members`-bound creator policies. Defaulting to a
+    // privileged role (e.g. "readonly", which permits reads on an unconstrained
+    // resource) would grant every creator fleet-wide cross-tenant read.
     let rows = pg
         .query(
             "SELECT \
                 u.email_verified_at IS NOT NULL AS email_verified, \
                 (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked, \
-                COALESCE(r.role, 'readonly') AS platform_role \
+                COALESCE(r.role, $2) AS platform_role \
              FROM zeroship.users u \
              LEFT JOIN zeroship.platform_admin_roles r ON r.user_id = u.id \
              WHERE u.id = $1",
-            &[&principal_id],
+            &[&principal_id, &DEFAULT_PLATFORM_ROLE],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("load user entities: {err}")))?;

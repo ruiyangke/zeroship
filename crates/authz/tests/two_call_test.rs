@@ -257,6 +257,106 @@ fn audit_decision_recorded() {
     });
 }
 
+/// Regression for finding C1 (cross-tenant read IDOR), exercised end-to-end
+/// through the real `enforce` path (which runs the `COALESCE(r.role, ...)`
+/// default-role SQL in `load_user`).
+///
+/// An ordinary creator with NO `platform_admin_roles` row and NO membership of
+/// the target app must be DENIED reads on that app. Before the fix the default
+/// resolved to `"readonly"`, whose Cedar policy permits reads on an
+/// unconstrained resource, so this returned Allow — a fleet-wide cross-tenant
+/// read of app metadata / env-var names / secret names / billing / deploy
+/// history. Requires AUTH_DB_URL (live PG).
+#[test]
+fn unroled_creator_denied_cross_tenant_reads() {
+    run_db_test(|pg| async move {
+        // Victim's app, owned by someone else. `victim` is the owner.
+        let victim = Fixture::new(&pg, "c1-victim", None, Some("owner")).await;
+
+        // Attacker: an ordinary creator, no platform role, member of nothing.
+        let attacker_id = Uuid::new_v4();
+        pg.execute(
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[
+                &attacker_id,
+                &format!("c1-attacker-{attacker_id}@example.com"),
+                &"c1-attacker",
+            ],
+        )
+        .await
+        .expect("insert attacker");
+
+        // Force a fresh entity-cache read so the attacker's (lack of) role is
+        // evaluated by load_user rather than a stale cache entry.
+        EntityCache::invalidate(attacker_id);
+
+        let policies = load_platform_policies().unwrap();
+        for action in [
+            Action::AppsRead,
+            Action::EnvRead,
+            Action::SecretsRead,
+            Action::BillingRead,
+            Action::DeploymentsRead,
+        ] {
+            let ctx = AuthzContext {
+                principal_id: attacker_id,
+                token_id: None,
+                token_policy: None,
+                action,
+                resource: Resource::App {
+                    id: victim.app_id.clone(),
+                },
+                now: 12 * 60 * 60,
+                request_ip: None,
+                mfa_verified: false,
+                mfa_age_seconds: None,
+                request_id: None,
+            };
+            let decision = enforce(&pg, &policies, &ctx).await.unwrap();
+            assert_eq!(
+                decision,
+                AuthzDecision::Deny,
+                "un-roled creator must NOT read {action:?} on a non-member app (cross-tenant IDOR)",
+            );
+        }
+
+        // Same-tenant access MUST still work: the victim/owner reads their own
+        // app. This guards against over-restricting the fix.
+        EntityCache::invalidate(victim.user_id);
+        let owner_ctx = AuthzContext {
+            principal_id: victim.user_id,
+            token_id: None,
+            token_policy: None,
+            action: Action::SecretsRead,
+            resource: Resource::App {
+                id: victim.app_id.clone(),
+            },
+            now: 12 * 60 * 60,
+            request_ip: None,
+            mfa_verified: false,
+            mfa_age_seconds: None,
+            request_id: None,
+        };
+        assert_eq!(
+            enforce(&pg, &policies, &owner_ctx).await.unwrap(),
+            AuthzDecision::Allow,
+            "owner must still read secrets on their OWN app",
+        );
+
+        // Cleanup attacker rows.
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+                &[&attacker_id],
+            )
+            .await;
+        let _ = pg
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&attacker_id])
+            .await;
+        victim.cleanup(&pg).await;
+    });
+}
+
 fn run_db_test<F, Fut>(test: F)
 where
     F: FnOnce(Client) -> Fut,
@@ -298,7 +398,11 @@ impl Fixture {
         app_role: Option<&str>,
     ) -> Self {
         let user_id = Uuid::new_v4();
-        let app_id = format!("blog-{label}-{user_id}");
+        // `app_members.app_id` and `apps.id` are `UUID` columns; seed a real
+        // UUID and bind it as `Uuid` (binding the String panics ToSql, which
+        // is exactly the bug that hid the eval.rs H2 read-as-String defect).
+        let app_db_id = Uuid::new_v4();
+        let app_id = app_db_id.to_string();
         let email = format!("{label}-{user_id}@example.com");
 
         pg.execute(
@@ -317,19 +421,31 @@ impl Fixture {
             .expect("insert platform role");
         }
 
-        if let Some(role) = app_role {
+        let app_db_id = if let Some(role) = app_role {
+            // A membership row requires the FK-referenced `apps` row to exist.
+            let app_name = format!("authz-{label}-{}", Uuid::new_v4().simple());
+            pg.execute(
+                "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
+                 VALUES ($1, $2, $3, $4)",
+                &[&app_db_id, &app_name, &"test-api-key", &"test-api-key-hash"],
+            )
+            .await
+            .expect("insert app");
             pg.execute(
                 "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
-                &[&app_id, &user_id, &role],
+                &[&app_db_id, &user_id, &role],
             )
             .await
             .expect("insert app member");
-        }
+            Some(app_db_id)
+        } else {
+            None
+        };
 
         Self {
             user_id,
             app_id,
-            app_db_id: None,
+            app_db_id,
             token_ids: Vec::new(),
         }
     }
@@ -367,9 +483,11 @@ impl Fixture {
         )
         .await
         .expect("insert app");
+        // `app_members.app_id` is a `UUID` column — bind the `Uuid`, not the
+        // stringified form (binding the String panics ToSql WrongType).
         pg.execute(
             "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
-            &[&app_id, &user_id, &app_role],
+            &[&app_db_id, &user_id, &app_role],
         )
         .await
         .expect("insert app member");

@@ -41,6 +41,68 @@ fn non_admin_user_does_not_get_admin_powers() {
     assert_eq!(decision, Decision::Deny);
 }
 
+/// Regression for finding C1 (cross-tenant read IDOR).
+///
+/// Every ordinary creator with no `platform_admin_roles` row evaluates as the
+/// `DEFAULT_PLATFORM_ROLE`. That default MUST NOT be authorized for any read on
+/// an app the principal is not a member of — otherwise a freshly signed-up
+/// creator can read every other tenant's app metadata, env-var names, secret
+/// names, billing/earnings and deploy history.
+///
+/// Before the fix the SQL defaulted un-roled principals to `"readonly"`, and
+/// `readonly.cedar` permits these reads on an *unconstrained* resource (no
+/// `resource in principal.app_*_of` clause). With the default-role principal
+/// holding zero memberships of `APP_ID`, the read still resolved to Allow —
+/// this assertion failed. The fix makes the default a true zero-privilege role.
+#[test]
+fn default_platform_role_cannot_read_non_member_app() {
+    let policies = load_platform_policies().expect("static policies should parse");
+    // A principal carrying the *default* platform role and NO membership of
+    // APP_ID (the entities() helper attaches no app_*_of sets).
+    let entities = entities(
+        "fresh_creator",
+        zeroship_authz::DEFAULT_PLATFORM_ROLE,
+        false,
+        false,
+    );
+
+    for action in [
+        "apps:read",
+        "env:read",
+        "secrets:read",
+        "billing:read",
+        "deployments:read",
+        "team:read",
+    ] {
+        let request = request("fresh_creator", action, APP_ID);
+        let decision = Authorizer::new()
+            .is_authorized(&request, &policies, &entities)
+            .decision();
+        assert_eq!(
+            decision,
+            Decision::Deny,
+            "default-role creator must be DENIED cross-tenant {action} on a non-member app",
+        );
+    }
+}
+
+/// A genuine `readonly` *staff* role (explicitly granted via
+/// `platform_admin_roles`) is still allowed to read — that is its purpose. This
+/// pins the contract so the C1 fix does not over-restrict legitimately granted
+/// platform staff.
+#[test]
+fn granted_readonly_staff_role_still_reads() {
+    let policies = load_platform_policies().expect("static policies should parse");
+    let request = request("staff", "apps:read", APP_ID);
+    let entities = entities("staff", "readonly", false, false);
+
+    let decision = Authorizer::new()
+        .is_authorized(&request, &policies, &entities)
+        .decision();
+
+    assert_eq!(decision, Decision::Allow);
+}
+
 #[test]
 fn suspended_app_denies_writes() {
     let policies = load_platform_policies().expect("static policies should parse");
