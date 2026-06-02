@@ -2,9 +2,11 @@
 #
 # Single entry point Liquibase reads
 # (`--changelog-file=db/changelog/db.changelog-master.yaml`). It owns the
-# single `zeroship` schema. Hydra owns its own schema via
-# `hydra migrate` (the hydra-migrate compose service) — do NOT add hydra
-# tables here.
+# single `zeroship` schema. It ALSO provisions the empty `oauth_hydra`
+# namespace + least-privileged role for Hydra (changeset 0027) — but Hydra
+# still migrates its own TABLES into oauth_hydra via `hydra migrate` (the
+# hydra-migrate compose service, connecting as that role). Do NOT add hydra
+# tables here — Hydra's table DDL is version-locked to the hydra binary.
 #
 # Every migration is a formatted-SQL file under changesets/, applied in
 # lexicographic filename order (0001_, 0002_, …). To add a migration, create

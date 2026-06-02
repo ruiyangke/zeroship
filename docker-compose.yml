@@ -354,7 +354,11 @@ services:
       hydra-migrate:
         condition: service_completed_successfully
     environment:
-      DSN: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+      # Connect as the dedicated oauth_hydra role (provisioned by the Liquibase
+      # `migrate` service, changeset 0027): its default search_path is
+      # `oauth_hydra, public`, so Hydra reads/writes its own `oauth_hydra`
+      # schema, isolated from the platform `zeroship` schema.
+      DSN: postgres://oauth_hydra:zeroship@postgres:5432/zeroship?sslmode=disable
       SECRETS_SYSTEM: ${SECRETS_SYSTEM:-dev-secret-please-change-this-please}
       SECRETS_COOKIE: ${SECRETS_COOKIE:-dev-secret-please-change-this-please}
     volumes:
@@ -369,16 +373,22 @@ services:
       # privileged and must never face the public internet.
       - "4445:4445"
 
-  # One-shot migrator. Runs hydra's own schema migrations into the
-  # shared zeroship Postgres database (creates the hydra_* tables
-  # alongside the auth.* schema we own).
+  # One-shot migrator. Runs hydra's own schema migrations into its DEDICATED
+  # `oauth_hydra` schema (provisioned — schema + least-priv `oauth_hydra` role +
+  # search_path — by the Liquibase `migrate` service, changeset 0027). Hydra
+  # connects AS that role, so its hydra_* tables land in oauth_hydra, isolated
+  # from the platform `zeroship` schema. Gated on `migrate` so the schema/role
+  # exist first (also fixes the prior race where this could run before the
+  # schema existed and scatter tables into public/zeroship).
   hydra-migrate:
     image: oryd/hydra:v25.4.0
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
-      DSN: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+      DSN: postgres://oauth_hydra:zeroship@postgres:5432/zeroship?sslmode=disable
     command: migrate sql up -e --yes
     restart: on-failure
 

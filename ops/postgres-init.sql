@@ -2,7 +2,9 @@
 -- (mounted into /docker-entrypoint-initdb.d/).
 --
 -- The whole platform shares ONE database with a single `zeroship` schema for
--- all system tables (hydra_* live in public). Most queries are fully qualified
+-- all system tables (Hydra's own hydra_* tables live in a separate
+-- `oauth_hydra` schema — Hydra connects as the dedicated `oauth_hydra` role,
+-- provisioned in changeset 0027). Most queries are fully qualified
 -- (`zeroship.apps`), but a few reference objects UNQUALIFIED (e.g.
 -- `crates/control/src/admin_handlers.rs` `UPDATE apps …`), so every connection
 -- needs `zeroship` on its search_path. Postgres's default role search_path
