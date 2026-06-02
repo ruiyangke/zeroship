@@ -225,7 +225,7 @@ impl ConsentTestApp {
                     .state(admin_state)
                     .state(cfg_state)
                     .state(pg_state)
-                    .middleware(SecurityHeaders)
+                    .middleware(SecurityHeaders::default())
                     .configure(server::configure(false, false))
             }
         })

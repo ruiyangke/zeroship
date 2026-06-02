@@ -321,6 +321,16 @@ services:
         --allow-remote-hydra-admin
         --relay-forward-mailer stdout
         --bootstrap
+    environment:
+      # Console origin(s) the auth login/signup/consent documents admit via CSP
+      # `frame-ancestors` so the console's immersive iframe login can embed them
+      # (design §4.3/§10.1). Browser-enforced anti-clickjacking — ONLY this origin
+      # may frame /login; everyone else is blocked and falls back to the popup.
+      # This dev compose serves the console at the Caddy host
+      # console.zeroship.localhost. A non-empty value here (CLI/env tier) wins
+      # over the [auth].frame_ancestor_origins overlay in ops/zeroship.toml; keep
+      # the two in sync. Comma-separated for multiple origins.
+      FRAME_ANCESTOR_ORIGINS: ${FRAME_ANCESTOR_ORIGINS:-http://console.zeroship.localhost}
     ports:
       - "9092:9092"
     volumes:

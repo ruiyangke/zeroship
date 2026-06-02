@@ -131,7 +131,7 @@ impl GithubFixture {
                     .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
-                    .middleware(SecurityHeaders)
+                    .middleware(SecurityHeaders::default())
                     .configure(server::configure(false, true))
             }
         })

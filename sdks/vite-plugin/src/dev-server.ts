@@ -539,9 +539,14 @@ export function devServerPlugin(
       // than being caught by Vite's index.html fallback. Forwarded path
       // prefixes:
       //   - /__zeroship/v1/<id>   ← spec wire (production + dev parity)
+      //   - /__zeroship/auth/*    ← platform BFF login (authorize,
+      //                     popup-callback, session[?mint=1], signout),
+      //                     answered by the child runtime's dev-auth
+      //                     provider (sdks/bootstrap/src/dev-auth.ts) — the
+      //                     same same-origin contract the gateway owns in
+      //                     prod. Without this the SDK's session mint hits
+      //                     Vite's SPA fallback and fails.
       //   - /api/*         ← raw HTTP routes the user app exposes
-      //   - /auth/login, /auth/callback, /auth/logout
-      //                     ← builder OAuth code-flow routes
       //   - /rpc, /_rpc    ← legacy wires kept for in-flight migrations
       server.middlewares.use(
         (
@@ -552,12 +557,10 @@ export function devServerPlugin(
           const url = req.url ?? "";
           if (
             !url.startsWith("/__zeroship/v1/") &&
+            !url.startsWith("/__zeroship/auth/") &&
             !url.startsWith("/_rpc") &&
             !url.startsWith("/rpc") &&
-            !url.startsWith("/api/") &&
-            !url.startsWith("/auth/login") &&
-            !url.startsWith("/auth/callback") &&
-            !url.startsWith("/auth/logout")
+            !url.startsWith("/api/")
           ) {
             return next();
           }

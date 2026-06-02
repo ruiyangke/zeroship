@@ -386,10 +386,17 @@ async fn popup_callback_relays_to_own_origin_and_never_reflects_query() {
         body.contains(&format!("<script nonce=\"{nonce}\">")),
         "script nonce must match CSP nonce: body={body}"
     );
-    // postMessage targets the OWN origin, never '*'.
+    // Dual-target postMessage (immersive iframe login, §4.2): the callback
+    // resolves the launcher as `window.opener` (popup) || `window.parent`
+    // (iframe), then posts to it pinned to `location.origin` — NEVER '*'.
     assert!(
-        body.contains("window.opener.postMessage(msg, location.origin)"),
-        "{body}"
+        body.contains("(window.opener && window.opener !== window) ? window.opener")
+            && body.contains("(window.parent  && window.parent  !== window) ? window.parent"),
+        "callback must resolve the launcher as opener||parent: {body}"
+    );
+    assert!(
+        body.contains("tgt.postMessage(msg, location.origin)"),
+        "callback must post to the resolved launcher at location.origin: {body}"
     );
     assert!(!body.contains(", '*')"), "never postMessage to '*': {body}");
     // The XSS payload from the query is NEVER reflected into the DOM.

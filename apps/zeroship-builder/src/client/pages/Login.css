@@ -70,6 +70,62 @@
   inline-size: 100%;
 }
 
+/* ── Immersive login modal chrome (@zeroship/auth <AuthModal>) ──────
+ * `<AuthModal>` hosts the cross-origin, same-site iframe embedding
+ * `auth.zeroship.ai/login` (the credential is typed into the auth-origin
+ * frame; console JS can never read it). The SDK ships override-friendly
+ * `zs-auth-*` class hooks + a minimal default stylesheet it injects once;
+ * we re-declare them here against `--zs-*` tokens so the modal reads as a
+ * crystal surface. The `zb-login__auth-modal` class added to the panel
+ * raises specificity over the SDK defaults regardless of stylesheet
+ * order. The SDK's default iframe factory mounts the frame full-viewport;
+ * these rules theme the modal panel chrome (header, close, divider). */
+.zs-auth-modal-backdrop {
+  background: var(--zs-overlay-scrim, rgba(0, 0, 0, 0.45));
+}
+.zb-login__auth-modal.zs-auth-modal {
+  inline-size: 27.5rem;
+  max-inline-size: 100%;
+  gap: var(--zs-space-4);
+  padding: var(--zs-space-5);
+  border-radius: var(--zs-control-radius-lg, 0.75rem);
+  background-color: var(--zs-bg-elevated, var(--zs-bg));
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+}
+.zb-login__auth-modal .zs-auth-title {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+.zb-login__auth-modal .zs-auth-close {
+  color: var(--zs-label-secondary);
+  border-radius: var(--zs-control-radius-md);
+}
+.zb-login__auth-modal .zs-auth-close:hover {
+  color: var(--zs-label);
+  background-color: var(--zs-fill-secondary);
+}
+.zb-login__auth-modal .zs-auth-close:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-accent);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+/* The iframe host slot — the SDK mounts the cross-origin <iframe> here
+ * (or full-viewport via its default factory); reserve a sensible frame
+ * box when it is mounted in-slot. */
+.zb-login__auth-modal .zs-auth-frame {
+  inline-size: 100%;
+  min-block-size: 22rem;
+}
+.zb-login__auth-modal .zs-auth-frame iframe {
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+}
+
 /* "or" rule — a label bracketed by two DS Separators, mirroring the
  * AuthForm block's divider. */
 .zb-login__or {

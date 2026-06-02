@@ -366,7 +366,14 @@ function popupCallbackHtml(): string {
     "    p.get('error')\n" +
     "      ? { error: p.get('error'), error_description: p.get('error_description'), state: state }\n" +
     "      : { code: p.get('code'), state: state } };\n" +
-    "  try { if (window.opener) window.opener.postMessage(msg, location.origin); } catch (e) {}\n" +
+    "  // Primary: postMessage to the launcher window — opener (popup leg) if\n" +
+    "  // present-and-distinct, else parent (iframe leg). targetOrigin pinned to\n" +
+    "  // location.origin (the app origin), NEVER '*'.\n" +
+    "  var tgt = (window.opener && window.opener !== window) ? window.opener\n" +
+    "          : (window.parent  && window.parent  !== window) ? window.parent : null;\n" +
+    "  try { if (tgt) tgt.postMessage(msg, location.origin); } catch (e) {}\n" +
+    "  // Fallback (opener/parent severed by COOP, or full-page redirect): both\n" +
+    "  // channels are SAME-ORIGIN, so no cross-origin exposure.\n" +
     "  try { new BroadcastChannel('zs:auth').postMessage(msg); } catch (e) {}\n" +
     "  try {\n" +
     "    if (state) {\n" +

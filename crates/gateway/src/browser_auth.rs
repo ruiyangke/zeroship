@@ -15,9 +15,12 @@
 //!   page. Inline (CSP-nonce-tagged) JS reads `code`+`state` (or
 //!   `error`+`error_description`+`state`) FROM `location.search` (never
 //!   reflected into the DOM by the gateway — no XSS sink) and
-//!   `postMessage`s `{type:'zs:authorization_response', response:{…}}` to
-//!   `window.opener` with `targetOrigin = location.origin` (its OWN origin,
-//!   never `'*'`). A same-origin `BroadcastChannel` + one-shot
+//!   `postMessage`s `{type:'zs:authorization_response', response:{…}}` to the
+//!   launcher — `window.opener` (the popup leg, federated google/github) OR
+//!   `window.parent` (the immersive iframe leg, our first-party password UI) —
+//!   with `targetOrigin = location.origin` (its OWN origin, never `'*'`); see
+//!   the dual-target block on [`popup_callback_html`]. A same-origin
+//!   `BroadcastChannel` + one-shot
 //!   `localStorage` relay cover the COOP-severed-opener case (§4.4). Strict
 //!   CSP (`default-src 'none'; script-src 'nonce-…'; frame-ancestors 'self'`),
 //!   `Referrer-Policy: no-referrer`, `COOP: same-origin`.
@@ -204,11 +207,22 @@ pub async fn popup_callback() -> HttpResponse {
 
 /// Build the popup-callback document. Self-contained, no external scripts.
 /// The inline JS parses `code`/`state`/`error` from `location.search` and
-/// relays them via THREE same-origin channels (postMessage to opener,
+/// relays them via THREE same-origin channels (postMessage to the launcher,
 /// BroadcastChannel, one-shot localStorage), targetOrigin = own origin. No
 /// DOM writes of any query value (the reflected `error_description` is never
 /// an XSS sink). The ONLY value the gateway interpolates is the CSP `nonce`,
 /// which is a server-generated base64url token (not attacker-controlled).
+///
+/// **Dual-target postMessage (immersive iframe login, design §4.2).** The same
+/// relay backs BOTH launchers: the popup WINDOW (federated `google`/`github`),
+/// where the launcher is `window.opener`; and the immersive `<iframe>` (our
+/// first-party password UI on the same-site console), where the launcher is
+/// `window.parent`. We post to EXACTLY ONE window — `window.opener` if
+/// present-and-distinct (popup leg), else `window.parent` if present-and-distinct
+/// (iframe leg), else NONE (full-page redirect: `parent === self`, opener null →
+/// the BroadcastChannel + localStorage fallbacks carry the code). `targetOrigin`
+/// stays pinned to `location.origin` (the app/console origin) — NEVER `'*'` — so
+/// even a wrong-context window of a foreign origin silently drops the message.
 fn popup_callback_html(nonce: &str) -> String {
     format!(
         "<!doctype html><meta charset=utf-8><title>Sign-in</title>\
@@ -220,10 +234,14 @@ fn popup_callback_html(nonce: &str) -> String {
     p.get('error')\n\
       ? {{ error: p.get('error'), error_description: p.get('error_description'), state: state }}\n\
       : {{ code: p.get('code'), state: state }} }};\n\
-  // Primary: postMessage to the opener (same-origin target; NEVER '*').\n\
-  try {{ if (window.opener) window.opener.postMessage(msg, location.origin); }} catch (e) {{}}\n\
-  // Fallback (opener severed by COOP across app->auth->app, §4.4): both\n\
-  // channels are SAME-ORIGIN, so no cross-origin exposure.\n\
+  // Primary: postMessage to the launcher — opener (popup) || parent (iframe).\n\
+  // Same-origin target pinned to location.origin; NEVER '*'.\n\
+  var tgt = (window.opener && window.opener !== window) ? window.opener\n\
+          : (window.parent  && window.parent  !== window) ? window.parent : null;\n\
+  try {{ if (tgt) tgt.postMessage(msg, location.origin); }} catch (e) {{}}\n\
+  // Fallback (opener/parent severed by COOP across app->auth->app, or the\n\
+  // full-page redirect leg, §4.4): both channels are SAME-ORIGIN, so no\n\
+  // cross-origin exposure.\n\
   try {{ new BroadcastChannel('zs:auth').postMessage(msg); }} catch (e) {{}}\n\
   try {{\n\
     if (state) {{\n\
@@ -489,10 +507,17 @@ mod tests {
         // postMessage target MUST be `location.origin`, never '*'.
         let nonce = "test-nonce-abc";
         let html = popup_callback_html(nonce);
-        // postMessage targets own origin (never wildcard).
+        // Dual-target (immersive iframe login, §4.2): the launcher is resolved
+        // as `window.opener` (popup) || `window.parent` (iframe), then posted to
+        // with `targetOrigin = location.origin` — NEVER '*'.
         assert!(
-            html.contains("window.opener.postMessage(msg, location.origin)"),
-            "{html}"
+            html.contains("(window.opener && window.opener !== window) ? window.opener")
+                && html.contains("(window.parent  && window.parent  !== window) ? window.parent"),
+            "callback must resolve the launcher as opener||parent: {html}"
+        );
+        assert!(
+            html.contains("tgt.postMessage(msg, location.origin)"),
+            "callback must post to the resolved launcher at location.origin: {html}"
         );
         assert!(!html.contains(", '*')"), "must never postMessage to '*': {html}");
         // The relay reads from location.search at runtime — the gateway does

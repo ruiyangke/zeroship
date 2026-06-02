@@ -121,6 +121,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
+        report.field(
+            "frame_ancestor_origins",
+            CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
+        );
         report.field("clients_config", CheckValue::Plain(cfg.clients_config.clone()));
         report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
         report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));

@@ -20,7 +20,7 @@ use uuid::Uuid;
 mod common;
 use common::{
     cleanup_rate_limits_like, cleanup_user, location, read_set_cookie, rewrite_to_hydra_loopback,
-    CookieJar, Fixture,
+    CookieJar, Fixture, TEST_CONSOLE_ORIGIN,
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────────
@@ -133,9 +133,17 @@ async fn login_csrf_mismatched_token_rejected() {
     fx.cleanup().await;
 }
 
-/// §13 "Clickjacking on consent": login pages must set `X-Frame-Options:
-/// DENY` and a CSP carrying `frame-ancestors 'none'`. The same headers
-/// apply across login/signup/consent per §14.
+/// Immersive iframe login pivot (design §4.3/§6.3, §9): the framed login routes
+/// (`/login`, `/signup`, the interactive `/consent` render) must NOW emit a
+/// relaxed `frame-ancestors 'self' <console origin>` (read from the
+/// `frame_ancestor_origins` config the fixture configures — NOT hard-coded) and
+/// DROP `X-Frame-Options` entirely, while every OTHER auth route keeps the
+/// fail-closed `X-Frame-Options: DENY` + `frame-ancestors 'none'`. This REPLACES
+/// the old "all login pages set XFO DENY + frame-ancestors 'none'" assertion —
+/// it is also the home of the regression test for the browser-enforced
+/// `frame-ancestors` gate that supersedes the deleted gateway credential-oracle
+/// first-party gate. A test that would have PASSED before the pivot (which set
+/// XFO DENY on /login) FAILS now, and vice-versa.
 #[ntex::test]
 async fn login_clickjacking_headers_present() {
     let Some(fx) = Fixture::boot("threat").await else {
@@ -143,6 +151,7 @@ async fn login_clickjacking_headers_present() {
         return;
     };
 
+    // (a) The FRAMED route `/login` GET: relaxed frame-ancestors, NO XFO.
     let challenge = fx.fresh_challenge().await;
     let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
     let resp = fx
@@ -153,6 +162,38 @@ async fn login_clickjacking_headers_present() {
         .await
         .expect("send GET");
 
+    assert!(
+        resp.headers().get("x-frame-options").is_none(),
+        "framed /login must NOT carry X-Frame-Options (a legacy UA honoring it \
+         would refuse the frame the CSP allows, §6.3)"
+    );
+    let csp = resp
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Read the admitted origin from CONFIG, not a literal in this assertion.
+    assert!(
+        csp.contains(&format!("frame-ancestors 'self' {TEST_CONSOLE_ORIGIN}")),
+        "framed /login CSP must allow 'self' + the configured console origin; got {csp:?}"
+    );
+    assert!(
+        !csp.replace(' ', "").contains("frame-ancestors'none'"),
+        "framed /login must NOT keep frame-ancestors 'none'; got {csp:?}"
+    );
+
+    // (b) A NON-framed route (`/healthz`) keeps the fail-closed default. We use
+    // /healthz because it needs no Hydra challenge and is always registered;
+    // the route-aware middleware decides framed-vs-strict purely on the path.
+    let health_url = format!("{}/healthz", fx.auth_base);
+    let resp = fx
+        .http
+        .request(http::Method::GET, &health_url)
+        .expect("build GET")
+        .send()
+        .await
+        .expect("send GET");
     let xfo = resp
         .headers()
         .get("x-frame-options")
@@ -161,9 +202,8 @@ async fn login_clickjacking_headers_present() {
     assert_eq!(
         xfo.to_ascii_uppercase(),
         "DENY",
-        "X-Frame-Options must be DENY on /login; got {xfo:?}"
+        "a non-framed route must keep X-Frame-Options: DENY; got {xfo:?}"
     );
-
     let csp = resp
         .headers()
         .get("content-security-policy")
@@ -171,7 +211,21 @@ async fn login_clickjacking_headers_present() {
         .unwrap_or("");
     assert!(
         csp.replace(' ', "").contains("frame-ancestors'none'"),
-        "CSP must include frame-ancestors 'none' on /login; got {csp:?}"
+        "a non-framed route must keep frame-ancestors 'none'; got {csp:?}"
+    );
+
+    // (c) `/oauth/google` is NOT in the framed set — the federated IdP page is
+    // never framed (it stays a popup). The path predicate is the single source
+    // of truth for which routes relax; assert it directly so the federated
+    // bounce can never accidentally inherit the relax even if google were
+    // enabled in this fixture.
+    assert!(
+        !zeroship_auth::headers::is_framed_route_for_test("/oauth/google/start"),
+        "/oauth/google must NOT be a framed route"
+    );
+    assert!(
+        zeroship_auth::headers::is_framed_route_for_test("/login"),
+        "/login must be a framed route"
     );
 
     fx.cleanup().await;

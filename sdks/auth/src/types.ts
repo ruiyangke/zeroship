@@ -74,6 +74,15 @@ export type AuthErrorCode =
   | "consent_required"
   | "interaction_required"
   | "invalid_grant"
+  /**
+   * The framed `auth.zeroship.ai/login` rejected the supplied password. It is
+   * surfaced via the relay's `{error, error_description, state}` envelope and
+   * mapped through here, so the modal can show a "wrong email or password"
+   * message; the auth origin re-renders the framed login for an in-frame retry.
+   */
+  | "invalid_credentials"
+  /** `400` from the gateway/auth on a malformed/missing field. */
+  | "invalid_request"
   | "missing_code_verifier"
   | "popup_closed"
   | "popup_blocked"
@@ -127,10 +136,57 @@ export interface AuthClientOptions {
    * cookie identity early.
    */
   refreshSkewSeconds?: number;
+  /**
+   * The auth-service origin (e.g. `https://auth.zeroship.ai`). Used ONLY as the
+   * same-site sanity check for the immersive iframe gate: the iframe is selected
+   * for `provider:'password'` only when `eTLD+1(appOrigin) === eTLD+1(authOrigin)`.
+   * The SDK cannot infer same-site from `appOrigin` alone (it is the console's
+   * own origin; the cross-site hop to the auth service happens server-side in
+   * the gateway 302), so this explicit input is required. Unset ⇒ never iframe.
+   */
+  authOrigin?: string;
+  /**
+   * Opt in to the immersive in-page login iframe for the first-party password
+   * UI. Default `false` → the popup window is used everywhere. The iframe is
+   * chosen ONLY when `immersive === true` AND `appOrigin`/`authOrigin` are
+   * same-site (§6.5); a misconfigured or cross-site surface falls back to the
+   * working popup. The platform console sets `immersive: true` +
+   * `authOrigin: 'https://auth.zeroship.ai'`; creator-app / custom-domain builds
+   * leave both unset.
+   */
+  immersive?: boolean;
+  /**
+   * Resolve the DOM host the immersive login `<iframe>` is mounted INTO (the
+   * modal's host slot). When it returns an element, the iframe fills that slot
+   * so the surrounding modal chrome — title + accessible close button — stays
+   * ABOVE it and the cancel affordance is reachable (§8/§10.5). When it returns
+   * `null` (or is unset) the iframe mounts as a bare full-viewport overlay on
+   * `document.body` (the headless, modal-less default). The React `AuthModal`
+   * wires this to its host-slot ref automatically; standalone callers driving
+   * the immersive flow themselves set it to their own container.
+   */
+  iframeMount?: () => Element | null;
+  /**
+   * Resolve the per-flow USER-CANCEL promise for the immersive login iframe.
+   * The React `AuthModal` returns a promise that resolves when the user
+   * dismisses the modal, so the in-flight sign-in rejects `popup_closed` and the
+   * iframe is torn down (§8). Unset ⇒ the flow only settles on the relay or the
+   * 60-second timeout (an iframe has no `closed` event).
+   */
+  iframeCancelled?: () => Promise<void> | undefined;
 }
 
 export interface SignInOptions {
-  provider?: "google" | "github" | "password";
+  /**
+   * The login UI to drive. `'password'` selects the platform's own first-party
+   * login (`auth.zeroship.ai/login`): an in-page iframe on the same-site console
+   * when `immersive` is enabled, a popup window everywhere else. `'google'` /
+   * `'github'` are federated providers, always a popup window (their IdP refuses
+   * to be framed). All three are forwarded to Hydra as `idp_hint`. Whatever the
+   * surface, the credential is never handled by app/console JS — the iframe and
+   * the popup both isolate it inside the auth origin.
+   */
+  provider?: "password" | "google" | "github";
   scopes?: string[];
   /** Default `true`. Popup vs full-page redirect. */
   popup?: boolean;

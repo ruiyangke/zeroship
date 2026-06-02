@@ -1,29 +1,34 @@
 import { test, expect } from "@playwright/test";
 
-// Auth UI smoke test: public auth pages render and protected routes
-// is wired. These tests do NOT exercise the control plane: they only
-// assert that the public auth pages render correctly and that the
-// dev-bypass branch of AuthGuard lets a developer hit /account.
+// Auth UI smoke test: public auth pages render and the immersive login
+// modal is wired.
+//
+// IMMERSIVE LOGIN PIVOT. The email/password path is no longer an in-page
+// credential form (the old `login-password`/`signup-password` testids are
+// gone). It is now the SDK `<AuthModal>`, which hosts a cross-origin,
+// same-site iframe embedding `auth.zeroship.ai`'s real `/login` form (the
+// Stripe-Elements model). Playwright CANNOT fill the credential inputs on
+// the parent page — in prod they live inside the auth-origin frame (SOP);
+// the actual credential entry is covered by the live full-stack browser
+// e2e (human-run). These specs assert the modal/iframe wiring + the
+// federated Google launcher, which is the deterministic offline surface.
 //
 // No OPENAI_API_KEY required, no control plane required, no sandbox
-// controller required. These are pure UI smoke tests that should run
-// against a vanilla `npm run dev` worktree.
+// controller required. Pure UI smoke tests against a vanilla `npm run dev`.
 
 test.describe("auth UI surfaces", () => {
-  test("/login renders the form, Google button, and link to /signup", async ({ page }) => {
+  test("/login renders the Google launcher, the email trigger, and a link to /signup", async ({
+    page,
+  }) => {
     await page.goto("/login");
 
     const root = page.getByTestId("login-page");
     await expect(root).toBeVisible();
 
-    await expect(page.getByTestId("login-email")).toBeVisible();
-    await expect(page.getByTestId("login-password")).toBeVisible();
-    await expect(page.getByTestId("login-submit")).toBeVisible();
+    // The federated popup launcher stays a button on the page.
     await expect(page.getByTestId("login-google")).toBeVisible();
-
-    // Google CTA points at /auth/google/start (sync URL builder).
-    const googleHref = await page.getByTestId("login-google").getAttribute("href");
-    expect(googleHref).toMatch(/^\/auth\/google\/start\?/);
+    // The email path is now a trigger that opens the immersive modal.
+    await expect(page.getByTestId("login-email-trigger")).toBeVisible();
 
     // Link to signup.
     const signupLink = page.getByTestId("login-link-signup");
@@ -31,20 +36,70 @@ test.describe("auth UI surfaces", () => {
     await expect(signupLink).toHaveAttribute("href", "/signup");
   });
 
-  test("/signup renders name + email + password + Google + link to /login", async ({ page }) => {
+  test("/login email trigger opens the immersive AuthModal (dialog + iframe host + close)", async ({
+    page,
+  }) => {
+    await page.goto("/login");
+
+    // The modal is not in the DOM until the trigger fires.
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await page.getByTestId("login-email-trigger").click();
+
+    // The SDK <AuthModal> mounts: role=dialog + aria-modal, an iframe host
+    // slot (where the cross-origin auth frame mounts), and an accessible
+    // close control. The credential inputs live INSIDE the cross-origin
+    // frame and are intentionally NOT fillable from the parent page.
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(page.getByTestId("auth-iframe-host")).toBeVisible();
+    await expect(page.getByTestId("auth-modal-close")).toBeVisible();
+
+    // The old same-origin credential inputs are gone (deleted with the pivot).
+    await expect(page.getByTestId("login-password")).toHaveCount(0);
+    await expect(page.getByTestId("login-email")).toHaveCount(0);
+  });
+
+  test("/login AuthModal close affordance dismisses the dialog", async ({ page }) => {
+    await page.goto("/login");
+    await page.getByTestId("login-email-trigger").click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+
+    await page.getByTestId("auth-modal-close").click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+
+  test("/signup renders the Google launcher, the email trigger, and a link to /login", async ({
+    page,
+  }) => {
     await page.goto("/signup");
 
     const root = page.getByTestId("signup-page");
     await expect(root).toBeVisible();
 
-    await expect(page.getByTestId("signup-email")).toBeVisible();
-    await expect(page.getByTestId("signup-password")).toBeVisible();
-    await expect(page.getByTestId("signup-name")).toBeVisible();
-    await expect(page.getByTestId("signup-submit")).toBeVisible();
     await expect(page.getByTestId("signup-google")).toBeVisible();
+    await expect(page.getByTestId("signup-email-trigger")).toBeVisible();
 
     // Link back to /login.
     await expect(page.getByRole("link", { name: /sign in/i })).toBeVisible();
+  });
+
+  test("/signup email trigger opens the immersive AuthModal", async ({ page }) => {
+    await page.goto("/signup");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await page.getByTestId("signup-email-trigger").click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(page.getByTestId("auth-iframe-host")).toBeVisible();
+    await expect(page.getByTestId("auth-modal-close")).toBeVisible();
+
+    // The old same-origin credential inputs are gone.
+    await expect(page.getByTestId("signup-password")).toHaveCount(0);
+    await expect(page.getByTestId("signup-email")).toHaveCount(0);
   });
 
   test("/forgot-password renders email field + submit", async ({ page }) => {

@@ -391,6 +391,11 @@ impl HydraClientAdmin for HydraAdmin {
 
 /// Build the canonical public-PKCE [`OAuth2Client`] body for an app. Shared by
 /// the create and redirect-sync paths so the two never drift.
+///
+/// `first_party` drives `skip_consent` (spec §5.2 + the first-party-console
+/// exception): `false` for every creator app (the consent prompt MUST fire),
+/// `true` only for the platform's own first-party console. See
+/// [`ensure_app_client`].
 fn build_client_body(
     client_id: &str,
     client_name: &str,
@@ -398,6 +403,7 @@ fn build_client_body(
     apex_host: &str,
     redirect_uris: Vec<String>,
     scope: &str,
+    first_party: bool,
 ) -> OAuth2Client {
     OAuth2Client {
         client_id: client_id.to_string(),
@@ -413,18 +419,23 @@ fn build_client_body(
         access_token_strategy: Some("jwt".to_string()),
         id_token_signed_response_alg: Some("EdDSA".to_string()),
         audience: Vec::new(),
-        // Per-app end-user clients NEVER set skip_consent (spec §5.2 round-3):
-        // the single grant ledger requires the consent prompt to fire.
-        skip_consent: false,
+        // skip_consent is FALSE for every creator (per-app end-user) client
+        // (spec §5.2 round-3): the single grant ledger requires the consent
+        // prompt to fire. The ONLY exception is the platform's own first-party
+        // console (`first_party == true`) — a consent prompt for the platform's
+        // own surface is meaningless. This exception applies ONLY to the
+        // console, NEVER to creator apps.
+        skip_consent: first_party,
         // Deliberate divergence from clients_config::to_oauth2_client, which
         // sets require_consent = !first_party (i.e. TRUE for a non-skip client).
         // We want first-grant-then-remembered consent for SSO: the prompt fires
         // on the FIRST authorization (recording the grant in the ledger), then
         // Hydra's remembered-consent serves subsequent logins silently.
         // require_consent=true would force the prompt on EVERY login, defeating
-        // SSO; skip_consent=false (above) already guarantees the first-grant
-        // prompt, which is all spec §5.2 mandates. Do NOT "fix" this to match
-        // the first-party template — these are end-user clients, not console.
+        // SSO; skip_consent=false (creator apps) already guarantees the
+        // first-grant prompt, which is all spec §5.2 mandates. The console
+        // (skip_consent=true) never prompts at all. Do NOT "fix" require_consent
+        // to match the first-party template — creator apps are end-user clients.
         require_consent: false,
         require_logout_consent: false,
         frontchannel_logout_uri: None,
@@ -468,6 +479,19 @@ fn build_client_body(
 /// existing diff-then-PUT so a no-op-scope deploy still issues no Hydra call.
 /// Pass `&[]` for an app declaring no custom scopes (the baseline allowlist).
 ///
+/// **`first_party` / `skip_consent` (spec §5.2 + the first-party-console
+/// exception).** Every creator app passes `first_party = false` ⇒
+/// `skip_consent = false`: the consent prompt MUST fire (the single grant
+/// ledger depends on it). Spec §5.2's "per-app clients NEVER skip consent"
+/// targets THIRD-PARTY creator apps. The ONE deliberate, narrow exception is
+/// the platform's own **first-party console**, which passes
+/// `first_party = true` ⇒ `skip_consent = true` (see
+/// [`crate::bootstrap_console`]) — a consent prompt for the platform's own
+/// surface is meaningless. This exception applies ONLY to the console, NEVER to
+/// creator apps. The flag is mirrored to `control.oauth_clients.skip_consent`
+/// in the same transaction as the client rows, so the DB and the live Hydra
+/// client never disagree.
+///
 /// # Errors
 /// [`AppOauthClientError`] on Hydra-admin failure, DB failure, an invalid host
 /// list, a merged set that would exceed [`MAX_REDIRECT_URIS`], or an invalid
@@ -480,6 +504,7 @@ pub async fn ensure_app_client(
     scheme: &str,
     hosts: &[String],
     declared_scopes: &[ScopeDef],
+    first_party: bool,
 ) -> Result<String> {
     // Validate declared scopes FIRST — reject before touching Hydra or the DB
     // so a bad manifest can never half-provision (spec §5.1).
@@ -502,6 +527,7 @@ pub async fn ensure_app_client(
                 &apex_host,
                 incoming_uris.clone(),
                 &scope_allowlist,
+                first_party,
             );
             hydra.create_client(&body).await?;
             incoming_uris
@@ -528,6 +554,7 @@ pub async fn ensure_app_client(
                     &apex_host,
                     next_uris,
                     &scope_allowlist,
+                    first_party,
                 );
                 hydra.update_client(&body).await?;
             }
@@ -545,6 +572,7 @@ pub async fn ensure_app_client(
         &effective_uris,
         &scope_allowlist,
         declared_scopes,
+        first_party,
     )
     .await?;
     Ok(client_id)
@@ -585,6 +613,8 @@ pub async fn sync_app_redirect_uris(
             &apex_host,
             desired_uris.clone(),
             BASE_SCOPE,
+            // Redirect-only self-heal is a creator-app path; never first-party.
+            false,
         );
         hydra.create_client(&body).await?;
         let sector = sector_identifier(scheme, &apex_host);
@@ -597,6 +627,7 @@ pub async fn sync_app_redirect_uris(
             &desired_uris,
             BASE_SCOPE,
             &[],
+            false,
         )
         .await?;
         return Ok(true);
@@ -607,6 +638,7 @@ pub async fn sync_app_redirect_uris(
         Some(next) => {
             // Redirect-only path: PRESERVE the live client's scope allowlist
             // (declared scopes are mirrored by `ensure_app_client`, not here).
+            // Redirect-only sync is a creator-app path; never first-party.
             let body = build_client_body(
                 &client_id,
                 app_name,
@@ -614,6 +646,7 @@ pub async fn sync_app_redirect_uris(
                 &apex_host,
                 next,
                 &existing.scope,
+                false,
             );
             hydra.update_client(&body).await?;
             update_redirect_uri_mirror(pg, &client_id, &desired_uris).await?;
@@ -650,6 +683,7 @@ async fn upsert_db_rows(
     redirect_uris: &[String],
     scope_allowlist: &str,
     declared_scopes: &[ScopeDef],
+    first_party: bool,
 ) -> Result<()> {
     let scopes: Vec<&str> = scope_allowlist.split_whitespace().collect();
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
@@ -660,20 +694,31 @@ async fn upsert_db_rows(
         .await
         .map_err(|e| AppOauthClientError::Db(e.to_string()))?;
 
-    // control.oauth_clients — the FK target + skip_consent reader. skip_consent
-    // is hard FALSE for per-app end-user clients (spec §5.2). hydra_client_id
-    // == client_id == oac_<base62>. `scopes` mirrors the Hydra allowlist
-    // (baseline + declared).
+    // control.oauth_clients — the FK target + skip_consent reader.
+    // `skip_consent` mirrors the live Hydra client: FALSE for every creator
+    // (per-app end-user) client (spec §5.2), TRUE only for the platform's own
+    // first-party console (`first_party`). Mirrored here in the SAME txn as the
+    // client rows so the DB and Hydra never disagree. hydra_client_id ==
+    // client_id == oac_<base62>. `scopes` mirrors the Hydra allowlist (baseline
+    // + declared).
     tx.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, FALSE, $5, $1) \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1) \
          ON CONFLICT (client_id) DO UPDATE SET \
             client_name = EXCLUDED.client_name, \
             redirect_uris = EXCLUDED.redirect_uris, \
-            scopes = EXCLUDED.scopes",
-        &[&client_id, &client_name, &redirect_uris, &scopes, &created_by],
+            scopes = EXCLUDED.scopes, \
+            skip_consent = EXCLUDED.skip_consent",
+        &[
+            &client_id,
+            &client_name,
+            &redirect_uris,
+            &scopes,
+            &created_by,
+            &first_party,
+        ],
     )
     .await
     .map_err(|e| AppOauthClientError::Db(e.to_string()))?;
@@ -945,6 +990,7 @@ mod tests {
             "apex.zeroship.ai",
             seeded.clone(),
             BASE_SCOPE,
+            false,
         );
         (&hydra).create_client(&body).await.unwrap();
         assert_eq!(*hydra.creates.borrow(), 1);
@@ -978,6 +1024,7 @@ mod tests {
             "apex.zeroship.ai",
             uris,
             BASE_SCOPE,
+            false,
         );
         assert_eq!(body.token_endpoint_auth_method, "none");
         assert!(body.client_secret.is_none());
@@ -1006,6 +1053,45 @@ mod tests {
         assert_eq!(
             body.post_logout_redirect_uris,
             vec!["https://apex.zeroship.ai/".to_string()]
+        );
+    }
+
+    /// The first-party-console exception (owner-approved, narrow): the platform's
+    /// own console (`first_party = true`) is the ONE client that skips consent —
+    /// a consent prompt for the platform's own surface is meaningless. Creator
+    /// apps (`first_party = false`) NEVER skip consent (asserted above + here).
+    #[test]
+    fn first_party_flag_drives_skip_consent() {
+        let uris = redirect_uris_for_hosts("https", &["console.zeroship.ai".to_string()]).unwrap();
+
+        // Creator app: skip_consent stays FALSE (spec §5.2, unchanged).
+        let creator = build_client_body(
+            "oac_creator",
+            "creator app",
+            "https",
+            "app.zeroship.ai",
+            uris.clone(),
+            BASE_SCOPE,
+            false,
+        );
+        assert!(
+            !creator.skip_consent,
+            "creator apps NEVER skip consent (spec §5.2)"
+        );
+
+        // First-party console: skip_consent is TRUE (the narrow exception).
+        let console = build_client_body(
+            "oac_console",
+            "zeroship console",
+            "https",
+            "console.zeroship.ai",
+            uris,
+            BASE_SCOPE,
+            true,
+        );
+        assert!(
+            console.skip_consent,
+            "the first-party console skips consent (owner-approved exception)"
         );
     }
 
@@ -1138,6 +1224,7 @@ mod tests {
                     &apex,
                     incoming.clone(),
                     &scope_allowlist,
+                    false,
                 );
                 hydra.create_client(&body).await.unwrap();
             }
@@ -1154,6 +1241,7 @@ mod tests {
                         &apex,
                         next_uris,
                         &scope_allowlist,
+                        false,
                     );
                     hydra.update_client(&body).await.unwrap();
                 }

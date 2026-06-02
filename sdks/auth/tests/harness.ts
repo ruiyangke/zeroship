@@ -14,6 +14,7 @@ import type {
   ClientEnv,
   CookieJar,
   CryptoLike,
+  IframeLike,
   MessageEventLike,
   StorageEventLike,
   StorageLike,
@@ -96,6 +97,45 @@ export class FakePopup implements WindowProxyLike {
   focus(): void {}
   close(): void {
     this.closed = true;
+  }
+}
+
+/**
+ * A fake login iframe. Records the `src` it was created with (the authorize
+ * URL, set on the ELEMENT — never via `contentWindow.location`), whether it was
+ * removed (the teardown signal), and exposes a `cancel()` to drive the modal's
+ * close affordance through the `cancelled` promise.
+ */
+export class FakeIframe implements IframeLike {
+  private _src: string;
+  removed = false;
+  /** The number of times `src` was assigned AFTER construction (must stay 0). */
+  srcReassignments = 0;
+  readonly cancelled: Promise<void>;
+  private fireCancel!: () => void;
+  private constructed = false;
+
+  constructor(url: string) {
+    this._src = url;
+    this.cancelled = new Promise<void>((resolve) => {
+      this.fireCancel = resolve;
+    });
+    this.constructed = true;
+  }
+  get src(): string {
+    return this._src;
+  }
+  /** Re-assigning `src` after construction is a contract violation — count it. */
+  set src(v: string) {
+    if (this.constructed) this.srcReassignments++;
+    this._src = v;
+  }
+  remove(): void {
+    this.removed = true;
+  }
+  /** Drive the modal-close cancel signal. */
+  cancel(): void {
+    this.fireCancel();
   }
 }
 
@@ -256,11 +296,18 @@ export interface Harness {
   cookies: FakeCookies;
   crypto: FakeCrypto;
   broadcast: BroadcastBus;
+  /** The most-recent iframe the SDK created via the injected factory (or undefined). */
+  lastIframe?: FakeIframe;
   /** Trigger a one-shot localStorage relay storage-event. */
   fireStorage(key: string, newValue: string): void;
 }
 
-export function makeHarness(): Harness {
+/**
+ * Build a fake client env. `opts.iframe` controls whether the env exposes a
+ * `createIframe` factory: `true` (default) injects one (the same-site console
+ * surface), `false` omits it (no DOM → the launcher falls back to the popup).
+ */
+export function makeHarness(opts: { iframe?: boolean } = {}): Harness {
   const window = new FakeWindow();
   const fetch = new FakeFetch();
   const session = new FakeStorage();
@@ -269,6 +316,9 @@ export function makeHarness(): Harness {
   const crypto = new FakeCrypto();
   const bus = new BroadcastBus();
   const storageListeners = new Set<(ev: StorageEventLike) => void>();
+  const withIframe = opts.iframe !== false;
+
+  const harness = {} as Harness;
 
   const env: ClientEnv = {
     window,
@@ -286,9 +336,16 @@ export function makeHarness(): Harness {
     // Short timings so popup poll/timeout-driven tests resolve fast and never
     // leak a 60 s timer into the node:test runner.
     popupTiming: { pollMs: 5, timeoutMs: 300 },
+    createIframe: withIframe
+      ? (url: string) => {
+          const frame = new FakeIframe(url);
+          harness.lastIframe = frame;
+          return frame;
+        }
+      : undefined,
   };
 
-  return {
+  Object.assign(harness, {
     env,
     window,
     fetch,
@@ -300,7 +357,8 @@ export function makeHarness(): Harness {
     fireStorage(key: string, newValue: string) {
       for (const l of [...storageListeners]) l({ key, newValue });
     },
-  };
+  });
+  return harness;
 }
 
 /**

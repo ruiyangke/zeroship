@@ -72,6 +72,11 @@ function mapError(status: number, body: WireError | null, fallback: string): Aut
     consent_required: "consent_required",
     interaction_required: "interaction_required",
     invalid_grant: "invalid_grant",
+    // The framed `auth.zeroship.ai/login` rejects a bad password and surfaces
+    // `invalid_credentials` via the relay's `{error,...}` envelope; a malformed
+    // request maps to `invalid_request` (gateway/auth contract).
+    invalid_credentials: "invalid_credentials",
+    invalid_request: "invalid_request",
     client_not_provisioned: "client_not_provisioned",
     // 403 from the gateway scope gate (auth-sdk Slice 3c, §5.3 / RFC 6750
     // §3.1). The body is `{"error":"scope_required","scope":"<space-joined>"}`;

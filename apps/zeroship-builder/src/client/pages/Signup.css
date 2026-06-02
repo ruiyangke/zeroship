@@ -81,12 +81,11 @@
   color: var(--zs-label-tertiary);
 }
 
-/* ── SignInButton launchers ─────────────────────────────────────────
+/* ── Google SignInButton launcher ───────────────────────────────────
  * `@zeroship/auth` SignInButton renders a plain <button> (no asChild),
- * so we style it here to read as a crystal Button. Shared chrome first,
- * then the two variants: Google = gray/outline-ish, email = filled. */
-.signup-oauth-btn,
-.signup-email-btn {
+ * so we style it here to read as a crystal Button variant="gray". The
+ * email/password path opens the immersive `<AuthModal>` (themed below). */
+.signup-oauth-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -96,6 +95,8 @@
   padding-inline: var(--zs-space-4);
   border: none;
   border-radius: var(--zs-control-radius-md);
+  background-color: var(--zs-fill-secondary);
+  color: var(--zs-label);
   font-family: var(--zs-font-system);
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
@@ -106,12 +107,6 @@
     box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
     opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
-
-/* Google — neutral gray fill (mirrors Button variant="gray"). */
-.signup-oauth-btn {
-  background-color: var(--zs-fill-secondary);
-  color: var(--zs-label);
-}
 @media (hover: hover) {
   .signup-oauth-btn:hover {
     background-color: var(--zs-fill);
@@ -120,26 +115,66 @@
 .signup-oauth-btn:active {
   background-color: var(--zs-fill-tertiary);
 }
-
-/* Email — accent fill (mirrors Button variant="filled"). */
-.signup-email-btn {
-  background-color: var(--zs-accent);
-  color: var(--zs-accent-ink);
-}
-@media (hover: hover) {
-  .signup-email-btn:hover {
-    background-color: var(--zs-accent-hover);
-  }
-}
-.signup-email-btn:active {
-  background-color: var(--zs-accent-active);
-}
-
-/* Shared focus ring — crystal focus-visible affordance. */
-.signup-oauth-btn:focus-visible,
-.signup-email-btn:focus-visible {
+.signup-oauth-btn:focus-visible {
   outline: var(--zs-focus-ring-width) solid var(--zs-accent);
   outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* "Sign up with email" trigger — opens the immersive <AuthModal>; full
+ * width to match the Google launcher column. */
+.signup-email-trigger {
+  inline-size: 100%;
+}
+
+/* ── Immersive login modal chrome (@zeroship/auth <AuthModal>) ──────
+ * `<AuthModal>` hosts the cross-origin, same-site iframe embedding
+ * `auth.zeroship.ai`'s login (the credential is typed into the
+ * auth-origin frame; console JS can never read it). The SDK ships
+ * override-friendly `zs-auth-*` class hooks + a minimal injected default
+ * stylesheet; we re-declare them here against `--zs-*` tokens so the modal
+ * reads as a crystal surface. The `signup-auth-modal` class added to the
+ * panel raises specificity over the SDK defaults regardless of order. */
+.zs-auth-modal-backdrop {
+  background: var(--zs-overlay-scrim, rgba(0, 0, 0, 0.45));
+}
+.signup-auth-modal.zs-auth-modal {
+  inline-size: 27.5rem;
+  max-inline-size: 100%;
+  gap: var(--zs-space-4);
+  padding: var(--zs-space-5);
+  border-radius: var(--zs-control-radius-lg, 0.75rem);
+  background-color: var(--zs-bg-elevated, var(--zs-bg));
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+}
+.signup-auth-modal .zs-auth-title {
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: var(--zs-text-title-3-weight);
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+.signup-auth-modal .zs-auth-close {
+  color: var(--zs-label-secondary);
+  border-radius: var(--zs-control-radius-md);
+}
+.signup-auth-modal .zs-auth-close:hover {
+  color: var(--zs-label);
+  background-color: var(--zs-fill-secondary);
+}
+.signup-auth-modal .zs-auth-close:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-accent);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+.signup-auth-modal .zs-auth-frame {
+  inline-size: 100%;
+  min-block-size: 22rem;
+}
+.signup-auth-modal .zs-auth-frame iframe {
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
 }
 
 /* Brand glyph — fixed optical size; #EA4335 inside is the official
@@ -170,7 +205,6 @@
 @media (prefers-reduced-motion: reduce) {
   .signup-brand,
   .signup-oauth-btn,
-  .signup-email-btn,
   .signup-footer__link {
     transition: none;
   }

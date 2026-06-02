@@ -24,6 +24,7 @@ import * as React from "react";
 import { act, render, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 
 import {
+  AuthModal,
   AuthProvider,
   SignIn,
   SignInButton,
@@ -63,7 +64,6 @@ type Listener = (event: AuthChangeEvent, session: Session | null) => void;
 
 interface CallLog {
   signInWithOAuth: unknown[][];
-  signInWithPassword: unknown[][];
   signOut: unknown[][];
   checkSession: number;
   exchangeCodeForSession: Array<[string, string | undefined]>;
@@ -82,13 +82,20 @@ interface FakeClient extends AuthClient {
   signInError: AuthError | null;
   /** When set, `exchangeCodeForSession` rejects with this. */
   exchangeError: AuthError | null;
+  /** When set, `checkSession` (the mount recovery probe) rejects with this. */
+  checkSessionReject: AuthError | null;
+  /**
+   * When set, `signInWithOAuth({provider:'password'})` resolves a SIGNED_IN
+   * session (mirrors the real iframe flow's success). Default false ⇒ it just
+   * records the call and resolves a session without emitting.
+   */
+  oauthEmitsSignedIn: boolean;
 }
 
 function makeFakeClient(): FakeClient {
   const listeners = new Set<Listener>();
   const calls: CallLog = {
     signInWithOAuth: [],
-    signInWithPassword: [],
     signOut: [],
     checkSession: 0,
     exchangeCodeForSession: [],
@@ -101,6 +108,8 @@ function makeFakeClient(): FakeClient {
     checkSessionResult: null,
     signInError: null,
     exchangeError: null,
+    checkSessionReject: null,
+    oauthEmitsSignedIn: false,
 
     emit(event, session) {
       current = session;
@@ -120,11 +129,10 @@ function makeFakeClient(): FakeClient {
     async signInWithOAuth(opts) {
       calls.signInWithOAuth.push([opts]);
       if (client.signInError) throw client.signInError;
-      return makeSession();
-    },
-    async signInWithPassword(opts) {
-      calls.signInWithPassword.push([opts]);
-      return makeSession();
+      const s = makeSession();
+      // A real iframe/popup flow emits SIGNED_IN as it stores the session.
+      if (client.oauthEmitsSignedIn) client.emit("SIGNED_IN", s);
+      return s;
     },
     async exchangeCodeForSession(code, state) {
       calls.exchangeCodeForSession.push([code, state]);
@@ -136,6 +144,7 @@ function makeFakeClient(): FakeClient {
     },
     async checkSession() {
       calls.checkSession += 1;
+      if (client.checkSessionReject) throw client.checkSessionReject;
       if (client.checkSessionResult) client.emit("SIGNED_IN", client.checkSessionResult);
       return client.checkSessionResult;
     },
@@ -214,6 +223,25 @@ describe("AuthProvider mount + reactive state", () => {
     assert.equal(observed?.isLoading, false, "loading must clear after checkSession settles");
     assert.equal(observed?.isAuthenticated, false);
     assert.equal(observed?.user, null);
+  });
+
+  test("a failed recovery probe settles signed-out WITHOUT a user-facing error", async () => {
+    // Regression: a transient mount-time checkSession failure (backend briefly
+    // unreachable on first paint, or a session-mint network_error) must NOT
+    // surface as `error` — that is what put "session mint request failed" on the
+    // login page. Only an active sign-in completion (redirect/popup exchange)
+    // should set `error`; a background recovery probe simply means "signed out".
+    const client = makeFakeClient();
+    client.checkSessionReject = new AuthError("network_error", "session mint request failed");
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(Probe, null)),
+      );
+    });
+    assert.equal(client.calls.checkSession, 1);
+    assert.equal(observed?.isLoading, false, "loading clears even when the probe rejects");
+    assert.equal(observed?.isAuthenticated, false);
+    assert.equal(observed?.error, null, "a background recovery-probe failure is NOT a user-facing error");
   });
 
   test("transitions isLoading → authenticated when the client fires SIGNED_IN", async () => {
@@ -437,6 +465,256 @@ describe("requestScopes — interactive step-up (NO token to the browser)", () =
       false,
       "BFF model: no token on the upgraded session",
     );
+  });
+});
+
+describe("<AuthModal> — hosts the cross-origin login iframe + Continue with Google", () => {
+  test("on open it launches the immersive password flow (signInWithOAuth provider:password)", async () => {
+    const client = makeFakeClient();
+    client.oauthEmitsSignedIn = true;
+    let succeeded = false;
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          { client },
+          React.createElement(AuthModal, { open: true, onSuccess: () => (succeeded = true) }),
+        ),
+      );
+    });
+
+    // The modal drove the first-party password sign-in (the iframe path) on open.
+    const passwordCalls = client.calls.signInWithOAuth.filter(
+      (c) => (c[0] as { provider?: string } | undefined)?.provider === "password",
+    );
+    assert.equal(passwordCalls.length, 1, "open launches signInWithOAuth({provider:'password'}) once");
+
+    // Modal chrome: an accessible close affordance + the iframe host slot.
+    assert.ok(screen.getByTestId("auth-modal-close"), "modal renders a close button");
+    assert.equal(screen.getByTestId("auth-modal-close").getAttribute("aria-label"), "Close");
+    assert.ok(screen.getByTestId("auth-iframe-host"), "modal renders the iframe host slot");
+    // It is NOT the old credential form — no email/password inputs exist.
+    assert.equal(screen.queryByLabelText("Email"), null, "no in-page email field (credential form deleted)");
+    assert.equal(screen.queryByLabelText("Password"), null, "no in-page password field");
+
+    // The fake emitted SIGNED_IN as a real iframe flow would → onSuccess fired.
+    await waitFor(() => assert.equal(succeeded, true, "onSuccess fires once the iframe flow resolves"));
+    assert.equal(observed === null, true, "no Probe rendered (modal-only tree)");
+  });
+
+  test("the close affordance invokes onClose (the caller dismisses the modal)", async () => {
+    const client = makeFakeClient();
+    let closed = false;
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          { client },
+          React.createElement(AuthModal, { open: true, onClose: () => (closed = true) }),
+        ),
+      );
+    });
+    fireEvent.click(screen.getByTestId("auth-modal-close"));
+    assert.equal(closed, true, "close button fires onClose");
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
+
+  test("Continue with Google launches the federated popup path", async () => {
+    const client = makeFakeClient();
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(AuthModal, { open: true })),
+      );
+    });
+
+    const google = screen.getByRole("button", { name: "Continue with Google" });
+    fireEvent.click(google);
+
+    const googleCalls = client.calls.signInWithOAuth.filter(
+      (c) => (c[0] as { provider?: string } | undefined)?.provider === "google",
+    );
+    assert.equal(googleCalls.length, 1, "Google routes through the federated popup OAuth path");
+    assert.deepEqual(googleCalls[0][0], { provider: "google" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
+
+  test("open=false renders nothing and does not launch a flow", async () => {
+    const client = makeFakeClient();
+    await act(async () => {
+      render(
+        React.createElement(AuthProvider, { client }, React.createElement(AuthModal, { open: false })),
+      );
+    });
+    assert.equal(screen.queryByTestId("auth-iframe-host"), null, "closed modal renders no iframe host");
+    assert.equal(
+      screen.queryByRole("button", { name: "Continue with Google" }),
+      null,
+      "closed modal renders no Google button",
+    );
+    assert.equal(client.calls.signInWithOAuth.length, 0, "a closed modal launches no sign-in flow");
+  });
+});
+
+describe("<AuthModal> — REAL client: the iframe mounts INTO the host slot (no overlay)", () => {
+  // Faithful: build the REAL headless client via the `options` path so the
+  // provider's auto-wiring (`iframeMount`/`iframeCancelled` → the modal slot)
+  // runs, and let the DEFAULT iframe factory (env.ts) execute against happy-dom.
+  // The iframe must land INSIDE the `auth-iframe-host` slot — NOT as a
+  // full-viewport overlay on document.body that would cover the close button
+  // (§8/§10.5). A stubbed global fetch keeps the exchange off the network; the
+  // relay is driven by a real `message` event on the top window.
+  const SAME_SITE_AUTH = "https://auth.zeroship.test";
+  let realFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    setURL("https://console.zeroship.test/login");
+    realFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  /** The OAuth `state` the SDK stashed for the in-flight transaction. */
+  function pendingState(): string {
+    for (let i = 0; i < window.sessionStorage.length; i++) {
+      const key = window.sessionStorage.key(i);
+      if (key && key.includes("zsauth") && key.includes("txn")) {
+        try {
+          const txn = JSON.parse(window.sessionStorage.getItem(key)!);
+          if (txn && typeof txn.state === "string") return txn.state;
+        } catch {
+          /* not a txn record */
+        }
+      }
+    }
+    throw new Error("no pending PKCE transaction found");
+  }
+
+  test("the immersive iframe is appended inside auth-iframe-host, fills it, and is NOT a fixed overlay", async () => {
+    // Stub the exchange so a relayed code resolves a session without a network.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          user: {
+            id: "pws_alice",
+            email: "alice@relay.zeroship.test",
+            email_verified: true,
+            name: "Alice",
+            avatar: null,
+            scopes: ["openid", "profile", "email"],
+          },
+          expires_at: Math.floor(Date.now() / 1000) + 600,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof globalThis.fetch;
+
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          {
+            options: {
+              appOrigin: "https://console.zeroship.test",
+              authOrigin: SAME_SITE_AUTH,
+              immersive: true,
+            },
+          },
+          React.createElement(AuthModal, { open: true, hideOAuth: true }),
+        ),
+      );
+    });
+
+    const host = screen.getByTestId("auth-iframe-host");
+
+    // The default factory mounts the iframe INTO the slot (after beginFlow's
+    // async PKCE), not onto document.body as a fixed overlay.
+    let iframe: HTMLIFrameElement | null = null;
+    await waitFor(() => {
+      iframe = host.querySelector("iframe");
+      assert.ok(iframe, "the immersive iframe must mount inside the auth-iframe-host slot");
+    });
+    // It is NOT a full-viewport fixed overlay (that would paint over the close
+    // button) — the in-slot variant carries no position:fixed / max z-index.
+    const style = iframe!.getAttribute("style") ?? "";
+    assert.ok(!/position\s*:\s*fixed/i.test(style), `in-slot iframe must not be position:fixed; got ${style}`);
+    assert.ok(!/z-index\s*:\s*2147483647/.test(style), "in-slot iframe must not use the max z-index overlay");
+    // The src is the cross-origin authorize URL on the app origin (element src,
+    // never contentWindow.location) — the §4.1 navigation contract.
+    assert.match(
+      iframe!.getAttribute("src") ?? "",
+      /\/__zeroship\/auth\/authorize\?/,
+      "the iframe src is the app-origin authorize URL",
+    );
+    // No iframe leaked onto document.body as a sibling overlay.
+    assert.equal(
+      document.body.querySelector(":scope > iframe"),
+      null,
+      "no full-viewport overlay iframe is appended directly to <body>",
+    );
+
+    // Settle the flow with a real relay message so no timer leaks, then assert
+    // SIGNED_IN propagated through the provider (state sync intact).
+    const state = pendingState();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "https://console.zeroship.test",
+          data: { type: "zs:authorization_response", response: { code: "real-code", state } },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitFor(() => {
+      assert.equal(host.querySelector("iframe"), null, "the iframe is torn down once the relay settles");
+    });
+  });
+
+  test("dismissing the modal (close button) cancels the in-flight flow and tears the iframe down", async () => {
+    // The exchange must never be reached — the user cancels first.
+    globalThis.fetch = (async () => {
+      throw new Error("exchange must not run on cancel");
+    }) as unknown as typeof globalThis.fetch;
+
+    let closed = false;
+    await act(async () => {
+      render(
+        React.createElement(
+          AuthProvider,
+          {
+            options: {
+              appOrigin: "https://console.zeroship.test",
+              authOrigin: SAME_SITE_AUTH,
+              immersive: true,
+            },
+          },
+          React.createElement(AuthModal, {
+            open: true,
+            hideOAuth: true,
+            onClose: () => (closed = true),
+          }),
+        ),
+      );
+    });
+
+    const host = screen.getByTestId("auth-iframe-host");
+    await waitFor(() => {
+      assert.ok(host.querySelector("iframe"), "iframe mounted before cancel");
+    });
+
+    // Click close → onClose fires AND the cancel signal resolves → runIframe
+    // rejects popup_closed → the iframe is removed (§8).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("auth-modal-close"));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.equal(closed, true, "the close button invokes onClose");
+    await waitFor(() => {
+      assert.equal(host.querySelector("iframe"), null, "the iframe is torn down on cancel");
+    });
   });
 });
 

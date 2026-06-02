@@ -1,41 +1,51 @@
-// ─── Login — crystal auth (BFF popup) ───────────────────────────
+// ─── Login — crystal auth (immersive iframe + Google popup) ──────
 //
-// The console authenticates creators through the platform BFF popup
-// flow (`@zeroship/auth/react`): clicking sign-in opens the gateway's
-// `/__zeroship/auth/authorize` popup against the seeded per-app public PKCE
-// client; on success the gateway sets the HttpOnly session cookie and
-// the SDK publishes the authenticated snapshot. There is NO password
-// form here anymore — the retired bespoke `/auth/{login,register}`
-// endpoints are gone (design
-// docs/superpowers/specs/2026-05-30-console-as-regular-app-design.md).
+// The console authenticates creators through the platform BFF
+// (`@zeroship/auth/react`). Two paths share one identity-only session +
+// HttpOnly cookie:
+//   • Email/password — IMMERSIVE: the SDK `<AuthModal>` hosts a
+//     cross-origin, same-site iframe embedding `auth.zeroship.ai`'s real
+//     `/login` form (the Stripe-Elements model). The credential is typed
+//     INTO the auth-origin frame, so console JS can never read it (SOP).
+//     Opening the modal launches `signInWithOAuth({provider:'password'})`,
+//     which drives the framed `authorize → /login → popup-callback →
+//     POST /session` dance and emits SIGNED_IN; the `useEffect` below then
+//     bounces to `/home`. (In dev the auth provider is same-origin, so the
+//     framed login is fillable in-frame.)
+//   • Google — the federated `SignInButton(provider="google")` popup,
+//     wrapped in a DS Button via `asChild` (the SDK button owns the
+//     gesture click that opens the popup; the DS Button lends it crystal
+//     chrome). Its error (popup_blocked / popup_closed) surfaces inline.
 //
 // Crystal: a centered Card (Center + Card) holds a Stack of the wordmark,
-// headline, optional error Banner, and the two SignInButton launchers
-// wrapped in DS Buttons via `asChild` (the SDK button owns the click that
-// opens the popup; the DS Button lends it the crystal chrome). Bespoke
-// type/lockup styling reads `--zs-*` tokens from the co-located Login.css.
+// headline, optional error Banner, the Google launcher, an "or" rule, and
+// the "Sign in with email" button that opens the immersive `<AuthModal>`
+// (themed via the co-located Login.css `zs-auth-*` modal-chrome hooks).
+// All type/lockup styling reads `--zs-*` tokens — no raw hex/px.
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Banner, Button, Card, Center, Separator, Stack } from "@zeroship/ui";
 import { useAuth } from "../auth/AuthContext";
-import { SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
+import { AuthModal, SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
 import "./Login.css";
 
 export default function Login() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, loading } = useAuth();
-  // The raw SDK hook exposes the popup error (popup_blocked / popup_closed)
-  // for inline display; the adapter intentionally hides it.
+  // The raw SDK hook exposes the flow error (popup_blocked / popup_closed /
+  // invalid_credentials relayed from the framed /login) for inline display;
+  // the adapter intentionally hides it.
   const { error } = useSdkAuth();
+  const [modalOpen, setModalOpen] = useState(false);
 
   const params = new URLSearchParams(location.search);
   const returnTo = sanitizeReturn(params.get("return"));
   const oauthError = params.get("error") ?? error?.message ?? null;
 
-  // Once the popup completes the SDK flips the snapshot to authenticated;
-  // bounce to the requested destination.
+  // Once the iframe/popup flow completes the SDK flips the snapshot to
+  // authenticated; bounce to the requested destination.
   useEffect(() => {
     if (!loading && user) navigate(returnTo, { replace: true });
   }, [loading, user, returnTo, navigate]);
@@ -85,11 +95,20 @@ export default function Login() {
               <Separator className="zb-login__or-line" />
             </div>
 
-            {/* Hosted-password sign-in — Phase-1 popup flow (provider=password). */}
-            <Button variant="filled" size="large" className="zb-login__button" asChild>
-              <SignInButton provider="password" data-testid="login-submit">
-                Sign in with email
-              </SignInButton>
+            {/* Immersive email login. Clicking opens the SDK `<AuthModal>`,
+                which launches `signInWithOAuth({provider:'password'})` →
+                the cross-origin, same-site iframe embedding the real
+                `auth.zeroship.ai/login`. Console JS never sees the
+                credential (SOP). On SIGNED_IN the provider snapshot flips
+                and the `useEffect` above navigates. */}
+            <Button
+              variant="filled"
+              size="large"
+              className="zb-login__button"
+              data-testid="login-email-trigger"
+              onClick={() => setModalOpen(true)}
+            >
+              Sign in with email
             </Button>
           </Stack>
 
@@ -101,6 +120,18 @@ export default function Login() {
           </p>
         </Stack>
       </Card>
+
+      {/* The immersive login modal hosts the cross-origin auth iframe; we
+          keep the federated Google launcher on the page (above) so the
+          modal hides its built-in one (`hideOAuth`). onSuccess relies on
+          the SIGNED_IN snapshot flip → the `useEffect` navigates. */}
+      <AuthModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title="Sign in"
+        hideOAuth
+        className="zb-login__auth-modal"
+      />
     </Center>
   );
 }

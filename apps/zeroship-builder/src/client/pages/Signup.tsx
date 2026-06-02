@@ -1,24 +1,29 @@
-// ─── Signup — crystal auth (BFF popup) ──────────────────────────
+// ─── Signup — crystal auth (immersive iframe + Google popup) ─────
 //
-// Account creation is a hosted flow: the same `@zeroship/auth` popup
-// as Login, against the seeded per-app public PKCE client. The IdP's
-// hosted-password screen handles register-or-sign-in; the retired
-// bespoke `/auth/register` endpoint is gone. On first authentication
-// we route into the onboarding intent flow.
+// Account creation shares the platform BFF with Login. The same
+// identity-only session + HttpOnly cookie is established two ways:
+//   • Email/password — IMMERSIVE: the SDK `<AuthModal>` hosts a
+//     cross-origin, same-site iframe embedding `auth.zeroship.ai`'s real
+//     login form (`signInWithOAuth({provider:'password'})`). The dev/IdP
+//     provider does register-or-sign-in inside that auth-origin frame; the
+//     credential never enters console JS (SOP). On SIGNED_IN the provider
+//     snapshot flips and the `useEffect` below routes into the onboarding
+//     intent flow. (In dev the auth provider is same-origin, so the framed
+//     login is fillable in-frame.)
+//   • Google — the federated `SignInButton(provider="google")` popup.
 //
 // Presentation rides the @zeroship/ui crystal surface: a `Center`d
 // elevated `Card` carries the brand mark, a title + description, an
-// optional danger `Banner`, the two `SignInButton` launchers (Google /
-// email, styled via the co-located .css to read as crystal buttons),
-// an "or" `Separator`, and a footer link back to /login. The
-// `@zeroship/auth` SignInButton + react-router nav are preserved
-// exactly — only the markup/styling changed.
+// optional danger `Banner`, the Google launcher, an "or" `Separator`,
+// the "Sign up with email" button that opens the immersive `<AuthModal>`
+// (themed via the co-located .css `zs-auth-*` modal-chrome hooks), and a
+// footer link back to /login.
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Banner, Card, Center, Separator, Stack } from "@zeroship/ui";
+import { Banner, Button, Card, Center, Separator, Stack } from "@zeroship/ui";
 import { useAuth } from "../auth/AuthContext";
-import { SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
+import { AuthModal, SignInButton, useAuth as useSdkAuth } from "@zeroship/auth/react";
 import "./Signup.css";
 
 export default function Signup() {
@@ -26,6 +31,7 @@ export default function Signup() {
   const navigate = useNavigate();
   const { user, loading } = useAuth();
   const { error } = useSdkAuth();
+  const [modalOpen, setModalOpen] = useState(false);
 
   const params = new URLSearchParams(location.search);
   const returnTo = sanitizeReturn(params.get("return"));
@@ -82,13 +88,22 @@ export default function Signup() {
               <Separator className="signup-or__line" />
             </div>
 
-            <SignInButton
-              provider="password"
-              data-testid="signup-submit"
-              className="signup-email-btn"
+            {/* Immersive email signup. Clicking opens the SDK `<AuthModal>`,
+                which launches `signInWithOAuth({provider:'password'})` →
+                the cross-origin, same-site iframe embedding the real
+                `auth.zeroship.ai` login. The dev/IdP provider does
+                register-or-sign-in; the credential never enters console JS
+                (SOP). On SIGNED_IN the provider snapshot flips and the
+                `useEffect` above routes to /onboarding/intent. */}
+            <Button
+              variant="filled"
+              size="large"
+              className="signup-email-trigger"
+              data-testid="signup-email-trigger"
+              onClick={() => setModalOpen(true)}
             >
               Sign up with email
-            </SignInButton>
+            </Button>
           </Stack>
 
           <p className="signup-footer">
@@ -99,6 +114,18 @@ export default function Signup() {
           </p>
         </Stack>
       </Card>
+
+      {/* The immersive login modal hosts the cross-origin auth iframe; we
+          keep the federated Google launcher on the page (above) so the
+          modal hides its built-in one (`hideOAuth`). onSuccess relies on
+          the SIGNED_IN snapshot flip → the `useEffect` navigates. */}
+      <AuthModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title="Create your account"
+        hideOAuth
+        className="signup-auth-modal"
+      />
     </Center>
   );
 }
