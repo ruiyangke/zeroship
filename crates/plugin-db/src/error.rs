@@ -199,13 +199,13 @@ impl DbError {
         };
 
         if code == &SqlState::UNIQUE_VIOLATION {
-            DbError::UniqueViolation { message: msg }
+            DbError::UniqueViolation { message: scrub_constraint_detail(msg) }
         } else if code == &SqlState::FOREIGN_KEY_VIOLATION {
-            DbError::FkViolation { message: msg }
+            DbError::FkViolation { message: scrub_constraint_detail(msg) }
         } else if code == &SqlState::NOT_NULL_VIOLATION {
-            DbError::NotNullViolation { message: msg }
+            DbError::NotNullViolation { message: scrub_constraint_detail(msg) }
         } else if code == &SqlState::CHECK_VIOLATION {
-            DbError::CheckViolation { message: msg }
+            DbError::CheckViolation { message: scrub_constraint_detail(msg) }
         } else if code == &SqlState::T_R_SERIALIZATION_FAILURE
             || code == &SqlState::T_R_DEADLOCK_DETECTED
         {
@@ -677,6 +677,19 @@ impl From<crate::query::QueryError> for DbError {
 /// underlying Postgres `DbError` body, not the bare wrapper kind. Mirrors
 /// the old `fmt_db_err` from `v8_bridge` so the message shape is
 /// preserved (`db: <wrapper> — caused by: <cause>`).
+/// DB-18: drop the Postgres `DETAIL` line from a constraint-violation message
+/// before it reaches app JS. PG puts the conflicting VALUE there (e.g.
+/// `Key (email)=(alice@example.com) already exists`), turning a unique/check
+/// probe into a value-exfiltration oracle for the app's own — possibly masked —
+/// columns. The primary message (violation class + constraint name, which the
+/// app author already knows from its own schema) is kept for conflict handling.
+fn scrub_constraint_detail(msg: String) -> String {
+    match msg.find("\nDETAIL:").or_else(|| msg.find("DETAIL:")) {
+        Some(idx) => msg[..idx].trim_end().to_string(),
+        None => msg,
+    }
+}
+
 fn walk_pg_chain(e: &compio_postgres::Error) -> String {
     let mut msg = format!("db: {e}");
     let mut cur: &dyn std::error::Error = e;
@@ -690,6 +703,22 @@ fn walk_pg_chain(e: &compio_postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_constraint_detail_drops_value_line_db18() {
+        // The DETAIL line (with the conflicting value) is removed; the primary
+        // message is kept for conflict handling.
+        let raw = "db: duplicate key value violates unique constraint \"users_email_key\"\n\
+                   DETAIL: Key (email)=(alice@example.com) already exists."
+            .to_string();
+        let scrubbed = scrub_constraint_detail(raw);
+        assert!(!scrubbed.contains("alice@example.com"), "value must be scrubbed: {scrubbed}");
+        assert!(!scrubbed.contains("DETAIL"), "DETAIL line must be gone: {scrubbed}");
+        assert!(scrubbed.contains("unique constraint"), "primary message kept: {scrubbed}");
+        // A message without a DETAIL line is unchanged.
+        let plain = "db: some other error".to_string();
+        assert_eq!(scrub_constraint_detail(plain.clone()), plain);
+    }
 
     #[test]
     fn validation_failed_stamps_code() {
