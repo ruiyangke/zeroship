@@ -85,18 +85,27 @@ pub fn sanitise_app_id(app_id: &str) -> Result<String, DbError> {
             "replication: app_id must not be empty",
         ));
     }
+    // DB-17: REJECT uppercase rather than silently lowercasing. PG replication
+    // slot/publication names must be lowercase, but schema names (quote_ident)
+    // preserve case and typed_ids are case-SENSITIVE base62 — so lowercasing
+    // here would map two distinct app_ids that differ only in case onto the
+    // SAME slot/publication while they keep DIFFERENT schemas: a latent
+    // cross-tenant CDC mix-up. Rejecting keeps the slot-name namespace
+    // injective over app_ids (production app_ids are lowercase UUIDs, so this
+    // never fires in practice — it is a guard against a future case-sensitive
+    // APP_ID stamp).
     for c in app_id.chars() {
-        if !(c.is_ascii_alphanumeric() || c == '_') {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
             return Err(DbError::validation(
                 "invalid_app_id",
                 format!(
                     "replication: app_id contains invalid character {c:?} \
-                     — only [A-Za-z0-9_] permitted"
+                     — only lowercase [a-z0-9_] permitted (slot-name injectivity)"
                 ),
             ));
         }
     }
-    Ok(app_id.to_ascii_lowercase())
+    Ok(app_id.to_string())
 }
 
 /// Compose the per-app publication name. Wraps [`sanitise_app_id`].
@@ -751,7 +760,6 @@ mod tests {
     #[test]
     fn sanitise_app_id_rejects_special_chars() {
         assert!(sanitise_app_id("ok_123").is_ok());
-        assert!(sanitise_app_id("UPPER").is_ok());
         assert!(sanitise_app_id("").is_err());
         assert!(sanitise_app_id("has space").is_err());
         assert!(sanitise_app_id("has-dash").is_err());
@@ -760,8 +768,16 @@ mod tests {
     }
 
     #[test]
-    fn sanitise_app_id_lowercases() {
-        assert_eq!(sanitise_app_id("MyApp").unwrap(), "myapp");
+    fn sanitise_app_id_rejects_uppercase_for_slot_injectivity_db17() {
+        // DB-17: uppercase must be REJECTED, not lowercased — otherwise two
+        // case-distinct app_ids would collide onto one slot/publication while
+        // keeping different (case-preserving) schemas. Lowercase passes through
+        // unchanged (no lossy transform).
+        assert!(sanitise_app_id("MyApp").is_err());
+        assert!(sanitise_app_id("UPPER").is_err());
+        assert_eq!(sanitise_app_id("myapp").unwrap(), "myapp");
+        // A canonical lowercase-hex UUID app_id (production shape) is accepted.
+        assert!(sanitise_app_id("0191e7a2b3c44d5e8f90123456789abc").is_ok());
     }
 
     #[test]
@@ -785,27 +801,19 @@ mod tests {
     /// failure described in CRITICAL C1.
     #[test]
     fn publication_sql_uses_quoted_original_case_schema() {
-        // Slot and publication object names are lowercased (Postgres requirement).
-        assert_eq!(publication_name("MyApp").unwrap(), "__zs_pub_myapp");
-        assert_eq!(slot_name("MyApp").unwrap(), "__zs_slot_myapp");
+        // DB-17: a mixed-case app_id is now REJECTED at sanitise_app_id, so the
+        // lowercased-slot-vs-case-preserving-schema mismatch that CRITICAL C1
+        // guarded against can no longer arise (the stronger fix supersedes the
+        // C1 lowercasing path). A lowercase (production-shape) app_id is accepted
+        // and flows through to the slot/publication names unchanged.
+        assert!(publication_name("MyApp").is_err());
+        assert!(slot_name("MyApp").is_err());
+        assert_eq!(publication_name("myapp").unwrap(), "__zs_pub_myapp");
+        assert_eq!(slot_name("myapp").unwrap(), "__zs_slot_myapp");
 
-        // The schema reference in FOR TABLES IN SCHEMA must preserve original
-        // case via a double-quoted identifier — quote_ident is the same function
-        // used by build_create_schema, so the two sides of the lifecycle agree.
-        let schema_ref = crate::query::quote_ident("MyApp");
-        assert_eq!(
-            schema_ref, "\"MyApp\"",
-            "schema ref must be double-quoted with original case"
-        );
-
-        // Confirm that the lowercased form (the pre-fix bug path) differs —
-        // i.e. that using sanitise_app_id output as the schema reference would
-        // silently target `myapp` instead of `MyApp`.
-        let lowercased_ref = crate::query::quote_ident("myapp");
-        assert_ne!(
-            schema_ref, lowercased_ref,
-            "original-case and lowercased schema refs must differ for mixed-case app_id"
-        );
+        // The schema reference still preserves original case via quote_ident
+        // (the same function build_create_schema uses) — defense-in-depth.
+        assert_eq!(crate::query::quote_ident("myapp"), "\"myapp\"");
     }
 
     #[test]
@@ -1027,11 +1035,11 @@ mod tests {
         assert_ne!(p, p_b);
         assert_eq!(p_b, "__zs_slot_app_b%");
 
-        // Sanitise + lowercase still applies (Postgres folds unquoted
-        // identifiers); a mixed-case stamp maps to the same prefix as
-        // its lowercased form so the param bind matches.
+        // DB-17: a mixed-case app_id is rejected (not lowercased), so the
+        // slot-name prefix stays injective over app_ids. A lowercase id passes.
+        assert!(slot_name_like_prefix("MyApp").is_err());
         assert_eq!(
-            slot_name_like_prefix("MyApp").unwrap(),
+            slot_name_like_prefix("myapp").unwrap(),
             "__zs_slot_myapp%"
         );
 
