@@ -608,11 +608,22 @@ impl RehydrateWalker {
         // — the check is the `==="__zsmask__"` discriminator.
         let sentinel_key = str_key(scope, "sentinel")?;
         if let Some(sentinel_v) = obj.get(scope, sentinel_key) {
-            if sentinel_v.is_string() {
-                let s = sentinel_v.to_rust_string_lossy(scope);
-                if s == "__zsmask__" {
+            if sentinel_v.is_string() && sentinel_v.to_rust_string_lossy(scope) == "__zsmask__" {
+                // DB-7: only mint from a sentinel carrying the unforgeable
+                // per-process signature the read pipeline stamps. A `__zsmask__`
+                // object fabricated by app JS (e.g. read back from a JSONB column
+                // it wrote) lacks it and is left untouched — it cannot be turned
+                // into a MaskedValue targeting an attacker-chosen cell.
+                let signed = str_key(scope, "_sig")
+                    .and_then(|k| obj.get(scope, k))
+                    .filter(|v| v.is_string())
+                    .map(|v| v.to_rust_string_lossy(scope))
+                    .is_some_and(|sig| sig == crate::crud::mask_pass::mask_sentinel_signature());
+                if signed {
                     return self.mint_replacement(scope, obj);
                 }
+                // Unsigned/forged sentinel: do not mint, do not descend further.
+                return None;
             }
         }
 
@@ -769,6 +780,76 @@ mod tests {
         )
         .expect("mint should succeed");
         assert!(MaskedValue::is_instance(scope, obj.into()));
+    }
+
+    fn set_str<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        obj: v8::Local<'s, v8::Object>,
+        k: &str,
+        v: &str,
+    ) {
+        let key = v8::String::new(scope, k).unwrap().into();
+        let val = v8::String::new(scope, v).unwrap().into();
+        let _ = obj.set(scope, key, val);
+    }
+
+    fn build_sentinel<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        sig: Option<&str>,
+    ) -> v8::Local<'s, v8::Object> {
+        let obj = v8::Object::new(scope);
+        set_str(scope, obj, "sentinel", "__zsmask__");
+        set_str(scope, obj, "masked", "***-**-6789");
+        set_str(scope, obj, "classification", "spi");
+        if let Some(s) = sig {
+            set_str(scope, obj, "_sig", s);
+        }
+        let meta = v8::Object::new(scope);
+        set_str(scope, meta, "collection", "users");
+        set_str(scope, meta, "row_pk", "usr_01");
+        set_str(scope, meta, "column", "ssn");
+        let meta_key = v8::String::new(scope, "_meta").unwrap().into();
+        let _ = obj.set(scope, meta_key, meta.into());
+        obj
+    }
+
+    #[test]
+    fn rehydrate_refuses_forged_sentinel_db7() {
+        // DB-7: a `__zsmask__` object app JS fabricated (e.g. read back from a
+        // JSONB column it wrote) lacks the per-process `_sig` the read pipeline
+        // stamps, so the rehydrator must NOT mint it into a MaskedValue (which
+        // could then `.unmask()` an attacker-chosen cell). A correctly-signed
+        // sentinel — what the pipeline actually produces — IS minted.
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        // Drive the walker directly (rehydrate_masked_values reads APP_ID from
+        // the runtime SharedState, absent in a bare test isolate; the walker
+        // carries app_id itself and is the unit under test).
+        fn new_walker() -> RehydrateWalker {
+            RehydrateWalker { app_id: "app_a".to_string(), depth: 0, cap: 16 }
+        }
+
+        let forged = build_sentinel(scope, None);
+        assert!(
+            new_walker().walk(scope, forged.into()).is_none(),
+            "an unsigned (forged) sentinel must not be minted"
+        );
+        assert!(!MaskedValue::is_instance(scope, forged.into()), "forged stays a plain object");
+
+        let wrong = build_sentinel(scope, Some("not-the-real-signature"));
+        assert!(
+            new_walker().walk(scope, wrong.into()).is_none(),
+            "a wrong-signature sentinel must not be minted"
+        );
+
+        let signed = build_sentinel(scope, Some(crate::crud::mask_pass::mask_sentinel_signature()));
+        let out = new_walker().walk(scope, signed.into());
+        assert!(out.is_some(), "a correctly-signed sentinel must be minted");
+        assert!(MaskedValue::is_instance(scope, out.unwrap()), "minted into a MaskedValue");
     }
 
     #[test]

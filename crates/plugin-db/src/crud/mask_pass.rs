@@ -469,6 +469,13 @@ pub(crate) fn wrap_row_on_read(
     for (col, masked, classification) in to_wrap {
         let repr = serde_json::json!({
             "sentinel": "__zsmask__",
+            // DB-7: an unforgeable per-process signature. Only sentinels the
+            // read pipeline itself produced carry it; the rehydrator refuses to
+            // mint a MaskedValue from any sentinel lacking it, so app JS cannot
+            // fabricate a `__zsmask__` object (e.g. stashed in a JSONB column it
+            // controls) and have it minted into a MaskedValue pointing at an
+            // attacker-chosen (collection, row, column).
+            "_sig": mask_sentinel_signature(),
             "masked": masked,
             "classification": classification,
             "_meta": {
@@ -480,6 +487,23 @@ pub(crate) fn wrap_row_on_read(
         obj.insert(col, repr);
     }
     Ok(())
+}
+
+/// DB-7: per-process secret stamped into every pipeline-minted mask sentinel
+/// (`_sig`) and verified at rehydration. App JS cannot read it — the rehydrator
+/// consumes the raw sentinel into a `MaskedValue` (whose internal fields do not
+/// expose `_sig`) before any handler sees the row, and the value is never
+/// serialized back to JS. Generated once per process from the OS RNG.
+pub(crate) fn mask_sentinel_signature() -> &'static str {
+    use std::sync::OnceLock;
+    static SIG: OnceLock<String> = OnceLock::new();
+    SIG.get_or_init(|| {
+        use aes_gcm::{aead::OsRng, AeadCore, Aes256Gcm};
+        // Two 12-byte GCM nonces → 24 bytes of OS entropy, hex-encoded.
+        let a = Aes256Gcm::generate_nonce(&mut OsRng);
+        let b = Aes256Gcm::generate_nonce(&mut OsRng);
+        a.iter().chain(b.iter()).map(|x| format!("{x:02x}")).collect()
+    })
 }
 
 #[cfg(test)]
