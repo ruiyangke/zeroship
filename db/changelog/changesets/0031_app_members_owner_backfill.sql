@@ -43,7 +43,7 @@
 
 --changeset zeroship:app-members-owner-backfill splitStatements:true
 --validCheckSum ANY
---   validCheckSum ANY — the backfill body was tightened (finding 2.0): the
+--   We mark this ANY because the backfill body was tightened (finding 2.0): the
 --   SELECT now also requires the sole member to be SELF-ORIGINATED so a
 --   delegated editor/viewer is never escalated to owner. That is a deliberate
 --   logic change to an already-applied changeset; ANY lets an existing DB
