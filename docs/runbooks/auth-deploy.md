@@ -130,21 +130,32 @@ at their defaults.
 
 1. **Postgres up + reachable.** Both processes share one database; verify
    `psql "$AUTH_DB_URL" -c 'select 1'` succeeds from inside the pod.
+   Hydra connects as the **least-privileged `oauth_hydra` role** (provisioned
+   by Liquibase changeset 0027 — its own `oauth_hydra` schema + search_path, NO
+   superuser / BYPASSRLS), NOT the shared `$AUTH_DB_URL` superuser. Inject its
+   DSN as a secret reference (password from your secret manager, never
+   committed):
+
+   ```bash
+   HYDRA_DSN="postgres://oauth_hydra:${OAUTH_HYDRA_PASSWORD}@<db-host>:5432/zeroship?sslmode=require"
+   ```
+
 2. **Migrate hydra schema** — one-shot job, `oryd/hydra:v25.4.x`:
 
    ```bash
    docker run --rm \
-     -e DSN="$AUTH_DB_URL" \
+     -e DSN="$HYDRA_DSN" \
      oryd/hydra:v25.4.0 migrate sql up -e --yes
    ```
 
 3. **Start hydra** with `ops/hydra.yaml` mounted at
-   `/etc/config/hydra/hydra.yaml` and `SECRETS_SYSTEM` / `SECRETS_COOKIE`
-   injected:
+   `/etc/config/hydra/hydra.yaml` and `DSN` / `SECRETS_SYSTEM` /
+   `SECRETS_COOKIE` injected (the template omits `dsn:` so Hydra fails closed
+   onto this env var):
 
    ```bash
    docker run -d --name hydra \
-     -e DSN="$AUTH_DB_URL" \
+     -e DSN="$HYDRA_DSN" \
      -e SECRETS_SYSTEM="$SECRETS_SYSTEM" \
      -e SECRETS_COOKIE="$SECRETS_COOKIE" \
      -v ./ops/hydra.yaml:/etc/config/hydra/hydra.yaml:ro \

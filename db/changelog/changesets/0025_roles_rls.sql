@@ -90,14 +90,24 @@ BEGIN
      WHERE rolname = current_user;
 
     IF NOT can_create_role THEN
-        -- Restricted CI Postgres: the calling role lacks CREATEROLE. The
-        -- integration suite runs every migration as one role (postgres) and
-        -- does not enforce role isolation; production/dev-compose deploys the
-        -- roles via a privileged principal. Degrade silently so the migration
-        -- still applies on restricted CI. The RLS changesets below are
-        -- ROLE-INDEPENDENT and still run.
-        RAISE NOTICE 'platform role creation skipped: caller lacks CREATEROLE';
-        RETURN;
+        -- FAIL LOUD (do NOT silently RETURN). If the migration principal
+        -- cannot create the service roles, the RLS changesets that follow
+        -- would still FORCE row-level security on the four tenant tables —
+        -- leaving a HALF-APPLIED LOCKOUT: RLS forced while the BYPASSRLS
+        -- roles (zeroship_auth, zeroship_control) that the cross-tenant
+        -- services rely on never exist. Aborting here makes role-creation
+        -- and RLS-force ATOMIC: either both apply or the migration rolls
+        -- back, so no path can reach the lockout state.
+        --
+        -- The shipped `migrate` service runs as `postgres` (has CREATEROLE),
+        -- so this never fires in the delivered config. A managed-DB bootstrap
+        -- principal MUST carry CREATEROLE; provision the roles out of band
+        -- first (these CREATEs then no-op) rather than running the migration
+        -- under a principal that cannot establish the role model.
+        RAISE EXCEPTION 'platform role creation requires CREATEROLE: % lacks it. '
+            'RLS would be force-enabled without the BYPASSRLS service roles '
+            '(half-applied lockout). Provision the zeroship_* roles via a '
+            'privileged principal, then re-run.', current_user;
     END IF;
 
     -- Dev login roles. Passwords are weak DEV defaults matching docker-compose;
@@ -212,7 +222,14 @@ BEGIN
     -- zeroship_worker + zeroship_app: NO system-table grants (deny-by-absence).
 EXCEPTION
     WHEN insufficient_privilege THEN
-        RAISE NOTICE 'platform role grants skipped: caller lacks privilege; production deploys roles separately';
+        -- FAIL LOUD: a grant/create failing mid-block means a misconfigured
+        -- migration principal. Re-raise rather than swallow so the migration
+        -- aborts and rolls back instead of leaving a partially-applied role
+        -- model (the shipped `postgres` principal never trips this).
+        RAISE EXCEPTION 'platform role provisioning failed for %: insufficient privilege. '
+            'The migration principal must be able to CREATE ROLE and GRANT on '
+            'schema zeroship; provision the zeroship_* roles via a privileged '
+            'principal, then re-run.', current_user;
 END
 $bootstrap$;
 --rollback DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_auth') THEN EXECUTE 'DROP OWNED BY zeroship_auth, zeroship_control, zeroship_gateway, zeroship_worker, zeroship_app'; EXECUTE 'DROP ROLE IF EXISTS zeroship_auth, zeroship_control, zeroship_gateway, zeroship_worker, zeroship_app'; END IF; END $rb$;

@@ -1,4 +1,13 @@
-dsn: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+# DSN is intentionally NOT inlined here. Hydra reads it from the `DSN`
+# environment variable, which production MUST inject as a secret reference to
+# the least-privileged `oauth_hydra` login role (provisioned by Liquibase
+# changeset 0027 — its own `oauth_hydra` schema + search_path, NO superuser /
+# BYPASSRLS). Never connect Hydra as the `postgres` superuser: that defeats the
+# schema isolation (BYPASSRLS over every tenant table) and scatters hydra_*
+# tables into the platform `zeroship` schema. Shape (password from your secret
+# manager, NEVER committed):
+#   DSN=postgres://oauth_hydra:<secret>@<db-host>:5432/zeroship?sslmode=require
+# See docs/runbooks/auth-deploy.md §3. (review finding I2)
 
 serve:
   public:
@@ -6,7 +15,7 @@ serve:
     host: 0.0.0.0
   admin:
     port: 4445
-    host: 0.0.0.0           # in production: 127.0.0.1; in compose we share network
+    host: 127.0.0.1         # prod: loopback only — the admin API is unauthenticated (port 4445 must never bind a routable interface)
   cookies:
     same_site_mode: Lax
     domain: auth.zeroship.ai
