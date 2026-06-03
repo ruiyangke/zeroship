@@ -272,6 +272,34 @@ fn lookup_encryption_meta(
 /// **Sync entry point**: this function does not perform I/O. The
 /// per-app policy MUST be cached (via [`ensure_mask_policy_cached`])
 /// before [`dispatch_unmask`] reaches the auth check.
+/// Actor `kind`s reserved for genuine platform/system callers (migration,
+/// backfill, drift). The default-deny stub and the `auto`-fallback rule grant
+/// these broad access; app JS must never be able to claim one.
+pub(crate) const RESERVED_SYSTEM_ACTOR_KINDS: &[&str] = &["auto"];
+
+/// DB-3: sanitize an actor descriptor that originated from **app JS** (the
+/// `{ actor }` field of an `unmask` / `find({unmask})` call). The unmask
+/// authorization read `actor.kind` straight off this app-supplied object, and
+/// `kind: "auto"` is the privileged system default that the default-deny stub
+/// (and the no-policy fallback) grant EVERY classification — so any handler
+/// could `unmask({ actor: { kind: "auto" } })` and read its own PII/PHI/PCI at
+/// will. Strip an actor that claims a reserved system kind to `None`
+/// (→ "unauthenticated → denied"), so app code can never impersonate the
+/// system actor. Genuine system callers build their actor in Rust and never
+/// pass through this V8 boundary, so they are unaffected.
+pub(crate) fn sanitize_app_actor(actor: Option<Value>) -> Option<Value> {
+    let kind = actor
+        .as_ref()
+        .and_then(|v| v.get("kind"))
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
+    if RESERVED_SYSTEM_ACTOR_KINDS.contains(&kind) {
+        None
+    } else {
+        actor
+    }
+}
+
 pub(crate) fn check_unmask_authorization(
     app_id: &str,
     actor: &Option<Value>,
@@ -1495,7 +1523,8 @@ fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
             ),
         });
     }
-    let actor = obj.get("actor").cloned().filter(|v| !v.is_null());
+    // DB-3: app JS cannot claim the reserved `auto` system actor.
+    let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
         .and_then(|v| v.as_str())
@@ -1657,7 +1686,8 @@ fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
         }
         items.push(BulkUnmaskItem { row_pk, columns });
     }
-    let actor = obj.get("actor").cloned().filter(|v| !v.is_null());
+    // DB-3: app JS cannot claim the reserved `auto` system actor.
+    let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
         .and_then(|v| v.as_str())
@@ -1690,6 +1720,37 @@ fn require_string_with_code(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sanitize_app_actor_strips_reserved_auto_db3() {
+        // App JS claiming the privileged system actor is stripped to None, so
+        // check_unmask_authorization's "unauthenticated → denied" arm applies —
+        // an app handler can no longer unmask its PII via {actor:{kind:"auto"}}.
+        assert_eq!(sanitize_app_actor(Some(json!({ "kind": "auto" }))), None);
+        // A non-reserved, app-declared actor kind passes through unchanged.
+        assert_eq!(
+            sanitize_app_actor(Some(json!({ "kind": "support_agent" }))),
+            Some(json!({ "kind": "support_agent" }))
+        );
+        // No actor / missing kind stay as-is (denied downstream regardless).
+        assert_eq!(sanitize_app_actor(None), None);
+        assert_eq!(sanitize_app_actor(Some(json!({}))), Some(json!({})));
+    }
+
+    #[test]
+    fn stripped_auto_actor_is_denied_by_authorization_db3() {
+        // The fix's effect: a sanitized app actor (the `auto` claim stripped to
+        // None) hits check_unmask_authorization's "unauthenticated → denied"
+        // arm — which returns before consulting any policy. Pre-fix the raw
+        // {kind:"auto"} reached the no-policy fallback and was GRANTED.
+        let sanitized = sanitize_app_actor(Some(json!({ "kind": "auto" })));
+        assert_eq!(sanitized, None);
+        assert_eq!(
+            check_unmask_authorization("app_x", &sanitized, "pii").unwrap(),
+            false,
+            "sanitized (stripped-auto) app actor must be denied"
+        );
+    }
 
     // ---------------------------------------------------------------
     // PR 4 default-deny stub — exercised by passing an `app_id` that

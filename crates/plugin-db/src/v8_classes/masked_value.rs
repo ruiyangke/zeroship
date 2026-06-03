@@ -282,7 +282,11 @@ impl MaskedValue {
         let state = runtime_state(scope);
         let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-        let actor = opts_v.get("actor").cloned().filter(|v| !v.is_null());
+        // DB-3: app JS must not be able to claim the reserved `auto` system
+        // actor — strip it so an app handler cannot impersonate the platform.
+        let actor = crate::crud::unmask::sanitize_app_actor(
+            opts_v.get("actor").cloned().filter(|v| !v.is_null()),
+        );
         let reason = opts_v
             .get("reason")
             .and_then(|v| v.as_str())
@@ -385,7 +389,11 @@ impl MaskedValue {
             })
             .unwrap_or_default();
 
-        let actor = opts_v.get("actor").cloned().filter(|v| !v.is_null());
+        // DB-3: app JS must not be able to claim the reserved `auto` system
+        // actor — strip it so an app handler cannot impersonate the platform.
+        let actor = crate::crud::unmask::sanitize_app_actor(
+            opts_v.get("actor").cloned().filter(|v| !v.is_null()),
+        );
         let reason = opts_v
             .get("reason")
             .and_then(|v| v.as_str())
