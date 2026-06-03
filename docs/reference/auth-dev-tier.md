@@ -41,9 +41,11 @@ session cookie + an identity projection, never a token. Two surfaces:
    - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; `{ user, expires_at }`.
    - `POST /__zeroship/auth/signout`       → revoke + clear; `204`.
 
-   A failed sign-in surfaces `401 { error: "invalid_credentials" }`: in prod the
-   framed `auth.zeroship.ai/login` re-renders the error in-frame and the relay
-   carries it; the dev tier never reaches it (the dev login is frictionless).
+   A failed sign-in surfaces the re-rendered login form with an error banner: in
+   prod the framed `auth.zeroship.ai/login` re-renders `invalid email or
+   password` (401) in-frame; the dev tier renders the **same** banner from its
+   own in-frame form, so the failure path is real in dev too (clear/alter the
+   prefilled fields to exercise it).
 
    The `user` projection is `{ id, email, emailVerified, name, avatar, scopes }`
    (client camelCase); the wire body uses snake_case `email_verified`. `id` is
@@ -72,16 +74,20 @@ Two pieces, mirroring the two contract surfaces:
 `createDevAuthProvider(getEnv)` serves the same-origin `/__zeroship/auth/*` routes
 from inside the dev runtime — no gateway, no Hydra:
 
-- `authorize` → **frictionless dev login**, with the SAME two documented paths
-  the SDK's immersive iframe drives (§7 of the immersive-login design), both
-  ending at the in-frame callback:
-  - **single-user / default-user (frictionless):** no `dev_user` param and ≤1
-    configured user → 302 **straight** to `/__zeroship/auth/popup-callback?code&state`
-    with a locally-minted dev code. No picker, no second step.
-  - **multi-user picker (two-step):** >1 configured user and no `dev_user` param
-    → render a tiny dev user-picker **in-frame**; its
-    `<form action="/__zeroship/auth/authorize">` re-submits within the frame with
-    the chosen `dev_user`, which then takes the frictionless 302 path.
+- `authorize` (GET) → render a **real dev login form** in-frame (the same
+  same-origin iframe the SDK drives in prod). It is **prefilled** with the
+  selected dev user's credentials so sign-in is one click, but it is **NOT
+  auto-submitted** — the developer clicks "Sign in", exactly mirroring prod's
+  framed `auth.zeroship.ai/login`. The form carries a CSRF token (double-submit
+  cookie, the dev peer of prod's `__Host-zsidp_csrf`) and hidden `state` /
+  `redirect_uri`. Multi-user configs render an email `<select>` of the
+  configured users (the default pre-selected); a tiny inline script re-prefills
+  the password on change. There is **no** frictionless 302 and **no** separate
+  picker step.
+- `authorize` (POST) → the form submit. Validates CSRF + email + password
+  against the configured dev users; on success mints a dev code and 302s to
+  `/__zeroship/auth/popup-callback?code&state`; on failure re-renders the form
+  with the `invalid email or password` banner (401) — same shape as prod.
 - `popup-callback` → the **byte-for-byte same** relay page the gateway serves —
   including the dual-target postMessage (`window.opener` for the popup leg, else
   `window.parent` for the immersive iframe leg, pinned to `location.origin`).
@@ -103,7 +109,7 @@ provider IS the auth service, served **same-origin** through the
 immersive iframe's `src` is the same `/__zeroship/auth/authorize?…`, which in dev
 is same-origin (localhost), so the iframe loads with no header relax needed:
 
-- The picker/authorize/callback responses set only `content-type` +
+- The login-form/authorize/callback responses set only `content-type` +
   `cache-control` (no `X-Frame-Options` / `frame-ancestors`), so they are already
   frameable same-origin. The prod-only framing relax (auth-service
   `frame-ancestors` allowlisting the console) is **N/A** in dev; the
@@ -111,9 +117,9 @@ is same-origin (localhost), so the iframe loads with no header relax needed:
   for symmetry).
 - Isolation is **N/A** in dev (one localhost origin; nothing to isolate), but the
   **UX/flow is identical**: the SDK opens the in-page iframe, the dev authorize
-  302s (or renders the picker, then 302s) to the in-frame callback, the callback
-  postMessages `{code,state}` to `window.parent`, and the SDK drives
-  `POST /session`.
+  renders the prefilled login form in-frame, the developer clicks "Sign in", the
+  POST 302s to the in-frame callback, the callback postMessages `{code,state}`
+  to `window.parent`, and the SDK drives `POST /session`.
 
 ### 2. Server-side identity — `__zeroship_dev_session` cookie → `user_json`
 
@@ -141,20 +147,27 @@ tier lives exclusively in the dev runtime; no dev/prod flag exists in app code.
 ```ts
 zeroship({
   // default in dev: the built-in dev user (pws_dev… / dev@localhost /
-  //   scopes openid profile email)
+  //   scopes openid profile email / password "dev")
   devAuth: true,
 
-  // one configured user
-  devAuth: { user: { email: "alice@localhost", scopes: ["openid", "admin"] } },
+  // one configured user (password defaults to "dev" when omitted)
+  devAuth: { user: { email: "alice@localhost", scopes: ["openid", "admin"], password: "s3cret" } },
 
-  // multiple users (a picker renders at /authorize)
-  devAuth: { users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }],
+  // multiple users (the login form renders an email dropdown at /authorize)
+  devAuth: { users: [{ id: "pws_a", name: "A", email: "a@x" },
+                     { id: "pws_b", name: "B", email: "b@x", password: "bee" }],
              defaultUserId: "pws_a" },
 
   // off — /__zeroship/auth/* falls through; env.auth.getUser() is anonymous
   devAuth: false,
 })
 ```
+
+The login form **prefills + validates** each user's `password` (default `"dev"`,
+overridable per user) — sign-in is one click, but it is not auto-login and the
+`invalid_credentials` failure arm is real. The `password` is *not* a secret: it
+is prefilled in the page and never enters the `{user}` identity projection /
+session cookie.
 
 The plugin serializes the resolved config into `ZEROSHIP_DEV_AUTH` and mints a
 fresh `ZEROSHIP_DEV_AUTH_SECRET`, both passed to the spawned `zeroship serve`

@@ -1,9 +1,10 @@
 /**
  * Faithful test for the dev-tier auth provider — drives the REAL
- * `createDevAuthProvider` through the full `/__zeroship/auth/*` flow (authorize →
- * 302 → popup-callback relay → code exchange → session cookie → probe → mint →
- * signout). Nothing is stubbed: the provider's real HMAC cookie signing
- * (WebCrypto), real code ledger, and real wire shapes are exercised.
+ * `createDevAuthProvider` through the full `/__zeroship/auth/*` flow (authorize
+ * login form → POST credentials → 302 → popup-callback relay → code exchange →
+ * session cookie → probe → mint → signout). Nothing is stubbed: the provider's
+ * real HMAC cookie signing (WebCrypto), real CSRF double-submit, real code
+ * ledger, and real wire shapes are exercised.
  *
  * Plus a production-build absence guard: the dev-auth provider must be
  * structurally absent from the prod artifacts the runtime crate `include_str!`s
@@ -45,6 +46,72 @@ function cookieTokenFrom(res: Response): string | null {
   return pair.slice(eq + 1);
 }
 
+/** Read a specific named cookie's value from a response's set-cookie. */
+function cookieValue(res: Response, name: string): string | null {
+  const sc = res.headers.get("set-cookie");
+  if (!sc) return null;
+  const pair = sc.split(";")[0].trim();
+  const eq = pair.indexOf("=");
+  return pair.slice(0, eq) === name ? pair.slice(eq + 1) : null;
+}
+
+const ORIGIN = "http://localhost:3001";
+
+/**
+ * Drive the dev login the way a developer (or browser) does: GET the prefilled
+ * form, then POST it back with the CSRF cookie+field + credentials. Credentials
+ * default to the built-in dev user; override to exercise the failure path.
+ * Returns the POST response (302 on success, re-rendered form on failure).
+ */
+async function devLogin(
+  p: { handle: (r: Request) => Promise<Response> },
+  opts: { state?: string; email?: string; password?: string } = {},
+): Promise<Response> {
+  const state = opts.state ?? "s";
+  const getRes = await p.handle(
+    new Request(`${ORIGIN}/__zeroship/auth/authorize?state=${state}`),
+  );
+  const csrf = cookieValue(getRes, "__zeroship_dev_csrf");
+  if (!csrf) throw new Error("GET /authorize did not set a csrf cookie");
+  const body = new URLSearchParams({
+    csrf,
+    state,
+    redirect_uri: `${ORIGIN}/__zeroship/auth/popup-callback`,
+    email: opts.email ?? "dev@localhost",
+    password: opts.password ?? "dev",
+  });
+  return p.handle(
+    new Request(`${ORIGIN}/__zeroship/auth/authorize`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: `__zeroship_dev_csrf=${csrf}`,
+      },
+      body: body.toString(),
+    }),
+  );
+}
+
+/** Full sign-in → the exchanged session cookie token. */
+async function devSessionCookie(
+  p: { handle: (r: Request) => Promise<Response> },
+  opts: { email?: string; password?: string } = {},
+): Promise<string> {
+  const loginRes = await devLogin(p, opts);
+  if (loginRes.status !== 302) throw new Error(`login failed: ${loginRes.status}`);
+  const code = new URL(loginRes.headers.get("location")!).searchParams.get("code")!;
+  const exch = await p.handle(
+    new Request(`${ORIGIN}/__zeroship/auth/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    }),
+  );
+  const token = cookieTokenFrom(exch);
+  if (!token) throw new Error("exchange did not set the session cookie");
+  return token;
+}
+
 describe("dev-auth provider — config", () => {
   test("absent/'1'/'true' → built-in default user; '0'/'false' → disabled", () => {
     assert.equal(parseDevAuthConfig(undefined)?.users[0].email, "dev@localhost");
@@ -67,6 +134,17 @@ describe("dev-auth provider — config", () => {
     assert.equal(cfg?.defaultUserId, "pws_b");
     assert.deepEqual(cfg?.users[1].scopes, ["openid", "admin"]);
   });
+
+  test("passwords default to the well-known dev password, overridable per user", () => {
+    // No password → the well-known default.
+    assert.equal(parseDevAuthConfig("1")?.passwords["pws_dev00000000000000000"], "dev");
+    // Per-user override is preserved; siblings still default.
+    const cfg = parseDevAuthConfig(
+      JSON.stringify({ users: [{ id: "pws_a", email: "a@x", password: "hunter2" }, { id: "pws_b", email: "b@x" }] }),
+    );
+    assert.equal(cfg?.passwords["pws_a"], "hunter2");
+    assert.equal(cfg?.passwords["pws_b"], "dev");
+  });
 });
 
 describe("dev-auth provider — cookie token round-trips (WebCrypto HMAC)", () => {
@@ -83,19 +161,100 @@ describe("dev-auth provider — cookie token round-trips (WebCrypto HMAC)", () =
 });
 
 describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
-  test("single-user authorize 302s straight to the callback (no picker, §7 frictionless)", async () => {
-    // The default config has exactly one user → the frictionless path: no
-    // picker render, a direct 302 to the same-origin popup-callback. This is
-    // the leg the immersive iframe drives in-frame when ≤1 dev user.
+  test("GET authorize renders a prefilled login form, NOT a frictionless 302", async () => {
+    // No auto-login: the developer must see + submit the form. It is prefilled
+    // with the dev user's credentials (one click) and carries a CSRF token.
     const p = makeProvider();
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/authorize?state=st123&scope=openid"),
     );
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    assert.ok(cookieValue(res, "__zeroship_dev_csrf"), "GET authorize sets the CSRF cookie");
+    const html = await res.text();
+    // A real login form posting back to authorize, with email + password.
+    assert.match(html, /method="POST" action="\/__zeroship\/auth\/authorize"/);
+    assert.match(html, /name="password"/);
+    assert.match(html, /name="csrf"/);
+    // Prefilled credentials (one-click) + the original state carried through.
+    assert.match(html, /value="dev@localhost"/);
+    assert.match(html, /value="dev"/);
+    assert.match(html, /name="state" value="st123"/);
+    // It is NOT auto-submitted (no inline form.submit()).
+    assert.doesNotMatch(html, /\.submit\(\)/);
+  });
+
+  test("POST authorize with the prefilled credentials 302s to the callback", async () => {
+    const p = makeProvider();
+    const res = await devLogin(p, { state: "st123" });
     assert.equal(res.status, 302);
     const loc = new URL(res.headers.get("location")!);
     assert.equal(loc.pathname, "/__zeroship/auth/popup-callback");
     assert.ok(loc.searchParams.get("code"));
     assert.equal(loc.searchParams.get("state"), "st123");
+  });
+
+  test("POST authorize with a wrong password re-renders the form with 401 invalid_credentials", async () => {
+    const p = makeProvider();
+    const res = await devLogin(p, { password: "wrong" });
+    assert.equal(res.status, 401);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const html = await res.text();
+    assert.match(html, /invalid email or password/);
+    // The form is re-rendered (still usable for a retry).
+    assert.match(html, /name="password"/);
+  });
+
+  test("a cross-origin redirect_uri is dropped to the same-origin callback (open-redirect guard)", async () => {
+    const p = makeProvider();
+    const getRes = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"),
+    );
+    const csrf = cookieValue(getRes, "__zeroship_dev_csrf")!;
+    const body = new URLSearchParams({
+      csrf,
+      state: "s",
+      redirect_uri: "https://evil.example/steal", // cross-origin → must be refused
+      email: "dev@localhost",
+      password: "dev",
+    });
+    const res = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `__zeroship_dev_csrf=${csrf}`,
+        },
+        body: body.toString(),
+      }),
+    );
+    assert.equal(res.status, 302);
+    const loc = new URL(res.headers.get("location")!);
+    assert.equal(loc.origin, "http://localhost:3001");
+    assert.equal(loc.pathname, "/__zeroship/auth/popup-callback");
+  });
+
+  test("POST authorize with a mismatched CSRF token is rejected (400)", async () => {
+    const p = makeProvider();
+    // Submit a form whose CSRF field does not match the cookie.
+    const body = new URLSearchParams({
+      csrf: "attacker-supplied",
+      state: "s",
+      email: "dev@localhost",
+      password: "dev",
+    });
+    const res = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: "__zeroship_dev_csrf=the-real-token",
+        },
+        body: body.toString(),
+      }),
+    );
+    assert.equal(res.status, 400);
+    assert.match(await res.text(), /invalid request/);
   });
 
   test("popup-callback serves the same-origin relay page", async () => {
@@ -127,9 +286,9 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
 
   test("exchange mints a session cookie + returns { user, expires_at }", async () => {
     const p = makeProvider();
-    // authorize → code
-    const authRes = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
-    const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
+    // login form → POST credentials → code
+    const loginRes = await devLogin(p);
+    const code = new URL(loginRes.headers.get("location")!).searchParams.get("code")!;
 
     const res = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/session", {
@@ -151,16 +310,7 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
 
   test("session probe with the cookie returns the user; without it → 401 login_required", async () => {
     const p = makeProvider();
-    const authRes = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
-    const code = new URL(authRes.headers.get("location")!).searchParams.get("code")!;
-    const exch = await p.handle(
-      new Request("http://localhost:3001/__zeroship/auth/session", {
-        method: "POST",
-        headers: { "X-ZS-Auth": "1", "content-type": "application/json" },
-        body: JSON.stringify({ code }),
-      }),
-    );
-    const token = cookieTokenFrom(exch)!;
+    const token = await devSessionCookie(p);
 
     const probe = await p.handle(
       new Request("http://localhost:3001/__zeroship/auth/session", {
@@ -204,33 +354,51 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.match(res.headers.get("set-cookie") ?? "", /Max-Age=0/);
   });
 
-  test("multi-user authorize renders the picker IN-FRAME, re-submitting to authorize (§7 two-step)", async () => {
-    // >1 dev user + no dev_user param → render the picker (a framed HTML doc).
-    // Its <form action="/__zeroship/auth/authorize"> re-submits within the
-    // frame WITH the chosen dev_user, which then takes the frictionless 302.
-    const p = makeProvider(JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }));
+  test("multi-user authorize renders one login form with an email dropdown of users", async () => {
+    // >1 dev user → a single login form whose email control is a <select> of
+    // the configured users (the default pre-selected), with a script that
+    // re-prefills the password on change. No separate picker hop.
+    const p = makeProvider(
+      JSON.stringify({
+        users: [
+          { id: "pws_a", email: "a@x", name: "A" },
+          { id: "pws_b", email: "b@x", name: "B" },
+        ],
+      }),
+    );
     const res = await p.handle(new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"));
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") ?? "", /text\/html/);
     const html = await res.text();
-    assert.match(html, /Choose a dev user/);
-    assert.match(html, /pws_a/);
-    assert.match(html, /pws_b/);
-    // The picker re-submits in-frame to authorize with the chosen dev_user.
-    assert.match(html, /action="\/__zeroship\/auth\/authorize"/);
-    assert.match(html, /name="dev_user"/);
+    assert.match(html, /<select name="email"/);
+    assert.match(html, /value="a@x"/);
+    assert.match(html, /value="b@x"/);
+    // Still one form posting to authorize, with a password + CSRF.
+    assert.match(html, /method="POST" action="\/__zeroship\/auth\/authorize"/);
+    assert.match(html, /name="password"/);
+    assert.match(html, /name="csrf"/);
   });
 
-  test("multi-user authorize WITH a chosen dev_user 302s straight to the callback (§7 step two)", async () => {
-    const p = makeProvider(JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }));
-    const res = await p.handle(
-      new Request("http://localhost:3001/__zeroship/auth/authorize?state=s&dev_user=pws_b"),
+  test("multi-user POST with the chosen user's credentials signs that user in", async () => {
+    const p = makeProvider(
+      JSON.stringify({
+        users: [
+          { id: "pws_a", email: "a@x", name: "A" },
+          { id: "pws_b", email: "b@x", name: "B", password: "bee" },
+        ],
+      }),
     );
-    assert.equal(res.status, 302);
-    const loc = new URL(res.headers.get("location")!);
-    assert.equal(loc.pathname, "/__zeroship/auth/popup-callback");
-    assert.ok(loc.searchParams.get("code"));
-    assert.equal(loc.searchParams.get("state"), "s");
+    // Sign in AS the second user (its own email + per-user password).
+    const token = await devSessionCookie(p, { email: "b@x", password: "bee" });
+    const probe = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/session", {
+        headers: { cookie: `__zeroship_dev_session=${token}` },
+      }),
+    );
+    assert.equal(probe.status, 200);
+    const body = (await probe.json()) as { user: { id: string; email: string } };
+    assert.equal(body.user.id, "pws_b");
+    assert.equal(body.user.email, "b@x");
   });
 
   test("disabled when no secret is present", () => {

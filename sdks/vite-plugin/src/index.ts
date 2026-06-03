@@ -35,6 +35,12 @@ export interface DevAuthUser {
   avatar?: string | null;
   /** Granted scopes. Defaults to `["openid","profile","email"]`. */
   scopes?: string[];
+  /**
+   * Password the dev login form prefills + validates for this user. Defaults
+   * to the well-known dev password (`"dev"`). Not a secret — it only makes the
+   * dev credential check (and its failure path) real.
+   */
+  password?: string;
 }
 
 export interface ZeroshipOptions {

@@ -61,4 +61,11 @@ describe("resolveDevAuthEnv", () => {
     assert.deepEqual(parsed, { users: [{ id: "pws_a" }] });
     assert.equal("defaultUserId" in parsed, false);
   });
+
+  test("per-user password is carried through to the dev runtime config", () => {
+    // The dev login form prefills + validates this; it must survive
+    // serialization into ZEROSHIP_DEV_AUTH verbatim.
+    const r = resolveDevAuthEnv({ user: { email: "a@b.c", password: "hunter2" } }, gen);
+    assert.deepEqual(JSON.parse(r.config!), { user: { email: "a@b.c", password: "hunter2" } });
+  });
 });

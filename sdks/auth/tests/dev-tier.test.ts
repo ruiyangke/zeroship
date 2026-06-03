@@ -67,24 +67,53 @@ function wireProviderToHarness(h: Harness, devAuthConfig?: string): DevAuthProvi
 }
 
 /**
- * Drive the popup leg: when the client opens a popup to the authorize URL, the
- * dev provider would 302 to popup-callback which postMessages the relay
- * envelope. We simulate that by following the provider's 302 ourselves and
- * dispatching the resulting `{code,state}` as a postMessage into the client's
- * relay listener — the SAME envelope the real popup-callback page emits.
+ * Drive the popup leg the way a developer does: the client opens a popup to the
+ * authorize URL → the dev provider renders the prefilled login FORM → the
+ * developer clicks "Sign in" (we POST the prefilled credentials + CSRF) → the
+ * provider 302s to popup-callback, whose inline script postMessages the relay
+ * envelope. We follow that POST ourselves and dispatch the resulting
+ * `{code,state}` — the SAME envelope the real popup-callback page emits.
+ *
+ * This is faithful to the new no-auto-login behaviour: there is no frictionless
+ * 302; the credential POST is the load-bearing step.
  */
 async function completePopup(h: Harness, provider: DevAuthProvider): Promise<void> {
   // Wait a tick for the client to open the popup + install the relay listener.
   await new Promise((r) => setTimeout(r, 0));
   const popup = h.window.lastOpened;
   assert.ok(popup, "client should have opened a popup");
-  // The client doesn't set popup.location.href itself in the fake; the
-  // authorize URL is the one runPopup navigates to. Re-derive it: the client
-  // built it from the transport. We instead ask the provider to authorize with
-  // the same state the client minted (read from the popup navigation target).
   const authorizeUrl = popup!.location.href || h.window.location.href;
   assert.ok(authorizeUrl.includes("/__zeroship/auth/authorize"), `popup should navigate to authorize, got ${authorizeUrl}`);
-  const authRes = await provider.handle(new Request(authorizeUrl));
+
+  // 1. GET the login form (no auto-login — this is a 200 HTML form now).
+  const formRes = await provider.handle(new Request(authorizeUrl));
+  assert.equal(formRes.status, 200);
+  const setCookie = formRes.headers.get("set-cookie") ?? "";
+  const csrfCookie = /__zeroship_dev_csrf=([^;]+)/.exec(setCookie)?.[1];
+  assert.ok(csrfCookie, "form should set a CSRF cookie");
+  const html = await formRes.text();
+  // The developer accepts the prefilled values and submits them.
+  const field = (name: string) =>
+    new RegExp(`name="${name}"[^>]*value="([^"]*)"`).exec(html)?.[1] ?? "";
+  const body = new URLSearchParams({
+    csrf: field("csrf"),
+    state: field("state"),
+    redirect_uri: field("redirect_uri"),
+    email: field("email"),
+    password: field("password"),
+  });
+
+  // 2. POST the credentials (the "click Sign in") → 302 to the callback.
+  const authRes = await provider.handle(
+    new Request(`${APP_ORIGIN}/__zeroship/auth/authorize`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        cookie: `__zeroship_dev_csrf=${csrfCookie}`,
+      },
+      body: body.toString(),
+    }),
+  );
   assert.equal(authRes.status, 302);
   const cb = new URL(authRes.headers.get("location")!);
   const code = cb.searchParams.get("code")!;

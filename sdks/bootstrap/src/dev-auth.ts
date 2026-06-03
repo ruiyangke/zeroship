@@ -88,17 +88,39 @@ export interface DevUserConfig {
   name?: string | null;
   avatar?: string | null;
   scopes?: string[];
+  /**
+   * The password this dev user signs in with. The dev login form prefills it
+   * (one-click sign-in) but still *validates* it on submit, so the
+   * `invalid_credentials` failure path is exercisable in dev exactly as in
+   * prod. Defaults to {@link DEFAULT_DEV_PASSWORD} when omitted.
+   */
+  password?: string;
 }
 
 /** Parsed `ZEROSHIP_DEV_AUTH` config. */
 export interface DevAuthConfig {
   users: WireUser[];
-  /** The user id selected by `/authorize` when none is chosen. */
+  /** The user id pre-selected by the `/authorize` login form. */
   defaultUserId: string;
+  /** `id → password` for credential validation on the login-form POST. */
+  passwords: Record<string, string>;
 }
 
 /** Cookie name — mirrors `DEV_SESSION_COOKIE` in `dev_auth.rs`. */
 const DEV_SESSION_COOKIE = "__zeroship_dev_session";
+/**
+ * Dev login CSRF cookie — the double-submit peer of the hidden `csrf` form
+ * field, mirroring prod's `__Host-zsidp_csrf` (`crates/auth/src/csrf.rs`). The
+ * GET form sets it and embeds the same token; the POST compares them.
+ */
+const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
+/**
+ * The well-known password every dev user signs in with unless the `devAuth`
+ * config overrides it per user. It is *not* a secret — the dev login form
+ * prefills it in plain sight; it exists only so the credential-validation path
+ * (and its `invalid_credentials` failure arm) is real in dev.
+ */
+export const DEFAULT_DEV_PASSWORD = "dev";
 /** Dev session lifetime (seconds). One day is plenty for a dev loop. */
 const DEV_SESSION_TTL_SECS = 24 * 60 * 60;
 /** RFC 4648 §5 base64url alphabet (no padding) — matches the Rust URL_SAFE_NO_PAD. */
@@ -221,18 +243,30 @@ function hexToBytes(hex: string): Uint8Array {
 
 // ── config ──────────────────────────────────────────────────────────────────
 
-/** Coerce a configured dev user into the canonical wire shape. */
-function normalizeUser(u: DevUserConfig, index: number): WireUser {
+/** Coerce a configured dev user into the canonical wire shape + its password. */
+function normalizeUser(u: DevUserConfig, index: number): { wire: WireUser; password: string } {
   const id =
     u.id ??
     (index === 0 ? DEFAULT_DEV_USER.id : `pws_dev${String(index).padStart(17, "0")}`);
   return {
-    id,
-    email: u.email ?? DEFAULT_DEV_USER.email,
-    name: u.name ?? DEFAULT_DEV_USER.name,
-    avatar: u.avatar ?? null,
-    email_verified: true,
-    scopes: u.scopes ?? [...DEFAULT_DEV_USER.scopes],
+    wire: {
+      id,
+      email: u.email ?? DEFAULT_DEV_USER.email,
+      name: u.name ?? DEFAULT_DEV_USER.name,
+      avatar: u.avatar ?? null,
+      email_verified: true,
+      scopes: u.scopes ?? [...DEFAULT_DEV_USER.scopes],
+    },
+    password: u.password ?? DEFAULT_DEV_PASSWORD,
+  };
+}
+
+/** The built-in default user as a `{ wire, password }` pair. */
+function defaultConfig(): DevAuthConfig {
+  return {
+    users: [DEFAULT_DEV_USER],
+    defaultUserId: DEFAULT_DEV_USER.id,
+    passwords: { [DEFAULT_DEV_USER.id]: DEFAULT_DEV_PASSWORD },
   };
 }
 
@@ -245,28 +279,29 @@ function normalizeUser(u: DevUserConfig, index: number): WireUser {
  */
 export function parseDevAuthConfig(raw: string | undefined): DevAuthConfig | null {
   if (raw === "0" || raw === "false") return null;
-  if (!raw || raw === "1" || raw === "true") {
-    return { users: [DEFAULT_DEV_USER], defaultUserId: DEFAULT_DEV_USER.id };
-  }
+  if (!raw || raw === "1" || raw === "true") return defaultConfig();
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { users: [DEFAULT_DEV_USER], defaultUserId: DEFAULT_DEV_USER.id };
+    return defaultConfig();
   }
   if (parsed && typeof parsed === "object") {
     const obj = parsed as { user?: DevUserConfig; users?: DevUserConfig[]; defaultUserId?: string };
     const list = obj.users ?? (obj.user ? [obj.user] : null);
     if (list && list.length > 0) {
-      const users = list.map(normalizeUser);
+      const normalized = list.map(normalizeUser);
+      const users = normalized.map((n) => n.wire);
+      const passwords: Record<string, string> = {};
+      for (const n of normalized) passwords[n.wire.id] = n.password;
       const defaultUserId =
         obj.defaultUserId && users.some((u) => u.id === obj.defaultUserId)
           ? obj.defaultUserId
           : users[0].id;
-      return { users, defaultUserId };
+      return { users, defaultUserId, passwords };
     }
   }
-  return { users: [DEFAULT_DEV_USER], defaultUserId: DEFAULT_DEV_USER.id };
+  return defaultConfig();
 }
 
 function wireToPublic(w: WireUser): DevUser {
@@ -342,6 +377,35 @@ function clearCookieHeader(): string {
   return `${DEV_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
+/**
+ * Resolve a SAME-ORIGIN popup-callback target. A cross-origin (or unparseable)
+ * `redirect_uri` falls back to the canonical same-origin callback — the dev
+ * peer of the gateway's exact-`redirect_uri`-match guard (open-redirect /
+ * code-exfiltration defense), so dev mirrors prod's rigor.
+ */
+function safeRedirectUri(candidate: string | null, origin: string): string {
+  const fallback = `${origin}/__zeroship/auth/popup-callback`;
+  if (!candidate) return fallback;
+  try {
+    const u = new URL(candidate, origin);
+    return u.origin === origin ? u.toString() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Mint a random CSRF token (URL-safe). */
+function mintCsrfToken(): string {
+  const bytes = new Uint8Array(18);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+/** Short-lived double-submit CSRF cookie for the dev login form. */
+function setCsrfCookieHeader(token: string): string {
+  return `${DEV_CSRF_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`;
+}
+
 function readCookie(request: Request, name: string): string | null {
   const header = request.headers.get("cookie");
   if (!header) return null;
@@ -387,23 +451,83 @@ function popupCallbackHtml(): string {
   );
 }
 
-/** A tiny dev user-picker form (multi-user config only). */
-function userPickerHtml(users: WireUser[], query: URLSearchParams): string {
-  const redirectUri = query.get("redirect_uri") ?? "/__zeroship/auth/popup-callback";
-  const state = query.get("state") ?? "";
-  const rows = users
-    .map(
-      (u) =>
-        `<form method="GET" action="/__zeroship/auth/authorize">` +
-        `<input type="hidden" name="dev_user" value="${escapeHtml(u.id)}">` +
-        `<input type="hidden" name="state" value="${escapeHtml(state)}">` +
-        `<input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">` +
-        `<button type="submit">${escapeHtml(u.name ?? u.id)} &lt;${escapeHtml(u.email ?? "")}&gt;</button>` +
-        `</form>`,
-    )
-    .join("\n");
-  return `<!doctype html><meta charset=utf-8><title>Dev sign-in</title>` +
-    `<h1>Choose a dev user</h1>${rows}`;
+/**
+ * The dev login screen — the same-origin in-iframe form the developer signs in
+ * through. It mirrors prod's `login.html` (heading, error banner, email +
+ * password + CSRF, submit) and is **prefilled** with the selected dev user's
+ * credentials so sign-in is one click — but it is NOT auto-submitted, so the
+ * developer exercises the real form → POST → callback flow (and can clear the
+ * fields to test the `invalid_credentials` path) exactly as a prod user does.
+ *
+ * Multi-user configs render an email `<select>`; a small inline script
+ * re-prefills the password when the selection changes (the dev passwords are
+ * well-known, not secret).
+ */
+function loginFormHtml(args: {
+  users: WireUser[];
+  passwords: Record<string, string>;
+  defaultUserId: string;
+  state: string;
+  redirectUri: string;
+  csrf: string;
+  error?: string;
+}): string {
+  const { users, passwords, defaultUserId, state, redirectUri, csrf, error } = args;
+  const def = users.find((u) => u.id === defaultUserId) ?? users[0];
+  const defEmail = def.email ?? "";
+  const defPassword = passwords[def.id] ?? DEFAULT_DEV_PASSWORD;
+
+  const errorBanner = error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : "";
+
+  let emailControl: string;
+  let pickerScript = "";
+  if (users.length > 1) {
+    const options = users
+      .map((u) => {
+        const email = u.email ?? "";
+        const label = u.name ? `${u.name} <${email}>` : email || u.id;
+        const sel = u.id === def.id ? " selected" : "";
+        return `<option value="${escapeHtml(email)}"${sel}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    emailControl =
+      `<label>Dev user<select name="email" id="zs-email" autocomplete="username">${options}</select></label>`;
+    // email → password map (dev passwords are well-known; prefilled in plain
+    // sight already). Repopulate the password field on selection change.
+    const emailToPassword: Record<string, string> = {};
+    for (const u of users) emailToPassword[u.email ?? ""] = passwords[u.id] ?? DEFAULT_DEV_PASSWORD;
+    pickerScript =
+      `<script>(function(){var M=${embedJson(emailToPassword)};` +
+      `var e=document.getElementById('zs-email'),p=document.getElementById('zs-password');` +
+      `e.addEventListener('change',function(){p.value=M[e.value]||'';});})();</script>`;
+  } else {
+    emailControl =
+      `<label>Email<input type="email" name="email" id="zs-email" autocomplete="username" value="${escapeHtml(defEmail)}" required></label>`;
+  }
+
+  return (
+    "<!doctype html><meta charset=utf-8><title>Sign in · zeroship (dev)</title>" +
+    "<style>body{font:15px system-ui,sans-serif;max-width:22rem;margin:3rem auto;padding:0 1rem}" +
+    "label{display:block;margin:.6rem 0}input,select{display:block;width:100%;padding:.4rem;margin-top:.2rem}" +
+    "button{margin-top:1rem;padding:.5rem 1rem}.error{background:#fde;border:1px solid #c66;color:#900;padding:.5rem;border-radius:4px}" +
+    ".dev-note{color:#888;font-size:.8rem;margin-top:1.2rem}</style>" +
+    `<h2>Sign in (dev)</h2>${errorBanner}` +
+    `<form method="POST" action="/__zeroship/auth/authorize">` +
+    `<input type="hidden" name="csrf" value="${escapeHtml(csrf)}">` +
+    `<input type="hidden" name="state" value="${escapeHtml(state)}">` +
+    `<input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">` +
+    emailControl +
+    `<label>Password<input type="password" name="password" id="zs-password" autocomplete="current-password" value="${escapeHtml(defPassword)}" required></label>` +
+    `<button type="submit">Sign in</button>` +
+    `</form>` +
+    `<p class="dev-note">Dev sign-in — credentials are prefilled and validated locally (no gateway, no Hydra). Edit them to exercise the failure path.</p>` +
+    pickerScript
+  );
+}
+
+/** Embed an object as a `<script>`-safe JSON literal (escapes `<`). */
+function embedJson(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function escapeHtml(s: string): string {
@@ -441,7 +565,9 @@ export function createDevAuthProvider(
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (path === "/__zeroship/auth/authorize") return authorize(url);
+    if (path === "/__zeroship/auth/authorize") {
+      return request.method === "POST" ? submitLogin(request, url) : renderLoginForm(url);
+    }
     if (path === "/__zeroship/auth/popup-callback") {
       return new Response(popupCallbackHtml(), {
         status: 200,
@@ -461,29 +587,82 @@ export function createDevAuthProvider(
     return errorEnvelope(404, "not_found", `no dev-auth route for ${path}`);
   }
 
-  function authorize(url: URL): Response {
-    // Frictionless: pick the chosen dev user (or default) and 302 straight back
-    // to the app's popup-callback with a dev code + the original state. No IdP.
+  /**
+   * `GET /authorize` — render the dev login form (NOT a frictionless 302).
+   * Prefilled with the default user's credentials + a fresh CSRF token; the
+   * developer clicks "Sign in" to POST it. Same UX shape as prod's framed
+   * `auth.zeroship.ai/login`, served same-origin in-iframe.
+   */
+  function renderLoginForm(url: URL, error?: string, status = 200): Response {
     const q = url.searchParams;
     const state = q.get("state") ?? "";
-    const redirectUri = q.get("redirect_uri") ?? `${url.origin}/__zeroship/auth/popup-callback`;
+    const redirectUri = safeRedirectUri(q.get("redirect_uri"), url.origin);
+    const csrf = mintCsrfToken();
+    const html = loginFormHtml({
+      users: config!.users,
+      passwords: config!.passwords,
+      defaultUserId: config!.defaultUserId,
+      state,
+      redirectUri,
+      csrf,
+      error,
+    });
+    return new Response(html, {
+      status,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "set-cookie": setCsrfCookieHeader(csrf),
+      },
+    });
+  }
 
-    // Multi-user config without an explicit pick → render the picker so a
-    // developer can switch identities / scope sets.
-    const chosen = q.get("dev_user");
-    if (!chosen && config!.users.length > 1) {
-      return new Response(userPickerHtml(config!.users, q), {
-        status: 200,
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      });
+  /**
+   * `POST /authorize` — validate the submitted dev credentials (CSRF + email +
+   * password). On success mint a dev code and 302 to the popup-callback (the
+   * old frictionless happy path). On failure re-render the form with the same
+   * `invalid email or password` banner + 401 that prod surfaces — so the
+   * failure path is real in dev.
+   */
+  async function submitLogin(request: Request, url: URL): Promise<Response> {
+    let form: URLSearchParams;
+    try {
+      form = new URLSearchParams(await request.text());
+    } catch {
+      return renderLoginForm(url, "invalid request", 400);
+    }
+    const state = form.get("state") ?? "";
+    const redirectUri = safeRedirectUri(form.get("redirect_uri"), url.origin);
+    // Preserve the submitted state/redirect_uri on any re-render.
+    const reUrl = new URL(url.toString());
+    reUrl.searchParams.set("state", state);
+    reUrl.searchParams.set("redirect_uri", redirectUri);
+
+    // 1. CSRF: form token must equal the double-submit cookie.
+    const cookieCsrf = readCookie(request, DEV_CSRF_COOKIE);
+    const formCsrf = form.get("csrf");
+    if (!cookieCsrf || !formCsrf || cookieCsrf !== formCsrf) {
+      return renderLoginForm(reUrl, "invalid request", 400);
     }
 
-    const userId = chosen && userById.has(chosen) ? chosen : config!.defaultUserId;
-    const code = mintCode(userId);
+    // 2. Credentials: email must match a configured dev user and the password
+    //    must match that user's configured/default dev password.
+    const email = form.get("email") ?? "";
+    const password = form.get("password") ?? "";
+    const user = config!.users.find((u) => (u.email ?? "") === email);
+    if (!user || config!.passwords[user.id] !== password) {
+      return renderLoginForm(reUrl, "invalid email or password", 401);
+    }
+
+    // 3. Success: mint a dev code bound to the user + 302 to the callback.
+    const code = mintCode(user.id);
     const target = new URL(redirectUri);
     target.searchParams.set("code", code);
     if (state) target.searchParams.set("state", state);
-    return new Response(null, { status: 302, headers: { location: target.toString(), "cache-control": "no-store" } });
+    return new Response(null, {
+      status: 302,
+      headers: { location: target.toString(), "cache-control": "no-store" },
+    });
   }
 
   async function exchange(request: Request): Promise<Response> {
