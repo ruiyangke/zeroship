@@ -10,7 +10,7 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
-use zeroship_authz::{Action, Resource};
+use zeroship_authz::{Action, EntityCache, Resource};
 
 use crate::app_oauth_client;
 use crate::authz_guard::AuthzGuard;
@@ -90,8 +90,17 @@ pub async fn create_app(
     if let Err(resp) = authz.require(Action::AppsWrite, Resource::Any, &state).await {
         return resp;
     }
-    match state.registry.create_app(&body.name, &body.plan_id).await {
+    match state
+        .registry
+        .create_app(&body.name, &body.plan_id, &authz.principal_id)
+        .await
+    {
         Ok(record) => {
+            // The create bound the principal as the app's owner. Invalidate the
+            // principal's entity-cache so the very next request (e.g. a deploy
+            // of the app just created) sees the fresh owner membership instead
+            // of a stale "no memberships" snapshot.
+            EntityCache::invalidate(authz.principal_id);
             // Slice 1d (§1.1): provision the per-app public PKCE OAuth client
             // BEFORE the app is routable, so the route-sync push that makes the
             // host live already carries Some(oauth_client_id) — no cold-start
@@ -128,10 +137,48 @@ pub async fn list_apps(
     if let Err(resp) = authz.require(Action::AppsRead, Resource::Any, &state).await {
         return resp;
     }
-    match state.registry.list_apps().await {
+    // The self-service policy grants every creator `apps:read` on the platform
+    // surface, so the gate above passes for ordinary creators too. The DATA must
+    // therefore be scoped to ownership: only platform staff with a fleet-wide
+    // read role (admin/readonly/support) see every app; everyone else sees only
+    // the apps they are a member of. Without this scope the broadened gate would
+    // be a fleet-wide cross-tenant read (the exact C1 leak, just at the list
+    // endpoint).
+    let result = match fleet_wide_reader(&state, authz.principal_id).await {
+        Ok(true) => state.registry.list_apps().await,
+        Ok(false) => state.registry.list_apps_for_owner(&authz.principal_id).await,
+        Err(resp) => return resp,
+    };
+    match result {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),
     }
+}
+
+/// Returns true when the principal holds a platform role that authorizes a
+/// fleet-wide read (admin / readonly / support). These are the only roles whose
+/// Cedar policy permits `apps:read` on an unconstrained resource, so they are
+/// the only principals allowed to see every tenant's apps in the list endpoint.
+async fn fleet_wide_reader(
+    state: &AppState,
+    principal_id: Uuid,
+) -> Result<bool, web::HttpResponse> {
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT 1 FROM zeroship.platform_admin_roles \
+             WHERE user_id = $1 AND role IN ('admin', 'readonly', 'support')",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| {
+            infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "platform role lookup",
+                err,
+            )
+        })?;
+    Ok(!rows.is_empty())
 }
 
 pub async fn get_app(

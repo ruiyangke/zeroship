@@ -66,6 +66,26 @@ fn tmpdir(label: &str) -> PathBuf {
     p
 }
 
+/// Seed a throwaway owner user so `create_app` (which binds an owner membership
+/// FKed to `zeroship.users`) succeeds. These tests exercise the deploy HTTP
+/// path, not authz, so the owner identity is immaterial.
+async fn seed_owner(state: &AppState, label: &str) -> Uuid {
+    let owner_id = Uuid::new_v4();
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[
+                &owner_id,
+                &format!("{label}-owner-{owner_id}@zeroship.test"),
+                &label,
+            ],
+        )
+        .await
+        .expect("seed owner user");
+    owner_id
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
@@ -302,11 +322,12 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     let fx = build_test_state(&db_url, "happy").await;
 
     // Real app row in the test DB.
+    let owner_id = seed_owner(&fx.state, "httpd").await;
     let app_name = format!("httpd-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -517,11 +538,12 @@ async fn deploy_manifest_not_first_returns_400() {
     // Real app — the handler walks all the way through ingest to
     // produce the structured BadRequest, so the app must exist for
     // the registry path to behave normally up to the rejection.
+    let owner_id = seed_owner(&fx.state, "httpmf").await;
     let app_name = format!("httpmf-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -593,11 +615,12 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
 
     let fx = build_test_state(&db_url, "scopecollide").await;
 
+    let owner_id = seed_owner(&fx.state, "httpsc").await;
     let app_name = format!("httpsc-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -684,11 +707,12 @@ async fn deploy_noncolliding_scope_returns_200() {
 
     let fx = build_test_state(&db_url, "scopeok").await;
 
+    let owner_id = seed_owner(&fx.state, "httpok").await;
     let app_name = format!("httpok-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;

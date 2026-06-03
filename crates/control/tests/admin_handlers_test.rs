@@ -314,6 +314,7 @@ async fn admin_can_audit_lock_app() {
         .create_app(
             &format!("audit-lock-{}", Uuid::new_v4().simple()),
             "free",
+            &pat.user_id,
         )
         .await
         .expect("create app");
@@ -349,7 +350,7 @@ async fn admin_can_suspend_app() {
     let app_record = fx
         .state
         .registry
-        .create_app(&format!("suspend-{}", Uuid::new_v4().simple()), "free")
+        .create_app(&format!("suspend-{}", Uuid::new_v4().simple()), "free", &pat.user_id)
         .await
         .expect("create app");
 

@@ -200,8 +200,30 @@ async fn deploy_round_trip() {
     if let Some(url) = db_url() {
         use zeroship_control::Registry;
         let registry = Registry::new(&url).await.expect("registry");
+        // create_app binds an owner membership (FK → zeroship.users); seed one.
+        let owner_id = Uuid::new_v4();
+        let (pg, pg_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
+            .await
+            .expect("owner-seed connect");
+        compio::runtime::spawn(async move {
+            let _ = pg_conn.run().await;
+        })
+        .detach();
+        pg.execute(
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[
+                &owner_id,
+                &format!("deploy-owner-{owner_id}@zeroship.test"),
+                &"deploy-owner",
+            ],
+        )
+        .await
+        .expect("seed owner user");
         let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
-        let record = registry.create_app(&name, "free").await.expect("create");
+        let record = registry
+            .create_app(&name, "free", &owner_id)
+            .await
+            .expect("create");
         let app_id2 = record.id;
 
         // Re-run ingest under the real app id, then update the DB.

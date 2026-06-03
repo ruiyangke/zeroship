@@ -12,7 +12,7 @@ const APP_ID: &str = "app_blog";
 fn all_static_policies_parse_cleanly() {
     let policies = load_platform_policies().expect("static policies should parse");
 
-    assert_eq!(policies.policies().count(), 9);
+    assert_eq!(policies.policies().count(), 10);
 }
 
 #[test]

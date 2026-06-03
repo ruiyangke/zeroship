@@ -14,9 +14,28 @@ use zeroship_control::{EnvStore, Registry};
 fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
 
 async fn create_test_app(registry: &Registry) -> Uuid {
+    // create_app now binds an owner membership (FK → zeroship.users), so seed a
+    // throwaway owner first. These tests only exercise EnvStore, not authz, so
+    // the owner identity is immaterial — it just has to exist.
+    let owner_id = Uuid::new_v4();
+    let url = db_url().expect("CONTROL_TEST_DB set when this runs");
+    let pg = pg_connect(&url).await;
+    pg.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &owner_id,
+            &format!("envstore-owner-{owner_id}@zeroship.test"),
+            &"envstore-owner",
+        ],
+    )
+    .await
+    .expect("seed owner user");
     // Generate a unique name to survive parallel test runs.
     let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
-    let rec = registry.create_app(&name, "free").await.expect("create_app");
+    let rec = registry
+        .create_app(&name, "free", &owner_id)
+        .await
+        .expect("create_app");
     rec.id
 }
 

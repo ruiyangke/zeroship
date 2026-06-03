@@ -1281,11 +1281,13 @@ async fn app_delete_returns_200_atomic() {
     };
     let fx = Fixture::new(&db_url, "atomic-ok").await;
 
+    // create_app binds an owner membership (FK → zeroship.users); seed one.
+    let owner_id = insert_user(&fx.state, "atomic-owner").await;
     let app_name = format!("atomicok{}", Uuid::new_v4().simple());
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -1314,6 +1316,8 @@ async fn app_delete_returns_200_atomic() {
     assert_eq!(body.get("deleted").and_then(Value::as_bool), Some(true));
 
     pat.cleanup(&fx.state).await;
+    // App delete cascaded the membership; remove the orphan owner user.
+    cleanup_user(&fx.state, owner_id).await;
 }
 
 #[compio::test]

@@ -57,10 +57,23 @@ async fn provision_asserts_hydra_db_and_routes() {
     let mut conn = pg(&url).await; // owned, mutable — for the transactional upsert
     let hydra = HydraAdmin::new(hydra_url.clone());
 
+    // create_app binds an owner membership (FK → zeroship.users); seed one.
+    let owner_id = Uuid::new_v4();
+    raw.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &owner_id,
+            &format!("oac-owner-{owner_id}@zeroship.test"),
+            &"oac-owner",
+        ],
+    )
+    .await
+    .expect("seed owner user");
+
     // 1. Create a uniquely-named app so reruns don't collide.
     let app_name = format!("zs-1d-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = app.id;
@@ -352,10 +365,25 @@ async fn appstate_provision_then_delete_end_to_end() {
     let state = build_state(&url, &hydra_url, app_base_domain).await;
     let hydra = HydraAdmin::new(hydra_url.clone());
 
+    // create_app binds an owner membership (FK → zeroship.users); seed one.
+    let owner_id = Uuid::new_v4();
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[
+                &owner_id,
+                &format!("oac-owner-{owner_id}@zeroship.test"),
+                &"oac-owner",
+            ],
+        )
+        .await
+        .expect("seed owner user");
+
     let app_name = format!("zs-1d-state-{}", Uuid::new_v4().simple());
     let app = state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     let app_id = app.id;

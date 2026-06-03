@@ -10,6 +10,7 @@ const PLATFORM_POLICY_SOURCES: &[&str] = &[
     include_str!("../../../policies/platform/support.cedar"),
     include_str!("../../../policies/platform/billing.cedar"),
     include_str!("../../../policies/platform/readonly.cedar"),
+    include_str!("../../../policies/platform/self_service.cedar"),
     include_str!("../../../policies/platform/suspended_apps.cedar"),
     include_str!("../../../policies/platform/audit_locked.cedar"),
     include_str!("../../../policies/creator/app_owner.cedar"),

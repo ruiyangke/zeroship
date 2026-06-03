@@ -283,12 +283,26 @@ async fn grant_platform_role(state: &AppState, user_id: Uuid, role: &str) {
         .expect("insert platform role");
 }
 
+/// Create an app owned by the fixture's principal (binds the owner membership).
 async fn create_app(fx: &mut Fixture, label: &str) -> Uuid {
+    let owner = fx.user_id;
+    create_app_owned_by(fx, label, owner).await
+}
+
+/// Create an app owned by an arbitrary `owner_id` (which may differ from the
+/// fixture principal). Used to exercise the "principal is only a viewer of an
+/// app someone else owns" case — the create now binds an owner membership, so
+/// tests that need the principal to NOT be the owner must seed a distinct owner.
+async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> Uuid {
+    if owner_id != fx.user_id {
+        // The owner must exist (FK on app_members.user_id → users.id).
+        insert_user(&fx.state, owner_id, &format!("{label}-owner")).await;
+    }
     let app_name = format!("{label}-{}", Uuid::new_v4().simple());
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free")
+        .create_app(&app_name, "free", &owner_id)
         .await
         .expect("create app");
     fx.app_id = Some(record.id);
@@ -398,6 +412,112 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         Some(request_id.as_str())
     );
 
+    fx.cleanup().await;
+}
+
+/// F3 regression — drives the REAL self-service path end to end with NO
+/// pre-seeded `app_members` / platform role:
+///
+///   1. A default-role creator (OAuth token, scopes `apps:write apps:read`)
+///      POSTs `/api/apps` → 201. This exercises the broadened create gate AND
+///      `registry::create_app` binding the principal as the app's `owner` row.
+///   2. The same creator GETs `/api/apps` → 200 and sees EXACTLY the app they
+///      just created (ownership-scoped list).
+///   3. Another creator's app (owned by a different principal) is NOT visible.
+///
+/// Before the fix step 1 was a 403 (no policy granted a default-role creator
+/// `apps:write` on `Resource::Any`) and there was no owner-binding at all, so a
+/// creator was locked out of their own apps. This test must NOT pre-seed any
+/// `app_members` row for the principal — the owner row has to come from the
+/// production create path.
+#[compio::test]
+async fn creator_self_service_creates_and_lists_only_own_apps() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(user_id, "apps:write apps:read");
+    let Some(mut fx) = fixture_with_hydra(&hydra, "self-service", user_id).await else {
+        return;
+    };
+
+    // Seed ANOTHER creator's app (different owner) directly. It must never show
+    // up in this principal's scoped list.
+    let other_owner = Uuid::new_v4();
+    insert_user(&fx.state, other_owner, "self-service-other").await;
+    let other_app = fx
+        .state
+        .registry
+        .create_app(
+            &format!("otherapp-{}", Uuid::new_v4().simple()),
+            "free",
+            &other_owner,
+        )
+        .await
+        .expect("create other-owner app");
+
+    let app = init_control!(fx);
+
+    // 1. Create an app as the default-role creator via the production handler.
+    let create_name = format!("mine-{}", Uuid::new_v4().simple());
+    let req = test::TestRequest::post()
+        .uri("/api/apps")
+        .header("authorization", bearer())
+        .set_json(&json!({ "name": create_name }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "default-role creator must be able to create their own app"
+    );
+    let body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("create body json");
+    let created_id = body["id"].as_str().expect("created app id").to_string();
+    // Track for fixture cleanup (FK cascade removes the owner membership).
+    fx.app_id = Some(Uuid::parse_str(&created_id).expect("uuid"));
+
+    // 2. List — the creator sees their app, scoped to ownership.
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("list body json");
+    let ids: Vec<String> = list
+        .as_array()
+        .expect("list is array")
+        .iter()
+        .map(|app| app["id"].as_str().expect("app id").to_string())
+        .collect();
+    assert!(
+        ids.contains(&created_id),
+        "creator must see their OWN app in the scoped list (got {ids:?})"
+    );
+    // 3. The other creator's app must NOT leak into this principal's list.
+    assert!(
+        !ids.contains(&other_app.id.to_string()),
+        "scoped list must NOT include another tenant's app"
+    );
+
+    // Cleanup the other-owner app + user (fixture cleanup handles `created_id`).
+    let _ = fx
+        .state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.app_members WHERE app_id = $1",
+            &[&other_app.id],
+        )
+        .await;
+    let _ = fx
+        .state
+        .control_pg
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&other_app.id])
+        .await;
+    let _ = fx
+        .state
+        .control_pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&other_owner])
+        .await;
     fx.cleanup().await;
 }
 
@@ -555,7 +675,11 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let Some(mut fx) = fixture_with_hydra(&hydra, "user-subset", user_id).await else {
         return;
     };
-    let app_id = create_app(&mut fx, "user-subset").await;
+    // The app is owned by a DIFFERENT principal; `user_id` is only a viewer.
+    // (create_app now binds the creator as owner, so the principal-under-test
+    // must NOT be the creator for this "viewer-only" scenario.)
+    let owner_id = Uuid::new_v4();
+    let app_id = create_app_owned_by(&mut fx, "user-subset", owner_id).await;
     grant_app_member(&fx.state, app_id, user_id, "viewer").await;
     let app = init_control!(fx);
 
@@ -567,6 +691,11 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     fx.cleanup().await;
+    let _ = fx
+        .state
+        .control_pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner_id])
+        .await;
 }
 
 fn unix_now_secs() -> u64 {

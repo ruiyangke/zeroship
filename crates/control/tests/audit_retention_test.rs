@@ -35,13 +35,25 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     let registry = Registry::new(&url).await.expect("registry");
     // Unique app so parallel runs don't collide; the count assertion is
     // app-scoped, and the global sweep only touches >retention rows.
+    let conn = raw_conn(&url).await;
+    // create_app binds an owner membership (FK → zeroship.users); seed one.
+    let owner_id = Uuid::new_v4();
+    conn.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &owner_id,
+            &format!("ret-owner-{owner_id}@zeroship.test"),
+            &"ret-owner",
+        ],
+    )
+    .await
+    .expect("seed owner user");
     let name = format!("ret-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let app = registry
-        .create_app(&name, "free")
+        .create_app(&name, "free", &owner_id)
         .await
         .expect("create_app")
         .id;
-    let conn = raw_conn(&url).await;
 
     // One >12-month row and one fresh row for this app.
     conn.execute(

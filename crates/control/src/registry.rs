@@ -122,11 +122,24 @@ impl Registry {
 
     // -- App CRUD -----------------------------------------------------------
 
-    /// Create a new application. Returns the created `AppRecord`.
+    /// Create a new application owned by `owner_id`. Returns the created
+    /// `AppRecord`.
+    ///
+    /// The `zeroship.apps` row and the creator's `zeroship.app_members(owner)`
+    /// row are written in ONE transaction, so the principal is bound to their
+    /// own app atomically — the app is never visible (or routable) without its
+    /// owner membership. That owner row is what authorizes the creator for every
+    /// per-app action through the `app_owner` Cedar policy; without it a
+    /// default-role creator would be locked out of the app they just created
+    /// (finding F3 / C1 over-restriction).
+    ///
+    /// Runs on a DEDICATED owned connection so the RAII `transaction()` guard
+    /// owns it and an aborted txn never poisons a shared handle.
     pub async fn create_app(
         &self,
         name: &str,
         plan_id: &str,
+        owner_id: &Uuid,
     ) -> Result<AppRecord, RegistryError> {
         if name.is_empty()
             || name.len() > 64
@@ -141,25 +154,33 @@ impl Registry {
 
         let api_key = Uuid::new_v4().to_string();
         let key_hash = hash_api_key(&api_key);
-        let conn = self.conn().await?;
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
 
-        conn.execute(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
-            &[&name, &plan_id, &api_key, &key_hash],
+        let rows = tx
+            .query(
+                "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+                 VALUES ($1, $2, $3, $4) \
+                 RETURNING id, name, plan_id, deploy_hash, api_key, \
+                           created_at::text, updated_at::text",
+                &[&name, &plan_id, &api_key, &key_hash],
+            )
+            .await?;
+        let record = rows
+            .first()
+            .map(row_to_record)
+            .ok_or_else(|| RegistryError::Database("insert ok but read-back failed".into()))?;
+
+        // Bind the creating principal as the app's owner in the SAME txn.
+        // `app_members.app_id` is a `uuid` column — bind the `Uuid` directly.
+        tx.execute(
+            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+            &[&record.id, owner_id],
         )
         .await?;
 
-        let rows = conn
-            .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM zeroship.apps WHERE name = $1",
-                &[&name],
-            )
-            .await?;
-
-        rows.first()
-            .map(row_to_record)
-            .ok_or_else(|| RegistryError::Database("insert ok but read-back failed".into()))
+        tx.commit().await?;
+        Ok(record)
     }
 
     /// Get an app by primary key.
@@ -188,7 +209,10 @@ impl Registry {
         Ok(rows.first().map(row_to_record))
     }
 
-    /// List all apps ordered by name.
+    /// List all apps ordered by name. Fleet-wide — for platform staff
+    /// (admin/readonly/support) only. Ordinary creators must use
+    /// [`Registry::list_apps_for_owner`] so the list never leaks other tenants'
+    /// apps.
     pub async fn list_apps(&self) -> Result<Vec<AppRecord>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
@@ -196,6 +220,31 @@ impl Registry {
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
                  FROM zeroship.apps ORDER BY name",
                 &[],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_record).collect())
+    }
+
+    /// List the apps `owner_id` is a member of (any role), ordered by name.
+    ///
+    /// This is the creator-facing listing: the `/api/apps` GET grants every
+    /// creator `apps:read` on the platform surface (self-service policy), but
+    /// the data it returns MUST be scoped to apps the principal actually belongs
+    /// to — otherwise the broadened gate becomes a fleet-wide cross-tenant read.
+    pub async fn list_apps_for_owner(
+        &self,
+        owner_id: &Uuid,
+    ) -> Result<Vec<AppRecord>, RegistryError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT a.id, a.name, a.plan_id, a.deploy_hash, a.api_key, \
+                        a.created_at::text, a.updated_at::text \
+                 FROM zeroship.apps a \
+                 JOIN zeroship.app_members m ON m.app_id = a.id \
+                 WHERE m.user_id = $1 \
+                 ORDER BY a.name",
+                &[owner_id],
             )
             .await?;
         Ok(rows.iter().map(row_to_record).collect())
