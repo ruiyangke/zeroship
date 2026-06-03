@@ -275,6 +275,15 @@ pub async fn read_live(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<Opti
 /// §3.1), so there is no cached wrapper to persist here — only the rotated
 /// encrypted refresh family + its lineage id.
 ///
+/// Returns the number of rows the UPDATE matched. The `WHERE … revoked_at IS
+/// NULL` predicate is re-evaluated INSIDE this write transaction, so a `0`
+/// return means the anchor was revoked between the caller's `read_live` and
+/// this persist — i.e. a concurrent teardown (H1 password reset, M1
+/// back-channel logout, signout) committed mid-rotation. The caller MUST treat
+/// `0` as fail-closed (`LoginRequired`) and NOT sign a fresh cookie: discarding
+/// this count is exactly the `?mint=1` TOCTOU fail-open (finding F4) that let a
+/// rotation racing a revocation resurrect the session.
+///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
 pub async fn update_rotated_family(
@@ -283,25 +292,26 @@ pub async fn update_rotated_family(
     id: Uuid,
     refresh_token_enc: &[u8],
     refresh_family_id: &str,
-) -> Result<()> {
+) -> Result<u64> {
     let refresh_enc = refresh_token_enc.to_vec();
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!("app_session_anchors update_rotated_family begin: {e}"))
     })?;
     rls::set_tenant_app(&tx, app_id).await?;
-    tx.execute(
-        "UPDATE zeroship.app_session_anchors SET \
-            refresh_token_enc = $2, \
-            refresh_family_id = $3 \
-         WHERE id = $1 AND revoked_at IS NULL",
-        &[&id, &refresh_enc, &refresh_family_id],
-    )
-    .await
-    .map_err(|e| GatewayError::Db(format!("app_session_anchors update_rotated_family: {e}")))?;
+    let affected = tx
+        .execute(
+            "UPDATE zeroship.app_session_anchors SET \
+                refresh_token_enc = $2, \
+                refresh_family_id = $3 \
+             WHERE id = $1 AND revoked_at IS NULL",
+            &[&id, &refresh_enc, &refresh_family_id],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors update_rotated_family: {e}")))?;
     tx.commit().await.map_err(|e| {
         GatewayError::Db(format!("app_session_anchors update_rotated_family commit: {e}"))
     })?;
-    Ok(())
+    Ok(affected)
 }
 
 /// Hard-delete an anchor row (anchor-dead: Hydra `invalid_grant`, or

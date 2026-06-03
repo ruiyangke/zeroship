@@ -601,6 +601,31 @@ pub(crate) async fn mint_session_from_code(
         // read on the per-request path (the signed cookie is self-contained;
         // revocation is the per-app family marker). `_session_id` documents that.
         let _session_id = session.id;
+
+        // 6c. Persist the per-app pairwise mapping into `app_user_identities`,
+        //     SYMMETRIC with the DPoP/Bearer arms (`project_pairwise` →
+        //     `identities::upsert`). The cookie mint is the DEFAULT
+        //     `@zeroship/auth` BFF path; without this row the H1 password-reset
+        //     teardown — whose family-marker CTE JOINs `app_user_identities` to
+        //     learn each `(client_id, pws_)` to revoke — would write ZERO markers
+        //     for a cookie-only user, so the victim's live
+        //     `__Host-zeroship_app_session` cookie would outlive the reset for its
+        //     full TTL (security finding F1). Best-effort / log-and-continue,
+        //     EXACTLY like the DPoP/Bearer arms: the `pws_` is already projected
+        //     and the cookie is the live credential, so a mapping write failure
+        //     must not fail the mint — it only degrades reset-time eviction, which
+        //     the credential_version / anchor-revoke arms still backstop.
+        if let Err(e) =
+            crate::identities::upsert(&mut conn, &route.client_id, global_user_id, &pws_sub).await
+        {
+            tracing::warn!(
+                error = %e,
+                app_client_id = %route.client_id,
+                "app_user_identities upsert failed on cookie mint \
+                 (non-fatal; pws_ already projected, but reset-time eviction degraded)"
+            );
+        }
+
         anchor.id
         // `conn`/`pool` drop here — released before we build the response.
     };
@@ -939,10 +964,20 @@ async fn rotate_family(
     // and never leaks a resolved-but-stuck result to later callers.
     let st = Arc::clone(state);
     let client_id = route.client_id.clone();
+    // The per-app `pws_` the rotated cookie will carry — derived HERE (the
+    // handler holds the route sector + pairwise salt) so `do_refresh` can
+    // re-check the per-app family-revocation marker INSIDE the rotation tx
+    // (finding F4: a marker written by a racing H1 reset must fail the
+    // rotation CLOSED before a fresh cookie is signed). `None` only when the
+    // route is not yet provisioned with a `sector_identifier`; the rotation
+    // then skips the marker re-check (it cannot project a `pws_` cookie at all,
+    // and the handler already 503s `client_not_provisioned` afterwards) but the
+    // anchor-revoked rows-affected gate still fails it closed.
+    let pws_sub = pairwise_sub(state, route, &anchor.global_user_id.to_string());
     let anchor = anchor.clone();
     let fut: anchors::SharedRotationFuture = (Box::pin(async move {
         let _guard = anchors::EntryGuard::new(anchor_id);
-        do_refresh(&st, &client_id, &anchor).await
+        do_refresh(&st, &client_id, pws_sub.as_deref(), &anchor).await
     }) as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
         .shared();
 
@@ -961,11 +996,21 @@ async fn rotate_family(
 async fn do_refresh(
     state: &Arc<GateState>,
     client_id: &str,
+    pws_sub: Option<&str>,
     anchor: &anchors::Anchor,
 ) -> RotationResult {
     let Some(db_cfg) = state.db.as_ref() else {
         return Err(RotationError::Upstream("no database".into()));
     };
+
+    // Stamp the rotation's START instant (epoch seconds) BEFORE the Hydra
+    // refresh. A per-app family marker written at-or-after this instant means a
+    // teardown (H1 reset, M1 logout, signout) revoked the family DURING the
+    // rotation — the fresh cookie we are about to mint carries `iat=now()`
+    // (strictly after the marker), so the plain `revoked_after > iat` gate would
+    // (wrongly) read "not revoked". We instead reject if a marker landed at or
+    // after this start instant: that is the F4 TOCTOU window made fail-closed.
+    let rotation_started_at = now_secs();
 
     // Decrypt the server-held refresh family. AAD binds (client_id, sub).
     let sub = anchor.global_user_id.to_string();
@@ -1092,13 +1137,56 @@ async fn do_refresh(
             Ok(c) => c,
             Err(e) => return Err(RotationError::Upstream(format!("pool get: {e}"))),
         };
+
+        // F4 POST-REFRESH RE-CHECK (fail-closed). Between the handler's
+        // `read_live` and this persist, a concurrent H1 password reset (or M1
+        // logout / signout) may have revoked this family — and the Hydra
+        // refresh SUCCEEDS regardless (H1 deliberately leaves the Hydra grant
+        // alive). Two gates close that TOCTOU window:
+        //
+        //   (a) the per-app family marker: if a `(client_id, pws_)` marker was
+        //       written at/after the rotation's start instant, the family was
+        //       torn down DURING the rotation — reject before signing. We read
+        //       the marker DIRECTLY from the DB (NOT the 5s-stale local cache),
+        //       since this is the authoritative cross-node revocation record.
+        //   (b) the anchor `revoked_at` predicate, enforced by
+        //       `update_rotated_family`'s rows-affected (below): 0 rows ⇒ the
+        //       anchor was revoked mid-rotation ⇒ fail closed.
+        if let Some(pws) = pws_sub {
+            match zeroship_core::wrapper_revocation::revoked_after_for(&conn, client_id, pws).await {
+                Ok(Some(revoked_after)) if revoked_after >= rotation_started_at => {
+                    // A family marker landed during the rotation — fail closed
+                    // (the handler deletes the anchor + clears the breadcrumb).
+                    return Err(RotationError::LoginRequired);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // Fail closed on a read error: never mint a fresh cookie on
+                    // an unverifiable revocation state.
+                    return Err(RotationError::Upstream(format!(
+                        "rotation family re-check: {e}"
+                    )));
+                }
+            }
+        }
+
         // RLS GUC keyed on the anchor's own app_id (loaded RLS-scoped to
-        // route.app_id, so identical to it).
-        if let Err(e) =
-            anchors::update_rotated_family(&mut conn, anchor.app_id, anchor.id, &new_enc, &family_id)
-                .await
+        // route.app_id, so identical to it). The `WHERE … revoked_at IS NULL`
+        // is re-evaluated in THIS tx: 0 rows matched ⇒ the anchor was revoked
+        // between `read_live` and here (concurrent teardown) ⇒ fail closed
+        // (LoginRequired), NEVER persist + sign a fresh cookie (F4).
+        match anchors::update_rotated_family(
+            &mut conn,
+            anchor.app_id,
+            anchor.id,
+            &new_enc,
+            &family_id,
+        )
+        .await
         {
-            return Err(RotationError::Upstream(format!("anchor update: {e}")));
+            Ok(0) => return Err(RotationError::LoginRequired),
+            Ok(_) => {}
+            Err(e) => return Err(RotationError::Upstream(format!("anchor update: {e}"))),
         }
     }
 

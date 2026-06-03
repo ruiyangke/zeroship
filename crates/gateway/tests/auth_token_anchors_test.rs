@@ -1584,3 +1584,395 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     cleanup_identities(&dsn, user_id).await;
     cleanup(&dsn, user_id).await;
 }
+
+/// Open a throwaway compio-postgres client for the F1 seeding/assertions.
+async fn connect_pg(dsn: &str) -> compio_postgres::Client {
+    let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
+
+/// Seed the `apps` + `oauth_clients` rows the REAL cookie mint FKs into
+/// (`gateway_sessions.app_id → apps`, `app_session_anchors.{app_id,client_id}`,
+/// and — once the fix lands — `app_user_identities.app_client_id → oauth_clients`).
+/// Returns the seeded `users` email so the F1 reset can be issued against the
+/// SAME account the mint binds its identity to.
+///
+/// Deliberately seeds NO `app_user_identities` row — that is the row the REAL
+/// mint must write itself; pre-seeding it is exactly what masked H1 (F1).
+async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
+    let client = connect_pg(dsn).await;
+    let email = format!("anchor-{}@zeroship.test", user_id.simple());
+    client
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
+             VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
+            &[&user_id, &email, &"F1 Test"],
+        )
+        .await
+        .expect("seed user");
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, $1) ON CONFLICT (client_id) DO NOTHING",
+            &[
+                &CLIENT_ID,
+                &"F1 App",
+                &vec![format!("https://{APP_HOST}/cb")],
+                &vec!["openid".to_string(), "email".to_string()],
+            ],
+        )
+        .await
+        .expect("seed oauth client");
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
+             ON CONFLICT (id) DO NOTHING",
+            &[
+                &Uuid::parse_str(APP_UUID).expect("app uuid"),
+                &format!("f1-app-{}", user_id.simple()),
+                &"k",
+            ],
+        )
+        .await
+        .expect("seed app");
+    email
+}
+
+async fn cleanup_f1(dsn: &str, user_id: Uuid) {
+    let client = connect_pg(dsn).await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
+            &[&CLIENT_ID],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
+            &[&user_id],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.app_user_identities WHERE global_user_id = $1",
+            &[&user_id],
+        )
+        .await;
+    let email = format!("anchor-{}@zeroship.test", user_id.simple());
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&Uuid::parse_str(APP_UUID).expect("app uuid")],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&CLIENT_ID],
+        )
+        .await;
+    let _ = client
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .await;
+}
+
+/// FAITHFUL REGRESSION for security finding F1 (H1 incomplete for cookie-only
+/// `@zeroship/auth` users).
+///
+/// The default BFF popup flow mints its session via `POST /__zeroship/auth/session`
+/// (`mint_session_from_code`). Pre-fix, THAT path wrote the gateway session +
+/// the reload-recovery anchor but NEVER wrote `zeroship.app_user_identities`
+/// (only the DPoP/Bearer arms did). H1's reset teardown (`password_reset::
+/// complete`) derives the per-app family marker by JOINing `app_user_identities`
+/// — so for a cookie-only user it found ZERO rows, wrote ZERO markers, and the
+/// victim's live `__Host-zeroship_app_session` cookie survived the reset for its
+/// full ~15-min TTL (the cookie arm's SOLE revocation gate is that marker).
+///
+/// This drives the REAL production path end to end and pre-seeds NOTHING in
+/// `app_user_identities` (pre-seeding it is exactly what masked the bug in the
+/// auth-crate H1 test):
+///   1. REAL cookie mint via `POST /__zeroship/auth/session` (mock Hydra + live PG).
+///   2. Assert the mint WROTE the `(CLIENT_ID, pws_)` identity row — the F1 gap.
+///   3. REAL `password_reset::{issue,complete}` for that user.
+///   4. Assert a `token_revocations` family marker now exists for the cookie's
+///      `(CLIENT_ID, pws_)` — the gate the per-request cookie arm consults.
+///
+/// PRE-FIX this FAILS at step 2 (0 identity rows) and, consequently, step 4
+/// (0 family markers) — the victim's cookie outlives the reset.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let auth_dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(d) if !d.is_empty() => d,
+        _ => dsn.clone(),
+    };
+
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    let user_id = hydra.user_id;
+    let email = seed_app_and_client(&dsn, user_id).await;
+
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db_cfg));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    // The per-app pairwise subject the minted cookie carries — the SAME value
+    // the reset teardown must write a family marker for.
+    let expected_pws = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &user_id.to_string(),
+        &format!("https://{APP_HOST}"),
+    );
+
+    // 1. REAL cookie mint (the default @zeroship/auth BFF popup path).
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/session")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=thecode&code_verifier=theverifier")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "real cookie mint must succeed");
+    assert!(
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").is_some(),
+        "mint must set the live session cookie"
+    );
+
+    // 2. The mint MUST have written the per-app identity row (F1 core gap).
+    //    Pre-fix the cookie mint never wrote it → this assertion FAILS.
+    {
+        let pool = zeroship_gateway::db::checkout(
+            &zeroship_gateway::db::DbConfig::new(dsn.clone(), 4),
+        )
+        .await
+        .expect("pool");
+        let mut conn = pool.get().await.expect("conn");
+        let persisted = zeroship_gateway::identities::lookup_pairwise_sub(
+            &mut conn, CLIENT_ID, user_id,
+        )
+        .await
+        .expect("identity lookup");
+        assert_eq!(
+            persisted.as_deref(),
+            Some(expected_pws.as_str()),
+            "the REAL cookie mint must persist the (CLIENT_ID, pws_) app_user_identities \
+             row — without it H1's reset teardown writes zero family markers and the \
+             cookie survives the reset (F1)"
+        );
+    }
+
+    // 3. REAL password reset for this user (drives auth-service H1 teardown).
+    let auth_client = connect_pg(&auth_dsn).await;
+    let issued = zeroship_auth::identity::password_reset::issue(&auth_client, &email)
+        .await
+        .expect("issue reset token");
+    let new_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFyZm9vYmFyZm9vYmFy";
+    let completed = zeroship_auth::identity::password_reset::complete(
+        &auth_client,
+        &issued.raw,
+        new_hash,
+    )
+    .await
+    .expect("complete reset")
+    .expect("reset must resolve to the seeded user");
+    assert_eq!(completed.user_id, user_id, "reset must target the seeded user");
+
+    // 4. The reset MUST have written the family marker for the cookie's
+    //    (CLIENT_ID, pws_) — the SOLE gate the per-request cookie arm consults.
+    //    Pre-fix: no identity row → no marker → the live cookie outlives the reset.
+    let assert_client = connect_pg(&dsn).await;
+    let marker_count: i64 = assert_client
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.token_revocations \
+             WHERE client_id = $1 AND sub = $2",
+            &[&CLIENT_ID, &expected_pws],
+        )
+        .await
+        .expect("count family markers")
+        .get(0);
+    assert_eq!(
+        marker_count, 1,
+        "password reset must write the (CLIENT_ID, pws_) family marker so the \
+         cookie-only victim's live __Host-zeroship_app_session is rejected (F1)"
+    );
+
+    cleanup_f1(&dsn, user_id).await;
+}
+
+/// FAITHFUL REGRESSION for security finding F4 (`?mint=1` rotation fails OPEN
+/// against a concurrent revocation — the H1/M1 TOCTOU).
+///
+/// Kill-chain reproduced end to end against the REAL handler + live PG + a
+/// loopback Hydra that COUNTS and DELAYS the refresh grant:
+///   1. REAL cookie mint establishes a live anchor (`POST /…/session`).
+///   2. A `?mint=1` rotation starts: `read_live` returns the still-live anchor,
+///      then `do_refresh` enters the (delayed) Hydra refresh.
+///   3. WHILE that refresh is in flight, the victim's REAL `password_reset::
+///      complete` commits — revoking the anchor AND writing the `(CLIENT_ID,
+///      pws_)` family marker (H1's teardown). The Hydra grant stays alive (H1
+///      leaves it), so the refresh SUCCEEDS.
+///   4. The rotation then reaches the persist/sign step.
+///
+/// PRE-FIX: `update_rotated_family` discarded its rows-affected and there was
+/// NO post-refresh revocation re-check, so the rotation re-signed a FRESH
+/// `__Host-zeroship_app_session` cookie with `iat=now()` — resurrecting the
+/// session the reset just killed. This test FAILS pre-fix: the `?mint=1`
+/// response is 200 and carries a fresh session cookie.
+///
+/// POST-FIX: the persist tx re-reads the family marker (rejects a marker that
+/// landed at/after the rotation start) AND `update_rotated_family` matches 0
+/// rows (anchor revoked) → `LoginRequired` → 401 with NO session cookie.
+///
+/// This drives the REAL flow; it does NOT pre-seed the revoked state the bug
+/// hides behind — the revocation is committed by the genuine `password_reset`
+/// path concurrently with the genuine `?mint=1` rotation.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip mint_racing_concurrent_reset (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let auth_dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(d) if !d.is_empty() => d,
+        _ => dsn.clone(),
+    };
+
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    let user_id = hydra.user_id;
+    let email = seed_app_and_client(&dsn, user_id).await;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
+
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db_cfg));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    // 1. REAL cookie mint → live anchor + identity row.
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/session")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=thecode&code_verifier=theverifier")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "real cookie mint must succeed");
+    let anchor_cookie =
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
+    let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
+
+    // Issue a reset token UP FRONT (the `issue` leg does not revoke anything; it
+    // only writes the magic-link row). The revocation lands when `complete`
+    // commits — which we time to fall INSIDE the in-flight refresh below.
+    let auth_client = connect_pg(&auth_dsn).await;
+    let issued = zeroship_auth::identity::password_reset::issue(&auth_client, &email)
+        .await
+        .expect("issue reset token");
+    let new_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFyZm9vYmFyZm9vYmFy";
+
+    // Hold the Hydra refresh open long enough that the concurrent reset commits
+    // AFTER `read_live` returned the live anchor but BEFORE `do_refresh`
+    // persists — the exact TOCTOU window.
+    hydra.refresh_delay_ms.store(400, Ordering::SeqCst);
+
+    // 3. Race: the genuine `?mint=1` rotation vs the genuine reset commit.
+    let mint_fut = async {
+        let req = test::TestRequest::get()
+            .uri("/__zeroship/auth/session?mint=1")
+            .header("host", APP_HOST)
+            .header("origin", format!("https://{APP_HOST}"))
+            .header("x-zs-auth", "1")
+            .header("cookie", anchor_pair.clone())
+            .to_request();
+        test::call_service(&app, req).await
+    };
+    let reset_fut = async {
+        // Land the reset commit mid-refresh (delay < the 400ms Hydra hold).
+        ntex::time::sleep(std::time::Duration::from_millis(120)).await;
+        zeroship_auth::identity::password_reset::complete(&auth_client, &issued.raw, new_hash)
+            .await
+            .expect("complete reset")
+            .expect("reset resolves to the seeded user")
+    };
+    let (mint_resp, completed) = futures::future::join(mint_fut, reset_fut).await;
+    assert_eq!(completed.user_id, user_id, "reset targeted the seeded user");
+
+    // 4. The rotation must fail CLOSED: NO fresh session cookie, and NOT a 200
+    //    identity projection. Pre-fix it 200'd with a freshly-signed
+    //    __Host-zeroship_app_session cookie (the resurrected session).
+    let status = mint_resp.status().as_u16();
+    let fresh_session_cookie = set_cookie_with_prefix(&mint_resp, "__Host-zeroship_app_session=");
+    assert!(
+        fresh_session_cookie.is_none(),
+        "F4: a ?mint=1 racing a concurrent reset MUST NOT re-sign a fresh session \
+         cookie (got: {fresh_session_cookie:?}, status {status})"
+    );
+    assert_ne!(
+        status, 200,
+        "F4: the rotation must fail closed (login_required), not return a 200 identity projection"
+    );
+
+    // Belt-and-suspenders: the anchor really was revoked (so this was a genuine
+    // race, not a no-op), and the family marker really was written.
+    let assert_client = connect_pg(&dsn).await;
+    let live_anchor_count: i64 = assert_client
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.app_session_anchors \
+             WHERE global_user_id = $1 AND revoked_at IS NULL",
+            &[&user_id],
+        )
+        .await
+        .expect("count live anchors")
+        .get(0);
+    assert_eq!(
+        live_anchor_count, 0,
+        "the concurrent reset must have revoked the anchor (genuine race)"
+    );
+    let expected_pws = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &user_id.to_string(),
+        &format!("https://{APP_HOST}"),
+    );
+    let marker_count: i64 = assert_client
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.token_revocations \
+             WHERE client_id = $1 AND sub = $2",
+            &[&CLIENT_ID, &expected_pws],
+        )
+        .await
+        .expect("count markers")
+        .get(0);
+    assert_eq!(marker_count, 1, "the reset must have written the family marker");
+
+    cleanup_f1(&dsn, user_id).await;
+}
