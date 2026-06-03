@@ -148,6 +148,13 @@ impl ChangeOp {
 /// proposal's stated default. Overflow triggers a `resync` event.
 pub const DEFAULT_QUEUE_DEPTH: usize = 1024;
 
+/// DB-12: max concurrent (live) subscriptions one app may hold. Each
+/// subscription carries a [`DEFAULT_QUEUE_DEPTH`]-slot queue and is iterated on
+/// every matching publish, so an unbounded `for (…) db.t.subscribe(…)` loop
+/// would grow the isolate's memory and per-event fan-out cost without bound.
+/// 256 is far above any legitimate app's working set.
+pub(crate) const MAX_SUBSCRIPTIONS_PER_APP: usize = 256;
+
 /// One subscriber's view of the broker.
 ///
 /// Held by the V8 layer (one per `subscribe()` call). Owned via
@@ -484,6 +491,24 @@ impl Broker {
                      window ends + one Resync is pushed per active subscription)"
                         .to_string(),
                 ),
+            });
+        }
+        // DB-12: cap the app's concurrent (live) subscriptions. Count only
+        // non-closed subs so dropped/unsubscribed ones (pruned lazily on
+        // publish) don't count against the limit.
+        let live = self
+            .by_key
+            .get(app_id)
+            .map(|colls| colls.values().flatten().filter(|s| !s.is_closed()).count())
+            .unwrap_or(0);
+        if live >= MAX_SUBSCRIPTIONS_PER_APP {
+            return Err(DbError::Coded {
+                code: "subscription_limit".to_string(),
+                message: format!(
+                    "subscribe refused for app `{app_id}`: at the maximum of \
+                     {MAX_SUBSCRIPTIONS_PER_APP} concurrent subscriptions"
+                ),
+                hint: Some("close unused subscriptions before opening new ones".to_string()),
             });
         }
         Ok(self.subscribe(app_id, collection))
@@ -963,6 +988,23 @@ mod tests {
                 .collect(),
             old_tuple: None,
         }
+    }
+
+    #[test]
+    fn try_subscribe_caps_per_app_db12() {
+        let mut b = Broker::new();
+        // Hold the subscriptions live (dropping them would close + prune).
+        let mut held = Vec::new();
+        for _ in 0..MAX_SUBSCRIPTIONS_PER_APP {
+            held.push(b.try_subscribe("app_x", "c").expect("under the cap"));
+        }
+        let err = b.try_subscribe("app_x", "c").unwrap_err();
+        assert!(
+            matches!(&err, DbError::Coded { code, .. } if code == "subscription_limit"),
+            "expected subscription_limit, got {err:?}"
+        );
+        // A different app is unaffected (the cap is per-app).
+        assert!(b.try_subscribe("app_y", "c").is_ok());
     }
 
     #[test]
