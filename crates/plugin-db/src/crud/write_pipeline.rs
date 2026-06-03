@@ -25,6 +25,42 @@ pub(crate) fn inspect_update(
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
 }
 
+/// DB-8: validate every top-level field key of a plain write document
+/// (insert / insertMany element / upsert) with the same `validate_field_name`
+/// fence the read/filter path enforces. Runs on the raw user document before
+/// any system/encryption/mask pass adds its own (legitimately reserved) keys.
+fn validate_user_doc_keys(doc: &Value) -> Result<(), DbError> {
+    if let Some(obj) = doc.as_object() {
+        for key in obj.keys() {
+            query::validate_field_name(key)?;
+        }
+    }
+    Ok(())
+}
+
+/// DB-8 (update patch): an update patch's top-level keys are either field names
+/// (`{ name: "x", views: { $inc: 1 } }`) or the document-level `$set`/`$setOnInsert`
+/// operators whose nested keys are field names. Validate the field-name keys
+/// (skipping `$`-prefixed operator keys, whose own nested fields are checked).
+fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
+    let Some(obj) = patch.as_object() else {
+        return Ok(());
+    };
+    for (key, value) in obj {
+        if key.starts_with('$') {
+            // Document-level operator (e.g. $set): its nested keys are fields.
+            if let Some(nested) = value.as_object() {
+                for nested_key in nested.keys() {
+                    query::validate_field_name(nested_key)?;
+                }
+            }
+        } else {
+            query::validate_field_name(key)?;
+        }
+    }
+    Ok(())
+}
+
 /// Apply the canonical write-side transform once per write site.
 ///
 /// The ordered stages are fixed:
@@ -43,6 +79,25 @@ pub(crate) async fn apply(
     payload: &mut Value,
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
+    // DB-8: validate every USER-supplied document field key BEFORE the system /
+    // encryption / mask passes below add their own (reserved-suffix / `__zsenc__`)
+    // sibling columns. The write SQL builders only `quote_ident`'d these keys —
+    // they skipped the `validate_field_name` fence the read/filter path enforces,
+    // letting a write smuggle a null-byte key, a >63-byte key (NAMEDATALEN
+    // truncation collision), or a reserved name (e.g. `ssn_masked`) straight into
+    // a column. Run the same fence here, on the raw user keys, once.
+    match &mode {
+        ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => validate_user_doc_keys(payload)?,
+        ApplyMode::InsertMany { .. } => {
+            if let Some(docs) = payload.as_array() {
+                for doc in docs {
+                    validate_user_doc_keys(doc)?;
+                }
+            }
+        }
+        ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
+    }
+
     let schema = crate::context::with(|c| c.schema_for(app_id, collection));
     let stages = WriteStages::new(schema.as_ref());
 
@@ -502,8 +557,37 @@ mod tests {
     use base64::Engine as _;
     use serde_json::Value;
 
-    use super::{apply, inspect_update, ApplyMode};
+    use super::{apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode};
     use crate::backend::sqlite::SqliteBackend;
+
+    #[test]
+    fn db8_rejects_reserved_and_malformed_user_doc_keys() {
+        use serde_json::json;
+        // A normal document passes.
+        assert!(validate_user_doc_keys(&json!({ "name": "a", "ssn": "x" })).is_ok());
+        // The user must not forge the masked sibling suffix the platform emits.
+        assert!(validate_user_doc_keys(&json!({ "ssn_masked": "x" })).is_err());
+        // Nor a platform-internal `_`-prefixed name (covers `__zsenc__` markers,
+        // `__zs_`, synthetic `_rank`/`_score`).
+        assert!(validate_user_doc_keys(&json!({ "__zsenc__ssn": true })).is_err());
+        assert!(validate_user_doc_keys(&json!({ "_rank": 1 })).is_err());
+        // Null-byte and >63-byte keys (NAMEDATALEN truncation collision).
+        assert!(validate_user_doc_keys(&json!({ "a\u{0}b": 1 })).is_err());
+        let long = "x".repeat(64);
+        assert!(validate_user_doc_keys(&json!({ long: 1 })).is_err());
+    }
+
+    #[test]
+    fn db8_update_patch_validates_field_keys_not_operators() {
+        use serde_json::json;
+        // Plain field keys + a field-scoped operator value pass.
+        assert!(validate_update_patch_keys(&json!({ "name": "a", "views": { "$inc": 1 } })).is_ok());
+        // $set's nested field keys are validated; the operator key itself is skipped.
+        assert!(validate_update_patch_keys(&json!({ "$set": { "name": "a" } })).is_ok());
+        assert!(validate_update_patch_keys(&json!({ "$set": { "ssn_masked": "x" } })).is_err());
+        // A top-level reserved field key is rejected.
+        assert!(validate_update_patch_keys(&json!({ "ssn_masked": "x" })).is_err());
+    }
     use crate::backend::{EncryptedColumn as _, EncryptionMode, NamespaceManager, SqlExecutor};
     use crate::encryption;
     use crate::query::{
