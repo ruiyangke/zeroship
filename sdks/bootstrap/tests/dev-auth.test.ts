@@ -145,6 +145,18 @@ describe("dev-auth provider — config", () => {
     assert.equal(cfg?.passwords["pws_a"], "hunter2");
     assert.equal(cfg?.passwords["pws_b"], "dev");
   });
+
+  test("id-only users get UNIQUE synthesized emails (no collision on the shared default)", () => {
+    // The doc's multi-user shape is `{ id, name }` with no email. These must
+    // NOT all collapse to dev@localhost, or every user but the first becomes
+    // unloginnable and the dropdown is ambiguous.
+    const cfg = parseDevAuthConfig(
+      JSON.stringify({ users: [{ id: "pws_a", name: "A" }, { id: "pws_b", name: "B" }] }),
+    );
+    assert.equal(cfg?.users[0].email, "pws_a@localhost");
+    assert.equal(cfg?.users[1].email, "pws_b@localhost");
+    assert.notEqual(cfg?.users[0].email, cfg?.users[1].email);
+  });
 });
 
 describe("dev-auth provider — cookie token round-trips (WebCrypto HMAC)", () => {
@@ -232,6 +244,35 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     const loc = new URL(res.headers.get("location")!);
     assert.equal(loc.origin, "http://localhost:3001");
     assert.equal(loc.pathname, "/__zeroship/auth/popup-callback");
+  });
+
+  test("a same-origin but WRONG-PATH redirect_uri is dropped to the canonical callback (exact-match)", async () => {
+    // Origin-only pinning is not enough: a same-origin app path that logs its
+    // query could capture the dev code. The match is exact (origin + path).
+    const p = makeProvider();
+    const getRes = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/authorize?state=s"),
+    );
+    const csrf = cookieValue(getRes, "__zeroship_dev_csrf")!;
+    const body = new URLSearchParams({
+      csrf,
+      state: "s",
+      redirect_uri: "http://localhost:3001/app/steal-code", // same origin, wrong path
+      email: "dev@localhost",
+      password: "dev",
+    });
+    const res = await p.handle(
+      new Request("http://localhost:3001/__zeroship/auth/authorize", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `__zeroship_dev_csrf=${csrf}`,
+        },
+        body: body.toString(),
+      }),
+    );
+    assert.equal(res.status, 302);
+    assert.equal(new URL(res.headers.get("location")!).pathname, "/__zeroship/auth/popup-callback");
   });
 
   test("POST authorize with a mismatched CSRF token is rejected (400)", async () => {
@@ -379,26 +420,95 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
     assert.match(html, /name="csrf"/);
   });
 
-  test("multi-user POST with the chosen user's credentials signs that user in", async () => {
+  test("multi-user: the RENDERED <select> form round-trips (browser submits the default selection)", async () => {
+    // Faithful: derive the POST from what the browser actually renders — the
+    // `selected` <option>'s email + the prefilled password — not a hand-built
+    // body. Proves a browser submitting the real <select> form produces a valid
+    // sign-in.
     const p = makeProvider(
       JSON.stringify({
         users: [
-          { id: "pws_a", email: "a@x", name: "A" },
-          { id: "pws_b", email: "b@x", name: "B", password: "bee" },
+          { id: "pws_a", name: "A" },
+          { id: "pws_b", name: "B", password: "bee" },
+        ],
+        defaultUserId: "pws_a",
+      }),
+    );
+    const getRes = await p.handle(new Request(`${ORIGIN}/__zeroship/auth/authorize?state=s`));
+    const csrf = cookieValue(getRes, "__zeroship_dev_csrf")!;
+    const html = await getRes.text();
+    const selectedEmail = /<option value="([^"]*)" selected>/.exec(html)![1];
+    const password = /name="password"[^>]*value="([^"]*)"/.exec(html)![1];
+    assert.equal(selectedEmail, "pws_a@localhost"); // default pre-selected
+    const body = new URLSearchParams({
+      csrf,
+      state: "s",
+      redirect_uri: `${ORIGIN}/__zeroship/auth/popup-callback`,
+      email: selectedEmail,
+      password,
+    });
+    const post = await p.handle(
+      new Request(`${ORIGIN}/__zeroship/auth/authorize`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", cookie: `__zeroship_dev_csrf=${csrf}` },
+        body: body.toString(),
+      }),
+    );
+    assert.equal(post.status, 302);
+    const code = new URL(post.headers.get("location")!).searchParams.get("code")!;
+    const exch = await p.handle(
+      new Request(`${ORIGIN}/__zeroship/auth/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      }),
+    );
+    assert.equal(((await exch.json()) as { user: { id: string } }).user.id, "pws_a");
+  });
+
+  test("multi-user: selecting the OTHER user (its mapped password) signs that user in", async () => {
+    // The onchange script's email→password map is the source of truth for the
+    // re-prefill. Submitting the other user's email + its mapped password must
+    // sign THAT user in (per-user password, unique synthesized email).
+    const p = makeProvider(
+      JSON.stringify({
+        users: [
+          { id: "pws_a", name: "A" },
+          { id: "pws_b", name: "B", password: "bee" },
         ],
       }),
     );
-    // Sign in AS the second user (its own email + per-user password).
-    const token = await devSessionCookie(p, { email: "b@x", password: "bee" });
-    const probe = await p.handle(
-      new Request("http://localhost:3001/__zeroship/auth/session", {
-        headers: { cookie: `__zeroship_dev_session=${token}` },
+    const getRes = await p.handle(new Request(`${ORIGIN}/__zeroship/auth/authorize?state=s`));
+    const csrf = cookieValue(getRes, "__zeroship_dev_csrf")!;
+    const html = await getRes.text();
+    const map = JSON.parse(/var M=(\{.*?\});/.exec(html)![1]) as Record<string, string>;
+    assert.equal(map["pws_b@localhost"], "bee");
+    const body = new URLSearchParams({
+      csrf,
+      state: "s",
+      redirect_uri: `${ORIGIN}/__zeroship/auth/popup-callback`,
+      email: "pws_b@localhost",
+      password: map["pws_b@localhost"],
+    });
+    const post = await p.handle(
+      new Request(`${ORIGIN}/__zeroship/auth/authorize`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", cookie: `__zeroship_dev_csrf=${csrf}` },
+        body: body.toString(),
       }),
     );
-    assert.equal(probe.status, 200);
-    const body = (await probe.json()) as { user: { id: string; email: string } };
-    assert.equal(body.user.id, "pws_b");
-    assert.equal(body.user.email, "b@x");
+    assert.equal(post.status, 302);
+    const code = new URL(post.headers.get("location")!).searchParams.get("code")!;
+    const exch = await p.handle(
+      new Request(`${ORIGIN}/__zeroship/auth/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      }),
+    );
+    const u = ((await exch.json()) as { user: { id: string; email: string } }).user;
+    assert.equal(u.id, "pws_b");
+    assert.equal(u.email, "pws_b@localhost");
   });
 
   test("disabled when no secret is present", () => {

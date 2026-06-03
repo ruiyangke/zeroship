@@ -92,9 +92,14 @@ async function completePopup(h: Harness, provider: DevAuthProvider): Promise<voi
   const csrfCookie = /__zeroship_dev_csrf=([^;]+)/.exec(setCookie)?.[1];
   assert.ok(csrfCookie, "form should set a CSRF cookie");
   const html = await formRes.text();
-  // The developer accepts the prefilled values and submits them.
-  const field = (name: string) =>
-    new RegExp(`name="${name}"[^>]*value="([^"]*)"`).exec(html)?.[1] ?? "";
+  // The developer accepts the prefilled values and submits them. Handles both
+  // the single-user <input value> and the multi-user <select> (selected option).
+  const field = (name: string) => {
+    const input = new RegExp(`name="${name}"[^>]*value="([^"]*)"`).exec(html)?.[1];
+    if (input !== undefined) return input;
+    const selected = new RegExp(`<select name="${name}"[\\s\\S]*?<option value="([^"]*)" selected`).exec(html)?.[1];
+    return selected ?? "";
+  };
   const body = new URLSearchParams({
     csrf: field("csrf"),
     state: field("state"),

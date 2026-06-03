@@ -78,19 +78,23 @@ from inside the dev runtime — no gateway, no Hydra:
   same-origin iframe the SDK drives in prod). It is **prefilled** with the
   selected dev user's credentials so sign-in is one click, but it is **NOT
   auto-submitted** — the developer clicks "Sign in", exactly mirroring prod's
-  framed `auth.zeroship.ai/login`. The form carries a CSRF token (double-submit
-  cookie, the dev peer of prod's `__Host-zsidp_csrf`) and hidden `state` /
-  `redirect_uri`. Multi-user configs render an email `<select>` of the
-  configured users (the default pre-selected); a tiny inline script re-prefills
-  the password on change. There is **no** frictionless 302 and **no** separate
-  picker step.
+  framed `auth.zeroship.ai/login`. The form carries a CSRF token (same
+  double-submit *contract* as prod's `__Host-zsidp_csrf`, but server-reflected:
+  the GET renders the token into both the cookie and the hidden field, so the
+  cookie stays `HttpOnly` — a stricter dev variant) and hidden `state` /
+  `redirect_uri` (pinned to the exact same-origin callback path). Multi-user
+  configs render an email `<select>` of the configured users (the default
+  pre-selected); a tiny inline script re-prefills the password on change. There
+  is **no** frictionless 302 and **no** separate picker step.
 - `authorize` (POST) → the form submit. Validates CSRF + email + password
   against the configured dev users; on success mints a dev code and 302s to
   `/__zeroship/auth/popup-callback?code&state`; on failure re-renders the form
   with the `invalid email or password` banner (401) — same shape as prod.
-- `popup-callback` → the **byte-for-byte same** relay page the gateway serves —
-  including the dual-target postMessage (`window.opener` for the popup leg, else
-  `window.parent` for the immersive iframe leg, pinned to `location.origin`).
+- `popup-callback` → the same relay **contract** the gateway serves — the
+  dual-target postMessage (`window.opener` for the popup leg, else
+  `window.parent` for the immersive iframe leg, pinned to `location.origin`). It
+  is a CSP-free localhost variant (prod serves the relay under a nonce'd CSP),
+  so the inline script is behaviourally identical but not byte-identical.
 - `session` (POST) → spends the dev code, mints the `__zeroship_dev_session` cookie,
   returns `{ user, expires_at }`.
 - `session` (GET / `?mint=1`) → read / re-mint, or `401 { error: "login_required" }`.

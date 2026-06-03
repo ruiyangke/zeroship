@@ -109,9 +109,13 @@ export interface DevAuthConfig {
 /** Cookie name — mirrors `DEV_SESSION_COOKIE` in `dev_auth.rs`. */
 const DEV_SESSION_COOKIE = "__zeroship_dev_session";
 /**
- * Dev login CSRF cookie — the double-submit peer of the hidden `csrf` form
- * field, mirroring prod's `__Host-zsidp_csrf` (`crates/auth/src/csrf.rs`). The
- * GET form sets it and embeds the same token; the POST compares them.
+ * Dev login CSRF cookie — the cookie half of a double-submit pair with the
+ * hidden `csrf` form field. Same *contract* as prod's `__Host-zsidp_csrf`
+ * (`crates/auth/src/csrf.rs`), but the mechanism differs deliberately: prod's
+ * cookie is non-HttpOnly because its inline script READS it to populate the
+ * field; the dev GET renders the token into BOTH the cookie and the field
+ * server-side, so no JS read is needed and we keep the cookie `HttpOnly` (a
+ * stricter dev variant). The POST compares cookie vs field.
  */
 const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
 /**
@@ -248,10 +252,17 @@ function normalizeUser(u: DevUserConfig, index: number): { wire: WireUser; passw
   const id =
     u.id ??
     (index === 0 ? DEFAULT_DEV_USER.id : `pws_dev${String(index).padStart(17, "0")}`);
+  // Synthesize a UNIQUE email per user when omitted — keyed off the (unique)
+  // id, not the shared default. Otherwise several id-only users (the doc's
+  // `{ id, name }` multi-user shape) would all collapse to `dev@localhost`,
+  // making every user but the first unloginnable and the dropdown ambiguous.
+  // The built-in default-shaped user keeps `dev@localhost`.
+  const email =
+    u.email ?? (id === DEFAULT_DEV_USER.id ? DEFAULT_DEV_USER.email : `${id}@localhost`);
   return {
     wire: {
       id,
-      email: u.email ?? DEFAULT_DEV_USER.email,
+      email,
       name: u.name ?? DEFAULT_DEV_USER.name,
       avatar: u.avatar ?? null,
       email_verified: true,
@@ -377,20 +388,27 @@ function clearCookieHeader(): string {
   return `${DEV_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
+/** The single legitimate callback path the dev code is ever delivered to. */
+const POPUP_CALLBACK_PATH = "/__zeroship/auth/popup-callback";
+
 /**
- * Resolve a SAME-ORIGIN popup-callback target. A cross-origin (or unparseable)
- * `redirect_uri` falls back to the canonical same-origin callback — the dev
- * peer of the gateway's exact-`redirect_uri`-match guard (open-redirect /
- * code-exfiltration defense), so dev mirrors prod's rigor.
+ * Resolve the popup-callback target with an EXACT same-origin + same-path match
+ * — the dev peer of the gateway's exact-`redirect_uri` guard (open-redirect /
+ * code-exfiltration defense). Anything that is not exactly the canonical
+ * same-origin `/__zeroship/auth/popup-callback` (cross-origin, a different
+ * same-origin path, or unparseable) falls back to the canonical callback, so a
+ * crafted `redirect_uri` can never steer the dev code elsewhere. The SDK always
+ * sends exactly this path (`transport.redirectUri()`), so this never rejects a
+ * legitimate request.
  */
 function safeRedirectUri(candidate: string | null, origin: string): string {
-  const fallback = `${origin}/__zeroship/auth/popup-callback`;
-  if (!candidate) return fallback;
+  const canonical = `${origin}${POPUP_CALLBACK_PATH}`;
+  if (!candidate) return canonical;
   try {
     const u = new URL(candidate, origin);
-    return u.origin === origin ? u.toString() : fallback;
+    return u.origin === origin && u.pathname === POPUP_CALLBACK_PATH ? u.toString() : canonical;
   } catch {
-    return fallback;
+    return canonical;
   }
 }
 
@@ -418,7 +436,13 @@ function readCookie(request: Request, name: string): string | null {
   return null;
 }
 
-/** The same-origin relay page the gateway serves — byte-identical behaviour. */
+/**
+ * The same-origin relay page — the same postMessage relay CONTRACT the gateway
+ * serves (opener-or-parent, pinned to `location.origin`). It is a CSP-free
+ * localhost variant: prod serves its relay under a nonce'd CSP, while the dev
+ * responses set no CSP, so the inline script here is not byte-identical to
+ * prod's nonce'd page — only the relay behaviour matches.
+ */
 function popupCallbackHtml(): string {
   return (
     "<!doctype html><meta charset=utf-8><title>Sign-in</title>\n" +
