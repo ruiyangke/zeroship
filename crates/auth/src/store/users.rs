@@ -124,6 +124,104 @@ pub async fn update_password_hash(
     Ok(())
 }
 
+/// Account-lockout policy (security finding L5). Per-user, conservative on
+/// purpose so an attacker can't trivially lock out a victim — the per-email
+/// leaky bucket (cap 10/hr) is the broad throttle; this is the escalation arm
+/// that turns sustained guessing against ONE account into a hard stop with
+/// exponential backoff.
+///
+/// Lockout engages on the Nth consecutive wrong-password attempt and is
+/// cleared on the next success. Backoff grows with the overage past the
+/// threshold (1 min → 2 → 4 → … capped) so a brief blip recovers fast while a
+/// sustained attack escalates.
+pub mod lockout {
+    /// Consecutive failures before the account is locked.
+    pub const THRESHOLD: i32 = 5;
+    /// Initial lock duration once the threshold is first crossed.
+    pub const INITIAL_BACKOFF_SECS: i64 = 60;
+    /// Upper bound on the (exponentially growing) lock duration.
+    pub const MAX_BACKOFF_SECS: i64 = 3600;
+
+    /// Lock duration for a row whose `failed_login_count` has reached `count`
+    /// (already including the failure being recorded). Returns `None` while
+    /// below `THRESHOLD` (no lock yet).
+    #[must_use]
+    pub fn backoff_secs(count: i32) -> Option<i64> {
+        if count < THRESHOLD {
+            return None;
+        }
+        // Overage past the threshold doubles the window: 0→1×, 1→2×, 2→4×…
+        // `min(20)` keeps the shift in range before the cap clamps it.
+        let overage = (count - THRESHOLD).min(20);
+        let secs = INITIAL_BACKOFF_SECS.saturating_mul(1_i64 << overage);
+        Some(secs.min(MAX_BACKOFF_SECS))
+    }
+}
+
+/// Record a failed password attempt against a real user: bump
+/// `failed_login_count` and, once it reaches [`lockout::THRESHOLD`], stamp
+/// `locked_until` with exponential backoff. Idempotent per-call (one increment
+/// per invocation). Returns the resulting consecutive-failure count.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure.
+pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> {
+    // Increment atomically and read back the new count so the lock decision is
+    // made against the row's authoritative value (no read-modify-write race).
+    let rows = conn
+        .query(
+            "UPDATE zeroship.users \
+             SET failed_login_count = failed_login_count + 1, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+             RETURNING failed_login_count",
+            &[&id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("users record_login_failure: {e}")))?;
+    let Some(row) = rows.first() else {
+        // No such user — nothing to lock (the enumeration-defense path never
+        // reaches here, since it only fires for a real user).
+        return Ok(0);
+    };
+    let count: i32 = row.get("failed_login_count");
+
+    if let Some(secs) = lockout::backoff_secs(count) {
+        conn.execute(
+            "UPDATE zeroship.users \
+             SET locked_until = NOW() + ($2 || ' seconds')::interval, \
+                 updated_at = NOW() \
+             WHERE id = $1",
+            &[&id, &secs.to_string()],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("users record_login_failure lock: {e}")))?;
+    }
+    Ok(count)
+}
+
+/// Clear the lockout state after a successful login: zero `failed_login_count`
+/// and clear `locked_until`. No-op write when already clean.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure.
+pub async fn reset_login_failures(conn: &Client, id: uuid::Uuid) -> Result<()> {
+    conn.execute(
+        "UPDATE zeroship.users \
+         SET failed_login_count = 0, \
+             locked_until = NULL, \
+             updated_at = NOW() \
+         WHERE id = $1 \
+           AND (failed_login_count <> 0 OR locked_until IS NOT NULL)",
+        &[&id],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("users reset_login_failures: {e}")))?;
+    Ok(())
+}
+
 /// Bump `last_login_at` to `NOW()`.
 ///
 /// # Errors
@@ -150,5 +248,50 @@ fn row_to_user(row: &compio_postgres::Row) -> UserRow {
         credential_version: row.get("credential_version"),
         locked_until: row.try_get("locked_until").ok(),
         disabled_at: row.try_get("disabled_at").ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lockout;
+
+    #[test]
+    fn no_lock_below_threshold() {
+        for count in 0..lockout::THRESHOLD {
+            assert_eq!(
+                lockout::backoff_secs(count),
+                None,
+                "count {count} is below threshold and must not lock"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_engages_at_threshold_with_initial_backoff() {
+        assert_eq!(
+            lockout::backoff_secs(lockout::THRESHOLD),
+            Some(lockout::INITIAL_BACKOFF_SECS),
+            "first lock uses the initial backoff"
+        );
+    }
+
+    #[test]
+    fn backoff_doubles_then_caps() {
+        // Each failure past the threshold doubles the window.
+        assert_eq!(
+            lockout::backoff_secs(lockout::THRESHOLD + 1),
+            Some(lockout::INITIAL_BACKOFF_SECS * 2)
+        );
+        assert_eq!(
+            lockout::backoff_secs(lockout::THRESHOLD + 2),
+            Some(lockout::INITIAL_BACKOFF_SECS * 4)
+        );
+        // Far past the threshold the window saturates at the cap, never beyond,
+        // and never overflows (large overage is clamped, no panic).
+        assert_eq!(
+            lockout::backoff_secs(lockout::THRESHOLD + 100),
+            Some(lockout::MAX_BACKOFF_SECS)
+        );
+        assert_eq!(lockout::backoff_secs(i32::MAX), Some(lockout::MAX_BACKOFF_SECS));
     }
 }

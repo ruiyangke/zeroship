@@ -11,7 +11,7 @@
   </label>
   <button type="submit">Update password</button>
 </form>
-<script nonce="{{ csrf }}">
+<script nonce="{{ script_nonce }}">
   // Scrub the token from URL/history; the hidden form input still has it.
   if (window.history && window.history.replaceState) {
     window.history.replaceState(null, '', window.location.pathname);

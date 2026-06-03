@@ -311,9 +311,13 @@ async fn complete_password_reset_tx(
 
 fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpResponse {
     let csrf_token = csrf::generate_token();
+    // Independent per-response CSP script nonce — must NOT be the CSRF token
+    // (which is also a non-HttpOnly cookie + plaintext form field). See L3.
+    let script_nonce = csrf::generate_token();
     let page = ResetPage {
         token,
         csrf: &csrf_token,
+        script_nonce: &script_nonce,
         error,
     };
     let body = page
@@ -325,7 +329,7 @@ fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpRespon
     resp.header("Pragma", "no-cache");
     resp.header(
         "Content-Security-Policy",
-        headers::content_security_policy_with_script_nonce(&csrf_token),
+        headers::content_security_policy_with_script_nonce(&script_nonce),
     );
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
@@ -368,6 +372,35 @@ mod tests {
         assert!(
             legacy.is_err(),
             "legacy ?t= must not deserialize into ResetQuery; got {legacy:?}"
+        );
+    }
+
+    /// L3 regression: the `/reset` inline `<script nonce>` must carry an
+    /// independent per-response CSP nonce, NOT the CSRF token. The render
+    /// helper (`render_form`) generates a fresh nonce; the template must
+    /// emit it (not `{{ csrf }}`).
+    #[test]
+    fn reset_page_script_nonce_is_independent_of_csrf() {
+        use askama::Template;
+
+        let csrf = "csrf-double-submit-token-value";
+        let script_nonce = "independent-csp-script-nonce";
+        let page = ResetPage {
+            token: "tok_abc",
+            csrf,
+            script_nonce,
+            error: None,
+        };
+
+        let html = page.render().expect("reset page renders");
+
+        assert!(
+            html.contains(&format!("nonce=\"{script_nonce}\"")),
+            "inline <script> must carry the independent script nonce"
+        );
+        assert!(
+            !html.contains(&format!("nonce=\"{csrf}\"")),
+            "inline <script> must NOT reuse the CSRF token as its nonce"
         );
     }
 }

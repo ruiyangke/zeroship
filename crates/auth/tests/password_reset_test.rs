@@ -893,6 +893,131 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .ok();
 }
 
+/// Regression for security finding L4: a password-reset token must bind to the
+/// IMMUTABLE `user_id` captured at issue time, not re-resolve its target by an
+/// `email` JOIN at `complete()` time.
+///
+/// Pre-fix, `complete()` ran `JOIN zeroship.users u ON u.email = ml.email`, so
+/// the account whose password gets set is whoever owns the email NOW — not the
+/// account the reset was issued for. If any future email-change / account-recycle
+/// path moves an email between accounts after a reset is outstanding, the
+/// outstanding token silently sets the password of the account that inherited
+/// the address.
+///
+/// This test simulates that reassignment directly (the same mutation a future
+/// email-change feature would perform): issue a reset for victim A's email,
+/// move that email to attacker-controlled account B, then `complete()`. The
+/// reset MUST NOT set B's password.
+///
+/// Pre-fix this FAILS — `complete()` returns `Some { user_id: B }` and B's
+/// password hash becomes the reset hash (cross-account takeover).
+///
+/// Post-fix `complete()` filters on the issue-time `user_id` (A); since A no
+/// longer owns the email row, the candidate resolves to A's id and the token is
+/// consumed against A only — B is never touched.
+#[compio::test]
+async fn complete_binds_issue_time_user_not_current_email_owner() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let suffix = Uuid::new_v4().simple();
+    let email_a = format!("reset-l4-victim-{suffix}@zeroship.test");
+    let email_b = format!("reset-l4-attacker-{suffix}@zeroship.test");
+
+    // Victim A: the account the reset is legitimately issued for.
+    let user_a = users::create(&client, &email_a, "Victim A", None)
+        .await
+        .expect("seed user A");
+    let a_old_hash = password::hash("victim-a old password phrase")
+        .expect("hash A old");
+    users::update_password_hash(&client, user_a.id, &a_old_hash)
+        .await
+        .expect("set A old password");
+
+    // Attacker B: a DIFFERENT account. Parked on a placeholder email for now.
+    let email_b_parked = format!("reset-l4-attacker-parked-{suffix}@zeroship.test");
+    let user_b = users::create(&client, &email_b_parked, "Attacker B", None)
+        .await
+        .expect("seed user B");
+    let b_old_hash = password::hash("attacker-b old password phrase")
+        .expect("hash B old");
+    users::update_password_hash(&client, user_b.id, &b_old_hash)
+        .await
+        .expect("set B old password");
+
+    // 1. Issue a reset legitimately for victim A's email.
+    let issued = password_reset::issue(&client, &email_a)
+        .await
+        .expect("issue reset for A");
+
+    // 2. Email reassignment between issue and complete: A's email is freed and
+    //    granted to attacker B. This is exactly the mutation a future
+    //    email-change / account-recycle feature performs; today no such path
+    //    exists, so we apply it by hand to exercise the latent retargeting.
+    client
+        .execute(
+            "UPDATE zeroship.users SET email = $1::citext WHERE id = $2",
+            &[&format!("reset-l4-victim-freed-{suffix}@zeroship.test"), &user_a.id],
+        )
+        .await
+        .expect("free A's email");
+    client
+        .execute(
+            "UPDATE zeroship.users SET email = $1::citext WHERE id = $2",
+            &[&email_a, &user_b.id],
+        )
+        .await
+        .expect("reassign A's email to B");
+    let _ = &email_b; // (kept for readability; B now holds email_a)
+
+    // 3. Complete the outstanding reset. It must NOT retarget to B.
+    let new_hash = password::hash("attacker-chosen new password phrase")
+        .expect("hash new");
+    let completed = password_reset::complete(&client, &issued.raw, &new_hash)
+        .await
+        .expect("complete must not error");
+
+    // The reset must never resolve to attacker B.
+    if let Some(ref c) = completed {
+        assert_ne!(
+            c.user_id, user_b.id,
+            "reset issued for A must NOT retarget to B after email reassignment"
+        );
+    }
+
+    // Authoritative check: B's password hash is unchanged.
+    let b_hash_now: String = client
+        .query_one(
+            "SELECT password_hash FROM zeroship.users WHERE id = $1",
+            &[&user_b.id],
+        )
+        .await
+        .expect("load B hash")
+        .get("password_hash");
+    assert_eq!(
+        b_hash_now, b_old_hash,
+        "attacker B's password MUST remain unchanged by a reset issued for A"
+    );
+
+    // Cleanup.
+    client
+        .execute(
+            "DELETE FROM zeroship.magic_links WHERE email IN ($1::citext, $2::citext)",
+            &[&email_a, &email_b],
+        )
+        .await
+        .ok();
+    client
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = ANY($1)",
+            &[&vec![user_a.id, user_b.id]],
+        )
+        .await
+        .ok();
+}
+
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
     let Some(client) = pg().await else {

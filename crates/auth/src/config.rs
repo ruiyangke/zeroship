@@ -119,6 +119,15 @@ pub struct AuthConfig {
     /// `frame-ancestors 'none'` default holds (dev / single-origin deployments).
     /// Production sets exactly the console origin (e.g.
     /// `https://console.zeroship.ai`).
+    ///
+    /// Each entry MUST be SAME-SITE (same registrable domain / eTLD+1) with the
+    /// auth issuer host ([`Self::public_url`]). The framed login's CSRF cookie is
+    /// `SameSite=Strict`, so it only reaches the in-frame POST when the console
+    /// shares the issuer's registrable domain; a cross-registrable-domain console
+    /// would silently break framed login (cookie withheld). [`Self::resolve`]
+    /// fail-closes by DROPPING any non-same-site origin — that deployment falls
+    /// back to popup login rather than getting a relaxed `frame-ancestors` that
+    /// can't actually authenticate (review finding I7).
     #[arg(
         long = "frame-ancestor-origin",
         env = "FRAME_ANCESTOR_ORIGINS",
@@ -469,6 +478,57 @@ fn is_concrete_frame_ancestor_origin(origin: &str) -> bool {
     })
 }
 
+/// Conservative registrable-domain (eTLD+1) approximation for SameSite scoping.
+///
+/// We deliberately avoid a Public-Suffix-List dependency (offline-build
+/// safety) and instead compute a FAIL-CLOSED registrable domain:
+/// - a single-label host (e.g. `localhost`) is its own registrable domain;
+/// - otherwise the registrable domain is the host's last two labels
+///   (`auth.zeroship.ai` → `zeroship.ai`).
+///
+/// This is intentionally narrower than a true PSL eTLD+1 for exotic
+/// multi-part public suffixes (`a.co.uk` → `co.uk` here, not `a.co.uk`): the
+/// consequence is that the same-site guard is *stricter*, never *looser* —
+/// it can only drop a legitimate origin, never admit a cross-site one. For
+/// zeroship's `*.zeroship.ai` / `*.zeroship.localhost` topologies it is exact.
+#[must_use]
+fn registrable_domain(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    if labels.len() <= 1 {
+        return host;
+    }
+    let n = labels.len();
+    format!("{}.{}", labels[n - 2], labels[n - 1])
+}
+
+/// True when a (concrete) frame-ancestor `origin` is SAME-SITE with the auth
+/// `issuer_host` — i.e. shares the same registrable domain (eTLD+1).
+///
+/// SameSite cookie scoping ignores scheme and port and keys on the
+/// registrable domain, so the `SameSite=Strict` `__Host-zsidp_csrf` cookie set
+/// by the issuer reaches the in-frame POST only when the framing (console)
+/// origin is same-site. Any non-same-site embedder must be dropped from the
+/// `frame-ancestors` relax (login falls back to popup) — keeping it would
+/// either silently break framed login (cookie withheld) or invite a
+/// `Strict→None` downgrade that re-opens cross-site CSRF (review finding I7).
+///
+/// Fails closed: an unparseable/host-less candidate returns `false`.
+#[must_use]
+fn is_same_site_with_issuer(origin: &str, issuer_host: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let issuer_host = issuer_host.trim();
+    if issuer_host.is_empty() {
+        return false;
+    }
+    registrable_domain(host) == registrable_domain(issuer_host)
+}
+
 impl AuthConfig {
     /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
     /// file overlay.
@@ -497,14 +557,25 @@ impl AuthConfig {
         // rejected here so a misconfiguration can never widen the
         // `frame-ancestors` allowlist (§6.2) nor produce an un-serializable CSP
         // header value (§4.3 `static_insert` fallback).
-        self.frame_ancestor_origins
-            .retain(|o| is_concrete_frame_ancestor_origin(o));
+        // The auth issuer host the SameSite=Strict `__Host-zsidp_csrf` cookie is
+        // scoped to. Every admitted frame-ancestor MUST be same-site (eTLD+1)
+        // with it (review finding I7) — otherwise the Strict cookie is withheld
+        // on the in-frame POST (framed login silently breaks) and the only
+        // "fixes" are insecure (Strict→None re-opens cross-site CSRF). A
+        // non-same-site origin is therefore DROPPED here so the relaxed
+        // `frame-ancestors` never admits it; that deployment falls back to popup.
+        let issuer_host = url::Url::parse(&self.public_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        let keep = |o: &String| {
+            is_concrete_frame_ancestor_origin(o) && is_same_site_with_issuer(o, &issuer_host)
+        };
+        self.frame_ancestor_origins.retain(|o| keep(o));
         if self.frame_ancestor_origins.is_empty() {
             if let Some(origins) = auth.frame_ancestor_origins {
-                self.frame_ancestor_origins = origins
-                    .into_iter()
-                    .filter(|o| is_concrete_frame_ancestor_origin(o))
-                    .collect();
+                self.frame_ancestor_origins =
+                    origins.into_iter().filter(|o| keep(o)).collect();
             }
         }
         self.hydra_admin_url = Some(resolve_overlay_string(
@@ -905,6 +976,10 @@ mod tests {
             "zeroship-auth",
             "--db-url",
             "postgres://test",
+            // Issuer same-site with the test origins so the I7 guard is a no-op
+            // here; this test isolates CLI-vs-overlay precedence.
+            "--public-url",
+            "https://auth.zeroship.ai",
             "--frame-ancestor-origin",
             "https://console.zeroship.ai",
         ]);
@@ -929,6 +1004,10 @@ mod tests {
             "zeroship-auth",
             "--db-url",
             "postgres://test",
+            // Same-site issuer so this test isolates the wildcard/non-concrete
+            // rejection (not the I7 same-site drop).
+            "--public-url",
+            "https://auth.zeroship.ai",
             "--frame-ancestor-origin",
             // Mixed: one valid origin + several poison entries.
             "https://console.zeroship.ai,https://*.zeroship.ai,*,'self',data:,\
@@ -946,6 +1025,8 @@ mod tests {
     #[test]
     fn frame_ancestor_origins_rejects_wildcards_from_overlay_too() {
         let mut cfg = test_config(); // no CLI value → overlay path
+        // Same-site issuer so this test isolates wildcard/keyword rejection.
+        cfg.public_url = "https://auth.zeroship.ai".to_string();
         cfg.resolve(AuthSection {
             frame_ancestor_origins: Some(vec![
                 "https://*.zeroship.ai".to_string(), // wildcard — dropped
@@ -994,6 +1075,8 @@ mod tests {
     #[test]
     fn frame_ancestor_origins_overlay_used_when_cli_empty() {
         let mut cfg = test_config(); // no --frame-ancestor-origin
+        // Same-site issuer so this test isolates the empty-CLI→overlay fallback.
+        cfg.public_url = "https://auth.zeroship.ai".to_string();
         cfg.resolve(AuthSection {
             frame_ancestor_origins: Some(vec![
                 "https://overlay.zeroship.ai".to_string(),
@@ -1006,6 +1089,126 @@ mod tests {
             vec!["https://overlay.zeroship.ai".to_string()],
             "an empty CLI value must fall back to the [auth] overlay (empties dropped)"
         );
+    }
+
+    // I7 (latent guard): the SameSite=Strict `__Host-zsidp_csrf` cookie reaches
+    // the in-frame POST only when the framing (console) origin is SAME-SITE
+    // (same registrable domain / eTLD+1) with the auth issuer host. A
+    // cross-registrable-domain console silently breaks framed login (cookie
+    // withheld) and tempts a `Strict→None` downgrade that re-opens cross-site
+    // CSRF. The resolve guard MUST drop any frame-ancestor origin that is not
+    // same-site with `public_url`'s host, so the relaxed `frame-ancestors` never
+    // admits a non-same-site embedder (it falls back to popup / strict default).
+    #[test]
+    fn frame_ancestor_origins_drops_non_same_site_with_issuer() {
+        let mut cfg = test_config();
+        // Concrete prod issuer host: registrable domain `zeroship.ai`.
+        cfg.public_url = "https://auth.zeroship.ai".to_string();
+        cfg.resolve(AuthSection {
+            frame_ancestor_origins: Some(vec![
+                // Same-site with the issuer (same registrable domain) — KEPT.
+                "https://console.zeroship.ai".to_string(),
+                // Concrete + wildcard-free, but a DIFFERENT registrable domain —
+                // NOT same-site, so the Strict CSRF cookie would be withheld in
+                // the frame. MUST be dropped.
+                "https://console.zeroship-eu.com".to_string(),
+                // A look-alike suffix that merely *contains* the issuer domain as
+                // a substring but is a different registrable domain — dropped.
+                "https://console.zeroship.ai.evil.com".to_string(),
+            ]),
+            ..AuthSection::default()
+        });
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["https://console.zeroship.ai".to_string()],
+            "only the origin same-site (eTLD+1) with the auth issuer survives; \
+             cross-registrable-domain consoles are dropped (relax → popup)"
+        );
+    }
+
+    // The same-site guard also applies on the CLI path (CLI value wins over the
+    // overlay but is still subject to the same-site drop).
+    #[test]
+    fn frame_ancestor_origins_cli_drops_non_same_site() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--public-url",
+            "https://auth.zeroship.ai",
+            "--frame-ancestor-origin",
+            "https://console.zeroship.ai,https://attacker.example.com",
+        ]);
+        cfg.resolve(AuthSection::default());
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["https://console.zeroship.ai".to_string()],
+            "a non-same-site CLI origin is dropped by the issuer-same-site guard"
+        );
+    }
+
+    // Dev loopback: issuer host `localhost`; a `localhost` console (any port) is
+    // same-site, but a real registrable-domain console is not.
+    #[test]
+    fn frame_ancestor_origins_loopback_issuer_keeps_localhost_only() {
+        let mut cfg = test_config(); // public_url defaults to http://localhost:9092
+        cfg.resolve(AuthSection {
+            frame_ancestor_origins: Some(vec![
+                "http://localhost:5173".to_string(),         // same-site (localhost)
+                "https://console.zeroship.ai".to_string(),   // not same-site
+            ]),
+            ..AuthSection::default()
+        });
+        assert_eq!(
+            cfg.frame_ancestor_origins,
+            vec!["http://localhost:5173".to_string()],
+            "with a loopback issuer only localhost consoles are same-site"
+        );
+    }
+
+    #[test]
+    fn same_site_predicate_matches_real_topologies() {
+        // Same registrable domain → same-site.
+        assert!(is_same_site_with_issuer(
+            "https://console.zeroship.ai",
+            "auth.zeroship.ai"
+        ));
+        assert!(is_same_site_with_issuer(
+            "https://console.zeroship.ai",
+            "zeroship.ai"
+        ));
+        assert!(is_same_site_with_issuer(
+            "https://auth.zeroship.ai",
+            "auth.zeroship.ai"
+        ));
+        // Multi-label dev suffix.
+        assert!(is_same_site_with_issuer(
+            "https://console.zeroship.localhost:8443",
+            "auth.zeroship.localhost"
+        ));
+        // Loopback issuer: only localhost consoles.
+        assert!(is_same_site_with_issuer("http://localhost:5173", "localhost"));
+        assert!(!is_same_site_with_issuer(
+            "https://console.zeroship.ai",
+            "localhost"
+        ));
+        // Different registrable domains → NOT same-site (fail closed).
+        assert!(!is_same_site_with_issuer(
+            "https://console.zeroship-eu.com",
+            "auth.zeroship.ai"
+        ));
+        // Suffix-substring look-alike must NOT pass (must match on label
+        // boundary, not substring).
+        assert!(!is_same_site_with_issuer(
+            "https://console.zeroship.ai.evil.com",
+            "auth.zeroship.ai"
+        ));
+        assert!(!is_same_site_with_issuer(
+            "https://evilzeroship.ai",
+            "auth.zeroship.ai"
+        ));
+        // Unparseable / non-origin candidate fails closed.
+        assert!(!is_same_site_with_issuer("not-a-url", "auth.zeroship.ai"));
     }
 
     #[test]

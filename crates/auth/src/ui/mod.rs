@@ -29,7 +29,7 @@ use askama::Template;
 use ntex::http::header::SET_COOKIE;
 use ntex::web::HttpResponse;
 
-use crate::headers;
+use crate::{csrf, headers};
 
 /// `/login` GET page. The handler resolves `client_name` from
 /// `info.client.client_name.as_deref().unwrap_or(&info.client.client_id)`
@@ -202,6 +202,13 @@ pub struct TokenRedeemInterstitial<'a> {
     pub action: &'a str,
     pub token: &'a str,
     pub csrf: &'a str,
+    /// Per-response CSP `script-src` nonce. MUST be independent of `csrf`:
+    /// the CSRF token is also a non-HttpOnly cookie and a plaintext form
+    /// field, so reusing it as the script nonce conflates two secrets and
+    /// any future reflection/logging of the CSRF token would silently
+    /// weaken the CSP nonce (L3). `render_token_interstitial` generates a
+    /// fresh value; the field is populated there, never by callers.
+    pub script_nonce: &'a str,
     pub extra_fields: Vec<(&'a str, &'a str)>,
 }
 
@@ -209,6 +216,18 @@ pub fn render_token_interstitial(
     page: &TokenRedeemInterstitial<'_>,
     csrf_set_cookie: &str,
 ) -> HttpResponse {
+    // Independent per-response CSP script nonce — distinct from the CSRF
+    // double-submit token. Generated here so callers cannot accidentally
+    // alias the two (and so the nonce is never exposed via cookie/form).
+    let script_nonce = csrf::generate_token();
+    let page = TokenRedeemInterstitial {
+        title: page.title,
+        action: page.action,
+        token: page.token,
+        csrf: page.csrf,
+        script_nonce: &script_nonce,
+        extra_fields: page.extra_fields.clone(),
+    };
     let body = page
         .render()
         .unwrap_or_else(|_| "<p>Redirecting...</p>".to_string());
@@ -218,7 +237,7 @@ pub fn render_token_interstitial(
     resp.header("Pragma", "no-cache");
     resp.header(
         "Content-Security-Policy",
-        headers::content_security_policy_with_script_nonce(page.csrf),
+        headers::content_security_policy_with_script_nonce(&script_nonce),
     );
     resp.header(SET_COOKIE, csrf_set_cookie);
     resp.body(body)
@@ -248,6 +267,9 @@ pub struct ForgotPage<'a> {
 pub struct ResetPage<'a> {
     pub token: &'a str,
     pub csrf: &'a str,
+    /// Per-response CSP `script-src` nonce, independent of `csrf` (L3).
+    /// See [`TokenRedeemInterstitial::script_nonce`].
+    pub script_nonce: &'a str,
     pub error: Option<&'a str>,
 }
 
@@ -291,7 +313,84 @@ pub struct MePage<'a> {
 mod tests {
     use askama::Template;
 
-    use super::{ErrorPage, PublicErrorMessage};
+    use super::{
+        render_token_interstitial, ErrorPage, PublicErrorMessage, TokenRedeemInterstitial,
+    };
+
+    /// Extract the `'nonce-<value>'` from a `script-src` CSP directive.
+    fn script_src_nonce(csp: &str) -> Option<String> {
+        let marker = "'nonce-";
+        let start = csp.find(marker)? + marker.len();
+        let rest = &csp[start..];
+        let end = rest.find('\'')?;
+        Some(rest[..end].to_string())
+    }
+
+    /// L3 regression: the CSP `script-src` nonce on the token-redeem
+    /// interstitial MUST be an independent per-response value, NOT the CSRF
+    /// token (which is also a non-HttpOnly cookie + plaintext form field).
+    /// Conflating the two means any change that logs/reflects/lengthens the
+    /// CSRF token silently weakens the CSP nonce.
+    #[test]
+    fn token_interstitial_csp_nonce_differs_from_csrf() {
+        let csrf = "csrf-double-submit-token-value";
+        let page = TokenRedeemInterstitial {
+            title: "Sign in",
+            action: "/magic/verify/redeem",
+            token: "tok_abc",
+            csrf,
+            // Caller-supplied value is ignored; render generates a fresh nonce.
+            script_nonce: "",
+            extra_fields: Vec::new(),
+        };
+
+        let resp = render_token_interstitial(&page, "zsidp_csrf=x; Path=/");
+
+        let csp = resp
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|v| v.to_str().ok())
+            .expect("CSP header present")
+            .to_string();
+
+        let nonce = script_src_nonce(&csp).expect("script-src carries a nonce");
+
+        assert_ne!(
+            nonce, csrf,
+            "CSP script-nonce must be independent of the CSRF token, got nonce==csrf"
+        );
+        assert!(
+            !nonce.is_empty(),
+            "CSP script-nonce must be a non-empty per-response value"
+        );
+    }
+
+    /// The rendered inline `<script nonce>` must carry the independent CSP
+    /// nonce, not the CSRF token — otherwise the CSP would reject the script.
+    #[test]
+    fn token_interstitial_script_tag_nonce_is_not_csrf() {
+        let csrf = "csrf-double-submit-token-value";
+        let script_nonce = "independent-csp-script-nonce";
+        let page = TokenRedeemInterstitial {
+            title: "Sign in",
+            action: "/magic/verify/redeem",
+            token: "tok_abc",
+            csrf,
+            script_nonce,
+            extra_fields: Vec::new(),
+        };
+
+        let html = page.render().expect("interstitial renders");
+
+        assert!(
+            html.contains(&format!("nonce=\"{script_nonce}\"")),
+            "inline <script> must carry the independent script nonce"
+        );
+        assert!(
+            !html.contains(&format!("nonce=\"{csrf}\"")),
+            "inline <script> must NOT reuse the CSRF token as its nonce"
+        );
+    }
 
     #[test]
     fn error_page_renders_only_public_message() {

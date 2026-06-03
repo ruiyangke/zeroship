@@ -731,6 +731,12 @@ async fn login_issue_does_not_supersede_reset_token() {
     };
 
     let email = format!("magic-reset-kept-{}@example.test", Uuid::new_v4().simple());
+    // A reset token binds to the issuing user's immutable id (security finding
+    // L4), so `issue` only writes a row when the email maps to a real user —
+    // mirroring the production `/forgot` caller, which guards on `find_by_email`.
+    let user = zeroship_auth::store::users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
     let reset = password_reset::issue(&client, &email)
         .await
         .expect("issue reset token");
@@ -751,6 +757,10 @@ async fn login_issue_does_not_supersede_reset_token() {
             "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
         )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

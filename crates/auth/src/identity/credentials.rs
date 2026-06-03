@@ -218,6 +218,14 @@ pub async fn verify_password_credentials(
     // 6b. Wrong password — fail (`invalid_credentials`). This is the ONLY arm
     // reachable past here, and only when `valid == true`.
     if !valid {
+        // Account-lockout escalation (finding L5): count this consecutive
+        // failure against the real user and, past the threshold, set
+        // `locked_until` so the NEXT attempt is rejected as locked even with
+        // the right password. Best-effort — a counter-store fault must not
+        // change the credential decision (still `invalid_credentials`).
+        if let Err(e) = users::record_login_failure(db, u.id).await {
+            tracing::error!(error = %e, user_id = %u.id, "record_login_failure failed");
+        }
         audit::emit(
             db,
             &AuditEvent {
@@ -257,7 +265,13 @@ pub async fn verify_password_credentials(
         return Err(CredentialError::Ineligible);
     }
 
-    // 8. Success — emit the audit row and hand the verified user back.
+    // 8. Success — clear any accumulated lockout state, emit the audit row, and
+    // hand the verified user back. Best-effort reset: a failure here must not
+    // block a legitimate login (the eligibility gate above already cleared a
+    // live lock).
+    if let Err(e) = users::reset_login_failures(db, u.id).await {
+        tracing::error!(error = %e, user_id = %u.id, "reset_login_failures failed");
+    }
     audit::emit(
         db,
         &AuditEvent {

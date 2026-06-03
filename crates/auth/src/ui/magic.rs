@@ -403,6 +403,9 @@ pub async fn verify(
         action: "/magic/verify/redeem",
         token: &query.token,
         csrf: &csrf_token,
+        // Overwritten with an independent per-response nonce inside
+        // `render_token_interstitial`; callers must not set it.
+        script_nonce: "",
         extra_fields: vec![("login_challenge", query.login_challenge.as_str())],
     };
     let csrf_set_cookie = magic_csrf_set_cookie(&csrf_token, cfg.insecure_dev);

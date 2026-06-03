@@ -21,7 +21,7 @@
   {%- endfor %}
 </form>
 <p>Redirecting…</p>
-<script nonce="{{ csrf }}">
+<script nonce="{{ script_nonce }}">
   (function() {
     // Scrub the token from history so back-button doesn't re-expose it.
     if (window.history && window.history.replaceState) {

@@ -3,14 +3,19 @@
 //! Per proposal §8.3 (Phase 5):
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
-//!   in `zeroship.magic_links` keyed by `(email, purpose='reset')`. Returns
-//!   the raw token to the caller, which embeds it in the `/reset?token=`
-//!   email link.
+//!   in `zeroship.magic_links` keyed by `(email, purpose='reset')`. The row
+//!   also captures the user's IMMUTABLE `user_id` (resolved from the email at
+//!   issue time) — `complete` binds on that id, never re-resolving the target
+//!   by email (security finding L4). Returns the raw token to the caller,
+//!   which embeds it in the `/reset?token=` email link.
 //!
 //! - **Complete**: SHA-256 the raw token, atomically update the user's
 //!   password hash and consume the reset row by `(token_hash,
 //!   purpose='reset')` with the predicates `consumed_at IS NULL` AND
-//!   `expires_at > NOW()`. Single-use is enforced at the database layer.
+//!   `expires_at > NOW()`. The target account is selected by the row's
+//!   stored `user_id`, not an email JOIN, so an email reassignment between
+//!   issue and complete cannot retarget the reset. Single-use is enforced at
+//!   the database layer.
 //!
 //! - **TTL**: 60 minutes. Longer than a magic-link's 15-minute window
 //!   (resetting a password is a deliberate flow the user may pick back
@@ -120,11 +125,20 @@ pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
         .await
         .map_err(|e| AuthError::Db(format!("password_reset supersede previous: {e}")))?;
 
-        // 3. Insert the new row.
+        // 3. Insert the new row, binding it to the user's IMMUTABLE id
+        //    resolved from the email NOW (security finding L4). `complete`
+        //    filters on this id, never re-resolving the target by email — so
+        //    a later email reassignment cannot retarget the reset to a
+        //    different account. The id is captured via a sub-SELECT in the
+        //    SAME statement (and SAME advisory-locked transaction) so it is
+        //    consistent with the email the token is keyed on. If the email
+        //    has no user, no row is inserted and the token is inert.
         db.execute(
             "INSERT INTO zeroship.magic_links \
-                (token_hash, email, csrf_nonce, purpose, expires_at) \
-             VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
+                (token_hash, email, csrf_nonce, purpose, expires_at, user_id) \
+             SELECT $1, $2::citext, $3, $4, \
+                    NOW() + ($5::text || ' minutes')::interval, u.id \
+             FROM zeroship.users u WHERE u.email = $2::citext",
             &[
                 &token_hash.as_slice(),
                 &email,
@@ -229,12 +243,19 @@ pub async fn complete(
     let token_hash = sha256(raw_token);
     let rows = db
         .query(
+            // Candidate is resolved by the IMMUTABLE `ml.user_id` captured at
+            // issue time (security finding L4), NOT by re-joining on email —
+            // so an email reassignment between issue and complete cannot
+            // retarget the reset. Email is JOINed only as a display value and
+            // plays no role in selecting the account. `ml.user_id IS NOT NULL`
+            // excludes magic-LINK login rows (which leave it NULL) defensively.
             "WITH candidate AS ( \
-                 SELECT u.id AS user_id, u.email::text AS email \
+                 SELECT ml.user_id AS user_id, u.email::text AS email \
                  FROM zeroship.magic_links ml \
-                 JOIN zeroship.users u ON u.email = ml.email \
+                 JOIN zeroship.users u ON u.id = ml.user_id \
                  WHERE ml.token_hash = $1 \
                    AND ml.purpose = $2 \
+                   AND ml.user_id IS NOT NULL \
                    AND ml.consumed_at IS NULL \
                    AND ml.expires_at > NOW() \
              ), updated_user AS ( \
@@ -251,7 +272,7 @@ pub async fn complete(
                  FROM updated_user u \
                  WHERE ml.token_hash = $1 \
                    AND ml.purpose = $2 \
-                   AND ml.email = u.email::citext \
+                   AND ml.user_id = u.id \
                    AND ml.consumed_at IS NULL \
                  RETURNING u.id AS user_id, u.email AS email \
              ), revoked_families AS ( \
