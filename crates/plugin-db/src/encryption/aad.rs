@@ -21,6 +21,20 @@
 //!   produce a different ciphertext per row and break that lookup
 //!   (the entire reason deterministic mode exists).
 //!
+//!   **DB-13 — accepted residual risk:** because deterministic columns omit
+//!   row_pk, the Camp-A relocation defence does NOT cover them: an attacker
+//!   with UPDATE access who copies row A's deterministic ciphertext into row
+//!   B's same column reads A's secret through B (AAD still matches). This is an
+//!   inherent tension with searchable equality — it CANNOT be fixed without
+//!   destroying the lookup property — so it is an explicit, documented
+//!   threat-acceptance. Deterministic mode is opt-in per column; a column whose
+//!   relocation risk is unacceptable must use randomised mode (which binds
+//!   row_pk) and forgo equality search.
+//!
+//! All modes additionally bind the **wire version** (DB-14) so the
+//! version flag — otherwise unauthenticated framing in the wire envelope —
+//! cannot be downgraded to force a weaker AAD reconstruction.
+//!
 //! ## Length-prefix encoding
 //!
 //! Each segment is encoded as `[u32 big-endian length][bytes]`. This
@@ -68,8 +82,15 @@ pub fn canonical_aad(
     // cheap; the helper runs once per encrypt/decrypt of a column
     // value.
     let mut out = Vec::with_capacity(
-        12 + collection.len() + column.len() + row_pk_bytes.map_or(0, <[u8]>::len),
+        17 + collection.len() + column.len() + row_pk_bytes.map_or(0, <[u8]>::len),
     );
+    // DB-14: bind the wire version FIRST, so the version byte (unauthenticated
+    // framing in the wire envelope) is authenticated by the AEAD tag. A future
+    // `0x02` (row-version-binding) shape that downgraded a stored `0x02` → `0x01`
+    // would force the weaker AAD reconstruction; binding the version here makes
+    // that mismatch fail the tag. When `0x02` ships, the version MUST be threaded
+    // through this function as a parameter rather than the constant below.
+    extend_with_len(&mut out, &[crate::encryption::wire::WIRE_VERSION_V1]);
     extend_with_len(&mut out, collection.as_bytes());
     extend_with_len(&mut out, column.as_bytes());
     extend_with_len(&mut out, row_pk_bytes.unwrap_or(&[]));
@@ -155,16 +176,27 @@ mod tests {
     /// PR 2 PG arm produce identical AAD bytes from this helper).
     #[test]
     fn explicit_byte_layout() {
-        // collection = "u" (1B), column = "s" (1B), pk = "p" (1B).
-        // Encoding: 00 00 00 01 75 00 00 00 01 73 00 00 00 01 70
+        // version = 0x01 (DB-14, bound first), collection = "u", column = "s",
+        // pk = "p". Encoding: 00000001 01 | 00000001 75 | 00000001 73 | 00000001 70
         let aad = canonical_aad("u", "s", Some(b"p"));
         assert_eq!(
             aad,
-            vec![0, 0, 0, 1, b'u', 0, 0, 0, 1, b's', 0, 0, 0, 1, b'p']
+            vec![0, 0, 0, 1, 0x01, 0, 0, 0, 1, b'u', 0, 0, 0, 1, b's', 0, 0, 0, 1, b'p']
         );
 
         // None pk → final segment length 0, no bytes.
         let aad_none = canonical_aad("u", "s", None);
-        assert_eq!(aad_none, vec![0, 0, 0, 1, b'u', 0, 0, 0, 1, b's', 0, 0, 0, 0]);
+        assert_eq!(
+            aad_none,
+            vec![0, 0, 0, 1, 0x01, 0, 0, 0, 1, b'u', 0, 0, 0, 1, b's', 0, 0, 0, 0]
+        );
+    }
+
+    /// DB-14: the wire version is bound into the AAD (first segment).
+    #[test]
+    fn aad_binds_wire_version_db14() {
+        let aad = canonical_aad("users", "ssn", None);
+        // First length-prefixed segment is the 1-byte wire version.
+        assert_eq!(&aad[..5], &[0, 0, 0, 1, super::super::wire::WIRE_VERSION_V1]);
     }
 }
