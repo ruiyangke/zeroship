@@ -521,6 +521,92 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     fx.cleanup().await;
 }
 
+/// 7.0 regression — a platform `billing` staffer holds fleet-wide `apps:read`
+/// authority (billing.cedar grants `apps:read` on an unconstrained resource, so
+/// `get_app` lets billing read ANY single app by id), but the `/api/apps` LIST
+/// endpoint must be consistent with that authority and return the whole fleet,
+/// not just apps the staffer happens to own.
+///
+/// Before the fix `list_apps`'s `fleet_wide_reader` SQL was
+/// `role IN ('admin','readonly','support')` — `billing` omitted — so a
+/// member-less billing staffer fell through to `list_apps_for_owner` and got an
+/// EMPTY list for an app it is authorized to (and can, via `get_app`) read.
+///
+/// This test seeds NO `app_members` row for the billing principal and a foreign
+/// app owned by someone else; the staffer must still see that foreign app in the
+/// list. It does NOT widen creator/default access: the principal here holds the
+/// platform `billing` role, and the C1 cross-tenant deny for un-roled creators
+/// is covered by `creator_self_service_creates_and_lists_only_own_apps`.
+#[compio::test]
+async fn billing_platform_role_lists_apps_fleet_wide() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(user_id, "apps:read");
+    let Some(fx) = fixture_with_hydra(&hydra, "billing-fleet", user_id).await else {
+        return;
+    };
+    // The staffer holds the platform `billing` role — fleet-wide `apps:read`
+    // authority per billing.cedar — but NO membership on any app.
+    grant_platform_role(&fx.state, user_id, "billing").await;
+
+    // A foreign app owned by a different principal. The billing staffer is not a
+    // member of it, yet is authorized to read it.
+    let other_owner = Uuid::new_v4();
+    insert_user(&fx.state, other_owner, "billing-fleet-other").await;
+    let other_app = fx
+        .state
+        .registry
+        .create_app(
+            &format!("otherapp-{}", Uuid::new_v4().simple()),
+            "free",
+            &other_owner,
+        )
+        .await
+        .expect("create other-owner app");
+
+    let app = init_control!(fx);
+
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("list body json");
+    let ids: Vec<String> = list
+        .as_array()
+        .expect("list is array")
+        .iter()
+        .map(|app| app["id"].as_str().expect("app id").to_string())
+        .collect();
+    assert!(
+        ids.contains(&other_app.id.to_string()),
+        "billing staffer with fleet-wide apps:read authority must see the \
+         foreign app in the list (got {ids:?})"
+    );
+
+    // Cleanup the foreign app + owner (fixture cleanup handles the principal).
+    let _ = fx
+        .state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.app_members WHERE app_id = $1",
+            &[&other_app.id],
+        )
+        .await;
+    let _ = fx
+        .state
+        .control_pg
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&other_app.id])
+        .await;
+    let _ = fx
+        .state
+        .control_pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&other_owner])
+        .await;
+    fx.cleanup().await;
+}
+
 #[compio::test]
 async fn oauth_token_without_required_scope_returns_403() {
     let user_id = Uuid::new_v4();

@@ -140,10 +140,10 @@ pub async fn list_apps(
     // The self-service policy grants every creator `apps:read` on the platform
     // surface, so the gate above passes for ordinary creators too. The DATA must
     // therefore be scoped to ownership: only platform staff with a fleet-wide
-    // read role (admin/readonly/support) see every app; everyone else sees only
-    // the apps they are a member of. Without this scope the broadened gate would
-    // be a fleet-wide cross-tenant read (the exact C1 leak, just at the list
-    // endpoint).
+    // read role (admin/readonly/support/billing) see every app; everyone else
+    // sees only the apps they are a member of. Without this scope the broadened
+    // gate would be a fleet-wide cross-tenant read (the exact C1 leak, just at
+    // the list endpoint).
     let result = match fleet_wide_reader(&state, authz.principal_id).await {
         Ok(true) => state.registry.list_apps().await,
         Ok(false) => state.registry.list_apps_for_owner(&authz.principal_id).await,
@@ -156,9 +156,14 @@ pub async fn list_apps(
 }
 
 /// Returns true when the principal holds a platform role that authorizes a
-/// fleet-wide read (admin / readonly / support). These are the only roles whose
-/// Cedar policy permits `apps:read` on an unconstrained resource, so they are
-/// the only principals allowed to see every tenant's apps in the list endpoint.
+/// fleet-wide read (admin / readonly / support / billing). These are the roles
+/// whose Cedar policy permits `apps:read` on an unconstrained resource
+/// (`billing.cedar` grants it too, so `get_app` already lets billing staff read
+/// any single app by id) — so they are the principals allowed to see every
+/// tenant's apps in the list endpoint. This SQL role set MUST stay in sync with
+/// the Cedar policies that grant unconstrained `apps:read`; omitting a role here
+/// under-scopes its list relative to its actual authority (the 7.0 defect, where
+/// `billing` was missing and billing staff got an empty `/api/apps`).
 async fn fleet_wide_reader(
     state: &AppState,
     principal_id: Uuid,
@@ -167,7 +172,7 @@ async fn fleet_wide_reader(
         .control_pg
         .query(
             "SELECT 1 FROM zeroship.platform_admin_roles \
-             WHERE user_id = $1 AND role IN ('admin', 'readonly', 'support')",
+             WHERE user_id = $1 AND role IN ('admin', 'readonly', 'support', 'billing')",
             &[&principal_id],
         )
         .await
