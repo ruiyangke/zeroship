@@ -74,9 +74,21 @@ pub fn encrypt_randomised(
     encrypt_with_nonce(key, &nonce_bytes, plaintext, aad)
 }
 
-/// Encrypt with a synthetic nonce = HMAC-SHA256(k_siv, plaintext)[..12].
-/// Same plaintext + key produces the same ciphertext, enabling
-/// equality-only B-tree lookups on encrypted columns.
+/// Encrypt with a synthetic nonce = HMAC-SHA256(k_siv, aad ‖ plaintext)[..12].
+///
+/// Same plaintext + key + **AAD** produces the same ciphertext, enabling
+/// equality-only B-tree lookups on encrypted columns (within a column the AAD
+/// is fixed — `(collection, column)`, deterministic by design — so equality is
+/// preserved across rows).
+///
+/// **DB-4:** the AAD is folded into the synthetic nonce (matching SIV's S2V
+/// construction), NOT just the plaintext. Without it, the same plaintext stored
+/// in two different columns reused the same `(k_enc, nonce)` (k_enc is per-app,
+/// shared across columns) under different AAD — a catastrophic AES-GCM nonce
+/// reuse that leaks the GHASH auth subkey and enables ciphertext forgery.
+/// Binding the AAD into the nonce makes each `(collection, column)` derive its
+/// own nonce space, so cross-column reuse can't occur. The AAD is internally
+/// length-prefixed (`aad.rs`), so `aad ‖ plaintext` is unambiguous.
 pub fn encrypt_deterministic(
     key: &AeadKey,
     plaintext: &[u8],
@@ -91,6 +103,7 @@ pub fn encrypt_deterministic(
     // satisfies both — the explicit `<… as Mac>::` syntax disambiguates.
     let mut mac = <HmacSha256 as Mac>::new_from_slice(&key.k_siv)
         .map_err(|_| DbError::internal("encryption::encrypt_deterministic: HMAC key length"))?;
+    mac.update(aad);
     mac.update(plaintext);
     let tag = mac.finalize().into_bytes();
     let mut nonce = [0u8; NONCE_LEN];
@@ -167,6 +180,36 @@ mod tests {
             k_enc: [0x11; 32],
             k_siv: [0x22; 32],
         }
+    }
+
+    /// DB-4: the deterministic synthetic nonce must bind the AAD, so the same
+    /// plaintext in two different columns derives DIFFERENT nonces — never a
+    /// `(k_enc, nonce)` reuse (k_enc is per-app, shared across columns). Within
+    /// one column (same AAD) it stays deterministic for equality lookups.
+    #[test]
+    fn deterministic_nonce_binds_aad_no_cross_column_reuse_db4() {
+        let key = test_key();
+        let pt = b"123-45-6789";
+        // Distinct AADs stand in for two columns (real AAD is length-prefixed).
+        let aad_col_a = b"\x00\x04collA";
+        let aad_col_b = b"\x00\x04collB";
+
+        let blob_a = encrypt_deterministic(&key, pt, aad_col_a).unwrap();
+        let blob_b = encrypt_deterministic(&key, pt, aad_col_b).unwrap();
+        let (nonce_a, _) = wire::unpack(&blob_a).unwrap();
+        let (nonce_b, _) = wire::unpack(&blob_b).unwrap();
+        assert_ne!(
+            nonce_a, nonce_b,
+            "same plaintext in different columns must NOT reuse the GCM nonce"
+        );
+
+        // Within the same column (same AAD): deterministic — identical nonce +
+        // ciphertext, which is what equality-lookup on the column relies on.
+        let blob_a2 = encrypt_deterministic(&key, pt, aad_col_a).unwrap();
+        assert_eq!(blob_a, blob_a2, "same plaintext+AAD must be deterministic");
+
+        // And it still decrypts under its own AAD.
+        assert_eq!(decrypt(&key, &blob_a, aad_col_a).unwrap(), pt);
     }
 
     /// Randomised: same plaintext encrypts to different ciphertext
