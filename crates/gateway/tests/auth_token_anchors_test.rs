@@ -1825,6 +1825,144 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     cleanup_f1(&dsn, user_id).await;
 }
 
+/// FAITHFUL REGRESSION for security finding 0.0 — the F1 MISSED SIBLING: the
+/// INTERACTIVE OIDC-callback minter (`issue_interactive_session_cookie`, the
+/// browser server-rendered `GET /__zeroship/auth/callback` login path) never
+/// wrote `zeroship.app_user_identities`, so a password reset evicted SDK-popup
+/// cookie sessions (F1, fixed) but NOT interactive-login cookie sessions — those
+/// survived the reset for the cookie's full TTL.
+///
+/// Pass-3 patched ONLY the SDK path (`mint_session_from_code`, `POST /session`).
+/// The symmetric interactive minter was left unpatched: it derives the per-app
+/// `pws_` and signs the `__Host-zeroship_app_session` cookie but never UPSERTs
+/// the `(client_id, global_user, pws_)` mapping. H1's reset teardown
+/// (`password_reset::complete`) learns each `(client_id, pws_)` to revoke by
+/// JOINing `app_user_identities`; with no row for the interactive user it writes
+/// ZERO family markers, and the cookie arm's SOLE revocation gate
+/// (`is_family_revoked_since(client_id, pws_, iat)`) returns NotRevoked → the
+/// interactive cookie is ACCEPTED after the victim's reset.
+///
+/// This drives the GENUINE production minter (the EXACT `pub` fn the dispatch
+/// callback calls — not a re-impl) against live PG, pre-seeding NOTHING in
+/// `app_user_identities`, then runs the REAL `password_reset::{issue,complete}`
+/// and asserts the cookie's family is now revoked THROUGH THE PRODUCTION GATE
+/// the per-request cookie arm consults (`is_family_revoked_since`).
+///
+/// PRE-FIX this FAILS at the final assertion: the interactive minter wrote no
+/// identity row, the reset wrote no marker, and `is_family_revoked_since` is
+/// false — the interactive cookie outlives the reset (0.0).
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip interactive_cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let auth_dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(d) if !d.is_empty() => d,
+        _ => dsn.clone(),
+    };
+
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    let user_id = hydra.user_id;
+    let email = seed_app_and_client(&dsn, user_id).await;
+
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db_cfg.clone()));
+
+    let sector = format!("https://{APP_HOST}");
+    // The per-app pairwise subject the interactive cookie carries — the SAME
+    // value the reset teardown must write a family marker for, and the value the
+    // production cookie arm keys `is_family_revoked_since` on.
+    let expected_pws =
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), &sector);
+
+    // The cookie's `iat` — captured BEFORE the mint so the post-reset
+    // `is_family_revoked_since(client_id, pws_, iat)` reflects "a token minted
+    // before the reset". (`revoked_after > iat` ⇒ revoked.)
+    let cookie_iat = now_secs();
+
+    // 1. Drive the GENUINE interactive minter — the EXACT fn the dispatch
+    //    `GET /__zeroship/auth/callback` handler calls. No pre-seeded identity.
+    let cookie = zeroship_gateway::auth_token::issue_interactive_session_cookie(
+        &state,
+        &db_cfg,
+        CLIENT_ID,
+        Some(sector.as_str()),
+        user_id,
+        Some("Interactive User"),
+        None,
+        Some(true),
+        Some(cookie_iat),
+        &[],
+        &["openid".to_string(), "email".to_string()],
+    )
+    .await
+    .expect("interactive minter must succeed");
+    assert!(
+        cookie.starts_with("__Host-zeroship_app_session="),
+        "interactive minter must set the live signed session cookie"
+    );
+
+    // 2. The interactive mint MUST have persisted the per-app identity row —
+    //    the 0.0 core gap. Pre-fix the interactive minter never wrote it → FAILS.
+    {
+        let pool = zeroship_gateway::db::checkout(
+            &zeroship_gateway::db::DbConfig::new(dsn.clone(), 4),
+        )
+        .await
+        .expect("pool");
+        let mut conn = pool.get().await.expect("conn");
+        let persisted =
+            zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, user_id)
+                .await
+                .expect("identity lookup");
+        assert_eq!(
+            persisted.as_deref(),
+            Some(expected_pws.as_str()),
+            "the interactive cookie minter must persist the (CLIENT_ID, pws_) \
+             app_user_identities row — without it H1's reset teardown writes zero \
+             family markers and the interactive-login cookie survives the reset (0.0)"
+        );
+    }
+
+    // 3. REAL password reset for this user (drives auth-service H1 teardown).
+    let auth_client = connect_pg(&auth_dsn).await;
+    let issued = zeroship_auth::identity::password_reset::issue(&auth_client, &email)
+        .await
+        .expect("issue reset token");
+    let new_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFyZm9vYmFyZm9vYmFy";
+    let completed =
+        zeroship_auth::identity::password_reset::complete(&auth_client, &issued.raw, new_hash)
+            .await
+            .expect("complete reset")
+            .expect("reset must resolve to the seeded user");
+    assert_eq!(completed.user_id, user_id, "reset must target the seeded user");
+
+    // 4. THE PRODUCTION GATE: the per-request cookie arm rejects the cookie iff
+    //    `is_family_revoked_since(client_id, pws_, iat)` is TRUE. After the reset
+    //    it MUST be true — the interactive cookie minted at `cookie_iat` is now
+    //    evicted. Pre-fix: no identity row → no marker → false → cookie SURVIVES.
+    let gate_client = connect_pg(&dsn).await;
+    let revoked = zeroship_core::wrapper_revocation::is_family_revoked_since(
+        &gate_client,
+        CLIENT_ID,
+        &expected_pws,
+        cookie_iat,
+    )
+    .await
+    .expect("family revocation gate");
+    assert!(
+        revoked,
+        "after the reset, the production cookie gate must REJECT the interactive \
+         __Host-zeroship_app_session minted before it — the interactive minter must \
+         persist app_user_identities so the reset teardown can revoke its family (0.0)"
+    );
+
+    cleanup_f1(&dsn, user_id).await;
+}
+
 /// FAITHFUL REGRESSION for security finding F4 (`?mint=1` rotation fails OPEN
 /// against a concurrent revocation — the H1/M1 TOCTOU).
 ///

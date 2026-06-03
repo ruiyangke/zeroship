@@ -1335,10 +1335,11 @@ fn sign_session_cookie(
 /// `Err(msg)` when the route has no `sector` yet / no signing key (the caller
 /// renders the callback error page).
 ///
-/// `pub(crate)` so the dispatch callback reuses the SAME mint path as the SDK
-/// `POST /session` — one cookie shape, one verifier.
+/// `pub` so the dispatch callback reuses the SAME mint path as the SDK
+/// `POST /session` — one cookie shape, one verifier — and the F1 regression
+/// integration test can drive the GENUINE interactive minter (not a re-impl).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn issue_interactive_session_cookie(
+pub async fn issue_interactive_session_cookie(
     state: &GateState,
     db_cfg: &crate::db::DbConfig,
     client_id: &str,
@@ -1359,6 +1360,44 @@ pub(crate) async fn issue_interactive_session_cookie(
         &global_user_id.to_string(),
         sector,
     );
+
+    // Persist the per-app `(client_id, global_user, pws_)` mapping into
+    // `app_user_identities`, SYMMETRIC with the SDK popup minter
+    // (`mint_session_from_code` step 6c) and the DPoP/Bearer arms
+    // (`project_pairwise`). H1's password-reset teardown
+    // (`password_reset::complete`) learns each `(client_id, pws_)` family to
+    // revoke by JOINing `app_user_identities`; without this row the INTERACTIVE
+    // login cookie minted here would survive a reset for its full TTL — the
+    // cookie arm's SOLE revocation gate is that family marker (security finding
+    // 0.0, the F1 missed sibling). Best-effort / log-and-continue, EXACTLY like
+    // the SDK + DPoP/Bearer paths: the `pws_` is already projected and the cookie
+    // is the live credential, so a mapping write failure must not fail the mint —
+    // it only degrades reset-time eviction.
+    match crate::db::checkout(db_cfg).await {
+        Ok(pool) => match pool.get().await {
+            Ok(mut conn) => {
+                if let Err(e) =
+                    crate::identities::upsert(&mut conn, client_id, global_user_id, &pws_sub).await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        app_client_id = %client_id,
+                        "app_user_identities upsert failed on interactive cookie mint \
+                         (non-fatal; pws_ already projected, but reset-time eviction degraded)"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "interactive cookie mint: app_user_identities upsert pool get failed (non-fatal)"
+            ),
+        },
+        Err(e) => tracing::warn!(
+            error = %e,
+            "interactive cookie mint: app_user_identities upsert pool checkout failed (non-fatal)"
+        ),
+    }
+
     let relay_email = relay_alias_for(db_cfg, client_id, global_user_id).await;
     sign_session_cookie(
         state,
