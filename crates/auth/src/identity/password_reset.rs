@@ -232,6 +232,26 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
 /// refresh family again, and the family marker rejects any token it could yield
 /// — so the 720h Hydra ceiling is moot.
 ///
+/// **F4 TOCTOU (gateway-side, closed).** A `?mint=1` rotation that read the
+/// anchor BEFORE this reset commits used to re-sign a fresh cookie even though
+/// the family was being torn down (the Hydra refresh succeeds — the grant is
+/// left alive by design above). The gateway now fails that rotation CLOSED:
+/// `anchors::update_rotated_family` reports 0 rows when the anchor was revoked
+/// mid-rotation, and `do_refresh` re-reads the `(client_id, pws_)` family
+/// marker inside the persist tx and rejects when a marker landed at/after the
+/// rotation started. So both signals this statement writes (anchor revoke +
+/// family marker) now also stop an in-flight rotation, not just future ones.
+///
+/// **F2 lockout recovery.** The same UPDATE also zeroes `failed_login_count`
+/// and clears `locked_until`. The L5 account-lockout was cleared ONLY by a
+/// successful PASSWORD login (`credentials::reset_login_failures`), which is
+/// unreachable while locked — so an attacker who knew the victim's email could
+/// lock the account out of EVERY method permanently (~1 wrong POST/hr sustains
+/// the exponential-backoff lock). A completed password reset is strong
+/// owner-present evidence (the reset link was delivered to and redeemed from the
+/// verified inbox), so it must restore access. The password-guessing defense is
+/// unchanged: only a *successful reset* clears the lock, never a guess.
+///
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure.
@@ -262,6 +282,8 @@ pub async fn complete(
                  UPDATE zeroship.users u \
                  SET password_hash = $3, \
                      credential_version = u.credential_version + 1, \
+                     failed_login_count = 0, \
+                     locked_until = NULL, \
                      updated_at = NOW() \
                  FROM candidate c \
                  WHERE u.id = c.user_id \

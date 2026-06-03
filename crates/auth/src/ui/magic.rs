@@ -528,6 +528,15 @@ pub async fn verify_redeem(
         }
     };
 
+    // F2 lockout recovery: the magic link was just cryptographically redeemed
+    // (strong owner-present evidence), so clear any soft password-guessing
+    // lockout BEFORE the eligibility gate — otherwise a victim locked by
+    // password-guessing could never recover via magic-link. Best-effort; the
+    // gate below still enforces hard `disabled_at`. Must precede the gate so the
+    // cleared `locked_until` is what the gate reads.
+    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "magic clear lockout failed");
+    }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
         if let Err(clear_err) = magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await {
             tracing::warn!(error = %clear_err, "magic_link clear pending after eligibility failure failed");
@@ -905,6 +914,13 @@ pub async fn complete(
         }
     };
 
+    // F2 lockout recovery (see the same-device path): the magic completion is
+    // strong owner-present evidence, so clear any soft password-guessing lockout
+    // before the eligibility gate. Best-effort; the gate still enforces hard
+    // `disabled_at`.
+    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "magic complete clear lockout failed");
+    }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
         if let Err(clear_err) =
             completions_store::clear_consume_pending(db.as_ref(), &form.csrf_nonce, None).await

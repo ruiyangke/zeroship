@@ -177,6 +177,13 @@ pub async fn verify_password_credentials(
         .as_ref()
         .filter(|u| u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some());
     if let Some(u) = ineligible_user {
+        // Enumeration-defense (finding F7): equalize DB round-trips with the
+        // wrong-password arm (which runs `record_login_failure` before audit)
+        // so the locked/disabled arm does not become a faster — hence
+        // distinguishable — path. Best-effort; never alters the decision.
+        if let Err(e) = users::record_login_failure_dummy(db).await {
+            tracing::error!(error = %e, "record_login_failure_dummy failed");
+        }
         audit::emit(
             db,
             &AuditEvent {
@@ -200,6 +207,16 @@ pub async fn verify_password_credentials(
             && u.password_hash.is_some()
     });
     let Some(u) = real_user else {
+        // Enumeration-defense (finding F7): the real-password arm below runs
+        // `record_login_failure` (a serialized `users` UPDATE) before its audit
+        // row. Issue the matching throwaway round-trip here so this arm does
+        // EQUAL latency-visible DB work — otherwise the post-Argon2 delta leaks
+        // whether the email belongs to a real, password-bearing account. This
+        // is the DB analog of the dummy-hash above. Best-effort: a fault must
+        // not change the credential decision.
+        if let Err(e) = users::record_login_failure_dummy(db).await {
+            tracing::error!(error = %e, "record_login_failure_dummy failed");
+        }
         audit::emit(
             db,
             &AuditEvent {

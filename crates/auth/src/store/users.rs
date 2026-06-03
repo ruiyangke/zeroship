@@ -1,8 +1,40 @@
 //! `zeroship.users` CRUD.
 
+use std::cell::Cell;
+
 use compio_postgres::{Client, GenericClient};
 
 use crate::error::{AuthError, Result};
+
+thread_local! {
+    /// Test-observable count of failed-login round-trips issued on THIS thread
+    /// (real or dummy).
+    ///
+    /// Bumped once per serialized PG round-trip performed by
+    /// [`record_login_failure`] and [`record_login_failure_dummy`]. It exists so a
+    /// regression test can assert — without flaky wall-clock timing — that the
+    /// real-password failure arm and the absent/OAuth-only failure arm perform an
+    /// EQUIVALENT number of latency-visible DB round-trips (finding F7: post-verify
+    /// DB-work asymmetry is an email-enumeration timing oracle).
+    ///
+    /// Thread-local (not a process global) so concurrent tests in the same
+    /// binary can't corrupt one another's delta — `verify_password_credentials`
+    /// runs its DB round-trips on the calling task's thread (only the Argon2
+    /// verify hops to `spawn_blocking`). Production code never reads it.
+    static LOGIN_FAILURE_ROUNDTRIPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Current value of this thread's failed-login round-trip counter (test
+/// instrumentation).
+#[must_use]
+pub fn login_failure_roundtrips() -> u64 {
+    LOGIN_FAILURE_ROUNDTRIPS.with(Cell::get)
+}
+
+#[inline]
+fn bump_login_failure_roundtrips() {
+    LOGIN_FAILURE_ROUNDTRIPS.with(|c| c.set(c.get() + 1));
+}
 
 #[derive(Debug, Clone)]
 pub struct UserRow {
@@ -169,6 +201,7 @@ pub mod lockout {
 pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> {
     // Increment atomically and read back the new count so the lock decision is
     // made against the row's authoritative value (no read-modify-write race).
+    bump_login_failure_roundtrips();
     let rows = conn
         .query(
             "UPDATE zeroship.users \
@@ -199,6 +232,46 @@ pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> 
         .map_err(|e| AuthError::Db(format!("users record_login_failure lock: {e}")))?;
     }
     Ok(count)
+}
+
+/// Enumeration-defense companion to [`record_login_failure`]: issue ONE
+/// throwaway `UPDATE zeroship.users … WHERE id = $1` against a random,
+/// guaranteed-absent UUID so the absent / OAuth-only / no-credential failure
+/// arm performs the SAME serialized PG round-trip the real-password arm does
+/// (finding F7).
+///
+/// Without this, the real-password wrong-password arm runs
+/// `record_login_failure` (a `users` UPDATE) before its audit row while the
+/// absent arm runs only the audit INSERT — a measurable post-Argon2 latency
+/// delta that leaks whether an email belongs to a real, password-bearing
+/// account. This is the DB-round-trip analog of the dummy-hash that already
+/// equalizes the Argon2 wall time. The UPDATE matches zero rows (random UUID),
+/// so it never mutates any account.
+///
+/// Best-effort by contract: like the real arm, a fault here must NOT change the
+/// credential decision. The caller logs and proceeds.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure.
+pub async fn record_login_failure_dummy(conn: &Client) -> Result<()> {
+    bump_login_failure_roundtrips();
+    // A fresh v4 UUID never collides with a real `users.id` (UUIDv7 + this is
+    // not persisted), so the UPDATE always matches 0 rows. We mirror the real
+    // statement's shape (same table, same SET targets, RETURNING) so PG plans
+    // and executes equivalent work.
+    let absent = uuid::Uuid::new_v4();
+    conn.query(
+        "UPDATE zeroship.users \
+         SET failed_login_count = failed_login_count + 1, \
+             updated_at = NOW() \
+         WHERE id = $1 \
+         RETURNING failed_login_count",
+        &[&absent],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("users record_login_failure_dummy: {e}")))?;
+    Ok(())
 }
 
 /// Clear the lockout state after a successful login: zero `failed_login_count`

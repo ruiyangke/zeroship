@@ -302,6 +302,14 @@ pub async fn callback(
         }
     };
 
+    // F2 lockout recovery: a verified federated GitHub login is strong
+    // owner-present evidence, so clear any soft password-guessing lockout before
+    // the eligibility gate — otherwise a victim locked by password-guessing
+    // could never recover via OAuth. Best-effort; the gate still enforces hard
+    // `disabled_at`.
+    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "github clear lockout failed");
+    }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
         if !e.is_account_state() {
             tracing::error!(error = %e, user_id = %user_id, "github callback eligibility check failed");

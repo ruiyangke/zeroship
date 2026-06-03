@@ -656,6 +656,18 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 ///   3. `users.credential_version` was bumped (IdP-leg defense in depth).
 ///
 /// Pre-fix this FAILS at assertion (1) (anchor stays live).
+///
+/// **Scope (security finding F1).** This is the AUTH-LEG unit: it pre-seeds the
+/// `app_user_identities` row to verify the reset CTE *given* a per-app identity
+/// mapping exists. It deliberately does NOT prove that mapping gets written in
+/// the first place — the auth service holds neither the `pairwise_salt` nor the
+/// route sector, so it cannot mint a gateway cookie. The FAITHFUL end-to-end —
+/// REAL `POST /__zeroship/auth/session` cookie mint (which must itself persist the
+/// identity row) → REAL `password_reset::complete` → family marker present —
+/// lives in `crates/gateway/tests/auth_token_anchors_test.rs::\
+/// cookie_mint_writes_identity_so_reset_evicts_cookie_session`, which pre-seeds
+/// NOTHING in `app_user_identities`. Pre-seeding it HERE is what masked F1, so
+/// the cross-crate faithful coverage is the gateway test, not this one.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
