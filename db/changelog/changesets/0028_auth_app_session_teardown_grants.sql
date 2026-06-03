@@ -23,7 +23,7 @@
 --     global_user_id / revoked_at, which a WHERE read needs SELECT for; no
 --     INSERT/DELETE — auth only ever flips revoked_at).
 
---changeset zeroship:auth-app-session-teardown-grants
+--changeset zeroship:auth-app-session-teardown-grants splitStatements:false
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_auth') THEN
