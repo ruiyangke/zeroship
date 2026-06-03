@@ -1890,7 +1890,10 @@ impl crate::backend::FullTextIndex for SqliteBackend {
         // order, so the trailing LIMIT value must be appended AFTER the
         // filter params rather than pre-seeded ahead of them.
         let mut params: Vec<String> = Vec::with_capacity(4);
-        params.push(query.to_string());
+        // DB-16: bind the query as LITERAL terms — FTS5 would otherwise parse it
+        // as MATCH query syntax (diverging from PG's plainto_tsquery and
+        // raising a per-request syntax error on malformed input).
+        params.push(fts::normalize_fts_query_literal(query));
 
         let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
             .map_err(DbError::from)?;

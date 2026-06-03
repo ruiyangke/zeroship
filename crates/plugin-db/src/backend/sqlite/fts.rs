@@ -349,6 +349,27 @@ pub(crate) fn build_update_trigger_sql(
 /// the sign flipped. The synthetic `_rank` column the caller sees
 /// carries the engine value verbatim (caller transformations like
 /// `Math.abs` happen SDK-side, not here).
+/// DB-16: normalize a user FTS query to LITERAL terms so SQLite FTS5 treats it
+/// the same way Postgres' `plainto_tsquery` does — as words to AND together,
+/// NOT as MATCH query syntax (phrase / prefix `foo*` / `NEAR`/`AND`/`OR`
+/// boolean). Two reasons: (1) dev↔prod parity — without this, `db.x.search(q)`
+/// returns different rows on SQLite (dev) vs PG (prod) for the same `q`; and
+/// (2) a malformed query (e.g. an unbalanced quote) raises an `fts5: syntax
+/// error` per request — a cheap DoS — whereas literal terms never do.
+///
+/// Each whitespace-delimited token is wrapped as a quoted FTS5 string (internal
+/// `"` doubled), which makes every character inside it literal. The bound value
+/// was already injection-safe (it rides a `?` param); this only changes the
+/// *query-language* interpretation FTS5 applies to it. An all-whitespace input
+/// yields an empty operand (matches nothing) — the same as `plainto_tsquery('')`.
+pub(crate) fn normalize_fts_query_literal(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn build_fts_search_sql(
     app_id: &str,
     collection: &str,
@@ -414,6 +435,22 @@ mod tests {
     //! the integration-test boundary.
 
     use super::*;
+
+    #[test]
+    fn normalize_fts_query_literal_neutralizes_syntax_db16() {
+        // Multiple words → quoted literal terms, implicitly ANDed (plainto_tsquery
+        // parity), not a phrase or boolean expression.
+        assert_eq!(normalize_fts_query_literal("hello world"), "\"hello\" \"world\"");
+        // FTS5 operators become literal characters inside the quotes (no prefix
+        // search, no NEAR/AND/OR, no column filter).
+        assert_eq!(normalize_fts_query_literal("foo*"), "\"foo*\"");
+        assert_eq!(normalize_fts_query_literal("a OR b"), "\"a\" \"OR\" \"b\"");
+        // An embedded quote is doubled — a lone `\"` no longer raises a syntax
+        // error (the per-request DoS), it matches the literal quote char.
+        assert_eq!(normalize_fts_query_literal("\""), "\"\"\"\"");
+        // All-whitespace → empty operand (matches nothing), like plainto_tsquery('').
+        assert_eq!(normalize_fts_query_literal("   "), "");
+    }
 
     #[test]
     fn create_fts_table_sql_two_columns() {
