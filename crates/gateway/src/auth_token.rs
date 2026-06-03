@@ -262,6 +262,27 @@ pub(crate) fn same_origin_guard(
     Ok(())
 }
 
+/// CSRF policy for `GET /__zeroship/auth/session[?mint=1]`.
+///
+/// `?mint=1` rotates the server-held refresh family (Hydra refresh + stored-token
+/// rewrite + DB row write) — a state-changing operation — so it gets the SAME
+/// Origin discipline as POST `/token`: it REQUIRES both the custom `X-ZS-Auth`
+/// header (a top-level navigation cannot set it ⇒ cannot trigger a rotation) AND
+/// a present, same-origin `Origin`. A missing or foreign Origin is rejected;
+/// browsers send `Origin` on same-origin `fetch`, so the legitimate SDK mint is
+/// unaffected, and `X-ZS-Auth` stays as an additional, browser-version-independent
+/// layer. A non-`mint` GET is a pure read, so neither the header nor `Origin` is
+/// required there. Centralised so the policy is pinned by one regression test
+/// rather than scattered call-site booleans.
+pub(crate) fn session_csrf_guard(
+    req: &HttpRequest,
+    host: &str,
+    insecure_dev: bool,
+    want_mint: bool,
+) -> Result<(), HttpResponse> {
+    same_origin_guard(req, host, insecure_dev, want_mint, want_mint)
+}
+
 /// Form/JSON body the SDK posts to `POST /__zeroship/auth/session` (the merged
 /// code→session exchange; the old `/token` route is gone).
 #[derive(serde::Deserialize, Default)]
@@ -644,18 +665,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         matches!(kv.split_once('='), Some(("mint", "1")))
     });
 
-    // Same-origin guard. `?mint=1` REQUIRES X-ZS-Auth (a top-level
-    // navigation cannot set it ⇒ cannot trigger a rotation). A non-mint GET is
-    // harmless, so the custom header is not required there. GET is not strictly
-    // state-changing, so a missing Origin is tolerated (the X-ZS-Auth
-    // requirement carries the rotation defense).
-    if let Err(resp) = same_origin_guard(
-        &req,
-        &route.host,
-        state.config.insecure_dev,
-        want_mint,
-        false,
-    ) {
+    if let Err(resp) = session_csrf_guard(&req, &route.host, state.config.insecure_dev, want_mint) {
         return resp;
     }
 
@@ -1348,4 +1358,83 @@ pub(crate) fn db_error(e: compio_postgres::Error) -> HttpResponse {
         "db_unavailable",
         "database checkout failed",
     )
+}
+
+#[cfg(test)]
+mod session_csrf_tests {
+    //! Regression for L1 (2026-06-02 auth-pipeline security review):
+    //! `GET /session?mint=1` rotates the server-held refresh family — a
+    //! state-changing op — yet originally tolerated a missing `Origin`
+    //! (`require_origin=false`), leaving `X-ZS-Auth` as the sole CSRF gate.
+    //! `session_csrf_guard` pins the post-fix policy: a mint request MUST
+    //! carry both `X-ZS-Auth` and a present same-origin `Origin`.
+    use super::session_csrf_guard;
+    use ntex::web::test::TestRequest;
+
+    const HOST: &str = "app.zeroship.localhost";
+    const ORIGIN: &str = "https://app.zeroship.localhost";
+
+    // A mint with X-ZS-Auth but NO Origin must be REJECTED. Pre-fix this was
+    // accepted (require_origin=false), so this assertion fails on old code.
+    #[test]
+    fn mint_without_origin_is_rejected() {
+        let req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            // no Origin header
+            .to_http_request();
+        let res = session_csrf_guard(&req, HOST, false, true);
+        assert!(
+            res.is_err(),
+            "mint?=1 with X-ZS-Auth but no Origin must be rejected (state-changing rotation)"
+        );
+    }
+
+    // A mint with X-ZS-Auth but a FOREIGN Origin must be REJECTED.
+    #[test]
+    fn mint_with_foreign_origin_is_rejected() {
+        let req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            .header(http::header::ORIGIN, "https://evil.example")
+            .to_http_request();
+        let res = session_csrf_guard(&req, HOST, false, true);
+        assert!(res.is_err(), "mint with a foreign Origin must be rejected");
+    }
+
+    // A mint missing X-ZS-Auth must be REJECTED (unchanged by the fix).
+    #[test]
+    fn mint_without_custom_header_is_rejected() {
+        let req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header(http::header::ORIGIN, ORIGIN)
+            // no X-ZS-Auth
+            .to_http_request();
+        let res = session_csrf_guard(&req, HOST, false, true);
+        assert!(res.is_err(), "mint without X-ZS-Auth must be rejected");
+    }
+
+    // The legitimate same-origin SDK mint (X-ZS-Auth + same-origin Origin)
+    // must SUCCEED — the fix must not over-restrict it.
+    #[test]
+    fn legitimate_same_origin_mint_succeeds() {
+        let req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .header("x-zs-auth", "1")
+            .header(http::header::ORIGIN, ORIGIN)
+            .header("sec-fetch-site", "same-origin")
+            .to_http_request();
+        let res = session_csrf_guard(&req, HOST, false, true);
+        assert!(res.is_ok(), "legitimate same-origin SDK mint must succeed: {res:?}");
+    }
+
+    // A non-mint GET (pure read) stays lenient: no X-ZS-Auth, no Origin → OK.
+    #[test]
+    fn non_mint_read_is_lenient() {
+        let req = TestRequest::default()
+            .header(http::header::HOST, HOST)
+            .to_http_request();
+        let res = session_csrf_guard(&req, HOST, false, false);
+        assert!(res.is_ok(), "non-mint read must not require Origin or X-ZS-Auth: {res:?}");
+    }
 }

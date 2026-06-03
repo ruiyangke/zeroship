@@ -1114,6 +1114,56 @@ async fn handle_subscription_dispatch(
 }
 
 // ---------------------------------------------------------------------------
+// Reserved-header scrubbing for the worker dispatch envelope
+// ---------------------------------------------------------------------------
+
+/// Platform-reserved header names that must never be forwarded verbatim
+/// into the worker dispatch envelope. These are either set by the gateway
+/// itself on the trusted side-channel (`ZeroShip-User` HMAC), are
+/// gateway/control-internal routing/identity hints, or are an attractive
+/// nuisance for app JS that (incorrectly) reads identity from raw
+/// `request.headers` instead of `env.auth`. A forged inbound copy of any
+/// of these is dropped at the trust boundary.
+///
+/// Matching is case-insensitive (HTTP header names are case-insensitive);
+/// callers compare against the lowercased inbound name.
+const RESERVED_HEADER_EXACT: &[&str] = &[
+    "zeroship-user",
+    "authorization",
+    "x-app-id",
+    "x-plan-id",
+    "x-request-id",
+];
+
+/// Reserved header *prefix*: every `x-zs-*` header is gateway/platform
+/// internal and is stripped from the forwarded envelope.
+const RESERVED_HEADER_PREFIX: &str = "x-zs-";
+
+/// True if `name` (any case) is a platform-reserved header that must not
+/// be forwarded into the worker dispatch envelope.
+fn is_reserved_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with(RESERVED_HEADER_PREFIX)
+        || RESERVED_HEADER_EXACT.iter().any(|r| *r == lower)
+}
+
+/// Collect inbound request headers as `[name, value]` pairs for the worker
+/// dispatch envelope, dropping the platform-reserved set (see
+/// [`is_reserved_header`]). Non-UTF-8 header values are skipped.
+fn collect_forwarded_headers(headers: &ntex::http::HeaderMap) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in headers {
+        if is_reserved_header(name.as_str()) {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            out.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch handler — the single worker-facing path
 // ---------------------------------------------------------------------------
 
@@ -1157,13 +1207,13 @@ async fn handle_dispatch(
         .unwrap_or("localhost");
     let url = format!("{scheme}://{host}/{tail}");
 
-    // Collect request headers as [key, value] pairs.
-    let mut headers: Vec<(String, String)> = Vec::new();
-    for (name, value) in req.headers() {
-        if let Ok(v) = value.to_str() {
-            headers.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
+    // Collect request headers as [key, value] pairs, scrubbing the
+    // platform-reserved set so a forged inbound `ZeroShip-User` /
+    // `Authorization` / `x-zs-*` cannot ride into the worker's
+    // dispatch envelope and be trusted by app JS reading raw
+    // `request.headers`. Authoritative identity travels the separate
+    // HMAC `ZeroShip-User` channel (`user_header_value`), never here.
+    let headers = collect_forwarded_headers(req.headers());
 
     let method = req.method().as_str();
     let body_str = String::from_utf8_lossy(&body);
@@ -1751,6 +1801,72 @@ mod tests {
         let req = ntex::web::test::TestRequest::default().to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false);
         assert_eq!(id, "unknown");
+    }
+
+    // -----------------------------------------------------------------------
+    // L7: platform-reserved headers must be scrubbed from the worker
+    // dispatch envelope so a forged inbound ZeroShip-User / Authorization /
+    // x-zs-* cannot ride into app JS `request.headers`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn forged_reserved_headers_are_stripped_from_envelope() {
+        let req = ntex::web::test::TestRequest::default()
+            // forged identity + platform-internal headers an attacker
+            // could inject on the inbound request
+            .header("ZeroShip-User", "usr_forged_admin")
+            .header("Authorization", "Bearer attacker-token")
+            .header("X-App-Id", "app_spoofed")
+            .header("X-Plan-Id", "plan_enterprise")
+            .header("X-Request-Id", "forged-rid")
+            .header("X-ZS-Internal", "1")
+            .header("x-zs-anything", "2")
+            // a legitimate app header that MUST survive
+            .header("X-Custom-App-Header", "keep-me")
+            .header("Content-Type", "application/json")
+            .to_http_request();
+
+        let fwd = collect_forwarded_headers(req.headers());
+        let names: Vec<String> = fwd.iter().map(|(k, _)| k.to_ascii_lowercase()).collect();
+
+        // None of the platform-reserved headers survive (case-insensitive).
+        for reserved in [
+            "zeroship-user",
+            "authorization",
+            "x-app-id",
+            "x-plan-id",
+            "x-request-id",
+            "x-zs-internal",
+            "x-zs-anything",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == reserved),
+                "reserved header `{reserved}` leaked into the worker envelope: {names:?}"
+            );
+        }
+
+        // Legitimate app headers are preserved.
+        assert!(
+            names.iter().any(|n| n == "x-custom-app-header"),
+            "legitimate app header was dropped: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "content-type"),
+            "content-type was dropped: {names:?}"
+        );
+    }
+
+    #[test]
+    fn is_reserved_header_is_case_insensitive_and_prefix_aware() {
+        assert!(is_reserved_header("ZeroShip-User"));
+        assert!(is_reserved_header("AUTHORIZATION"));
+        assert!(is_reserved_header("x-zs-foo"));
+        assert!(is_reserved_header("X-ZS-Bar"));
+        // Not reserved: ordinary headers and the X-Forwarded-* family
+        // that the gateway's own client_ip logic handles separately.
+        assert!(!is_reserved_header("content-type"));
+        assert!(!is_reserved_header("x-forwarded-for"));
+        assert!(!is_reserved_header("x-custom"));
     }
 
     #[test]

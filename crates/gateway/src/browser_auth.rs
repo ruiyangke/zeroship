@@ -107,23 +107,24 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
     let idp_hint = q.idp_hint.as_deref().filter(|s| !s.is_empty());
 
     // redirect_uri defaults to THIS app's own popup-callback (a registered
-    // URI from 1d). When the SDK supplies one, it MUST be on this app's
-    // origin — a foreign redirect_uri is rejected (open-redirect guard). The
-    // ultimate allowlist is Hydra's registered redirect_uris, but we reject
-    // an obviously-foreign value up front so a misconfigured SDK fails fast.
+    // URI from 1d). When the SDK supplies one, it MUST EXACTLY match one of
+    // this app's registered callback URIs — a foreign OR same-origin-but-
+    // unregistered redirect_uri is rejected (open-redirect guard, RFC 6749
+    // §3.1.2.3 / RFC 9700 §4.1.3). The ultimate allowlist is Hydra's
+    // registered redirect_uris; we mirror that exact-match set up front so a
+    // misconfigured SDK fails fast AND so a gateway-layer deviation can never
+    // widen Hydra's allowlist if Hydra registration ever drifts.
     let scheme = if state.config.insecure_dev { "http" } else { "https" };
-    let default_redirect = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
     let redirect_uri = match q.redirect_uri.as_deref().filter(|s| !s.is_empty()) {
-        None => default_redirect,
+        None => default_redirect_uri(scheme, &route.host),
         Some(supplied) => {
-            let own_origin = format!("{scheme}://{}/", route.host);
-            if supplied.starts_with(&own_origin) {
+            if is_registered_redirect_uri(scheme, &route.host, supplied) {
                 supplied.to_string()
             } else {
                 return error_response(
                     HttpResponse::BadRequest(),
                     "invalid_request",
-                    "redirect_uri must be on this app's origin",
+                    "redirect_uri must exactly match a registered callback URI",
                 );
             }
         }
@@ -146,6 +147,29 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
         .header(http::header::LOCATION, url)
         .header("cache-control", CACHE_NO_STORE)
         .finish()
+}
+
+/// The same-origin OAuth callback paths registered per host by the control
+/// plane (`control::app_oauth_client::CALLBACK_PATHS`). The gateway MUST keep
+/// this list byte-identical to that registration set: a `redirect_uri` override
+/// is accepted only when it exactly equals one of these paths on this app's own
+/// origin (RFC 6749 §3.1.2.3 exact-match). The first entry is the default.
+const REGISTERED_CALLBACK_PATHS: [&str; 2] =
+    ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"];
+
+/// This app's default redirect_uri — the first registered callback path.
+fn default_redirect_uri(scheme: &str, host: &str) -> String {
+    format!("{scheme}://{host}{}", REGISTERED_CALLBACK_PATHS[0])
+}
+
+/// Exact-match a supplied `redirect_uri` against this app's registered callback
+/// set. NOT a prefix/origin check: a same-origin-but-unregistered path (or any
+/// extra query/fragment) is rejected, mirroring Hydra's registered allowlist so
+/// the gateway can never widen it.
+fn is_registered_redirect_uri(scheme: &str, host: &str, supplied: &str) -> bool {
+    REGISTERED_CALLBACK_PATHS
+        .iter()
+        .any(|path| supplied == format!("{scheme}://{host}{path}"))
 }
 
 /// `GET /__zeroship/auth/authorize` query params (all browser-supplied).
@@ -583,6 +607,86 @@ mod tests {
         let req = TestRequest::default().to_http_request();
         let b = parse_signout_body(&req, b"");
         assert_eq!(b.scope, None);
+    }
+
+    #[test]
+    fn redirect_uri_override_is_exact_match_not_prefix_match() {
+        // L2 regression: a `redirect_uri` override must EXACTLY match one of
+        // this app's registered callback URIs (RFC 6749 §3.1.2.3), not merely
+        // be prefixed by the app's own origin. The prior `starts_with(origin)`
+        // check accepted any same-origin path; this exercises the cases it let
+        // through.
+        let scheme = "https";
+        let host = "app.zeroship.ai";
+
+        // (1) The two registered callbacks are accepted (legitimate behavior
+        //     preserved — popup-callback + callback, matching the control
+        //     plane's CALLBACK_PATHS registration set).
+        assert!(is_registered_redirect_uri(
+            scheme,
+            host,
+            "https://app.zeroship.ai/__zeroship/auth/popup-callback"
+        ));
+        assert!(is_registered_redirect_uri(
+            scheme,
+            host,
+            "https://app.zeroship.ai/__zeroship/auth/callback"
+        ));
+        assert_eq!(
+            default_redirect_uri(scheme, host),
+            "https://app.zeroship.ai/__zeroship/auth/popup-callback"
+        );
+
+        // (2) THE BUG: a same-origin-but-UNREGISTERED path. This passes the old
+        //     prefix check (`starts_with("https://app.zeroship.ai/")`) yet is
+        //     NOT a registered callback — it must be rejected.
+        assert!(
+            "https://app.zeroship.ai/evil"
+                .starts_with("https://app.zeroship.ai/"),
+            "precondition: the malicious URI DID pass the old prefix check",
+        );
+        assert!(
+            !is_registered_redirect_uri(scheme, host, "https://app.zeroship.ai/evil"),
+            "same-origin-but-unregistered redirect_uri must be rejected (exact-match)",
+        );
+
+        // (3) A registered path with an extra query string / fragment is a
+        //     distinct URI under exact-match — rejected.
+        assert!(!is_registered_redirect_uri(
+            scheme,
+            host,
+            "https://app.zeroship.ai/__zeroship/auth/popup-callback?next=//evil.com"
+        ));
+        assert!(!is_registered_redirect_uri(
+            scheme,
+            host,
+            "https://app.zeroship.ai/__zeroship/auth/popup-callback/../evil"
+        ));
+
+        // (4) A foreign origin (and a sibling-domain prefix trick) is rejected.
+        assert!(!is_registered_redirect_uri(
+            scheme,
+            host,
+            "https://evil.com/__zeroship/auth/popup-callback"
+        ));
+        assert!(!is_registered_redirect_uri(
+            scheme,
+            host,
+            "https://app.zeroship.ai.evil.com/__zeroship/auth/popup-callback"
+        ));
+    }
+
+    #[test]
+    fn registered_callback_paths_match_control_plane_registration() {
+        // The gateway's accept-set MUST stay byte-identical to the control
+        // plane's CALLBACK_PATHS (control::app_oauth_client) that registers the
+        // URIs with Hydra. If these drift, the gateway would either reject a
+        // legitimately-registered callback or (worse) accept one Hydra never
+        // registered. Pin the exact strings.
+        assert_eq!(
+            REGISTERED_CALLBACK_PATHS,
+            ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"],
+        );
     }
 
     #[test]
