@@ -615,7 +615,12 @@ pub(crate) fn dispatch_find<'s>(
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
-    let limit = opts.get("limit").and_then(Value::as_i64);
+    // DB-2: an omitted `limit` defaults to MAX_QUERY_LIMIT — never "no LIMIT"
+    // (which would stream the whole collection into the worker). Callers
+    // paginate past the first page via `offset`.
+    let limit = Some(query::effective_query_limit(
+        opts.get("limit").and_then(Value::as_i64),
+    ));
     let offset = opts.get("offset").and_then(Value::as_i64);
     let order_by = opts.get("orderBy").cloned();
     let select = opts.get("select").cloned();

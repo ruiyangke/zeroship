@@ -144,9 +144,21 @@ pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zsenc_blob__:";
 pub(crate) const MAX_QUERY_LIMIT: i64 = 500;
 pub(crate) const MAX_QUERY_OFFSET: i64 = 10_000;
 pub(crate) const MAX_SEARCH_LIMIT: usize = 500;
+/// DB-11: max documents in a single `insertMany`. Bounds the multi-row SQL
+/// string + bound-param vector materialized in the worker (and stays well
+/// under Postgres' 65535-bind-param wall). Callers needing more must chunk.
+pub(crate) const MAX_INSERT_MANY_BATCH: usize = 1_000;
 const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
 const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
+
+/// DB-2: the effective row limit for a `find` — an omitted limit defaults to
+/// [`MAX_QUERY_LIMIT`] rather than emitting NO `LIMIT` clause (which would pull
+/// the entire collection into the worker). Callers paginate past one page via
+/// `offset`. Explicit limits are still bounds-checked by `validate_limit_bound`.
+pub(crate) fn effective_query_limit(explicit: Option<i64>) -> i64 {
+    explicit.unwrap_or(MAX_QUERY_LIMIT)
+}
 
 /// Validate a collection name: alphanumeric + underscores only.
 ///
@@ -3291,6 +3303,17 @@ pub fn build_insert_many_with_dialect(
         ));
     }
 
+    // DB-11: cap the batch BEFORE materializing the multi-row SQL + param vec,
+    // so one call can't slam a multi-MB statement at the shared DB or blow the
+    // worker heap. Enforced in the builder (the single choke point) so a raw
+    // `default={fetch}` deploy bypassing the SDK is bounded too.
+    if arr.len() > MAX_INSERT_MANY_BATCH {
+        return Err(QueryError::InvalidFilter(format!(
+            "insertMany batch of {} exceeds the maximum of {MAX_INSERT_MANY_BATCH}",
+            arr.len()
+        )));
+    }
+
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
 
@@ -5438,6 +5461,29 @@ mod tests {
         assert_eq!(q.params.len(), 4, "params: {:?}", q.params);
         assert!(q.sql.contains("($1, $2)"), "sql: {}", q.sql);
         assert!(q.sql.contains("($3, $4)"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn insert_many_rejects_oversized_batch_db11() {
+        // DB-11: a batch over MAX_INSERT_MANY_BATCH must be rejected by the
+        // builder BEFORE allocating the multi-row SQL + param vec. A batch at
+        // the cap is accepted.
+        let over: Vec<Value> = (0..=MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
+        let err = build_insert_many("app1", "users", &Value::Array(over)).unwrap_err();
+        match err {
+            QueryError::InvalidFilter(m) => assert!(m.contains("exceeds the maximum"), "{m}"),
+            other => panic!("expected InvalidFilter, got {other:?}"),
+        }
+        let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
+        assert!(build_insert_many("app1", "users", &Value::Array(at_cap)).is_ok());
+    }
+
+    #[test]
+    fn effective_query_limit_defaults_to_max_when_omitted_db2() {
+        // DB-2: an omitted limit must default to the ceiling, not "no LIMIT".
+        assert_eq!(effective_query_limit(None), MAX_QUERY_LIMIT);
+        assert_eq!(effective_query_limit(Some(10)), 10);
+        assert_eq!(effective_query_limit(Some(0)), 0);
     }
 
     #[test]
