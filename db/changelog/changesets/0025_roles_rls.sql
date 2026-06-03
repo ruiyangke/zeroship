@@ -80,8 +80,9 @@
 
 -- ─── Roles ───────────────────────────────────────────────────────────────
 -- splitStatements:false: the DO block carries `;` inside `$bootstrap$`.
---changeset zeroship:platform-roles splitStatements:false validCheckSum:ANY
---   validCheckSum:ANY — the no-CREATEROLE branch was changed from a silent
+--changeset zeroship:platform-roles splitStatements:false
+--validCheckSum ANY
+--   validCheckSum ANY — the no-CREATEROLE branch was changed from a silent
 --   RAISE NOTICE/RETURN to a fail-loud RAISE EXCEPTION (finding I3, atomicity).
 --   That is a deliberate logic change to an already-applied changeset; ANY lets
 --   an existing DB re-migrate without a checksum failure (the role state it
