@@ -134,10 +134,15 @@ pub(crate) async fn apply_per_app_role(
     client: &compio_postgres::Client,
     app_id: &str,
 ) -> Result<(), crate::error::DbError> {
-    let sql = crate::auth::bootstrap::set_local_role_sql(app_id);
-    client.execute(&sql, &[]).await.map_err(|e| {
+    // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
+    // in one simple-query batch — all SET LOCAL, so they revert at the tx end.
+    // The idle-in-tx guard is the load-bearing defense: a creator callback that
+    // never resolves can no longer pin this dedicated connection forever and
+    // exhaust the shared Postgres for other tenants.
+    let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id);
+    client.simple_query(&sql).await.map_err(|e| {
         let mut err = crate::error::DbError::from_pg(&e);
-        crate::error::prefix_message(&mut err, "db: SET LOCAL ROLE (per-app §17.5): ");
+        crate::error::prefix_message(&mut err, "db: tx session setup (per-app §17.5 + DB-1 guards): ");
         err
     })?;
     Ok(())

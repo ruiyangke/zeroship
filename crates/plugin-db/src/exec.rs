@@ -200,10 +200,14 @@ async fn apply_autocommit_role(
     client: &compio_postgres::Client,
     app_id: &str,
 ) -> Result<(), DbError> {
-    let sql = crate::auth::bootstrap::set_role_sql(app_id);
-    client.execute(&sql, &[]).await.map_err(|e| {
+    // SET ROLE + the DB-1 session statement/lock-timeout guards in one batch,
+    // so a slow autocommit statement can't pin one of the bounded pool's
+    // connections indefinitely. Reset by `reset_autocommit_role` before the
+    // connection returns to the pool.
+    let sql = crate::auth::bootstrap::autocommit_session_setup_sql(app_id);
+    client.simple_query(&sql).await.map_err(|e| {
         let mut err = DbError::from_pg(&e);
-        crate::error::prefix_message(&mut err, "db: SET ROLE (per-app §17.5 autocommit): ");
+        crate::error::prefix_message(&mut err, "db: autocommit session setup (per-app §17.5 + DB-1 guards): ");
         err
     })?;
     Ok(())
@@ -211,11 +215,11 @@ async fn apply_autocommit_role(
 
 async fn reset_autocommit_role(client: &compio_postgres::Client) -> Result<(), DbError> {
     client
-        .execute(crate::auth::bootstrap::reset_role_sql(), &[])
+        .simple_query(crate::auth::bootstrap::autocommit_session_reset_sql())
         .await
         .map_err(|e| {
             let mut err = DbError::from_pg(&e);
-            crate::error::prefix_message(&mut err, "db: RESET ROLE (per-app §17.5 autocommit): ");
+            crate::error::prefix_message(&mut err, "db: autocommit session reset (per-app §17.5 + DB-1 guards): ");
             err
         })?;
     Ok(())

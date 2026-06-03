@@ -1419,7 +1419,7 @@ pub fn per_app_role_name(app_id: &str) -> String {
 /// normalised) and is double-quoted, so this is injection-safe even
 /// though it interpolates.
 pub fn set_local_role_sql(app_id: &str) -> String {
-    format!(r#"SET LOCAL ROLE "{}""#, per_app_role_name(app_id))
+    format!("SET LOCAL ROLE {}", crate::query::quote_ident(&per_app_role_name(app_id)))
 }
 
 /// `SET ROLE "app_<id>_role"` — session-level variant for the rare
@@ -1427,13 +1427,66 @@ pub fn set_local_role_sql(app_id: &str) -> String {
 /// [`reset_role_sql`] before the connection returns to the pool, or the
 /// next checkout inherits the constrained role.
 pub fn set_role_sql(app_id: &str) -> String {
-    format!(r#"SET ROLE "{}""#, per_app_role_name(app_id))
+    format!("SET ROLE {}", crate::query::quote_ident(&per_app_role_name(app_id)))
 }
 
 /// `RESET ROLE` — restore the session's original (login) role. Pairs
 /// with [`set_role_sql`] on the non-transactional path.
 pub fn reset_role_sql() -> &'static str {
     "RESET ROLE"
+}
+
+// ── DB-1: per-app connection-hold / statement-time guards ────────────────────
+//
+// Bound how long any one app connection can pin shared-Postgres resources, so a
+// single tenant cannot exhaust the shared instance — neither by parking a
+// dedicated transaction connection `idle in transaction` (the unbounded risk:
+// `env.db.transaction()` acquires a fresh connection held for the whole JS
+// callback) nor by pinning a backend on a runaway statement. The values are
+// generous (legitimate work stays well under) but finite. Applied as a single
+// simple-query batch alongside the role SET, so it costs one extra round-trip.
+
+/// Max wall-time a single statement may run before Postgres cancels it.
+pub const DB_STATEMENT_TIMEOUT_MS: u32 = 30_000;
+/// Max time a connection may sit `idle in transaction` before Postgres
+/// terminates it — the direct guard against tx-hold connection exhaustion.
+pub const DB_IDLE_IN_TX_TIMEOUT_MS: u32 = 15_000;
+/// Max time a statement waits on a lock before erroring (avoids lock pileups).
+pub const DB_LOCK_TIMEOUT_MS: u32 = 10_000;
+
+/// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout
+/// guards, as one simple-query batch run right after `BEGIN`. All `SET LOCAL`,
+/// so every value (role + timeouts) auto-reverts at COMMIT/ROLLBACK and can
+/// never leak to a later checkout of the (dedicated, but defensively reset)
+/// connection.
+pub fn tx_session_setup_sql(app_id: &str) -> String {
+    let role = crate::query::quote_ident(&per_app_role_name(app_id));
+    format!(
+        "SET LOCAL ROLE {role}; \
+         SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
+         SET LOCAL idle_in_transaction_session_timeout = {DB_IDLE_IN_TX_TIMEOUT_MS}; \
+         SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"
+    )
+}
+
+/// Combined autocommit (pooled) client setup: session-level `SET ROLE` +
+/// statement/lock timeout guards. No `idle_in_transaction` guard — autocommit
+/// holds no open transaction. MUST be paired with [`autocommit_session_reset_sql`]
+/// before the pooled connection returns to the pool.
+pub fn autocommit_session_setup_sql(app_id: &str) -> String {
+    let role = crate::query::quote_ident(&per_app_role_name(app_id));
+    format!(
+        "SET ROLE {role}; \
+         SET statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
+         SET lock_timeout = {DB_LOCK_TIMEOUT_MS}"
+    )
+}
+
+/// `RESET` everything [`autocommit_session_setup_sql`] set, before the pooled
+/// connection returns to the pool (otherwise the next checkout inherits the
+/// constrained role + timeouts).
+pub fn autocommit_session_reset_sql() -> &'static str {
+    "RESET ROLE; RESET statement_timeout; RESET lock_timeout"
 }
 
 /// Result of [`ensure_per_app_role`] — distinguishes "created the role
@@ -1602,6 +1655,45 @@ mod tests {
         assert_eq!(set_local_role_sql("app_demo"), r#"SET LOCAL ROLE "app_app_demo_role""#);
         assert_eq!(set_role_sql("app_demo"), r#"SET ROLE "app_app_demo_role""#);
         assert_eq!(reset_role_sql(), "RESET ROLE");
+    }
+
+    #[test]
+    fn set_role_sql_doubles_embedded_quote_via_quote_ident() {
+        // DB-15: the role name is the single statement enforcing per-tenant
+        // role separation. It MUST flow through quote_ident (doubling any
+        // embedded `"`), not a hand-written `"{}"` splice — even though app_id
+        // is validated upstream, this boundary must not rely on that.
+        assert_eq!(set_local_role_sql(r#"a"b"#), r#"SET LOCAL ROLE "app_a""b_role""#);
+        assert_eq!(set_role_sql(r#"a"b"#), r#"SET ROLE "app_a""b_role""#);
+    }
+
+    #[test]
+    fn tx_session_setup_bounds_hold_and_statement_time() {
+        // DB-1: every dedicated transaction client must SET LOCAL the timeout
+        // guards that bound how long it can be held idle-in-transaction and how
+        // long a statement may run — the defense against one tenant exhausting
+        // the shared Postgres connection pool fleet-wide. SET LOCAL so they
+        // revert at COMMIT/ROLLBACK.
+        let sql = tx_session_setup_sql("app_demo");
+        assert!(sql.contains(r#"SET LOCAL ROLE "app_app_demo_role""#), "{sql}");
+        assert!(sql.contains("SET LOCAL idle_in_transaction_session_timeout ="), "{sql}");
+        assert!(sql.contains("SET LOCAL statement_timeout ="), "{sql}");
+        assert!(sql.contains("SET LOCAL lock_timeout ="), "{sql}");
+    }
+
+    #[test]
+    fn autocommit_session_setup_and_reset_bound_statement_time() {
+        // DB-1: the pooled autocommit path is pool-bounded (8) but a slow
+        // statement still pins one of those shared connections — bound it with a
+        // session statement_timeout, reset before the connection returns to the
+        // pool. No idle-in-tx guard (autocommit holds no open transaction).
+        let setup = autocommit_session_setup_sql("app_demo");
+        assert!(setup.contains(r#"SET ROLE "app_app_demo_role""#), "{setup}");
+        assert!(setup.contains("SET statement_timeout ="), "{setup}");
+        assert!(!setup.contains("idle_in_transaction"), "no idle guard on autocommit: {setup}");
+        let reset = autocommit_session_reset_sql();
+        assert!(reset.contains("RESET ROLE"), "{reset}");
+        assert!(reset.contains("RESET statement_timeout"), "{reset}");
     }
 
     #[test]
