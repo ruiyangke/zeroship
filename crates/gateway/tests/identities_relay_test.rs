@@ -64,7 +64,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     };
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
     let user_id = seed_user(&client, "relayswap").await;
-    let pairwise_sub = format!("pws_{}", Uuid::new_v4().simple());
+    let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
 
     // Active alias row (relay_email set, revoked_at NULL).
@@ -116,7 +116,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
     };
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());
     let user_id = seed_user(&client, "noalias").await;
-    let pairwise_sub = format!("pws_{}", Uuid::new_v4().simple());
+    let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 
     // Identity row exists (gateway upserted the pairwise mapping) but no alias
     // minted yet — relay_email NULL (consent ran before, or no email scope).

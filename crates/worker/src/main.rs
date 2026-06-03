@@ -295,6 +295,20 @@ fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
+    } else if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
+        // L6: a present-but-weak WORKER_KEY skips the empty-key loopback guard
+        // above, can bind any interface, and is brute-forceable for the
+        // ZeroShip-User HMAC. Hold a NON-EMPTY worker_key to the same ≥32-byte
+        // strength floor as the stash key / pairwise salt (empty stays handled
+        // by the dev-loopback branch above). Skipped for a secret REFERENCE
+        // under --check-config (the raw ref text would wrongly fail the length
+        // check); it runs on the resolved value at real boot.
+        if let Err(message) =
+            zeroship_core::config::validate_worker_key(&worker_key, insecure_dev)
+        {
+            tracing::error!(error = %message, "worker: refusing to start with unsafe WORKER_KEY");
+            std::process::exit(1);
+        }
     }
 
     if cli.check_config {

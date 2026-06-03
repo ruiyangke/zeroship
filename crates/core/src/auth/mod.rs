@@ -19,28 +19,47 @@ type HmacSha256 = Hmac<Sha256>;
 pub const ZEROSHIP_USER_MAX_AGE_SECS: u64 = 60;
 pub const ZEROSHIP_USER_FUTURE_SKEW_SECS: u64 = 5;
 
-/// Constant-time comparison using XOR fold to prevent timing attacks.
+/// Constant-time comparison to prevent timing attacks.
 /// Returns true if `provided` and `expected` are equal.
+///
+/// The comparison iterates a FIXED number of times — always over the
+/// `expected` length — regardless of `provided`'s length. There is no
+/// length-dependent early exit and no shorter-of-the-two iteration bound, so
+/// the work done (and hence the timing) depends only on `expected.len()`
+/// (which is not secret) and never on the attacker-controlled `provided.len()`.
+/// A length mismatch folds into the accumulator instead of short-circuiting.
+#[must_use]
 pub fn validate_control_key(provided: &str, expected: &str) -> bool {
-    let a = provided.as_bytes();
-    let b = expected.as_bytes();
+    let (equal, _iterations) = control_key_compare(provided.as_bytes(), expected.as_bytes());
+    equal
+}
 
-    // If lengths differ, we still do a comparison on the shorter slice
-    // but the length mismatch itself sets the result to false — without
-    // branching early so the timing is uniform for a fixed `expected` length.
-    let len_ok = a.len() == b.len();
+/// Core constant-time comparison. Returns `(equal, iterations)` where
+/// `iterations` is the loop count performed — exposed so tests can assert the
+/// iteration count depends ONLY on `expected.len()`, never on `provided.len()`.
+///
+/// Implementation notes (security-critical):
+/// - We iterate exactly `expected.len()` times. For each index we read the
+///   corresponding `provided` byte if it exists, else a fixed `0`. This keeps
+///   the loop bound independent of `provided.len()`.
+/// - The length difference is folded into `diff` (via `len_mismatch`) rather
+///   than producing an early return, so a wrong-length input takes the same
+///   path as a wrong-content input of the right length.
+/// - Indexing uses `.get()` (no panic) instead of slice indexing, so an empty
+///   or short `provided` cannot panic.
+fn control_key_compare(provided: &[u8], expected: &[u8]) -> (bool, usize) {
+    let len_mismatch: u8 = u8::from(provided.len() != expected.len());
 
-    // XOR every byte of the shorter of the two slices.  Using the expected
-    // length as the iteration bound leaks the expected length (acceptable —
-    // the expected key length is not secret), but does NOT leak whether the
-    // provided key is longer or shorter.
-    let min_len = a.len().min(b.len());
-    let diff: u8 = a[..min_len]
-        .iter()
-        .zip(b[..min_len].iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    let mut diff: u8 = 0;
+    for (i, &e) in expected.iter().enumerate() {
+        // `provided.get(i)` is `None` past the end of a short input; substitute
+        // a constant so the per-iteration work is uniform and panic-free.
+        let p = *provided.get(i).unwrap_or(&0);
+        diff |= p ^ e;
+    }
 
-    len_ok && diff == 0
+    // Fold the length check in last so it cannot be observed as an early exit.
+    (diff == 0 && len_mismatch == 0, expected.len())
 }
 
 /// SHA-256 hash of `key`, returned as a lowercase hex string.
@@ -108,24 +127,42 @@ pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 /// global Hydra UUID rather than a projected pairwise pseudonym.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
-/// Whether `sub` is a well-formed per-app pairwise subject — i.e. it carries
-/// the `pws_` prefix AND a non-empty body. The gateway wrapper is JS-readable
-/// by app code, so it MUST NOT carry the global Hydra UUID in any claim; a
-/// wrapper whose `sub` survives this predicate can never be the un-projected
-/// global identity.
+/// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
+/// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base62 (`[0-9A-Za-z]`)
+/// chars. The gateway wrapper / session cookie is JS-readable by app code, so
+/// it MUST NOT carry the global Hydra UUID in any claim; a `sub` that survives
+/// this predicate can never be the un-projected global identity (a bare UUID
+/// has no `pws_` prefix).
 ///
-/// This is the inbound twin of [`derive_pairwise`]: every `pws_…` it mints
-/// (`pws_` + a base62 body) satisfies the predicate, while the global Hydra
-/// subject — a bare UUID with NO `pws_` prefix — fails it. We anchor the check
-/// on the `pws_` PREFIX rather than "the body must not parse as a UUID": a real
-/// `derive_pairwise` body is base62 (never a dashed UUID), and a body-parse
-/// check would false-reject a perfectly valid `pws_<hex>` body that happens to
-/// be a UUID's no-dash form. The global identity always arrives WITHOUT the
-/// `pws_` prefix, so the prefix anchor is both sufficient and exact.
+/// ## This is a SHAPE inverse, NOT a forgery/trust gate (security-review I8)
+///
+/// The predicate proves only that a string is shaped like a `derive_pairwise`
+/// output — it does NOT prove the string was actually derived for any real
+/// `(global_user_id, sector)`. Authenticity is established UPSTREAM, by the
+/// cryptographic check that gates every call site:
+///
+/// - The session-cookie arms (`router/auth.rs`, `auth_token.rs`) call this
+///   ONLY AFTER `session_verifier.verify(...)` authenticates a cookie the
+///   gateway itself signed — so the `sub` is already trusted; this predicate is
+///   a defense-in-depth minter-bug containment check (reject a wrapper a mint
+///   bug failed to project), never the thing that decides trust.
+/// - The Bearer/DPoP arms NEVER consume an inbound `pws_` as identity at all —
+///   they re-derive it with [`derive_pairwise`] from the verified global Hydra
+///   subject. There is no path where an attacker-supplied `pws_` is trusted for
+///   an authz/lookup decision on the strength of its shape.
+///
+/// Anchoring on the EXACT minted shape (prefix + fixed length + base62
+/// alphabet) rather than a loose `pws_<anything>` closes the gap where a
+/// malformed or forged-shape body (`pws_short`, a punctuation/path-traversal
+/// body, an over-length splice) would silently pass: such a string is provably
+/// not a `derive_pairwise` output, so it is rejected here too.
 #[must_use]
 pub fn is_pairwise_subject(sub: &str) -> bool {
     match sub.strip_prefix(PAIRWISE_SUB_PREFIX) {
-        Some(body) => !body.is_empty(),
+        Some(body) => {
+            body.len() == PAIRWISE_SUB_BODY_LEN
+                && body.bytes().all(|c| c.is_ascii_alphanumeric())
+        }
         None => false,
     }
 }
@@ -395,12 +432,67 @@ mod tests {
         // Empty / prefix-only fail.
         assert!(!is_pairwise_subject(""));
         assert!(!is_pairwise_subject("pws_"));
-        // A `pws_…` whose body happens to be a UUID's no-dash form is STILL a
-        // valid pairwise subject — the prefix is the anchor, not the body
-        // shape (test fixtures mint `pws_<Uuid::simple()>`).
+        // A `pws_…` whose body is a UUID's 32-char no-dash form is NOT a real
+        // `derive_pairwise` output (which is exactly PAIRWISE_SUB_BODY_LEN
+        // chars), so the tightened shape inverse rejects it (security-review I8).
         assert!(
-            is_pairwise_subject(&format!("pws_{}", uid.replace('-', ""))),
-            "a pws_-prefixed body is accepted regardless of its byte shape"
+            !is_pairwise_subject(&format!("pws_{}", uid.replace('-', ""))),
+            "a 32-char no-dash-UUID body is over-length → not a derivable subject"
+        );
+    }
+
+    /// I8 (security-review 2026-06-02): `is_pairwise_subject` must be the EXACT
+    /// inverse of [`derive_pairwise`]'s output shape — `pws_` + exactly
+    /// [`PAIRWISE_SUB_BODY_LEN`] base62 chars — so a `pws_`-SHAPED string that
+    /// `derive_pairwise` could never have minted (wrong length, or a non-base62
+    /// byte) is rejected. This is hardening only: at every production call site
+    /// the predicate runs DOWNSTREAM of cryptographic authentication (the
+    /// session-cookie signature) and the gateway never trusts an inbound `pws_`
+    /// for an authz/lookup decision — it always re-derives via `derive_pairwise`
+    /// from the verified global subject. But making the predicate an exact
+    /// shape-inverse closes the "any `pws_<anything>` passes" gap so the check
+    /// cannot silently wave through a malformed/forged-shape subject.
+    #[test]
+    fn is_pairwise_subject_rejects_forged_non_derived_shapes() {
+        let salt = b"platform-pairwise-salt";
+        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let minted = derive_pairwise(salt, uid, "https://app.zeroship.ai");
+        // The real minted shape is still accepted (sanity).
+        assert!(is_pairwise_subject(&minted), "minted pws_ must pass: {minted}");
+        // The minted body is exactly PAIRWISE_SUB_BODY_LEN base62 chars.
+        let minted_body = minted.strip_prefix(PAIRWISE_SUB_PREFIX).unwrap();
+        assert_eq!(minted_body.len(), PAIRWISE_SUB_BODY_LEN);
+
+        // A body SHORTER than a real derivation — never minted → reject.
+        assert!(
+            !is_pairwise_subject("pws_short"),
+            "an under-length pws_ body is not a derivable pairwise subject"
+        );
+        // A body LONGER than a real derivation (e.g. the 32-char no-dash UUID a
+        // test fixture might splice in) — never minted by derive_pairwise → reject.
+        assert!(
+            !is_pairwise_subject(&format!("pws_{}", "a".repeat(PAIRWISE_SUB_BODY_LEN + 1))),
+            "an over-length pws_ body is not a derivable pairwise subject"
+        );
+        // A body of the RIGHT length but carrying a non-base62 byte — the
+        // base62 alphabet is [0-9A-Za-z], so '-', '_', '.', '/', '+', '=' are
+        // all out. A forged path-traversal-shaped or punctuation-laced body
+        // that happens to be 20 chars must still be rejected.
+        assert!(
+            !is_pairwise_subject(&format!("pws_{}", "-".repeat(PAIRWISE_SUB_BODY_LEN))),
+            "a right-length body of non-base62 bytes is not a derivable subject"
+        );
+        assert!(
+            !is_pairwise_subject("pws_..%2F..%2Fetc%2Fpw"),
+            "a punctuation/encoded forged body must be rejected even at length"
+        );
+        // A right-length, all-base62 body IS accepted — we reject SHAPE, not
+        // value (the value's authenticity is the signature's job, not the
+        // predicate's). This documents the trust boundary: the predicate is a
+        // shape inverse, never a forgery gate on its own.
+        assert!(
+            is_pairwise_subject(&format!("pws_{}", "a".repeat(PAIRWISE_SUB_BODY_LEN))),
+            "a well-shaped (right-length base62) body passes the shape inverse"
         );
     }
 
@@ -521,6 +613,58 @@ mod tests {
     fn control_key_length_mismatch() {
         assert!(!validate_control_key("sec", "secret"));
         assert!(!validate_control_key("secretextra", "secret"));
+    }
+
+    /// I10 regression: the comparison must iterate a FIXED number of times —
+    /// always `expected.len()` — regardless of `provided`'s length, so the
+    /// timing cannot leak the expected secret's length via a min-length /
+    /// early-exit iteration bound. The pre-fix implementation iterated
+    /// `min(provided.len(), expected.len())`, so a short provided input did
+    /// fewer iterations (and a long one did `expected.len()` only because the
+    /// bound clamped) — making the iteration count depend on the attacker's
+    /// input. This asserts the count is constant across short / exact / long /
+    /// empty provided inputs.
+    #[test]
+    fn control_key_iteration_count_is_independent_of_provided_length() {
+        let expected = b"secret-of-known-length";
+        let n = expected.len();
+
+        // Various provided lengths: empty, much shorter, one short, exact,
+        // one longer, much longer.
+        for provided in [
+            b"".as_slice(),
+            b"x".as_slice(),
+            b"short".as_slice(),
+            &expected[..n - 1],
+            expected.as_slice(),
+            b"secret-of-known-length-and-then-some-extra".as_slice(),
+        ] {
+            let (_equal, iterations) = control_key_compare(provided, expected);
+            assert_eq!(
+                iterations, n,
+                "iteration count must equal expected.len()={n} regardless of \
+                 provided.len()={}, got {iterations}",
+                provided.len()
+            );
+        }
+    }
+
+    /// I10 correctness: the constant-time comparison still accepts the exact
+    /// key and rejects every wrong / wrong-length input.
+    #[test]
+    fn control_key_constant_time_preserves_correctness() {
+        assert!(validate_control_key("secret", "secret"));
+        assert!(validate_control_key("", ""));
+        // Wrong content, right length.
+        assert!(!validate_control_key("secreX", "secret"));
+        // Shorter.
+        assert!(!validate_control_key("sec", "secret"));
+        // Longer (prefix-equal — the classic length-extension trap).
+        assert!(!validate_control_key("secretX", "secret"));
+        // Empty provided against a non-empty key.
+        assert!(!validate_control_key("", "secret"));
+        // Non-empty provided against an empty key.
+        assert!(!validate_control_key("secret", ""));
     }
 
     #[test]

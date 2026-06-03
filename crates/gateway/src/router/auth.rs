@@ -2128,7 +2128,7 @@ mod tests {
     /// Build a GET request carrying a signed session cookie for the cookie arm.
     fn scope_cookie_req(state: &crate::GateState, client_id: &str, scopes: &[&str], aud: &str) -> ntex::web::HttpRequest {
         let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token =
             issue_signed_session_cookie(state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
         let cookie_name = oidc_rp::app_session_cookie_name(true); // insecure_dev fixture
@@ -3291,7 +3291,7 @@ mod tests {
         let state = build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 
         // Mint a REAL, currently-valid SIGNED cookie for a user.
         let signed = issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
@@ -3379,7 +3379,7 @@ mod tests {
         );
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 
         // Signed cookie whose scopes INCLUDE the route's required scope.
         let scopes = vec!["openid".to_string(), "read:billing".to_string()];
@@ -3418,7 +3418,7 @@ mod tests {
         );
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 
         // Signed cookie whose scopes do NOT include the route's required scope —
         // identity is fine, the grant is too narrow → 403, not 401.
@@ -3702,7 +3702,7 @@ mod tests {
 
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let scopes = vec!["openid".to_string(), "email".to_string()];
         let token =
             issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
@@ -3751,7 +3751,7 @@ mod tests {
             build_state_with_session_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let rid = Uuid::new_v4();
         let cookie_name = oidc_rp::app_session_cookie_name(true);
 
@@ -3915,7 +3915,7 @@ mod tests {
             build_state_with_session_and_auth_ui_url_and_db(gateway_signing.clone(), "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let rid = Uuid::new_v4();
 
         // (1) Session cookie presented on the Bearer arm → not a user session
@@ -3976,7 +3976,7 @@ mod tests {
         }
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 
         // Mint under the PREVIOUS key A.
         let prev_issuer =
@@ -4031,7 +4031,7 @@ mod tests {
         );
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
@@ -4143,7 +4143,7 @@ mod tests {
         set_revocation_cache_ttl(&mut state, 0);
 
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
@@ -4225,7 +4225,7 @@ mod tests {
         set_revocation_cache_ttl(&mut state, 600);
 
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         // Ensure no stale marker exists for this fresh family.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
@@ -4327,7 +4327,7 @@ mod tests {
         set_revocation_cache_ttl(&mut state, 600);
 
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
@@ -4395,7 +4395,7 @@ mod tests {
         );
 
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let cookie_name = oidc_rp::app_session_cookie_name(true);
         let req = ntex::web::test::TestRequest::default()
@@ -4434,7 +4434,7 @@ mod tests {
             build_state_with_session_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
-        let pws = format!("pws_{}", Uuid::new_v4().simple());
+        let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token =
             issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
         let cookie_name = oidc_rp::app_session_cookie_name(true);

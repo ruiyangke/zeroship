@@ -537,7 +537,7 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
     let state = build_state(&base, None);
     assert!(state.db.is_none(), "fixture must have no DB for the DB-free proof");
 
-    let pws = format!("pws_{}", Uuid::new_v4().simple());
+    let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
     let scopes = vec!["openid".to_string(), "email".to_string()];
     let cookie = issue_session_cookie(&state, &pws, &scopes);
 

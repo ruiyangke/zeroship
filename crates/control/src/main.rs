@@ -513,15 +513,21 @@ fn main() -> std::io::Result<()> {
         std::path::PathBuf::from(&deploy_tmp_dir_str)
     };
 
-    // S3: control authenticates the worker admin log fan-out with WORKER_KEY.
-    // Enforce its presence outside dev (worker already refuses a non-loopback
-    // bind without it; this guards the caller side symmetrically).
-    if let Err(message) =
-        require_unless_dev("WORKER_KEY / --worker-key", &worker_key, insecure_dev)
-    {
-        eprintln!("control: {message}");
-        tracing::error!(error = %message, "control: refusing to start without WORKER_KEY");
-        std::process::exit(1);
+    // S3 / L6: control authenticates the worker admin log fan-out with
+    // WORKER_KEY. The same key gates the worker's dispatch bearer AND keys the
+    // per-request ZeroShip-User HMAC, so it carries the ≥32-byte strength floor
+    // (empty rejected outside dev, present-but-weak rejected). Skipped for a
+    // secret REFERENCE under --check-config (the local is then the raw ref
+    // string, which would wrongly fail the length check); it runs on the
+    // resolved value at real boot.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&worker_key) {
+        if let Err(message) =
+            zeroship_core::config::validate_worker_key(&worker_key, insecure_dev)
+        {
+            eprintln!("control: {message}");
+            tracing::error!(error = %message, "control: refusing to start with unsafe WORKER_KEY");
+            std::process::exit(1);
+        }
     }
 
     if !insecure_dev {

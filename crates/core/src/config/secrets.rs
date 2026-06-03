@@ -109,6 +109,42 @@ pub fn validate_pairwise_salt(value: &str, insecure_dev: bool) -> Result<(), Str
     Ok(())
 }
 
+/// Validate the production requirement for the worker dispatch key.
+///
+/// The `worker_key` authenticates the gateway→worker dispatch bearer AND keys
+/// the per-request `ZeroShip-User` HMAC (the only authoritative identity channel
+/// into app code). An empty or weak key therefore disables auth or makes the
+/// HMAC forgeable — so it carries the SAME strength posture as the stash key /
+/// pairwise salt: non-empty, raw UTF-8 length ≥ 32 bytes. Empty is permitted
+/// ONLY under `--dev-insecure` (where it means "disabled", paired with the
+/// loopback-only bind guard).
+///
+/// # Errors
+///
+/// Returns an explanatory error when `value` is empty or shorter than 32 bytes,
+/// unless `insecure_dev` is enabled.
+pub fn validate_worker_key(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev {
+        return Ok(());
+    }
+
+    if value.is_empty() {
+        return Err(
+            "WORKER_KEY is required outside --dev-insecure; set a strong (>=32 byte) value"
+                .to_owned(),
+        );
+    }
+
+    if value.len() < 32 {
+        return Err(format!(
+            "WORKER_KEY is too short ({} bytes); minimum 32 bytes",
+            value.len()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Decode a master-key candidate and return its byte length, if decodable.
 ///
 /// Accepts hex (even length, all hex digits, ≥32 decoded bytes) or
@@ -447,8 +483,8 @@ mod tests {
     use super::{
         decoded_master_key_len, is_loopback_url, is_secret_ref, obtain_secret, parse_secret_ref,
         require_unless_dev, resolve_secret, validate_master_key_material, validate_pairwise_salt,
-        validate_secret_ref, validate_stash_key, SecretError, SecretRef, DEV_PAIRWISE_SALT,
-        DEV_STASH_SIGNING_KEY,
+        validate_secret_ref, validate_stash_key, validate_worker_key, SecretError, SecretRef,
+        DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
     };
 
     // `std::env::set_var` mutates process-global state; serialize the env-touching
@@ -524,6 +560,32 @@ mod tests {
         // insecure_dev bypasses every check
         validate_pairwise_salt("", true).expect("insecure dev bypass");
         validate_pairwise_salt(DEV_PAIRWISE_SALT, true).expect("insecure dev bypass sentinel");
+    }
+
+    // L6: the worker_key gates BOTH the dispatch bearer check and the
+    // ZeroShip-User HMAC. Presence-only validation let a weak short key bind
+    // any interface and be brute-forced for header forgery. It now carries the
+    // SAME ≥32-byte strength floor as the stash key / pairwise salt: empty
+    // rejected, short rejected, ≥32 ok, dev bypass.
+    #[test]
+    fn validate_worker_key_enforces_min_len_outside_dev() {
+        // empty rejected (an empty key would HMAC-verify against a zero-length
+        // key any party can compute)
+        assert!(validate_worker_key("", false)
+            .expect_err("empty key")
+            .contains("required"));
+
+        // short (<32) rejected
+        assert!(validate_worker_key("short", false)
+            .expect_err("short key")
+            .contains("too short"));
+
+        // exactly 32 ok
+        validate_worker_key("0123456789abcdef0123456789abcdef", false).expect("strong key");
+
+        // insecure_dev bypasses every check (empty = "disabled", dev-only)
+        validate_worker_key("", true).expect("insecure dev bypass");
+        validate_worker_key("short", true).expect("insecure dev bypass short");
     }
 
     #[test]
