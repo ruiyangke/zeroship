@@ -160,10 +160,34 @@ pub(crate) fn refuse_if_query_capability<'s>(
 /// - array → `Value::Array` (recurse on each element)
 /// - object → `Value::Object` (recurse on each enumerable own property)
 /// - anything else (functions, symbols) → `Value::Null`
+/// DB-6: max nesting depth the V8→serde walker will descend. A malicious
+/// deeply-nested argument (tens of thousands of `[[[…]]]` / `{a:{a:…}}` levels)
+/// would otherwise overflow the worker thread's native stack inside the
+/// recursion — an **end-user-reachable** abort, since apps routinely forward
+/// untrusted end-user JSON straight into a filter/document. 256 is far above
+/// any legitimate document nesting yet far below the stack limit. Structure
+/// past the cap decodes to `Value::Null` (fail-safe: the downstream validator
+/// then rejects/handles it; no crash).
+pub(crate) const MAX_DECODE_DEPTH: usize = 256;
+
 pub(crate) fn v8_value_to_serde_json(
     scope: &mut v8::PinScope<'_, '_>,
     v: v8::Local<v8::Value>,
 ) -> Value {
+    v8_value_to_serde_json_depth(scope, v, 0)
+}
+
+fn v8_value_to_serde_json_depth(
+    scope: &mut v8::PinScope<'_, '_>,
+    v: v8::Local<v8::Value>,
+    depth: usize,
+) -> Value {
+    // DB-6: stop descending past the cap (before recursing into the
+    // array/object branches below) so a pathological nesting can't overflow
+    // the native stack.
+    if depth > MAX_DECODE_DEPTH {
+        return Value::Null;
+    }
     if v.is_null_or_undefined() {
         return Value::Null;
     }
@@ -225,7 +249,7 @@ pub(crate) fn v8_value_to_serde_json(
             let elem = arr
                 .get_index(scope, i)
                 .unwrap_or_else(|| v8::null(scope).into());
-            out.push(v8_value_to_serde_json(scope, elem));
+            out.push(v8_value_to_serde_json_depth(scope, elem, depth + 1));
         }
         return Value::Array(out);
     }
@@ -248,7 +272,7 @@ pub(crate) fn v8_value_to_serde_json(
                     Some(v) => v,
                     None => continue,
                 };
-                map.insert(key, v8_value_to_serde_json(scope, val_v));
+                map.insert(key, v8_value_to_serde_json_depth(scope, val_v, depth + 1));
             }
             return Value::Object(map);
         }
@@ -266,6 +290,55 @@ pub(crate) fn read_json_arg(
     match v {
         Some(val) if !val.is_null_or_undefined() => v8_value_to_serde_json(scope, val),
         _ => Value::Object(serde_json::Map::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_runtime::init_v8;
+
+    #[test]
+    fn decode_caps_recursion_depth_db6() {
+        // DB-6: a deeply-nested arg must not overflow the worker thread's
+        // native stack inside the recursive decoder. Build an array nested far
+        // past MAX_DECODE_DEPTH (via a loop, not a literal, to avoid V8's own
+        // parser depth limit), decode it, and assert (a) the process does NOT
+        // crash — the test completing is the proof — and (b) the structure is
+        // terminated at the cap with Null rather than descending forever.
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let depth = MAX_DECODE_DEPTH + 50;
+        let src = format!(
+            "(() => {{ let root = [], cur = root; for (let i = 0; i < {depth}; i++) \
+             {{ const n = []; cur.push(n); cur = n; }} return root; }})()"
+        );
+        let code = v8::String::new(scope, &src).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        let val = script.run(scope).unwrap();
+
+        let decoded = v8_value_to_serde_json(scope, val);
+
+        // Descend the decoded tree; it must bottom out at/around the cap in a
+        // Null (the guard), never continue for the full JS-side depth.
+        let mut cur = &decoded;
+        let mut levels = 0usize;
+        loop {
+            match cur {
+                Value::Array(a) if !a.is_empty() => {
+                    cur = &a[0];
+                    levels += 1;
+                    assert!(levels <= MAX_DECODE_DEPTH + 2, "decoded past the cap: {levels}");
+                }
+                _ => break,
+            }
+        }
+        assert!(levels >= MAX_DECODE_DEPTH, "should descend to the cap, got {levels}");
+        assert!(matches!(cur, Value::Null), "structure past the cap is Null");
     }
 }
 
