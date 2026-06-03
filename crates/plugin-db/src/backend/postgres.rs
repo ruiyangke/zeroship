@@ -582,6 +582,15 @@ impl FullTextIndex for PostgresBackend {
             });
         }
 
+        // DB-9: validate every FTS source column with the identifier fence
+        // BEFORE it is spliced UNQUOTED into the `tsvector_update_trigger` arg
+        // list below. That arg list requires bare column names, so quoting is
+        // not an option — validation is the only guard. Today CreateTable
+        // validates these columns first, but that is a non-local cross-statement
+        // ordering invariant; enforce it locally so a direct or FTS-only
+        // re-apply against an unvalidated spec can't inject DDL via a column name.
+        validate_fts_columns(columns)?;
+
         let qschema = self.quote_ident(app_id);
         let qcoll = self.quote_ident(collection);
         let qtable = format!("{qschema}.{qcoll}");
@@ -1852,6 +1861,15 @@ mod backup_pg {
     }
 }
 
+/// DB-9: validate FTS source column names with the shared identifier fence
+/// before they are spliced unquoted into the `tsvector_update_trigger` DDL.
+fn validate_fts_columns(columns: &[String]) -> Result<(), DbError> {
+    for col in columns {
+        crate::query::validate_field_name(col).map_err(DbError::from)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit tests for [`PostgresBackend`].
@@ -1951,6 +1969,16 @@ mod tests {
     // P1 PR 3: PgDialect hook unit tests. ZST has no I/O — each test
     // is a string-compare against the expected SQL fragment.
     // ---------------------------------------------------------------------
+
+    #[test]
+    fn validate_fts_columns_rejects_unsafe_names_db9() {
+        // Normal FTS source columns pass.
+        assert!(super::validate_fts_columns(&["title".into(), "body".into()]).is_ok());
+        // A column name that would break out of the unquoted trigger arg list
+        // (or carry a null byte) is rejected before any DDL is built.
+        assert!(super::validate_fts_columns(&["body); DROP TABLE x; --".into()]).is_err());
+        assert!(super::validate_fts_columns(&["a\u{0}b".into()]).is_err());
+    }
 
     #[test]
     fn pg_dialect_quote_ident_doubles_embedded_quote() {
