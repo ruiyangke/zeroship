@@ -14,7 +14,9 @@
 //!    disabled / has no `password_hash`, verify against the dummy hash so the
 //!    wall time matches a real verify (defeats email enumeration by timing).
 //! 4. Argon2 verify on `spawn_blocking` (~100 ms; never parks the event loop).
-//! 5. Locked / disabled (ineligible) arm → fail.
+//! 5. Locked / disabled (ineligible) arm → fail. A soft `locked_until` lock is
+//!    attacker-inducible, so it returns the OPAQUE `invalid_credentials` (5.1),
+//!    indistinguishable from arm 6; a hard `disabled_at` keeps `Ineligible`.
 //! 6. Absent / no-credential / wrong-password arm → fail (`invalid_credentials`).
 //! 7. `eligibility::check_user_eligible` → fail on account-state.
 //! 8. Audit (`login_success` | `login_failure`, `auth_method: "pwd"`).
@@ -49,10 +51,14 @@ pub struct VerifiedUser {
 pub enum CredentialError {
     /// Rate-limit bucket exhausted. HTTP 429.
     RateLimited,
-    /// No user / wrong password / OAuth-only account. HTTP 401. Opaque on
-    /// purpose — never distinguishes "no such user" from "wrong password".
+    /// No user / wrong password / OAuth-only account / soft-locked account.
+    /// HTTP 401. Opaque on purpose — never distinguishes "no such user" from
+    /// "wrong password" from "attacker-induced soft lock" (finding 5.1), so an
+    /// unauthenticated probe cannot enumerate account existence or lock-state.
     InvalidCredentials,
-    /// Account locked or disabled. HTTP 403.
+    /// Account hard-disabled (admin action). HTTP 403. NOT used for a soft
+    /// `locked_until` lock — that is attacker-inducible and would leak via a
+    /// distinct status, so it maps to `InvalidCredentials` instead (5.1).
     Ineligible,
     /// Infrastructure failure (DB / rate-limit store). HTTP 503. NOT a
     /// credential decision; no `login_failure` audit row is emitted for it.
@@ -197,6 +203,27 @@ pub async fn verify_password_credentials(
             },
         )
         .await;
+        // Status-code enumeration defense (finding 5.1): a soft `locked_until`
+        // lock is ATTACKER-INDUCIBLE — any anonymous caller who knows a
+        // victim's email can drive THRESHOLD wrong-password attempts to lock the
+        // row. If the locked arm answered 403 (`Ineligible`) while absent /
+        // wrong-password answer 401 (`InvalidCredentials`), the very next probe
+        // would be a single-request account-existence / lock-state oracle. Fold
+        // the lock into the opaque `InvalidCredentials` so a locked real account
+        // is indistinguishable from an absent one to an unauthenticated probe.
+        // The lock still HOLDS — no `VerifiedUser` is minted, the correct
+        // password is still rejected (L5/F2 lockout). Only the public
+        // status/message is equalized; the locked user still sees a generic
+        // "invalid email or password" failure, not a lock disclosure.
+        //
+        // A hard `disabled_at` is an ADMIN action, not reachable by anonymous
+        // probing, so it keeps the distinct `Ineligible` (403) status (the
+        // operator-facing "account disabled" state); it leaks nothing an
+        // attacker can induce.
+        let locked = u.locked_until.is_some_and(|t| t > now);
+        if locked && u.disabled_at.is_none() {
+            return Err(CredentialError::InvalidCredentials);
+        }
         return Err(CredentialError::Ineligible);
     }
 
@@ -260,7 +287,11 @@ pub async fn verify_password_credentials(
     }
 
     // 7. Eligibility (re-check via the shared account-state gate). A non-state
-    // error is infrastructure (Internal); a state error is Ineligible.
+    // error is infrastructure (Internal); a state error is Ineligible — except
+    // a soft `Locked`, which (per finding 5.1, same rationale as arm 5) is
+    // folded into the opaque `InvalidCredentials` so an attacker-inducible lock
+    // never leaks via a distinct status. This re-check is the TOCTOU backstop
+    // for a lock set between arm 5 and here.
     if let Err(e) = eligibility::check_user_eligible(db, u.id).await {
         if !e.is_account_state() {
             tracing::error!(error = %e, user_id = %u.id, "password login eligibility check failed");
@@ -279,6 +310,9 @@ pub async fn verify_password_credentials(
             },
         )
         .await;
+        if matches!(e, eligibility::LoginIneligible::Locked) {
+            return Err(CredentialError::InvalidCredentials);
+        }
         return Err(CredentialError::Ineligible);
     }
 

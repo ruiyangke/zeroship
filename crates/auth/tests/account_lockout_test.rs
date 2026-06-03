@@ -93,8 +93,14 @@ async fn consecutive_failures_lock_account_then_success_resets() {
         "after {LOCKOUT_THRESHOLD} consecutive failures locked_until must be set in the future, got {locked_until:?}"
     );
 
-    // 2. The next attempt — WITH THE CORRECT PASSWORD — is rejected as locked.
-    //    Pre-fix this returns Ok(VerifiedUser) (lock never set) → test fails.
+    // 2. The next attempt — WITH THE CORRECT PASSWORD — is STILL rejected
+    //    (the lock holds; no VerifiedUser is minted). Pre-lockout-fix this
+    //    returns Ok(VerifiedUser) (lock never set) → test fails.
+    //
+    //    Per finding 5.1 the locked rejection is the OPAQUE `InvalidCredentials`
+    //    (not the distinct `Ineligible`/403) so an attacker-inducible lock does
+    //    not leak account existence/lock-state via a status split. The security
+    //    goal is unchanged — the correct password is still refused.
     let err = verify_password_credentials(
         &pg,
         &req,
@@ -107,8 +113,8 @@ async fn consecutive_failures_lock_account_then_success_resets() {
     .expect_err("correct password on a locked account must STILL fail");
     assert_eq!(
         err,
-        CredentialError::Ineligible,
-        "locked account must reject even the correct password as Ineligible, got {err:?}"
+        CredentialError::InvalidCredentials,
+        "locked account must reject even the correct password, opaquely (5.1), got {err:?}"
     );
 
     // 3. Clear the lock window (simulate it elapsing) and verify a successful
@@ -350,6 +356,113 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
     pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
         .await
         .ok();
+}
+
+/// 5.1 regression (status-code enumeration oracle) — a LOCKED real account, an
+/// ABSENT account, and a WRONG-PASSWORD real account must all be
+/// INDISTINGUISHABLE to an unauthenticated `/login` probe.
+///
+/// The locked state is attacker-INDUCIBLE: any anonymous caller who knows a
+/// victim's email can drive THRESHOLD wrong-password attempts to lock the row.
+/// Pre-fix, the very next probe takes the ineligible arm → `Ineligible` (403),
+/// while an absent email always returns `InvalidCredentials` (401). That binary
+/// status split is a single-request account-existence / lock-state oracle.
+///
+/// This drives the REAL production path (`verify_password_credentials`) for all
+/// three failure shapes and asserts the returned `CredentialError` — which maps
+/// 1:1 to the public HTTP status — is identical. It does NOT pre-seed the
+/// locked state; the lock is produced by the production failure path itself.
+///
+/// Pre-fix: locked → `Ineligible` (403), absent/wrong → `InvalidCredentials`
+/// (401) → the locked assertion FAILS. Post-fix: the locked arm is folded into
+/// `InvalidCredentials` so all three are 401.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
+    let Some(pg) = connect_pg("locked_absent_and_wrongpw_are_status_indistinguishable").await
+    else {
+        return;
+    };
+
+    let req = TestRequest::default().to_http_request();
+
+    // ── Probe A: a LOCKED real account (lock produced via the production
+    //    failure path, not pre-seeded). The follow-up probe carries the
+    //    CORRECT password so we know the only thing failing it is the lock. ──
+    let locked_email = format!("oracle-locked-{}@zeroship.test", Uuid::new_v4().simple());
+    let phc = password::hash(GOOD_PW).expect("hash password");
+    let locked_user = users::create(&pg, &locked_email, "Oracle Locked", Some(&phc))
+        .await
+        .expect("seed locked user");
+    lock_account_via_failures(&pg, &locked_email, locked_user.id).await;
+    let locked_err = verify_password_credentials(
+        &pg,
+        &req,
+        "test-client",
+        "192.0.2.10",
+        &locked_email,
+        GOOD_PW,
+    )
+    .await
+    .expect_err("locked account must reject even the correct password");
+
+    // ── Probe B: an ABSENT account. ──
+    let ghost_email = format!("oracle-ghost-{}@zeroship.test", Uuid::new_v4().simple());
+    let absent_err = verify_password_credentials(
+        &pg,
+        &req,
+        "test-client",
+        "192.0.2.11",
+        &ghost_email,
+        BAD_PW,
+    )
+    .await
+    .expect_err("absent account must fail");
+
+    // ── Probe C: a real account with the WRONG password (one sub-threshold
+    //    attempt so it does not itself lock). ──
+    let real_email = format!("oracle-real-{}@zeroship.test", Uuid::new_v4().simple());
+    let phc2 = password::hash(GOOD_PW).expect("hash password");
+    let real_user = users::create(&pg, &real_email, "Oracle Real", Some(&phc2))
+        .await
+        .expect("seed real user");
+    let wrongpw_err = verify_password_credentials(
+        &pg,
+        &req,
+        "test-client",
+        "192.0.2.12",
+        &real_email,
+        BAD_PW,
+    )
+    .await
+    .expect_err("wrong password must fail");
+
+    // The crux: status codes (via CredentialError) must be IDENTICAL. A locked
+    // real account that answers 403 while absent/wrong answer 401 is a
+    // single-request existence/lock-state oracle to an anonymous probe.
+    assert_eq!(
+        absent_err, wrongpw_err,
+        "absent ({absent_err:?}) and wrong-password ({wrongpw_err:?}) must be indistinguishable"
+    );
+    assert_eq!(
+        locked_err, absent_err,
+        "LOCKED real account ({locked_err:?}) must be indistinguishable from an ABSENT account \
+         ({absent_err:?}) to an anonymous /login probe — a status-code split leaks existence/lock-state"
+    );
+    assert_eq!(
+        locked_err.status(),
+        absent_err.status(),
+        "locked status {} must equal absent status {}",
+        locked_err.status(),
+        absent_err.status(),
+    );
+
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = ANY($1)",
+        &[&vec![locked_user.id, real_user.id]],
+    )
+    .await
+    .ok();
 }
 
 /// F7 regression — the two password-failure arms must perform an EQUIVALENT
