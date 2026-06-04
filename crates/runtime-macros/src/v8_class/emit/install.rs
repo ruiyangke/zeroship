@@ -365,7 +365,20 @@ fn gen_proto_method_set(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 
                 // fallback AND the CFunction shim as the fast-path
                 // overload. V8 chooses fast vs slow at JIT time per
                 // the receiver/arg shape.
+                //
+                // SECURITY (RT-1): a `v8::Signature` over this class's
+                // constructor template is MANDATORY. Without it the fast-API
+                // path runs the brand-check-free shim
+                // (`get_aligned_pointer_from_internal_field` → `&*Self`) on
+                // ANY receiver, so a foreign/forged `this` under JIT is
+                // reinterpreted as `*const Self` — type confusion → arbitrary
+                // memory read / abort = isolate escape. The signature makes V8
+                // deopt a non-matching receiver to the slow callback, which
+                // brand-checks + bounds-checks the internal field. Subclass
+                // instances still match (signatures walk the template chain).
+                let __sig = v8::Signature::new(scope, __ctor_tmpl);
                 let __fn_tmpl = v8::FunctionTemplate::builder(#cb)
+                    .signature(__sig)
                     .build_fast(scope, &[#cfn.0]);
                 __proto.set(__key.into(), __fn_tmpl.into());
             }
@@ -403,7 +416,12 @@ fn gen_proto_accessor_set(
         .map(|cm| fastcall_cfn_ident(class_ty, &cm.func.sig.ident));
     let getter_tokens = match (getter_opt, getter_fastcall_cfn) {
         (Some(cb), Some(cfn)) => quote! {
+            // SECURITY (RT-1): see the method site — the `v8::Signature` is
+            // mandatory on the fastcall GETTER too, else a foreign receiver
+            // reaches the brand-check-free fast shim (isolate escape).
+            let __getter_sig = v8::Signature::new(scope, __ctor_tmpl);
             let __getter_tmpl = v8::FunctionTemplate::builder(#cb)
+                .signature(__getter_sig)
                 .build_fast(scope, &[#cfn.0]);
             let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
         },

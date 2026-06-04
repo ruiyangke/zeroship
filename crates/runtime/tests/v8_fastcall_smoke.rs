@@ -552,6 +552,83 @@ fn fastcall_runs_user_body_under_optimisation() {
         "fastcall caused a deopt mid-loop; status: {s}");
 }
 
+// ---------------------------------------------------------------------------
+// Test 8: RT-1 regression — foreign-receiver type confusion (isolate escape)
+// ---------------------------------------------------------------------------
+//
+// A `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]` invoked on a FOREIGN
+// or forged receiver under JIT must throw `TypeError: Illegal invocation`,
+// NOT reach the brand-check-free fast shim — which would reinterpret the
+// receiver's slot-1 bytes as `*const Self` (type confusion → arbitrary memory
+// read / SIGABRT, an isolate escape). The fix wires a `v8::Signature` onto the
+// FunctionTemplate so V8 deopts a non-matching receiver to the slow callback,
+// which brand-checks and bounds-checks the internal field. WITHOUT the fix,
+// the optimised fast path runs on ANY object and these tests abort the process.
+
+#[test]
+fn fastcall_method_foreign_receiver_throws_not_crash() {
+    let s = run_in_v8(
+        |scope, global| install_class::<u32_method::Adder>(
+            u32_method::Adder::install, "Adder", scope, global,
+        ),
+        r#"
+        const a = new Adder(100);
+        const stolen = Adder.prototype.add;
+        function call(x) { return stolen.call(x, 5); }
+        %PrepareFunctionForOptimization(call);
+        call(a); call(a); call(a);
+        %OptimizeFunctionOnNextCall(call);
+        call(a); // optimise on the real native shape
+        let k_plain, k_proto, legit;
+        // A plain object — fails the signature AND the slow-path brand check.
+        try { call({}); } catch (e) { k_plain = e.constructor.name; }
+        // A fake with the right prototype but no internal fields — fails the
+        // signature; slow path brand-passes then bounds-checks the field → throws.
+        try { call(Object.create(Adder.prototype)); } catch (e) { k_proto = e.constructor.name; }
+        // A legitimate receiver must still work on the (optimised) fast path.
+        legit = call(a);
+        JSON.stringify({ k_plain, k_proto, legit });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(parsed["k_plain"], serde_json::json!("TypeError"),
+        "plain {{}} receiver must throw, not crash; got: {s}");
+    assert_eq!(parsed["k_proto"], serde_json::json!("TypeError"),
+        "Object.create(proto) receiver must throw, not crash; got: {s}");
+    assert_eq!(parsed["legit"], serde_json::json!(105),
+        "a legitimate receiver must still work on the fast path; got: {s}");
+}
+
+#[test]
+fn fastcall_getter_foreign_receiver_throws_not_crash() {
+    // Same RT-1 fix must cover the GETTER fastcall install site.
+    let s = run_in_v8(
+        |scope, global| install_class::<bool_getter::Flag>(
+            bool_getter::Flag::install, "Flag", scope, global,
+        ),
+        r#"
+        const f = new Flag(1);
+        const get = Object.getOwnPropertyDescriptor(Flag.prototype, "is_on").get;
+        function read(x) { return get.call(x); }
+        %PrepareFunctionForOptimization(read);
+        read(f); read(f); read(f);
+        %OptimizeFunctionOnNextCall(read);
+        read(f);
+        let k_plain, legit;
+        try { read({}); } catch (e) { k_plain = e.constructor.name; }
+        legit = read(f);
+        JSON.stringify({ k_plain, legit });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(parsed["k_plain"], serde_json::json!("TypeError"),
+        "getter on a plain {{}} receiver must throw, not crash; got: {s}");
+    assert_eq!(parsed["legit"], serde_json::json!(true),
+        "getter on a legitimate receiver must still work; got: {s}");
+}
+
 #[test]
 fn fastcall_method_compiles_via_turbofan() {
     let s = run_in_v8(
