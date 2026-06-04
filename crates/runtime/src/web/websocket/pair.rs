@@ -139,6 +139,26 @@ pub fn mint_pair(state: &SharedState) -> (u32, u32) {
     if let Some(ws) = network::lookup_native_ws_state(state, hi) {
         ws.borrow_mut().is_pair = true;
     }
+
+    // Bind the upgrading connection's authenticated user to BOTH sockets.
+    // The mint runs inside the upgrading `fetch` handler, so
+    // `executing_request_id` → `per_request_user` still resolves the
+    // connection's user. A connection has one identity; bind both ends so
+    // the WS-event pump can re-establish it for every `onmessage` /
+    // `onclose` turn regardless of which socket the app holds. Without
+    // this, `env.auth.getUser()` inside a WS handler would read whatever
+    // user last touched the pooled isolate (identity bleed) or null.
+    {
+        let mut s = state.borrow_mut();
+        if let Some(user) = s
+            .executing_request_id
+            .and_then(|rid| s.per_request_user.get(&rid).cloned())
+        {
+            s.ws_user.insert(lo, user.clone());
+            s.ws_user.insert(hi, user);
+        }
+    }
+
     (lo, hi)
 }
 

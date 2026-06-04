@@ -74,17 +74,35 @@ pub fn clear_request_user(state: &SharedState, request_id: u64) {
     state.borrow_mut().per_request_user.remove(&request_id);
 }
 
-/// Look up the currently-executing request's user JSON.
+/// Look up the currently-executing turn's user JSON.
 ///
 /// `executing_request_id` is set by the runtime immediately before every
 /// V8 turn that belongs to a specific request (dispatch, op resolve, op
-/// reject, timer fire). If no request is currently attributed — e.g. a
-/// module-init callback, or a stream pump with no owning request —
-/// returns `None`.
+/// reject, timer fire), and resolves the user via `per_request_user`.
+///
+/// WebSocket turns (`onmessage` / `onclose`) are not attributed to a
+/// request id — they belong to a long-lived connection. For those, the
+/// WS-event pump binds the connection's user in `executing_ws_user`
+/// (sourced from `ws_user[ws_id]`, captured at upgrade time). We prefer
+/// the request-id-keyed user when present, then fall back to the bound
+/// WS-connection user.
+///
+/// If neither resolves — e.g. a module-init callback, or a stream pump
+/// with no owning request — returns `None`.
 fn current_user(state: &SharedState) -> Option<String> {
     let s = state.borrow();
-    let rid = s.executing_request_id?;
-    s.per_request_user.get(&rid).cloned()
+    if let Some(rid) = s.executing_request_id {
+        if let Some(u) = s.per_request_user.get(&rid) {
+            return Some(u.clone());
+        }
+    }
+    #[cfg(feature = "runtime_native_websocket")]
+    {
+        if let Some(u) = s.executing_ws_user.as_ref() {
+            return Some(u.clone());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

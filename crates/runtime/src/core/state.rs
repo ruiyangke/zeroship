@@ -459,6 +459,31 @@ pub struct RuntimeState {
     /// across every `.await` boundary in a single-threaded async runtime.
     pub per_request_user: HashMap<u64, String>,
 
+    /// Per-WebSocket-connection authenticated user JSON, keyed by native
+    /// `ws_id`. Captured at WS upgrade time (the `WebSocketPair` mint runs
+    /// inside the upgrading `fetch` handler, where `executing_request_id`
+    /// still resolves the connection's user). Both sockets of a pair are
+    /// bound to the same user — a connection has one identity.
+    ///
+    /// The WS-event pump (`OpResult::WebSocketEvent`) reads this to
+    /// re-establish the connection's identity for every WS turn
+    /// (`onmessage` / `onclose`) via `executing_ws_user`, so
+    /// `env.auth.getUser()` inside a WS handler returns THIS connection's
+    /// user — never null, never a stale leftover from a prior request on
+    /// the pooled isolate. Dropped in `free_native_ws_state`.
+    #[cfg(feature = "runtime_native_websocket")]
+    pub ws_user: HashMap<u32, String>,
+
+    /// The connection user the WS-event pump has bound for the current WS
+    /// turn (set from `ws_user[ws_id]` immediately before entering V8 to
+    /// dispatch `onmessage` / `onclose`, cleared right after). Read by
+    /// `auth::current_user` as the per-turn identity when no
+    /// `executing_request_id`-keyed user resolves. This is the WS analogue
+    /// of the `executing_request_id` → `per_request_user` lookup the normal
+    /// fetch / op / timer turns use.
+    #[cfg(feature = "runtime_native_websocket")]
+    pub executing_ws_user: Option<String>,
+
     /// For each in-flight request, the list of promises registered via
     /// `ctx.waitUntil(p)` from JS. The kernel keeps the isolate alive past
     /// the response body write until every promise settles or the wall
@@ -619,6 +644,10 @@ impl RuntimeState {
 
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
+            #[cfg(feature = "runtime_native_websocket")]
+            ws_user: HashMap::new(),
+            #[cfg(feature = "runtime_native_websocket")]
+            executing_ws_user: None,
             wait_until_by_request: HashMap::new(),
             request_by_id: HashMap::new(),
             request_ctx_by_id: HashMap::new(),

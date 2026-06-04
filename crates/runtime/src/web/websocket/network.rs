@@ -221,6 +221,10 @@ pub fn free_native_ws_state(state: &SharedState, ws_id: u32) {
     let mut s = state.borrow_mut();
     s.native_websockets.remove(&ws_id);
     s.native_ws_wrappers.remove(&ws_id);
+    // Drop the connection's bound auth user — mirrors the per-request
+    // user cleanup, so a long-lived worker doesn't accumulate identity
+    // state for closed connections.
+    s.ws_user.remove(&ws_id);
 }
 
 pub fn lookup_native_ws_state(

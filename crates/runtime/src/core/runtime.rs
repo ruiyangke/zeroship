@@ -2203,6 +2203,26 @@ impl RuntimeInner {
                 // resolve as no-op drains).
                 let state_clone = self.state.clone();
 
+                // Re-establish THIS connection's authenticated identity for
+                // the WS turn. WS events aren't attributed to a request id,
+                // so without this `env.auth.getUser()` inside an `onmessage`
+                // / `onclose` handler would read whatever user last touched
+                // the pooled isolate (a stale leftover) or null. The user
+                // was bound to `ws_user[ws_id]` at upgrade time; mirror the
+                // request path by binding it for the duration of the turn.
+                //
+                // Critically, clear any leftover `executing_request_id`
+                // first: WS turns have no owning request, and
+                // `auth::current_user` resolves the request-id-keyed user
+                // before the WS fallback — a stale id left over from a prior
+                // turn would otherwise win and leak the wrong identity.
+                {
+                    let mut s = self.state.borrow_mut();
+                    s.executing_request_id = None;
+                    s.executing_request_cancel = None;
+                    s.executing_ws_user = s.ws_user.get(&ws_id).cloned();
+                }
+
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
                     crate::websocket_native::dispatch::dispatch_pending_ws_events(
@@ -2212,6 +2232,10 @@ impl RuntimeInner {
                     collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
+
+                // Clear the per-turn WS identity so it never bleeds into a
+                // subsequent non-WS turn on this isolate.
+                self.state.borrow_mut().executing_ws_user = None;
 
                 if self.check_v8_terminated() {
                     self.clear_executing_request();
