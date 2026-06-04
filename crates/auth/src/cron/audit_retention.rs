@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use compio_postgres::Client;
+use compio_postgres::{Client, NoTls, Transaction};
 
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
@@ -84,11 +84,11 @@ const DEBUG: &[&str] = &[
 // `compio_postgres::Client` holds a connection handle that is `!Send`;
 // the lint is structural, not actionable (mirrors `jwk_rotation::run`).
 #[allow(clippy::future_not_send)]
-pub async fn run(db: Arc<Client>, cfg: Arc<AuthConfig>) {
+pub async fn run(cfg: Arc<AuthConfig>) {
     let interval_secs = cfg.audit_retention_check_secs;
     tracing::info!(interval_secs, "audit_retention cron starting");
     loop {
-        if let Err(e) = tick(&db).await {
+        if let Err(e) = tick(&cfg.db_url).await {
             tracing::error!(error = %e, "audit_retention tick failed");
         }
         compio::time::sleep(Duration::from_secs(interval_secs)).await;
@@ -99,24 +99,37 @@ pub async fn run(db: Arc<Client>, cfg: Arc<AuthConfig>) {
 /// `#[doc(hidden)]`) so the live-PG integration test in
 /// `tests/audit_retention_test.rs` can drive a single tick
 /// deterministically without sitting on the cron sleep.
+///
+/// Opens its OWN dedicated connection from `dsn`: the
+/// `zeroship.audit_retention` GUC that disarms the append-only tamper
+/// trigger MUST NOT bleed onto any other query. The shared, pipelined
+/// service connection carries unrelated traffic, so flagging it would
+/// leave every concurrent query running with forensic-integrity
+/// protection off for the whole sweep window. A fresh connection per
+/// tick guarantees no other code path shares the socket; the GUC is
+/// further scoped to a single explicit transaction via `SET LOCAL`
+/// (see [`sweep_once`]) so it auto-reverts at COMMIT and can never
+/// outlive the sweep even on its own connection.
+//
+// Holds the dedicated `compio_postgres::Client` (a `!Send` connection
+// handle) across awaits; the lint is structural, not actionable (mirrors
+// `run` / `jwk_rotation`).
+#[allow(clippy::future_not_send)]
 #[doc(hidden)]
-pub async fn tick(db: &Client) -> Result<()> {
-    // `zeroship.audit_events` is append-only — a BEFORE DELETE trigger rejects any
-    // tampering. This retention sweep is the single sanctioned deleter, so it
-    // flags the connection (`zeroship.audit_retention = 'on'`); the trigger
-    // permits DELETEs only while that GUC is set. The flag is cleared afterward
-    // (in all paths) so nothing else on this connection can delete. See the
-    // `zeroship.audit_events_block_tamper()` trigger in db/changelog/0002_auth.sql.
-    db.batch_execute("SET zeroship.audit_retention = 'on'")
+pub async fn tick(dsn: &str) -> Result<()> {
+    let (mut conn, driver) = compio_postgres::connect(dsn, NoTls)
         .await
-        .map_err(|e| AuthError::Db(format!("audit retention: enable sweep: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("audit retention: connect: {e}")))?;
+    // Detach the connection driver; it exits when `conn` is dropped at the
+    // end of this tick, tearing the dedicated socket down.
+    compio::runtime::spawn(async move {
+        if let Err(e) = driver.run().await {
+            tracing::error!(error = %e, "audit_retention: pg connection error");
+        }
+    })
+    .detach();
 
-    let swept = sweep_all(db).await;
-
-    // Always clear the flag, even if a delete failed mid-sweep.
-    let _ = db.batch_execute("SET zeroship.audit_retention = 'off'").await;
-
-    let (security_deleted, pii_deleted, debug_deleted) = swept?;
+    let (security_deleted, pii_deleted, debug_deleted) = sweep_once(&mut conn).await?;
     let total = security_deleted + pii_deleted + debug_deleted;
     if total > 0 {
         tracing::info!(
@@ -129,12 +142,41 @@ pub async fn tick(db: &Client) -> Result<()> {
     Ok(())
 }
 
-/// Sweep all three buckets. Split out so [`tick`] can bracket it with the
-/// retention GUC and still guarantee the flag is cleared on the error path.
-async fn sweep_all(db: &Client) -> Result<(u64, u64, u64)> {
-    let security_deleted = delete_older_than(db, SECURITY, 365).await?;
-    let pii_deleted = delete_older_than(db, PII, 90).await?;
-    let debug_deleted = delete_older_than(db, DEBUG, 30).await?;
+/// Sweep all three buckets inside ONE explicit transaction scoped by
+/// `SET LOCAL zeroship.audit_retention = 'on'`.
+///
+/// `zeroship.audit_events` is append-only — a BEFORE DELETE trigger rejects any
+/// tampering, permitting DELETEs only while the `zeroship.audit_retention` GUC
+/// reads `'on'`. `SET LOCAL` confines that flag to the lifetime of this
+/// transaction: it auto-reverts at COMMIT/ROLLBACK (and, since the connection
+/// is dedicated and dropped after the tick, nothing else ever observes it).
+/// See the `zeroship.audit_events_block_tamper()` trigger in
+/// `db/changelog/changesets/0002_auth.sql`.
+///
+/// Exposed (under `#[doc(hidden)]`) so the live-PG regression test can drive
+/// the REAL sweep on a connection it owns and then assert the privileged GUC
+/// did not leak past the sweep's own transaction.
+#[doc(hidden)]
+pub async fn sweep_once(conn: &mut Client) -> Result<(u64, u64, u64)> {
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| AuthError::Db(format!("audit retention: begin tx: {e}")))?;
+
+    // Transaction-local: reverts automatically at COMMIT/ROLLBACK. It can
+    // never bleed onto any query outside this transaction.
+    tx.batch_execute("SET LOCAL zeroship.audit_retention = 'on'")
+        .await
+        .map_err(|e| AuthError::Db(format!("audit retention: enable sweep: {e}")))?;
+
+    let security_deleted = delete_older_than(&tx, SECURITY, 365).await?;
+    let pii_deleted = delete_older_than(&tx, PII, 90).await?;
+    let debug_deleted = delete_older_than(&tx, DEBUG, 30).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| AuthError::Db(format!("audit retention: commit: {e}")))?;
+
     Ok((security_deleted, pii_deleted, debug_deleted))
 }
 
@@ -147,13 +189,13 @@ async fn sweep_all(db: &Client) -> Result<(u64, u64, u64)> {
 /// numeric on the LHS directly. Days is bound as text (rather than via a
 /// `Vec<&str>` cast on the array) to sidestep `postgres-types`'s slice
 /// quirks.
-async fn delete_older_than(db: &Client, event_types: &[&str], days: i64) -> Result<u64> {
+async fn delete_older_than(tx: &Transaction<'_>, event_types: &[&str], days: i64) -> Result<u64> {
     // Bind the array as `Vec<&str>` so `postgres-types` resolves it to
     // `text[]` cleanly — bare `&[&str]` doesn't always coerce through
     // the `ToSql` impl matrix.
     let types_owned: Vec<&str> = event_types.to_vec();
     let days_str = days.to_string();
-    let affected = db
+    let affected = tx
         .execute(
             "DELETE FROM zeroship.audit_events \
              WHERE event_type = ANY($1) \

@@ -35,10 +35,13 @@ pub fn spawn_all(
     })
     .detach();
 
-    let db_audit = db.clone();
+    // `audit_retention` opens its OWN dedicated connection per tick (the
+    // sweep flips the append-only tamper trigger off via a transaction-local
+    // GUC, which must never share a socket with other traffic), so it takes
+    // only the config — not the shared `Arc<Client>`.
     let cfg_audit = cfg;
     compio::runtime::spawn(async move {
-        audit_retention::run(db_audit, cfg_audit).await;
+        audit_retention::run(cfg_audit).await;
     })
     .detach();
 
