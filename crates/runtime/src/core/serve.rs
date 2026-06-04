@@ -228,6 +228,24 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// to keep the connection open forever.
 const MAX_CONNECTION_BUFFER_BYTES: usize = MAX_HEADER_BYTES + MAX_BODY_BYTES + 4096;
 
+/// Idle ceiling for a streaming (chunked / SSE) response body. If the
+/// handler produces no chunk and does not finish within this window, the
+/// pump closes the connection and releases the worker task.
+///
+/// This is *idle*, not wall: every emitted chunk resets the clock, so a
+/// legitimate long-lived SSE/LLM stream that keeps producing tokens runs
+/// indefinitely. The cap only fires on a stream that stalls — e.g. a
+/// handler stuck in an infinite `await` that never enqueues or closes —
+/// which otherwise pins the TCP connection and its compio task forever
+/// (resource-exhaustion DoS). 5 minutes is generous: it comfortably
+/// exceeds keepalive/heartbeat intervals of every SSE client we target
+/// while still bounding a wedged stream.
+///
+/// Static, like the other per-connection limits above: the standalone
+/// server is a dev/bench entrypoint; the worker+gateway deployment
+/// enforces its own stream bounds.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
 // ===========================================================================
 // HTTP connection handler
 // ===========================================================================
@@ -572,9 +590,46 @@ fn find_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\r\n")
 }
 
+/// Outcome of waiting for the next streaming-body event.
+#[derive(Debug, PartialEq, Eq)]
+enum StreamWait {
+    /// Data is available or the stream finished — drain and continue.
+    Ready,
+    /// The idle ceiling elapsed with no chunk and no completion. The pump
+    /// must stop and release the connection.
+    IdleTimeout,
+}
+
+/// Await the next chunk (or stream completion), bounded by `idle_timeout`.
+///
+/// Races `reader.wait_for_data()` against a `compio::time::sleep`. Returns
+/// `Ready` the instant data arrives or the writer signals done/overflow;
+/// returns `IdleTimeout` if neither happens before the deadline. Extracted
+/// from the pump loop so the idle bound is unit-testable without a socket.
+async fn wait_for_data_or_idle(
+    reader: &crate::channel::StreamReader,
+    idle_timeout: Duration,
+) -> StreamWait {
+    let data = reader.wait_for_data().fuse();
+    let sleep = compio::time::sleep(idle_timeout).fuse();
+    pin_mut!(data, sleep);
+    futures::select! {
+        _ = data => StreamWait::Ready,
+        _ = sleep => StreamWait::IdleTimeout,
+    }
+}
+
 async fn stream_chunked_body(
     stream: &mut TcpStream,
     reader: crate::channel::StreamReader,
+) -> bool {
+    stream_chunked_body_with_idle(stream, reader, STREAM_IDLE_TIMEOUT).await
+}
+
+async fn stream_chunked_body_with_idle(
+    stream: &mut TcpStream,
+    reader: crate::channel::StreamReader,
+    idle_timeout: Duration,
 ) -> bool {
     use std::io::Write as _;
 
@@ -597,7 +652,16 @@ async fn stream_chunked_body(
         if reader.is_done() {
             break;
         }
-        reader.wait_for_data().await;
+        // Bound the idle wait: a handler that produces nothing and never
+        // closes would otherwise pin this connection + compio task forever.
+        // Every emitted chunk resets the clock (we loop back and re-arm the
+        // sleep), so a steadily-producing stream is never cut off.
+        if wait_for_data_or_idle(&reader, idle_timeout).await == StreamWait::IdleTimeout {
+            // Stream wedged. Send the terminator so a well-behaved client
+            // sees a clean (if truncated) end, then drop the connection.
+            let _ = stream.write_all(b"0\r\n\r\n" as &'static [u8]).await;
+            return false;
+        }
     }
     // `&'static [u8]` implements `IoBuf`, so the trailer ships without a
     // `.to_vec()` allocation.
@@ -1595,5 +1659,81 @@ mod ws_frame_tests {
         let (opcode, payload) = frame.expect("normal frame should parse");
         assert_eq!(opcode, 0x1);
         assert_eq!(payload, b"hello");
+    }
+}
+
+#[cfg(test)]
+mod stream_idle_tests {
+    //! Regression for P4-B-3 / RT-3: the SSE/chunked streaming pump must
+    //! release a stalled stream instead of pinning the connection + worker
+    //! task forever. We exercise the real idle-wait helper the pump calls on
+    //! every loop iteration (`wait_for_data_or_idle`) against a live
+    //! `StreamReader`/`StreamWriter` pair — no shim, no fake.
+    use super::*;
+    use crate::channel::stream_buffer;
+    use std::time::Instant;
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        compio::runtime::Runtime::new().unwrap().block_on(fut)
+    }
+
+    /// A stream that produces nothing and never closes must resolve to
+    /// `IdleTimeout` once the deadline elapses — not hang. Pre-fix the pump
+    /// awaited `reader.wait_for_data()` with no bound, so the equivalent wait
+    /// would block forever and this test would never return.
+    #[test]
+    fn idle_stream_times_out() {
+        let (_writer, reader) = stream_buffer();
+        // Keep `_writer` alive but silent: not closed, no chunks pushed —
+        // exactly the wedged-handler shape.
+        let idle = Duration::from_millis(50);
+        let start = Instant::now();
+        let outcome = block_on(wait_for_data_or_idle(&reader, idle));
+        assert_eq!(
+            outcome,
+            StreamWait::IdleTimeout,
+            "a silent, never-closed stream must hit the idle ceiling"
+        );
+        assert!(
+            start.elapsed() >= idle,
+            "must wait the full idle window before giving up"
+        );
+    }
+
+    /// A stream with a chunk already queued must resolve `Ready` immediately
+    /// — the idle bound must never cut off a producing stream.
+    #[test]
+    fn active_stream_not_prematurely_closed() {
+        let (writer, reader) = stream_buffer();
+        // Data is available before we even start waiting.
+        assert_eq!(
+            writer.push(b"token".to_vec()),
+            crate::channel::StreamPushResult::Ok
+        );
+        // Generous idle window: if the bound fired here it would be a bug,
+        // but the test would still finish fast because `Ready` short-circuits.
+        let idle = Duration::from_secs(30);
+        let start = Instant::now();
+        let outcome = block_on(wait_for_data_or_idle(&reader, idle));
+        assert_eq!(
+            outcome,
+            StreamWait::Ready,
+            "available data must resolve Ready, not time out"
+        );
+        assert!(
+            start.elapsed() < idle,
+            "Ready must short-circuit well before the idle deadline"
+        );
+    }
+
+    /// A closed (completed) stream resolves `Ready` so the pump can write its
+    /// terminator and finish cleanly — the idle bound must not swallow a
+    /// legitimate end-of-stream.
+    #[test]
+    fn closed_stream_resolves_ready() {
+        let (writer, reader) = stream_buffer();
+        writer.close();
+        let outcome = block_on(wait_for_data_or_idle(&reader, Duration::from_secs(30)));
+        assert_eq!(outcome, StreamWait::Ready);
     }
 }
