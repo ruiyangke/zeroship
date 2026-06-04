@@ -26,6 +26,15 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 >    never runs) → unbounded resource leak under app churn.
 >
 > RT-5/6/7 mean **mutually-untrusted apps are not yet safe on a shared worker thread**.
+>
+> 5. **CT-B1 — the 15% platform fee is not enforced server-side (revenue-model integrity).**
+>    The Stripe checkout session is built in creator-controlled code (`@zeroship/payments`
+>    runs in the app); `applicationFeePercent` defaults to 15 but is caller-settable, and
+>    the webhook's `record_payout` records `application_fee_amount` + a self-attested
+>    `creator_id` verbatim — only checking `fee≤gross`, no minimum-fee floor, no binding of
+>    `creator_id` to the connected account (verified `stripe_store.rs:226`). A creator sets
+>    `applicationFeePercent: 0` → keeps 100%. **The platform must own checkout-session
+>    creation (or enforce a server-side fee floor + account↔creator binding).**
 
 ## Threat model (platform-wide)
 
@@ -49,10 +58,10 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 | 1 | **gateway** (`crates/gateway`) | internet-facing front door | ✅ 4 HIGH (host-trust ×2, rate-limit ×2), signing strong, no SSRF/traversal |
 | 2 | **runtime** (`crates/runtime`) | V8 sandbox, fetch/SSRF, WS, crypto, capability boundary | ✅ **4 CRITICAL** (isolate escape + 3 DoS), 2 MAJOR SSRF; node-compat + SSRF posture strong |
 | 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | ✅ kv STRONG (2 MAJOR quota/scan); storage 2 HIGH (path-validator, size cap), S3 N/A |
-| 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | 🔄 reviewing |
-| 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | ⏳ queued |
-| 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ⏳ queued |
-| 7 | **compio-postgres / compio-redis** | bespoke wire-protocol drivers | ⏳ queued |
+| 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | ✅ **1 CRITICAL** (fee unenforced), 1 HIGH (plan self-escalate), 3 MAJOR; IDOR/bundle-ingest solid |
+| 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | 🔄 reviewing |
+| 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ✅ unpack/blob hardened (covered by control lane A) + worker lane |
+| 7 | **compio-postgres / compio-redis** | bespoke wire-protocol drivers | 🔄 reviewing (protocol-parse memory safety) |
 | 8 | **sandbox** (`crates/sandbox`) | Nomad + Cloud Hypervisor VM isolation | ⏳ queued |
 | 9 | **core** (`crates/core`) | typed_id, signing utils, wire types | ⏳ queued |
 
@@ -153,6 +162,31 @@ closed + tested; DSN credentials redacted from errors; `list` cursor opaque + te
 
 ---
 
-## 4. Control plane — findings 🔄
+## 4. Control plane — findings ✅
 
-_(deploy, billing/Stripe, env/secrets, API/authz reviewers running)_
+3 lanes: deploy/CRUD-authz (A), billing/Stripe (B), env/secrets (C). The Cedar authz +
+`app_members` ownership were covered by the auth-pipeline review; these lanes confirm the
+**ownership/IDOR model is consistently sound** and focus on input-validation + the money path.
+
+| ID | Sev | Lane | Finding | Status |
+| --- | --- | --- | --- | --- |
+| CT-B1 | **CRITICAL** | B | **15% platform fee not enforced server-side.** Checkout session built in creator code (`@zeroship/payments`); `applicationFeePercent` caller-settable; `record_payout` records `application_fee_amount` + self-attested `creator_id` verbatim, only checking `fee≤gross` — no fee floor, no `creator_id`↔connected-account binding (`stripe_store.rs:226`). Creator sets `applicationFeePercent:0` → keeps 100%. Platform must own session creation or enforce a server-side floor + account binding. | **verified** (src) |
+| CT-A1 | HIGH | A | **Creator self-escalates to `unlimited` runtime/billing tier via unvalidated `plan_id`.** `set_plan`/`create_app` (`api.rs:563,85`) pass `body.plan_id` to a raw `UPDATE` with no allowlist; the owner Cedar policy grants `billing:write` on their own app, and `runtime_limits_for_plan("unlimited")` returns `cpu/wall/heap = None` (`registry.rs:519`). A free-tier creator removes their own guardrails — **chains into RT-5** (cpu_limit None → wedge the shared worker thread). Validate `plan_id` against a known set; gate tier raises behind admin/verified-billing, derive limits server-side. | reviewer-evidenced |
+| CT-C1 | MAJOR | C | **No reserved/platform env-name denylist** — `valid_key` accepts any `[A-Z][A-Z0-9_]{0,63}`; a creator can set `DATABASE_URL`/`WORKER_KEY`/`CONTROL_KEY`/`NODE_OPTIONS`/`PATH` and `merged_env_for_worker` injects them into their isolate (`env_store.rs:67,469`). Vars are always in `process.env`; severity = whatever the runtime/node-compat trusts. Add a reserved-name denylist at write time. | reviewer-evidenced |
+| CT-B2 | MAJOR | B | **Metering spoofable per-tenant + non-idempotent.** `report_usage` (`internal.rs:152`) keys counters by `app_id` from the request body, authed only by the shared control-key — any control-key holder reports usage for ANY app; `record_usage` is a blind `value+=delta` (no event-id/dedupe → replay double-counts). **Feeds no billing path today** (metering stub), so currently a stats-integrity/DoS issue; money-critical once usage drives invoicing. Scope to the worker's own apps + add idempotency. | reviewer-evidenced |
+| CT-B3 | MAJOR | B | **`insecure_dev` disables BOTH webhook signature verification AND `/internal/*` auth** (`stripe_handlers.rs:404`, `internal.rs:17`) — a single boolean between dev convenience and full compromise (forged `invoice.paid`; unauth decrypted-secret read). Hard-refuse to start `insecure_dev` on a non-loopback bind. | reviewer-evidenced |
+| CT-A2 | MEDIUM | A | **Deploy endpoint has no rate-limit / concurrency cap** (unlike env handlers) — each call streams ≤256MB to tmp + CPU-heavy zstd decode; N concurrent deploys = N×256MB tmp + parallel decompression → control-plane disk/CPU DoS by one creator. Add `admin_rate_limit` + in-flight semaphore + tmp-byte cap. | reviewer-evidenced |
+| CT-A3 | MEDIUM | A | **Case-variant app names collide** — `create_app` accepts mixed case + the DB `UNIQUE` is case-sensitive, but DNS/Host is case-insensitive and the gateway indexes the raw-case label (cross-ref GW-11). `Foo` and `foo` are distinct apps owned by different tenants reachable by Host casing → cross-tenant routing capture. Store/compare lowercase (`citext`/`UNIQUE(lower(name))`). | reviewer-evidenced |
+| CT-A4 | MEDIUM | A | **No reserved-name denylist on `create_app`** — creators can claim `console`/`api`/`www`/`admin`/`internal`/`static` → `{name}.zeroship.ai` (only `auth.` is special-cased). Future platform hosts silently squattable + phishing (cross-ref GW-1 host-trust). | reviewer-evidenced |
+| CT-C2 | MINOR | C | **Single platform-wide secret key** — `derive_key = SHA256("…v1"‖master)`, same key for every app's secrets (AAD scopes the row, but a master/`primary_key` compromise decrypts the whole fleet). Per-app HKDF (`info=app_id`) already roadmapped — prioritize. | reviewer-evidenced |
+| CT-B4 / CT-misc | MINOR | B/A/C | currency defaulted to `usd` + cross-currency aggregation in `total_earnings` (wrong figures); Connect `callback` (billing-staff only) doesn't verify the `acct_` is owned by the creator before linking payouts; orphan blobs on deploy-vs-delete race; unbounded per-app env-var count; rate-limit fail-open on missing source IP; dead `merged_env` plaintext path. | reviewer-evidenced |
+
+**Solid (verified):** **per-app IDOR consistently closed** — every CRUD/deploy/env endpoint gates `authz.require(action, App{id})` keyed on the authenticated principal via DB-backed Cedar memberships; `list_apps` ownership-scoped; no mass-assignment (owner bound from `principal_id`, columns hardcoded) — *except* the `plan_id` field (CT-A1). **Bundle ingest hardened** — tar entries must be exactly `manifest.json` or `blobs/<64-hex-sha256>` (no `../`), decompression `take`-capped + per-blob/count/manifest caps, blob hash verified during write (no cross-app/platform blob overwrite, content-addressed). **Webhook crypto solid** — HMAC `t=,v1=` parse, ±300s replay tolerance, constant-time compare, rotation, CPU-amplification cap, size caps, ledger idempotency (`event_id` UNIQUE + `payload_hash` tamper check). **Env/secrets solid** — write-only secret API, AAD binds `(app_id,key_name)`, random nonces, control-key-gated worker delivery (constant-time), generic error bodies, key zeroization. Internal sync lane constant-time auth; no master-key→creator-endpoint bypass.
+
+**Top fixes for return:** CT-B1 (enforce the platform fee server-side), CT-A1 (validate `plan_id` — also closes a path to RT-5), CT-C1 (reserved env-name denylist), CT-B3 (`insecure_dev` blast radius).
+
+---
+
+## 5. Worker + bundle — findings 🔄
+
+_(reviewers running; bundle unpack/blob already largely covered by control lane A)_
