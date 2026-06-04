@@ -401,3 +401,19 @@ Reviewed end-to-end three times over: pass 1 (9 crates module-by-module), pass 2
 - A long tail of resource-bounds / fail-open-env-gate / host-trust hardening.
 
 Further passes would be diminishing returns (re-review of covered ground). **The audit is complete.**
+
+---
+
+# Pass 4 — new review axes (supply-chain · realtime · background-jobs · secrets-hygiene)
+
+Passes 1-3 covered the code module-by-module + SDK/RPC + traces + red-team + authz/RLS/auth-flows.
+Pass 4 covers axes orthogonal to the per-module review (not re-review).
+
+| Lane | Scope | Status |
+| --- | --- | --- |
+| P4-A | **Dependency / supply-chain** — `cargo audit`/`pnpm audit` + critical crate/npm versions vs known CVEs; unpinned external artifacts; lockfile integrity; build-time exec | 🔄 |
+| P4-B | **Realtime auth/isolation** — WebSocket/SSE/subscription end-to-end: upgrade auth, per-connection identity, subscription tenant-scoping at delivery, CSWSH origin-check, stream resource bounds | 🔄 |
+| P4-C | **Background jobs / crons** — sweepers/WAL-consumer/watchdog/JTI-sweep/key-rotation: DB-role least-priv, cross-tenant correctness, trigger/abuse surface, failure=broken-control | 🔄 |
+| P4-D | **Committed secrets / config hygiene** — hardcoded secrets, dev-default creds, committed `.env`/keys, prod-shaped insecure flags, `.gitignore` coverage, secret-logging | 🔄 |
+
+_(findings recorded on completion; after pass 4 the review axes are exhausted → recommend shifting to remediation, starting with RT-1)_
