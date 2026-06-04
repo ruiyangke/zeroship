@@ -451,3 +451,39 @@ Pass 1 (9 crates module-by-module) · pass 2 (SDK/RPC, PG-pool, request-traces, 
 7. The HIGH host-trust/storage/redis + the MAJOR resource-bounds / fail-open-env-gate / no-TLS sweep; then the one-line dep bumps (rustls-webpki, react-router).
 
 **Further review passes = re-review (diminishing returns). The right next step is remediation, not more review.**
+
+---
+
+## Remediation log & execution plan (offline pilot, 2026-06-03)
+
+Operator is offline and asked for a **review**. So the remediation rule for this pass is: **apply only fixes that are both (a) contained — a clear, single correct behavior, no design choice — and (b) trivially reversible (commit-only, never pushed).** Everything that requires a design decision, breaks a wire/SDK contract, or touches money flow is **flagged for the operator's return, not silently rewritten.** Commit-only throughout; nothing pushed.
+
+### Applied this pass (commit-only, NOT pushed)
+
+| ID | Sev | Fix | Commit | Verification |
+| --- | --- | --- | --- | --- |
+| **RT-1** | CRITICAL | `v8::Signature::new(scope, ctor_tmpl)` added to **both** the `#[v8_method(fastcall)]` and `#[v8_getter(fastcall)]` install sites (`runtime-macros/.../emit/install.rs`); foreign/forged receivers now deopt to the brand-checked slow path. | `39913e47` | TDD: pre-fix the new `v8_fastcall_smoke` foreign-receiver tests **SIGABRT** (reproduced isolate escape); post-fix **11/11 fastcall + 233 runtime-lib + all fetch/headers + WPT-headers/fetch** green. Only production fastcall is `Headers.has`; non-fastcall codegen byte-identical. |
+| **P4-A-R1** | MED | `cargo update -p rustls-webpki` → 0.103.13 (transitive; no manifest change). | `fd79d65f` | `zeroship-gateway` (rustls TLS consumer) builds clean post-bump. |
+
+### Flagged for operator return — **NEEDS DESIGN REVIEW** (do NOT apply blind)
+
+- **CT-B1 (15% fee) — money-flow redesign, not a one-liner.** Re-traced this pass: `sdks/payments/src/checkout.ts:114` issues a Connect **direct charge** (`stripe-account: creatorAccountId`), where `subscription_data[application_fee_percent]` is the *only* revenue path to the platform — and it executes **inside creator-controlled worker code** with `applicationFeePercent` caller-overridable (`checkout.ts:80`, default 15 but settable to 0), and the creator can bypass the SDK and craft the Stripe POST directly. The webhook (`stripe_handlers.rs:444`) merely *records* whatever fee Stripe reports. ⇒ the fee is **100% creator-controlled today.** Correct fix = move checkout-session creation **server-side** (control plane stamps `application_fee_percent` from a platform-held creator→fee mapping, using the platform key; creator code receives only a session URL and never the fee knob). This breaks the `@zeroship/payments` SDK contract and defines new revenue-model surface → **operator design call required.** (Pre-launch: no live money, so no live loss.)
+- **CT-A1 (plan self-escalation)** — requires a server-side plans/limits model that doesn't exist yet; design-coupled to billing. Defer.
+- **P4-C-F4 (control_key over plaintext)** — the fix is *transport/deploy* (require TLS / private mesh on the internal API), not a code one-liner; deploy-topology decision. Defer.
+- **SB-A1/A2/A4 + P4-A-SC1 (sandbox infra)** — GCP startup scripts + checksum-pinning of the VM TCB; ops/infra change, not Rust. Defer to the sandbox-backend owner.
+- **P2-B4 (build-host RCE via `new Function` of creator source)** — builder-host hardening; needs a sandboxing-strategy decision. Defer.
+
+### Flagged for operator return — **CONTAINED & SAFE to apply** (ready for a fix pass, each with a failing-test-first plan)
+
+These are clear single-correct-behavior fixes; left unapplied this pass only because the operator scoped the loop to *review*. Each is a clean TDD target on return:
+
+- **P2-C1 (HIGH)** PG-pool leaks `SET ROLE`/timeouts across tenants on the autocommit path — fix = `SET LOCAL` inside an explicit tx + `DISCARD ALL` reset barrier / RAII guard (`plugin-db/.../exec.rs:182`). Test: assert a forced setup-error mid-checkout leaves no residual `role`/`statement_timeout` on the next checkout.
+- **P4-B-1 (HIGH)** unbounded WS frame alloc on `zeroship serve` (`serve.rs:819`, `vec![0u8; n]` from client `u64`) — cap before allocate, close 1009. Test: oversized length header → close, no alloc.
+- **P4-B-2 (HIGH)** WS per-connection identity not bound (`runtime.rs:2226`) — bind user at upgrade + re-establish per WS turn. Test: `env.auth.getUser()` inside `onmessage` returns the connection's user, never `null`/stale.
+- **P4-C-F1 (HIGH)** audit append-only trigger disabled session-wide via bare `SET` on a shared pipelined conn (`audit_retention.rs:110`) — dedicated conn + `SET LOCAL`-in-tx (mirror the control peer). Test: a query pipelined during the sweep still sees the trigger armed.
+- **P2-A2 (MAJOR)** `is_auth_host` unanchored prefix match (reaches internal Hydra) — anchor the host comparison. Test: `auth.evil.com`/`authx` rejected; exact host accepted.
+- **RT-7 (MAJOR)** LRU eviction leaks an isolate via the pump's strong-`Rc` cycle (`runtime.rs:919`) — break the cycle with a `Weak`. Test: evict → isolate dropped (refcount/Drop probe).
+- **P4-B-3 / RT-3 (MAJOR)** SSE/WS pumps lack wall/idle timeout + `CancelFlag` (`serve.rs:575/1119`) — add a timeout/cancel. Test: idle stream past deadline → closed.
+- **P4-C-F3 / P4-misc (MED/LOW)** floor `dropAbandoned` to ≥60s; `react-router` bump (builder app); pin Docker base tags.
+
+**Pilot stance:** RT-1 (top CRITICAL) and the rustls-webpki CVE bump are done and reversible. The rest is staged for an explicit "apply the contained fixes" / "let's design CT-B1" from the operator. The review itself is complete.
