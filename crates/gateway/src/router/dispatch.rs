@@ -331,18 +331,26 @@ pub(crate) fn classify_auth_path(path: &str) -> AuthUpstream {
     }
 }
 
-/// True when the request's Host header is the auth.zeroship.ai
-/// platform host. Strips an optional port. Tolerates dev hostnames
-/// like `auth.zeroship.localhost` by matching the `auth.zeroship.`
-/// prefix as well — exact-match on `auth.zeroship.ai` is the
-/// production case.
+/// Platform-internal auth hosts. A request whose Host matches one of
+/// these EXACTLY is routed to the internal auth/Hydra upstream rather
+/// than treated as a creator app. Production is `auth.zeroship.ai`;
+/// `auth.zeroship.localhost` is the dev/compose hostname.
+const AUTH_HOSTS: &[&str] = &["auth.zeroship.ai", "auth.zeroship.localhost"];
+
+/// True when the request's Host header is a platform auth host.
+///
+/// The match is **anchored / exact** (lowercased, port-stripped). A
+/// loose prefix/substring comparison would let a crafted Host —
+/// `auth.zeroship.ai.evil.com` (suffix), `authx.zeroship.ai` (label
+/// prefix-extension), `evil-auth.zeroship.ai` (substring) — reach the
+/// internal auth/Hydra routing it must never see (finding P2-A2).
 fn is_auth_host(req: &HttpRequest) -> bool {
     let Some(host_hdr) = req.headers().get("host").and_then(|v| v.to_str().ok()) else {
         return false;
     };
     let host = host_hdr.split(':').next().unwrap_or(host_hdr);
     let host_lc = host.to_ascii_lowercase();
-    host_lc == "auth.zeroship.ai" || host_lc.starts_with("auth.zeroship.")
+    AUTH_HOSTS.contains(&host_lc.as_str())
 }
 
 async fn route_auth_host(
@@ -2678,6 +2686,63 @@ mod tests {
         );
         // `/userinfo` is exact-match; substring matches must not steal.
         assert_eq!(classify_auth_path("/userinfo/foo"), AuthUpstream::Auth);
+    }
+
+    // ----------------------------------------------------------------------
+    // is_auth_host — the Host header that routes to internal auth/Hydra
+    // MUST be an anchored, exact match. A loose prefix/substring match
+    // lets a crafted Host (`auth.zeroship.ai.evil.com`, `authx.zeroship.ai`,
+    // `evil-auth.zeroship.ai`) reach the platform-internal auth upstream.
+    // ----------------------------------------------------------------------
+
+    fn req_with_host(host: &str) -> HttpRequest {
+        ntex::web::test::TestRequest::default()
+            .header("host", host)
+            .to_http_request()
+    }
+
+    #[test]
+    fn is_auth_host_accepts_exact_production_host() {
+        assert!(is_auth_host(&req_with_host("auth.zeroship.ai")));
+        // Case-insensitive + port-stripped, like the rest of the host logic.
+        assert!(is_auth_host(&req_with_host("AUTH.ZEROSHIP.AI")));
+        assert!(is_auth_host(&req_with_host("auth.zeroship.ai:443")));
+        // Dev host parity is exact too.
+        assert!(is_auth_host(&req_with_host("auth.zeroship.localhost")));
+        assert!(is_auth_host(&req_with_host("auth.zeroship.localhost:8080")));
+    }
+
+    #[test]
+    fn is_auth_host_rejects_unanchored_lookalikes() {
+        // Subdomain-suffix: attacker-controlled parent domain.
+        assert!(
+            !is_auth_host(&req_with_host("auth.zeroship.ai.evil.com")),
+            "suffix attack must not match"
+        );
+        // Prefix-extension on the label.
+        assert!(
+            !is_auth_host(&req_with_host("authx.zeroship.ai")),
+            "label prefix-extension must not match"
+        );
+        assert!(
+            !is_auth_host(&req_with_host("auth-evil.com")),
+            "label prefix-extension must not match"
+        );
+        // Substring containment.
+        assert!(
+            !is_auth_host(&req_with_host("evil-auth.zeroship.ai")),
+            "substring must not match"
+        );
+        // The old `starts_with("auth.zeroship.")` prefix arm let any
+        // `auth.zeroship.<anything>` through — this is the exact regression.
+        assert!(
+            !is_auth_host(&req_with_host("auth.zeroship.evil.com")),
+            "former prefix arm must no longer match arbitrary suffixes"
+        );
+        // No host header at all → not an auth host.
+        assert!(!is_auth_host(
+            &ntex::web::test::TestRequest::default().to_http_request()
+        ));
     }
 
     // -----------------------------------------------------------------------
