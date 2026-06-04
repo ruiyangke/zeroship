@@ -411,9 +411,43 @@ Pass 4 covers axes orthogonal to the per-module review (not re-review).
 
 | Lane | Scope | Status |
 | --- | --- | --- |
-| P4-A | **Dependency / supply-chain** — `cargo audit`/`pnpm audit` + critical crate/npm versions vs known CVEs; unpinned external artifacts; lockfile integrity; build-time exec | 🔄 |
-| P4-B | **Realtime auth/isolation** — WebSocket/SSE/subscription end-to-end: upgrade auth, per-connection identity, subscription tenant-scoping at delivery, CSWSH origin-check, stream resource bounds | 🔄 |
-| P4-C | **Background jobs / crons** — sweepers/WAL-consumer/watchdog/JTI-sweep/key-rotation: DB-role least-priv, cross-tenant correctness, trigger/abuse surface, failure=broken-control | 🔄 |
-| P4-D | **Committed secrets / config hygiene** — hardcoded secrets, dev-default creds, committed `.env`/keys, prod-shaped insecure flags, `.gitignore` coverage, secret-logging | 🔄 |
+| P4-A | **Dependency / supply-chain** | ✅ mostly clean; 1 MED (rustls-webpki), SC1 HIGH (sandbox TCB unpinned) |
+| P4-B | **Realtime auth/isolation** | ✅ subscription path SOLID; 2 HIGH + 1 MAJOR on the `serve` WS/SSE path |
+| P4-C | **Background jobs / crons** | ✅ scoping/least-priv solid; 3 HIGH (audit-trigger, no-liveness, control_key plaintext) |
+| P4-D | **Committed secrets / config hygiene** | ✅ CLEAN — no real committed secret |
 
-_(findings recorded on completion; after pass 4 the review axes are exhausted → recommend shifting to remediation, starting with RT-1)_
+### Pass-4 findings
+
+| ID | Sev | Lane | Finding | Status |
+| --- | --- | --- | --- | --- |
+| P4-C-F4 | HIGH | C | **`control_key` shipped over plaintext HTTP** — the gateway↔control route-sync (`sync.rs:159`, hand-rolled `TcpStream`) sends `Authorization: Bearer {control_key}` in cleartext every ~5s; that key authorizes pulling **every app's decrypted env/secrets** via `/internal/*`. A passive observer on the gateway↔control segment captures the master internal credential. (Concretizes DR-6 no-TLS.) Require TLS / private-mesh-only for the internal API. | reviewer-evidenced |
+| P4-C-F1 | HIGH | C | **Audit append-only tamper-trigger disabled session-wide during the retention sweep** — auth's sweep does bare `SET zeroship.audit_retention='on'` (not `SET LOCAL`, no tx) on the **shared, pipelined** auth connection (`audit_retention.rs:110`, *verified*); for the hourly sweep window any concurrently-pipelined query runs with the forensic-integrity trigger OFF. (HIGH not CRIT: tampering needs a concurrent `audit_events` DELETE/UPDATE path, which doesn't exist today — defense-in-depth erosion.) Fix: dedicated connection + `SET LOCAL`-in-tx (the control peer already does this). | **verified** (src) |
+| P4-C-F2 | HIGH | C | **Security crons have no liveness/fail-closed signal** — JWK rotation, token/revocation sweeps loop with `if let Err(e){error!}` + `.detach()`, no supervisor, no last-success metric. A stuck/panicked rotation/revocation job silently stops (stale signing keys never retired; `token_revocations` grows unbounded — auth-hot-path latency/DoS) with only an indistinguishable `error!` line. Export per-cron last-success + alert. | reviewer-evidenced |
+| P4-B-1 | HIGH | B | **Unbounded WS frame allocation on `zeroship serve`** — `read_ws_frame` (`serve.rs:819`) honors a client `u64` payload length → `vec![0u8; n]` with no cap → trivial OOM/abort (a 16-byte header triggers a ~280TB alloc). The bounded `FrameReader(max_frame,max_message)` is a *separate* impl used only by the JS client. (Single-node serve path; multi-node 501s WS.) Cap before allocate, close 1009. | reviewer-evidenced |
+| P4-B-2 | HIGH | B | **WS per-connection identity not bound** — the WS-event pump dispatches `onmessage`/`onclose` without setting `executing_request_id`/per-request user (and clears it, `runtime.rs:2226`), so `env.auth.getUser()` inside a WS handler returns `null` **or a stale leftover from a prior request** (identity-bleed window on a pooled isolate). Auth-correctness footgun on the channel creators are told to use. Bind the connection's user at upgrade + re-establish it per WS turn. | reviewer-evidenced |
+| P4-A-R1 | MEDIUM | A | **`rustls-webpki 0.103.11`** — 3 advisories (CRL-parse panic DoS + name-constraint bypass for URI/wildcard certs), reachable via `cyper` (outbound HTTPS). One-line fix: `cargo update -p rustls-webpki` → ≥0.103.13. | reviewer-evidenced |
+| P4-A-SC1 | HIGH(s-c) | A | **Sandbox VM-isolation TCB fetched without checksums** (extends SB-A4) — `gcp-worker-startup.sh:153` `gs_pull`s `cloud-hypervisor`, `vmlinuz`, the rootfs image, AND the `zeroship-sandbox` controller binary with **no SHA verification** (only `nomad-driver-ch` is pinned). GCS-bucket-write = code-exec on every sandbox host. Extend the existing SHA-pin gate to all of them. | reviewer-evidenced |
+| P4-B-3 / RT-3 | MAJOR | B | SSE/streaming + native-WS pumps (`serve.rs:575`/`:1119`) have no wall/idle-timeout or `CancelFlag` — a never-ending stream pins the connection+worker (same class as RT-3/GW-5). | reviewer-evidenced |
+| P4-C-F3 | MEDIUM | C | `db.replication.dropAbandoned({inactiveSeconds:0})` — tenant-controlled, reaps the app's own freshly-created slots → self-DoS (resync storm). Floor to ≥60s or make control-plane-only. | reviewer-evidenced |
+| P4-misc | LOW/latent | B/C/A | Latent **CSWSH** on the WS upgrade (no server-side Origin check; SameSite=Lax cookies; subscriptions bypass `csrf_origins`) — only bites once the gateway proxies WS; DPoP JTI sweep is opportunistic + caller-supplied TTL; `migration_sweeper`/replication-watchdog reapers are dead-code stubs (orphan migration rows + abandoned slots never GC'd → slow disk-fill); `react-router<7.15` DoS (builder app only); Docker bases use mutable tags (`rust:latest`); `auth-clients.example.toml` carries an inert dev secret. **Non-vuln note:** `tokio 1.51.1` (full) is in the tree via `crates/platform` — a deviation from the "zero tokio" invariant. | reviewer-evidenced |
+
+**Solid / verified-clean (pass 4):** **No committed secrets** (every secret-like value is a `--dev-insecure`-gated compose default behind fail-closed ≥32B startup guards, an empty template, a secret-manager `urn:`/`arn:` ref, or a test fixture); `.gitignore` solid; no secret-logging; GCP provisioning auto-generates from `/dev/urandom`. **Subscription tenant-scoping + CDC-masking SOLID** (app_id-stamped, broker-keyed, not JS-widenable; CDC carries ciphertext/mask-siblings — no plaintext leak, regression-tested). **Background-job cross-tenant scoping + DB-role least-priv solid** (per-app `slot LIKE` scoping, app_id-override ignored, platform-role not BYPASSRLS, control-key constant-time, the control audit-sweep correctly isolated). **Deps mostly clean** (ring/aws-lc-rs/jsonwebtoken/argon2/tar/zstd/postgres-protocol no current advisory; no `h2`; lockfiles committed; no git/tarball deps; no network `build.rs`).
+
+---
+
+## FINAL audit conclusion (4 passes, ~56 reviewer-lanes — every axis covered)
+
+Pass 1 (9 crates module-by-module) · pass 2 (SDK/RPC, PG-pool, request-traces, red-team) · pass 3 (Cedar authz, SQL RLS/grants, federated auth, CLI) · pass 4 (supply-chain, realtime, background-jobs, secrets). **The review is exhausted — every component, integration seam, and orthogonal axis (deps, realtime, jobs, secrets) has been covered, the top findings re-verified against source (RT-1 reproduced + fix-verified), and most surfaces re-confirmed by independent reviewers.**
+
+**Consistent verdict:** the platform's security *fundamentals are well-built* — identity signing, the authz model (Cedar + forced-RLS, no over-permit), tenant isolation (DB schema + KV hash-tags + subscription scoping), injection prevention, the V8 node-compat sandbox, the auth/OAuth flows (no account-takeover), config/secret hygiene. The serious findings are **concentrated, well-characterized, and have no live exposure** (pre-launch). Total: **7 CRITICAL · ~14 HIGH · ~22 MAJOR** + a long MINOR tail — all documented per-finding with file:line + fix.
+
+**Recommended remediation order (the must-fix-before-launch spine):**
+1. **RT-1** V8 isolate escape (reproduced; one-line `.signature()` fix verified — *and the getter path*).
+2. **CT-B1** enforce the 15% fee server-side.
+3. **RT-5/6/7 + CT-A1** shared-thread containment + plan validation.
+4. **P2-C1** PG-pool session-state leak + **P2-B1/2/3** SDK dispatcher hardening + **P2-B4** build-host RCE.
+5. **P4-C-F4/F1/F2** (control_key TLS, audit-trigger scoping, cron liveness) + **P4-B-1/2** (WS frame cap, WS identity).
+6. **SB-A1/2/A4 + P4-A-SC1** sandbox infra (if that backend serves untrusted workloads).
+7. The HIGH host-trust/storage/redis + the MAJOR resource-bounds / fail-open-env-gate / no-TLS sweep; then the one-line dep bumps (rustls-webpki, react-router).
+
+**Further review passes = re-review (diminishing returns). The right next step is remediation, not more review.**
