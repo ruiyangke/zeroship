@@ -48,8 +48,8 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 | --- | --- | --- | --- |
 | 1 | **gateway** (`crates/gateway`) | internet-facing front door | ✅ 4 HIGH (host-trust ×2, rate-limit ×2), signing strong, no SSRF/traversal |
 | 2 | **runtime** (`crates/runtime`) | V8 sandbox, fetch/SSRF, WS, crypto, capability boundary | ✅ **4 CRITICAL** (isolate escape + 3 DoS), 2 MAJOR SSRF; node-compat + SSRF posture strong |
-| 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | 🔄 reviewing |
-| 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | ⏳ queued |
+| 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | ✅ kv STRONG (2 MAJOR quota/scan); storage 2 HIGH (path-validator, size cap), S3 N/A |
+| 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | 🔄 reviewing |
 | 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | ⏳ queued |
 | 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ⏳ queued |
 | 7 | **compio-postgres / compio-redis** | bespoke wire-protocol drivers | ⏳ queued |
@@ -118,6 +118,41 @@ crypto/node-compat (4). **The highest-stakes module — 4 CRITICAL + 2 MAJOR.**
 
 ---
 
-## 3. plugin-kv + plugin-storage — findings 🔄
+## 3. plugin-kv + plugin-storage — findings ✅
 
-_(reviewers running)_
+Sibling native primitives, reviewed with the plugin-db lens.
+
+### plugin-kv — **STRONG** (no CRITICAL; better than the plugin-db baseline)
+`app_id` un-spoofable (server-stamped, never a JS arg); keys `{app_id}:`-namespaced
+with `{`/`}`/control chars banned → **hash-tag isolation correct under cluster routing**;
+commands are RESP arrays (**no injection**); SCAN patterns glob-escaped; TTL overflow
+closed + tested; DSN credentials redacted from errors; `list` cursor opaque + tenant-scoped.
+
+| ID | Sev | Finding |
+| --- | --- | --- |
+| KV-1 | MAJOR | **No per-app key-count / byte quota** — per-item caps exist (key 512B, value 256KiB) but nothing bounds total keys/bytes. On shared prod Redis, one tenant can exhaust `maxmemory` → cross-tenant key eviction or `OOM`-failed writes for every colocated tenant (all of an app's keys share a hash-tag = one shard). Needs a real per-app quota (control-plane `AppRuntimeLimits` + atomic counter). |
+| KV-2 | MAJOR | **`kv.list("")` unbounded blocking scan** — empty prefix walks up to 10k entries **synchronously on the event-loop thread** (redb path; module doc admits no offload). Self-inflicted/abusive latency DoS on the worker. Offload the scan; lower `LIST_MAX_LIMIT`. |
+| KV-3 | MINOR | incr overflow vs non-numeric conflated on the Redis path (substring-sniff); `from_utf8_lossy` silent corruption on `get`; `now_ms` swallows clock error; URL parsed per-op. |
+
+### plugin-storage — path-validator gaps + zero resource limits (S3 backend not yet implemented)
+`app_id` un-spoofable + prefix-rooted (`<root>/<app_id>/<bucket>/…`); `..` segments rejected;
+`list` prefix can't traverse (starts_with, not path-join); key segments pushed individually.
+
+| ID | Sev | Finding | Status |
+| --- | --- | --- | --- |
+| ST-1 | HIGH | **Incomplete central path validator** — `validate_object_coords` (`backend/mod.rs:94`) rejects `/` and `..` but NOT NUL, backslash, newline/control chars, or dotfile segments. The stated "one validator makes every backend safe" boundary is leaky. **Not an app-JS cross-tenant escape on LocalFs today** (`..` caught, `app_id` a trusted UUID, interior-NUL paths fail at the fs syscall) — but a latent CRITICAL the moment the S3 backend lands (different key semantics) or user uploads are served. Switch to a strict allowlist; apply to `app_id`/`bucket` too. | **verified** (src) |
+| ST-2 | HIGH | **No object-size limit** — `put` base64-decodes the full input then `to_vec()`s again (2× in RAM, `callbacks.rs:101`/`local.rs:65`), no cap → app-JS-reachable **co-tenant OOM** on the shared worker thread (compounds RT-6 off-heap-memory). Cap base64 length before decode + per-app storage quota. | reviewer-evidenced |
+| ST-3 | MEDIUM | `get` triple-buffers the whole object (read→base64→JSON), no range/streaming → memory spike; `list` is a full recursive walk with **no pagination/cap** (`local.rs:131`) → DoS. | reviewer-evidenced |
+| ST-4 | MEDIUM | **`list` re-implements a weaker, divergent validator** (`local.rs:121`) instead of the central one — the exact drift the centralization was meant to prevent; inherits ST-1's gaps. Add `validate_list_coords` as the single source. | reviewer-evidenced |
+| ST-5 | MEDIUM | **`get_app_id` falls back to `"default"`** when `APP_ID` is absent (`callbacks.rs:51`) — a fail-*open* shared tenant. Not reachable on the real worker path (APP_ID always stamped) but the kernel should hard-fail, not invent a shared tenant. | reviewer-evidenced |
+| ST-6 | LOW | `walk` follows symlinks (`metadata()` not `symlink_metadata`, `local.rs:155`) — not app-creatable today; `content_type` silently discarded (security-relevant once uploads are served); storage-root vs bundle-store disjointness not asserted (N4); back-compat alias contradicts pre-launch stance. | reviewer-evidenced |
+
+**Note:** the **S3/R2 backend does not exist yet** (the `s3` feature gates nothing) — the S3-specific threats (leading-`/`, `..`, presigned URLs) are N/A and must be re-reviewed when it lands, with ST-1 fixed *first* so S3 inherits a correct validator.
+
+**Top fixes for return:** ST-1 (strict path allowlist before S3), ST-2/KV-1 (resource quotas), KV-2/ST-3 (unbounded blocking scans).
+
+---
+
+## 4. Control plane — findings 🔄
+
+_(deploy, billing/Stripe, env/secrets, API/authz reviewers running)_
