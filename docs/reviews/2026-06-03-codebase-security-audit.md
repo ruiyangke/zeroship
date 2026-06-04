@@ -473,17 +473,24 @@ Operator is offline and asked for a **review**. So the remediation rule for this
 - **SB-A1/A2/A4 + P4-A-SC1 (sandbox infra)** — GCP startup scripts + checksum-pinning of the VM TCB; ops/infra change, not Rust. Defer to the sandbox-backend owner.
 - **P2-B4 (build-host RCE via `new Function` of creator source)** — builder-host hardening; needs a sandboxing-strategy decision. Defer.
 
-### Flagged for operator return — **CONTAINED & SAFE to apply** (ready for a fix pass, each with a failing-test-first plan)
+### APPLIED 2026-06-04 — **CONTAINED & SAFE fixes** (operator authorized "just do it"; workflow-orchestrated, TDD, commit-only NOT pushed, each independently verified)
 
-These are clear single-correct-behavior fixes; left unapplied this pass only because the operator scoped the loop to *review*. Each is a clean TDD target on return:
+All seven applied via a sequential-fix → parallel-verify workflow (14 agents); every commit independently re-reviewed (commit stages only intended files, regression test genuinely fails-without-fix, fix contained, nothing pushed). Stacked HEAD re-tested green: runtime `--lib` 239 pass + the 2 new integration tests, gateway `is_auth_host` 2 pass, PG-gated crates compile + self-skip.
 
-- **P2-C1 (HIGH)** PG-pool leaks `SET ROLE`/timeouts across tenants on the autocommit path — fix = `SET LOCAL` inside an explicit tx + `DISCARD ALL` reset barrier / RAII guard (`plugin-db/.../exec.rs:182`). Test: assert a forced setup-error mid-checkout leaves no residual `role`/`statement_timeout` on the next checkout.
-- **P4-B-1 (HIGH)** unbounded WS frame alloc on `zeroship serve` (`serve.rs:819`, `vec![0u8; n]` from client `u64`) — cap before allocate, close 1009. Test: oversized length header → close, no alloc.
-- **P4-B-2 (HIGH)** WS per-connection identity not bound (`runtime.rs:2226`) — bind user at upgrade + re-establish per WS turn. Test: `env.auth.getUser()` inside `onmessage` returns the connection's user, never `null`/stale.
-- **P4-C-F1 (HIGH)** audit append-only trigger disabled session-wide via bare `SET` on a shared pipelined conn (`audit_retention.rs:110`) — dedicated conn + `SET LOCAL`-in-tx (mirror the control peer). Test: a query pipelined during the sweep still sees the trigger armed.
-- **P2-A2 (MAJOR)** `is_auth_host` unanchored prefix match (reaches internal Hydra) — anchor the host comparison. Test: `auth.evil.com`/`authx` rejected; exact host accepted.
-- **RT-7 (MAJOR)** LRU eviction leaks an isolate via the pump's strong-`Rc` cycle (`runtime.rs:919`) — break the cycle with a `Weak`. Test: evict → isolate dropped (refcount/Drop probe).
-- **P4-B-3 / RT-3 (MAJOR)** SSE/WS pumps lack wall/idle timeout + `CancelFlag` (`serve.rs:575/1119`) — add a timeout/cancel. Test: idle stream past deadline → closed.
-- **P4-C-F3 / P4-misc (MED/LOW)** floor `dropAbandoned` to ≥60s; `react-router` bump (builder app); pin Docker base tags.
+| ID | Sev | Fix | Commit | Regression test |
+| --- | --- | --- | --- | --- |
+| **P2-A2** | MAJOR | `is_auth_host` (`gateway/.../dispatch.rs`) was `== "auth.zeroship.ai" \|\| starts_with("auth.zeroship.")` — the prefix arm matched `auth.zeroship.ai.evil.com`. Replaced with an exact `AUTH_HOSTS.contains(host_lc)` allow-list (prod + `.localhost` dev host). | `6ab2b4b0` | `is_auth_host_rejects_unanchored_lookalikes` (+exact-accept); RED pre-fix, GREEN post — pure unit. |
+| **P4-B-1** | HIGH | native WS frame reader (`serve.rs`) did `vec![0u8; n]` from a client `u64` → ~280TB OOM. Cap at existing `DEFAULT_MAX_FRAME_SIZE` (1 MiB) **before** allocate; synthesize a 0x8/1009 Close (handled by both call sites unchanged). | `b4976caa` | `oversized_frame_rejected_with_1009_no_alloc` (+at-cap/normal still parse); RED pre-fix. |
+| **P4-B-3** | MAJOR | SSE/chunked stream pump (`serve.rs`) had no idle bound. Added `STREAM_IDLE_TIMEOUT` (300s, **idle**-based — each chunk re-arms, so legit long LLM/SSE streams run forever; only wedged ones close). | `57c61d8f` | `idle_stream_times_out` (+active-not-cut/closed-resolves); RED pre-fix. **Carve-out below.** |
+| **P4-B-2** | HIGH | WS turns set no per-request auth ctx → `env.auth.getUser()` in a WS handler returned a **stale** prior-request user. Bind the connection user at `mint_pair` (upgrade) + re-establish per WS turn via `current_user` (the single getUser/requireUser chokepoint). | `ddd2d264` | `ws_handler_getuser_is_connection_user_not_stale_leftover` — verifier reverted-fix → RED shows actual `usr_BBB` bleed. |
+| **RT-7** | MAJOR | detached pump held a **strong** `Rc<RefCell<RuntimeInner>>` → eviction never dropped the isolate. Downgraded the pump back-ref to `Weak` (upgrade-or-exit at use). | `9cd7afc0` | `eviction_drops_isolate_after_pump_started` (Drop-flag probe); RED pre-fix. |
+| **P2-C1** | HIGH | autocommit funnel ran session-level `SET ROLE`+timeouts; RESET skipped on **cancellation** → leaked role/timeout to the pooled conn. Switched to `SET LOCAL` inside an explicit `compio_postgres::Transaction` (rollback-on-drop + pool dirty-barrier auto-reset). | `f37c07a6` | `autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool` — **PG-gated, not run here** (`ranHere:false`); self-skips; verified by code + compile. |
+| **P4-C-F1** | HIGH | audit-retention sweep did a bare session `SET zeroship.audit_retention='on'` on the **shared pipelined** conn (disarmed the tamper trigger session-wide). Now opens its **own** dedicated per-tick connection + `SET LOCAL`-in-tx (mirrors control's `registry.conn()`). | `5992dcec` | `sweep_guc_does_not_leak_past_its_transaction` — **PG-gated, not run here**; verified by code + compile (3 non-PG asserts pass). |
 
-**Pilot stance:** RT-1 (top CRITICAL) and the rustls-webpki CVE bump are done and reversible. The rest is staged for an explicit "apply the contained fixes" / "let's design CT-B1" from the operator. The review itself is complete.
+**One carve-out (P4-B-3, agent-flagged, correctly deferred):** only the **SSE/chunked** pump got the idle timeout. The **native-WS pump** (`read_ws_frame`/`native_ws_pump`) was *deliberately left unbounded* because a naive read deadline would wrongly kill an idle-but-alive WebSocket — that path does no server-initiated ping keepalive. A correct WS idle bound needs ping/pong keepalive or a configurable knob = a separate **design** change. → moved to the design-review list. (Single-node `serve`/bench path; multi-node 501s WS.)
+
+### Still flagged — NEEDS DESIGN REVIEW (unchanged + the new WS-pump carve-out)
+
+CT-B1 (money-flow redesign — *in active discussion*), CT-A1 (plan model), P4-C-F4 (internal-API TLS), sandbox-TCB checksums (SB-A1/2/A4 + P4-A-SC1), P2-B4 (build-host sandbox), **WS-pump idle bound** (P4-B-3 remainder, needs ping/pong). Plus the MINOR tail: `dropAbandoned` ≥60s floor, `react-router` bump (builder app), pin Docker base tags.
+
+**Pilot stance (2026-06-04):** top CRITICAL **RT-1** + the rustls-webpki CVE + **all 7 contained HIGH/MAJOR fixes are applied, verified, and reversible (commit-only, 41 ahead of origin/main, none pushed).** Remaining work is design-gated and awaits operator decisions (CT-B1 first).
