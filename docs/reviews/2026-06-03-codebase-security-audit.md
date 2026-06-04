@@ -59,11 +59,11 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 | 2 | **runtime** (`crates/runtime`) | V8 sandbox, fetch/SSRF, WS, crypto, capability boundary | ✅ **4 CRITICAL** (isolate escape + 3 DoS), 2 MAJOR SSRF; node-compat + SSRF posture strong |
 | 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | ✅ kv STRONG (2 MAJOR quota/scan); storage 2 HIGH (path-validator, size cap), S3 N/A |
 | 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | ✅ **1 CRITICAL** (fee unenforced), 1 HIGH (plan self-escalate), 3 MAJOR; IDOR/bundle-ingest solid |
-| 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | 🔄 reviewing |
-| 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ✅ unpack/blob hardened (covered by control lane A) + worker lane |
-| 7 | **compio-postgres / compio-redis** | bespoke wire-protocol drivers | 🔄 reviewing (protocol-parse memory safety) |
-| 8 | **sandbox** (`crates/sandbox`) | Nomad + Cloud Hypervisor VM isolation | ⏳ queued |
-| 9 | **core** (`crates/core`) | typed_id, signing utils, wire types | ⏳ queued |
+| 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | ✅ 2 MAJOR (identity not app-bound, redeploy no-cleanup); bundle-integrity/cache-keying solid |
+| 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ✅ unpack/blob hardened (covered by control lane A) |
+| 7 | **compio-postgres / compio-redis** | bespoke wire-protocol drivers | ✅ redis 2 HIGH (slot panic, SSRF redirect); pg close; no-TLS MEDIUM |
+| 8 | **sandbox** (`crates/sandbox`) | Nomad + Cloud Hypervisor VM isolation | 🔄 reviewing |
+| 9 | **core** (`crates/core`) | typed_id, signing utils, wire types | 🔄 reviewing |
 
 Legend: ⏳ queued · 🔄 reviewing · ✅ findings recorded
 
@@ -187,6 +187,38 @@ closed + tested; DSN credentials redacted from errors; `list` cursor opaque + te
 
 ---
 
-## 5. Worker + bundle — findings 🔄
+## 5. Worker + bundle — findings ✅
 
-_(reviewers running; bundle unpack/blob already largely covered by control lane A)_
+| ID | Sev | Finding | Status |
+| --- | --- | --- | --- |
+| W-1 | MAJOR | **`ZeroShip-User` identity header not bound to `app_id`.** Signed payload is `{user_json}.{request_id}.{issued_at}` (`core/auth/mod.rs:263`); the worker validates it independently of the dispatch path app_id (`handler.rs:48,163`) and never cross-checks. A header minted for app A can be replayed to `/dispatch/{app_B}` within the 60s window with the same `request_id` → app A's authenticated user injected into app B's isolate, defeating pairwise-subject isolation. Defense-in-depth at the gateway↔worker boundary (needs `worker_key` to reach `/dispatch`, so gated on a breach/misroute there) — **refines the gateway "signing strong" verdict.** Fix: add `app_id` to the MAC (gateway signer + worker verifier, one patch). | reviewer-evidenced |
+| W-2 | MAJOR | **Redeploy isolate swap drops in-flight work with no abort fan-out.** LRU eviction fires every in-flight `AbortController` (`cache.rs:287`); the redeploy path (`cache.rs:165`, `sync.rs:258`) just drops the old `Runtime` — pending `fetch()`/DB queries/SSE streams abandoned, JS abort handlers + tx rollbacks never run. Redeploy is the common case. (Sibling to RT-7's pump leak.) Fix: factor the eviction abort fan-out + call it before every `isolates.remove`. | reviewer-evidenced |
+| W-3 | MINOR | Secrets/env never zeroized on eviction/rotation — old `Arc<CachedEnv>` plaintext (DB passwords, API keys) lives in worker heap until last reader drops, no scrub; recoverable via core dump/heap scan. Wrap in `Zeroizing`/`secrecy`. | reviewer-evidenced |
+| W-4/W-5 | MINOR | Reconcile jitter seed is a stack pointer (ASLR leak + doesn't de-correlate threads as claimed); request body modeled as `String` via `from_utf8_lossy` (`dispatch.rs:1219`) → **binary bodies corrupted before the app sees them**, breaking app-side signature verification / content hashing. Model the body as bytes/base64. | reviewer-evidenced |
+
+**Solid (verified):** **bundle-load integrity enforced** — `BlobStore::get_blob` re-computes `sha256` and rejects mismatch before instantiation (no poisoned-bundle run); **cache keying is the trusted path-UUID** (no `X-App-Id` path exists in the worker); concurrent same-app requests are V8-serialized (`!Send` `Rc<RefCell>`, no `.await` mid-call); control→worker channel constant-time `worker_key`-authenticated + non-loopback startup guard fails closed; redeploy commits env *before* the V8 swap (no new-code/old-env window).
+
+### 6. Bundle (`crates/bundle`) — **covered by control lane A (✅)**
+`.zship` unpack is hardened: tar entries must be exactly `manifest.json` or `blobs/<64-hex-sha256>` (no `../` traversal), decompression `take`-capped + per-blob/count/manifest size caps, blob hash verified during streaming write (content-addressed → no cross-app/platform blob overwrite). No additional findings.
+
+## 7. compio-postgres / compio-redis drivers — findings ✅
+
+Both delegate byte-level wire parsing to mature crates (`postgres-protocol`, `redis-protocol` v6) — so length-field/null handling is covered. Findings are in the **bespoke framing/pool/cluster glue**.
+
+| ID | Sev | Driver | Finding | Status |
+| --- | --- | --- | --- | --- |
+| DR-1 | HIGH | redis | **Server-triggerable panic** — `set_slot` does `slots[slot as usize]` unchecked (`cluster.rs:489`); `slots.len()=16384` but `parse_redirect` accepts the full `u16`. A `-MOVED 60000 ip:port` reply → OOB index → **panic crashing the shared worker thread**. (`parse_cluster_slots` bounds-checks; the redirect path doesn't.) Gated on backend compromise/MITM. Fix: reject `slot>=16384`. | reviewer-evidenced |
+| DR-2 | HIGH | redis | **SSRF-via-cluster-redirect** — MOVED/ASK `host:port` is connected to verbatim with no allowlist (`cluster.rs:472,537`), replaying the authenticated command + re-attaching the Redis password to an attacker-named IP:port. (IP-literal only, no DNS — so internal IPs, not arbitrary DNS.) Gated on backend compromise/MITM. Fix: restrict redirects to nodes learned from `CLUSTER SLOTS`. | reviewer-evidenced |
+| DR-3 | MEDIUM | redis | **Pool returns errored connections un-poisoned** (`pool.rs:160`) — no `send_recv` error path calls `poison()`; a timed-out/mid-frame connection with leftover `rx` bytes, on next checkout, decodes them as a *different* command's response → **cross-request response desync** (tenant-isolation concern in multi-tenant KV). Fix: poison on any I/O/timeout/protocol error. | reviewer-evidenced |
+| DR-4 | MEDIUM | redis | No max-frame cap on the read buffer (`client.rs:328`) — `$2147483647` dribble grows `rx` toward 2GB (PG has a 64MB cap; redis doesn't). Fix: mirror the PG ceiling. | reviewer-evidenced |
+| DR-5 | MEDIUM | pg | Panic on a DataRow with fewer fields than RowDescription (`row.rs:196` indexes `ranges` validated only against the column list) — inherited from tokio-postgres, platform-backend-gated. Bounds-check `idx` vs `ranges.len()`. | reviewer-evidenced |
+| DR-6 | MEDIUM | both | **No TLS in practice** — every PG consumer passes `NoTls` (`plugin-db/lib.rs:467,694`); redis has no TLS path at all → all DB/Redis traffic is plaintext. MITM reads/alters everything + enables DR-1/DR-2's MITM variants. Safe ONLY if PG/Redis are strictly private-network/loopback — make that explicit + enforced. (No `accept_invalid_certs` footgun — but only because verify code is never reached.) | reviewer-evidenced |
+| DR-7 | LOW | pg | No portable per-query read timeout (only Linux `tcp_user_timeout` if configured) → a never-finishing response parks a pool slot (slow-loris). PG prepared-stmt/`search_path` reuse across multi-tenant pool checkout was NOT audited this pass — flagged for a dedicated look. | reviewer-evidenced |
+
+**Solid (verified):** PG framing has an explicit 64MB cap checked *before* buffering (no `with_capacity(attacker_len)` OOM), `checked_add`+`get()` offset math, SCRAM delegated to `postgres-protocol` with channel-binding-downgrade rejected + `sslmode=prefer+direct` refused, no plaintext-password logging. Both parser cores are mature crates (injection-safe binding already confirmed in plugin-db/kv lanes). **Verdict: compio-postgres close to production-ready; compio-redis not (bespoke cluster layer needs the DR-1..4 fixes).**
+
+---
+
+## 8. Sandbox + 9. Core — findings 🔄
+
+_(reviewers running)_
