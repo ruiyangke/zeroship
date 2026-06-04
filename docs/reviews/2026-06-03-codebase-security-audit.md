@@ -311,3 +311,19 @@ unauditable here.
 
 ## 9. Core (`crates/core`) — findings ✅ — **STRONG, no findings above MINOR**
 `typed_id` is overflow-safe (checked base62 decode, no panics on attacker input) and **never used as an auth secret** (session/preview/agent auth all use proper HMAC/Ed25519); `config/secrets.rs` enforces uniform ≥32B strength floors, rejects dev sentinels + plaintext-literal secrets outside `--dev-insecure`, `is_loopback_url` is literal-only (no DNS rebind), fails closed (`exit(1)`) on resolution failure; wire types don't leak (`AppRecord.api_key` `skip_serializing`, `RouteEntry` carries `api_key_hash` not the secret); observability emits no secrets/identities. The `ZeroShip-User` mint/verify (gateway lane D) is strong. **MINOR:** `typed_id` prefix validation is opt-in (`parse()` vs `parse_with_prefix()`) — a future caller using bare `parse()` could reintroduce prefix-confusion; the security boundary already uses the hardened form.
+
+---
+
+# Pass 2 — deeper review (gaps · red-team · SDK/RPC · request-traces)
+
+Pass 1 covered the 9 crates module-by-module. Pass 2 targets what pass 1 deferred or didn't reach,
+and adversarially re-verifies the pass-1 CRITICALs.
+
+| Lane | Scope | Status |
+| --- | --- | --- |
+| P2-A | **Red-team** pass-1 CRITICALs (RT-1, CT-B1, RT-2/6, GW-1) — independent confirm/refute — + runtime residual gaps (module-loader specifier spoofing, bootstrap prototype-pollution, ArrayBuffer-detach TOCTOU) | 🔄 |
+| P2-B | **SDK / dispatcher / RPC** — `@zeroship/bootstrap` `__zsDispatch` (RPC parse/capability/stream), `@zeroship/rpc` server-fn auth, vite-plugin build-pipeline trust | 🔄 |
+| P2-C | **PG pool cross-tenant state** — `SET ROLE`/RESET skip-on-error, prepared-stmt/`search_path`/GUC/tx-state reuse across pool checkouts (pass-1-deferred) | 🔄 |
+| P2-D | **Request-tracing** — auth'd end-user flow + RPC dispatch + internal-header seam across gateway→worker→runtime→plugin; cross-component desync + inconsistent-enforcement entry points | 🔄 |
+
+_(findings recorded on completion)_
