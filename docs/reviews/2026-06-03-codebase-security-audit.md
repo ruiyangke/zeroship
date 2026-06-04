@@ -8,6 +8,25 @@ verifies top findings against source and records them here.
 **This is a review pass** — findings only, no fixes applied while the operator is
 offline (anything CRITICAL + trivially-safe is flagged for action on return).
 
+> ## ⚠️ CRITICAL findings — action before launch
+> (No live exposure today — pre-launch, no production apps — but these are the must-fix-before-launch items.)
+>
+> 1. **RT-1 — V8 isolate escape (fastcall null signature).** Every `#[v8_class]`
+>    `fastcall` method (e.g. `Headers.has`, reachable by all untrusted app JS) is
+>    callable on a foreign/forged receiver, which the brand-check-free fast shim
+>    reinterprets as `*const Self` → type confusion → arbitrary memory read. **The
+>    worst class of finding — defeats one-isolate-per-app.** Fix: add a
+>    `v8::Signature` to the FunctionTemplate + an `internal_field_count()` guard in
+>    the shim + a foreign-receiver regression test. (Verified against source.)
+> 2. **RT-5 — sync CPU loop wedges the shared worker thread** when `cpu_limit` is
+>    `None` (`unlimited`/`enterprise` plans) → permanent co-tenant starvation.
+> 3. **RT-6 — off-heap memory escapes the V8 heap cap** (`Buffer.allocUnsafe`,
+>    fetch bodies) → OOM-kills the whole worker process + every co-tenant isolate.
+> 4. **RT-7 — LRU eviction leaks the isolate** (pump strong-`Rc` cycle; `Drop`
+>    never runs) → unbounded resource leak under app churn.
+>
+> RT-5/6/7 mean **mutually-untrusted apps are not yet safe on a shared worker thread**.
+
 ## Threat model (platform-wide)
 
 - App code is **untrusted JS**, one V8 isolate per app; many tenants share the
@@ -28,8 +47,8 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 | # | Module | Why | Status |
 | --- | --- | --- | --- |
 | 1 | **gateway** (`crates/gateway`) | internet-facing front door | ✅ 4 HIGH (host-trust ×2, rate-limit ×2), signing strong, no SSRF/traversal |
-| 2 | **runtime** (`crates/runtime`) | V8 sandbox, fetch/SSRF, WS, crypto, capability boundary | 🔄 reviewing |
-| 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | ⏳ queued |
+| 2 | **runtime** (`crates/runtime`) | V8 sandbox, fetch/SSRF, WS, crypto, capability boundary | ✅ **4 CRITICAL** (isolate escape + 3 DoS), 2 MAJOR SSRF; node-compat + SSRF posture strong |
+| 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | 🔄 reviewing |
 | 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | ⏳ queued |
 | 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | ⏳ queued |
 | 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ⏳ queued |
@@ -75,6 +94,30 @@ verify are all sound. The real exposure is **host-trust + rate-limit robustness*
 
 ---
 
-## 2. Runtime — findings 🔄
+## 2. Runtime — findings ✅
 
-_(V8 sandbox / fetch-SSRF / resource-limits / crypto-node-compat reviewers running)_
+4 lanes: V8 sandbox/isolate-integrity (1), fetch/SSRF (2), resource-limits/DoS (3),
+crypto/node-compat (4). **The highest-stakes module — 4 CRITICAL + 2 MAJOR.**
+
+| ID | Sev | Lane | Finding | Status |
+| --- | --- | --- | --- | --- |
+| RT-1 | **CRITICAL** | 1 | **V8 isolate escape via fastcall null signature.** `#[v8_class]` builds fastcall templates with no `v8::Signature` (`runtime-macros/.../emit/install.rs:368`, no `.signature()`); the fast shim does `get_aligned_pointer_from_internal_field(1,0)` → `&*(raw as *const Self)` with no brand check / no internal-field-count guard (`fastcall/mod.rs:455`). A foreign/forged receiver (`m.call({})`, `Object.create(C.prototype)`, another native instance) reaches the fast path under JIT and is reinterpreted as `*const Self` → type confusion → arbitrary-relative memory read (and write for any `&mut self` fastcall). `Headers.has` is fastcall + reachable by all app JS. Reviewer reproduced SIGABRT. Fix: `.signature(v8::Signature::new(scope, ctor_tmpl))` + `internal_field_count()>=2` guard + foreign-receiver regression test. | **verified** (src) |
+| RT-5 | **CRITICAL** | 3 | **Sync CPU loop wedges the shared worker thread when `cpu_limit` is `None`.** The POSIX CPU timer — the only interrupt for synchronous JS — is armed only `if cpu_limit.is_some()` (`core/runtime.rs:1322`); the wall-timeout fires only on the async `Pending` arm a sync loop never reaches. `unlimited`/`enterprise` plans set `cpu_limit_ms: None` (`control/registry.rs:531`). `while(true){}` (or a microtask flood) permanently starves every co-tenant isolate on that thread. Fix: always arm a watchdog (`None` = platform ceiling, not "off"); isolate truly-trusted apps onto dedicated threads. | reviewer-evidenced |
+| RT-6 | **CRITICAL** | 3 | **Off-heap memory escapes the V8 heap cap → whole-worker OOM.** No `adjust_amount_of_external_allocated_memory` anywhere; backing stores (`new_backing_store_from_vec`, `Buffer.alloc(Unsafe)`) and retained fetch bodies allocate Rust `Vec`s invisible to `heap_limit`/`near_heap_limit`. `while(true) a.push(Buffer.allocUnsafe(64MB))` grows RSS until the kernel OOM-kills the worker + all co-tenants. Fix: account external bytes against the heap budget (or a per-isolate external cap). | reviewer-evidenced |
+| RT-7 | **CRITICAL** | 3 | **LRU eviction leaks the isolate + native resources.** The pump is spawned holding a **strong** `Rc<RefCell<RuntimeInner>>` (`core/runtime.rs:919`); `evict_lru` (`worker/cache.rs:275`) only drops the cache handle, so the self-sustaining pump cycle keeps `RuntimeInner` alive — `Drop` never runs, leaking the isolate, DB connections, sockets, file handles. App churn → unbounded leak → OOM despite eviction. (Idle-GC ticker correctly uses `Weak` — the pump must too.) Fix: pump holds `Weak`+`upgrade()` per loop; eviction signals pump shutdown. | reviewer-evidenced |
+| RT-2 | **MAJOR** | 2 | **Fail-open `ZEROSHIP_DEV` SSRF bypass.** `transport/ssrf.rs:89/144/162` + `client.rs:26` gate the dev bypass on `env::var("ZEROSHIP_DEV").is_ok()` — true for ANY value (`0`, ``, `false`). Unlike `ZEROSHIP_DEV_INSECURE`, the worker/gateway never scrub it. If the var leaks into a prod worker, the entire SSRF guard is disabled → `fetch('http://169.254.169.254/...')` (cloud creds) + `fetch('http://localhost:9090/...')` (control plane) work for every tenant. Fix: gate on `== "1"` checked once at boot; hard-clear it unless `--dev-insecure`. | reviewer-evidenced |
+| RT-3 | **MAJOR** | 2 | **No fetch timeout; `wall_timeout` stored but never enforced.** cyper client built with no connect/read/total timeout (`client.rs:22`); `wall_timeout` (`runtime.rs:616`) is never read in the pump (only CPU is). A `fetch()` on a hung/blackholed socket consumes ~0 CPU so no limit fires; 64 (`MAX_PENDING_FETCHES`) hung fetches + connect-timing oracle = slow-DoS + internal/arbitrary-host port scanner. Fix: explicit cyper timeouts + enforce `wall_timeout` by flipping the request cancel flag. | reviewer-evidenced |
+| RT-4 | MEDIUM | 1 | **`__zs_env` is a permanent global** (`core/init.rs:1784`) returning the full `env.{db,auth,kv,storage}` to user-module top-level — never deleted (unlike `__zsDbPlatform`). Same class as plugin-db DB-5, generalized to every namespace; own-app scope (capability-timing / over-broad authority, not cross-app). Fix: delete after bootstrap captures it, or gate to require an active request context. | reviewer-evidenced |
+| RT-8 | MEDIUM | 3 | **CPU-watchdog map never unregisters + keyed by reusable raw pointer.** `CpuTimerSystem::unregister` is `#[allow(dead_code)]`/never called; the watchdog map is keyed by `addr_of!(self.isolate)` (`runtime.rs:1327`). Unbounded growth; once RT-7 is fixed, a reused address → a stale timer could `terminate_execution()` an unrelated live app. Fix: unregister in `Drop`, key by app `Uuid`. | reviewer-evidenced |
+| RT-9 | MEDIUM | 3 | Pump-CPU budget has a **10s grace window** (`record_pump_cpu` `runtime.rs:2506`) — pump-side work (timer/microtask chains, `setInterval(fn,0)` via the `ready_timers` fast-path) can pin the thread ~100% for 10s before the first check; the only pump-side backstop. Tighten window + add a burst check. | reviewer-evidenced |
+| RT-10 | LOW | 1/2/4 | `__zs_env` aside: outbound fetch has **no forbidden-header filter** (`Host`/`CL`/`TE`/`Cookie` forwarded — `headers.rs:64` deferred guards) → intermediary/vhost confusion (CRLF still blocked); `data:` URL has no decoded-size cap; `setInterval(fn,0)` spin; `randomInt` over-rejects (no bias); SHA-1 exposed (legit). | reviewer-evidenced |
+
+**Solid (verified):** **node-compat sandbox is excellent** — no `fs`/`net`/`dgram`/`child_process` bindings, `process.env` allowlist-gated (no host-secret leak; `std::env::vars()` leak already removed), real `aws_lc_rs` CSPRNG, WebCrypto extractable/usage enforced, node-crypto cipher allowlist (no ECB, keyless disabled, IV lengths, constant-time `timingSafeEqual`), `os` stubbed, module resolver closed. **SSRF posture strong** — IP-pinned connect (no rebind TOCTOU, verified vs cyper), per-hop redirect re-validation, scheme allowlist, IP-encoding canonicalized, metadata/CGNAT/loopback/RFC1918 blocked, CRLF-safe. **Slow-path native recovery is brand-checked** (`recover_box.rs`: brand → External → re-entry guard; `get_internal_field` bounds-checks, so `Object.create(proto)` throws not OOB). **Per-request auth identity correctly request-id-scoped** (no cross-request/isolate bleed). Heap cap, frame/buffer caps, admission controls (timers/ops/fetches), WebSocket reassembly bounds all real.
+
+**Top fixes for return:** RT-1 (isolate escape — one-line signature + guard + test), RT-5/6/7 (shared-thread containment), RT-2 (SSRF fail-open env gate).
+
+---
+
+## 3. plugin-kv + plugin-storage — findings 🔄
+
+_(reviewers running)_
