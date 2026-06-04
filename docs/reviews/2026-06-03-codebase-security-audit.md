@@ -358,3 +358,19 @@ and adversarially re-verifies the pass-1 CRITICALs.
 **Cleared (negatives):** module-loader specifier spoofing **REFUTED** (closed-world resolution: bundle's flat `sources` + fixed native allowlist, no fetch/FS/compile-on-demand; re-importing `./__user__.js`/`zeroship` grants no caps — caps are `env.*` globals/args, not module exports). WebCrypto (`read_buffer_source`) + fetch-body (`chunk_to_bytes`) buffer reads have **no detach TOCTOU** (synchronous length-read+copy, no JS reentry). The dispatcher prototype-confusion (P2-B1) was independently re-confirmed by this lane.
 
 **Seams confirmed TIGHT (request-trace negative results — reassuring):** RPC (`/__zeroship/v1/<id>`) and fetch traverse the **same** `execute_resource_tree` auth/CSRF/rate-limit gate (no RPC auth-skip); per-request user/ctx is **request-id-keyed, set per turn, cleared on every terminal path** (no cross-request bleed on a pooled isolate; holds for RPC + fetch); `__Host-` cookie + `app==oauth_client_id` claim check + sector `pws_` subject (no confused-deputy — app B can't get app A's user); worker **ignores `X-App-Id`** (app_id from path only); `/dispatch` + `/logs` both worker-auth-gated, only `/health`+`/metrics` open (no identity); DPoP/Bearer both bind `client_id`→route with per-app revocation. **Dispatcher solid:** gateway fail-closed on unknown wireIds, plain `export function` helpers excluded from registration, secure-by-default forces explicit `publicly_accessible` for `auth:"anon"`, `__zsDbPlatform` deleted before any handler runs (top-level reachability is the separate DB-5/RT-4 finding).
+
+---
+
+# Pass 3 — remaining surfaces (authz policies · DB-layer RLS · federated auth · CLI)
+
+Passes 1-2 covered the 9 crates + SDK/RPC + request-traces + red-team. Pass 3 covers the surfaces
+explicitly noted as not-yet-deep-reviewed.
+
+| Lane | Scope | Status |
+| --- | --- | --- |
+| P3-A | **Cedar authz** — `crates/authz` engine + ALL `.cedar` policy files: over-permit, default-deny completeness, entity resolution, TOKEN⊂USER, platform-role escalation | 🔄 |
+| P3-B | **DB-layer authz** — `db/changelog/changesets/*.sql`: RLS completeness (enabled+forced+WITH CHECK), per-app role grant scoping, service-role least-priv, SECURITY DEFINER search_path | 🔄 |
+| P3-C | **Federated auth flows** — `crates/auth/src/ui/{oauth_google,oauth_github,consent,device,magic,signup,verify,link}.rs`: OAuth state/PKCE/redirect, account-linking takeover, consent/device/magic-link integrity (the pipeline review covered password/reset/lockout) | 🔄 |
+| P3-D | **CLI + control client** — `crates/cli` (master-key/deploy handling, build-time eval, `serve` defaults) + `@zeroship/control` (token handling) | 🔄 |
+
+_(findings recorded on completion)_
