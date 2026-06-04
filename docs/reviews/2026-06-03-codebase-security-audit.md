@@ -17,7 +17,7 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 >    reinterprets as `*const Self` → type confusion → arbitrary memory read. **The
 >    worst class of finding — defeats one-isolate-per-app.** Fix: add a
 >    `v8::Signature` to the FunctionTemplate + an `internal_field_count()` guard in
->    the shim + a foreign-receiver regression test. (Verified against source.)
+>    the shim + a foreign-receiver regression test. (Verified + empirically reproduced; fix verified. NOTE: the getter fastcall path needs the same fix.)
 > 2. **RT-5 — sync CPU loop wedges the shared worker thread** when `cpu_limit` is
 >    `None` (`unlimited`/`enterprise` plans) → permanent co-tenant starvation.
 > 3. **RT-6 — off-heap memory escapes the V8 heap cap** (`Buffer.allocUnsafe`,
@@ -99,6 +99,9 @@ GW-1 (no apex allowlist in Host→app, *verified*) · GW-2 (`/apps/{name}` decou
 
 ### MAJOR (notable)
 GW-5 (streaming idle-timeout DoS) · RT-2 (fail-open `ZEROSHIP_DEV` SSRF bypass) · RT-3 (no fetch timeout / `wall_timeout` unenforced) · KV-1 (no per-app Redis quota) · CT-C1 (no reserved env-name denylist — `WORKER_KEY`/`DATABASE_URL`/`NODE_OPTIONS`) · CT-B2 (metering spoofable + non-idempotent) · CT-B3 (`insecure_dev` disables webhook+internal auth) · W-1 (`ZeroShip-User` not bound to `app_id` — cross-app identity replay) · W-2 (redeploy drops in-flight work) · DR-3 (redis pool desync) · DR-6 (no TLS in practice for PG/Redis) · SB-1 (preview-secret RNG fallback).
+
+### Pass-2 addendum (deeper review — gaps, red-team, SDK/RPC, request-traces, PG-pool)
+**Red-team STRENGTHENED the top two:** RT-1 was **empirically reproduced** (memory-disclosure + SIGABRT PoC) **and its one-line fix verified** — highest confidence (also: the *getter* fastcall path needs the same fix); CT-B1 fully re-traced. **New HIGH:** **P2-C1** (PG-pool autocommit leaks `SET ROLE`+timeouts across tenants on setup-error/cancellation — no RAII guard, no `DISCARD ALL`; *verified*; HIGH not CRITICAL because schema-qualification still bounds it to permission-denied, not data-read) · **P2-B1/2/3** (dispatcher prototype-chain lookup; no input-size cap → JSON DoS; manifest-vs-runtime discovery divergence → app-layer authz is 100% gateway) · **P2-B4** (build-time `new Function()` eval of creator source = **builder-host RCE** on shared build infra; *verified*). **New MAJOR:** **P2-A1** (`randomFill` ArrayBuffer-detach TOCTOU → guest-triggerable worker-abort DoS) · **P2-A2** (`is_auth_host` unanchored prefix → `auth.zeroship.ai.evil.com` proxies into internal Hydra) · **P2-D1** (identity HMAC not app-bound — elevates W-1). **Reassuring negatives:** request-tracing confirmed cross-component seams TIGHT (RPC/fetch share the auth gate, per-request ctx is request-id-scoped+cleared, `__Host-`cookie app-binding holds, worker ignores `X-App-Id`); module-loader spoofing REFUTED; WebCrypto/fetch-body have no detach-TOCTOU; the tx (non-autocommit) DB path is airtight. **Not separately deep-reviewed** (lower residual value / already covered): the `crates/auth` UI-handler internals + Cedar policy files (the **auth pipeline** was deeply reviewed 2026-06-02), the CLI, and the client-side SDKs (`@zeroship/db`/`control`/`ui` — server-enforced trust boundary).
 
 ### Cross-cutting themes
 - **Resource quantity, not quality.** Injection/isolation are closed; the recurring gap is *bounds* — unbounded maps (GW-4), no per-app quotas (KV-1, ST-2, CT-A2), off-heap memory (RT-6), missing timeouts (GW-5, RT-3, DR-4) — all noisy-neighbor/DoS on shared infra.
@@ -321,7 +324,7 @@ and adversarially re-verifies the pass-1 CRITICALs.
 
 | Lane | Scope | Status |
 | --- | --- | --- |
-| P2-A | **Red-team** pass-1 CRITICALs (RT-1, CT-B1, RT-2/6, GW-1) — independent confirm/refute — + runtime residual gaps (module-loader specifier spoofing, bootstrap prototype-pollution, ArrayBuffer-detach TOCTOU) | 🔄 |
+| P2-A | **Red-team** + runtime gaps | ✅ RT-1 reproduced+fix-verified, CT-B1 confirmed; 2 new MAJOR; module-loader refuted |
 | P2-B | **SDK / dispatcher / RPC** | ✅ 4 HIGH (proto-lookup, no-input-cap, discovery-divergence, build-RCE) |
 | P2-C | **PG pool cross-tenant state** | ✅ **HIGH (P2-C1)** — see below |
 | P2-D | **Request-tracing** | ✅ MAJOR (identity not app-bound); most seams TIGHT |
@@ -338,5 +341,20 @@ and adversarially re-verifies the pass-1 CRITICALs.
 | P2-B4 | HIGH (builder) / MED (gen) | B | **Build-time `new Function()` eval of app source** (manifest.ts:526) — `defineApp(...)` arg is `eval`'d in the build process with full Node privileges. On the **builder service** (compiles untrusted creator/AI source on shared infra — the product), `defineApp((()=>{require('child_process').execSync(...)})())` is **build-host RCE / tenant-escape**. Fix: AST-parse the literal (the transform already has a parser), never `new Function`. | **verified** (src) |
 | P2-B5 | MEDIUM | B | Output Zod validation default-OFF in prod (dispatcher.ts:129) → a handler that over-fetches (returns a full DB row incl `password_hash`) has no boundary redaction; the declared `output` schema is cosmetic at runtime. Enforce output parse when a schema is declared, or document loudly. | reviewer-evidenced |
 | P2-B6 / P2-D2 / P2-B7 | LOW | B/D | 5xx error sanitization keyed on a runtime-readable env var (`AUTH_INSECURE_DEV`) the app could shadow → raw error (SQL/paths/secrets) leak on misconfig; `serve.rs` dev path doesn't scrub reserved client headers (dev-only, identity still safe via separate resolution); dev-auth dev-only guarantee is tree-shaking-dependent (no `sideEffects:false`) — **verified absent from built bundles today** but no CI grep-assert. | reviewer-evidenced |
+
+### Pass-2 lane A — red-team verification + runtime gaps
+
+**Pass-1 CRITICALs independently verified:**
+- **RT-1 — CONFIRMED CRITICAL, empirically reproduced + fix verified.** A second reviewer wrote an in-tree adversarial test (`%OptimizeFunctionOnNextCall` + foreign receiver): a foreign *native* receiver returned **another class's memory** as an integer (silent type-confusion disclosure, no throw); a plain `{}` receiver **SIGABRT**'d. Applying `.signature(v8::Signature::new(scope, ctor_tmpl))` made both → `TypeError: Illegal invocation` while legit receivers keep the fast path — **fix confirmed correct + sufficient**. ⚠️ The **getter** fastcall path (`install.rs:404`) needs the identical fix, not just methods.
+- **CT-B1 — CONFIRMED CRITICAL.** Full trace: checkout session built entirely in creator worker code, POSTed directly to Stripe with the creator's key/account; `applicationFeePercent` validated only `[0,100]`; no server-side session creation, no fee floor, `creator_id` self-attested, `record_payout` records verbatim. `fee=0` passes.
+- **RT-6 → recalibrated MAJOR** (confirmed real — zero `adjust_amount_of_external_allocated_memory`; resource-evasion/OOM-DoS, not corruption). RT-2 → MAJOR, GW-1 → MAJOR (both confirmed real, pass-1 over-rated). *(I keep RT-6 in the shared-thread-containment cluster for fix-priority — whole-worker OOM denies all co-tenants, same fix-gate as RT-5/7.)*
+
+**New pass-2 runtime findings:**
+| ID | Sev | Finding |
+| --- | --- | --- |
+| P2-A1 | MAJOR | **`randomFillSync`/`randomFill` ArrayBuffer-coercion TOCTOU** (`node/crypto/random.rs:142,234`) — `byte_length()` cached *before* `uint32_value()` coerces offset/size (runs user JS); a `valueOf` that `buffer.transfer()`s (resizable AB + `transfer` are on by default in V8 147) detaches after the stale length check → OOB index → Rust safe-slice **panic** across the `extern "C"` boundary = abort-class **guest-triggerable worker DoS at will**. (Panic backstops silent OOB → MAJOR.) Fix: re-read `byte_length()` after coercion / coerce without invoking user JS. |
+| P2-A2 | MAJOR | **`is_auth_host` unanchored prefix** (`dispatch.rs:345`, sharper GW-1 sibling) — `host_lc.starts_with("auth.zeroship.")` matches `Host: auth.zeroship.ai.evil.com` → request proxied into the **internal Hydra/Auth-UI upstream**. Auth-host confusion / route-into-internal-infra. Anchor to an exact host/suffix allowlist. |
+
+**Cleared (negatives):** module-loader specifier spoofing **REFUTED** (closed-world resolution: bundle's flat `sources` + fixed native allowlist, no fetch/FS/compile-on-demand; re-importing `./__user__.js`/`zeroship` grants no caps — caps are `env.*` globals/args, not module exports). WebCrypto (`read_buffer_source`) + fetch-body (`chunk_to_bytes`) buffer reads have **no detach TOCTOU** (synchronous length-read+copy, no JS reentry). The dispatcher prototype-confusion (P2-B1) was independently re-confirmed by this lane.
 
 **Seams confirmed TIGHT (request-trace negative results — reassuring):** RPC (`/__zeroship/v1/<id>`) and fetch traverse the **same** `execute_resource_tree` auth/CSRF/rate-limit gate (no RPC auth-skip); per-request user/ctx is **request-id-keyed, set per turn, cleared on every terminal path** (no cross-request bleed on a pooled isolate; holds for RPC + fetch); `__Host-` cookie + `app==oauth_client_id` claim check + sector `pws_` subject (no confused-deputy — app B can't get app A's user); worker **ignores `X-App-Id`** (app_id from path only); `/dispatch` + `/logs` both worker-auth-gated, only `/health`+`/metrics` open (no identity); DPoP/Bearer both bind `client_id`→route with per-app revocation. **Dispatcher solid:** gateway fail-closed on unknown wireIds, plain `export function` helpers excluded from registration, secure-by-default forces explicit `publicly_accessible` for `auth:"anon"`, `__zsDbPlatform` deleted before any handler runs (top-level reachability is the separate DB-5/RT-4 finding).
