@@ -27,6 +27,13 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 >
 > RT-5/6/7 mean **mutually-untrusted apps are not yet safe on a shared worker thread**.
 >
+> *(Sandbox micro-VM backend, if/when deployed for untrusted workloads:)*
+> **SB-A1 — guest VM has unfiltered L3 egress** to cloud metadata + the internal VPC (no
+> egress firewall; `ip_forward=1`) and **SB-A2 — the Nomad API is unauthenticated** — chaining
+> to full sandbox-fleet control-plane + cross-tenant DB takeover from inside one guest. These are
+> **GCP provisioning-script (infra) fixes**, not Rust-code bugs (the Rust job-spec path is
+> injection-safe). The VM path is currently *less* contained than the V8 `fetch` SSRF guard.
+>
 > 5. **CT-B1 — the 15% platform fee is not enforced server-side (revenue-model integrity).**
 >    The Stripe checkout session is built in creator-controlled code (`@zeroship/payments`
 >    runs in the app); `applicationFeePercent` defaults to 15 but is caller-settable, and
@@ -51,6 +58,66 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 - **plugin-db** — `docs/reviews/2026-06-02-plugin-db-security-review.md` (5-lane);
   17/18 findings fixed (DB-5 capability-ordering remains).
 
+## Executive summary — audit complete (9 modules, ~40 reviewer-lanes)
+
+**Bottom line:** the **identity, isolation, and injection fundamentals are largely sound** — the
+gateway's `ZeroShip-User` signing is strong, the V8 node-compat sandbox is excellent (no
+host fs/net/process), `fetch` has a real IP-pinned SSRF guard, per-app tenant isolation (DB
+schema, KV hash-tags, control-plane IDOR, env-secret AAD) is consistently enforced, and SQL/
+command injection is closed everywhere. The platform is **not breakable by injection or by
+ordinary cross-tenant IDOR.** The serious findings cluster in **three themes**:
+
+1. **Shared-thread containment is half-built (runtime).** A V8 isolate escape (RT-1, fastcall
+   null signature — *verified*) plus three resource holes (RT-5 sync-loop wedge, RT-6 off-heap
+   OOM, RT-7 eviction leak) mean **mutually-untrusted apps are not yet safe on a shared worker
+   thread**. RT-5 is *creator-reachable* via CT-A1 (self-escalate to the `unlimited` plan that
+   sets `cpu_limit=None`).
+2. **The money model is unenforced (control).** CT-B1 (*verified*): the 15% platform fee and
+   revenue attribution originate in creator-controlled checkout code with no server-side floor
+   or account binding — a creator keeps 100%.
+3. **The micro-VM backend's network containment is broken (sandbox infra).** SB-A1/A2: a guest
+   reaches cloud metadata + an unauthenticated Nomad API → fleet takeover. GCP-script fixes, and
+   only if the nomad-ch backend is used for untrusted workloads.
+
+**No live exposure today** — pre-launch, no production apps/tenants. These are the
+must-fix-before-launch list. All findings are in `docs/reviews/2026-06-03-codebase-security-audit.md`
+per module; the top ones below were re-verified against source by the orchestrator.
+
+### CRITICAL (7)
+| ID | Module | What | Verified |
+| --- | --- | --- | --- |
+| RT-1 | runtime | V8 isolate escape — fastcall methods built with no `v8::Signature` → foreign-receiver type confusion → arbitrary memory read (`Headers.has` reachable by all app JS) | ✅ src |
+| RT-5 | runtime | sync `while(true){}` wedges the shared worker thread when `cpu_limit=None` (unlimited/enterprise plans) | reviewer |
+| RT-6 | runtime | off-heap memory (`Buffer.allocUnsafe`, fetch bodies) escapes the V8 heap cap → whole-worker OOM | reviewer |
+| RT-7 | runtime | LRU eviction leaks the isolate (pump strong-`Rc` cycle) → resource leak under churn | reviewer |
+| CT-B1 | control | 15% platform fee not enforced server-side → creator keeps 100% | ✅ src |
+| SB-A1 | sandbox(infra) | guest VM unfiltered L3 egress to cloud metadata + internal VPC (no egress firewall) | reviewer |
+| SB-A2 | sandbox(infra) | Nomad API unauthenticated + VPC-reachable → sandbox-fleet control-plane takeover | reviewer |
+
+### HIGH (10)
+GW-1 (no apex allowlist in Host→app, *verified*) · GW-2 (`/apps/{name}` decouples tenant from origin, *verified*) · GW-3 (XFF rate-limit spoof under `trust_proxy`) · GW-4 (unbounded rate-limiter maps) · ST-1 (incomplete storage path validator, *verified*; critical once S3 lands) · ST-2 (no object-size cap → co-tenant OOM) · CT-A1 (plan self-escalation → chains to RT-5) · DR-1 (redis `set_slot` OOB panic) · DR-2 (redis SSRF-via-cluster-redirect) · SB-A3/A4 (PG `10/8`-trust + creds in metadata; VMM/kernel/rootfs not hash-verified).
+
+### MAJOR (notable)
+GW-5 (streaming idle-timeout DoS) · RT-2 (fail-open `ZEROSHIP_DEV` SSRF bypass) · RT-3 (no fetch timeout / `wall_timeout` unenforced) · KV-1 (no per-app Redis quota) · CT-C1 (no reserved env-name denylist — `WORKER_KEY`/`DATABASE_URL`/`NODE_OPTIONS`) · CT-B2 (metering spoofable + non-idempotent) · CT-B3 (`insecure_dev` disables webhook+internal auth) · W-1 (`ZeroShip-User` not bound to `app_id` — cross-app identity replay) · W-2 (redeploy drops in-flight work) · DR-3 (redis pool desync) · DR-6 (no TLS in practice for PG/Redis) · SB-1 (preview-secret RNG fallback).
+
+### Cross-cutting themes
+- **Resource quantity, not quality.** Injection/isolation are closed; the recurring gap is *bounds* — unbounded maps (GW-4), no per-app quotas (KV-1, ST-2, CT-A2), off-heap memory (RT-6), missing timeouts (GW-5, RT-3, DR-4) — all noisy-neighbor/DoS on shared infra.
+- **Fail-open env-gate footguns.** `ZEROSHIP_DEV` (RT-2), `insecure_dev` (CT-B3), `get_app_id`→"default" (ST-5), the preview-secret RNG fallback (SB-1) — security-critical controls keyed on env presence/fallbacks rather than fail-closed explicit values.
+- **Host-trust assumptions at boundaries.** Host→app (GW-1/2, CT-A3/A4), `app_id` not in the worker MAC (W-1), no TLS to PG/Redis (DR-6), VM L3 egress (SB-A1) — several boundaries trust the layer in front more than they should (defense-in-depth gaps, mostly pre-launch-acceptable but worth closing).
+
+### Recommended fix order (before launch)
+1. **RT-1** (isolate escape — one-line `.signature()` + guard + test; the worst class).
+2. **CT-B1** (enforce the platform fee server-side — the business model).
+3. **RT-5/6/7 + CT-A1** (shared-thread containment + plan validation) — gate before multi-tenant.
+4. **SB-A1/A2** (sandbox infra) — only if the micro-VM backend serves untrusted workloads.
+5. The HIGH host-trust + storage + redis-driver items; then the MAJOR quota/timeout/fail-open sweep.
+
+> **Note on the one previously-known item:** plugin-db **DB-5** (capability handle reachable at
+> module top-level) and runtime **RT-4** (`__zs_env` permanent global) are the *same class* —
+> a capability reachable during user-module evaluation; own-app scope. Worth a unified fix.
+
+---
+
 ## Module order + status
 
 | # | Module | Why | Status |
@@ -62,10 +129,10 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 | 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | ✅ 2 MAJOR (identity not app-bound, redeploy no-cleanup); bundle-integrity/cache-keying solid |
 | 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ✅ unpack/blob hardened (covered by control lane A) |
 | 7 | **compio-postgres / compio-redis** | bespoke wire-protocol drivers | ✅ redis 2 HIGH (slot panic, SSRF redirect); pg close; no-TLS MEDIUM |
-| 8 | **sandbox** (`crates/sandbox`) | Nomad + Cloud Hypervisor VM isolation | 🔄 reviewing |
-| 9 | **core** (`crates/core`) | typed_id, signing utils, wire types | 🔄 reviewing |
+| 8 | **sandbox** (`crates/sandbox`) | Nomad + Cloud Hypervisor VM isolation | ✅ **2 CRITICAL** (infra: guest L3 egress, unauth Nomad), Rust code solid |
+| 9 | **core** (`crates/core`) | typed_id, signing utils, wire types | ✅ STRONG (no findings above MINOR) |
 
-Legend: ⏳ queued · 🔄 reviewing · ✅ findings recorded
+Legend: ⏳ queued · 🔄 reviewing · ✅ findings recorded — **ALL 9 MODULES COMPLETE**
 
 ---
 
@@ -219,6 +286,28 @@ Both delegate byte-level wire parsing to mature crates (`postgres-protocol`, `re
 
 ---
 
-## 8. Sandbox + 9. Core — findings 🔄
+## 8. Sandbox (Nomad + Cloud Hypervisor micro-VM backend) — findings ✅
 
-_(reviewers running)_
+The nomad-ch micro-VM backend is an **alternative** isolation model to the primary V8-per-thread
+worker. The **Rust code is solid** — no spec/shell injection (job spec built with `serde_json::json!`,
+not string templating; app-influenced fields hard-validated as base62 typed-UUIDs *before* any
+host-path join → path traversal blocked), driver binary SHA-256-pinned, agent RPC Ed25519-signed
+(per-sandbox key, private half never leaves the controller), secrets written 0400/root/no-env. The
+breaks are in the **GCP provisioning scripts** (deployment config) + missing artifact pinning. The
+out-of-tree `nomad-driver-ch` Go plugin (CH privilege/seccomp/jailer model) is **not in this repo** —
+unauditable here.
+
+| ID | Sev | Finding | Status |
+| --- | --- | --- | --- |
+| SB-A1 | **CRITICAL** (infra) | **Guest VM has unfiltered L3 egress to the host internal network + cloud metadata.** Host confinement is just `ip_forward=1` + a per-VM `/30` tap — **zero iptables/nftables egress rules** (`gcp-worker-startup.sh:261`). A workload in the VM reaches `169.254.169.254` (GCP metadata → instance SA token, `sandbox-token`/`admin-token`/`pg-password` attributes) and the VPC (Nomad :4646, Postgres :5432, controller, other agents). **The VM path is *less* contained than the V8 `fetch` SSRF guard it was meant to harden.** Fix: default-DROP FORWARD from `10.99/16`; allow only public-internet egress (drop 169.254/16, RFC1918, host IPs). | reviewer-evidenced |
+| SB-A2 | **CRITICAL** (infra) | **Nomad API unauthenticated (no ACLs), bound `0.0.0.0:4646`**, firewall-open to the VPC (`gcp-worker-startup.sh:334`, `provision-gcp-cluster.sh:144`). Chained with SB-A1, a guest → full control-plane takeover of the sandbox fleet: submit arbitrary `ch` jobs (read other tenants' `home.img`, hijack a tap index, arbitrary kernel/resources), `alloc exec`/stop other allocs, enumerate tenants via job `Meta`. Bypasses ALL the Rust-side validation. Fix: enable Nomad ACLs (default-deny anon), bind to the private IP, controller uses a scoped token. | reviewer-evidenced |
+| SB-A3 | HIGH (infra) | Postgres `pg_hba` trusts the entire `10.0.0.0/8` with `md5` password, and `pg-password` is in guest-reachable VM metadata → a guest escape reads it and gets full DB access (every tenant's data). Scope `pg_hba` to the controller IP, use `scram-sha-256`, source the password host-only. | reviewer-evidenced |
+| SB-A4 | HIGH | `cloud-hypervisor`, `vmlinuz`, and the rootfs image are **NOT hash-verified before boot** (`gcp-worker-startup.sh:153`) — only the driver binary is SHA-pinned. The kernel + rootfs *define* guest isolation; a poisoned bucket artifact boots silently. Extend the FATAL-on-mismatch SHA gate to all three. | reviewer-evidenced |
+| SB-1 | MAJOR | **Preview-share HMAC secret has an insecure `/dev/urandom`-failure fallback** to `time^pid` material (`registry.rs:126`) that silently keys real preview-share tokens → brute-forceable → forged `rw` share links. (The Ed25519 paths correctly hard-fail on RNG failure; this one doesn't.) Make it `Result`/fail-closed. | reviewer-evidenced |
+| SB-A6 | MEDIUM | `user.blacklist = ""` clears Nomad's root-task guard → CH runs as **root** with no visible jailer/seccomp (the out-of-tree driver's posture is unverifiable) — a CH VM-escape CVE lands as host root with no second containment layer. Run CH unprivileged under a jailer-equivalent. | reviewer-evidenced |
+| SB-misc | LOW/MED | admin bearer has no length floor (vs ≥32B elsewhere); `clock_resync` skew-bypass replay relies on the agent challenge-LRU (residual); `chmod 0666 /dev/kvm`; tenant ids in clear Nomad `Meta` (enumeration oracle with SB-A2); stale `nomad-vm-wrapper.sh` test reference (the script is deleted — no injection surface, good). | reviewer-evidenced |
+
+**Solid (verified):** Rust job-spec construction injection-safe + typed-ID-validated before path joins (no traversal/arg/spec injection); driver binary SHA-pinned FATAL-on-mismatch; per-sandbox Ed25519 agent auth (private key controller-only, `verify_strict`, domain tags, nonce-after-verify); `SANDBOX_TOKEN` ≥32B floor + redaction + constant-time; admin Full/RO distinct-token boot guard; `nomad_addr` loopback-only; secrets 0400/root/no-env; per-VM `/30` tap (L2 cross-tenant isolation holds — the break is L3).
+
+## 9. Core (`crates/core`) — findings ✅ — **STRONG, no findings above MINOR**
+`typed_id` is overflow-safe (checked base62 decode, no panics on attacker input) and **never used as an auth secret** (session/preview/agent auth all use proper HMAC/Ed25519); `config/secrets.rs` enforces uniform ≥32B strength floors, rejects dev sentinels + plaintext-literal secrets outside `--dev-insecure`, `is_loopback_url` is literal-only (no DNS rebind), fails closed (`exit(1)`) on resolution failure; wire types don't leak (`AppRecord.api_key` `skip_serializing`, `RouteEntry` carries `api_key_hash` not the secret); observability emits no secrets/identities. The `ZeroShip-User` mint/verify (gateway lane D) is strong. **MINOR:** `typed_id` prefix validation is opt-in (`parse()` vs `parse_with_prefix()`) — a future caller using bare `parse()` could reintroduce prefix-confusion; the security boundary already uses the hardened form.
