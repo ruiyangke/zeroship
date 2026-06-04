@@ -368,9 +368,36 @@ explicitly noted as not-yet-deep-reviewed.
 
 | Lane | Scope | Status |
 | --- | --- | --- |
-| P3-A | **Cedar authz** — `crates/authz` engine + ALL `.cedar` policy files: over-permit, default-deny completeness, entity resolution, TOKEN⊂USER, platform-role escalation | 🔄 |
-| P3-B | **DB-layer authz** — `db/changelog/changesets/*.sql`: RLS completeness (enabled+forced+WITH CHECK), per-app role grant scoping, service-role least-priv, SECURITY DEFINER search_path | 🔄 |
-| P3-C | **Federated auth flows** — `crates/auth/src/ui/{oauth_google,oauth_github,consent,device,magic,signup,verify,link}.rs`: OAuth state/PKCE/redirect, account-linking takeover, consent/device/magic-link integrity (the pipeline review covered password/reset/lockout) | 🔄 |
-| P3-D | **CLI + control client** — `crates/cli` (master-key/deploy handling, build-time eval, `serve` defaults) + `@zeroship/control` (token handling) | 🔄 |
+| P3-A | **Cedar authz** | ✅ SOUND (no CRIT/HIGH); 1 MED app-flag fail-open; CT-A1 = plan-validation not authz |
+| P3-B | **DB-layer authz** | ✅ SOUND (forced RLS+WITH CHECK); 2 MAJOR (dpop_jti grant, oauth no-RLS-backstop) |
+| P3-C | **Federated auth flows** | ✅ SOUND, no account-takeover; 2 MED (device rate-limit, linker 23505) |
+| P3-D | **CLI + control client** | ✅ HIGH (serve 0.0.0.0+env-flood) + control-client origin MED |
 
-_(findings recorded on completion)_
+### Pass-3 findings — **headline: the authorization + auth layers are SOUND**
+
+The three highest-stakes remaining surfaces (Cedar authz, SQL-layer RLS/grants, federated auth) came back with **no new CRITICAL/HIGH** — materially raising confidence in the platform's core trust model.
+
+| ID | Sev | Lane | Finding | Status |
+| --- | --- | --- | --- | --- |
+| P3-D1 | HIGH | D | **`zeroship serve` binds `0.0.0.0` (no `--host` flag, no authz) + floods the app's `process.env` with the dev's entire shell env** (`std::env::vars()`, main.rs:178) → `OPENAI_API_KEY`/`STRIPE_KEY`/`DATABASE_URL` reachable by anyone on the LAN. Dev-only, but a real secret-exposure footgun. Fix: default-bind `127.0.0.1`; env allowlist. | reviewer-evidenced |
+| P3-B1 | MAJOR | B | **`zeroship_gateway` has no grant on `dpop_jti`** but INSERT/SELECT/DELETEs it for DPoP replay protection (dpop.rs:927) → `permission denied` → DPoP auth fails or replay-detection silently degrades. Add the grant in a new changeset. | reviewer-evidenced |
+| P3-B2 | MAJOR | B | **`oauth_clients`/`oauth_grants` have no RLS backstop** — per-app OAuth secrets/grants isolated app-layer-only (RLS would be inert today since only BYPASSRLS roles touch them — but no SQL net beneath an app-scoping bug, unlike the 4 forced-RLS tenant tables). | reviewer-evidenced |
+| P3-C1 | MEDIUM | C | **`/device` user-code POST has no app-level rate-limit** (every other sensitive POST does) — only Hydra's throttle guards online guessing of low-entropy RFC-8628 user codes; a hit can bind a victim's pending device authz. Add a per-IP/session bucket. | reviewer-evidenced |
+| P3-A1 | MEDIUM | A | **Cedar app-flag lookup fail-OPEN** — `load_app_flags` (eval.rs:218) unqualified `apps` table + missing row → `AppFlags::default()={suspended:false}` → `suspended`/`audit_locked` forbids silently stop applying. Bounded (live apps always load flags) but the one control that should fail-closed fails open. Qualify the table + default missing→deny. | reviewer-evidenced |
+| P3-C2 / P3-D2 | MEDIUM | C/D | Auth `linker` doesn't map a `(provider,subject)` `23505` race to a policy outcome (opaque 500 vs "already linked"; not exploitable — step-1 read prevents the takeover, write has no defense-in-depth); `@zeroship/control` attaches the bearer to whatever `baseUrl`/`path` resolves to with no origin binding → master-key exfil if `baseUrl` influenced. | reviewer-evidenced |
+| P3-misc | LOW | A/B/C/D | `pitr_targets` `GRANT SELECT…TO PUBLIC` → cross-tenant PITR-*metadata* read; `0014` swallows `WHEN OTHERS` as race-success; sandbox tables app-layer-only; CLI `--token` in argv (`ps`-visible), no TLS enforcement on non-loopback control URL; magic 6-digit code's 5-attempt cap is load-bearing; `oauth_stash`/`PendingLink` share an HMAC key (non-confusable by shape today). | reviewer-evidenced |
+
+**Solid / verified-clean (pass 3):** Cedar — default-deny, DB-backed memberships (absence=deny), TOKEN⊂USER two-call fail-closed + regression-tested, PAT mint-time subset check, platform-role escalation admin-gated, injection-defended. **CT-A1 clarified: the authz is correct** (owner changing their own app's plan is by design; the Stripe payout surface requires platform `billing`/`admin` via `Resource::Any`) — CT-A1 is a *plan-validation/semantics* issue, not an authz over-permit. SQL — forced RLS + `WITH CHECK` on all 4 tenant tables, non-BYPASSRLS gateway + per-app roles, pinned-`search_path` `SECURITY DEFINER`s, `BYPASSRLS` confined to 2 roles, Hydra least-priv (0027), no `GRANT…TO PUBLIC` on `zeroship.*`. Federated auth — OAuth state+PKCE+nonce binding, full `id_token` validation (no alg-confusion), verified-email-only linking (domain-re-registration takeover defended), consent no-escalation, single-use atomic tokens, signup/forgot enumeration-safe, `/me` last-method orphan-guard. **No account-takeover, no cross-tenant authz/RLS hole found.**
+
+---
+
+## Audit conclusion (3 passes, ~52 reviewer-lanes — comprehensive)
+
+Reviewed end-to-end three times over: pass 1 (9 crates module-by-module), pass 2 (SDK/RPC dispatcher, PG-pool, request-traces, red-team verification), pass 3 (Cedar authz, SQL RLS/grants, federated auth, CLI). **The verdict is consistent and strengthening:** the security *fundamentals* — identity signing, the authorization model (Cedar + forced-RLS), tenant isolation, injection prevention, the V8 node-compat sandbox, the auth flows — are **well-built and largely sound**, repeatedly confirmed across independent reviewers and request-traces. The must-fix items are concentrated and well-characterized:
+- **Runtime shared-thread containment** (RT-1 isolate escape [reproduced+fix-verified], RT-5/6/7 DoS) — top priority.
+- **The money model** (CT-B1 — server-side fee enforcement).
+- **The sandbox micro-VM network infra** (SB-A1/2 — if that backend is used for untrusted workloads).
+- **The pass-2 cluster** (PG-pool role/state leak, SDK dispatcher hardening, build-host RCE).
+- A long tail of resource-bounds / fail-open-env-gate / host-trust hardening.
+
+Further passes would be diminishing returns (re-review of covered ground). **The audit is complete.**
