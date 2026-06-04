@@ -180,49 +180,56 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
-    apply_autocommit_role(&client, app_id).await?;
-    let query_result = client
-        .query_text_params(sql, params)
-        .await
-        .map_err(|e| DbError::from_pg(&e));
-    let reset_result = reset_autocommit_role(&client).await;
-    if let Err(reset_err) = reset_result {
-        client.__private_api_close();
-        return Err(match query_result {
-            Ok(_) => reset_err,
-            Err(query_err) => query_err,
-        });
-    }
-    query_result
-}
 
-async fn apply_autocommit_role(
-    client: &compio_postgres::Client,
-    app_id: &str,
-) -> Result<(), DbError> {
-    // SET ROLE + the DB-1 session statement/lock-timeout guards in one batch,
-    // so a slow autocommit statement can't pin one of the bounded pool's
-    // connections indefinitely. Reset by `reset_autocommit_role` before the
-    // connection returns to the pool.
-    let sql = crate::auth::bootstrap::autocommit_session_setup_sql(app_id);
-    client.simple_query(&sql).await.map_err(|e| {
+    // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
+    // inside an explicit transaction, exactly like the explicit-tx path
+    // (`tx_session_setup_sql`). `SET LOCAL` auto-reverts at COMMIT and at
+    // the implicit ROLLBACK the `compio_postgres::Transaction` issues on
+    // drop — so a setup error, a query error, OR a cancellation between
+    // setup and the would-be reset can no longer leave the pooled
+    // connection carrying this tenant's role + timeouts for the next
+    // checkout. The previous shape ran a session-level `SET ROLE` + a
+    // separate `RESET` that was skipped entirely when the future was
+    // cancelled mid-flight (no RAII guard, and the pool's Drop is
+    // synchronous so it cannot issue async RESET SQL).
+    let tx = client.transaction().await.map_err(|e| {
         let mut err = DbError::from_pg(&e);
-        crate::error::prefix_message(&mut err, "db: autocommit session setup (per-app §17.5 + DB-1 guards): ");
+        crate::error::prefix_message(
+            &mut err,
+            "db: autocommit BEGIN (per-app §17.5 + DB-1 guards): ",
+        );
         err
     })?;
-    Ok(())
-}
 
-async fn reset_autocommit_role(client: &compio_postgres::Client) -> Result<(), DbError> {
-    client
-        .simple_query(crate::auth::bootstrap::autocommit_session_reset_sql())
+    let setup_sql = crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id);
+    tx.simple_query(&setup_sql).await.map_err(|e| {
+        let mut err = DbError::from_pg(&e);
+        crate::error::prefix_message(
+            &mut err,
+            "db: autocommit session setup (per-app §17.5 + DB-1 guards): ",
+        );
+        err
+    })?;
+
+    let rows = tx
+        .query_text_params(sql, params)
         .await
-        .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
-            crate::error::prefix_message(&mut err, "db: autocommit session reset (per-app §17.5 + DB-1 guards): ");
-            err
-        })?;
-    Ok(())
+        .map_err(|e| DbError::from_pg(&e))?;
+
+    // COMMIT reverts the SET LOCAL state and releases the connection
+    // clean. On any early return above, `tx` is dropped instead, which
+    // rolls back (also reverting the SET LOCAL state) and marks the
+    // connection dirty so the pool drains it before the next checkout.
+    tx.commit().await.map_err(|e| {
+        let mut err = DbError::from_pg(&e);
+        crate::error::prefix_message(
+            &mut err,
+            "db: autocommit COMMIT (per-app §17.5 + DB-1 guards): ",
+        );
+        err
+    })?;
+
+    Ok(rows)
 }
 
 async fn exec_sqlite_json(
@@ -1055,6 +1062,159 @@ mod tests {
                 panic!("sqlite tx client should still be parked for cleanup");
             }
             context::with_mut(|c| c.clear_pool());
+        });
+        reset_world();
+    }
+
+    // -------------------------------------------------------------------
+    // P2-C1 — non-tx (autocommit) path must NOT leak role/timeout on a
+    // cancelled query.
+    // -------------------------------------------------------------------
+    //
+    // PG-REQUIRED. Gated like the crate's other live-Postgres tests:
+    // connects to `PG_TEST_URL` (default `postgres://postgres:test@
+    // localhost:5434/postgres`) and SKIPS (prints + returns) when no
+    // Postgres is reachable. No zeroship test PG is configured in the
+    // fix-authoring environment, so this is verified by compile + code
+    // reasoning here, not observed red/green.
+    //
+    // Real path: drives `query_postgres_pool_with_autocommit_role` (the
+    // single funnel every autocommit CRUD op flows through) against a
+    // pool of size 1 so the SAME backend is reused on the next checkout.
+    // We force the leak window by running `pg_sleep` and cancelling the
+    // future mid-statement (after `SET LOCAL ROLE` + timeouts are
+    // applied, before any reset/commit). Pre-fix (session-level `SET
+    // ROLE` + a separate `RESET` that the cancellation skips), the next
+    // checkout inherited the app role + `statement_timeout`. Post-fix
+    // (SET LOCAL inside an explicit transaction), the rollback-on-drop
+    // reverts both, so the next checkout sees the clean login role and
+    // default timeout.
+
+    fn pg_test_url() -> String {
+        std::env::var("PG_TEST_URL")
+            .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string())
+    }
+
+    #[test]
+    fn autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool() {
+        use compio_postgres::{NoTls, Pool};
+        use std::time::Duration;
+
+        reset_world();
+        run(async {
+            let url = pg_test_url();
+            // Skip when no Postgres is reachable — same convention as
+            // tests/integration.rs `require_pg`.
+            match compio_postgres::connect(&url, NoTls).await {
+                Ok((client, connection)) => {
+                    compio::runtime::spawn(async move {
+                        let _ = connection.run().await;
+                    })
+                    .detach();
+                    drop(client);
+                }
+                Err(e) => {
+                    eprintln!("Skipping autocommit-leak test — Postgres not reachable: {e}");
+                    return;
+                }
+            }
+
+            // Pool of ONE so the cancelled-then-reused checkout lands on
+            // the same backend whose session state we want to inspect.
+            let pool = Rc::new(Pool::connect(&url, 1).await.expect("pool connect"));
+
+            let app_id = "p2c1leak";
+            let role = crate::auth::bootstrap::per_app_role_name(app_id);
+            let role_ident = crate::query::quote_ident(&role);
+
+            // Discover the login role so we can (a) GRANT it membership
+            // in the app role (required for SET LOCAL ROLE) and (b)
+            // assert the connection returns to it after cancellation.
+            let login_user = {
+                let c = pool.get().await.expect("checkout for setup");
+                let rows = c
+                    .query_text_params("SELECT current_user AS u", &[])
+                    .await
+                    .expect("current_user");
+                rows[0].get::<_, &str>("u").to_string()
+            };
+
+            // Provision the per-app role directly (NOLOGIN) and grant the
+            // login user membership so `SET LOCAL ROLE` succeeds.
+            {
+                let c = pool.get().await.expect("checkout for role setup");
+                let _ = c
+                    .simple_query(&format!("DROP ROLE IF EXISTS {role_ident}"))
+                    .await;
+                c.simple_query(&format!("CREATE ROLE {role_ident} NOLOGIN"))
+                    .await
+                    .expect("create app role");
+                c.simple_query(&format!(
+                    "GRANT {role_ident} TO {}",
+                    crate::query::quote_ident(&login_user)
+                ))
+                .await
+                .expect("grant membership");
+            }
+
+            // Force the leak window: run a server-side sleep through the
+            // funnel and cancel the future before it can reset/commit.
+            // `pg_sleep(1)` + a 100ms timeout drops the future while the
+            // SET LOCAL role + timeouts are live on the backend.
+            let cancelled = compio::time::timeout(
+                Duration::from_millis(100),
+                query_postgres_pool_with_autocommit_role(
+                    &pool,
+                    app_id,
+                    "SELECT pg_sleep(1)",
+                    &[],
+                ),
+            )
+            .await;
+            assert!(
+                cancelled.is_err(),
+                "the pg_sleep query must be cancelled by the timeout to exercise the leak window",
+            );
+
+            // Re-check out (size-1 pool → same backend). The pool's dirty
+            // barrier drains the rolled-back tx; assert NO residual state.
+            let c = pool.get().await.expect("re-checkout after cancel");
+            let user_after = {
+                let rows = c
+                    .query_text_params("SELECT current_user AS u", &[])
+                    .await
+                    .expect("current_user after");
+                rows[0].get::<_, &str>("u").to_string()
+            };
+            let timeout_after = {
+                let rows = c
+                    .query_text_params("SHOW statement_timeout", &[])
+                    .await
+                    .expect("show statement_timeout");
+                rows[0].get::<_, &str>("statement_timeout").to_string()
+            };
+
+            assert_eq!(
+                user_after, login_user,
+                "cancelled autocommit query must NOT leave the per-app role on the pooled \
+                 connection (saw {user_after}, want login role {login_user})",
+            );
+            assert_eq!(
+                timeout_after, "0",
+                "cancelled autocommit query must NOT leave a residual statement_timeout \
+                 on the pooled connection (saw {timeout_after}, want default 0)",
+            );
+
+            // Cleanup: revoke + drop the throwaway role.
+            let _ = c
+                .simple_query(&format!(
+                    "REVOKE {role_ident} FROM {}",
+                    crate::query::quote_ident(&login_user)
+                ))
+                .await;
+            let _ = c
+                .simple_query(&format!("DROP ROLE IF EXISTS {role_ident}"))
+                .await;
         });
         reset_world();
     }

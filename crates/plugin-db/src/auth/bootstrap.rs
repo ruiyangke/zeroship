@@ -1469,24 +1469,25 @@ pub fn tx_session_setup_sql(app_id: &str) -> String {
     )
 }
 
-/// Combined autocommit (pooled) client setup: session-level `SET ROLE` +
-/// statement/lock timeout guards. No `idle_in_transaction` guard — autocommit
-/// holds no open transaction. MUST be paired with [`autocommit_session_reset_sql`]
-/// before the pooled connection returns to the pool.
-pub fn autocommit_session_setup_sql(app_id: &str) -> String {
+/// Combined autocommit (pooled) client setup, run inside a short-lived
+/// explicit transaction: `SET LOCAL ROLE` + statement/lock timeout guards.
+///
+/// Every value is `SET LOCAL`, so role + timeouts auto-revert at
+/// COMMIT/ROLLBACK — including the implicit rollback-on-drop the
+/// `compio_postgres::Transaction` performs when the future is cancelled
+/// mid-flight. This makes the pooled (autocommit) path leak-proof on
+/// EVERY return-to-pool path, matching the explicit-transaction path's
+/// guarantee. No `idle_in_transaction` guard — the wrapping transaction
+/// is opened and committed around a single statement, so it never sits
+/// idle in transaction (the per-statement `statement_timeout` already
+/// bounds the work).
+pub fn autocommit_local_session_setup_sql(app_id: &str) -> String {
     let role = crate::query::quote_ident(&per_app_role_name(app_id));
     format!(
-        "SET ROLE {role}; \
-         SET statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
-         SET lock_timeout = {DB_LOCK_TIMEOUT_MS}"
+        "SET LOCAL ROLE {role}; \
+         SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
+         SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"
     )
-}
-
-/// `RESET` everything [`autocommit_session_setup_sql`] set, before the pooled
-/// connection returns to the pool (otherwise the next checkout inherits the
-/// constrained role + timeouts).
-pub fn autocommit_session_reset_sql() -> &'static str {
-    "RESET ROLE; RESET statement_timeout; RESET lock_timeout"
 }
 
 /// Result of [`ensure_per_app_role`] — distinguishes "created the role
@@ -1682,18 +1683,25 @@ mod tests {
     }
 
     #[test]
-    fn autocommit_session_setup_and_reset_bound_statement_time() {
-        // DB-1: the pooled autocommit path is pool-bounded (8) but a slow
-        // statement still pins one of those shared connections — bound it with a
-        // session statement_timeout, reset before the connection returns to the
-        // pool. No idle-in-tx guard (autocommit holds no open transaction).
-        let setup = autocommit_session_setup_sql("app_demo");
-        assert!(setup.contains(r#"SET ROLE "app_app_demo_role""#), "{setup}");
-        assert!(setup.contains("SET statement_timeout ="), "{setup}");
-        assert!(!setup.contains("idle_in_transaction"), "no idle guard on autocommit: {setup}");
-        let reset = autocommit_session_reset_sql();
-        assert!(reset.contains("RESET ROLE"), "{reset}");
-        assert!(reset.contains("RESET statement_timeout"), "{reset}");
+    fn autocommit_local_session_setup_bounds_statement_time_via_set_local() {
+        // P2-C1 + DB-1: the pooled autocommit path is pool-bounded (8) but a
+        // slow statement still pins one of those shared connections — bound it
+        // with a statement_timeout. Crucially every value is `SET LOCAL`, run
+        // inside an explicit transaction, so role + timeouts auto-revert at
+        // COMMIT/ROLLBACK (including rollback-on-drop on cancellation) and can
+        // never leak to the next checkout. No idle-in-tx guard — the wrapping
+        // transaction commits around a single statement and never sits idle.
+        let setup = autocommit_local_session_setup_sql("app_demo");
+        assert!(setup.contains(r#"SET LOCAL ROLE "app_app_demo_role""#), "{setup}");
+        assert!(setup.contains("SET LOCAL statement_timeout ="), "{setup}");
+        assert!(setup.contains("SET LOCAL lock_timeout ="), "{setup}");
+        // Every directive must be SET LOCAL — a bare session-level SET would
+        // re-introduce the leak the explicit transaction is here to prevent.
+        assert!(!setup.contains("SET ROLE "), "must be SET LOCAL ROLE: {setup}");
+        assert!(
+            !setup.contains("idle_in_transaction"),
+            "no idle guard on autocommit: {setup}"
+        );
     }
 
     #[test]

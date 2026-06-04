@@ -171,6 +171,20 @@ impl<'a> Transaction<'a> {
         self.client.query_typed(statement, params).await
     }
 
+    /// Like `Client::query_text_params` — text-format params with
+    /// implicit cast, run inside this transaction. Mirrors the
+    /// `query_typed` passthrough; the JSON-driven query builders in
+    /// `zeroship-plugin-db` use this to run the autocommit CRUD path
+    /// inside an explicit transaction so `SET LOCAL` role/timeouts
+    /// auto-revert on COMMIT/ROLLBACK (including the rollback-on-drop).
+    pub async fn query_text_params(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>, Error> {
+        self.client.query_text_params(sql, params).await
+    }
+
     /// Like `Client::query_typed_one`.
     pub async fn query_typed_one(
         &self,
