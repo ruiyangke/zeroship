@@ -202,6 +202,22 @@ pub struct Runtime {
     app_id: Option<uuid::Uuid>,
 }
 
+/// Test-only strong-count probe over the inner `Rc<RefCell<RuntimeInner>>`.
+/// Holds only a `Weak`, so it never keeps the inner alive. `strong_count()`
+/// counts the remaining strong references (cache handle, in-flight request
+/// handles, and — pre-fix — the leaked pump task). Returned by
+/// [`Runtime::into_inner_probe_for_test`].
+#[doc(hidden)]
+pub struct InnerProbe(Weak<RefCell<RuntimeInner>>);
+
+impl InnerProbe {
+    /// Number of strong references still alive to the inner runtime.
+    /// `0` means `RuntimeInner` (and its V8 isolate) has been dropped.
+    pub fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+}
+
 impl Runtime {
     /// Start building a new `Runtime`. See [`RuntimeBuilder`].
     pub fn builder() -> RuntimeBuilder {
@@ -235,6 +251,19 @@ impl Runtime {
     /// registry by `(app_id, request_id)`.
     pub fn app_id(&self) -> Option<uuid::Uuid> {
         self.app_id
+    }
+
+    /// Test-only: consume this handle and return a strong-count probe for
+    /// the inner `Rc<RefCell<RuntimeInner>>`. Dropping the handle here
+    /// releases the caller's strong reference, so the probe afterwards
+    /// reflects only the references held *elsewhere* (e.g. the detached
+    /// pump task). Used by the eviction-leak regression test to assert the
+    /// inner is actually dropped once the handle goes away — which only
+    /// holds if the pump holds a `Weak`, not a strong `Rc`. (The inner type
+    /// is `pub(crate)`, so the probe type-erases it behind a count.)
+    #[doc(hidden)]
+    pub fn into_inner_probe_for_test(self) -> InnerProbe {
+        InnerProbe(Rc::downgrade(&self.inner))
     }
 
     /// Run `f` inside this isolate's HandleScope + Context. Wraps the
@@ -916,10 +945,20 @@ impl RuntimeInner {
             rt.idle_gc_after
         };
 
-        let rt = self_ref.clone();
+        // The pump task must hold a *Weak* back-reference, not a strong
+        // `Rc`. A strong clone here forms a reference cycle: the cache's
+        // `IsolateEntry` owns the `Runtime` handle (one strong `Rc`), and
+        // the detached pump task would own another. The pump loops forever,
+        // so on LRU eviction — when the cache drops its `Runtime` — the
+        // pump's strong ref keeps `RuntimeInner` alive, the isolate is
+        // never disposed, and memory grows. Downgrading to `Weak` (matching
+        // the idle-GC ticker below) lets eviction actually drop the inner;
+        // the pump upgrades transiently per iteration and exits the moment
+        // `upgrade()` returns `None`.
+        let weak = Rc::downgrade(&self_ref);
         compio::runtime::spawn(async move {
             crate::panic_util::guard("pump_loop", async move {
-                Self::pump_loop(rt, notify_rx).await;
+                Self::pump_loop(weak, notify_rx).await;
             }).await;
         })
         .detach();
@@ -997,33 +1036,48 @@ impl RuntimeInner {
     /// correctly.  For single-isolate use (benchmark server) the extra
     /// enter/exit is a harmless nested push/pop.
     async fn pump_loop(
-        runtime: Rc<RefCell<Self>>,
+        runtime: Weak<RefCell<Self>>,
         mut notify_rx: futures::channel::mpsc::Receiver<()>,
     ) {
         use futures::{FutureExt, StreamExt};
         let mut work = AsyncWork::new();
 
         loop {
-            // PHASE 1 — drain new spawned ops/timers/fetches + flush outbound
-            // streams. Only enter the V8 isolate if there's actually work to
-            // do: v8::Isolate::enter/exit aren't free (TLS swap + scheduling
-            // slot manipulation), and in steady-state "await an op, handle
-            // it, await another" the drain phase finds nothing new. Checking
-            // the shared-state sizes behind a short immutable borrow lets us
-            // skip this entire block when it would be a no-op.
-            let needs_drain = {
-                let rt = runtime.borrow();
-                let s = rt.state().borrow();
-                !s.spawned_ops.is_empty()
-                    || !s.spawned_timers.is_empty()
-                    || !s.ready_timers.is_empty()
-            };
+            // Upgrade the Weak back-reference for this iteration's synchronous
+            // V8 work. If it returns `None`, the `Runtime` handle has been
+            // dropped (LRU eviction or shutdown) and `RuntimeInner` is gone —
+            // the pump must exit so it doesn't resurrect a disposed isolate
+            // and so its task can be reaped. The strong `Rc` is held only
+            // across the synchronous phases below; it is dropped before the
+            // idle `notify_rx` await so eviction during an idle window drops
+            // the inner immediately rather than waiting for the next event.
+            {
+                let Some(runtime) = runtime.upgrade() else { return; };
 
-            if needs_drain {
-                let mut rt = runtime.borrow_mut();
-                rt.enter_isolate();
-                rt.drain_new_tasks_into(&mut work);
-                rt.exit_isolate();
+                // PHASE 1 — drain new spawned ops/timers/fetches + flush
+                // outbound streams. Only enter the V8 isolate if there's
+                // actually work to do: v8::Isolate::enter/exit aren't free
+                // (TLS swap + scheduling slot manipulation), and in
+                // steady-state "await an op, handle it, await another" the
+                // drain phase finds nothing new. Checking the shared-state
+                // sizes behind a short immutable borrow lets us skip this
+                // entire block when it would be a no-op.
+                let needs_drain = {
+                    let rt = runtime.borrow();
+                    let s = rt.state().borrow();
+                    !s.spawned_ops.is_empty()
+                        || !s.spawned_timers.is_empty()
+                        || !s.ready_timers.is_empty()
+                };
+
+                if needs_drain {
+                    let mut rt = runtime.borrow_mut();
+                    rt.enter_isolate();
+                    rt.drain_new_tasks_into(&mut work);
+                    rt.exit_isolate();
+                }
+                // `runtime` (strong Rc) dropped here — not held across the
+                // event await below.
             }
 
             let event = {
@@ -1106,6 +1160,12 @@ impl RuntimeInner {
                 }
 
                 {
+                    // Re-upgrade for the batch: the strong `Rc` from phase 1
+                    // was dropped before the event await. If the runtime was
+                    // evicted while we were awaiting events, exit the pump —
+                    // the disposed isolate must not be re-entered, and the
+                    // batched results have nowhere to go.
+                    let Some(runtime) = runtime.upgrade() else { return; };
                     let v8_start = Instant::now();
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
