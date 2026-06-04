@@ -807,6 +807,26 @@ async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<
         ]);
     }
 
+    // Reject oversized frames BEFORE allocating the payload buffer.
+    //
+    // A 16-byte 64-bit-length header can declare a payload of up to
+    // ~16 EiB. Without this guard the `vec![0u8; len]` below would
+    // honour that request and abort the process (OOM) — a trivial DoS
+    // for any client that can open a WebSocket on the native `zeroship
+    // serve` path. Cap at the same `DEFAULT_MAX_FRAME_SIZE` the JS-side
+    // `FrameReader` enforces so the two WS paths agree.
+    //
+    // We synthesise an RFC 6455 §7.4.1 status 1009 ("Message Too Big")
+    // Close frame (opcode 0x8, payload = 1009 big-endian) and return it
+    // instead of the real frame. Both `read_ws_frame` call sites already
+    // handle a 0x8 frame by echoing a Close with the carried code and
+    // tearing the connection down — so the peer sees a clean 1009 close
+    // and we never touch the oversized length again.
+    const MAX_WS_FRAME_PAYLOAD: u64 = crate::web::websocket::constants::DEFAULT_MAX_FRAME_SIZE as u64;
+    if payload_len > MAX_WS_FRAME_PAYLOAD {
+        return Some((0x8, 1009u16.to_be_bytes().to_vec()));
+    }
+
     // Masking key (4 bytes if masked)
     let mask_key = if masked {
         let mk = read_exact(stream, 4).await?;
@@ -1480,5 +1500,100 @@ mod chunked_decode_tests {
     fn empty_body_accepted() {
         let input = b"0\r\n\r\n";
         assert_complete(decode_chunked_body(input, 1024), b"");
+    }
+}
+
+#[cfg(test)]
+mod ws_frame_tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        compio::runtime::Runtime::new().unwrap().block_on(fut)
+    }
+
+    /// Build a masked client->server frame header that *declares* a
+    /// 64-bit payload length of `declared_len` (using the 127 extended
+    /// form). Only the header bytes are emitted — for the oversized case
+    /// the reader must reject before it ever tries to read the payload,
+    /// so trailing payload bytes are deliberately absent.
+    fn masked_header(opcode: u8, declared_len: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(0x80 | (opcode & 0x0F)); // FIN + opcode
+        out.push(0x80 | 127); // MASK bit + 127 (8-byte extended length)
+        out.extend_from_slice(&declared_len.to_be_bytes());
+        out
+    }
+
+    /// A full, valid, masked client frame (header + mask key + masked
+    /// payload) carrying `payload` under `opcode`.
+    fn masked_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(0x80 | (opcode & 0x0F));
+        let mask = [0xA1u8, 0xB2, 0xC3, 0xD4];
+        let len = payload.len();
+        if len <= 125 {
+            out.push(0x80 | len as u8);
+        } else if len <= u16::MAX as usize {
+            out.push(0x80 | 126);
+            out.extend_from_slice(&(len as u16).to_be_bytes());
+        } else {
+            out.push(0x80 | 127);
+            out.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+        out.extend_from_slice(&mask);
+        for (i, b) in payload.iter().enumerate() {
+            out.push(b ^ mask[i % 4]);
+        }
+        out
+    }
+
+    /// Regression for P4-B-1: a frame declaring a payload larger than the
+    /// cap must be rejected WITHOUT allocating the declared buffer, and
+    /// must surface as a 1009 ("Message Too Big") Close frame. Pre-fix the
+    /// reader did `vec![0u8; len]` with no bound, so this header would have
+    /// triggered a multi-terabyte allocation / OOM abort instead.
+    #[test]
+    fn oversized_frame_rejected_with_1009_no_alloc() {
+        // Declare ~280 TB. Only the 10-byte header is provided; if the
+        // reader tried to honour the length it would allocate (and abort)
+        // long before noticing the payload bytes are missing.
+        let declared: u64 = 280_000_000_000_000;
+        let header = masked_header(0x2, declared);
+        let mut r: &[u8] = &header;
+
+        let frame = block_on(read_ws_frame(&mut r));
+        let (opcode, payload) = frame.expect("oversized frame should yield a Close, not EOF");
+        assert_eq!(opcode, 0x8, "oversized frame must surface as a Close frame");
+        assert_eq!(payload.len(), 2, "Close payload must carry just the 2-byte status code");
+        let code = u16::from_be_bytes([payload[0], payload[1]]);
+        assert_eq!(code, 1009, "must close with status 1009 (Message Too Big)");
+    }
+
+    /// A frame exactly at the cap (DEFAULT_MAX_FRAME_SIZE) still parses
+    /// normally — the guard rejects strictly-greater-than, not equal.
+    #[test]
+    fn frame_at_cap_still_parses() {
+        let cap = crate::web::websocket::constants::DEFAULT_MAX_FRAME_SIZE as usize;
+        let payload = vec![0x5Au8; cap];
+        let bytes = masked_frame(0x2, &payload);
+        let mut r: &[u8] = &bytes;
+
+        let frame = block_on(read_ws_frame(&mut r));
+        let (opcode, got) = frame.expect("at-cap frame should parse");
+        assert_eq!(opcode, 0x2);
+        assert_eq!(got, payload, "payload round-trips through unmasking");
+    }
+
+    /// A normal small frame still parses and unmasks correctly after the
+    /// guard is in place.
+    #[test]
+    fn normal_frame_still_parses() {
+        let bytes = masked_frame(0x1, b"hello");
+        let mut r: &[u8] = &bytes;
+
+        let frame = block_on(read_ws_frame(&mut r));
+        let (opcode, payload) = frame.expect("normal frame should parse");
+        assert_eq!(opcode, 0x1);
+        assert_eq!(payload, b"hello");
     }
 }
