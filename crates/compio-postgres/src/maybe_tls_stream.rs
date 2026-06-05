@@ -3,6 +3,7 @@
 // Compio doesn't use pin-projection (async-fn traits carry no `poll_*`
 // methods), so the wrapper is a plain enum; no pin_project_lite needed.
 
+use crate::buf_stream::SplitStream;
 use crate::tls::{ChannelBinding, TlsStream};
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
@@ -65,6 +66,27 @@ where
         match self {
             MaybeTlsStream::Raw(_) => ChannelBinding::none(),
             MaybeTlsStream::Tls(s) => s.channel_binding(),
+        }
+    }
+}
+
+impl<S, T> SplitStream for MaybeTlsStream<S, T>
+where
+    S: SplitStream,
+{
+    type ReadHalf = S::ReadHalf;
+    type WriteHalf = S::WriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        match self {
+            // The plain transport splits into two owned, independently
+            // pollable halves — the path the connection pool always takes.
+            MaybeTlsStream::Raw(s) => s.try_into_split().map_err(MaybeTlsStream::Raw),
+            // rustls keeps shared session state across the read and write
+            // directions, so a TLS stream cannot be torn into halves that
+            // run concurrent io_uring submissions. Hand it back so the
+            // caller falls back to the serialized loop.
+            MaybeTlsStream::Tls(_) => Err(self),
         }
     }
 }

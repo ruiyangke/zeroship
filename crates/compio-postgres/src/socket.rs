@@ -4,9 +4,10 @@
 // async-fn-based IoBuf/IoBufMut shape; see `compio::io` for the trait
 // signatures we implement below.
 
+use crate::buf_stream::SplitStream;
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::net::TcpStream;
+use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 #[cfg(unix)]
 use compio::net::UnixStream;
 
@@ -68,6 +69,81 @@ impl AsyncWrite for Socket {
             Inner::Tcp(s) => s.shutdown().await,
             #[cfg(unix)]
             Inner::Unix(s) => s.shutdown().await,
+        }
+    }
+}
+
+/// Owned read half of a split [`Socket`] — the read side of a TCP or
+/// Unix stream produced by compio's `into_split` (the fd is dup'd so the
+/// two halves can run independent io_uring submissions).
+#[derive(Debug)]
+pub enum SocketReadHalf {
+    Tcp(OwnedReadHalf<TcpStream>),
+    #[cfg(unix)]
+    Unix(OwnedReadHalf<UnixStream>),
+}
+
+/// Owned write half of a split [`Socket`].
+#[derive(Debug)]
+pub enum SocketWriteHalf {
+    Tcp(OwnedWriteHalf<TcpStream>),
+    #[cfg(unix)]
+    Unix(OwnedWriteHalf<UnixStream>),
+}
+
+impl AsyncRead for SocketReadHalf {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        match self {
+            SocketReadHalf::Tcp(s) => s.read(buf).await,
+            #[cfg(unix)]
+            SocketReadHalf::Unix(s) => s.read(buf).await,
+        }
+    }
+}
+
+impl AsyncWrite for SocketWriteHalf {
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        match self {
+            SocketWriteHalf::Tcp(s) => s.write(buf).await,
+            #[cfg(unix)]
+            SocketWriteHalf::Unix(s) => s.write(buf).await,
+        }
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            SocketWriteHalf::Tcp(s) => s.flush().await,
+            #[cfg(unix)]
+            SocketWriteHalf::Unix(s) => s.flush().await,
+        }
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        match self {
+            SocketWriteHalf::Tcp(s) => s.shutdown().await,
+            #[cfg(unix)]
+            SocketWriteHalf::Unix(s) => s.shutdown().await,
+        }
+    }
+}
+
+impl SplitStream for Socket {
+    type ReadHalf = SocketReadHalf;
+    type WriteHalf = SocketWriteHalf;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        // A plain TCP/Unix socket always splits: compio dups the fd so
+        // the read and write halves own independent submission slots.
+        match self.0 {
+            Inner::Tcp(s) => {
+                let (r, w) = s.into_split();
+                Ok((SocketReadHalf::Tcp(r), SocketWriteHalf::Tcp(w)))
+            }
+            #[cfg(unix)]
+            Inner::Unix(s) => {
+                let (r, w) = s.into_split();
+                Ok((SocketReadHalf::Unix(r), SocketWriteHalf::Unix(w)))
+            }
         }
     }
 }

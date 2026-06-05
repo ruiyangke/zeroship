@@ -157,6 +157,19 @@ where
             route_async(&mut self.parameters, self.async_sender.as_ref(), msg)?;
         }
 
+        self.run_serialized().await
+    }
+
+    /// The original serialized run-loop: reads and writes never overlap.
+    ///
+    /// Reads run to completion before control returns to the dispatch
+    /// point (the cancel-safety invariant documented at the top of this
+    /// file). This is the fallback path for streams that cannot be split
+    /// into independent owned read/write halves (the TLS variant — rustls
+    /// keeps shared session state, so `read_half` and `write_half` cannot
+    /// own disjoint borrows). The splittable plain-socket path uses
+    /// [`run_multiplexed`](Self::run_multiplexed) instead.
+    async fn run_serialized(mut self) -> Result<(), Error> {
         let mut terminating = false;
 
         loop {
