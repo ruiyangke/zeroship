@@ -153,31 +153,12 @@ impl Stream for BinaryCopyOutStream {
         let has_oids = match &this.header {
             Some(header) => header.has_oids,
             None => {
-                check_remaining(&chunk, HEADER_LEN)?;
-                if !chunk.chunk().starts_with(MAGIC) {
-                    return Poll::Ready(Some(Err(Error::parse(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid magic value",
-                    )))));
-                }
-                chunk.advance(MAGIC.len());
-
-                let flags = chunk.get_i32();
-                // Per PG COPY binary format spec: the high 16 bits are critical —
-                // if any are set and not recognized by the reader, abort.
-                if (flags as u32) & 0xFFFF_0000 != 0 {
-                    return Poll::Ready(Some(Err(Error::parse(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unsupported COPY header: critical flags set 0x{:08X}", flags as u32),
-                    )))));
-                }
-                let has_oids = (flags & (1 << 16)) != 0;
-
-                let header_extension = chunk.get_u32() as usize;
-                check_remaining(&chunk, header_extension)?;
-                chunk.advance(header_extension);
-
-                *this.header = Some(Header { has_oids });
+                let header = match parse_binary_copy_header(&mut chunk) {
+                    Ok(header) => header,
+                    Err(e) => return Poll::Ready(Some(Err(e))),
+                };
+                let has_oids = header.has_oids;
+                *this.header = Some(header);
                 has_oids
             }
         };
@@ -219,6 +200,45 @@ impl Stream for BinaryCopyOutStream {
             types: this.types.clone(),
         })))
     }
+}
+
+/// Parse the 19-byte binary-COPY file header from the front of `chunk`,
+/// advancing the cursor past it (magic + flags + header-extension area).
+///
+/// Validates the magic value, rejects unknown critical flag bits, and reports
+/// the recognized has-OIDs flag (bit 16).
+fn parse_binary_copy_header(chunk: &mut Cursor<Bytes>) -> Result<Header, Error> {
+    check_remaining(chunk, HEADER_LEN)?;
+    if !chunk.chunk().starts_with(MAGIC) {
+        return Err(Error::parse(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid magic value",
+        )));
+    }
+    chunk.advance(MAGIC.len());
+
+    let flags = chunk.get_i32();
+    // Per PG COPY binary format spec: bits 16-31 are critical (abort on an
+    // UNRECOGNIZED bit) and bits 0-15 are backward-compatible (ignore). Bit 16
+    // is the recognized has-OIDs flag, so the unknown-critical range is bits
+    // 17-31 (mask 0xFFFE_0000) — bit 16 must NOT be swallowed here, else the
+    // has_oids report below becomes unreachable.
+    if (flags as u32) & 0xFFFE_0000 != 0 {
+        return Err(Error::parse(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported COPY header: critical flags set 0x{:08X}",
+                flags as u32
+            ),
+        )));
+    }
+    let has_oids = (flags & (1 << 16)) != 0;
+
+    let header_extension = chunk.get_u32() as usize;
+    check_remaining(chunk, header_extension)?;
+    chunk.advance(header_extension);
+
+    Ok(Header { has_oids })
 }
 
 fn check_remaining(buf: &Cursor<Bytes>, len: usize) -> Result<(), Error> {
@@ -278,5 +298,67 @@ impl BinaryCopyOutRow {
             Ok(value) => value,
             Err(e) => panic!("error retrieving column {}: {}", idx, e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a 19-byte binary-COPY file header: MAGIC + flags (BE i32) +
+    /// header-extension-length 0 (BE u32), wrapped in a `Cursor<Bytes>`.
+    fn header_buf(flags: i32) -> Cursor<Bytes> {
+        let mut buf = BytesMut::new();
+        buf.put_slice(MAGIC);
+        buf.put_i32(flags);
+        buf.put_u32(0); // header extension length
+        Cursor::new(buf.freeze())
+    }
+
+    #[test]
+    fn header_accepts_oid_flag() {
+        // Bit 16 is the recognized has-OIDs flag — it must NOT be rejected as
+        // an unknown critical bit, and must surface as `has_oids == true`.
+        let mut chunk = header_buf(1 << 16);
+        let header = parse_binary_copy_header(&mut chunk).expect("OID-flag header must parse");
+        assert!(header.has_oids, "bit 16 must be reported as has_oids");
+    }
+
+    #[test]
+    fn header_rejects_unknown_critical_flag() {
+        // Bit 17 is in the unknown-critical range (17-31): must abort.
+        let mut chunk = header_buf(1 << 17);
+        assert!(
+            parse_binary_copy_header(&mut chunk).is_err(),
+            "an unknown critical flag (bit 17) must be rejected"
+        );
+    }
+
+    #[test]
+    fn header_ignores_noncritical_low_bits() {
+        // Bits 0-15 are backward-compatible (non-critical): accept, no OIDs.
+        let mut chunk = header_buf(1 << 0);
+        let header = parse_binary_copy_header(&mut chunk).expect("low-bit header must parse");
+        assert!(!header.has_oids, "low bits must not set has_oids");
+    }
+
+    #[test]
+    fn header_plain_no_oids() {
+        let mut chunk = header_buf(0);
+        let header = parse_binary_copy_header(&mut chunk).expect("plain header must parse");
+        assert!(!header.has_oids, "no flags means no OIDs");
+    }
+
+    #[test]
+    fn header_rejects_bad_magic() {
+        let mut buf = BytesMut::new();
+        buf.put_slice(b"NOTPGCOPY\0\0"); // 11 bytes, wrong magic
+        buf.put_i32(0);
+        buf.put_u32(0);
+        let mut chunk = Cursor::new(buf.freeze());
+        assert!(
+            parse_binary_copy_header(&mut chunk).is_err(),
+            "a bad magic value must be rejected"
+        );
     }
 }
