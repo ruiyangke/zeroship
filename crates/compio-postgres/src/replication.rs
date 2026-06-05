@@ -344,8 +344,7 @@ where
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                     return Ok(ReplicationStream {
                         stream: self.stream,
-                        last_received_lsn: parse_lsn(opts.start_lsn).unwrap_or(0),
-                        last_processed_lsn: parse_lsn(opts.start_lsn).unwrap_or(0),
+                        lsn: LsnTracker::new(parse_lsn(opts.start_lsn).unwrap_or(0)),
                     });
                 }
                 ERROR_RESPONSE_TAG => {
@@ -415,15 +414,69 @@ pub struct StartReplicationOptions<'a> {
 /// agnostic to the logical-decoding plugin.
 pub struct ReplicationStream<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
-    /// Highest LSN seen on the wire (the `wal_end` field of either
-    /// XLogData or PrimaryKeepalive). The "received" position the
-    /// next StandbyStatusUpdate will report — meaning "we have this
-    /// many bytes buffered or processed".
-    last_received_lsn: u64,
-    /// Highest LSN the caller has confirmed processed (advances on
-    /// [`advance_lsn`](Self::advance_lsn)). The "flushed" position
-    /// the slot will retain WAL up to.
-    last_processed_lsn: u64,
+    /// The two StandbyStatusUpdate positions (received vs flushed).
+    lsn: LsnTracker,
+}
+
+/// Tracks the two distinct LSN positions a logical-replication client
+/// reports back to the walsender in a `StandbyStatusUpdate`:
+///
+/// - `received` — the highest LSN we've *seen on the wire* (the
+///   `wal_end` of an XLogData / PrimaryKeepalive). Reported as
+///   `write_lsn`.
+/// - `processed` — the highest LSN the caller has *durably handled*
+///   (advanced via [`ReplicationStream::advance_lsn`]). Reported as both
+///   `flush_lsn` and `apply_lsn`.
+///
+/// Keeping them separate matters: `flush_lsn` is a *durability promise*
+/// — Postgres recycles WAL and advances the slot's `confirmed_flush`
+/// up to it. Conflating "received" (merely buffered) with "flushed"
+/// (durably processed) would let the server discard WAL the consumer
+/// hasn't actually persisted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LsnTracker {
+    received: u64,
+    processed: u64,
+}
+
+impl LsnTracker {
+    /// Seed both positions from the resume LSN passed to
+    /// `START_REPLICATION`.
+    const fn new(start_lsn: u64) -> Self {
+        Self {
+            received: start_lsn,
+            processed: start_lsn,
+        }
+    }
+
+    /// Record that `lsn` has been seen on the wire (`XLogData` /
+    /// `PrimaryKeepalive` `wal_end`). Advances ONLY the received
+    /// position; merely seeing bytes is not a durability promise.
+    /// Monotonic: never regresses.
+    const fn observe_received(&mut self, lsn: u64) {
+        if lsn > self.received {
+            self.received = lsn;
+        }
+    }
+
+    /// Record that the caller has durably processed up to `lsn`.
+    /// Advances ONLY the flush position. Monotonic: never regresses.
+    const fn advance_processed(&mut self, lsn: u64) {
+        if lsn > self.processed {
+            self.processed = lsn;
+        }
+    }
+
+    /// The `(write, flush, apply)` triple for a `StandbyStatusUpdate`.
+    ///
+    /// `write` reports the received position (highest seen on the wire);
+    /// `flush` and `apply` report the durably-processed position. They
+    /// are deliberately NOT collapsed into one value: `flush` is the
+    /// WAL-recycling promise, and reporting the received position there
+    /// would let the server discard WAL the consumer hasn't persisted.
+    const fn standby_lsns(&self) -> (u64, u64, u64) {
+        (self.received, self.processed, self.processed)
+    }
 }
 
 /// One frame off the CopyBoth wire.
@@ -496,10 +549,9 @@ where
                             ]);
                             // The XLogData "wal_end" advertises how far
                             // along the server has decoded; we track it
-                            // for StandbyStatusUpdate reporting.
-                            if wal_end > self.last_received_lsn {
-                                self.last_received_lsn = wal_end;
-                            }
+                            // as the "received" position for
+                            // StandbyStatusUpdate reporting.
+                            self.lsn.observe_received(wal_end);
                             let payload = body.slice(25..);
                             return Ok(Some(ReplicationMessage::XLogData {
                                 wal_start,
@@ -527,9 +579,7 @@ where
                                 body[15], body[16],
                             ]);
                             let reply_requested = body[17] != 0;
-                            if wal_end > self.last_received_lsn {
-                                self.last_received_lsn = wal_end;
-                            }
+                            self.lsn.observe_received(wal_end);
                             return Ok(Some(ReplicationMessage::PrimaryKeepalive {
                                 wal_end,
                                 timestamp,
@@ -571,35 +621,41 @@ where
     /// Highest WAL LSN seen on the wire so far (advances as the
     /// stream yields XLogData / PrimaryKeepalive).
     pub fn last_received_lsn(&self) -> u64 {
-        self.last_received_lsn
+        self.lsn.received
     }
 
     /// Highest WAL LSN the caller has confirmed it processed —
     /// reported as `flush_lsn` in StandbyStatusUpdate frames.
     pub fn last_processed_lsn(&self) -> u64 {
-        self.last_processed_lsn
+        self.lsn.processed
     }
 
-    /// Mark `lsn` as fully processed. The next StandbyStatusUpdate
-    /// will surface this as the `flush_lsn`, letting Postgres recycle
-    /// WAL up to it.
+    /// Mark `lsn` as durably processed. The next StandbyStatusUpdate
+    /// surfaces this as the `flush_lsn` (and `apply_lsn`), letting
+    /// Postgres recycle WAL and advance the slot's `confirmed_flush`
+    /// up to it.
+    ///
+    /// This advances ONLY the flush position; the received position
+    /// (`write_lsn`) tracks `wal_end` independently in
+    /// [`next`](Self::next). Fully realizing the durability guarantee
+    /// therefore requires the CONSUMER to call `advance_lsn` only
+    /// *after* a durable hand-off (persisted / acknowledged), never on
+    /// mere receipt — a concern that lives in the consumer
+    /// (`wal_consumer.rs`), intentionally out of scope of this driver.
     pub fn advance_lsn(&mut self, lsn: u64) {
-        if lsn > self.last_processed_lsn {
-            self.last_processed_lsn = lsn;
-        }
-        if lsn > self.last_received_lsn {
-            self.last_received_lsn = lsn;
-        }
+        self.lsn.advance_processed(lsn);
     }
 
     /// Send a `StandbyStatusUpdate` frame upstream.
     ///
-    /// The frame's three LSN slots (`write`, `flush`, `apply`) are
-    /// reported with the same value — the highest LSN the caller has
-    /// confirmed via [`advance_lsn`](Self::advance_lsn). pgoutput
-    /// doesn't currently distinguish them, and conflating them keeps
-    /// the slot retention conservative (Postgres releases WAL up to
-    /// the lowest of the three).
+    /// The `write_lsn` slot reports the highest LSN seen on the wire
+    /// (the received position, advanced in [`next`](Self::next)); the
+    /// `flush_lsn` and `apply_lsn` slots report the durably-processed
+    /// position (advanced via [`advance_lsn`](Self::advance_lsn)).
+    /// These are kept distinct on purpose: `flush_lsn` is a durability
+    /// promise that lets the server recycle WAL, so reporting the
+    /// received position there would let Postgres discard WAL the
+    /// consumer hasn't actually persisted.
     ///
     /// `reply_requested = true` makes the server reply with an
     /// immediate PrimaryKeepalive — typically left `false`.
@@ -608,8 +664,8 @@ where
         reply_requested: bool,
     ) -> Result<(), Error> {
         let now = postgres_microseconds_since_epoch();
-        let lsn = self.last_processed_lsn.max(self.last_received_lsn);
-        encode_standby_status_update(&mut self.stream, lsn, lsn, lsn, now, reply_requested)?;
+        let (write, flush, apply) = self.lsn.standby_lsns();
+        encode_standby_status_update(&mut self.stream, write, flush, apply, now, reply_requested)?;
         self.stream.flush().await
     }
 }
@@ -1378,12 +1434,12 @@ mod tests {
     /// encoded as length -1).
     fn identify_row_body(fields: &[Option<&str>]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&u16::try_from(fields.len()).unwrap().to_be_bytes());
         for f in fields {
             match f {
                 None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
                 Some(s) => {
-                    buf.extend_from_slice(&(s.len() as i32).to_be_bytes());
+                    buf.extend_from_slice(&i32::try_from(s.len()).unwrap().to_be_bytes());
                     buf.extend_from_slice(s.as_bytes());
                 }
             }
@@ -1466,7 +1522,7 @@ mod tests {
 
         let mut msg = BytesMut::new();
         msg.put_u8(ERROR_RESPONSE_TAG);
-        msg.put_u32((payload.len() + 4) as u32);
+        msg.put_u32(u32::try_from(payload.len() + 4).unwrap());
         msg.extend_from_slice(&payload);
         msg
     }
@@ -1491,7 +1547,57 @@ mod tests {
         assert_eq!(db.message(), "permission denied to start WAL sender");
 
         // The convenience accessor on Error must also expose the SQLSTATE.
-        assert_eq!(err.code().map(|c| c.code()), Some("42501"));
+        assert_eq!(
+            err.code().map(crate::error::SqlState::code),
+            Some("42501")
+        );
+    }
+
+    #[test]
+    fn lsn_tracker_reports_flush_below_received() {
+        // The walsender protocol distinguishes write (received) from
+        // flush (durably processed). A careful caller that has *seen*
+        // up to LSN 100 on the wire but only durably *flushed* 50 must
+        // be able to report write=100, flush=50, apply=50 — otherwise
+        // Postgres would recycle WAL the consumer hasn't persisted.
+        let mut t = LsnTracker::new(0);
+        t.observe_received(100);
+        t.advance_processed(50);
+
+        assert_eq!(
+            t.standby_lsns(),
+            (100, 50, 50),
+            "write must reflect received (100); flush/apply must reflect processed (50)"
+        );
+        assert_eq!(t.received, 100);
+        assert_eq!(t.processed, 50);
+    }
+
+    #[test]
+    fn lsn_tracker_is_monotonic() {
+        let mut t = LsnTracker::new(0);
+        t.observe_received(100);
+        t.advance_processed(50);
+
+        // Advancing processed backwards must not regress.
+        t.advance_processed(40);
+        assert_eq!(t.processed, 50, "advance_processed must not regress");
+
+        // Observing an older received must not regress, and must NOT
+        // drag the (already-higher) processed position back.
+        t.advance_processed(80);
+        t.observe_received(70);
+        assert_eq!(t.received, 100, "observe_received must not regress");
+        assert_eq!(t.processed, 80, "observe_received must not touch processed");
+        assert_eq!(t.standby_lsns(), (100, 80, 80));
+
+        // A fresh tracker seeded at a non-zero resume LSN reports it in
+        // all three slots until something advances.
+        let seeded = LsnTracker::new(0x016B_3750);
+        assert_eq!(
+            seeded.standby_lsns(),
+            (0x016B_3750, 0x016B_3750, 0x016B_3750)
+        );
     }
 
     #[test]
