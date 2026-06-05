@@ -248,7 +248,11 @@ where
 /// io_uring submissions against it. `try_into_split` therefore returns
 /// the stream back unchanged for any unsplittable case, letting the
 /// caller fall back to the serialized loop.
-pub(crate) trait SplitStream: Sized {
+// `pub` (not `pub(crate)`) so it can appear in the bounds of the public
+// `Connection::run` without tripping `private_bounds`. The enclosing
+// `mod buf_stream` is private, so this is not actually part of the crate's
+// external API.
+pub trait SplitStream: Sized {
     /// Owned read half (read side of the socket).
     type ReadHalf: AsyncRead + Unpin;
     /// Owned write half (write side of the socket).

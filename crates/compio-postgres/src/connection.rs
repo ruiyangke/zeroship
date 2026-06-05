@@ -6,35 +6,48 @@
 // equivalent; instead we use the async-fn `read_backend` /
 // `write_frontend` primitives defined in `codec.rs` over a `BufStream`.
 //
-// ## Architecture
+// ## THE cancel-safety invariant (load-bearing — do not weaken)
 //
-//   loop {
-//       // Step 1: drain any `pending_responses` batches that couldn't
-//       //          land on their sender (bounded mpsc::channel(1) was
-//       //          full). This MUST run before any more reads so the
-//       //          next batch for the same request can't shadow them.
-//       // Step 2: if terminating & no in-flight responses, flush +
-//       //          shutdown + return.
-//       // Step 3: while responses are in-flight, reads must complete
-//       //          atomically (no racing against the receiver) — compio
-//       //          io_uring cancellation is best-effort, and a dropped
-//       //          Submit may still complete in the kernel with its
-//       //          owned buffer lost. Between messages we opportunistic-
-//       //          ally drain queued requests via `try_recv()`.
-//       // Step 4: idle (no in-flight work) — await a new request with
-//       //          `.next().await`. Unsolicited server messages arriving
-//       //          while idle stay in the kernel socket buffer and are
-//       //          picked up on the next read. (We explicitly do not
-//       //          race read vs. recv here because a cancelled read can
-//       //          silently drop completed-but-unreaped bytes.)
-//   }
+// compio is completion-based: dropping a future whose io_uring read
+// submission is in flight can silently lose bytes the kernel has already
+// moved into the owned buffer. So the cancel-unsafe primitive — the
+// socket `read` inside `read_backend` — must NEVER be dropped while a
+// submission is outstanding. Both run-loops below honour this; neither
+// ever races-and-cancels a `read_backend`.
 //
-// The critical cancel-safety invariant: we NEVER drop a read future
-// whose associated compio submission may have in-flight bytes. Every
-// `read_backend().await` runs to completion before control returns to
-// the select loop.
+// ## Two run-loops (`run` picks one)
+//
+// * `run_multiplexed` — the splittable plain-socket path (always taken by
+//   the connection pool, which uses NoTls). The socket is split into two
+//   owned halves. A DEDICATED, DETACHED read task owns the read half and
+//   loops `read_backend` forever, forwarding frames over a bounded
+//   channel; the cancel-unsafe read lives entirely inside that task's
+//   own loop and is never dropped mid-submission (even on teardown the
+//   task is detached, so its current read RESOLVES — to EOF — before the
+//   task exits). The main loop owns the write half and only ever
+//   `select`s over CHANNELS (read channel, request receiver, COPY
+//   receiver, a sender's `poll_ready`) plus a fully-awaited write flush —
+//   all cancel-safe. Reads and writes therefore proceed concurrently:
+//   COPY-IN no longer deadlocks (COPY-1/IO-1), idle listeners receive
+//   notifications (IO-2), and later requests are written without waiting
+//   for earlier responses (IO-3). See `run_multiplexed` for the full
+//   FIFO / back-pressure argument.
+//
+// * `run_serialized` — the fallback for unsplittable streams (TLS:
+//   rustls keeps shared session state across read/write, so the halves
+//   cannot run independent submissions). Reads and writes never overlap;
+//   every `read_backend().await` runs to completion before control
+//   returns to the dispatch point. This is the original loop, preserved
+//   verbatim. Its documented trade-off stands: an idle connection does
+//   not read (notifications wait for the next request), and a COPY-IN the
+//   server rejects mid-stream can deadlock. TLS is not used by the pool,
+//   so this path carries no real platform traffic.
+//
+// Both paths share `Dispatch` (backend-frame routing) and the
+// `pending_responses` back-pressure stash, so message handling and FIFO
+// batch ordering are identical across them.
 
-use crate::buf_stream::BufStream;
+use crate::buf_stream::{BufReadHalf, BufStream, BufWriteHalf, SplitStream};
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
 use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
@@ -43,12 +56,13 @@ use crate::{AsyncMessage, Error, Notification};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use log::trace;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
+use std::task::Poll;
 
 /// A request from a `Client` to be forwarded to the server by the
 /// `Connection` task.
@@ -145,19 +159,6 @@ where
         let (tx, rx) = mpsc::unbounded();
         self.async_sender = Some(tx);
         rx
-    }
-
-    /// Drive the connection until the client is dropped and all
-    /// outstanding requests have completed, or a fatal I/O error occurs.
-    pub async fn run(mut self) -> Result<(), Error> {
-        // Drain any async messages captured during handshake
-        // (for example notices from `read_info`) before entering the
-        // main loop.
-        while let Some(msg) = self.delayed_notices.pop_front() {
-            route_async(&mut self.parameters, self.async_sender.as_ref(), msg)?;
-        }
-
-        self.run_serialized().await
     }
 
     /// The original serialized run-loop: reads and writes never overlap.
@@ -284,12 +285,77 @@ where
         }
     }
 
+    /// Dispatch a single decoded backend frame (serialized path).
+    /// Thin wrapper that borrows the dispatch-relevant fields and defers
+    /// to the shared [`Dispatch`] logic, so the serialized and
+    /// multiplexed loops route messages identically.
+    fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
+        Dispatch {
+            parameters: &mut self.parameters,
+            responses: &mut self.responses,
+            pending_responses: &mut self.pending_responses,
+            async_sender: self.async_sender.as_ref(),
+        }
+        .handle_message(message)
+    }
+
+    /// Handle a request received from the client (serialized path).
+    /// Pushes the response channel onto `responses` and writes the
+    /// frontend messages onto the unsplit stream.
+    async fn handle_request(&mut self, request: Request) -> Result<(), Error> {
+        self.responses.push_back(Response {
+            sender: request.sender,
+        });
+
+        match request.messages {
+            RequestMessages::Single(msg) => {
+                write_frontend(&mut self.stream, msg)?;
+                self.stream.flush().await?;
+            }
+            RequestMessages::CopyIn(mut receiver) => {
+                // COPY FROM STDIN: stream user-supplied frames to the
+                // server until the receiver signals end-of-stream. The
+                // serialized loop CANNOT read while writing (see the
+                // cancel-safety note at the top of this file), so a COPY
+                // that the server rejects mid-stream can deadlock here —
+                // this is exactly the COPY-1 limitation the multiplexed
+                // path fixes. The TLS fallback retains this behaviour.
+                loop {
+                    match receiver.next().await {
+                        Some(msg) => {
+                            write_frontend(&mut self.stream, msg)?;
+                            self.stream.flush().await?;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Borrowed view of the connection's message-dispatch state, shared by
+/// the serialized and multiplexed loops so a decoded backend frame is
+/// routed identically on both paths.
+///
+/// It holds four **disjoint** mutable borrows (plus the shared async
+/// sender). The multiplexed loop keeps the socket's read/write halves in
+/// separate locals, so building a `Dispatch` over the remaining state
+/// never aliases the carried read future — that is what lets the read
+/// future stay alive across a `deliver_batch`/`handle_message` call.
+struct Dispatch<'a> {
+    parameters: &'a mut HashMap<String, String>,
+    responses: &'a mut VecDeque<Response>,
+    pending_responses: &'a mut VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)>,
+    async_sender: Option<&'a mpsc::UnboundedSender<AsyncMessage>>,
+}
+
+impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
     fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
         match message {
-            BackendMessage::Async(m) => {
-                route_async(&mut self.parameters, self.async_sender.as_ref(), m)
-            }
+            BackendMessage::Async(m) => route_async(self.parameters, self.async_sender, m),
             BackendMessage::Normal {
                 messages,
                 request_complete,
@@ -298,10 +364,9 @@ where
     }
 
     /// Deliver a normal batch to the front response channel. Mirrors
-    /// tokio-postgres's `poll_read` dispatch (connection.rs lines
-    /// 138-169): try to land the batch on the sender; if the slot is
-    /// full, stash it in `pending_responses` and let the next loop
-    /// iteration re-poll via `poll_ready`.
+    /// tokio-postgres's `poll_read` dispatch: try to land the batch on the
+    /// sender; if the slot is full, stash it in `pending_responses` and
+    /// let the next loop iteration re-poll via `poll_ready`.
     fn deliver_batch(
         &mut self,
         mut messages: BackendMessages,
@@ -344,52 +409,6 @@ where
                 // us drain its response stream; just discard this batch.
                 if !request_complete {
                     self.responses.push_front(response);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Handle a request received from the client. Pushes the response
-    /// channel onto `responses` and writes the frontend messages.
-    async fn handle_request(&mut self, request: Request) -> Result<(), Error> {
-        self.responses.push_back(Response {
-            sender: request.sender,
-        });
-
-        match request.messages {
-            RequestMessages::Single(msg) => {
-                write_frontend(&mut self.stream, msg)?;
-                self.stream.flush().await?;
-            }
-            RequestMessages::CopyIn(mut receiver) => {
-                // COPY FROM STDIN: stream user-supplied frames to the
-                // server until the receiver signals end-of-stream. We
-                // alternate send/read rather than race them — the
-                // receiver IS safe to cancel (it's an mpsc channel), but
-                // `read_backend` is NOT (see cancel-safety comments at
-                // the top of this file).
-                //
-                // While the user is sending frames, the server may emit
-                // an ErrorResponse (e.g., constraint violation) that we
-                // need to surface to the caller via the Response
-                // channel. Rather than race reads, we poll the socket
-                // non-blockingly between each frame by checking whether
-                // any parseable message is already in the read buffer.
-                //
-                // A full-blown error during copy will still flow through
-                // normally: the write will fail once the server shuts
-                // its half of the socket, or we'll see the ErrorResponse
-                // in the batch after the CopyIn receiver closes and the
-                // main run() loop reads it.
-                loop {
-                    match receiver.next().await {
-                        Some(msg) => {
-                            write_frontend(&mut self.stream, msg)?;
-                            self.stream.flush().await?;
-                        }
-                        None => break,
-                    }
                 }
             }
         }
@@ -471,6 +490,321 @@ impl Error {
             match src.source() {
                 Some(s) => src = s,
                 None => return None,
+            }
+        }
+    }
+}
+
+/// What the main multiplexed loop's per-iteration `select` resolved to.
+/// Exactly one event is returned per wake.
+enum MuxEvent {
+    /// A backend frame arrived from the dedicated read task (`None` =
+    /// the read task ended, i.e. its channel closed).
+    Read(Option<Result<BackendMessage, Error>>),
+    /// A stashed `pending_responses` front sender now has capacity.
+    SenderReady,
+    /// A new client request was dequeued (normal mode).
+    Request(Option<Request>),
+    /// A COPY-IN frame was dequeued, or the COPY stream ended (`None`).
+    CopyFrame(Option<FrontendMessage>),
+}
+
+impl<S, T> Connection<S, T>
+where
+    S: AsyncRead + AsyncWrite + Unpin + SplitStream,
+    T: AsyncRead + AsyncWrite + Unpin,
+    // The read half is moved into a detached read task, which must be
+    // `'static`. Always satisfied by the real socket halves
+    // (`OwnedReadHalf<TcpStream>` / `OwnedReadHalf<UnixStream>`).
+    <S as SplitStream>::ReadHalf: 'static,
+{
+    /// Drive the connection until the client is dropped and all
+    /// outstanding requests have completed, or a fatal I/O error occurs.
+    ///
+    /// Splits the socket into owned read/write halves and runs the
+    /// [multiplexed loop](Self::run_multiplexed) when possible (always,
+    /// for the plain-socket path the pool uses). TLS streams cannot be
+    /// split, so they fall back to the [serialized
+    /// loop](Self::run_serialized).
+    pub async fn run(mut self) -> Result<(), Error> {
+        // Drain async messages captured during the handshake (e.g.
+        // notices from `read_info`) before any socket I/O.
+        while let Some(msg) = self.delayed_notices.pop_front() {
+            route_async(&mut self.parameters, self.async_sender.as_ref(), msg)?;
+        }
+
+        // Decompose so the stream can be consumed by the split; on the
+        // unsplittable (TLS) path we put the pieces back together and run
+        // the serialized loop. `delayed_notices` is already empty.
+        let Connection {
+            stream,
+            parameters,
+            receiver,
+            delayed_notices,
+            responses,
+            pending_responses,
+            async_sender,
+        } = self;
+
+        match stream.try_into_split() {
+            Ok((read_half, write_half)) => {
+                Self::run_multiplexed(read_half, write_half, parameters, receiver, async_sender)
+                    .await
+            }
+            Err(stream) => {
+                let conn = Connection {
+                    stream,
+                    parameters,
+                    receiver,
+                    delayed_notices,
+                    responses,
+                    pending_responses,
+                    async_sender,
+                };
+                conn.run_serialized().await
+            }
+        }
+    }
+
+    /// The multiplexed run-loop: reads and writes proceed concurrently.
+    /// Fixes the serialized loop's COPY-IN deadlock (COPY-1/IO-1), the
+    /// idle-listener notification gap (IO-2), and write-serialized
+    /// pipelining (IO-3).
+    ///
+    /// ## The never-drop-an-in-flight-read invariant
+    ///
+    /// compio is completion-based: dropping a future whose io_uring
+    /// submission is in flight can silently lose bytes the kernel has
+    /// already moved into the owned buffer. The cancel-unsafe primitive is
+    /// the socket `read` inside `read_backend`. Concurrency here is built
+    /// so that future is **never dropped**:
+    ///
+    /// * A dedicated **read task** owns `read_half` outright and loops
+    ///   `read_backend` forever, forwarding each decoded frame over a
+    ///   bounded channel. Its in-flight `read` lives entirely inside that
+    ///   task's own `loop`; nothing ever drops it mid-submission. Even on
+    ///   teardown the task is detached (never cancelled): when the main
+    ///   loop goes away, the task's *next* channel send fails and it exits
+    ///   — after the current read has fully resolved, not during it.
+    /// * The **main loop** owns `write_half` and the request/response
+    ///   bookkeeping. It only ever `select`s over **channels** (the read
+    ///   channel, the request receiver, the COPY receiver, a sender's
+    ///   `poll_ready`) and `await`s the write **flush** to completion.
+    ///   Channel ops and a fully-awaited flush are cancel-safe, so the
+    ///   select dropping a not-ready branch loses nothing.
+    ///
+    /// Because the read task drains the socket independently, the main
+    /// loop can `flush().await` a COPY frame to completion without
+    /// deadlocking: the server's ErrorResponse is read concurrently by the
+    /// task, unblocking the server so it keeps draining our COPY data.
+    ///
+    /// ## FIFO framing
+    ///
+    /// The read task forwards frames in wire order over a FIFO channel.
+    /// `responses` is the in-order queue of awaited requests; a batch is
+    /// always delivered to its front entry. When a downstream sender is
+    /// full, the batch is stashed in `pending_responses` and **the main
+    /// loop stops consuming the read channel** until it drains (gate: the
+    /// read branch is disabled while `pending_responses` is non-empty).
+    /// This is the exact ordering guarantee of tokio-postgres's
+    /// `poll_response` (pending replayed before the socket is read again),
+    /// so a later batch for the same request can never overtake an earlier
+    /// one. The bounded read channel propagates that back-pressure to the
+    /// socket (the task blocks on send → stops reading).
+    async fn run_multiplexed(
+        read_half: BufReadHalf<<S as SplitStream>::ReadHalf>,
+        mut write_half: BufWriteHalf<<S as SplitStream>::WriteHalf>,
+        mut parameters: HashMap<String, String>,
+        mut receiver: mpsc::UnboundedReceiver<Request>,
+        async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
+    ) -> Result<(), Error> {
+        // ---- Spawn the dedicated read task. It OWNS `read_half` and loops
+        // `read_backend` forever, forwarding each frame over a bounded
+        // (capacity 1) channel. Bounded so back-pressure propagates to the
+        // socket: when the main loop stops consuming, the task blocks on
+        // `send` after one buffered frame and stops reading. The task is
+        // DETACHED — never cancelled — so its in-flight socket read is never
+        // dropped mid-submission (the never-drop invariant). On the first
+        // read error it forwards the error and exits; if the main loop has
+        // gone, its next `send` fails and it exits.
+        let (mut read_tx, mut read_rx) =
+            mpsc::channel::<Result<BackendMessage, Error>>(1);
+        compio::runtime::spawn(async move {
+            let mut read_half = read_half;
+            loop {
+                let res = read_backend(&mut read_half).await;
+                let is_err = res.is_err();
+                // SinkExt::send awaits channel capacity (back-pressure).
+                if read_tx.send(res).await.is_err() {
+                    // Main loop dropped the receiver — connection is done.
+                    break;
+                }
+                if is_err {
+                    // Forwarded the terminal error; stop reading.
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let mut responses: VecDeque<Response> = VecDeque::new();
+        let mut pending_responses: VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)> =
+            VecDeque::new();
+        // COPY-IN frame source, set while streaming a `COPY ... FROM STDIN`.
+        let mut copy_in: Option<CopyInReceiver> = None;
+        // The `Client` handle dropped (`receiver` closed). We do NOT send
+        // `Terminate` until the response queue has drained (mirrors
+        // tokio-postgres `poll_write`), then send it exactly once.
+        let mut client_gone = false;
+        let mut terminate_sent = false;
+
+        loop {
+            // ---- Shutdown sequencing. Once the client is gone and no
+            // response/COPY work remains, send Terminate once. The server
+            // then closes; the read task forwards EOF; the Read arm returns
+            // Ok. The read task's in-flight read RESOLVES (to EOF) rather
+            // than being cancelled — never-drop holds on teardown.
+            if client_gone && !terminate_sent && responses.is_empty() && copy_in.is_none() {
+                trace!("client gone + queue drained, sending Terminate (multiplexed)");
+                let buf = inner_encode_terminate();
+                write_frontend(&mut write_half, FrontendMessage::Raw(buf))?;
+                write_half.flush().await?;
+                terminate_sent = true;
+            }
+
+            // ---- Gating for this iteration.
+            // Read is consumed only when no stashed batch is waiting — that
+            // gate preserves FIFO batch ordering (a stashed batch is always
+            // re-delivered before the next inbound frame is dispatched).
+            let accept_read = pending_responses.is_empty();
+            let has_pending = !pending_responses.is_empty();
+            // Stop accepting new requests once the client has gone or we are
+            // mid-COPY. COPY frames always drain so an in-flight sink can
+            // complete.
+            let accept_request = !client_gone && copy_in.is_none();
+            let accept_copy = copy_in.is_some();
+
+            // ---- Single-event select. Every branch is a channel op or a
+            // `poll_ready` — all cancel-safe, so a not-ready branch being
+            // dropped here loses nothing (the cancel-unsafe socket read lives
+            // in the detached read task, never here).
+            let event = poll_fn(|cx| -> Poll<MuxEvent> {
+                // (1) Inbound frame from the read task — highest priority so
+                // the server's send buffer keeps draining (delivers idle
+                // NOTIFYs and races COPY ErrorResponses).
+                if accept_read {
+                    match read_rx.poll_next_unpin(cx) {
+                        Poll::Ready(item) => return Poll::Ready(MuxEvent::Read(item)),
+                        Poll::Pending => {}
+                    }
+                }
+
+                // (2) Back-pressure: the front stashed batch's sender has room.
+                if has_pending
+                    && let Some((sender, _)) = pending_responses.front_mut()
+                    && let Poll::Ready(ready) = sender.poll_ready(cx)
+                {
+                    // Err (consumer hung up) still counts as "ready"; the
+                    // SenderReady arm discards the batch in that case.
+                    let _ = ready;
+                    return Poll::Ready(MuxEvent::SenderReady);
+                }
+
+                // (3) New client request (normal mode).
+                if accept_request
+                    && let Poll::Ready(req) = receiver.poll_next_unpin(cx)
+                {
+                    return Poll::Ready(MuxEvent::Request(req));
+                }
+
+                // (4) COPY-IN frame (copy mode).
+                if accept_copy
+                    && let Some(rx) = copy_in.as_mut()
+                    && let Poll::Ready(frame) = rx.poll_next_unpin(cx)
+                {
+                    return Poll::Ready(MuxEvent::CopyFrame(frame));
+                }
+
+                Poll::Pending
+            })
+            .await;
+
+            match event {
+                // ---------- Inbound frame ----------
+                MuxEvent::Read(Some(Ok(msg))) => {
+                    Dispatch {
+                        parameters: &mut parameters,
+                        responses: &mut responses,
+                        pending_responses: &mut pending_responses,
+                        async_sender: async_sender.as_ref(),
+                    }
+                    .handle_message(msg)?;
+                }
+                MuxEvent::Read(Some(Err(e))) => {
+                    // EOF with the response queue drained is a clean close;
+                    // otherwise it is a genuine error. (IO-4: the dead
+                    // `&& is_empty()` conjunct from the serialized loop is
+                    // gone — EOF mid-response is always an error here.)
+                    if is_eof(&e) && responses.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(e);
+                }
+                MuxEvent::Read(None) => {
+                    // The read task ended without forwarding a terminal error
+                    // (channel closed). Clean only if nothing is in flight.
+                    if responses.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(Error::closed());
+                }
+
+                // ---------- Stashed batch deliverable ----------
+                MuxEvent::SenderReady => {
+                    if let Some((mut sender, messages)) = pending_responses.pop_front() {
+                        // The poll above observed Ready; start_send may still
+                        // fail if the consumer hung up between poll and now.
+                        let _ = sender.start_send(messages);
+                    }
+                }
+
+                // ---------- New request ----------
+                MuxEvent::Request(Some(request)) => {
+                    responses.push_back(Response {
+                        sender: request.sender,
+                    });
+                    match request.messages {
+                        RequestMessages::Single(msg) => {
+                            write_frontend(&mut write_half, msg)?;
+                            // Flush to completion: cancel-safe (we await it
+                            // fully). The read task keeps draining the socket
+                            // meanwhile, so this never deadlocks.
+                            write_half.flush().await?;
+                        }
+                        RequestMessages::CopyIn(rx) => {
+                            // Enter COPY mode; frames stream via branch (4).
+                            copy_in = Some(rx);
+                        }
+                    }
+                }
+                MuxEvent::Request(None) => {
+                    // The Client handle dropped. Defer Terminate until the
+                    // response queue drains (top of the loop). Stop accepting
+                    // further requests.
+                    trace!("receiver closed (multiplexed)");
+                    client_gone = true;
+                }
+
+                // ---------- COPY-IN frame ----------
+                MuxEvent::CopyFrame(Some(msg)) => {
+                    write_frontend(&mut write_half, msg)?;
+                    write_half.flush().await?;
+                }
+                MuxEvent::CopyFrame(None) => {
+                    // COPY stream ended (the receiver already appended
+                    // CopyDone+Sync / CopyFail+Sync as its terminal frame).
+                    copy_in = None;
+                }
             }
         }
     }

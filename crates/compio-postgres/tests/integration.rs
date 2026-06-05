@@ -1240,3 +1240,235 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.total_count(), 1, "no connection lost or leaked overall");
 }
+
+// ---------------------------------------------------------------------------
+// 27. notify_delivered_on_idle_listener (IO-2)
+//
+// A pure-listener connection must receive LISTEN/NOTIFY notifications without
+// issuing any further query of its own. The serialized run-loop only ever
+// reads the socket while a request response is in flight or after the client
+// sends a new request; an idle listener never reads, so a NOTIFY arriving on
+// the wire sits unread in the kernel buffer forever.
+//
+// Pre-fix: the timeout fires (notification never delivered) -> RED.
+// Post-fix: the multiplexed loop carries a read future even while idle, so the
+// NotificationResponse is read and routed to the async channel promptly -> the
+// receive completes within the timeout -> GREEN.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn notify_delivered_on_idle_listener() {
+    use futures_util::StreamExt;
+
+    let url = require_pg().await;
+
+    // Listener connection A. Register the async-message sink BEFORE spawning
+    // run(), then LISTEN on a channel.
+    let (client_a, mut conn_a) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let mut notifications = conn_a.notifications();
+    compio::runtime::spawn(async move {
+        if let Err(e) = conn_a.run().await {
+            eprintln!("listener connection error: {e}");
+        }
+    })
+    .detach();
+
+    // Unique channel name so concurrent test runs don't cross-deliver.
+    let chan = format!("zs_notify_test_{}", std::process::id());
+    client_a
+        .batch_execute(&format!("LISTEN {chan}"))
+        .await
+        .unwrap();
+
+    // Notifier connection B fires the NOTIFY. A issues NO further query after
+    // its LISTEN — the notification must arrive purely from A's idle read.
+    let client_b = connect(&url).await.unwrap();
+    client_b
+        .batch_execute(&format!("NOTIFY {chan}, 'hello-from-b'"))
+        .await
+        .unwrap();
+
+    // The crux: wait for A's async receiver to yield WITHOUT A querying again.
+    // Wrap in a timeout so a non-delivering (serialized) loop fails fast as a
+    // timeout rather than hanging the suite.
+    let received = compio::time::timeout(std::time::Duration::from_secs(5), notifications.next())
+        .await
+        .expect(
+            "IO-2: idle listener never received the notification within 5s \
+             (serialized loop does not read while idle)",
+        );
+
+    match received {
+        Some(compio_postgres::AsyncMessage::Notification(n)) => {
+            assert_eq!(n.channel(), chan, "notification arrived on wrong channel");
+            assert_eq!(n.payload(), "hello-from-b", "wrong notification payload");
+        }
+        other => panic!("expected a Notification, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 28. copy_in_error_does_not_deadlock (COPY-1 / IO-1)
+//
+// On a large COPY FROM STDIN where the server rejects rows mid-stream (here a
+// NOT NULL violation), the server emits an ErrorResponse and stops draining.
+// Its receive buffer fills; meanwhile the client keeps writing COPY frames.
+// The serialized loop never reads while streaming COPY frames, so both sides
+// block on a full socket buffer -> permanent deadlock; the copy future never
+// returns and the connection never goes back to the pool.
+//
+// Pre-fix: the whole copy (send + finish) deadlocks -> the timeout fires -> RED.
+// Post-fix: the multiplexed loop reads the ErrorResponse concurrently with the
+// writes, so finish() returns Err(DbError) promptly -> GREEN. We assert it is
+// an ERROR (not a timeout): correctness is "surface the failure", not "hang".
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn copy_in_error_does_not_deadlock() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+    use std::pin::pin;
+
+    let url = require_pg().await;
+    let client = connect(&url).await.unwrap();
+
+    client
+        .execute("DROP TABLE IF EXISTS copy_deadlock_test", &[])
+        .await
+        .unwrap();
+    client
+        .execute("CREATE TABLE copy_deadlock_test (id int, n int)", &[])
+        .await
+        .unwrap();
+
+    // Stream a large text-COPY body that the server rejects. The first row is
+    // a PARSE error ("notanint" is not valid for `n int`); the server reports
+    // it with an ErrorResponse. We then keep streaming a large volume of
+    // further rows so the client is still writing long after the server has
+    // produced its error and stopped draining — exactly the condition that
+    // wedges the serialized loop (server's send buffer fills with the
+    // ErrorResponse while the client floods; both block). PG buffers a lot of
+    // COPY input before surfacing the error, so the volume must be large
+    // (~hundreds of KB) to exceed the socket buffers.
+    //
+    // `feed` (not `send`) is used for the bulk rows: `send` force-flushes a
+    // CopyData frame per call, while `feed` lets `CopyInSink` batch into ~4 KB
+    // frames — without it, this is hundreds of thousands of tiny io_uring
+    // writes and the test is dominated by syscall latency rather than the
+    // deadlock it is meant to probe.
+    let copy_fut = async {
+        let sink = client
+            .copy_in::<_, Bytes>("COPY copy_deadlock_test (id, n) FROM STDIN")
+            .await?;
+        let mut sink = pin!(sink);
+
+        sink.feed(Bytes::from_static(b"1\tnotanint\n")).await?;
+        for i in 0..200_000i64 {
+            sink.feed(Bytes::from(format!("{i}\t{i}\n"))).await?;
+        }
+        sink.finish().await
+    };
+
+    // A deadlock manifests as the copy future never completing. Bound it
+    // generously — the multiplexed loop completes well within this, while the
+    // serialized loop wedges forever (RED-proven).
+    let outcome = compio::time::timeout(std::time::Duration::from_secs(15), copy_fut).await;
+
+    match outcome {
+        Err(_) => panic!(
+            "COPY-1: copy_in deadlocked (timed out) — the loop never read the \
+             server's ErrorResponse while streaming COPY frames"
+        ),
+        Ok(Ok(rows)) => panic!(
+            "expected the COPY parse error to surface, but the copy succeeded \
+             with {rows} rows"
+        ),
+        Ok(Err(e)) => {
+            // GREEN: the error was surfaced (read concurrently with the
+            // writes) rather than deadlocking. Any server DbError proves the
+            // read raced the write.
+            assert!(
+                e.as_db_error().is_some() || e.code().is_some(),
+                "expected a server DbError from the failed COPY, got: {e}"
+            );
+        }
+    }
+
+    // The connection must remain usable (not wedged) after the failed copy.
+    // Drop the failed client's borrow and run a fresh query on a NEW client to
+    // confirm the server side recovered and the table is intact/empty.
+    let verify = connect(&url).await.unwrap();
+    let rows = verify
+        .query("SELECT count(*)::int8 AS c FROM copy_deadlock_test", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0].get::<_, i64>("c"),
+        0,
+        "a rejected COPY must leave no rows committed"
+    );
+    verify
+        .execute("DROP TABLE copy_deadlock_test", &[])
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 29. concurrent_queries_are_pipelined (IO-3)
+//
+// Multiple queries issued concurrently on ONE client/connection must all
+// complete with correct, in-order results. The multiplexed loop writes the
+// later requests immediately (without waiting for the earlier response to
+// start arriving) and reads the responses concurrently; this test guards
+// against any corruption / misrouting / hang in that multi-outstanding-request
+// path (FIFO response routing, the read channel, the pending_responses gate).
+//
+// On the timing of the pipelining win: it is NOT observable on a single
+// PostgreSQL connection. A backend executes one connection's messages strictly
+// in order, so two `pg_sleep(0.4)` always take ~0.8s wall-clock whether the
+// second request is written up-front (multiplexed) or after the first response
+// (serialized) — the second query cannot begin on the server until the first
+// finishes regardless. The serialized loop also already drains its queued
+// requests right after the first read, so the only difference is a single
+// round-trip's worth of latency (sub-millisecond on localhost). A timing
+// assertion was therefore tried and rejected as inherently non-discriminating;
+// this asserts the achievable, deterministic property instead: correctness of
+// many concurrent in-flight requests.
+//
+// We drive several queries via `join_all` on the same `&Client`. Each
+// `simple_query` enqueues its request synchronously on first poll (before
+// awaiting its response), so all are outstanding at once — exercising the
+// multiplexed loop with a full pipeline of overlapping requests.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn concurrent_queries_are_pipelined() {
+    use futures_util::future::join_all;
+
+    let url = require_pg().await;
+    let client = connect(&url).await.unwrap();
+
+    // 32 distinct queries, each returning its own index, all issued at once.
+    let futs = (0..32i32).map(|i| {
+        let client = &client;
+        async move {
+            let rows = client.query("SELECT $1::int4 AS v", &[&i]).await.unwrap();
+            rows[0].get::<_, i32>("v")
+        }
+    });
+    let results = join_all(futs).await;
+
+    // Every concurrently-issued request must come back with its own correct
+    // value — proving the multiplexed loop routed the overlapping responses to
+    // the right callers (FIFO), with no corruption, loss, or hang.
+    assert_eq!(results, (0..32i32).collect::<Vec<_>>());
+
+    // And a couple of concurrent simple_query streams resolve correctly too.
+    let (a, b) = futures_util::future::join(
+        client.query("SELECT 'a'::text AS x", &[]),
+        client.query("SELECT 'b'::text AS x", &[]),
+    )
+    .await;
+    assert_eq!(a.unwrap()[0].get::<_, &str>("x"), "a");
+    assert_eq!(b.unwrap()[0].get::<_, &str>("x"), "b");
+}
