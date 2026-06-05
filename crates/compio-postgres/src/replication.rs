@@ -279,40 +279,11 @@ where
             match msg {
                 Message::RowDescription(_) => {}
                 Message::DataRow(row) => {
-                    let buf = row.buffer();
-                    // 4 fields per the spec, encoded as length-prefixed
-                    // strings. Parse positionally.
-                    let mut idx = 0usize;
-                    let n = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-                    idx += 2;
-                    let mut fields: Vec<Option<&str>> = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let len = i32::from_be_bytes([
-                            buf[idx],
-                            buf[idx + 1],
-                            buf[idx + 2],
-                            buf[idx + 3],
-                        ]);
-                        idx += 4;
-                        if len < 0 {
-                            fields.push(None);
-                        } else {
-                            let end = idx + len as usize;
-                            fields.push(Some(
-                                std::str::from_utf8(&buf[idx..end])
-                                    .map_err(|e| Error::parse(std::io::Error::other(e)))?,
-                            ));
-                            idx = end;
-                        }
-                    }
-                    systemid = fields.first().and_then(|f| *f).unwrap_or("").to_string();
-                    timeline = fields
-                        .get(1)
-                        .and_then(|f| *f)
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    xlogpos = fields.get(2).and_then(|f| *f).unwrap_or("").to_string();
-                    dbname = fields.get(3).and_then(|f| *f).map(|s| s.to_string());
+                    let parsed = parse_identify_system_row(row.buffer())?;
+                    systemid = parsed.systemid;
+                    timeline = parsed.timeline;
+                    xlogpos = parsed.xlogpos;
+                    dbname = parsed.dbname;
                 }
                 Message::CommandComplete(_) => {}
                 Message::ReadyForQuery(_) => break,
@@ -759,6 +730,78 @@ where
     dst.put_i64(timestamp);
     dst.put_u8(if reply_requested { 1 } else { 0 });
     Ok(())
+}
+
+/// Parse the body of the `IDENTIFY_SYSTEM` `DataRow` into an
+/// [`IdentifySystem`].
+///
+/// `buf` is the raw `DataRow` body: a `u16` field count followed by that
+/// many length-prefixed fields (`i32` length, then `length` bytes; a
+/// negative length is SQL NULL). The four fields, in order, are
+/// `systemid`, `timeline`, `xlogpos`, `dbname` (`dbname` is NULL when
+/// the connection isn't bound to a database).
+///
+/// Every read is bounds-checked: a truncated or malformed row yields an
+/// `Err` (mirroring the pgoutput decoder's `read_u8/u16/u32` posture)
+/// instead of indexing out of bounds and panicking the replication
+/// task.
+fn parse_identify_system_row(buf: &[u8]) -> Result<IdentifySystem, Error> {
+    // 4 fields per the spec, encoded as length-prefixed strings. Parse
+    // positionally, bounds-checking each read.
+    let mut idx = 0usize;
+    let n = read_u16_be(buf, &mut idx)? as usize;
+    let mut fields: Vec<Option<&str>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = read_i32_be(buf, &mut idx)?;
+        if len < 0 {
+            fields.push(None);
+        } else {
+            let end = idx.checked_add(len as usize).ok_or_else(eof_identify_row)?;
+            let slice = buf.get(idx..end).ok_or_else(eof_identify_row)?;
+            fields.push(Some(
+                std::str::from_utf8(slice).map_err(|e| Error::parse(std::io::Error::other(e)))?,
+            ));
+            idx = end;
+        }
+    }
+
+    Ok(IdentifySystem {
+        systemid: fields.first().and_then(|f| *f).unwrap_or("").to_string(),
+        timeline: fields
+            .get(1)
+            .and_then(|f| *f)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        xlogpos: fields.get(2).and_then(|f| *f).unwrap_or("").to_string(),
+        dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
+    })
+}
+
+/// Read a big-endian `u16` at `*idx`, advancing `*idx` by 2. Returns an
+/// `UnexpectedEof` parse error if fewer than 2 bytes remain.
+fn read_u16_be(buf: &[u8], idx: &mut usize) -> Result<u16, Error> {
+    let end = idx.checked_add(2).ok_or_else(eof_identify_row)?;
+    let slice = buf.get(*idx..end).ok_or_else(eof_identify_row)?;
+    *idx = end;
+    Ok(u16::from_be_bytes([slice[0], slice[1]]))
+}
+
+/// Read a big-endian `i32` at `*idx`, advancing `*idx` by 4. Returns an
+/// `UnexpectedEof` parse error if fewer than 4 bytes remain.
+fn read_i32_be(buf: &[u8], idx: &mut usize) -> Result<i32, Error> {
+    let end = idx.checked_add(4).ok_or_else(eof_identify_row)?;
+    let slice = buf.get(*idx..end).ok_or_else(eof_identify_row)?;
+    *idx = end;
+    Ok(i32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// The `UnexpectedEof` error returned when the `IDENTIFY_SYSTEM`
+/// `DataRow` body is truncated mid-field.
+fn eof_identify_row() -> Error {
+    Error::parse(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "IDENTIFY_SYSTEM DataRow truncated",
+    ))
 }
 
 /// Parse a Postgres text LSN like `"0/16B3750"` into a `u64`.
@@ -1312,6 +1355,83 @@ pub mod pgoutput {
 mod tests {
     use super::*;
     use pgoutput::{PgOutputMessage, TupleColumn};
+
+    /// Build the body of an `IDENTIFY_SYSTEM` `DataRow`: a `u16` field
+    /// count followed by length-prefixed fields (`None` = SQL NULL,
+    /// encoded as length -1).
+    fn identify_row_body(fields: &[Option<&str>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+        for f in fields {
+            match f {
+                None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(s) => {
+                    buf.extend_from_slice(&(s.len() as i32).to_be_bytes());
+                    buf.extend_from_slice(s.as_bytes());
+                }
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn identify_row_parses_well_formed() {
+        // 4 fields: systemid, timeline, xlogpos, dbname.
+        let buf = identify_row_body(&[
+            Some("7012345678901234567"),
+            Some("3"),
+            Some("0/16B3750"),
+            Some("zeroship"),
+        ]);
+        let got = parse_identify_system_row(&buf).expect("well-formed row must parse");
+        assert_eq!(got.systemid, "7012345678901234567");
+        assert_eq!(got.timeline, 3);
+        assert_eq!(got.xlogpos, "0/16B3750");
+        assert_eq!(got.dbname.as_deref(), Some("zeroship"));
+
+        // dbname NULL (physical replication connection) must parse to None.
+        let buf = identify_row_body(&[Some("701"), Some("1"), Some("0/0"), None]);
+        let got = parse_identify_system_row(&buf).expect("row with NULL dbname must parse");
+        assert_eq!(got.dbname, None);
+        assert_eq!(got.timeline, 1);
+    }
+
+    #[test]
+    fn identify_row_truncated_is_error_not_panic() {
+        // Field count claims 4, but the buffer ends immediately. The
+        // raw-indexing parser indexes buf[2..] out of bounds and panics;
+        // the bounds-checked parser must return Err.
+        let claims_four_no_body = [0x00u8, 0x04];
+        assert!(
+            parse_identify_system_row(&claims_four_no_body).is_err(),
+            "truncated row (count only) must be Err, not panic"
+        );
+
+        // Field count 1, then a length prefix that runs off the end
+        // (only 2 of the 4 length bytes present).
+        let truncated_len = [0x00u8, 0x01, 0x00, 0x00];
+        assert!(
+            parse_identify_system_row(&truncated_len).is_err(),
+            "truncated length prefix must be Err, not panic"
+        );
+
+        // Field count 1, length 10, but only 3 payload bytes follow.
+        let mut truncated_payload = Vec::new();
+        truncated_payload.extend_from_slice(&1u16.to_be_bytes());
+        truncated_payload.extend_from_slice(&10i32.to_be_bytes());
+        truncated_payload.extend_from_slice(b"abc");
+        assert!(
+            parse_identify_system_row(&truncated_payload).is_err(),
+            "field length exceeding remaining bytes must be Err, not panic"
+        );
+
+        // Completely empty buffer: even the u16 field count can't be read.
+        let empty: [u8; 0] = [];
+        assert!(
+            parse_identify_system_row(&empty).is_err(),
+            "empty row body must be Err, not panic"
+        );
+    }
 
     #[test]
     fn parse_lsn_round_trip() {
