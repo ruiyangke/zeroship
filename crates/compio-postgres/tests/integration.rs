@@ -973,3 +973,270 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
         pool.total_count()
     );
 }
+
+// ---------------------------------------------------------------------------
+// 25. freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller (POOL-2)
+//
+// FIFO fairness regression. When a `PooledClient` drops, the freed entry must
+// go to the connection that has been queued LONGEST (the front parked waiter),
+// not to a fresh caller that wanders in afterwards.
+//
+// Pre-fix `return_client` pushed the freed entry onto the shared `idle` vec and
+// only *advisory-woke* the front waiter. A fresh caller entering `get_inner`
+// between the wake and the woken waiter's re-poll pops the idle entry first —
+// barging ahead of the longer-queued waiter. Under load the parked waiter is
+// repeatedly barged -> starvation.
+//
+// Deterministic on the single-threaded cooperative runtime: control only moves
+// at `.await` points, so we can drive the exact interleaving that exposes the
+// barge.
+//
+// Setup: max_size=1 (a single slot). Hold c1. Spawn task A which parks as the
+// sole waiter. Drop c1 (frees the slot, targeting waiter A). BEFORE yielding to
+// A, a fresh caller C in the main task calls get(). Pre-fix C synchronously
+// pops the idle entry and wins -> order is ['C', 'A']. Post-fix the freed entry
+// went straight into A's slot (not idle), so C finds nothing, parks behind A,
+// and A acquires first -> order is ['A', 'C'].
+// ---------------------------------------------------------------------------
+
+/// A future that yields control to the scheduler exactly `n` times, then
+/// resolves. Each yield returns `Pending` after self-waking, so other ready
+/// tasks (e.g. a just-woken pool waiter) get a chance to run before this task
+/// is polled again. Used to step the cooperative single-threaded runtime
+/// deterministically.
+struct YieldNow(u32);
+impl std::future::Future for YieldNow {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 == 0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 -= 1;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+async fn yield_n(n: u32) {
+    YieldNow(n).await;
+}
+
+#[compio::test]
+async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let url = require_pg().await;
+
+    // Single slot so "the freed connection" is unambiguous, and the only way a
+    // fresh caller can get one is by intercepting the entry freed for waiter A.
+    let config = compio_postgres::PoolConfig {
+        max_size: 1,
+        min_idle: 0,
+        connection_timeout: std::time::Duration::from_secs(5),
+        // Large so reacquiring the warm entry never does a network round-trip
+        // (no validation / dirty barrier) — keeps the interleaving synchronous
+        // and deterministic.
+        validation_bypass: std::time::Duration::from_secs(60),
+        ..compio_postgres::PoolConfig::default()
+    };
+    // Warm-up opens exactly one connection (min_idle=0 -> warm = max(0,1) = 1).
+    let pool = Rc::new(Pool::connect_with_config(&url, config).await.unwrap());
+    assert_eq!(pool.total_count(), 1, "warm-up should open exactly one conn");
+
+    // Acquire and hold the only slot. idle now empty, pool full.
+    let c1 = pool.get().await.expect("warm connection acquires locally");
+    assert_eq!(pool.idle_count(), 0);
+    assert_eq!(pool.active_count(), 1);
+    assert_eq!(pool.total_count(), 1);
+
+    // Records who acquired the connection, in order.
+    let order: Rc<RefCell<Vec<char>>> = Rc::new(RefCell::new(Vec::new()));
+    // Set by task A right before it awaits get(), so the main task can confirm
+    // A actually reached the parking point before proceeding.
+    let a_reached_get = Rc::new(std::cell::Cell::new(false));
+
+    // Task A: the front (and initially only) waiter. It parks waiting for the
+    // single slot.
+    let a_handle = {
+        let pool = Rc::clone(&pool);
+        let order = Rc::clone(&order);
+        let a_reached_get = Rc::clone(&a_reached_get);
+        compio::runtime::spawn(async move {
+            a_reached_get.set(true);
+            let c = pool.get().await.expect("waiter A must obtain the freed conn");
+            order.borrow_mut().push('A');
+            // Hold briefly, then release so a later waiter (C) can proceed.
+            yield_n(2).await;
+            drop(c);
+        })
+    };
+
+    // Let A run until it parks as a waiter. A sets `a_reached_get` then awaits
+    // get(), whose Waiter::poll registers a slot and returns Pending. Yield
+    // until the waiter is registered (defensive loop with a bounded ceiling so
+    // a regression can't hang the suite).
+    let mut spins = 0;
+    while pool.pending_count() == 0 {
+        yield_n(1).await;
+        spins += 1;
+        assert!(spins < 1000, "task A never parked as a waiter");
+    }
+    assert!(a_reached_get.get(), "task A should have reached get()");
+    assert_eq!(pool.pending_count(), 1, "exactly one parked waiter (A)");
+    assert_eq!(pool.idle_count(), 0);
+
+    // Free the only slot. This targets the front waiter A. Pre-fix the entry is
+    // pushed to `idle` (and A is advisory-woken); post-fix it is deposited into
+    // A's slot and A is woken, with nothing left in `idle`.
+    drop(c1);
+
+    // CRITICAL: before yielding to A, a FRESH caller C (never parked) tries to
+    // acquire. Pre-fix this synchronously pops the idle entry and barges A.
+    let c = pool.get().await;
+    order.borrow_mut().push('C');
+    drop(c);
+
+    // Drain: let A (and anything else) finish.
+    a_handle
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+
+    // The longest-queued waiter (A) must have won the freed connection first.
+    // Pre-fix: ['C', 'A'] (fresh caller barged). Post-fix: ['A', 'C'].
+    assert_eq!(
+        *order.borrow(),
+        vec!['A', 'C'],
+        "front waiter A must receive the freed connection before a fresh caller C; \
+         got {:?} (a value of ['C','A'] means the fresh caller barged the parked waiter)",
+        *order.borrow()
+    );
+
+    // Pool is back to a clean single-connection state.
+    assert_eq!(pool.active_count(), 0, "all clients released");
+    assert_eq!(pool.total_count(), 1, "no connection lost or leaked");
+    assert_eq!(pool.idle_count(), 1, "the one connection is idle");
+    assert_eq!(pool.pending_count(), 0, "no waiters left");
+}
+
+// ---------------------------------------------------------------------------
+// 26. handed_off_connection_is_reclaimed_if_waiter_is_cancelled (POOL-2 edge)
+//
+// The dangerous edge case of the direct hand-off: `return_client` deposits a
+// freed connection into the front waiter's slot and wakes it — but if that
+// waiter's `get()` future is DROPPED/cancelled before it polls the entry out,
+// the connection must be re-homed (back to `idle`, or to the next live waiter),
+// NOT lost. A leaked entry here would be a worse bug than the unfairness we are
+// fixing.
+//
+// Accounting: the reclaim must NOT decrement `active` (it was never incremented
+// for this waiter — `active += 1` happens only when a waiter actually takes the
+// entry) and must NOT decrement `total` (the connection is still alive).
+//
+// In compio, dropping a task's `JoinHandle` (instead of `.detach()`-ing it)
+// cancels the task: its future is dropped without further polling. So we drop
+// A's handle AFTER the connection lands in A's slot but BEFORE A is polled to
+// take it — driving exactly the cancel-with-stranded-entry path.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
+    use std::rc::Rc;
+
+    let url = require_pg().await;
+
+    let config = compio_postgres::PoolConfig {
+        max_size: 1,
+        min_idle: 0,
+        connection_timeout: std::time::Duration::from_secs(5),
+        validation_bypass: std::time::Duration::from_secs(60),
+        ..compio_postgres::PoolConfig::default()
+    };
+    let pool = Rc::new(Pool::connect_with_config(&url, config).await.unwrap());
+    assert_eq!(pool.total_count(), 1);
+
+    // Hold the only slot.
+    let c1 = pool.get().await.expect("warm connection acquires locally");
+    assert_eq!(pool.idle_count(), 0);
+    assert_eq!(pool.active_count(), 1);
+
+    // Task A parks as the sole waiter. If it is ever polled after a hand-off it
+    // would take the entry and bump `active`; we cancel it before that happens.
+    let a_handle = {
+        let pool = Rc::clone(&pool);
+        compio::runtime::spawn(async move {
+            let _c = pool.get().await.expect("(unreached) A is cancelled first");
+            // Hold forever-ish if somehow reached, so a bug is visible.
+            yield_n(1_000_000).await;
+        })
+    };
+
+    // Let A park.
+    let mut spins = 0;
+    while pool.pending_count() == 0 {
+        yield_n(1).await;
+        spins += 1;
+        assert!(spins < 1000, "task A never parked as a waiter");
+    }
+    assert_eq!(pool.pending_count(), 1, "exactly one parked waiter (A)");
+
+    // Free the slot: the entry is deposited DIRECTLY into A's slot (not idle),
+    // A is woken (scheduled), and A is popped from the wait queue.
+    drop(c1);
+    assert_eq!(
+        pool.idle_count(),
+        0,
+        "freed entry went to A's slot, not idle"
+    );
+    assert_eq!(pool.active_count(), 0, "no active client during hand-off");
+    assert_eq!(pool.total_count(), 1, "connection still alive");
+    assert_eq!(pool.pending_count(), 0, "A popped from queue on hand-off");
+
+    // Cancel A BEFORE it is polled to take the entry. Dropping the JoinHandle
+    // cancels the task; its future (holding the Waiter) is dropped, firing
+    // Waiter::drop -> reclaim of the stranded entry. The cancellation runnable
+    // executes on a scheduler turn, so yield until the reclaim lands (bounded).
+    drop(a_handle);
+    let mut spins = 0;
+    while pool.idle_count() == 0 {
+        yield_n(1).await;
+        spins += 1;
+        assert!(
+            spins < 1000,
+            "reclaim never happened — the handed-off connection was LEAKED \
+             (idle={}, active={}, total={})",
+            pool.idle_count(),
+            pool.active_count(),
+            pool.total_count()
+        );
+    }
+
+    // The reclaimed connection is back in idle, with accounting intact: not
+    // active (the cancelled waiter never took it), not lost from total.
+    assert_eq!(pool.idle_count(), 1, "reclaimed entry returned to idle");
+    assert_eq!(
+        pool.active_count(),
+        0,
+        "reclaim must NOT have bumped/left active set"
+    );
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "reclaim must NOT drop the connection from total"
+    );
+    assert_eq!(pool.pending_count(), 0, "no waiters left");
+
+    // And the reclaimed connection is fully usable: a fresh get() reclaims it
+    // locally (no network round-trip under the 60 s bypass) and runs a query.
+    let c = pool.get().await.expect("reclaimed connection is reusable");
+    assert_eq!(pool.active_count(), 1, "fresh caller took the reclaimed conn");
+    let rows = c.query("SELECT 7::int4 AS v", &[]).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>("v"), 7);
+    drop(c);
+    assert_eq!(pool.active_count(), 0);
+    assert_eq!(pool.total_count(), 1, "no connection lost or leaked overall");
+}

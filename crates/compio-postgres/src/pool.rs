@@ -35,6 +35,7 @@ use std::future::Future;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -230,13 +231,18 @@ pub struct Pool {
     active: Cell<usize>,
     /// Total connections (idle + active). Used for max_size enforcement.
     total: Cell<usize>,
-    /// Callers waiting for a connection.
+    /// Callers waiting for a connection, in FIFO order.
     ///
-    /// `Option<Waker>` allows waiters to tombstone their slot on drop: a
-    /// cancelled future (outer timeout, caller dropped) writes `None` into
-    /// its own slot so `return_client` skips it. Without this the queue leaks
-    /// dead wakers and live waiters starve.
-    waiters: RefCell<VecDeque<Option<Waker>>>,
+    /// Each live slot is a shared [`WaiterSlot`] the pool can deposit a freed
+    /// [`PoolEntry`] directly into — handing the connection straight to the
+    /// longest-queued waiter instead of returning it to `idle` where a fresh
+    /// caller could barge it (POOL-2 / bb8/deadpool fairness model).
+    ///
+    /// `Option<…>` allows waiters to tombstone their queue slot on drop: a
+    /// cancelled future (outer timeout, caller dropped) writes `None` here so
+    /// `return_client` skips it. Without this the queue leaks dead waiters and
+    /// live ones starve.
+    waiters: RefCell<VecDeque<Option<Rc<WaiterSlot>>>>,
     /// Index offset of `waiters.front()` — grows monotonically as waiters
     /// are popped. A waiter's slot id minus `waiters_base` gives its index.
     waiters_base: Cell<u64>,
@@ -499,13 +505,33 @@ impl Pool {
                 // actually becomes available.
             }
 
-            // 3. Pool is full — wait for a connection to be returned.
-            Waiter::new(self).await;
+            // 3. Pool is full — park in the FIFO wait queue. Resolves either
+            // with a connection handed *directly* to us by `return_client`
+            // (bypassing `idle`, so no fresh caller can barge it — POOL-2), or
+            // with `None` meaning capacity/idle opened up and we should loop.
+            if let Some(mut entry) = Waiter::new(self).await {
+                // A live connection was handed to us. It is still counted in
+                // `total`; `active` was NOT bumped on the hand-off, so we do it
+                // here — at the moment we take ownership. No `.await` lies
+                // between the take (inside the resolved future) and here, so
+                // there is no cancellation window.
+                entry.touch();
+                self.active.set(self.active.get() + 1);
+                return Ok(PooledClient {
+                    entry: Some(entry),
+                    pool: self,
+                });
+            }
+            // else: woken for capacity/idle — loop and retry the acquire.
         }
     }
 
     /// Return a connection to the pool (called by `PooledClient::drop`).
     fn return_client(&self, mut entry: PoolEntry) {
+        // The returning client is no longer active. (When the entry is handed
+        // directly to a waiter below, that waiter re-bumps `active` only when
+        // it actually takes the entry — so across a hand-off `active` is
+        // decremented here and incremented there, netting zero.)
         self.active.set(self.active.get().saturating_sub(1));
 
         // Eviction criteria:
@@ -518,23 +544,70 @@ impl Pool {
         if entry.is_expired() || entry.client.is_closed() {
             self.total.set(self.total.get().saturating_sub(1));
             self.metrics.inc_evictions();
-        } else {
-            entry.touch();
-            self.idle.borrow_mut().push(entry);
+            // Capacity just opened up (`total` dropped below `max_size`); wake a
+            // parked waiter so it can create a fresh connection rather than
+            // stalling until its own timeout. The entry itself is gone, so this
+            // is a pure capacity wake (the woken waiter resolves with `None`).
+            self.wake_one_waiter();
+            return;
         }
 
-        self.wake_one_waiter();
+        // Live connection. Hand it DIRECTLY to the longest-queued waiter if one
+        // exists — bypassing `idle` so a fresh, never-parked caller cannot pop
+        // it first (POOL-2 FIFO fairness). Otherwise park it in `idle`.
+        entry.touch();
+        self.redeposit_freed_entry(entry);
     }
 
-    /// Wake the first live waiter in the queue, skipping tombstoned slots.
-    fn wake_one_waiter(&self) {
+    /// Home an alive, un-owned [`PoolEntry`] that needs a new holder: hand it
+    /// directly to the front live waiter, or push it to `idle` if none is
+    /// waiting. Does NOT touch `active` or `total` — the connection is alive
+    /// and already counted, and `active` is bumped only when a waiter actually
+    /// takes the entry (or when a fresh caller pops it from `idle`).
+    ///
+    /// Shared by `return_client` (normal release of a live connection) and
+    /// `Waiter::drop` (reclaim of an entry deposited into a slot that was then
+    /// cancelled before polling it out).
+    fn redeposit_freed_entry(&self, entry: PoolEntry) {
+        match self.take_front_live_waiter() {
+            Some(slot) => {
+                // Deposit into the waiter's rendezvous slot and wake it. The
+                // waiter has been popped from the queue (it is no longer
+                // "waiting"); it now owns the right to this entry via its
+                // retained `Rc<WaiterSlot>` clone.
+                *slot.entry.borrow_mut() = Some(entry);
+                if let Some(w) = slot.waker.borrow_mut().take() {
+                    w.wake();
+                }
+            }
+            None => self.idle.borrow_mut().push(entry),
+        }
+    }
+
+    /// Pop and return the first live (non-tombstoned) waiter slot, advancing
+    /// `waiters_base` past every slot removed. Returns `None` if no live waiter
+    /// remains. The popped waiter is no longer in the queue; the caller takes
+    /// responsibility for it (deposit an entry + wake, or — for a capacity
+    /// wake — just wake).
+    fn take_front_live_waiter(&self) -> Option<Rc<WaiterSlot>> {
         let mut waiters = self.waiters.borrow_mut();
         while let Some(slot) = waiters.pop_front() {
             self.waiters_base.set(self.waiters_base.get() + 1);
-            if let Some(w) = slot {
-                w.wake();
-                return;
+            if let Some(slot) = slot {
+                return Some(slot);
             }
+        }
+        None
+    }
+
+    /// Wake the first live waiter in the queue (capacity wake — no entry
+    /// handed). Used on the eviction path, where a `total` slot just freed up
+    /// and a parked waiter should retry (and create a fresh connection).
+    fn wake_one_waiter(&self) {
+        if let Some(slot) = self.take_front_live_waiter()
+            && let Some(w) = slot.waker.borrow_mut().take()
+        {
+            w.wake();
         }
     }
 
@@ -781,17 +854,56 @@ fn spawn_connection_task(connection: Connection<Socket, crate::tls::NoTlsStream>
 }
 
 // ---------------------------------------------------------------------------
-// Waiter — drop-safe slot in the wait queue
+// Waiter — drop-safe slot in the wait queue with direct connection hand-off
 // ---------------------------------------------------------------------------
 
-/// A future that registers a waker in the pool's wait queue and unregisters
-/// it on drop. Solves the waker-leak bug: if the caller's outer timeout
-/// cancels this future, Drop tombstones our slot so `return_client` won't
-/// wake a dead task while live waiters starve.
+/// Shared rendezvous between a parked [`Waiter`] and `return_client`.
+///
+/// `return_client` deposits a freed [`PoolEntry`] into `entry` and wakes the
+/// waiter via `waker`, handing the connection *directly* to the longest-queued
+/// caller instead of pushing it to `idle` (which a fresh, never-parked caller
+/// could pop first — the POOL-2 barge). The slot is an `Rc` so the pool holds
+/// one clone (in the `waiters` queue, for depositing) and the `Waiter` future
+/// holds another (so it can still read a deposited entry even after the pool
+/// has popped its queue slot).
+struct WaiterSlot {
+    waker: RefCell<Option<Waker>>,
+    /// A connection handed to this waiter by `return_client`, awaiting the
+    /// waiter's next poll. Not yet counted in `active` — `active += 1` happens
+    /// only when the waiter actually takes it.
+    entry: RefCell<Option<PoolEntry>>,
+}
+
+impl WaiterSlot {
+    fn new(waker: Waker) -> Rc<Self> {
+        Rc::new(Self {
+            waker: RefCell::new(Some(waker)),
+            entry: RefCell::new(None),
+        })
+    }
+}
+
+/// A future that registers itself in the pool's wait queue and unregisters on
+/// drop. Resolves to:
+///   - `Some(entry)` — `return_client` handed us a connection directly; the
+///     caller must build a [`PooledClient`] from it (incrementing `active`).
+///   - `None` — we were woken because capacity opened up or an idle entry
+///     appeared (e.g. an eviction freed a `total` slot); the caller should loop
+///     and retry the acquire (pop idle / create).
+///
+/// Drop-safety: a cancelled future (outer timeout, caller dropped) tombstones
+/// its queue slot so `return_client`/`wake_one_waiter` skip it. CRITICALLY, if
+/// a connection was already deposited into our slot but we are dropped before
+/// polling it out, Drop re-homes that entry (to the next live waiter or `idle`)
+/// so the connection is never lost.
 struct Waiter<'a> {
     pool: &'a Pool,
     /// Monotonic slot id assigned on first poll. `None` before registration.
     slot_id: Option<u64>,
+    /// Our own clone of the shared slot, retained even after the pool pops our
+    /// queue entry on hand-off — so `poll`/`drop` can still see a deposited
+    /// entry. `None` until first poll registers us.
+    slot: Option<Rc<WaiterSlot>>,
 }
 
 impl<'a> Waiter<'a> {
@@ -799,10 +911,13 @@ impl<'a> Waiter<'a> {
         Self {
             pool,
             slot_id: None,
+            slot: None,
         }
     }
 
-    /// Index into `waiters` for this waiter, if still present.
+    /// Index into `waiters` for this waiter, if it is still queued. Returns
+    /// `None` once the pool has popped our slot (hand-off or wake), in which
+    /// case `slot_id < waiters_base`.
     fn slot_index(&self) -> Option<usize> {
         let id = self.slot_id?;
         let base = self.pool.waiters_base.get();
@@ -811,32 +926,45 @@ impl<'a> Waiter<'a> {
 }
 
 impl Future for Waiter<'_> {
-    type Output = ();
+    type Output = Option<PoolEntry>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Wake immediately if a connection is available or capacity opened up.
-        if !self.pool.idle.borrow().is_empty() || self.pool.total.get() < self.pool.config.max_size
+        // 1. A connection handed directly to us takes priority — claim it.
+        if let Some(slot) = &self.slot
+            && let Some(entry) = slot.entry.borrow_mut().take()
         {
-            return Poll::Ready(());
+            return Poll::Ready(Some(entry));
         }
 
+        // 2. Otherwise, if a connection is available or capacity opened up,
+        //    resolve with `None` so the caller loops and retries the acquire.
+        if !self.pool.idle.borrow().is_empty() || self.pool.total.get() < self.pool.config.max_size
+        {
+            return Poll::Ready(None);
+        }
+
+        // 3. Still no connection — (re)register and park.
         let mut waiters = self.pool.waiters.borrow_mut();
         let new_waker = cx.waker();
 
         match self.slot_index() {
             Some(idx) if idx < waiters.len() => {
-                // Slot still live — update waker only if different.
-                match &waiters[idx] {
+                // Slot still live in the queue — refresh the waker if changed.
+                let slot = self.slot.as_ref().expect("queued waiter has a slot");
+                let mut w = slot.waker.borrow_mut();
+                match &*w {
                     Some(existing) if existing.will_wake(new_waker) => {}
-                    _ => waiters[idx] = Some(new_waker.clone()),
+                    _ => *w = Some(new_waker.clone()),
                 }
             }
             _ => {
-                // First poll (or slot was consumed by wake_one_waiter before
-                // we saw Ready — rare race). Register a fresh slot.
+                // First poll, or our slot was popped (hand-off / wake) and we
+                // need to re-park. Register a fresh slot.
                 let base = self.pool.waiters_base.get();
                 let id = base + waiters.len() as u64;
-                waiters.push_back(Some(new_waker.clone()));
+                let slot = WaiterSlot::new(new_waker.clone());
+                waiters.push_back(Some(Rc::clone(&slot)));
+                self.slot = Some(slot);
                 self.slot_id = Some(id);
             }
         }
@@ -847,6 +975,8 @@ impl Future for Waiter<'_> {
 
 impl Drop for Waiter<'_> {
     fn drop(&mut self) {
+        // 1. Tombstone our queue slot (if still queued) so the pool stops
+        //    treating us as a live waiter.
         if let Some(idx) = self.slot_index() {
             let mut waiters = self.pool.waiters.borrow_mut();
             if idx < waiters.len() {
@@ -860,6 +990,17 @@ impl Drop for Waiter<'_> {
                     self.pool.waiters_base.set(self.pool.waiters_base.get() + 1);
                 }
             }
+        }
+
+        // 2. Reclaim-on-drop: if a connection was deposited into our slot but
+        //    we were cancelled before polling it out, re-home it so it is not
+        //    lost. `active` was NEVER incremented for this entry (that happens
+        //    only when `poll` takes it), so the reclaim must NOT touch `active`;
+        //    nor `total` (the connection is still alive and counted).
+        if let Some(slot) = self.slot.take()
+            && let Some(entry) = slot.entry.borrow_mut().take()
+        {
+            self.pool.redeposit_freed_entry(entry);
         }
     }
 }
