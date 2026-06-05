@@ -354,10 +354,7 @@ where
                     body.put_u8(ERROR_RESPONSE_TAG);
                     body.put_u32(header.length);
                     body.extend_from_slice(&bytes);
-                    return Err(Error::io(std::io::Error::other(format!(
-                        "START_REPLICATION ErrorResponse: {} bytes",
-                        body.len()
-                    ))));
+                    return Err(error_from_error_response_body(body));
                 }
                 NOTICE_RESPONSE_TAG => {
                     // Drop the notice payload silently.
@@ -730,6 +727,26 @@ where
     dst.put_i64(timestamp);
     dst.put_u8(if reply_requested { 1 } else { 0 });
     Ok(())
+}
+
+/// Turn a reconstructed `ErrorResponse` wire message (`E` tag + 4-byte
+/// big-endian length + field payload) into an [`Error`].
+///
+/// Runs `postgres_protocol`'s framer over `body` so the SQLSTATE,
+/// severity, and message survive as a [`crate::error::DbError`] — the
+/// same shape the `IDENTIFY_SYSTEM` loop produces via
+/// `Message::ErrorResponse(body) => Error::db(body)`. A byte count alone
+/// (the former behaviour) made `START_REPLICATION` failures
+/// undebuggable. If the framer can't parse the bytes, fall back to a
+/// parse error rather than silently dropping the failure.
+fn error_from_error_response_body(mut body: BytesMut) -> Error {
+    match Message::parse(&mut body) {
+        Ok(Some(Message::ErrorResponse(b))) => Error::db(b),
+        _ => Error::parse(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "START_REPLICATION: malformed ErrorResponse",
+        )),
+    }
 }
 
 /// Parse the body of the `IDENTIFY_SYSTEM` `DataRow` into an
@@ -1431,6 +1448,50 @@ mod tests {
             parse_identify_system_row(&empty).is_err(),
             "empty row body must be Err, not panic"
         );
+    }
+
+    /// Build a full `ErrorResponse` wire message: `E` tag + 4-byte
+    /// big-endian length + field payload, where each field is
+    /// `type-byte + NUL-terminated string`, terminated by a single
+    /// `0x00`. The length field counts itself (4 bytes) + the payload,
+    /// but NOT the leading tag.
+    fn error_response_message(fields: &[(u8, &str)]) -> BytesMut {
+        let mut payload = Vec::new();
+        for (ty, val) in fields {
+            payload.push(*ty);
+            payload.extend_from_slice(val.as_bytes());
+            payload.push(0);
+        }
+        payload.push(0); // field-list terminator
+
+        let mut msg = BytesMut::new();
+        msg.put_u8(ERROR_RESPONSE_TAG);
+        msg.put_u32((payload.len() + 4) as u32);
+        msg.extend_from_slice(&payload);
+        msg
+    }
+
+    #[test]
+    fn start_replication_error_response_surfaces_dberror() {
+        // A walsender refusing START_REPLICATION (e.g. the role lacks
+        // REPLICATION) sends an ErrorResponse carrying SQLSTATE + message.
+        // The driver must surface that as a DbError, not a byte count.
+        let body = error_response_message(&[
+            (b'S', "ERROR"),
+            (b'V', "ERROR"),
+            (b'C', "42501"),
+            (b'M', "permission denied to start WAL sender"),
+        ]);
+        let err = error_from_error_response_body(body);
+
+        let db = err
+            .as_db_error()
+            .expect("START_REPLICATION ErrorResponse must surface as a DbError");
+        assert_eq!(db.code().code(), "42501");
+        assert_eq!(db.message(), "permission denied to start WAL sender");
+
+        // The convenience accessor on Error must also expose the SQLSTATE.
+        assert_eq!(err.code().map(|c| c.code()), Some("42501"));
     }
 
     #[test]
