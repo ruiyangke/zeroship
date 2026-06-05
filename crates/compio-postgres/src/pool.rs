@@ -379,8 +379,16 @@ impl Pool {
             // 1. Try to pop an idle connection
             let entry = self.idle.borrow_mut().pop();
             if let Some(mut entry) = entry {
+                // Adopt the popped slot: it is already counted in `total`, and
+                // until a PooledClient owns it (or it is pushed back to idle)
+                // its decrement must ride on Drop so cancellation during the
+                // dirty barrier / alive validation below — or an eviction
+                // `continue` — releases it exactly once. The manual
+                // `total -= 1` on the eviction paths is therefore gone; the
+                // guard's Drop does it when the loop body unwinds on `continue`.
+                let permit = PermitGuard::adopt(self);
+
                 if entry.is_expired() {
-                    self.total.set(self.total.get().saturating_sub(1));
                     self.metrics.inc_evictions();
                     continue;
                 }
@@ -388,7 +396,6 @@ impl Pool {
                 // If the Client's sender is closed (connection task exited
                 // due to I/O error, EOF, etc), we cannot use this entry.
                 if entry.client.is_closed() {
-                    self.total.set(self.total.get().saturating_sub(1));
                     self.metrics.inc_evictions();
                     continue;
                 }
@@ -411,7 +418,6 @@ impl Pool {
                     match entry.client.simple_query("").await {
                         Ok(_) => entry.client.clear_dirty(),
                         Err(_) => {
-                            self.total.set(self.total.get().saturating_sub(1));
                             self.metrics.inc_evictions();
                             continue;
                         }
@@ -420,6 +426,10 @@ impl Pool {
                     // second `simple_query("")` below.
                     entry.touch();
                     self.active.set(self.active.get() + 1);
+                    // PooledClient now owns the slot; its Drop -> return_client
+                    // handles total/active. Disarm so the guard doesn't also
+                    // decrement total.
+                    permit.disarm();
                     return Ok(PooledClient {
                         entry: Some(entry),
                         pool: self,
@@ -433,13 +443,16 @@ impl Pool {
                 if entry.last_used.elapsed() > self.config.validation_bypass
                     && entry.client.simple_query("").await.is_err()
                 {
-                    self.total.set(self.total.get().saturating_sub(1));
                     self.metrics.inc_evictions();
                     continue;
                 }
 
                 entry.touch();
                 self.active.set(self.active.get() + 1);
+                // PooledClient now owns the slot; its Drop -> return_client
+                // handles total/active. Disarm so the guard doesn't also
+                // decrement total.
+                permit.disarm();
                 return Ok(PooledClient {
                     entry: Some(entry),
                     pool: self,
@@ -449,13 +462,17 @@ impl Pool {
             // 2. No idle connections — create a new one if under limit.
             // Reserve the slot synchronously *before* the await so concurrent
             // callers in the same loop see the bumped `total` and don't race
-            // past `max_size`. Decrement on failure.
+            // past `max_size`. The reservation rides on a PermitGuard: if this
+            // future is cancelled while parked at `connect_one().await` (the
+            // outer `connection_timeout`, or a caller dropping the get()), the
+            // guard's Drop releases the slot — without it the `+1` would leak
+            // forever (POOL-1). On Err the guard also releases it on return.
             if self.total.get() < self.config.max_size {
-                self.total.set(self.total.get() + 1);
+                let permit = PermitGuard::reserve(self);
                 let client = match Self::connect_one(&self.url).await {
                     Ok(c) => c,
                     Err(e) => {
-                        self.total.set(self.total.get().saturating_sub(1));
+                        // `permit` drops here -> total -= 1.
                         // Wake a waiter so they don't stall behind our
                         // failed reservation until the outer timeout fires.
                         self.wake_one_waiter();
@@ -466,6 +483,10 @@ impl Pool {
                 self.active.set(self.active.get() + 1);
                 let mut entry = PoolEntry::new(client, self.config.max_lifetime);
                 entry.touch();
+                // PooledClient now owns the slot; its Drop -> return_client
+                // handles total/active. Disarm so the guard doesn't also
+                // decrement total.
+                permit.disarm();
                 return Ok(PooledClient {
                     entry: Some(entry),
                     pool: self,
@@ -581,7 +602,11 @@ impl Pool {
 
         let mut created = 0usize;
         for _ in 0..to_create {
-            self.total.set(self.total.get() + 1);
+            // Same RAII discipline as the on-demand connect path: reserve the
+            // slot before the await so concurrent get_inner calls see the
+            // bumped `total`, and let the guard release it on Err / cancellation
+            // (the housekeeper runs as a detached task and can be dropped).
+            let permit = PermitGuard::reserve(self);
             match Self::connect_one(&self.url).await {
                 Ok(client) => {
                     self.metrics.inc_created();
@@ -589,9 +614,12 @@ impl Pool {
                     self.idle
                         .borrow_mut()
                         .push(PoolEntry::new(client, self.config.max_lifetime));
+                    // The entry now lives in `idle` and is counted in `total`;
+                    // disarm so the guard doesn't decrement it back out.
+                    permit.disarm();
                 }
                 Err(e) => {
-                    self.total.set(self.total.get().saturating_sub(1));
+                    // `permit` drops here -> total -= 1.
                     eprintln!("[compio-postgres] housekeeper: failed to create connection: {e}");
                     break;
                 }
@@ -663,6 +691,59 @@ impl Pool {
     /// Number of callers waiting for a connection (including tombstoned slots).
     pub fn pending_count(&self) -> usize {
         self.waiters.borrow().len()
+    }
+}
+
+/// RAII guard for a `total` permit held between reservation/adoption and the
+/// moment the slot is safely owned by a returned [`PooledClient`] (or pushed
+/// back to `idle`).
+///
+/// `total` is the pool's hand-maintained capacity counter. Every path that
+/// touches it crosses an `.await` (on-demand `connect_one`, the dirty barrier,
+/// alive-bypass validation, housekeeper refill). `Pool::get` runs `get_inner`
+/// under `compio::time::timeout`, a `select!` that DROPS the inner future when
+/// the timer wins — so a post-await `total -= 1` statement is skipped on
+/// cancellation, leaking the permit forever (POOL-1). Tying the decrement to
+/// `Drop` makes it fire on every exit: success, error, early return, panic,
+/// and — crucially — cancellation. The guard is `disarm()`ed once a
+/// `PooledClient` owns the slot (its own Drop -> `return_client` then accounts
+/// for it) or the entry is back in `idle`.
+struct PermitGuard<'a> {
+    pool: &'a Pool,
+    armed: bool,
+}
+
+impl<'a> PermitGuard<'a> {
+    /// Reserve a NEW slot (`total += 1`). Use on paths that create a
+    /// connection: the on-demand connect path and the housekeeper refill.
+    fn reserve(pool: &'a Pool) -> Self {
+        pool.total.set(pool.total.get() + 1);
+        Self { pool, armed: true }
+    }
+
+    /// Adopt an EXISTING slot already counted in `total` — a `PoolEntry`
+    /// popped out of `idle`. Does not touch `total`; only governs the
+    /// decrement-on-drop so a cancellation during the barrier / validation
+    /// await releases the popped entry's slot.
+    const fn adopt(pool: &'a Pool) -> Self {
+        Self { pool, armed: true }
+    }
+
+    /// Hand off the slot: the caller now owns it (via a returned
+    /// `PooledClient` or an entry pushed back to `idle`), so Drop must NOT
+    /// decrement `total`.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PermitGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pool
+                .total
+                .set(self.pool.total.get().saturating_sub(1));
+        }
     }
 }
 

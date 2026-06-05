@@ -895,3 +895,81 @@ async fn update_with_returning() {
 
     drop_complex_table(&client).await;
 }
+
+// ---------------------------------------------------------------------------
+// 24. get_cancellation_during_connect_does_not_leak_permits (POOL-1)
+//
+// Regression: `Pool::get` wraps `get_inner` in `compio::time::timeout`, a
+// `select!` that DROPS the inner future when the timer wins. On the on-demand
+// connect path the capacity permit is the hand-maintained `total` counter,
+// incremented before `connect_one().await` and decremented only by the
+// `Err(_)` match arm. When the get() future is cancelled mid-connect, neither
+// arm runs, so the `+1` is never undone -> `total` is permanently inflated.
+// After `max_size` such cancellations the create-gate (`total < max_size`)
+// never fires again and every get() times out: the pool is bricked.
+//
+// This drives many on-demand connects with a 1 ms connection_timeout (far
+// shorter than a real TCP+startup handshake), so each one is cancelled
+// mid-flight. Pre-fix: leaked permits inflate `total_count()` up to max_size.
+// Post-fix: every cancelled connect releases its permit via RAII Drop, so only
+// the genuinely-held warm connection remains counted.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn get_cancellation_during_connect_does_not_leak_permits() {
+    let url = require_pg().await;
+    let config = compio_postgres::PoolConfig {
+        max_size: 4,
+        min_idle: 0,
+        // Shorter than a real TCP+startup connect, so on-demand connects get
+        // cancelled mid-flight by the pool's own timeout.
+        connection_timeout: std::time::Duration::from_millis(1),
+        // Large, so acquiring the already-warm connection never does a network
+        // round-trip (no validation / dirty barrier) and completes well under
+        // the 1 ms budget.
+        validation_bypass: std::time::Duration::from_secs(60),
+        ..compio_postgres::PoolConfig::default()
+    };
+    let pool = Pool::connect_with_config(&url, config).await.unwrap();
+
+    // The warm-up opened exactly one connection (min_idle=0 -> warm = max(0,1)
+    // = 1). Hold it so `idle` is empty and every further get() must take the
+    // on-demand connect path.
+    let c1 = pool.get().await.expect("warm connection acquires locally");
+    assert_eq!(pool.total_count(), 1, "warm-up should open exactly one conn");
+
+    // Drive many cancelled on-demand connects. Each returns Err(timeout) after
+    // being dropped mid-`connect_one().await`.
+    for _ in 0..100 {
+        let r = pool.get().await;
+        assert!(
+            r.is_err(),
+            "1 ms on-demand connect should time out, not succeed"
+        );
+    }
+
+    // Primary invariant: `total_count()` must not exceed the genuinely-held
+    // connections (just c1). Pre-fix this climbs to max_size (4) and sticks.
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "cancelled on-demand connects leaked permits: total_count()={}",
+        pool.total_count()
+    );
+
+    // Liveness: the pool must not be bricked. Returning c1 makes a warm idle
+    // entry available; a fresh get() must reclaim it locally (no network
+    // round-trip, so it fits the 1 ms budget) and succeed.
+    drop(c1);
+    let c2 = pool
+        .get()
+        .await
+        .expect("pool bricked: get() fails after cancellations even with an idle conn");
+    drop(c2);
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "post-recovery total_count() should still be 1, got {}",
+        pool.total_count()
+    );
+}
