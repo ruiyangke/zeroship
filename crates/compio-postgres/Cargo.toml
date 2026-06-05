@@ -10,7 +10,7 @@ categories = ["database"]
 rust-version = "1.85"
 
 [lib]
-test = false
+test = true
 
 [features]
 default = []

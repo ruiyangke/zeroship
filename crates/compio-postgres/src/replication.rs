@@ -1193,7 +1193,6 @@ pub mod pgoutput {
 
     #[cfg(test)]
     pub(crate) mod encode {
-        use super::*;
         use bytes::BufMut;
 
         pub fn relation(
