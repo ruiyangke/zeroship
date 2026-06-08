@@ -154,6 +154,14 @@ impl ClusterTopology {
     pub fn node_for_slot(&self, slot: u16) -> Option<&NodeAddr> {
         self.slots.get(slot as usize).and_then(|o| o.as_ref())
     }
+
+    /// Distinct node addresses present in this topology. Used to build the
+    /// SSRF allowlist: every node the authoritative `CLUSTER SLOTS` reply
+    /// names is, by definition, a trusted cluster member.
+    pub fn node_addrs(&self) -> impl Iterator<Item = &NodeAddr> {
+        // De-dup is left to the caller's set insert; we just yield owners.
+        self.slots.iter().filter_map(|o| o.as_ref())
+    }
 }
 
 /// Parse the RESP2 array returned by `CLUSTER SLOTS` into a topology.
@@ -429,7 +437,7 @@ mod slot_parse_tests {
 }
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::client::Client;
@@ -446,6 +454,14 @@ struct Inner {
     /// Saved so we can rebuild pools for newly-discovered nodes.
     password: Option<String>,
     db: Option<i64>,
+    /// CR-CLUSTER-2 / REDIS-SSRF-1: the set of operator-trusted node
+    /// addresses (normalized `host:port`) we are willing to connect to
+    /// with the cluster credentials. Seeded from the configured seed URLs
+    /// and extended with the addresses in any authoritative `CLUSTER
+    /// SLOTS` topology learned from a trusted node. A server-supplied
+    /// redirect/topology address that isn't in here is refused before we
+    /// connect (and before we replay the password).
+    known_nodes: HashSet<NodeAddr>,
 }
 
 /// Cluster-aware client. One per worker thread; cheap to clone (the
@@ -485,8 +501,20 @@ impl ClusterClient {
         // for newly-discovered nodes can authenticate.
         let (password, db) = credentials_from_url(url)?;
 
+        // CR-CLUSTER-2: build the SSRF allowlist. The seed (operator-
+        // configured, trusted) plus every node named by the authoritative
+        // CLUSTER SLOTS topology we just parsed from it. These are the only
+        // addresses we'll later connect to with the cluster password.
+        let mut known_nodes: HashSet<NodeAddr> = HashSet::new();
+        if let Some(seed_addr) = host_port_from_url(url) {
+            known_nodes.insert(seed_addr);
+        }
+        for addr in topology.node_addrs() {
+            known_nodes.insert(normalize_node_addr(addr));
+        }
+
         let pools = HashMap::new();
-        let inner = Inner { topology, pools, pool_size, password, db };
+        let inner = Inner { topology, pools, pool_size, password, db, known_nodes };
         Ok(Self { inner: Rc::new(RefCell::new(inner)) })
     }
 
@@ -495,6 +523,22 @@ impl ClusterClient {
     async fn pool_for(&self, addr: &str) -> Result<Pool> {
         if let Some(p) = self.inner.borrow().pools.get(addr).cloned() {
             return Ok(p);
+        }
+        // CR-CLUSTER-2 / REDIS-SSRF-1: never open a credentialed connection
+        // to an address the cluster merely *claimed* (via MOVED/ASK or a
+        // topology entry) unless it's an operator-trusted node. This stops
+        // SSRF to internal services / the cloud metadata endpoint and
+        // exfiltration of the cluster password to an attacker-chosen host.
+        // Checked BEFORE any connect so a rejection costs no network I/O.
+        {
+            let b = self.inner.borrow();
+            if !is_known_node(addr, &b.known_nodes) {
+                return Err(Error::Config(format!(
+                    "refusing to connect to untrusted cluster address '{addr}': \
+                     not an operator-configured seed or a node in the verified \
+                     CLUSTER SLOTS topology (possible MOVED/ASK SSRF)"
+                )));
+            }
         }
         let (pw, db) = {
             let b = self.inner.borrow();
@@ -525,12 +569,22 @@ impl ClusterClient {
     /// `set_slot` / routing without a live cluster.
     #[cfg(test)]
     pub(crate) fn for_test(topology: ClusterTopology) -> Self {
+        Self::for_test_with_known(topology, HashSet::new())
+    }
+
+    /// Test-only constructor that also seeds the SSRF allowlist.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_known(
+        topology: ClusterTopology,
+        known_nodes: HashSet<NodeAddr>,
+    ) -> Self {
         let inner = Inner {
             topology,
             pools: HashMap::new(),
             pool_size: 1,
             password: None,
             db: None,
+            known_nodes,
         };
         Self { inner: Rc::new(RefCell::new(inner)) }
     }
@@ -907,6 +961,35 @@ fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
     Ok((pw, db))
 }
 
+/// Extract the bare `host:port` from a seed URL so it can be compared
+/// against server-supplied redirect/topology addresses. Defaults the
+/// port to Redis's 6379 when the URL omits it. Returns `None` if the URL
+/// can't be parsed or has no host.
+fn host_port_from_url(url: &str) -> Option<NodeAddr> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port().unwrap_or(6379);
+    Some(normalize_node_addr(&format!("{host}:{port}")))
+}
+
+/// Canonicalize a `host:port` string for set membership: the host is
+/// case-insensitive, so we lowercase everything up to (and including) the
+/// final `:` boundary. We split on the **last** colon so bracketed IPv6
+/// literals (`[::1]:6379`) survive intact.
+fn normalize_node_addr(addr: &str) -> NodeAddr {
+    addr.to_ascii_lowercase()
+}
+
+/// CR-CLUSTER-2 / REDIS-SSRF-1: is `addr` an operator-trusted cluster
+/// node? Only addresses derived from the configured seeds or learned from
+/// an authoritative `CLUSTER SLOTS` topology are trusted; a
+/// server-supplied MOVED/ASK or topology entry pointing anywhere else
+/// (cloud metadata, localhost ports, internal services) is rejected
+/// before we ever connect — and before we replay the cluster password.
+fn is_known_node(addr: &str, known: &HashSet<NodeAddr>) -> bool {
+    known.contains(&normalize_node_addr(addr))
+}
+
 fn build_node_url(addr: &str, password: Option<&str>, db: Option<i64>) -> String {
     let mut s = String::from("redis://");
     if let Some(p) = password {
@@ -920,6 +1003,63 @@ fn build_node_url(addr: &str, password: Option<&str>, db: Option<i64>) -> String
         s.push_str(&d.to_string());
     }
     s
+}
+
+#[cfg(test)]
+mod known_node_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn known(addrs: &[&str]) -> HashSet<NodeAddr> {
+        addrs.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn known_seed_addr_is_allowed() {
+        let k = known(&["127.0.0.1:7000", "127.0.0.1:7001"]);
+        assert!(is_known_node("127.0.0.1:7000", &k));
+        assert!(is_known_node("127.0.0.1:7001", &k));
+    }
+
+    #[test]
+    fn attacker_addr_not_in_set_is_rejected() {
+        // CR-CLUSTER-2 / REDIS-SSRF-1: a server-supplied MOVED/topology addr
+        // pointing at the cloud metadata endpoint (or any host not derived
+        // from operator seeds / verified topology) must NOT be a known node.
+        let k = known(&["127.0.0.1:7000"]);
+        assert!(!is_known_node("169.254.169.254:80", &k)); // cloud metadata
+        assert!(!is_known_node("127.0.0.1:5432", &k));     // local Postgres
+        assert!(!is_known_node("10.0.0.7:6379", &k));      // internal host
+        assert!(!is_known_node("[::1]:6379", &k));         // IPv6 loopback
+    }
+
+    #[test]
+    fn empty_known_set_rejects_everything() {
+        let k: HashSet<NodeAddr> = HashSet::new();
+        assert!(!is_known_node("127.0.0.1:7000", &k));
+    }
+
+    #[test]
+    fn host_case_is_normalized() {
+        // Host comparison is case-insensitive (DNS / hostnames); the addr
+        // and the seed may differ only in case.
+        let k = known(&["node-a:7000"]);
+        assert!(is_known_node("NODE-A:7000", &k));
+    }
+
+    #[test]
+    fn host_port_from_url_extracts_host_colon_port() {
+        assert_eq!(host_port_from_url("redis://127.0.0.1:7000").as_deref(), Some("127.0.0.1:7000"));
+        assert_eq!(host_port_from_url("redis://:pw@10.0.0.1:6379/3").as_deref(), Some("10.0.0.1:6379"));
+        // No explicit port -> default Redis 6379.
+        assert_eq!(host_port_from_url("redis://myhost").as_deref(), Some("myhost:6379"));
+    }
+
+    #[test]
+    fn host_port_from_url_rejects_garbage() {
+        assert!(host_port_from_url("").is_none());
+        assert!(host_port_from_url("not a url").is_none());
+    }
 }
 
 #[cfg(test)]
@@ -1056,5 +1196,81 @@ mod set_slot_tests {
         let cc = ClusterClient::for_test(ClusterTopology::empty());
         cc.set_slot(NUM_SLOTS as u16, "6.6.6.6:6379"); // 16384, must NOT panic
         assert!(cc.slot_owner(16383).is_none());
+    }
+}
+
+#[cfg(test)]
+mod ssrf_allowlist_tests {
+    use super::*;
+
+    /// A topology mapping slot 0 to one known node, used to seed the
+    /// allowlist with a single trusted addr.
+    fn topo_with(addr: &str) -> ClusterTopology {
+        let mut t = ClusterTopology::empty();
+        t.slots[0] = Some(addr.to_string());
+        t
+    }
+
+    #[compio::test]
+    async fn pool_for_unknown_addr_is_rejected_without_connecting() {
+        // CR-CLUSTER-2 / REDIS-SSRF-1: pool_for must REFUSE to connect (and
+        // thus refuse to replay the cluster password) to a server-supplied
+        // address that isn't an operator-trusted node. We point it at the
+        // cloud metadata endpoint; pre-fix it would TCP-connect there with
+        // creds, post-fix it returns an Err with no connection attempt.
+        //
+        // The addr is unroutable/blackholed in CI, so a *missing* guard
+        // would also eventually fail — but with a connect/timeout Error,
+        // not the allowlist rejection we assert below. We assert the error
+        // is the allowlist rejection AND that it returns essentially
+        // immediately (no multi-second connect attempt).
+        let known: HashSet<NodeAddr> = ["127.0.0.1:7000".to_string()].into_iter().collect();
+        let cc = ClusterClient::for_test_with_known(topo_with("127.0.0.1:7000"), known);
+
+        let t = std::time::Instant::now();
+        let res = cc.pool_for("169.254.169.254:80").await;
+        let elapsed = t.elapsed();
+
+        let err = match res {
+            Ok(_) => panic!("pool_for must reject an unknown (SSRF) addr, not connect to it"),
+            Err(e) => e,
+        };
+        // The rejection must name the disallowed node, and must NOT be a
+        // generic connect/IO error (which would mean we tried to connect).
+        let msg = err.to_string();
+        assert!(
+            matches!(&err, Error::Config(_)) && msg.contains("169.254.169.254:80"),
+            "expected an allowlist Config rejection naming the addr, got: {err:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "rejection must be immediate (no connect attempt); took {elapsed:?}"
+        );
+        // And no pool was cached for the rejected addr.
+        assert!(
+            cc.inner.borrow().pools.get("169.254.169.254:80").is_none(),
+            "no pool may be created for a rejected addr"
+        );
+    }
+
+    #[compio::test]
+    async fn pool_for_known_addr_attempts_connection() {
+        // Positive control: a KNOWN addr is allowed past the guard. We use
+        // a closed local port so the connect itself fails fast — the point
+        // is the error is a *connect/pool* error (we got past the
+        // allowlist), NOT the Config allowlist rejection.
+        let known: HashSet<NodeAddr> =
+            ["127.0.0.1:1".to_string()].into_iter().collect();
+        let cc = ClusterClient::for_test_with_known(topo_with("127.0.0.1:1"), known);
+
+        let err = match cc.pool_for("127.0.0.1:1").await {
+            Ok(_) => panic!("connect to closed port 1 should fail"),
+            Err(e) => e,
+        };
+        // Got past the allowlist -> a Pool/IO error, not a Config rejection.
+        assert!(
+            matches!(err, Error::Pool(_)),
+            "known addr must reach the connect path (Pool error), got: {err:?}"
+        );
     }
 }
