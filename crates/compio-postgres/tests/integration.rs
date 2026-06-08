@@ -1555,17 +1555,21 @@ async fn concurrent_queries_are_pipelined() {
 async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
     use futures_util::future::join_all;
 
-    let url = require_pg().await;
-    let client = connect(&url).await.unwrap();
-
     const BLOB_LEN: usize = 16 * 1024 * 1024; // ~16 MB param per query (< 64 MB cap)
     const ROWS: i32 = 3; // result ~= 48 MB, fanned over 3 frames of ~16 MB
     const N: usize = 16; // concurrent in-flight queries on one connection
 
+    let url = require_pg().await;
+    let client = connect(&url).await.unwrap();
+
     // Distinct payloads so a misrouted/corrupted response is caught, not just
-    // a hang. Byte i of blob k = (i + k) as u8.
+    // a hang. Byte i of blob k = (i + k) mod 256.
     let blobs: Vec<Vec<u8>> = (0..N)
-        .map(|k| (0..BLOB_LEN).map(|i| (i + k) as u8).collect())
+        .map(|k| {
+            (0..BLOB_LEN)
+                .map(|i| u8::try_from((i + k) % 256).unwrap())
+                .collect()
+        })
         .collect();
 
     let futs = blobs.iter().enumerate().map(|(k, blob)| {
@@ -1648,18 +1652,15 @@ async fn multiplexed_clean_shutdown_completes_without_hang() {
 
     // The driver must finish on its own, promptly, with a clean Ok. A hang
     // here (parked read task / wedged shutdown) trips the timeout.
-    let outcome = compio::time::timeout(std::time::Duration::from_secs(5), conn_handle).await;
-
-    match outcome {
-        Ok(join_result) => {
-            // Task ran to completion (not cancelled/panicked) ...
-            let run_result = join_result.expect("connection task panicked or was cancelled");
-            // ... and the multiplexed clean-shutdown path returned Ok.
-            run_result.expect("clean shutdown should resolve Ok(())");
-        }
-        Err(_) => panic!(
+    // A timeout here means a hang (parked read task / wedged shutdown).
+    let join_result = compio::time::timeout(std::time::Duration::from_secs(5), conn_handle)
+        .await
+        .expect(
             "multiplexed driver did not shut down within 5s after client drop \
-             — read task likely left parked / teardown hung"
-        ),
-    }
+             — read task likely left parked / teardown hung",
+        );
+    // Task ran to completion (not cancelled / panicked) ...
+    let run_result = join_result.expect("connection task panicked or was cancelled");
+    // ... and the multiplexed clean-shutdown path returned Ok.
+    run_result.expect("clean shutdown should resolve Ok(())");
 }
