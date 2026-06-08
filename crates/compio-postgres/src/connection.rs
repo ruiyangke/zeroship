@@ -782,14 +782,21 @@ where
         // `read_backend` forever, forwarding each frame over a bounded
         // (capacity 1) channel. Bounded so back-pressure propagates to the
         // socket: when the main loop stops consuming, the task blocks on
-        // `send` after one buffered frame and stops reading. The task is
-        // DETACHED — never cancelled — so its in-flight socket read is never
-        // dropped mid-submission (the never-drop invariant). On the first
-        // read error it forwards the error and exits; if the main loop has
-        // gone, its next `send` fails and it exits.
+        // `send` after one buffered frame and stops reading. On the first read
+        // error it forwards the error and exits; if the main loop has gone,
+        // its next `send` fails and it exits.
+        //
+        // The JoinHandle is RETAINED (not detached) so every exit path can
+        // stop the task — see the `teardown:` block below. Without that, a
+        // main loop returning for a WRITE reason (a `?`-propagated error on a
+        // flush) against a half-open/partitioned peer would leave this task
+        // parked forever in `read_backend().await`, leaking the task, its
+        // buffers, and the shared refcounted fd (compio `into_split` clones
+        // ONE fd; dropping `write_half` alone does not close it while the read
+        // task still holds its clone). MUX-1.
         let (mut read_tx, mut read_rx) =
             mpsc::channel::<Result<BackendMessage, Error>>(1);
-        compio::runtime::spawn(async move {
+        let read_handle = compio::runtime::spawn(async move {
             let mut read_half = read_half;
             loop {
                 let res = read_backend(&mut read_half).await;
@@ -804,8 +811,7 @@ where
                     break;
                 }
             }
-        })
-        .detach();
+        });
 
         let mut responses: VecDeque<Response> = VecDeque::new();
         let mut pending_responses: VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)> =
@@ -818,19 +824,35 @@ where
         let mut client_gone = false;
         let mut terminate_sent = false;
 
-        loop {
-            // ---- Shutdown sequencing. Once the client is gone and no
-            // response/COPY work remains, send Terminate once. The server
-            // then closes; the read task forwards EOF; the Read arm returns
-            // Ok. The read task's in-flight read RESOLVES (to EOF) rather
-            // than being cancelled — never-drop holds on teardown.
-            if client_gone && !terminate_sent && responses.is_empty() && copy_in.is_none() {
-                trace!("client gone + queue drained, sending Terminate (multiplexed)");
-                let buf = inner_encode_terminate();
-                write_frontend(&mut write_half, FrontendMessage::Raw(buf))?;
-                write_half.flush().await?;
-                terminate_sent = true;
-            }
+        // Run the loop inside an inner future so that EVERY exit path — a
+        // clean `return Ok(())`, a `?`-propagated write/read error, all of it
+        // — falls through to the `teardown:` block below, which stops the read
+        // task and emits a FIN. `?` and `return` inside resolve this block.
+        let run_result: Result<(), Error> = async {
+            loop {
+                // ---- Shutdown sequencing. Once the client is gone and no
+                // response/COPY work remains, send Terminate once, then emit a
+                // FIN via the write half's `shutdown` (mirrors the serialized
+                // path; MUX-4). The server then closes; the read task forwards
+                // EOF; the Read arm returns Ok.
+                if client_gone && !terminate_sent && responses.is_empty() && copy_in.is_none() {
+                    trace!("client gone + queue drained, sending Terminate (multiplexed)");
+                    let buf = inner_encode_terminate();
+                    write_frontend(&mut write_half, FrontendMessage::Raw(buf))?;
+                    write_half.flush().await?;
+                    // Emit a clean TCP FIN on the write side, matching the
+                    // serialized loop's `stream.shutdown()`. Swallow the
+                    // expected BrokenPipe / NotConnected if the server already
+                    // half-closed. This also nudges a well-behaved peer to
+                    // close, which resolves the read task's parked read to EOF.
+                    if let Err(e) = write_half.shutdown().await {
+                        use std::io::ErrorKind::{BrokenPipe, NotConnected};
+                        if !matches!(e.kind(), BrokenPipe | NotConnected) {
+                            trace!("write-half shutdown non-fatal error: {e}");
+                        }
+                    }
+                    terminate_sent = true;
+                }
 
             // ---- Gating for this iteration.
             // Read is consumed only when no stashed batch is waiting — that
@@ -984,6 +1006,25 @@ where
                     copy_in = None;
                 }
             }
+            }
         }
+        .await;
+
+        // ---- teardown: stop the read task on EVERY exit path. ----
+        //
+        // On a clean close the FIN above already made the server close, so the
+        // task's parked `read_backend` has resolved (EOF) and the task is
+        // exiting on its own. But on a WRITE-error exit against a half-open /
+        // partitioned peer, no FIN/RST is coming and the read is parked
+        // forever. `JoinHandle::cancel().await` cancels the task (compio
+        // defers the in-flight read's io_uring buffer reclaim — memory-safe;
+        // losing in-flight bytes is fine since the connection is going away)
+        // and drops the task's `read_half`, releasing its clone of the shared
+        // fd. With `write_half` dropped on return, the last fd reference goes
+        // and the socket actually closes. Awaiting `cancel` also guarantees no
+        // orphaned task / buffers outlive `run_multiplexed`. MUX-1 / MUX-4.
+        let _ = read_handle.cancel().await;
+
+        run_result
     }
 }

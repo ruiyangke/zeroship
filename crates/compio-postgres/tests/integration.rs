@@ -1559,3 +1559,60 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 31. multiplexed_clean_shutdown_completes_without_hang (MUX-1 / MUX-4)
+//
+// When the `Client` is dropped, the multiplexed driver must (a) send
+// Terminate, (b) emit a clean TCP FIN via the write half's `shutdown`, (c)
+// stop the dedicated read task, and (d) have `Connection::run` resolve
+// `Ok(())` promptly — never hang.
+//
+// We RETAIN the connection task's JoinHandle (instead of the detaching
+// `connect` helper) so we can observe the task actually finishing. Dropping
+// the client closes the request channel; the driver drains, terminates,
+// FINs, cancels the read task in its teardown block, and returns Ok. A 5 s
+// timeout turns any teardown hang (e.g. a read task left parked forever, or a
+// shutdown that wedges) into a fast, loud failure.
+//
+// This is the deterministically-testable slice of the teardown fix. The
+// other half — a leak on a WRITE-error exit against a half-open / partitioned
+// peer — cannot be forced reliably against a live PG without a custom
+// man-in-the-middle socket, and is covered by code review (the teardown block
+// runs on every exit path, including `?`-propagated errors).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn multiplexed_clean_shutdown_completes_without_hang() {
+    let url = require_pg().await;
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    // Retain the handle so we can await the driver's own clean exit.
+    let conn_handle = compio::runtime::spawn(async move { connection.run().await });
+
+    // Use the connection so the multiplexed loop is fully live (responses
+    // queue exercised, read task streaming).
+    let rows = client.query("SELECT 42::int4 AS v", &[]).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>("v"), 42);
+
+    // Drop the client: request channel closes -> driver sends Terminate, FINs,
+    // stops the read task, and `run` returns Ok(()).
+    drop(client);
+
+    // The driver must finish on its own, promptly, with a clean Ok. A hang
+    // here (parked read task / wedged shutdown) trips the timeout.
+    let outcome = compio::time::timeout(std::time::Duration::from_secs(5), conn_handle).await;
+
+    match outcome {
+        Ok(join_result) => {
+            // Task ran to completion (not cancelled/panicked) ...
+            let run_result = join_result.expect("connection task panicked or was cancelled");
+            // ... and the multiplexed clean-shutdown path returned Ok.
+            run_result.expect("clean shutdown should resolve Ok(())");
+        }
+        Err(_) => panic!(
+            "multiplexed driver did not shut down within 5s after client drop \
+             — read task likely left parked / teardown hung"
+        ),
+    }
+}
