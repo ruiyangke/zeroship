@@ -1274,3 +1274,145 @@ mod ssrf_allowlist_tests {
         );
     }
 }
+
+// =====================================================================
+// FIX 3 — CR-CLUSTER-5: confirm R2's automatic dirty barrier covers
+// CLUSTER NODE connections.
+//
+// Audit result (documented by these regression tests): every cluster
+// command runs through `send_to_slot`, which acquires a `PooledConn`
+// from a per-node `Pool` (`pool_for(addr).acquire()`) and issues both
+// the optional `ASKING` and the command via `Client::send_recv`. R2 sets
+// `dirty=true` at the start of `send_recv` (before the write) and clears
+// it only after a full clean frame; `PooledConn::drop` then refuses to
+// return any conn that is dirty or has a non-empty rx. So a timed-out /
+// errored / cancelled cluster-node command leaves NO reusable dirty conn
+// in that node's pool — the cross-tenant desync is closed for the
+// cluster path exactly as for the single-node path. The bootstrap
+// `probe` is a one-shot local `Client` that is never pooled or reused,
+// so it has no desync surface. NO cluster-specific fix was needed.
+// =====================================================================
+#[cfg(test)]
+mod cluster_dirty_barrier_tests {
+    use super::*;
+    use compio::io::{AsyncRead, AsyncWriteExt};
+    use compio::net::TcpListener;
+    use std::time::Duration;
+
+    /// Mock node that reads one command chunk per connection and NEVER
+    /// replies (holding the socket open) — drives the command-timeout path
+    /// that leaves a conn dirty. Returns `host:port`.
+    async fn spawn_silent_node() -> NodeAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock node");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                compio::runtime::spawn(async move {
+                    let buf = vec![0u8; 1024];
+                    let _ = stream.read(buf).await;
+                    compio::time::sleep(Duration::from_secs(30)).await;
+                    drop(stream);
+                })
+                .detach();
+            }
+        })
+        .detach();
+        format!("{}:{}", addr.ip(), addr.port())
+    }
+
+    /// Mock node that replies to every command with a fixed RESP frame,
+    /// then keeps the connection open for reuse. Positive control for the
+    /// clean-conn-is-reused path. Returns `host:port`.
+    async fn spawn_replying_node(reply: &'static [u8]) -> NodeAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock node");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                compio::runtime::spawn(async move {
+                    loop {
+                        let buf = vec![0u8; 1024];
+                        let compio::BufResult(n, _b) = stream.read(buf).await;
+                        match n {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let compio::BufResult(w, _r) = stream.write_all(reply).await;
+                                if w.is_err() { break; }
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+        })
+        .detach();
+        format!("{}:{}", addr.ip(), addr.port())
+    }
+
+    /// Build a single-node cluster client whose only slot owner is `addr`
+    /// and whose allowlist trusts `addr` — so `send_to_slot` routes there.
+    fn client_routing_all_to(addr: &str) -> ClusterClient {
+        let mut topo = ClusterTopology::empty();
+        for s in topo.slots.iter_mut() {
+            *s = Some(addr.to_string());
+        }
+        let known: HashSet<NodeAddr> = [addr.to_string()].into_iter().collect();
+        ClusterClient::for_test_with_known(topo, known)
+    }
+
+    /// CR-CLUSTER-5 regression: a cluster-node command that TIMES OUT must
+    /// leave no reusable (dirty) connection in that node's pool. This
+    /// drives the exact `pool_for(addr).acquire()` → `send_recv` sequence
+    /// `send_to_slot` uses (lines 627-640), then asserts the R2 barrier
+    /// dropped the dirty conn.
+    #[compio::test]
+    async fn timed_out_cluster_node_command_leaves_no_reusable_conn() {
+        let node = spawn_silent_node().await;
+        let cc = client_routing_all_to(&node);
+
+        // Same per-node pool send_to_slot would use.
+        let pool = cc.pool_for(&node).await.expect("node pool opens (allowlisted)");
+        {
+            let mut conn = pool.acquire().await.expect("acquire node conn");
+            // Short timeout so the silent node trips it fast (rather than 5 s).
+            conn.set_cmd_timeout(Duration::from_millis(150));
+            let err = conn.get("{app}:k").await.expect_err("silent node must time out");
+            assert!(
+                matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+                "expected TimedOut on the cluster node conn, got {err:?}"
+            );
+            // The conn is dirty (a reply may still be in flight on the wire).
+            assert!(conn.is_dirty(), "timed-out cluster-node conn must be dirty");
+            // conn drops here -> R2 barrier MUST discard it (not re-pool).
+        }
+        assert_eq!(
+            pool.idle_len(), 0,
+            "R2 barrier must discard a dirty cluster-node conn (CR-CLUSTER-5)"
+        );
+        assert_eq!(pool.busy_count(), 0, "busy must settle to 0 after drop");
+    }
+
+    /// Positive control: a CLEAN cluster-node command round-trips through
+    /// the REAL `send_to_slot` path and leaves a reusable idle conn in the
+    /// node pool (the barrier only discards dirty conns).
+    #[compio::test]
+    async fn clean_cluster_node_command_reuses_conn() {
+        let node = spawn_replying_node(b"$5\r\nhello\r\n").await;
+        let cc = client_routing_all_to(&node);
+
+        // Drive the real end-to-end cluster command path.
+        let v = cc.get("{app}:k").await.expect("cluster GET");
+        assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
+
+        // The node pool must now hold the clean conn for reuse.
+        let pool = cc.pool_for(&node).await.expect("node pool");
+        assert_eq!(
+            pool.idle_len(), 1,
+            "a clean cluster-node conn must be returned to its pool for reuse"
+        );
+        // A second command reuses it (still works, no desync).
+        let v2 = cc.get("{app}:k2").await.expect("second cluster GET");
+        assert_eq!(v2.as_deref(), Some(b"hello".as_ref()));
+    }
+}
