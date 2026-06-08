@@ -1248,7 +1248,7 @@ mod ssrf_allowlist_tests {
         );
         // And no pool was cached for the rejected addr.
         assert!(
-            cc.inner.borrow().pools.get("169.254.169.254:80").is_none(),
+            !cc.inner.borrow().pools.contains_key("169.254.169.254:80"),
             "no pool may be created for a rejected addr"
         );
     }
