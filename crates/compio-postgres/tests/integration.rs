@@ -908,25 +908,30 @@ async fn update_with_returning() {
 // After `max_size` such cancellations the create-gate (`total < max_size`)
 // never fires again and every get() times out: the pool is bricked.
 //
-// This drives many on-demand connects with a 1 ms connection_timeout (far
-// shorter than a real TCP+startup handshake), so each one is cancelled
-// mid-flight. Pre-fix: leaked permits inflate `total_count()` up to max_size.
-// Post-fix: every cancelled connect releases its permit via RAII Drop, so only
-// the genuinely-held warm connection remains counted.
+// Cancellation here is driven DETERMINISTICALLY by dropping the get() future
+// mid-connect (the same mechanism `timeout` uses, and what test 26 does for
+// the waiter path), NOT by racing a 1 ms timeout against a real connect. On
+// the cooperative single-threaded runtime we poll a fresh get() future until
+// it has taken the on-demand path and reserved its permit (total_count() == 2:
+// past the `total < max_size` gate, parked in `connect_one().await`), then
+// drop it. Pre-fix the reserved `+1` leaks; post-fix the `PermitGuard` Drop
+// releases it (back to 1). No timing assumption -> no flakiness on fast hosts.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
 async fn get_cancellation_during_connect_does_not_leak_permits() {
+    use futures_util::poll;
+
     let url = require_pg().await;
     let config = compio_postgres::PoolConfig {
         max_size: 4,
         min_idle: 0,
-        // Shorter than a real TCP+startup connect, so on-demand connects get
-        // cancelled mid-flight by the pool's own timeout.
-        connection_timeout: std::time::Duration::from_millis(1),
+        // Normal timeout: cancellation is driven by dropping the future, not by
+        // the timer firing, so this value is irrelevant to the race (and safely
+        // long so a genuine acquire never times out).
+        connection_timeout: std::time::Duration::from_secs(30),
         // Large, so acquiring the already-warm connection never does a network
-        // round-trip (no validation / dirty barrier) and completes well under
-        // the 1 ms budget.
+        // round-trip (no validation / dirty barrier).
         validation_bypass: std::time::Duration::from_secs(60),
         ..compio_postgres::PoolConfig::default()
     };
@@ -938,18 +943,61 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     let c1 = pool.get().await.expect("warm connection acquires locally");
     assert_eq!(pool.total_count(), 1, "warm-up should open exactly one conn");
 
-    // Drive many cancelled on-demand connects. Each returns Err(timeout) after
-    // being dropped mid-`connect_one().await`.
-    for _ in 0..100 {
-        let r = pool.get().await;
-        assert!(
-            r.is_err(),
-            "1 ms on-demand connect should time out, not succeed"
+    // Drive many cancelled on-demand connects. Each reserves a permit then is
+    // dropped while parked in `connect_one().await`.
+    for i in 0..100 {
+        // Box::pin so an explicit `drop(fut)` genuinely drops the future (the
+        // cancellation), not just a `Pin<&mut _>` borrow of it.
+        let mut fut = Box::pin(pool.get());
+
+        // Poll until the on-demand connect has reserved its permit. The first
+        // poll pops idle (empty), passes the `total < max_size` gate, reserves
+        // (`total` -> 2) and parks in the TCP connect (Pending); bound the
+        // spins so a regression that resolves synchronously fails loudly
+        // instead of hanging.
+        let mut spins = 0;
+        loop {
+            match poll!(fut.as_mut()) {
+                std::task::Poll::Pending => {}
+                std::task::Poll::Ready(_) => {
+                    panic!("on-demand connect resolved instead of parking (iter {i})")
+                }
+            }
+            if pool.total_count() == 2 {
+                break;
+            }
+            spins += 1;
+            assert!(
+                spins < 1000,
+                "on-demand connect never reserved its permit (iter {i}, \
+                 total_count()={})",
+                pool.total_count()
+            );
+            // Let the runtime advance the parked connect's submission.
+            yield_n(1).await;
+        }
+        assert_eq!(
+            pool.total_count(),
+            2,
+            "permit must be reserved while the connect is in flight (iter {i})"
+        );
+
+        // Drop the in-flight get() future -> cancellation. The PermitGuard's
+        // Drop must release the reserved permit.
+        drop(fut);
+
+        assert_eq!(
+            pool.total_count(),
+            1,
+            "cancelled on-demand connect leaked its permit (iter {i}): \
+             total_count()={}",
+            pool.total_count()
         );
     }
 
-    // Primary invariant: `total_count()` must not exceed the genuinely-held
-    // connections (just c1). Pre-fix this climbs to max_size (4) and sticks.
+    // Primary invariant: after 100 deterministic cancellations only the
+    // genuinely-held warm connection (c1) remains counted. Pre-fix this climbs
+    // to max_size (4) and sticks.
     assert_eq!(
         pool.total_count(),
         1,
@@ -958,8 +1006,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     );
 
     // Liveness: the pool must not be bricked. Returning c1 makes a warm idle
-    // entry available; a fresh get() must reclaim it locally (no network
-    // round-trip, so it fits the 1 ms budget) and succeed.
+    // entry available; a fresh get() must reclaim it locally and succeed.
     drop(c1);
     let c2 = pool
         .get()
