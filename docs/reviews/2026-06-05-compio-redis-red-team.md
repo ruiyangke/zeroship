@@ -6,6 +6,28 @@ Overall risk posture: **high / do-not-ship-against-hostile-server.** Five confir
 
 ---
 
+## Remediation status — all CRITICALS + HIGHS fixed (2026-06-08, branch `fix/compio-redis-red-team`, not pushed)
+
+Fixed under strict TDD (RED test proving the exploit → minimal GREEN → refactor), each with a faithful regression test (synthetic mock-RESP servers for the malicious-server cases) and its own commit. Every critical/high RED was **independently re-proven** by the reviewer (revert/disable the fix → watch the test fail). Full suite after all fixes: **75 lib + 11 integration + 18 cluster** green (vs an isolated throwaway Redis on `:6390` — the shared service `:6379` was never touched); the sole dependent `plugin-kv` builds clean (no `.poison()` callers — the dead method was removed).
+
+| ID | Sev | Fix | Commit |
+| --- | --- | --- | --- |
+| CR-CLUSTER-1 | critical | `parse_redirect` rejects slot ≥ `NUM_SLOTS`; `set_slot` uses checked `get_mut` (no raw index → no remote panic) | `d9beb637` |
+| RED-POOL-1 / REDIS-DESYNC-1 / REDIS-READ-002 | critical/high | dirty-flag barrier: `Client` marks `dirty` before write / clears on clean decode; `PooledConn::drop` discards dirty-or-undrained conns; checkout discards non-clean idle; dead `poison()` deleted | `ea6ea101` (infra) + `c5144c72` |
+| REDIS-OOM-1 / REDIS-READ-001 | high | 64 MB reply cap (early reject of oversized declared bulk/aggregate length + `rx` backstop), mirroring compio-postgres `MAX_MESSAGE_SIZE` | `ea6ea101` |
+| CR-CLUSTER-2 / REDIS-SSRF-1 | high | redirect/topology connect targets allowlisted to operator seeds ∪ verified `CLUSTER SLOTS` nodes; credentialed connect to any other addr refused before any I/O | `b1c45621` |
+| RED-POOL-2 | high | RAII `BusyGuard` backs out the `busy` counter on cancellation/early-return of `acquire()` (no exhaustion DoS) | `c5144c72` |
+| CR-CLUSTER-5 | low (bonus) | confirmed R2's pool barrier already covers cluster node conns (all routed through per-node `Pool`); regression tests added | `1cf29192` |
+
+### Incidentally mitigated by the above
+- **CR-CLUSTER-3 / RED-POOL-4 / REDIS-POOLGROW-1** (unbounded per-node pool-cache growth from server-spammed MOVED addresses): the SSRF allowlist (`b1c45621`) now refuses to create a pool for any non-allowlisted address, so a malicious node can no longer inflate the `pools` map with arbitrary addresses — growth is bounded by the (operator-derived) known-node set.
+- **REDIS-TOPO-1** (slot-map poisoning by a single MOVED): a MOVED can now only repoint a slot to an *already-trusted* node (allowlist) and only to an in-range slot (CR-CLUSTER-1) — arbitrary-address poisoning is blocked.
+
+### Remaining (out of the criticals+highs scope chosen for this pass — recommended follow-ups)
+- **RED-POOL-3** (medium): no liveness/health check on checkout for a connection that died while *idle* (server-side close). The dirty barrier covers conns that errored *in use*, not idle-death; add a cheap probe or first-command reconnect-retry.
+- **REDIS-INVARIANT-1** (low): `lib.rs` header still says cluster/MOVED-ASK/pipelining are "out of scope" while shipping `ClusterClient`. Rewrite to describe the shipped surface + trust model (and track TLS as a concrete gap).
+- **REDIS-RECONNECT-1** (low) / **REDIS-CMD-1** (info): no reconnection on idle-death; `connect_tcp` skips AUTH/SELECT and the connect timeout (gate it `#[cfg(test)]`/`pub(crate)`).
+
 ## Confirmed exploitable findings
 
 ### CRITICAL
