@@ -74,8 +74,11 @@ impl AsyncWrite for Socket {
 }
 
 /// Owned read half of a split [`Socket`] — the read side of a TCP or
-/// Unix stream produced by compio's `into_split` (the fd is dup'd so the
-/// two halves can run independent io_uring submissions).
+/// Unix stream produced by compio's `into_split`. `into_split` does NOT
+/// `dup(2)`: it `clone()`s a refcounted shared fd (compio `SharedFd`), so
+/// both halves reference the SAME underlying fd. Concurrency relies on the
+/// kernel allowing concurrent read and write SQEs on one socket, not on two
+/// distinct fds. The fd is closed only when BOTH halves drop.
 #[derive(Debug)]
 pub enum SocketReadHalf {
     Tcp(OwnedReadHalf<TcpStream>),
@@ -132,8 +135,11 @@ impl SplitStream for Socket {
     type WriteHalf = SocketWriteHalf;
 
     fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
-        // A plain TCP/Unix socket always splits: compio dups the fd so
-        // the read and write halves own independent submission slots.
+        // A plain TCP/Unix socket always splits: compio `into_split`
+        // `clone()`s a refcounted shared fd (one fd, shared by both halves —
+        // NOT a `dup`). Concurrent read/write submissions are safe because the
+        // kernel permits concurrent read+write SQEs on a single socket; the fd
+        // closes only when BOTH halves drop.
         match self.0 {
             Inner::Tcp(s) => {
                 let (r, w) = s.into_split();

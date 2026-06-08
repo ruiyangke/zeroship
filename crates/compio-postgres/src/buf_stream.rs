@@ -241,11 +241,14 @@ where
 /// halves, each pollable without aliasing the other.
 ///
 /// Implemented for the plain socket (`Socket` → compio `into_split`,
-/// which dups the fd into two owned halves) and for
-/// `MaybeTlsStream::Raw`. The TLS variant deliberately does **not**
-/// split — rustls keeps shared session state behind the read and write
-/// directions, so two owned halves cannot safely run concurrent
-/// io_uring submissions against it. `try_into_split` therefore returns
+/// which `clone()`s a refcounted shared fd into two owned halves — one fd,
+/// shared, NOT a `dup`) and for `MaybeTlsStream::Raw`. The plain-socket
+/// halves run concurrent `io_uring` submissions safely because the kernel
+/// allows concurrent read+write SQEs on a single socket fd, and that fd
+/// closes only when BOTH halves drop. The TLS variant deliberately does
+/// **not** split — rustls keeps shared session state behind the read and
+/// write directions, so two owned halves cannot safely run concurrent
+/// `io_uring` submissions against it. `try_into_split` therefore returns
 /// the stream back unchanged for any unsplittable case, letting the
 /// caller fall back to the serialized loop.
 // `pub` (not `pub(crate)`) so it can appear in the bounds of the public
@@ -382,12 +385,17 @@ where
     ///
     /// The userspace `read_buf` travels with the read half and the
     /// `write_buf` with the write half, so no buffered bytes are lost
-    /// across the split. If the inner stream cannot be split (TLS), the
-    /// `BufStream` is reconstructed and returned in `Err` so the caller
-    /// can keep using the serialized loop. A non-empty `write_buf` at
-    /// split time also forces the serialized fallback: those bytes would
-    /// otherwise need re-homing onto the new write half, and in practice
-    /// the split is always taken at an idle point with an empty buffer.
+    /// across the split. The split decision depends SOLELY on whether the
+    /// inner stream is splittable: a plain socket always splits, TLS never
+    /// does. If the inner stream cannot be split (TLS), the `BufStream` is
+    /// reconstructed and returned in `Err` so the caller can keep using the
+    /// serialized loop.
+    ///
+    /// A non-empty `write_buf` does NOT force the serialized fallback — those
+    /// bytes are simply carried onto the new write half and flushed with the
+    /// next frame by [`BufWriteHalf::flush`] (which prepends them). In
+    /// practice the split is taken at an idle point right after the handshake,
+    /// where `write_buf` is empty anyway.
     #[allow(clippy::type_complexity)]
     pub fn try_into_split(
         self,

@@ -19,19 +19,29 @@
 //
 // * `run_multiplexed` — the splittable plain-socket path (always taken by
 //   the connection pool, which uses NoTls). The socket is split into two
-//   owned halves. A DEDICATED, DETACHED read task owns the read half and
-//   loops `read_backend` forever, forwarding frames over a bounded
-//   channel; the cancel-unsafe read lives entirely inside that task's
-//   own loop and is never dropped mid-submission (even on teardown the
-//   task is detached, so its current read RESOLVES — to EOF — before the
-//   task exits). The main loop owns the write half and only ever
-//   `select`s over CHANNELS (read channel, request receiver, COPY
-//   receiver, a sender's `poll_ready`) plus a fully-awaited write flush —
-//   all cancel-safe. Reads and writes therefore proceed concurrently:
-//   COPY-IN no longer deadlocks (COPY-1/IO-1), idle listeners receive
-//   notifications (IO-2), and later requests are written without waiting
-//   for earlier responses (IO-3). See `run_multiplexed` for the full
-//   FIFO / back-pressure argument.
+//   owned halves (compio `into_split` clones ONE refcounted shared fd; it
+//   does not `dup`). A DEDICATED read task owns the read half and loops
+//   `read_backend` forever, forwarding frames over a bounded channel; the
+//   cancel-unsafe read lives entirely inside that task's own loop and is
+//   never dropped mid-submission during normal operation. The read task's
+//   JoinHandle is RETAINED (not detached): on a clean close the server's FIN
+//   resolves the parked read to EOF, and on every exit path the teardown
+//   step cancels the task — compio defers the in-flight read's io_uring
+//   buffer reclaim, so cancelling is memory-safe (losing in-flight bytes is
+//   acceptable on a connection that is closing). This closes the half-open
+//   write-error leak (MUX-1).
+//
+//   The main loop owns the write half and only ever `select`s over CHANNELS
+//   (read channel, request receiver, COPY receiver, a sender's `poll_ready`)
+//   plus a write flush. Each request/COPY flush is interleaved with
+//   read-channel draining (`flush_with_read_draining`) so reads and writes
+//   make progress in the same poll, mirroring upstream tokio-postgres: the
+//   owned flush future is awaited to completion (never dropped) while inbound
+//   frames are dispatched, so a large bidirectional exchange cannot wedge the
+//   cap-1 channel (MUX-DEADLOCK-1). COPY-IN no longer deadlocks (COPY-1/IO-1),
+//   idle listeners receive notifications (IO-2), and later requests are
+//   written without waiting for earlier responses (IO-3). See
+//   `run_multiplexed` for the full FIFO / back-pressure argument.
 //
 // * `run_serialized` — the fallback for unsplittable streams (TLS:
 //   rustls keeps shared session state across read/write, so the halves
@@ -742,21 +752,36 @@ where
     /// * A dedicated **read task** owns `read_half` outright and loops
     ///   `read_backend` forever, forwarding each decoded frame over a
     ///   bounded channel. Its in-flight `read` lives entirely inside that
-    ///   task's own `loop`; nothing ever drops it mid-submission. Even on
-    ///   teardown the task is detached (never cancelled): when the main
-    ///   loop goes away, the task's *next* channel send fails and it exits
-    ///   — after the current read has fully resolved, not during it.
+    ///   task's own `loop`; nothing ever drops it mid-submission during
+    ///   normal operation. The task's `JoinHandle` is RETAINED so the teardown
+    ///   step can stop it on every exit path (see below); the only place the
+    ///   read future is ever dropped is that teardown `cancel`, where compio
+    ///   defers the `io_uring` buffer reclaim (memory-safe) and the connection
+    ///   is closing anyway so losing in-flight bytes is acceptable.
     /// * The **main loop** owns `write_half` and the request/response
     ///   bookkeeping. It only ever `select`s over **channels** (the read
     ///   channel, the request receiver, the COPY receiver, a sender's
-    ///   `poll_ready`) and `await`s the write **flush** to completion.
-    ///   Channel ops and a fully-awaited flush are cancel-safe, so the
-    ///   select dropping a not-ready branch loses nothing.
+    ///   `poll_ready`) and drives the write **flush** to completion. Channel
+    ///   ops are cancel-safe, and each request/COPY flush runs through
+    ///   [`flush_with_read_draining`], which carries the owned flush future to
+    ///   completion (never dropping it) while concurrently draining inbound
+    ///   frames — so the cancel-unsafe read is never raced here either.
     ///
-    /// Because the read task drains the socket independently, the main
-    /// loop can `flush().await` a COPY frame to completion without
-    /// deadlocking: the server's ErrorResponse is read concurrently by the
-    /// task, unblocking the server so it keeps draining our COPY data.
+    /// Because the read channel is drained concurrently with the flush (both
+    /// by the dedicated read task AND by the in-flush draining), the main loop
+    /// can flush a large request or COPY frame to completion without
+    /// deadlocking: the server's response / ErrorResponse is read
+    /// concurrently, unblocking the server so it keeps draining our data
+    /// (MUX-DEADLOCK-1).
+    ///
+    /// ## Teardown
+    ///
+    /// The loop runs inside an inner future; on EVERY exit (clean `Ok`, a
+    /// `?`-propagated write/read error) control falls through to a teardown
+    /// step that `cancel().await`s the read task and (on the clean path)
+    /// `shutdown`s the write half to emit a FIN. This guarantees the read task
+    /// and its fd clone are released even when the main loop returns for a
+    /// write reason against a half-open peer (MUX-1 / MUX-4).
     ///
     /// ## FIFO framing
     ///
