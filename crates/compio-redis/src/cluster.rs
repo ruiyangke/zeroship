@@ -16,6 +16,14 @@ pub(crate) fn parse_redirect(server_msg: &str) -> Option<Error> {
     let mut it = server_msg.splitn(3, ' ');
     let kind = it.next()?;
     let slot = it.next()?.parse::<u16>().ok()?;
+    // CR-CLUSTER-1: the slot must be a real cluster slot. A bare u16 admits
+    // 0..=65535, but the slot map is exactly NUM_SLOTS (16384) long, so an
+    // out-of-range value like 40000 would later index-panic in `set_slot`.
+    // Reject it here so an out-of-range MOVED/ASK is treated as a
+    // non-redirect server error, never an Error::Moved/Ask.
+    if slot as usize >= NUM_SLOTS {
+        return None;
+    }
     let addr = it.next()?.to_string();
     match kind {
         "MOVED" => Some(Error::Moved { slot, addr }),
@@ -77,6 +85,21 @@ mod redirect_tests {
     fn parse_slot_out_of_u16_returns_none() {
         // 99999 overflows u16.
         assert!(parse_redirect("MOVED 99999 127.0.0.1:7000").is_none());
+    }
+
+    #[test]
+    fn parse_slot_in_u16_but_out_of_cluster_range_returns_none() {
+        // CR-CLUSTER-1: 40000 is a valid u16 but >= NUM_SLOTS (16384). A
+        // bare u16 parse would accept it and the MOVED arm would then do a
+        // RAW index into the 16384-long slot Vec → out-of-bounds panic. The
+        // parser MUST reject any slot >= NUM_SLOTS so an out-of-range
+        // redirect never becomes an Error::Moved/Ask.
+        assert!(parse_redirect("MOVED 40000 6.6.6.6:6379").is_none());
+        assert!(parse_redirect("ASK 40000 6.6.6.6:6379").is_none());
+        // Boundary: NUM_SLOTS itself (16384) is out of range; the last
+        // valid slot (16383) is still a redirect.
+        assert!(parse_redirect("MOVED 16384 1.2.3.4:6379").is_none());
+        assert!(parse_redirect("MOVED 16383 1.2.3.4:6379").is_some());
     }
 
     #[test]
@@ -488,7 +511,34 @@ impl ClusterClient {
     /// arrives with a more recent mapping than our cache.
     fn set_slot(&self, slot: u16, addr: &str) {
         let mut b = self.inner.borrow_mut();
-        b.topology.slots[slot as usize] = Some(addr.to_string());
+        // CR-CLUSTER-1: checked write (mirrors the safe `.get()` in
+        // `node_for_slot`). An out-of-range slot is silently ignored rather
+        // than panicking the worker via a raw `Vec` index. `parse_redirect`
+        // already bounds the slot, so this is defense in depth.
+        if let Some(s) = b.topology.slots.get_mut(slot as usize) {
+            *s = Some(addr.to_string());
+        }
+    }
+
+    /// Test-only constructor: build a client around a given topology with
+    /// an empty pool cache and no credentials. Lets unit tests drive
+    /// `set_slot` / routing without a live cluster.
+    #[cfg(test)]
+    pub(crate) fn for_test(topology: ClusterTopology) -> Self {
+        let inner = Inner {
+            topology,
+            pools: HashMap::new(),
+            pool_size: 1,
+            password: None,
+            db: None,
+        };
+        Self { inner: Rc::new(RefCell::new(inner)) }
+    }
+
+    /// Test-only: read the owner currently recorded for a slot.
+    #[cfg(test)]
+    pub(crate) fn slot_owner(&self, slot: u16) -> Option<String> {
+        self.inner.borrow().topology.node_for_slot(slot).cloned()
     }
 
     /// Send an encoded command, routed to the owner of the slot of
@@ -972,5 +1022,39 @@ mod connect_unit_tests {
             Error::ClusterBootstrap(msg) => assert!(msg.contains("seed")),
             other => panic!("expected ClusterBootstrap, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod set_slot_tests {
+    use super::*;
+
+    #[test]
+    fn set_slot_in_range_updates_owner() {
+        // Positive control: an in-range slot write lands.
+        let cc = ClusterClient::for_test(ClusterTopology::empty());
+        cc.set_slot(100, "127.0.0.1:7000");
+        assert_eq!(cc.slot_owner(100).as_deref(), Some("127.0.0.1:7000"));
+    }
+
+    #[test]
+    fn set_slot_out_of_range_does_not_panic() {
+        // CR-CLUSTER-1: a MOVED with slot 40000 reaches `set_slot(40000, …)`.
+        // Pre-fix the raw index `slots[40000] = …` into a 16384-long Vec
+        // panics: "index out of bounds: the len is 16384 but the index is
+        // 40000". Post-fix the checked write silently ignores it.
+        let cc = ClusterClient::for_test(ClusterTopology::empty());
+        cc.set_slot(40000, "6.6.6.6:6379"); // must NOT panic
+        // The out-of-range write is dropped; no in-range slot is corrupted.
+        assert!(cc.slot_owner(0).is_none());
+        assert!(cc.slot_owner(16383).is_none());
+    }
+
+    #[test]
+    fn set_slot_at_num_slots_boundary_is_ignored() {
+        // Exactly NUM_SLOTS (16384) is the first invalid index.
+        let cc = ClusterClient::for_test(ClusterTopology::empty());
+        cc.set_slot(NUM_SLOTS as u16, "6.6.6.6:6379"); // 16384, must NOT panic
+        assert!(cc.slot_owner(16383).is_none());
     }
 }
