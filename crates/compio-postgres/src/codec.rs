@@ -14,9 +14,8 @@
 // still guard against an attacker-controlled length field.
 
 use crate::Error;
-use crate::buf_stream::BufStream;
+use crate::buf_stream::{ReadFramer, WriteFramer};
 use bytes::{Buf, Bytes, BytesMut};
-use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend;
 use postgres_protocol::message::frontend::CopyData;
@@ -79,9 +78,9 @@ impl FallibleIterator for BackendMessages {
 /// (Parse + Bind + Describe + Execute + Sync) into one flush, matching
 /// tokio-postgres's `Framed::send` + `Sink::poll_flush` split.
 #[allow(dead_code)]
-pub fn write_frontend<S>(stream: &mut BufStream<S>, msg: FrontendMessage) -> Result<(), Error>
+pub fn write_frontend<S>(stream: &mut S, msg: FrontendMessage) -> Result<(), Error>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: WriteFramer + ?Sized,
 {
     let dst = stream.write_buf_mut();
     match msg {
@@ -103,9 +102,9 @@ where
 /// `BytesMut` slice — the stream's read buffer is drained exactly that
 /// many bytes via `split_to`, so subsequent reads start fresh.
 #[allow(dead_code)]
-pub async fn read_backend<S>(stream: &mut BufStream<S>) -> Result<BackendMessage, Error>
+pub async fn read_backend<S>(stream: &mut S) -> Result<BackendMessage, Error>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: ReadFramer + ?Sized,
 {
     loop {
         // Ensure we have at least one full message header (1-byte tag + 4-byte length).

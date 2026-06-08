@@ -279,40 +279,11 @@ where
             match msg {
                 Message::RowDescription(_) => {}
                 Message::DataRow(row) => {
-                    let buf = row.buffer();
-                    // 4 fields per the spec, encoded as length-prefixed
-                    // strings. Parse positionally.
-                    let mut idx = 0usize;
-                    let n = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-                    idx += 2;
-                    let mut fields: Vec<Option<&str>> = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let len = i32::from_be_bytes([
-                            buf[idx],
-                            buf[idx + 1],
-                            buf[idx + 2],
-                            buf[idx + 3],
-                        ]);
-                        idx += 4;
-                        if len < 0 {
-                            fields.push(None);
-                        } else {
-                            let end = idx + len as usize;
-                            fields.push(Some(
-                                std::str::from_utf8(&buf[idx..end])
-                                    .map_err(|e| Error::parse(std::io::Error::other(e)))?,
-                            ));
-                            idx = end;
-                        }
-                    }
-                    systemid = fields.first().and_then(|f| *f).unwrap_or("").to_string();
-                    timeline = fields
-                        .get(1)
-                        .and_then(|f| *f)
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    xlogpos = fields.get(2).and_then(|f| *f).unwrap_or("").to_string();
-                    dbname = fields.get(3).and_then(|f| *f).map(|s| s.to_string());
+                    let parsed = parse_identify_system_row(row.buffer())?;
+                    systemid = parsed.systemid;
+                    timeline = parsed.timeline;
+                    xlogpos = parsed.xlogpos;
+                    dbname = parsed.dbname;
                 }
                 Message::CommandComplete(_) => {}
                 Message::ReadyForQuery(_) => break,
@@ -373,8 +344,7 @@ where
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                     return Ok(ReplicationStream {
                         stream: self.stream,
-                        last_received_lsn: parse_lsn(opts.start_lsn).unwrap_or(0),
-                        last_processed_lsn: parse_lsn(opts.start_lsn).unwrap_or(0),
+                        lsn: LsnTracker::new(parse_lsn(opts.start_lsn).unwrap_or(0)),
                     });
                 }
                 ERROR_RESPONSE_TAG => {
@@ -383,10 +353,7 @@ where
                     body.put_u8(ERROR_RESPONSE_TAG);
                     body.put_u32(header.length);
                     body.extend_from_slice(&bytes);
-                    return Err(Error::io(std::io::Error::other(format!(
-                        "START_REPLICATION ErrorResponse: {} bytes",
-                        body.len()
-                    ))));
+                    return Err(error_from_error_response_body(body));
                 }
                 NOTICE_RESPONSE_TAG => {
                     // Drop the notice payload silently.
@@ -447,15 +414,69 @@ pub struct StartReplicationOptions<'a> {
 /// agnostic to the logical-decoding plugin.
 pub struct ReplicationStream<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
-    /// Highest LSN seen on the wire (the `wal_end` field of either
-    /// XLogData or PrimaryKeepalive). The "received" position the
-    /// next StandbyStatusUpdate will report — meaning "we have this
-    /// many bytes buffered or processed".
-    last_received_lsn: u64,
-    /// Highest LSN the caller has confirmed processed (advances on
-    /// [`advance_lsn`](Self::advance_lsn)). The "flushed" position
-    /// the slot will retain WAL up to.
-    last_processed_lsn: u64,
+    /// The two StandbyStatusUpdate positions (received vs flushed).
+    lsn: LsnTracker,
+}
+
+/// Tracks the two distinct LSN positions a logical-replication client
+/// reports back to the walsender in a `StandbyStatusUpdate`:
+///
+/// - `received` — the highest LSN we've *seen on the wire* (the
+///   `wal_end` of an XLogData / PrimaryKeepalive). Reported as
+///   `write_lsn`.
+/// - `processed` — the highest LSN the caller has *durably handled*
+///   (advanced via [`ReplicationStream::advance_lsn`]). Reported as both
+///   `flush_lsn` and `apply_lsn`.
+///
+/// Keeping them separate matters: `flush_lsn` is a *durability promise*
+/// — Postgres recycles WAL and advances the slot's `confirmed_flush`
+/// up to it. Conflating "received" (merely buffered) with "flushed"
+/// (durably processed) would let the server discard WAL the consumer
+/// hasn't actually persisted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LsnTracker {
+    received: u64,
+    processed: u64,
+}
+
+impl LsnTracker {
+    /// Seed both positions from the resume LSN passed to
+    /// `START_REPLICATION`.
+    const fn new(start_lsn: u64) -> Self {
+        Self {
+            received: start_lsn,
+            processed: start_lsn,
+        }
+    }
+
+    /// Record that `lsn` has been seen on the wire (`XLogData` /
+    /// `PrimaryKeepalive` `wal_end`). Advances ONLY the received
+    /// position; merely seeing bytes is not a durability promise.
+    /// Monotonic: never regresses.
+    const fn observe_received(&mut self, lsn: u64) {
+        if lsn > self.received {
+            self.received = lsn;
+        }
+    }
+
+    /// Record that the caller has durably processed up to `lsn`.
+    /// Advances ONLY the flush position. Monotonic: never regresses.
+    const fn advance_processed(&mut self, lsn: u64) {
+        if lsn > self.processed {
+            self.processed = lsn;
+        }
+    }
+
+    /// The `(write, flush, apply)` triple for a `StandbyStatusUpdate`.
+    ///
+    /// `write` reports the received position (highest seen on the wire);
+    /// `flush` and `apply` report the durably-processed position. They
+    /// are deliberately NOT collapsed into one value: `flush` is the
+    /// WAL-recycling promise, and reporting the received position there
+    /// would let the server discard WAL the consumer hasn't persisted.
+    const fn standby_lsns(&self) -> (u64, u64, u64) {
+        (self.received, self.processed, self.processed)
+    }
 }
 
 /// One frame off the CopyBoth wire.
@@ -528,10 +549,9 @@ where
                             ]);
                             // The XLogData "wal_end" advertises how far
                             // along the server has decoded; we track it
-                            // for StandbyStatusUpdate reporting.
-                            if wal_end > self.last_received_lsn {
-                                self.last_received_lsn = wal_end;
-                            }
+                            // as the "received" position for
+                            // StandbyStatusUpdate reporting.
+                            self.lsn.observe_received(wal_end);
                             let payload = body.slice(25..);
                             return Ok(Some(ReplicationMessage::XLogData {
                                 wal_start,
@@ -559,9 +579,7 @@ where
                                 body[15], body[16],
                             ]);
                             let reply_requested = body[17] != 0;
-                            if wal_end > self.last_received_lsn {
-                                self.last_received_lsn = wal_end;
-                            }
+                            self.lsn.observe_received(wal_end);
                             return Ok(Some(ReplicationMessage::PrimaryKeepalive {
                                 wal_end,
                                 timestamp,
@@ -603,35 +621,41 @@ where
     /// Highest WAL LSN seen on the wire so far (advances as the
     /// stream yields XLogData / PrimaryKeepalive).
     pub fn last_received_lsn(&self) -> u64 {
-        self.last_received_lsn
+        self.lsn.received
     }
 
     /// Highest WAL LSN the caller has confirmed it processed —
     /// reported as `flush_lsn` in StandbyStatusUpdate frames.
     pub fn last_processed_lsn(&self) -> u64 {
-        self.last_processed_lsn
+        self.lsn.processed
     }
 
-    /// Mark `lsn` as fully processed. The next StandbyStatusUpdate
-    /// will surface this as the `flush_lsn`, letting Postgres recycle
-    /// WAL up to it.
+    /// Mark `lsn` as durably processed. The next StandbyStatusUpdate
+    /// surfaces this as the `flush_lsn` (and `apply_lsn`), letting
+    /// Postgres recycle WAL and advance the slot's `confirmed_flush`
+    /// up to it.
+    ///
+    /// This advances ONLY the flush position; the received position
+    /// (`write_lsn`) tracks `wal_end` independently in
+    /// [`next`](Self::next). Fully realizing the durability guarantee
+    /// therefore requires the CONSUMER to call `advance_lsn` only
+    /// *after* a durable hand-off (persisted / acknowledged), never on
+    /// mere receipt — a concern that lives in the consumer
+    /// (`wal_consumer.rs`), intentionally out of scope of this driver.
     pub fn advance_lsn(&mut self, lsn: u64) {
-        if lsn > self.last_processed_lsn {
-            self.last_processed_lsn = lsn;
-        }
-        if lsn > self.last_received_lsn {
-            self.last_received_lsn = lsn;
-        }
+        self.lsn.advance_processed(lsn);
     }
 
     /// Send a `StandbyStatusUpdate` frame upstream.
     ///
-    /// The frame's three LSN slots (`write`, `flush`, `apply`) are
-    /// reported with the same value — the highest LSN the caller has
-    /// confirmed via [`advance_lsn`](Self::advance_lsn). pgoutput
-    /// doesn't currently distinguish them, and conflating them keeps
-    /// the slot retention conservative (Postgres releases WAL up to
-    /// the lowest of the three).
+    /// The `write_lsn` slot reports the highest LSN seen on the wire
+    /// (the received position, advanced in [`next`](Self::next)); the
+    /// `flush_lsn` and `apply_lsn` slots report the durably-processed
+    /// position (advanced via [`advance_lsn`](Self::advance_lsn)).
+    /// These are kept distinct on purpose: `flush_lsn` is a durability
+    /// promise that lets the server recycle WAL, so reporting the
+    /// received position there would let Postgres discard WAL the
+    /// consumer hasn't actually persisted.
     ///
     /// `reply_requested = true` makes the server reply with an
     /// immediate PrimaryKeepalive — typically left `false`.
@@ -640,8 +664,8 @@ where
         reply_requested: bool,
     ) -> Result<(), Error> {
         let now = postgres_microseconds_since_epoch();
-        let lsn = self.last_processed_lsn.max(self.last_received_lsn);
-        encode_standby_status_update(&mut self.stream, lsn, lsn, lsn, now, reply_requested)?;
+        let (write, flush, apply) = self.lsn.standby_lsns();
+        encode_standby_status_update(&mut self.stream, write, flush, apply, now, reply_requested)?;
         self.stream.flush().await
     }
 }
@@ -759,6 +783,98 @@ where
     dst.put_i64(timestamp);
     dst.put_u8(if reply_requested { 1 } else { 0 });
     Ok(())
+}
+
+/// Turn a reconstructed `ErrorResponse` wire message (`E` tag + 4-byte
+/// big-endian length + field payload) into an [`Error`].
+///
+/// Runs `postgres_protocol`'s framer over `body` so the SQLSTATE,
+/// severity, and message survive as a [`crate::error::DbError`] — the
+/// same shape the `IDENTIFY_SYSTEM` loop produces via
+/// `Message::ErrorResponse(body) => Error::db(body)`. A byte count alone
+/// (the former behaviour) made `START_REPLICATION` failures
+/// undebuggable. If the framer can't parse the bytes, fall back to a
+/// parse error rather than silently dropping the failure.
+fn error_from_error_response_body(mut body: BytesMut) -> Error {
+    match Message::parse(&mut body) {
+        Ok(Some(Message::ErrorResponse(b))) => Error::db(b),
+        _ => Error::parse(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "START_REPLICATION: malformed ErrorResponse",
+        )),
+    }
+}
+
+/// Parse the body of the `IDENTIFY_SYSTEM` `DataRow` into an
+/// [`IdentifySystem`].
+///
+/// `buf` is the raw `DataRow` body: a `u16` field count followed by that
+/// many length-prefixed fields (`i32` length, then `length` bytes; a
+/// negative length is SQL NULL). The four fields, in order, are
+/// `systemid`, `timeline`, `xlogpos`, `dbname` (`dbname` is NULL when
+/// the connection isn't bound to a database).
+///
+/// Every read is bounds-checked: a truncated or malformed row yields an
+/// `Err` (mirroring the pgoutput decoder's `read_u8/u16/u32` posture)
+/// instead of indexing out of bounds and panicking the replication
+/// task.
+fn parse_identify_system_row(buf: &[u8]) -> Result<IdentifySystem, Error> {
+    // 4 fields per the spec, encoded as length-prefixed strings. Parse
+    // positionally, bounds-checking each read.
+    let mut idx = 0usize;
+    let n = read_u16_be(buf, &mut idx)? as usize;
+    let mut fields: Vec<Option<&str>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = read_i32_be(buf, &mut idx)?;
+        if len < 0 {
+            fields.push(None);
+        } else {
+            let end = idx.checked_add(len as usize).ok_or_else(eof_identify_row)?;
+            let slice = buf.get(idx..end).ok_or_else(eof_identify_row)?;
+            fields.push(Some(
+                std::str::from_utf8(slice).map_err(|e| Error::parse(std::io::Error::other(e)))?,
+            ));
+            idx = end;
+        }
+    }
+
+    Ok(IdentifySystem {
+        systemid: fields.first().and_then(|f| *f).unwrap_or("").to_string(),
+        timeline: fields
+            .get(1)
+            .and_then(|f| *f)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        xlogpos: fields.get(2).and_then(|f| *f).unwrap_or("").to_string(),
+        dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
+    })
+}
+
+/// Read a big-endian `u16` at `*idx`, advancing `*idx` by 2. Returns an
+/// `UnexpectedEof` parse error if fewer than 2 bytes remain.
+fn read_u16_be(buf: &[u8], idx: &mut usize) -> Result<u16, Error> {
+    let end = idx.checked_add(2).ok_or_else(eof_identify_row)?;
+    let slice = buf.get(*idx..end).ok_or_else(eof_identify_row)?;
+    *idx = end;
+    Ok(u16::from_be_bytes([slice[0], slice[1]]))
+}
+
+/// Read a big-endian `i32` at `*idx`, advancing `*idx` by 4. Returns an
+/// `UnexpectedEof` parse error if fewer than 4 bytes remain.
+fn read_i32_be(buf: &[u8], idx: &mut usize) -> Result<i32, Error> {
+    let end = idx.checked_add(4).ok_or_else(eof_identify_row)?;
+    let slice = buf.get(*idx..end).ok_or_else(eof_identify_row)?;
+    *idx = end;
+    Ok(i32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// The `UnexpectedEof` error returned when the `IDENTIFY_SYSTEM`
+/// `DataRow` body is truncated mid-field.
+fn eof_identify_row() -> Error {
+    Error::parse(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "IDENTIFY_SYSTEM DataRow truncated",
+    ))
 }
 
 /// Parse a Postgres text LSN like `"0/16B3750"` into a `u64`.
@@ -1193,7 +1309,6 @@ pub mod pgoutput {
 
     #[cfg(test)]
     pub(crate) mod encode {
-        use super::*;
         use bytes::BufMut;
 
         pub fn relation(
@@ -1313,6 +1428,177 @@ pub mod pgoutput {
 mod tests {
     use super::*;
     use pgoutput::{PgOutputMessage, TupleColumn};
+
+    /// Build the body of an `IDENTIFY_SYSTEM` `DataRow`: a `u16` field
+    /// count followed by length-prefixed fields (`None` = SQL NULL,
+    /// encoded as length -1).
+    fn identify_row_body(fields: &[Option<&str>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&u16::try_from(fields.len()).unwrap().to_be_bytes());
+        for f in fields {
+            match f {
+                None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(s) => {
+                    buf.extend_from_slice(&i32::try_from(s.len()).unwrap().to_be_bytes());
+                    buf.extend_from_slice(s.as_bytes());
+                }
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn identify_row_parses_well_formed() {
+        // 4 fields: systemid, timeline, xlogpos, dbname.
+        let buf = identify_row_body(&[
+            Some("7012345678901234567"),
+            Some("3"),
+            Some("0/16B3750"),
+            Some("zeroship"),
+        ]);
+        let got = parse_identify_system_row(&buf).expect("well-formed row must parse");
+        assert_eq!(got.systemid, "7012345678901234567");
+        assert_eq!(got.timeline, 3);
+        assert_eq!(got.xlogpos, "0/16B3750");
+        assert_eq!(got.dbname.as_deref(), Some("zeroship"));
+
+        // dbname NULL (physical replication connection) must parse to None.
+        let buf = identify_row_body(&[Some("701"), Some("1"), Some("0/0"), None]);
+        let got = parse_identify_system_row(&buf).expect("row with NULL dbname must parse");
+        assert_eq!(got.dbname, None);
+        assert_eq!(got.timeline, 1);
+    }
+
+    #[test]
+    fn identify_row_truncated_is_error_not_panic() {
+        // Field count claims 4, but the buffer ends immediately. The
+        // raw-indexing parser indexes buf[2..] out of bounds and panics;
+        // the bounds-checked parser must return Err.
+        let claims_four_no_body = [0x00u8, 0x04];
+        assert!(
+            parse_identify_system_row(&claims_four_no_body).is_err(),
+            "truncated row (count only) must be Err, not panic"
+        );
+
+        // Field count 1, then a length prefix that runs off the end
+        // (only 2 of the 4 length bytes present).
+        let truncated_len = [0x00u8, 0x01, 0x00, 0x00];
+        assert!(
+            parse_identify_system_row(&truncated_len).is_err(),
+            "truncated length prefix must be Err, not panic"
+        );
+
+        // Field count 1, length 10, but only 3 payload bytes follow.
+        let mut truncated_payload = Vec::new();
+        truncated_payload.extend_from_slice(&1u16.to_be_bytes());
+        truncated_payload.extend_from_slice(&10i32.to_be_bytes());
+        truncated_payload.extend_from_slice(b"abc");
+        assert!(
+            parse_identify_system_row(&truncated_payload).is_err(),
+            "field length exceeding remaining bytes must be Err, not panic"
+        );
+
+        // Completely empty buffer: even the u16 field count can't be read.
+        let empty: [u8; 0] = [];
+        assert!(
+            parse_identify_system_row(&empty).is_err(),
+            "empty row body must be Err, not panic"
+        );
+    }
+
+    /// Build a full `ErrorResponse` wire message: `E` tag + 4-byte
+    /// big-endian length + field payload, where each field is
+    /// `type-byte + NUL-terminated string`, terminated by a single
+    /// `0x00`. The length field counts itself (4 bytes) + the payload,
+    /// but NOT the leading tag.
+    fn error_response_message(fields: &[(u8, &str)]) -> BytesMut {
+        let mut payload = Vec::new();
+        for (ty, val) in fields {
+            payload.push(*ty);
+            payload.extend_from_slice(val.as_bytes());
+            payload.push(0);
+        }
+        payload.push(0); // field-list terminator
+
+        let mut msg = BytesMut::new();
+        msg.put_u8(ERROR_RESPONSE_TAG);
+        msg.put_u32(u32::try_from(payload.len() + 4).unwrap());
+        msg.extend_from_slice(&payload);
+        msg
+    }
+
+    #[test]
+    fn start_replication_error_response_surfaces_dberror() {
+        // A walsender refusing START_REPLICATION (e.g. the role lacks
+        // REPLICATION) sends an ErrorResponse carrying SQLSTATE + message.
+        // The driver must surface that as a DbError, not a byte count.
+        let body = error_response_message(&[
+            (b'S', "ERROR"),
+            (b'V', "ERROR"),
+            (b'C', "42501"),
+            (b'M', "permission denied to start WAL sender"),
+        ]);
+        let err = error_from_error_response_body(body);
+
+        let db = err
+            .as_db_error()
+            .expect("START_REPLICATION ErrorResponse must surface as a DbError");
+        assert_eq!(db.code().code(), "42501");
+        assert_eq!(db.message(), "permission denied to start WAL sender");
+
+        // The convenience accessor on Error must also expose the SQLSTATE.
+        assert_eq!(
+            err.code().map(crate::error::SqlState::code),
+            Some("42501")
+        );
+    }
+
+    #[test]
+    fn lsn_tracker_reports_flush_below_received() {
+        // The walsender protocol distinguishes write (received) from
+        // flush (durably processed). A careful caller that has *seen*
+        // up to LSN 100 on the wire but only durably *flushed* 50 must
+        // be able to report write=100, flush=50, apply=50 — otherwise
+        // Postgres would recycle WAL the consumer hasn't persisted.
+        let mut t = LsnTracker::new(0);
+        t.observe_received(100);
+        t.advance_processed(50);
+
+        assert_eq!(
+            t.standby_lsns(),
+            (100, 50, 50),
+            "write must reflect received (100); flush/apply must reflect processed (50)"
+        );
+        assert_eq!(t.received, 100);
+        assert_eq!(t.processed, 50);
+    }
+
+    #[test]
+    fn lsn_tracker_is_monotonic() {
+        let mut t = LsnTracker::new(0);
+        t.observe_received(100);
+        t.advance_processed(50);
+
+        // Advancing processed backwards must not regress.
+        t.advance_processed(40);
+        assert_eq!(t.processed, 50, "advance_processed must not regress");
+
+        // Observing an older received must not regress, and must NOT
+        // drag the (already-higher) processed position back.
+        t.advance_processed(80);
+        t.observe_received(70);
+        assert_eq!(t.received, 100, "observe_received must not regress");
+        assert_eq!(t.processed, 80, "observe_received must not touch processed");
+        assert_eq!(t.standby_lsns(), (100, 80, 80));
+
+        // A fresh tracker seeded at a non-zero resume LSN reports it in
+        // all three slots until something advances.
+        let seeded = LsnTracker::new(0x016B_3750);
+        assert_eq!(
+            seeded.standby_lsns(),
+            (0x016B_3750, 0x016B_3750, 0x016B_3750)
+        );
+    }
 
     #[test]
     fn parse_lsn_round_trip() {
