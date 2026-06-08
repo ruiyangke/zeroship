@@ -495,6 +495,43 @@ impl Error {
     }
 }
 
+/// Map a terminal read event (`Err` frame or channel-closed) observed by the
+/// multiplexed loop into the `Result` the loop should return. Shared by the
+/// main `select`'s `Read` arms and the in-flush read-draining
+/// ([`flush_with_read_draining`]) so both classify EOF / error / close
+/// identically.
+///
+/// `Some(Err(e))` -> clean close (`Ok(())`) iff EOF with the response queue
+/// drained, else propagate `e`. `None` (channel closed without a terminal
+/// error) -> clean iff nothing is in flight, else `Error::closed()`. A
+/// `Some(Ok(_))` never reaches here (those frames are dispatched inline).
+fn classify_read_terminal(
+    terminal: Option<Result<BackendMessage, Error>>,
+    responses: &VecDeque<Response>,
+) -> Result<(), Error> {
+    match terminal {
+        Some(Err(e)) => {
+            // EOF with the response queue drained is a clean close; otherwise
+            // it is a genuine error (IO-4: EOF mid-response is always an error
+            // on the multiplexed path).
+            if is_eof(&e) && responses.is_empty() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+        Some(Ok(_)) | None => {
+            // The read task ended (channel closed) without a terminal error.
+            // Clean only if nothing is in flight.
+            if responses.is_empty() {
+                Ok(())
+            } else {
+                Err(Error::closed())
+            }
+        }
+    }
+}
+
 /// What the main multiplexed loop's per-iteration `select` resolved to.
 /// Exactly one event is returned per wake.
 enum MuxEvent {
@@ -507,6 +544,129 @@ enum MuxEvent {
     Request(Option<Request>),
     /// A COPY-IN frame was dequeued, or the COPY stream ended (`None`).
     CopyFrame(Option<FrontendMessage>),
+}
+
+/// Flush `write_half` to completion while concurrently draining the read
+/// channel — the cancel-safe interleave that keeps the multiplexed loop's
+/// "reads and writes proceed in the same poll" property even across a large
+/// write (MUX-DEADLOCK-1).
+///
+/// A bare `write_half.flush().await` could deadlock: with the cap-1 read
+/// channel, a write larger than the kernel send buffer issued while the
+/// server is simultaneously flooding a large response wedges in the cycle
+/// flush-blocked -> server-recv-full -> server-send-blocked -> client-not-
+/// reading -> read-task-send-blocked -> main-loop-not-consuming. Upstream
+/// tokio-postgres avoids this by polling read and write in the same poll;
+/// this helper restores that by draining inbound frames (via the SAME
+/// `Dispatch` / `handle_message` / `pending_responses` machinery the main
+/// loop uses) until the flush resolves.
+///
+/// Cancel-safety: the owned `flush` future is polled to completion and is
+/// NEVER dropped mid-submission — the never-drop invariant holds (it borrows
+/// only `write_half`; the read-draining touches only the disjoint response
+/// state, so there is no borrow conflict and no `read_backend` future is
+/// raced here either).
+///
+/// FIFO is preserved: a stashed batch is delivered before any further inbound
+/// frame is dispatched (the read branch is gated on `pending_responses`
+/// being empty, exactly as in the main loop), and pending delivery is driven
+/// concurrently so the socket keeps draining even when a consumer is briefly
+/// behind.
+///
+/// Returns once the flush resolves. If a terminal read event (`Err` /
+/// channel-closed) arrived from the read task during the flush, it is
+/// returned as the second tuple element for the caller to act on with the
+/// same logic as the main loop's `Read` arms; further read polling stops
+/// after the first terminal event (but the flush is still driven to
+/// completion, and any already-stashed batches keep draining).
+#[allow(clippy::type_complexity)]
+async fn flush_with_read_draining<W>(
+    write_half: &mut BufWriteHalf<W>,
+    read_rx: &mut mpsc::Receiver<Result<BackendMessage, Error>>,
+    parameters: &mut HashMap<String, String>,
+    responses: &mut VecDeque<Response>,
+    pending_responses: &mut VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)>,
+    async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
+) -> (
+    Result<(), Error>,
+    Option<Option<Result<BackendMessage, Error>>>,
+)
+where
+    W: AsyncWrite + Unpin,
+{
+    // The cancel-unsafe primitive is the socket read in the detached read
+    // task; here we only own the WRITE flush plus channel ops, all of which
+    // are safe to poll repeatedly. The flush is the only future we hold
+    // across polls and we never drop it before it resolves.
+    let flush = write_half.flush();
+    futures_util::pin_mut!(flush);
+
+    // At most one terminal read event (Err / closed) is recorded; once seen
+    // we stop polling the read channel but keep driving the flush.
+    let mut read_terminal: Option<Option<Result<BackendMessage, Error>>> = None;
+
+    let flush_result = poll_fn(|cx| -> Poll<Result<(), Error>> {
+        // (1) Drive the flush first; finishing it is the whole point.
+        if let Poll::Ready(res) = flush.as_mut().poll(cx) {
+            return Poll::Ready(res);
+        }
+
+        // Keep making inbound progress until the flush is ready. Loop so a
+        // delivered batch immediately frees the FIFO gate for the next read
+        // within this single wake.
+        loop {
+            // (2) Deliver a stashed batch whose sender now has room. Honour
+            // the FIFO gate: while a batch is stashed, no new inbound frame
+            // may be dispatched ahead of it.
+            if let Some((sender, _)) = pending_responses.front_mut() {
+                match sender.poll_ready(cx) {
+                    Poll::Ready(_) => {
+                        // Err (consumer hung up) still counts as "ready":
+                        // start_send below is a no-op drop in that case.
+                        if let Some((mut sender, messages)) = pending_responses.pop_front() {
+                            let _ = sender.start_send(messages);
+                        }
+                        continue;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            // (3) FIFO gate clear (no stashed batch) -> dispatch one inbound
+            // frame, unless we already saw a terminal read event.
+            if read_terminal.is_none() {
+                match read_rx.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(msg))) => {
+                        if let Err(e) = (Dispatch {
+                            parameters,
+                            responses,
+                            pending_responses,
+                            async_sender,
+                        })
+                        .handle_message(msg)
+                        {
+                            // A dispatch error is terminal; surface it after
+                            // the flush completes (do not drop the flush).
+                            read_terminal = Some(Some(Err(e)));
+                        }
+                        continue;
+                    }
+                    Poll::Ready(other) => {
+                        // Err frame or channel-closed: record and stop reading.
+                        read_terminal = Some(other);
+                        continue;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            // Flush still pending, nothing left to drain this wake.
+            return Poll::Pending;
+        }
+    })
+    .await;
+
+    (flush_result, read_terminal)
 }
 
 impl<S, T> Connection<S, T>
@@ -740,23 +900,10 @@ where
                     }
                     .handle_message(msg)?;
                 }
-                MuxEvent::Read(Some(Err(e))) => {
-                    // EOF with the response queue drained is a clean close;
-                    // otherwise it is a genuine error. (IO-4: the dead
-                    // `&& is_empty()` conjunct from the serialized loop is
-                    // gone — EOF mid-response is always an error here.)
-                    if is_eof(&e) && responses.is_empty() {
-                        return Ok(());
-                    }
-                    return Err(e);
-                }
-                MuxEvent::Read(None) => {
-                    // The read task ended without forwarding a terminal error
-                    // (channel closed). Clean only if nothing is in flight.
-                    if responses.is_empty() {
-                        return Ok(());
-                    }
-                    return Err(Error::closed());
+                MuxEvent::Read(terminal @ (Some(Err(_)) | None)) => {
+                    // EOF / error / channel-close classification, shared with
+                    // the in-flush read-draining path.
+                    return classify_read_terminal(terminal, &responses);
                 }
 
                 // ---------- Stashed batch deliverable ----------
@@ -776,10 +923,25 @@ where
                     match request.messages {
                         RequestMessages::Single(msg) => {
                             write_frontend(&mut write_half, msg)?;
-                            // Flush to completion: cancel-safe (we await it
-                            // fully). The read task keeps draining the socket
-                            // meanwhile, so this never deadlocks.
-                            write_half.flush().await?;
+                            // Flush to completion while concurrently draining
+                            // the read channel (cancel-safe: the flush future
+                            // is never dropped). Interleaving read+write in the
+                            // same poll is what prevents a large bidirectional
+                            // exchange from wedging the cap-1 channel
+                            // (MUX-DEADLOCK-1).
+                            let (res, terminal) = flush_with_read_draining(
+                                &mut write_half,
+                                &mut read_rx,
+                                &mut parameters,
+                                &mut responses,
+                                &mut pending_responses,
+                                async_sender.as_ref(),
+                            )
+                            .await;
+                            res?;
+                            if let Some(terminal) = terminal {
+                                return classify_read_terminal(terminal, &responses);
+                            }
                         }
                         RequestMessages::CopyIn(rx) => {
                             // Enter COPY mode; frames stream via branch (4).
@@ -798,7 +960,23 @@ where
                 // ---------- COPY-IN frame ----------
                 MuxEvent::CopyFrame(Some(msg)) => {
                     write_frontend(&mut write_half, msg)?;
-                    write_half.flush().await?;
+                    // Same cancel-safe flush+read-drain interleave as the
+                    // request path: a COPY frame the server rejects mid-stream
+                    // (ErrorResponse) is read concurrently, and a large COPY
+                    // frame cannot wedge the cap-1 channel (MUX-DEADLOCK-1).
+                    let (res, terminal) = flush_with_read_draining(
+                        &mut write_half,
+                        &mut read_rx,
+                        &mut parameters,
+                        &mut responses,
+                        &mut pending_responses,
+                        async_sender.as_ref(),
+                    )
+                    .await;
+                    res?;
+                    if let Some(terminal) = terminal {
+                        return classify_read_terminal(terminal, &responses);
+                    }
                 }
                 MuxEvent::CopyFrame(None) => {
                     // COPY stream ended (the receiver already appended

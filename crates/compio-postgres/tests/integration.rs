@@ -1472,3 +1472,90 @@ async fn concurrent_queries_are_pipelined() {
     assert_eq!(a.unwrap()[0].get::<_, &str>("x"), "a");
     assert_eq!(b.unwrap()[0].get::<_, &str>("x"), "b");
 }
+
+// ---------------------------------------------------------------------------
+// 30. concurrent_large_bidirectional_queries_do_not_deadlock (MUX-DEADLOCK-1)
+//
+// Regression for the cap-1-read-channel + blocking-flush deadlock in the
+// multiplexed loop. Many large queries are issued concurrently on ONE
+// `Client`; each sends a ~4 MB bytea param (a large WRITE that fills the
+// kernel send buffer) and selects back a much larger result the server
+// floods concurrently (filling ITS send buffer once the client stalls
+// reading). The result is fanned out over many rows so each individual
+// DataRow frame stays well under the 64 MB MAX_MESSAGE_SIZE cap (a single
+// 64 MB+ field would be rejected as oversize, masking the deadlock behind an
+// io error; and a single giant frame would not wedge anyway, since the read
+// task drains the socket continuously while assembling one frame).
+//
+// Pre-fix the main loop did `write_half.flush().await?` SEQUENTIALLY without
+// draining the read channel, so this cycle wedged:
+//   flush-blocked (client send buffer full)
+//     -> server recv buffer full -> server send blocked
+//       -> client not reading -> read task's cap-1 send().await blocked
+//         -> main loop never drains the read channel -> flush never resumes.
+// Sequentially the same queries finish in a few seconds.
+//
+// Post-fix the flush is interleaved with read-channel draining (a cancel-safe
+// select carrying the owned flush future against the read branch), so reads
+// keep the socket draining while the large write completes -> no deadlock.
+//
+// Wrapped in a 20 s timeout so a wedged (pre-fix) loop fails fast as a
+// timeout (RED) instead of hanging the whole suite; post-fix it completes
+// well under the budget with every blob echoed back byte-for-byte (GREEN).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
+    use futures_util::future::join_all;
+
+    let url = require_pg().await;
+    let client = connect(&url).await.unwrap();
+
+    const BLOB_LEN: usize = 16 * 1024 * 1024; // ~16 MB param per query (< 64 MB cap)
+    const ROWS: i32 = 3; // result ~= 48 MB, fanned over 3 frames of ~16 MB
+    const N: usize = 16; // concurrent in-flight queries on one connection
+
+    // Distinct payloads so a misrouted/corrupted response is caught, not just
+    // a hang. Byte i of blob k = (i + k) as u8.
+    let blobs: Vec<Vec<u8>> = (0..N)
+        .map(|k| (0..BLOB_LEN).map(|i| (i + k) as u8).collect())
+        .collect();
+
+    let futs = blobs.iter().enumerate().map(|(k, blob)| {
+        let client = &client;
+        async move {
+            // generate_series echoes the 4 MB param back on every row, so the
+            // server emits ~ROWS x the param size: a large result it floods
+            // while we are still writing other queries' large params.
+            let rows = client
+                .query(
+                    "SELECT $1::bytea AS b FROM generate_series(1, $2::int4)",
+                    &[blob, &ROWS],
+                )
+                .await
+                .unwrap();
+            let echoed: Vec<Vec<u8>> = rows.iter().map(|r| r.get("b")).collect();
+            (k, echoed)
+        }
+    });
+
+    // Pre-fix: deadlock -> this times out (RED). Post-fix: completes (GREEN).
+    let outcome = compio::time::timeout(std::time::Duration::from_secs(20), join_all(futs)).await;
+
+    let results = outcome.expect(
+        "concurrent large bidirectional queries DEADLOCKED on one connection \
+         (multiplexed flush did not interleave read-draining) -- timed out",
+    );
+
+    // Every concurrently-issued query came back, in order, with its own blob
+    // echoed byte-for-byte on every row: no hang, no loss, no misrouting, no
+    // corruption.
+    assert_eq!(results.len(), N);
+    for (k, echoed) in results {
+        assert_eq!(echoed.len(), ROWS as usize, "query {k} wrong row count");
+        for (r, row) in echoed.iter().enumerate() {
+            assert_eq!(row.len(), BLOB_LEN, "query {k} row {r} truncated");
+            assert_eq!(row, &blobs[k], "query {k} row {r} corrupted or misrouted");
+        }
+    }
+}
