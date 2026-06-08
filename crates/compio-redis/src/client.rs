@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::time::timeout;
 use redis_protocol::resp2::types::OwnedFrame;
@@ -21,6 +21,42 @@ const READ_CHUNK: usize = 4096;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum single-reply size the client will accept, in bytes. Mirrors the
+/// sibling `compio-postgres` driver's `MAX_MESSAGE_SIZE` (64 MB): a
+/// malicious or MITM'd server that declares a giant bulk/array length
+/// (`$2000000000\r\n…`) would otherwise grow the read buffer until the
+/// worker OOMs. We reject the declared length up front (before buffering
+/// the body) and also cap the accumulated buffer as a backstop.
+const MAX_REPLY_SIZE: usize = 64 * 1024 * 1024;
+
+/// Peek the declared length of a RESP reply from the front of `buf`,
+/// returning `Some(declared)` when `buf` begins with a length-prefixed
+/// header (`$` bulk, or one of the `*`/`%`/`~`/`>` aggregates) whose
+/// `<len>\r\n` is fully present. Returns `None` if the leading byte is not
+/// a length-prefixed kind or the header is still incomplete.
+///
+/// For `$` the declared length is the body byte count; for the aggregate
+/// kinds it is the element count. Both are checked against `MAX_REPLY_SIZE`
+/// by the caller: a reply cannot contain more elements than its byte cap
+/// (each wire element is at least one byte), so the element-count ceiling
+/// is a safe over-approximation that stops a `*2000000000\r\n` array bomb
+/// from coercing a 2-billion-capacity `Vec` allocation in the decoder.
+///
+/// A negative length (`$-1`, RESP null) yields `None` — it is not an
+/// oversized declaration.
+fn peek_declared_len(buf: &[u8]) -> Option<u64> {
+    let (&kind, rest) = buf.split_first()?;
+    if !matches!(kind, b'$' | b'*' | b'%' | b'~' | b'>') {
+        return None;
+    }
+    // Find the CRLF that terminates the length field.
+    let crlf = rest.windows(2).position(|w| w == b"\r\n")?;
+    let digits = &rest[..crlf];
+    // RESP integers are ASCII. A leading '-' is a null/streaming marker,
+    // not an oversized length — ignore it here.
+    std::str::from_utf8(digits).ok()?.parse::<u64>().ok()
+}
+
 /// A Redis client owning one TCP connection.
 pub struct Client {
     stream: TcpStream,
@@ -31,6 +67,14 @@ pub struct Client {
     /// transfer API returns the Vec back; we reuse it.
     read_scratch: Vec<u8>,
     cmd_timeout: Duration,
+    /// "Dirty" barrier for safe pool reuse. Set SYNCHRONOUSLY at the start
+    /// of `send_recv` (before the write/await) so it survives even if the
+    /// future is cancelled or times out mid-reply, and cleared ONLY after a
+    /// full frame is decoded and returned. A decode error or the OOM-cap
+    /// rejection leaves it set. The pool (R2) refuses to recycle a dirty
+    /// connection — a cancelled/errored conn may have a pending or partial
+    /// reply on the wire, so reusing it would desync the reply stream.
+    dirty: bool,
 }
 
 impl Client {
@@ -71,6 +115,7 @@ impl Client {
             rx: BytesMut::with_capacity(READ_CHUNK),
             read_scratch: vec![0u8; READ_CHUNK],
             cmd_timeout: DEFAULT_CMD_TIMEOUT,
+            dirty: false,
         };
 
         if let Some(pw) = password {
@@ -92,7 +137,41 @@ impl Client {
             rx: BytesMut::with_capacity(READ_CHUNK),
             read_scratch: vec![0u8; READ_CHUNK],
             cmd_timeout: DEFAULT_CMD_TIMEOUT,
+            dirty: false,
         })
+    }
+
+    /// True if this connection is in a "dirty" state — a command was
+    /// started but no full reply has been cleanly decoded since (timed out,
+    /// cancelled, decode-errored, or rejected by the size cap). The pool
+    /// (R2) must NOT return a dirty connection to the idle stack.
+    ///
+    /// `allow(dead_code)`: consumed by the pool fail-safe in R2; for now only
+    /// the in-crate red-team tests call it.
+    #[allow(dead_code)]
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// True if the accumulating read buffer is empty. A non-empty `rx` at
+    /// checkout time means leftover/partial reply bytes from a prior
+    /// command — the pool (R2) treats that as "do not reuse".
+    ///
+    /// `allow(dead_code)`: consumed by the pool fail-safe in R2; for now only
+    /// the in-crate red-team tests call it.
+    #[allow(dead_code)]
+    pub(crate) fn is_rx_empty(&self) -> bool {
+        self.rx.is_empty()
+    }
+
+    /// Override the per-command timeout. Used by tests to drive the
+    /// timeout/dirty-barrier paths deterministically without waiting the
+    /// 5 s default; also lets the pool/cluster layers tune liveness.
+    ///
+    /// `allow(dead_code)`: test/R2-facing knob; no production caller yet.
+    #[allow(dead_code)]
+    pub(crate) fn set_cmd_timeout(&mut self, d: Duration) {
+        self.cmd_timeout = d;
     }
 
     // -----------------------------------------------------------------
@@ -318,11 +397,23 @@ impl Client {
 
     /// Write a command frame, read until a full reply decodes, return it.
     pub(crate) async fn send_recv(&mut self, cmd: OwnedFrame) -> Result<OwnedFrame> {
-        timeout(self.cmd_timeout, self.send_recv_inner(cmd))
+        // Mark the connection dirty SYNCHRONOUSLY, before the write/await.
+        // This is the only state observable at `PooledConn::drop` time after
+        // the future is cancelled or times out mid-reply — so the pool (R2)
+        // can refuse to recycle a connection that may have a pending or
+        // partial reply still on the wire. We clear it ONLY after a full
+        // frame is cleanly decoded and returned below; any error path
+        // (timeout, IO, decode, or the OOM-cap rejection) leaves it set.
+        self.dirty = true;
+        let out = timeout(self.cmd_timeout, self.send_recv_inner(cmd))
             .await
             .map_err(|_| Error::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut, "redis command timed out",
-            )))?
+            )))?;
+        if out.is_ok() {
+            self.dirty = false;
+        }
+        out
     }
 
     async fn send_recv_inner(&mut self, cmd: OwnedFrame) -> Result<OwnedFrame> {
@@ -333,12 +424,43 @@ impl Client {
         // userspace buffering to drain. `nodelay` already prevents Nagle.
 
         loop {
+            // OOM guard (early rejection): if the buffered reply begins with
+            // a length-prefixed header whose declared length already exceeds
+            // the cap, bail BEFORE we ever buffer the (multi-GB) body. This
+            // is O(1) and mirrors compio-postgres's `validate_length`.
+            if let Some(declared) = peek_declared_len(&self.rx)
+                && declared > MAX_REPLY_SIZE as u64
+            {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "redis reply too large: declared {declared} bytes \
+                         (max {MAX_REPLY_SIZE}) — refusing to buffer",
+                    ),
+                )));
+            }
+
             // Try to decode from what we already buffered.
             if !self.rx.is_empty()
                 && let Some((frame, consumed)) = try_decode(&self.rx)?
             {
                 let _ = self.rx.split_to(consumed);
                 return Ok(frame);
+            }
+
+            // OOM backstop: even absent a parseable oversized header (e.g. a
+            // huge aggregate of small elements, or a header not yet fully
+            // arrived), never let the accumulating buffer exceed the cap
+            // without yielding a complete frame.
+            if self.rx.len() > MAX_REPLY_SIZE {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "redis reply too large: buffered {} bytes without a \
+                         complete frame (max {MAX_REPLY_SIZE})",
+                        self.rx.len(),
+                    ),
+                )));
             }
 
             // Need more bytes. Read a chunk.
@@ -355,5 +477,186 @@ impl Client {
             // Return the scratch buffer for reuse next iteration.
             self.read_scratch = buf;
         }
+    }
+}
+
+// =====================================================================
+// Red-team regression tests (R1 — REDIS-OOM-1 + dirty-flag infra).
+//
+// These drive the REAL client against a small in-process mock Redis
+// (a `compio::net::TcpListener` speaking raw RESP bytes) so we can
+// reproduce adversarial wire conditions a real server won't emit.
+// =====================================================================
+#[cfg(test)]
+mod red_team_tests {
+    use super::*;
+    use compio::net::TcpListener;
+    use std::time::Duration;
+
+    /// Spawn a mock Redis that accepts ONE connection, reads (and discards)
+    /// the client's command bytes, then writes `reply` and holds the socket
+    /// open (sleeping) so the client can't rely on EOF. Returns the bound
+    /// `host:port` for `Client::connect_tcp`.
+    async fn mock_server_reply(reply: &'static [u8]) -> (std::net::IpAddr, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            let (mut stream, _peer) = listener.accept().await.expect("accept");
+            // Read whatever command the client sends (one chunk is enough —
+            // we don't parse it, we just need the client to have written).
+            let buf = vec![0u8; 1024];
+            let compio::BufResult(_n, _buf) = stream.read(buf).await;
+            // Send the crafted reply.
+            let _ = stream.write_all(reply).await;
+            // Hold the connection open so the client never sees EOF; it must
+            // bail on the size cap, not on a closed socket.
+            compio::time::sleep(Duration::from_secs(30)).await;
+            drop(stream);
+        })
+        .detach();
+        (addr.ip(), addr.port())
+    }
+
+    /// A mock that reads the command but NEVER replies, then holds the
+    /// socket open — used to drive the command-timeout path.
+    async fn mock_server_silent() -> (std::net::IpAddr, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            let (mut stream, _peer) = listener.accept().await.expect("accept");
+            let buf = vec![0u8; 1024];
+            let compio::BufResult(_n, _buf) = stream.read(buf).await;
+            // Never reply; just hold the conn open.
+            compio::time::sleep(Duration::from_secs(30)).await;
+            drop(stream);
+        })
+        .detach();
+        (addr.ip(), addr.port())
+    }
+
+    // -----------------------------------------------------------------
+    // FIX 1 — REDIS-OOM-1: oversized declared reply length is rejected
+    // promptly, WITHOUT buffering the (multi-GB) body.
+    // -----------------------------------------------------------------
+    #[compio::test]
+    async fn oversized_bulk_reply_is_rejected_promptly() {
+        // Bulk header declaring ~2 GB, plus a few filler body bytes. The
+        // body is NEVER fully sent, so a pre-fix client buffers forever
+        // (bounded only by the 5 s cmd_timeout) waiting for 2 GB.
+        let (ip, port) = mock_server_reply(b"$2000000000\r\nABCDEFGH").await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+
+        // Wrap in a SHORT timeout so a pre-fix hang fails cleanly (RED)
+        // rather than blocking the test for 5 s. A correct client rejects
+        // the oversized header essentially immediately (one read).
+        let res = compio::time::timeout(Duration::from_secs(2), c.get("k")).await;
+
+        // RED (pre-fix): this `timeout` itself elapses (the inner future is
+        // stuck buffering), so `res` is Err(Elapsed) -> .expect panics.
+        let inner = res.expect("client did not reject oversized reply promptly (it hung buffering)");
+
+        // The inner result must be an error identifying an oversized reply.
+        let err = inner.expect_err("oversized bulk reply must be an error, not Ok");
+        let msg = err.to_string();
+        let is_oversize = matches!(&err, Error::Protocol(_))
+            || matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::InvalidData);
+        assert!(
+            is_oversize,
+            "expected an oversized-reply Protocol/InvalidData error, got: {err:?} ({msg})"
+        );
+        assert!(
+            msg.contains("too large") || msg.to_lowercase().contains("oversiz") || msg.contains("exceed"),
+            "error should name the size violation, got: {msg}"
+        );
+    }
+
+    /// An oversized *aggregate* (array) header — a `*2000000000\r\n` "array
+    /// bomb" — must also be rejected up front, not handed to the decoder
+    /// (which would try to reserve a 2-billion-element Vec).
+    #[compio::test]
+    async fn oversized_array_reply_is_rejected_promptly() {
+        let (ip, port) = mock_server_reply(b"*2000000000\r\n").await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+        let inner = compio::time::timeout(Duration::from_secs(2), c.mget(&["k"]))
+            .await
+            .expect("client did not reject oversized array promptly (it hung)");
+        let err = inner.expect_err("oversized array reply must be an error");
+        assert!(
+            matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::InvalidData),
+            "expected InvalidData, got {err:?}"
+        );
+        assert!(err.to_string().contains("too large"), "got: {err}");
+    }
+
+    /// Positive control: a normal-sized bulk reply still decodes fine.
+    #[compio::test]
+    async fn normal_bulk_reply_still_works() {
+        let (ip, port) = mock_server_reply(b"$5\r\nhello\r\n").await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+        let v = compio::time::timeout(Duration::from_secs(2), c.get("k"))
+            .await
+            .expect("normal reply timed out")
+            .expect("normal reply errored");
+        assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
+    }
+
+    /// Positive control: a large-but-under-cap bulk (1 MB) round-trips —
+    /// the 64 MB cap must not reject legitimate big values. The mock streams
+    /// the body in chunks across multiple writes to exercise the
+    /// accumulating read path under the cap.
+    #[compio::test]
+    async fn large_under_cap_bulk_reply_still_works() {
+        // 1 MiB body. Header + body + CRLF, all valid.
+        const N: usize = 1024 * 1024;
+        // Build the full reply once; leak it to get the &'static the mock
+        // helper wants (test-only, freed at process exit).
+        let mut reply = Vec::with_capacity(N + 32);
+        reply.extend_from_slice(format!("${N}\r\n").as_bytes());
+        reply.extend(std::iter::repeat_n(b'x', N));
+        reply.extend_from_slice(b"\r\n");
+        let reply: &'static [u8] = Box::leak(reply.into_boxed_slice());
+
+        let (ip, port) = mock_server_reply(reply).await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+        let v = compio::time::timeout(Duration::from_secs(5), c.get("k"))
+            .await
+            .expect("1MB reply timed out")
+            .expect("1MB reply errored")
+            .expect("1MB reply was null");
+        assert_eq!(v.len(), N);
+        assert!(v.iter().all(|&b| b == b'x'));
+        assert!(!c.is_dirty(), "successful large reply must leave conn clean");
+    }
+
+    // -----------------------------------------------------------------
+    // FIX 2 — dirty-flag infra: a timed-out command leaves the Client
+    // dirty (so the pool — R2 — can refuse to reuse it); a successful
+    // command leaves it clean.
+    // -----------------------------------------------------------------
+    #[compio::test]
+    async fn timeout_marks_connection_dirty() {
+        let (ip, port) = mock_server_silent().await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+        c.set_cmd_timeout(Duration::from_millis(150));
+
+        let res = c.get("k").await;
+        // The command must time out (server never replies).
+        let err = res.expect_err("silent server should produce a timeout error");
+        assert!(
+            matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "expected TimedOut, got {err:?}"
+        );
+        // And the connection must be marked dirty so the pool won't reuse it.
+        assert!(c.is_dirty(), "a timed-out connection must be left dirty");
+    }
+
+    #[compio::test]
+    async fn successful_command_leaves_connection_clean() {
+        let (ip, port) = mock_server_reply(b"$5\r\nhello\r\n").await;
+        let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
+        let v = c.get("k").await.expect("get");
+        assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
+        assert!(!c.is_dirty(), "a successful command must leave the conn clean");
+        assert!(c.is_rx_empty(), "rx must be fully drained after a single reply");
     }
 }
