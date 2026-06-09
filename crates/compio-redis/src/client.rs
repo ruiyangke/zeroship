@@ -127,10 +127,20 @@ impl Client {
         Ok(client)
     }
 
-    /// Dev-only constructor for in-process tests — connects without
-    /// running AUTH/SELECT via the URL parser.
-    pub async fn connect_tcp(addr: (IpAddr, u16)) -> Result<Self> {
-        let stream = TcpStream::connect(addr).await.map_err(Error::Io)?;
+    /// In-crate test constructor — connects WITHOUT running AUTH/SELECT (it
+    /// bypasses the URL parser), so it must never carry production traffic
+    /// against a password-protected or non-default-db server. `pub(crate)`
+    /// (REDIS-CMD-1): only the in-crate `#[cfg(test)]` mock helpers use it;
+    /// gating it off the public surface keeps it from being an app/SDK
+    /// footgun. It still applies the same `DEFAULT_CONNECT_TIMEOUT` as
+    /// `connect`, so even internal callers get a bounded connect.
+    pub(crate) async fn connect_tcp(addr: (IpAddr, u16)) -> Result<Self> {
+        let stream = timeout(DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(addr))
+            .await
+            .map_err(|_| Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut, "connect timed out",
+            )))?
+            .map_err(Error::Io)?;
         stream.set_nodelay(true).map_err(Error::Io)?;
         Ok(Client {
             stream,
