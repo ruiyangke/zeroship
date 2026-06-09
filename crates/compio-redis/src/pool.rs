@@ -131,14 +131,28 @@ impl Pool {
         // double-execution risk). Hot conns skip the probe → zero added
         // latency on the common path.
         let now = Instant::now();
+        // `client` + `busy_guard` are CLAIMED together: the moment we pop an
+        // idle candidate (or decide to connect on-demand) we reserve a `busy`
+        // slot ATOMICALLY — in the same `borrow_mut()` as the pop, with no
+        // `.await` in between — and hand it to a `BusyGuard`. The guard then
+        // protects that reservation across EVERY subsequent `.await` (the
+        // probe, the connect). This is what closes the over-subscription
+        // window: single-threaded compio is cooperative, so a concurrent
+        // acquire on the same `Pool` interleaves at each `.await`; because the
+        // claim already moved the conn idle->busy, that other acquire sees the
+        // reservation (idle shorter, `busy` higher) and cannot over-create.
         let mut client = None;
+        let mut busy_guard: Option<BusyGuard> = None;
         loop {
             // Synchronously pop the freshest clean idle entry (and its parked
-            // timestamp). A dirty / not-fully-drained conn must never be
-            // handed out (it would splice the previous caller's pending reply
-            // into ours), so discard and keep scanning. Drop's own barrier
-            // should prevent these from landing here, but checkout is the last
-            // line of defence.
+            // timestamp) AND reserve its busy slot in the same borrow. A dirty
+            // / not-fully-drained conn must never be handed out (it would
+            // splice the previous caller's pending reply into ours), so discard
+            // and keep scanning. Drop's own barrier should prevent these from
+            // landing here, but checkout is the last line of defence.
+            //
+            // Popping an idle conn moves it idle->busy (total unchanged), so no
+            // `max_size` re-check is needed on this path — only an atomic claim.
             let candidate = {
                 let mut inner = self.inner.borrow_mut();
                 // Drop stale-by-idle-timeout conns from the top of the stack.
@@ -155,6 +169,10 @@ impl Pool {
                     if c.is_dirty() || !c.is_rx_empty() {
                         drop(c); // discard without counting it busy
                     } else {
+                        // Atomic claim: reserve the slot for THIS conn before
+                        // releasing the borrow, so the probe `.await` below
+                        // cannot expose an unreserved window.
+                        inner.busy += 1;
                         picked = Some((c, ts));
                         break;
                     }
@@ -167,52 +185,72 @@ impl Pool {
                 break;
             };
 
+            // The popped conn's reservation is now guard-protected: a probe
+            // failure below, OR a cancellation while parked in the probe,
+            // backs it out via `release()` / Drop.
+            let guard = BusyGuard::new(self.inner.clone());
+
             // Hot conn (used recently): reuse without a probe.
             if now.duration_since(parked_at) <= self.inner.borrow().config.liveness_probe_after {
                 client = Some(conn);
+                busy_guard = Some(guard);
                 break;
             }
 
             // Stale conn: test-on-borrow. PING it; on success reuse it, on
             // failure DISCARD it (drop) and try the next idle entry. The
-            // probe is OUTSIDE the `RefCell` borrow (it awaits).
+            // probe is OUTSIDE the `RefCell` borrow (it awaits) but the
+            // reservation is already held by `guard`.
             match conn.ping().await {
                 Ok(()) => {
+                    // The probe round-trip may have left trailing pipelined
+                    // bytes in `rx` (a server replying `+PONG\r\n` plus extra
+                    // frames), or otherwise dirtied the conn. Handing it out
+                    // now would splice that leftover into the caller's next
+                    // reply, so re-apply the checkout barrier: discard and try
+                    // the next idle entry, releasing this reservation.
+                    if conn.is_dirty() || !conn.is_rx_empty() {
+                        drop(conn);
+                        guard.release();
+                        continue;
+                    }
                     client = Some(conn);
+                    busy_guard = Some(guard);
                     break;
                 }
                 Err(_) => {
                     // Dead/stale idle conn — drop it, do not hand it out, and
-                    // do not count it busy. Loop to try the next idle entry.
+                    // release its reservation. Loop to try the next idle entry.
                     drop(conn);
+                    guard.release();
                     continue;
                 }
             }
         }
 
-        // Reserve a busy slot for the conn we are about to hand out (whether a
-        // probed-live idle conn or a fresh on-demand connect). The reservation
-        // happens AFTER probing so a discarded stale conn never leaks a slot.
-        {
-            let mut inner = self.inner.borrow_mut();
-            if client.is_none() && inner.busy >= inner.config.max_size {
-                return Err(Error::Pool(format!(
-                    "pool exhausted — max_size={}, busy={}",
-                    inner.config.max_size, inner.busy
-                )));
+        // RAII reservation across the rest of `acquire`. For the idle-reuse
+        // path it was already claimed (above) at pop time; for the on-demand
+        // path we gate `busy < max_size` and claim it now, BEFORE `connect()`.
+        // Either way the guard backs the increment out on Drop — including if
+        // THIS `acquire` future is cancelled while parked at `connect().await`
+        // (caller dropped, enclosing timeout). It is disarmed only once the
+        // `PooledConn` is built, at which point the `PooledConn`'s own Drop
+        // takes over the decrement. Exactly one of the two is armed at any
+        // instant, so `busy` is never double-counted.
+        let busy_guard = match busy_guard {
+            Some(g) => g,
+            None => {
+                let mut inner = self.inner.borrow_mut();
+                if inner.busy >= inner.config.max_size {
+                    return Err(Error::Pool(format!(
+                        "pool exhausted — max_size={}, busy={}",
+                        inner.config.max_size, inner.busy
+                    )));
+                }
+                inner.busy += 1;
+                BusyGuard::new(self.inner.clone())
             }
-            inner.busy += 1;
-        }
-
-        // RAII reservation: from the moment `busy` was incremented above
-        // (BOTH the idle-reuse and on-demand paths) a `BusyGuard` owns that
-        // increment and will back it out on Drop — including if THIS
-        // `acquire` future is cancelled while parked at the `connect().await`
-        // below (caller dropped, enclosing timeout). It is disarmed only once
-        // the `PooledConn` is successfully built, at which point the
-        // `PooledConn`'s own Drop takes over the decrement. Exactly one of
-        // the two is armed at any instant, so `busy` is never double-counted.
-        let busy_guard = BusyGuard::new(self.inner.clone());
+        };
 
         let client = match client {
             Some(c) => c,
@@ -251,6 +289,16 @@ impl BusyGuard {
     /// to the constructed `PooledConn`).
     fn disarm(mut self) {
         self.inner = None;
+    }
+
+    /// Back the reservation out NOW (decrement `busy`) and consume the guard.
+    /// Used when a claimed idle conn is discarded mid-`acquire` (probe failed,
+    /// or the probe left it dirty) so its slot is freed immediately instead of
+    /// waiting for Drop — letting the same loop iteration's `continue` re-pop
+    /// under an accurate count. Equivalent to letting the guard Drop, but
+    /// explicit at the call site.
+    fn release(self) {
+        // `self` drops here; its Drop performs the decrement.
     }
 }
 
@@ -392,6 +440,106 @@ mod red_team_tests {
         format!("redis://{}:{}", addr.ip(), addr.port())
     }
 
+    /// Spawn a mock Redis whose FIRST connection answers the liveness PING
+    /// with `+PONG\r\n` IMMEDIATELY FOLLOWED, in the same write, by an extra
+    /// unsolicited frame (`trailing`) — modelling a server that pipelines a
+    /// reply or push so the probe leaves leftover bytes in the client's `rx`.
+    /// Every SUBSEQUENT connection is clean: `+PONG\r\n` to a PING, `reply`
+    /// otherwise.
+    ///
+    /// This reproduces FIX C: a probe that returns `Ok(())` can still leave
+    /// the conn non-rx-empty; handing it out would splice `trailing` into the
+    /// caller's next command reply (intra-acquire desync). With the post-probe
+    /// re-check the conn is discarded and a clean (second) conn is handed out.
+    async fn spawn_ping_with_trailing_mock(
+        reply: &'static [u8],
+        trailing: &'static [u8],
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            let mut conn_no = 0u32;
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                conn_no += 1;
+                let dirty_pong = conn_no == 1;
+                compio::runtime::spawn(async move {
+                    loop {
+                        let buf = vec![0u8; 1024];
+                        let compio::BufResult(n, b) = stream.read(buf).await;
+                        let n = match n {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let is_ping = b[..n].windows(4).any(|w| w == b"PING");
+                        let out: Vec<u8> = if is_ping {
+                            let mut v = b"+PONG\r\n".to_vec();
+                            if dirty_pong {
+                                // Append the leftover frame to the PONG so the
+                                // probe decodes PONG but leaves `trailing` in rx.
+                                v.extend_from_slice(trailing);
+                            }
+                            v
+                        } else {
+                            reply.to_vec()
+                        };
+                        let compio::BufResult(w, _r) = stream.write_all(out).await;
+                        if w.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+        })
+        .detach();
+        format!("redis://{}:{}", addr.ip(), addr.port())
+    }
+
+    /// Spawn a mock Redis that answers commands like `spawn_replying_mock`,
+    /// but DELAYS its reply to a PING by `ping_delay` (the liveness probe).
+    /// This deliberately widens the probe-`await` window so a second,
+    /// concurrent `acquire()` can interleave while the first is parked in its
+    /// probe — the precondition for the FIX A over-subscription bug.
+    /// Non-PING commands are answered immediately with `reply`.
+    async fn spawn_slow_ping_mock(reply: &'static [u8], ping_delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                compio::runtime::spawn(async move {
+                    loop {
+                        let buf = vec![0u8; 1024];
+                        let compio::BufResult(n, b) = stream.read(buf).await;
+                        let n = match n {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let is_ping = b[..n].windows(4).any(|w| w == b"PING");
+                        if is_ping {
+                            // Hold the PONG back so the probe stays parked,
+                            // keeping the acquire that issued it in its window.
+                            compio::time::sleep(ping_delay).await;
+                            let compio::BufResult(w, _r) = stream.write_all(b"+PONG\r\n").await;
+                            if w.is_err() {
+                                break;
+                            }
+                        } else {
+                            let compio::BufResult(w, _r) = stream.write_all(reply).await;
+                            if w.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+        })
+        .detach();
+        format!("redis://{}:{}", addr.ip(), addr.port())
+    }
+
     /// Spawn a mock Redis that, for every connection, reads one command
     /// chunk and replies with a fixed RESP frame, then holds the socket
     /// open. Used as a positive control (a clean command).
@@ -421,6 +569,56 @@ mod red_team_tests {
         })
         .detach();
         format!("redis://{}:{}", addr.ip(), addr.port())
+    }
+
+    /// Spawn a mock Redis that answers EVERY command (PING included) with the
+    /// bulk `reply` on its FIRST accepted connection, but slams the door on
+    /// any SECOND connection (accepts then immediately closes it). It tallies
+    /// accepted connections in the returned counter.
+    ///
+    /// This makes a wrongful reconnect OBSERVABLE: if the pool ever discards
+    /// the (live) first conn and opens a second — e.g. because a hot conn was
+    /// wrongly probed, the bulk reply failed `ping()`'s `+PONG` check, and the
+    /// conn got recycled into a reconnect — the command on that second conn
+    /// hits a closed socket and ERRORS, and the counter reads 2. The correct
+    /// hot-skip path never opens a second conn (counter stays 1) and the
+    /// command succeeds.
+    async fn spawn_first_conn_only_mock(reply: &'static [u8]) -> (String, Rc<std::cell::Cell<u32>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        let accepted = Rc::new(std::cell::Cell::new(0u32));
+        let accepted_task = accepted.clone();
+        compio::runtime::spawn(async move {
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                let n = accepted_task.get() + 1;
+                accepted_task.set(n);
+                if n >= 2 {
+                    // Second (and later) connection: refuse to serve it so a
+                    // wrongful reconnect's command fails loudly.
+                    drop(stream);
+                    continue;
+                }
+                compio::runtime::spawn(async move {
+                    loop {
+                        let buf = vec![0u8; 1024];
+                        let compio::BufResult(rn, _b) = stream.read(buf).await;
+                        match rn {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let compio::BufResult(w, _r) = stream.write_all(reply).await;
+                                if w.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+        })
+        .detach();
+        (format!("redis://{}:{}", addr.ip(), addr.port()), accepted)
     }
 
     // -----------------------------------------------------------------
@@ -613,17 +811,82 @@ mod red_team_tests {
         assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
     }
 
-    // Positive control: a HOT (recently-used) idle conn is NOT probed, so a
-    // mock that would FAIL a PING but answer the real command still works on
-    // reuse — proving hot conns skip the probe (zero added latency / round
-    // trips on the common path).
+    // -----------------------------------------------------------------
+    // FIX C — RED-POOL-PROBE-DIRTY: a liveness probe that returns Ok(()) can
+    // still leave the conn NON-rx-empty (server pipelined a reply/push after
+    // `+PONG`, arriving in the same TCP segment). The checkout barrier
+    // (~154) and the drop barrier both refuse such a conn, but the post-probe
+    // hand-out skipped that re-check — so the leftover frame would splice into
+    // the caller's FIRST command reply (intra-acquire desync).
+    //
+    // FIX: after `ping()` returns Ok, re-apply `is_dirty() || !is_rx_empty()`;
+    // if it trips, discard the conn (release its reservation) and continue —
+    // exactly as a probe FAILURE does. Here the warm conn's PONG carries a
+    // trailing `$3\r\nXXX\r\n`, so the probe leaves rx dirty; the fixed pool
+    // discards it and hands out a clean second conn whose GET returns "hello".
+    // Pre-fix the dirty conn is handed out and `get("k")` decodes the buffered
+    // leftover ("XXX") instead of the real reply.
+    #[compio::test]
+    async fn probe_leaving_trailing_bytes_discards_conn() {
+        // Warm conn's PING answer = `+PONG\r\n` + a leftover bulk frame.
+        let url = spawn_ping_with_trailing_mock(b"$5\r\nhello\r\n", b"$3\r\nXXX\r\n").await;
+        let pool = Pool::connect_with(
+            &url,
+            PoolConfig {
+                max_size: 4,
+                min_idle: 1,
+                // Always probe on borrow so the warm conn is the one probed.
+                liveness_probe_after: Duration::ZERO,
+                ..PoolConfig::default()
+            },
+        )
+        .await
+        .expect("pool warm-up");
+        assert_eq!(pool.idle_len(), 1, "warm-up parked one idle conn");
+
+        // Acquire: the stale warm conn is probed -> PONG decodes but leaves
+        // `$3\r\nXXX\r\n` in rx. With the fix that conn is discarded and a
+        // fresh (clean) conn opens, so GET returns the REAL value. Without the
+        // fix the dirty conn is handed out and GET reads the buffered "XXX".
+        let mut c = pool.acquire().await.expect("acquire a clean conn");
+        let v = c
+            .get("k")
+            .await
+            .expect("GET must succeed on a clean conn (not a desynced one)");
+        assert_eq!(
+            v.as_deref(),
+            Some(b"hello".as_ref()),
+            "a probe that left trailing bytes must NOT be handed out — the \
+             leftover frame would be spliced into this reply"
+        );
+    }
+
+    // Positive control: a HOT (recently-used) idle conn is NOT probed.
+    //
+    // FIX B (was a partial tautology): the old test's only assertion was
+    // `busy_count() <= 1`, which a BROKEN hot-skip also satisfies — a wrongful
+    // probe -> discard -> reconnect path also lands at `busy == 1`. This
+    // version is DISCRIMINATING: the mock serves only its FIRST connection and
+    // tallies accepts, so a wrongful reconnect is observable two ways —
+    //   (a) the reused command FAILS (the second conn is closed), and
+    //   (b) the accept counter reads 2 instead of 1.
+    // The correct hot-skip path reuses the first conn (no `ping()`, no
+    // reconnect): the command succeeds, `idle_len()==0 && busy_count()==1`
+    // while held, and exactly ONE connection was ever accepted.
+    //
+    // How I confirmed it discriminates: temporarily neutering the hot-skip
+    // early-return (`if false && …` so every borrow probes) makes the test
+    // FAIL — the first borrow PINGs the lone served conn, the mock answers
+    // with the bulk reply (not `+PONG`) so `ping()` errors, the conn is
+    // discarded, and the on-demand reconnect lands on conn #2 which the mock
+    // slams shut, so the very next `get` fails (and `accepted` would read 2).
+    // The OLD test could NOT catch this: against `spawn_replying_mock` (which
+    // serves every connection) a wrongful reconnect's `get` still succeeds and
+    // `busy` still settles to 1, so its lone `busy_count() <= 1` assert stayed
+    // GREEN. (Sabotage reverted; the shipped hot-skip keeps `accepted == 1`.)
     #[compio::test]
     async fn hot_connection_is_not_probed_on_reuse() {
-        // This mock answers EVERY command with the bulk reply — including a
-        // PING (which `ping()` would reject as Unexpected, since it's not
-        // `+PONG`). So if the pool probed a hot conn, the probe would error
-        // and the conn would be discarded; we assert it is reused instead.
-        let url = spawn_replying_mock(b"$5\r\nhello\r\n").await;
+        let (url, accepted) = spawn_first_conn_only_mock(b"$5\r\nhello\r\n").await;
         let pool = Pool::connect_with(
             &url,
             PoolConfig {
@@ -636,6 +899,11 @@ mod red_team_tests {
         )
         .await
         .expect("pool warm-up");
+        // NB: don't read `accepted` here — the client's TCP connect completes
+        // at the kernel before the mock's userspace `accept().await` returns
+        // (and bumps the counter), so an early read races to 0. We sample the
+        // counter only AFTER a command round-trip, which proves the conn was
+        // accepted and served.
 
         // First use parks a hot idle conn.
         {
@@ -645,12 +913,118 @@ mod red_team_tests {
         }
         assert_eq!(pool.idle_len(), 1, "clean conn parked as hot idle");
 
-        // Second use: the conn is hot, so it must be reused WITHOUT a probe
-        // (a probe would hit the bulk-answering mock and error out).
+        // Second use: the conn is hot, so it must be reused WITHOUT a probe.
+        // If the hot-skip were broken, the probe would PING the bulk-answering
+        // mock (-> `ping()` errors -> conn discarded -> on-demand RECONNECT),
+        // and that reconnect's conn #2 is force-closed by the mock, so this
+        // command would FAIL. It succeeding proves no probe/reconnect happened.
         let mut c = pool.acquire().await.expect("acquire 2 (reuse hot conn)");
+        // Exactly the SAME single conn is in flight: moved out of idle, no new
+        // connection opened.
+        assert_eq!(pool.idle_len(), 0, "hot conn moved out of idle (not discarded)");
+        assert_eq!(pool.busy_count(), 1, "exactly one conn busy — no reconnect");
         let v = c.get("k").await.expect("get 2 on reused hot conn");
         assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
-        // And no extra connection was opened: still exactly one conn in play.
-        assert!(pool.busy_count() <= 1);
+
+        // The decisive check: the pool never opened a second connection. A
+        // wrongful probe-discard-then-reconnect would have made this 2.
+        assert_eq!(
+            accepted.get(),
+            1,
+            "a hot conn must be reused WITHOUT probing/reconnecting (only the \
+             warm-up connection should ever be accepted)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // FIX A — RED-POOL-PROBE-WINDOW: the liveness probe must NOT open a
+    // window in which the pool over-subscribes `max_size`. The follow-up
+    // (11d7974c) MOVED `busy += 1` to AFTER `conn.ping().await`, so while
+    // acquire A is parked in its probe (having already popped its idle
+    // candidate out of `idle` but NOT yet reserved `busy`), a concurrent
+    // acquire B sees an empty idle stack, passes the on-demand gate
+    // (`busy < max_size`), reserves a slot, and connects. When A's probe
+    // then succeeds it does an UNCONDITIONAL `busy += 1` (the gate is on
+    // the on-demand path only), pushing `busy` past `max_size`.
+    //
+    // Single-threaded compio is COOPERATIVE: distinct tasks sharing one
+    // `Pool` interleave at every `.await`, so this is reachable. The mock
+    // delays its PONG to widen A's probe window deterministically.
+    //
+    // Pre-fix: `busy` reaches 2 for `max_size=1` -> RED.
+    // Post-fix (reserve atomically at pop, before the probe): the claim
+    // moves the conn idle->busy with no intervening `.await`, so B sees the
+    // reservation and is refused (Pool exhausted) -> `busy` stays <= 1.
+    #[compio::test]
+    async fn probe_window_does_not_oversubscribe_max_size() {
+        // PING (the probe) is held back ~250ms so acquire A parks in its
+        // probe long enough for acquire B to interleave.
+        let url = spawn_slow_ping_mock(b"$5\r\nhello\r\n", Duration::from_millis(250)).await;
+        let pool = Pool::connect_with(
+            &url,
+            PoolConfig {
+                max_size: 1,
+                min_idle: 1,
+                // ZERO => the lone warm conn is ALWAYS treated as stale and
+                // probed on borrow, so acquire A definitely awaits the probe.
+                liveness_probe_after: Duration::ZERO,
+                ..PoolConfig::default()
+            },
+        )
+        .await
+        .expect("pool warm-up");
+        assert_eq!(pool.idle_len(), 1, "warm-up parked one idle conn");
+        assert_eq!(pool.busy_count(), 0);
+
+        // Acquire A: pops the warm conn and parks in the (slow) probe.
+        let pool_a = pool.clone();
+        let task_a = compio::runtime::spawn(async move {
+            let _g = pool_a.acquire().await.expect("acquire A");
+            // Hold the conn briefly so it overlaps with B's reservation.
+            compio::time::sleep(Duration::from_millis(150)).await;
+            // Return the busy count observed WHILE A holds its conn.
+            pool_a.busy_count()
+        });
+
+        // Let A get firmly parked inside its probe `await` (idle now empty,
+        // but A has NOT reserved busy yet under the buggy ordering).
+        compio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            pool.idle_len(),
+            0,
+            "A popped the only idle conn before parking in its probe"
+        );
+
+        // Acquire B, concurrently. idle is empty, so B takes the on-demand
+        // path. Under the bug it passes `busy(0) < max_size(1)`, reserves a
+        // slot and connects -> a SECOND live conn for a max_size=1 pool.
+        let b_result = pool.acquire().await;
+
+        // Sample the over-subscription. Under the bug, by now A's probe has
+        // either resolved (busy incremented to 2) or is about to; give it a
+        // beat so A's post-probe `busy += 1` lands, then read the peak.
+        compio::time::sleep(Duration::from_millis(250)).await;
+        let peak_busy = pool.busy_count();
+
+        let a_observed = task_a.await.expect("task A joins");
+
+        let max = pool.inner.borrow().config.max_size;
+        assert!(
+            peak_busy <= max && a_observed <= max,
+            "probe window over-subscribed: max_size={max}, peak busy={peak_busy}, \
+             A-observed busy={a_observed} (B acquired ok? {})",
+            b_result.is_ok(),
+        );
+        // The discriminating post-fix contract: A's atomic claim took the lone
+        // slot while it probed, so B (idle empty, no free slot) MUST be refused
+        // with pool exhaustion rather than over-create. Pre-fix B succeeded
+        // (and `peak_busy` hit 2); this asserts the window is truly closed, not
+        // merely that the counter happened to settle low.
+        assert!(
+            matches!(b_result, Err(Error::Pool(_))),
+            "B should be refused (pool exhausted) while A holds the only slot \
+             (B acquired ok? {})",
+            b_result.is_ok(),
+        );
     }
 }
