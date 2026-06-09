@@ -23,10 +23,12 @@ Fixed under strict TDD (RED test proving the exploit → minimal GREEN → refac
 - **CR-CLUSTER-3 / RED-POOL-4 / REDIS-POOLGROW-1** (unbounded per-node pool-cache growth from server-spammed MOVED addresses): the SSRF allowlist (`b1c45621`) now refuses to create a pool for any non-allowlisted address, so a malicious node can no longer inflate the `pools` map with arbitrary addresses — growth is bounded by the (operator-derived) known-node set.
 - **REDIS-TOPO-1** (slot-map poisoning by a single MOVED): a MOVED can now only repoint a slot to an *already-trusted* node (allowlist) and only to an in-range slot (CR-CLUSTER-1) — arbitrary-address poisoning is blocked.
 
-### Remaining (out of the criticals+highs scope chosen for this pass — recommended follow-ups)
-- **RED-POOL-3** (medium): no liveness/health check on checkout for a connection that died while *idle* (server-side close). The dirty barrier covers conns that errored *in use*, not idle-death; add a cheap probe or first-command reconnect-retry.
-- **REDIS-INVARIANT-1** (low): `lib.rs` header still says cluster/MOVED-ASK/pipelining are "out of scope" while shipping `ClusterClient`. Rewrite to describe the shipped surface + trust model (and track TLS as a concrete gap).
-- **REDIS-RECONNECT-1** (low) / **REDIS-CMD-1** (info): no reconnection on idle-death; `connect_tcp` skips AUTH/SELECT and the connect timeout (gate it `#[cfg(test)]`/`pub(crate)`).
+### Follow-up lows — now also fixed (2026-06-08, branch `fix/compio-redis-followups`)
+- **RED-POOL-3 / REDIS-RECONNECT-1** (medium/low): ✅ test-on-borrow liveness probe — `acquire` `PING`s any idle conn that has sat idle past the new `PoolConfig.liveness_probe_after` (default 30 s; `0` = always probe) and discards + replaces a dead one before handing it out; hot conns skip the probe (zero added latency on the common path). The `busy` reservation moved to after the probe so a discarded corpse never reserves a slot; the R2 cancel-leak guard is preserved. RED-proven (skip-probe → dead conn handed out → `UnexpectedEof`). Commit `11d7974c`.
+- **REDIS-INVARIANT-1** (low): ✅ `lib.rs` header rewritten to the actually-shipped surface (single-node `Client` + cluster `ClusterClient` with MOVED/ASK) + the in-place trust model (size cap, dirty barrier + stale-idle probe, redirect/topology allowlist) + TLS named as a concrete gap (plaintext `redis://` only). Commit `c32dcb05`.
+- **REDIS-CMD-1** (info): ✅ `connect_tcp` gated `pub(crate)` (no production callers) + given the connect timeout. Commit `9cd1fd7b`.
+
+Nothing material remains open. The one genuine forward-looking gap is **TLS / `rediss://`** (a planned feature, not a vulnerability) — the link is plaintext, so deploy this client only on a trusted network segment until TLS lands.
 
 ## Confirmed exploitable findings
 
