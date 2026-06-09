@@ -28,6 +28,17 @@ pub struct PoolConfig {
     pub min_idle: usize,
     /// Max time a connection can stay idle before being dropped.
     pub idle_timeout: Duration,
+    /// Test-on-borrow threshold (RED-POOL-3). A connection that has sat
+    /// idle longer than this is PINGed before being handed to the next
+    /// caller; if the probe fails (the server closed it while idle — a
+    /// Redis `timeout`, restart, or RST), it is discarded and the acquire
+    /// loop tries the next idle entry, else opens a fresh connection. The
+    /// probe replaces the dead conn BEFORE the caller's command is written,
+    /// so there is no double-execution risk for non-idempotent ops.
+    ///
+    /// Hot conns (used more recently than this) are NOT probed — zero added
+    /// latency on the common path. `Duration::ZERO` means always probe.
+    pub liveness_probe_after: Duration,
 }
 
 impl Default for PoolConfig {
@@ -36,6 +47,7 @@ impl Default for PoolConfig {
             max_size: 16,
             min_idle: 1,
             idle_timeout: Duration::from_secs(600),
+            liveness_probe_after: Duration::from_secs(30),
         }
     }
 }
@@ -108,48 +120,89 @@ impl Pool {
     /// Acquire a connection, opening a new one if idle is empty and
     /// capacity permits.
     pub async fn acquire(&self) -> Result<PooledConn> {
-        // Fast path: take from idle stack, dropping timed-out entries.
+        // Fast path: take from idle stack, dropping timed-out entries, and
+        // probe any STALE idle conn (one that has sat idle past
+        // `liveness_probe_after`) before reusing it. A conn that died while
+        // idle — the server closed it (a Redis `timeout`, restart, or RST) —
+        // is otherwise handed to the next caller, who eats a spurious
+        // connection error on their FIRST command (RED-POOL-3). Test-on-borrow
+        // replaces the corpse BEFORE the caller's command is written, so it is
+        // safe even for non-idempotent ops (no blind reconnect-retry, no
+        // double-execution risk). Hot conns skip the probe → zero added
+        // latency on the common path.
         let now = Instant::now();
-        let (client, opened_new) = {
+        let mut client = None;
+        loop {
+            // Synchronously pop the freshest clean idle entry (and its parked
+            // timestamp). A dirty / not-fully-drained conn must never be
+            // handed out (it would splice the previous caller's pending reply
+            // into ours), so discard and keep scanning. Drop's own barrier
+            // should prevent these from landing here, but checkout is the last
+            // line of defence.
+            let candidate = {
+                let mut inner = self.inner.borrow_mut();
+                // Drop stale-by-idle-timeout conns from the top of the stack.
+                let timeout = inner.config.idle_timeout;
+                while let Some((_, ts)) = inner.idle.last() {
+                    if now.duration_since(*ts) > timeout {
+                        inner.idle.pop();
+                    } else {
+                        break;
+                    }
+                }
+                let mut picked = None;
+                while let Some((c, ts)) = inner.idle.pop() {
+                    if c.is_dirty() || !c.is_rx_empty() {
+                        drop(c); // discard without counting it busy
+                    } else {
+                        picked = Some((c, ts));
+                        break;
+                    }
+                }
+                picked
+            };
+
+            let Some((mut conn, parked_at)) = candidate else {
+                // Idle exhausted — fall through to the on-demand connect path.
+                break;
+            };
+
+            // Hot conn (used recently): reuse without a probe.
+            if now.duration_since(parked_at) <= self.inner.borrow().config.liveness_probe_after {
+                client = Some(conn);
+                break;
+            }
+
+            // Stale conn: test-on-borrow. PING it; on success reuse it, on
+            // failure DISCARD it (drop) and try the next idle entry. The
+            // probe is OUTSIDE the `RefCell` borrow (it awaits).
+            match conn.ping().await {
+                Ok(()) => {
+                    client = Some(conn);
+                    break;
+                }
+                Err(_) => {
+                    // Dead/stale idle conn — drop it, do not hand it out, and
+                    // do not count it busy. Loop to try the next idle entry.
+                    drop(conn);
+                    continue;
+                }
+            }
+        }
+
+        // Reserve a busy slot for the conn we are about to hand out (whether a
+        // probed-live idle conn or a fresh on-demand connect). The reservation
+        // happens AFTER probing so a discarded stale conn never leaks a slot.
+        {
             let mut inner = self.inner.borrow_mut();
-            // Drop stale idle conns.
-            let timeout = inner.config.idle_timeout;
-            while let Some((_, ts)) = inner.idle.last() {
-                if now.duration_since(*ts) > timeout {
-                    inner.idle.pop();
-                } else {
-                    break;
-                }
-            }
-            // Pop the freshest idle conn that is still clean. A dirty /
-            // not-fully-drained conn must never be handed out (it would
-            // splice the previous caller's pending reply into ours), so
-            // discard any such entry and keep scanning. Drop's own barrier
-            // should prevent these from ever landing here, but checkout is
-            // the last line of defence.
-            let mut reused = None;
-            while let Some((c, _)) = inner.idle.pop() {
-                if c.is_dirty() || !c.is_rx_empty() {
-                    // Discard (drop) without counting it as busy.
-                    drop(c);
-                } else {
-                    reused = Some(c);
-                    break;
-                }
-            }
-            if let Some(c) = reused {
-                inner.busy += 1;
-                (Some(c), false)
-            } else if inner.busy < inner.config.max_size {
-                inner.busy += 1;
-                (None, true)
-            } else {
+            if client.is_none() && inner.busy >= inner.config.max_size {
                 return Err(Error::Pool(format!(
                     "pool exhausted — max_size={}, busy={}",
                     inner.config.max_size, inner.busy
                 )));
             }
-        };
+            inner.busy += 1;
+        }
 
         // RAII reservation: from the moment `busy` was incremented above
         // (BOTH the idle-reuse and on-demand paths) a `BusyGuard` owns that
@@ -170,7 +223,6 @@ impl Pool {
                 Client::connect(&url).await?
             }
         };
-        let _ = opened_new; // silence unused
         let conn = PooledConn {
             pool: self.inner.clone(),
             client: Some(client),
@@ -284,6 +336,54 @@ mod red_team_tests {
                     // hit its command timeout rather than see EOF.
                     compio::time::sleep(Duration::from_secs(30)).await;
                     drop(stream);
+                })
+                .detach();
+            }
+        })
+        .detach();
+        format!("redis://{}:{}", addr.ip(), addr.port())
+    }
+
+    /// Spawn a mock Redis whose FIRST accepted connection is closed
+    /// immediately (simulating an idle connection the server reaped — a
+    /// Redis `timeout`, restart, or RST), and every SUBSEQUENT connection
+    /// stays alive and answers commands: `+PONG\r\n` to a request whose
+    /// bytes contain `PING` (the liveness probe), otherwise `reply`.
+    ///
+    /// This reproduces RED-POOL-3: the pool's warm-up connection dies while
+    /// idle, and the next `acquire()` must NOT hand the corpse to the caller.
+    /// With test-on-borrow it probes the stale conn (PING fails on the dead
+    /// socket), discards it, and opens a fresh (second) connection that
+    /// answers the user's command.
+    async fn spawn_idle_death_then_alive_mock(reply: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("local_addr");
+        compio::runtime::spawn(async move {
+            let mut conn_no = 0u32;
+            loop {
+                let Ok((mut stream, _peer)) = listener.accept().await else { break };
+                conn_no += 1;
+                if conn_no == 1 {
+                    // First (warm-up) connection: drop it right away so it is
+                    // a dead/half-closed socket by the time the pool reuses it.
+                    drop(stream);
+                    continue;
+                }
+                compio::runtime::spawn(async move {
+                    loop {
+                        let buf = vec![0u8; 1024];
+                        let compio::BufResult(n, b) = stream.read(buf).await;
+                        let n = match n {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let is_ping = b[..n].windows(4).any(|w| w == b"PING");
+                        let out: &[u8] = if is_ping { b"+PONG\r\n" } else { reply };
+                        let compio::BufResult(w, _r) = stream.write_all(out).await;
+                        if w.is_err() {
+                            break;
+                        }
+                    }
                 })
                 .detach();
             }
@@ -465,5 +565,92 @@ mod red_team_tests {
             "a clean connection must be returned to the idle stack for reuse"
         );
         assert_eq!(pool.busy_count(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // FIX 3 — RED-POOL-3 / REDIS-RECONNECT-1: a connection that died while
+    // IDLE (server-side close: redis `timeout`, restart, RST) is still
+    // popped from the idle stack and handed to the next caller, who gets a
+    // spurious connection error on their FIRST command. The dirty barrier
+    // (R2) only covers conns that errored *in use*, not idle-death.
+    //
+    // FIX (test-on-borrow): when a popped idle conn has been idle longer
+    // than `liveness_probe_after`, PING it first; if the probe fails,
+    // DISCARD it and continue the acquire loop (next idle entry, else a
+    // fresh connection). The probe replaces the conn BEFORE the user's
+    // command is sent, so there is no double-execution risk.
+    // -----------------------------------------------------------------
+    #[compio::test]
+    async fn stale_idle_connection_is_probed_and_replaced() {
+        // The mock closes its FIRST (warm-up) connection immediately, so the
+        // pool's lone idle conn is dead; the SECOND connection answers PING
+        // + the command.
+        let url = spawn_idle_death_then_alive_mock(b"$5\r\nhello\r\n").await;
+        // `liveness_probe_after = 0` => always probe on borrow (no waiting on
+        // an idle clock). max_size>=2 so a fresh conn can open after discard.
+        let pool = Pool::connect_with(
+            &url,
+            PoolConfig {
+                max_size: 4,
+                min_idle: 1,
+                liveness_probe_after: Duration::ZERO,
+                ..PoolConfig::default()
+            },
+        )
+        .await
+        .expect("pool warm-up");
+        assert_eq!(pool.idle_len(), 1, "warm-up parked one (now-dead) idle conn");
+
+        // Acquire + run a command. With the fix: the dead warm conn is
+        // probed -> PING fails -> discarded -> a fresh live conn opens ->
+        // the command SUCCEEDS. Pre-fix: the dead conn is handed out and the
+        // command fails with a connection error (UnexpectedEof / reset).
+        let mut c = pool.acquire().await.expect("acquire must yield a LIVE conn");
+        let v = c
+            .get("k")
+            .await
+            .expect("command on a freshly-probed live conn must succeed");
+        assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
+    }
+
+    // Positive control: a HOT (recently-used) idle conn is NOT probed, so a
+    // mock that would FAIL a PING but answer the real command still works on
+    // reuse — proving hot conns skip the probe (zero added latency / round
+    // trips on the common path).
+    #[compio::test]
+    async fn hot_connection_is_not_probed_on_reuse() {
+        // This mock answers EVERY command with the bulk reply — including a
+        // PING (which `ping()` would reject as Unexpected, since it's not
+        // `+PONG`). So if the pool probed a hot conn, the probe would error
+        // and the conn would be discarded; we assert it is reused instead.
+        let url = spawn_replying_mock(b"$5\r\nhello\r\n").await;
+        let pool = Pool::connect_with(
+            &url,
+            PoolConfig {
+                max_size: 4,
+                min_idle: 1,
+                // Large threshold: a just-parked conn is "hot" => never probed.
+                liveness_probe_after: Duration::from_secs(3600),
+                ..PoolConfig::default()
+            },
+        )
+        .await
+        .expect("pool warm-up");
+
+        // First use parks a hot idle conn.
+        {
+            let mut c = pool.acquire().await.expect("acquire 1");
+            let v = c.get("k").await.expect("get 1");
+            assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
+        }
+        assert_eq!(pool.idle_len(), 1, "clean conn parked as hot idle");
+
+        // Second use: the conn is hot, so it must be reused WITHOUT a probe
+        // (a probe would hit the bulk-answering mock and error out).
+        let mut c = pool.acquire().await.expect("acquire 2 (reuse hot conn)");
+        let v = c.get("k").await.expect("get 2 on reused hot conn");
+        assert_eq!(v.as_deref(), Some(b"hello".as_ref()));
+        // And no extra connection was opened: still exactly one conn in play.
+        assert!(pool.busy_count() <= 1);
     }
 }
