@@ -176,11 +176,9 @@ pub async fn start(
 
     // 2. Rate-limit per-email + per-IP. On throttle, render the
     //    check-email page anyway so the attacker can't distinguish.
-    let ip = req
-        .connection_info()
-        .remote()
-        .unwrap_or("0.0.0.0")
-        .to_string();
+    //    Trusted, gateway-authored client IP (SEC-3) — not the spoofable
+    //    leftmost X-Forwarded-For token.
+    let ip = crate::headers::client_ip(&req);
     let buckets = [
         (format!("magic:email:{email_norm}"), Bucket::LOGIN_EMAIL),
         (format!("magic:ip:{ip}"), Bucket::LOGIN_IP),
@@ -798,11 +796,8 @@ pub async fn complete(
 
     // 2. Per-IP throttle before touching the completion row. This limits
     //    online guessing even across many CSRF nonces from one source.
-    let ip = req
-        .connection_info()
-        .remote()
-        .unwrap_or("0.0.0.0")
-        .to_string();
+    //    Trusted, gateway-authored client IP (SEC-3).
+    let ip = crate::headers::client_ip(&req);
     let rate_key = format!("magic_complete:{ip}");
     match ratelimit::consume_or_throttle(db.as_ref(), &rate_key, Bucket::MAGIC_COMPLETE).await {
         Ok(RateLimitDecision::Allowed) => {}

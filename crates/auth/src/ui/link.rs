@@ -183,11 +183,9 @@ pub async fn post(
         return render_error_page(PublicErrorMessage::InvalidRequest);
     }
 
-    let ip = req
-        .connection_info()
-        .remote()
-        .unwrap_or("0.0.0.0")
-        .to_string();
+    // Trusted, gateway-authored client IP (SEC-3) — not the spoofable
+    // leftmost X-Forwarded-For token.
+    let ip = crate::headers::client_ip(&req);
     let link_attempt_key = format!("link_attempt:{}:{ip}", pending.user_id);
     match ratelimit::consume(db.as_ref(), &link_attempt_key, Bucket::LINK_ATTEMPT).await {
         Ok(RateLimitDecision::Allowed) => {}

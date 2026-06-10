@@ -370,12 +370,14 @@ async fn route_auth_host(
         .map(|p| p.as_str())
         .unwrap_or("/");
 
-    let mut headers: Vec<(String, String)> = Vec::new();
-    for (name, value) in req.headers() {
-        if let Ok(v) = value.to_str() {
-            headers.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
+    // SEC-3: the auth/Hydra upstream keys per-IP rate limits on the forwarded
+    // client address. Scrub any client-supplied `X-Forwarded-For` /
+    // `Forwarded` / `X-Real-IP` and inject a SINGLE authoritative
+    // `X-Forwarded-For` derived from the real socket peer, so a creator app
+    // (or any inbound caller) cannot rotate a spoofed IP to bypass the auth
+    // service's credential-stuffing / email-amplification limits.
+    let peer_ip = req.peer_addr().map(|addr| addr.ip());
+    let headers = build_auth_upstream_headers(req.headers(), peer_ip);
 
     let method = req.method().as_str();
 
@@ -387,6 +389,45 @@ async fn route_auth_host(
                 .json(&serde_json::json!({"error": format!("auth proxy: {e}")}))
         }
     }
+}
+
+/// Inbound client-IP spoofing vectors the gateway MUST strip before forwarding
+/// to the trusted auth/Hydra upstream (SEC-3). The auth service derives its
+/// per-IP rate-limit bucket key from a forwarded client address; if a creator
+/// app's request could carry these verbatim, an attacker would rotate the
+/// value to evade credential-stuffing / email-amplification limits and mint an
+/// unbounded number of `zeroship.rate_limits` rows. Matching is
+/// case-insensitive (HTTP header names are case-insensitive).
+const CLIENT_IP_SPOOF_HEADERS: &[&str] = &["x-forwarded-for", "forwarded", "x-real-ip"];
+
+/// Build the header set forwarded to the auth/Hydra upstream: drop any
+/// client-supplied forwarding headers ([`CLIENT_IP_SPOOF_HEADERS`]) and inject
+/// a SINGLE authoritative `X-Forwarded-For` carrying the real socket peer.
+///
+/// The injected `X-Forwarded-For` is the ONLY client-IP signal the auth
+/// service sees, so its per-IP rate-limit buckets key on an address the
+/// inbound caller cannot forge. When the peer address is unknown (exotic
+/// transport / test fixture) NO `X-Forwarded-For` is injected — the auth side
+/// falls back to its own socket peer rather than trusting a forged header.
+fn build_auth_upstream_headers(
+    headers: &ntex::http::HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in headers {
+        let lname = name.as_str().to_ascii_lowercase();
+        if CLIENT_IP_SPOOF_HEADERS.contains(&lname.as_str()) {
+            // Drop the inbound copy — we re-author the authoritative value.
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            out.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+    if let Some(ip) = peer_ip {
+        out.push(("X-Forwarded-For".to_string(), ip.to_string()));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2112,6 +2153,60 @@ mod tests {
     // Resource-tree request-level tests — exercise the per-resource policy
     // gates on synthetic requests built via ntex's `TestRequest`.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_upstream_headers_drop_spoofed_client_ip_and_inject_peer() {
+        // SEC-3: forwarding to the auth/Hydra upstream must strip ANY
+        // client-supplied X-Forwarded-For / Forwarded / X-Real-IP and inject a
+        // single authoritative X-Forwarded-For from the real socket peer.
+        // Pre-fix the helper copies headers verbatim and injects nothing → the
+        // spoofed 1.2.3.4 survives and the authoritative peer is absent → RED.
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("forwarded", "for=1.2.3.4")
+            .header("x-real-ip", "1.2.3.4")
+            .header("cookie", "zsidp_csrf=keep")
+            .header("user-agent", "keep-me/1")
+            .to_http_request();
+
+        let peer: std::net::IpAddr = "9.9.9.9".parse().unwrap();
+        let fwd = build_auth_upstream_headers(req.headers(), Some(peer));
+        let lc: Vec<(String, String)> = fwd
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect();
+
+        // The spoofed value never reaches the auth upstream under any of the
+        // three client-IP header names.
+        for spoof in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+            assert!(
+                !lc.iter().any(|(k, v)| k == spoof && v.contains("1.2.3.4")),
+                "spoofed client IP leaked via `{spoof}`: {lc:?}"
+            );
+        }
+
+        // Exactly one authoritative X-Forwarded-For, set to the real peer.
+        let xff: Vec<&String> = lc
+            .iter()
+            .filter(|(k, _)| k == "x-forwarded-for")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            xff,
+            vec![&"9.9.9.9".to_string()],
+            "auth upstream must receive exactly one authoritative X-Forwarded-For (peer): {lc:?}"
+        );
+
+        // Benign headers survive the scrub.
+        assert!(
+            lc.iter().any(|(k, v)| k == "user-agent" && v == "keep-me/1"),
+            "benign header dropped: {lc:?}"
+        );
+        assert!(
+            lc.iter().any(|(k, _)| k == "cookie"),
+            "auth cookies must still be forwarded: {lc:?}"
+        );
+    }
 
     #[test]
     fn canonicalize_dispatch_path_rejects_traversal_and_normalizes() {
