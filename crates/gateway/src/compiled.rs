@@ -428,6 +428,10 @@ fn resolve_effective_policy(
     let chain = build_inheritance_chain(key, resources);
 
     let mut auth: AuthLevel = AuthLevel::Anon;
+    // SEC-5: track whether ANY resource in the chain declared `auth`, so a
+    // procedure that falls through to the default is distinguishable from one
+    // deliberately set to `anon` — see the fail-closed default after the loop.
+    let mut auth_declared = false;
     let mut rate_limit: Option<RateLimit> = None;
     let mut cors: Option<Cors> = None;
     let mut cache: Option<CacheCtl> = None;
@@ -447,6 +451,7 @@ fn resolve_effective_policy(
         let is_self = ancestor_key == key;
 
         if let Some(a) = node.auth {
+            auth_declared = true;
             // stricter wins — child only weakens via override (validated).
             if a.rank() > auth.rank() {
                 auth = a;
@@ -505,6 +510,18 @@ fn resolve_effective_policy(
             input_schema.clone_from(&node.input_schema);
             output_schema.clone_from(&node.output_schema);
         }
+    }
+
+    // SEC-5 fail-closed default for the RPC surface. A procedure whose entire
+    // inheritance chain declares no `auth` defaults to `User`, never the silent
+    // `Anon` that turned a forgotten or mistyped policy into an unauthenticated
+    // exposure (the SEC-5 class — a drifted family key left `projects.*` open).
+    // The web surface (URL / SSR / static) keeps the public-by-default norm;
+    // only `rpc:` procedures flip. A deliberately public procedure opts in with
+    // `auth: anon` + `publicly_accessible: true` somewhere in its chain, which
+    // sets `auth_declared` and so is left untouched here.
+    if !auth_declared && key.starts_with("rpc:") {
+        auth = AuthLevel::User;
     }
 
     let action = resolve_action(key, resources);
@@ -920,6 +937,88 @@ mod tests {
         let c = CompiledManifest::compile(&m);
         let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
         assert_eq!(p.auth, AuthLevel::User, "stricter user beats root anon");
+    }
+
+    /// SEC-5 fail-closed default: an RPC procedure whose entire inheritance
+    /// chain declares NO `auth` must resolve to `User`, never the silent `Anon`
+    /// that turned a forgotten/typo'd policy into an unauthenticated exposure.
+    /// Pre-flip this resolved to `Anon` → RED.
+    #[test]
+    fn rpc_procedure_defaults_to_user_when_no_auth_declared() {
+        let mut resources = HashMap::new();
+        resources.insert("rpc:todos.list".into(), rpc_entry(ProcedureKind::Query));
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c
+            .lookup_resource("/__zeroship/v1/todos.list")
+            .expect("matches");
+        assert_eq!(
+            p.auth,
+            AuthLevel::User,
+            "an undeclared rpc procedure must fail closed to user, not anon"
+        );
+        assert!(
+            !p.publicly_accessible,
+            "the fail-closed default is not publicly accessible"
+        );
+    }
+
+    /// The web surface keeps the public-by-default norm — only the `rpc:` API
+    /// flips. A URL/SSR resource with no declared auth stays `Anon` so a
+    /// creator's blog/landing/static assets remain readable without login.
+    #[test]
+    fn url_resource_keeps_public_default_when_no_auth_declared() {
+        let mut resources = HashMap::new();
+        resources.insert("/blog".into(), ResourceEntry::default());
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/blog").expect("matches");
+        assert_eq!(
+            p.auth,
+            AuthLevel::Anon,
+            "url/web resources keep public-by-default"
+        );
+    }
+
+    /// A deliberately public procedure (its family declares `auth: anon` +
+    /// `publicly_accessible: true`) stays `Anon`. The fail-closed default only
+    /// fires when NOTHING in the chain declares auth, so an explicit public
+    /// opt-in is preserved.
+    #[test]
+    fn rpc_procedure_explicit_public_stays_anon() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "rpc:wizard".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                ..Default::default()
+            },
+        );
+        resources.insert("rpc:wizard.suggest".into(), rpc_entry(ProcedureKind::Action));
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c
+            .lookup_resource("/__zeroship/v1/wizard.suggest")
+            .expect("matches");
+        assert_eq!(
+            p.auth,
+            AuthLevel::Anon,
+            "explicit anon+publicly_accessible family keeps the procedure public"
+        );
+        assert!(p.publicly_accessible);
     }
 
     #[test]
