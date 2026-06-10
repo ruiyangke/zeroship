@@ -135,6 +135,100 @@ struct UrlGlob {
     literal_segs: usize,
 }
 
+/// A path segment that means "this directory" (WHATWG URL "single-dot path
+/// segment"): literal `.` or its percent-encoded form `%2e` (case-insensitive).
+fn is_single_dot_segment(seg: &str) -> bool {
+    seg == "." || seg.eq_ignore_ascii_case("%2e")
+}
+
+/// A path segment that means "parent directory" (WHATWG URL "double-dot path
+/// segment"): `..`, `.%2e`, `%2e.`, or `%2e%2e` (case-insensitive). These are
+/// the exact forms a browser's `new URL(...)` collapses, so the gateway must
+/// resolve them identically to keep its auth match in lock-step with the
+/// worker's re-parse.
+fn is_double_dot_segment(seg: &str) -> bool {
+    seg.eq_ignore_ascii_case("..")
+        || seg.eq_ignore_ascii_case(".%2e")
+        || seg.eq_ignore_ascii_case("%2e.")
+        || seg.eq_ignore_ascii_case("%2e%2e")
+}
+
+/// True if `seg` is any dot-segment (single or double). A request path that
+/// carries one is non-canonical and — because WHATWG `new URL` collapses it —
+/// is the gateway↔worker path-disagreement vector SEC-2 closes. Callers that
+/// want fail-closed rejection (the dispatch layer) use this to 400 such paths;
+/// the matcher uses [`canonicalize_path`] to resolve them defensively.
+pub(crate) fn is_dot_segment(seg: &str) -> bool {
+    is_single_dot_segment(seg) || is_double_dot_segment(seg)
+}
+
+/// True if the raw request path is NOT already in canonical form because it
+/// carries a dot-segment (`.`/`..`, literal or `%2e`-encoded) or an empty
+/// interior segment (`//`). These are exactly the forms a browser's WHATWG
+/// `new URL` rewrites, so forwarding the raw path while matching auth on a
+/// different normalization is the SEC-2 bypass. The dispatch layer rejects
+/// such requests (400) rather than guess which normalization the worker will
+/// pick.
+pub(crate) fn path_has_traversal_or_empty_segment(path: &str) -> bool {
+    let trimmed = path.strip_prefix('/').unwrap_or(path);
+    // A lone trailing slash (`/api/admin/`) is a benign single-slash-policy
+    // case, normalized — not rejected. Only an EMPTY INTERIOR segment (`//`)
+    // or any dot-segment is a disagreement vector.
+    let segs: Vec<&str> = trimmed.split('/').collect();
+    for (i, seg) in segs.iter().enumerate() {
+        if is_dot_segment(seg) {
+            return true;
+        }
+        // Interior empty segment (`a//b`) — exclude the final element so a
+        // single trailing slash is not treated as traversal.
+        if seg.is_empty() && i + 1 < segs.len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Canonicalize a request path before resource matching (SEC-2).
+///
+/// Resolves the path to the single normal form the gateway both *matches auth
+/// against* and *forwards to the worker*, so the gateway's resource match can
+/// never disagree with the worker's WHATWG `new URL(req.url).pathname`:
+///
+/// * percent-encoded dot segments (`%2e`/`%2E`) decode to `.`,
+/// * single-dot segments (`.`) and empty segments (`//`) are dropped,
+/// * double-dot segments (`..`) pop the previous segment, clamped at root
+///   (never escaping above `/`),
+/// * a single trailing slash is stripped (`/a/b/` → `/a/b`); root stays `/`.
+///
+/// Only the dot-segment-relevant `%2e` is decoded — every other percent-escape
+/// is preserved byte-for-byte so the canonical form still round-trips through
+/// the worker's URL parser unchanged.
+pub(crate) fn canonicalize_path(path: &str) -> String {
+    let trimmed = path.strip_prefix('/').unwrap_or(path);
+    let mut out: Vec<&str> = Vec::new();
+    for seg in trimmed.split('/') {
+        if seg.is_empty() || is_single_dot_segment(seg) {
+            // Drop empty (`//`) and single-dot (`.`) segments.
+            continue;
+        }
+        if is_double_dot_segment(seg) {
+            // Pop the parent; clamp at root (a `..` past root is ignored).
+            out.pop();
+            continue;
+        }
+        out.push(seg);
+    }
+    if out.is_empty() {
+        return "/".to_string();
+    }
+    let mut canonical = String::with_capacity(path.len());
+    for seg in out {
+        canonical.push('/');
+        canonical.push_str(seg);
+    }
+    canonical
+}
+
 impl PathMatcher {
     /// Look up the most-specific matching resource id for `path`.
     /// Returns `None` if nothing matched.
@@ -237,10 +331,18 @@ impl CompiledManifest {
     /// instead of the policy. Used by the per-resource rate-limiter to
     /// hash the matched key into a stable `rule_idx`.
     pub fn lookup_resource_key(&self, path: &str) -> Option<String> {
-        if let Some(rest) = path.strip_prefix("/__zeroship/v1/") {
+        // SEC-2: canonicalize BEFORE matching so dot-segment / percent-encoded
+        // -dot / empty-segment / trailing-slash evasions of a protected
+        // resource resolve to that resource (and its stricter auth) instead of
+        // falling through to a permissive catch-all. The dispatch layer also
+        // rejects (400) traversal forms; canonicalizing here keeps every
+        // caller (CORS preflight, rate-limit keying, this lookup) safe even if
+        // a future callsite forgets the 400 guard.
+        let canonical = canonicalize_path(path);
+        if let Some(rest) = canonical.strip_prefix("/__zeroship/v1/") {
             return self.rpc_index.get(rest).cloned();
         }
-        self.url_index.find(path)
+        self.url_index.find(&canonical)
     }
 
     /// Look up an asset (build-time or runtime-emitted) by path.
@@ -647,6 +749,101 @@ mod tests {
         // Exact-literal match takes priority.
         let key = c.lookup_resource_key("/api/admin").expect("matches");
         assert_eq!(key, "/api/admin");
+    }
+
+    #[test]
+    fn path_normalization_bypass_resolves_to_protected_resource() {
+        // SEC-2: the gateway must canonicalize the request path BEFORE
+        // resource matching, so dot-segment / percent-encoded-dot /
+        // trailing-slash evasions of a protected literal can never fall
+        // through to a permissive catch-all. Manifest: `/api/admin` is
+        // `user`-gated; a root catch-all glob is `anon`. Pre-fix each
+        // evasion matches the anon catch-all (the literal compares the RAW
+        // string and misses); post-fix the canonical form re-matches the
+        // `/api/admin` user literal. The worker's WHATWG `new URL` collapses
+        // these exact forms to `/api/admin`, so the gateway match and the
+        // worker view must agree on the protected resource.
+        let mut resources = HashMap::new();
+        resources.insert(
+            "/api/admin".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::User),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "/[...rest]".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                ..Default::default()
+            },
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+
+        // Baseline: the catch-all is reachable for an unrelated path.
+        assert_eq!(
+            c.lookup_resource_key("/public/page").as_deref(),
+            Some("/[...rest]"),
+            "unrelated path falls through to the anon catch-all"
+        );
+
+        for evasion in [
+            "/api/foo/../admin",
+            "/api/%2e/admin",
+            "/api/%2E/admin",
+            "/api/./admin",
+            "/api/admin/",
+            "/api//admin",
+            "/api/foo/%2e%2e/admin",
+        ] {
+            let key = c.lookup_resource_key(evasion);
+            assert_eq!(
+                key.as_deref(),
+                Some("/api/admin"),
+                "evasion {evasion:?} must canonicalize to the user-gated /api/admin, \
+                 not fall through to the anon catch-all (got {key:?})"
+            );
+            let policy = c.lookup_resource(evasion).expect("policy resolves");
+            assert_eq!(
+                policy.auth,
+                AuthLevel::User,
+                "evasion {evasion:?} must resolve the User auth gate, not Anon"
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalize_path_resolves_dot_segments_and_trailing_slash() {
+        // SEC-2 unit coverage of the canonicalizer that backs the matcher:
+        // percent-encoded dot segments decode, `.`/`..` resolve (clamped at
+        // root), empty segments collapse, and a single trailing slash is
+        // stripped (root stays `/`).
+        assert_eq!(canonicalize_path("/api/admin"), "/api/admin");
+        assert_eq!(canonicalize_path("/api/admin/"), "/api/admin");
+        assert_eq!(canonicalize_path("/api/./admin"), "/api/admin");
+        assert_eq!(canonicalize_path("/api/foo/../admin"), "/api/admin");
+        assert_eq!(canonicalize_path("/api/%2e/admin"), "/api/admin");
+        assert_eq!(canonicalize_path("/api/%2E/admin"), "/api/admin");
+        assert_eq!(canonicalize_path("/api/foo/%2e%2e/admin"), "/api/admin");
+        assert_eq!(canonicalize_path("/api//admin"), "/api/admin");
+        // `..` past root is clamped, never escapes above `/`.
+        assert_eq!(canonicalize_path("/../../etc/passwd"), "/etc/passwd");
+        // Root and empty normalize to `/`.
+        assert_eq!(canonicalize_path("/"), "/");
+        assert_eq!(canonicalize_path(""), "/");
+        // A dot INSIDE a segment is not a dot-segment.
+        assert_eq!(canonicalize_path("/docs/a.b.c"), "/docs/a.b.c");
+        // RPC wire paths are untouched (no dot segments).
+        assert_eq!(
+            canonicalize_path("/__zeroship/v1/todos.list"),
+            "/__zeroship/v1/todos.list"
+        );
     }
 
     #[test]

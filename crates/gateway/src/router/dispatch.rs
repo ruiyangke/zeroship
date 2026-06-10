@@ -393,6 +393,37 @@ async fn route_auth_host(
 // Unified request handler
 // ---------------------------------------------------------------------------
 
+/// Outcome of canonicalizing an inbound dispatch path (SEC-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CanonicalPath {
+    /// The path is safe to dispatch under this canonical form. Auth matching
+    /// AND the worker-forwarded URL both use this exact string, so the
+    /// gateway's resource match can never disagree with the worker's
+    /// WHATWG `new URL` re-parse.
+    Use(String),
+    /// The path carried a traversal / empty-segment form (`.`/`..`, literal or
+    /// `%2e`-encoded, or `//`) that a browser's `new URL` would silently
+    /// rewrite. Rather than guess the worker's normalization, reject (400).
+    Reject,
+}
+
+/// Canonicalize an inbound dispatch path for SEC-2.
+///
+/// Fails CLOSED on the gateway↔worker path-disagreement class: a path that
+/// carries a dot-segment (`.`/`..`, literal or `%2e`-encoded) or an empty
+/// interior segment (`//`) is `Reject`ed (the caller answers 400) — a browser's
+/// `new URL` would silently rewrite those, so matching auth on one form while
+/// forwarding another is the bypass. Every other path is returned as its
+/// [`canonicalize_path`] normal form (e.g. a lone trailing slash is stripped),
+/// and the caller forwards THAT canonical string to the worker so the worker's
+/// `new URL(req.url).pathname` reproduces exactly what the gateway matched.
+pub(crate) fn canonicalize_dispatch_path(dispatch_path: &str) -> CanonicalPath {
+    if crate::compiled::path_has_traversal_or_empty_segment(dispatch_path) {
+        return CanonicalPath::Reject;
+    }
+    CanonicalPath::Use(crate::compiled::canonicalize_path(dispatch_path))
+}
+
 async fn handle_request(
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
@@ -413,7 +444,25 @@ async fn handle_request(
 
     // Normalize tail: strip leading slash
     let tail = tail.strip_prefix('/').unwrap_or(tail);
-    let dispatch_path = format!("/{tail}");
+    let raw_dispatch_path = format!("/{tail}");
+
+    // SEC-2: canonicalize the request path BEFORE any resource matching, and
+    // derive the worker-forwarded path from the SAME canonical form so the
+    // gateway's auth match can never disagree with the worker's WHATWG
+    // `new URL(req.url).pathname`. A traversal / empty-segment form (`.`/`..`,
+    // literal or `%2e`-encoded, or `//`) — which a browser would silently
+    // rewrite — is rejected (400) rather than guessed.
+    let dispatch_path = match canonicalize_dispatch_path(&raw_dispatch_path) {
+        CanonicalPath::Use(p) => p,
+        CanonicalPath::Reject => {
+            return HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "request path is not canonical (path traversal or empty segment)",
+            }));
+        }
+    };
+    // The forwarded `tail` is the canonical path minus its leading slash, so
+    // the URL the worker re-parses matches the resource the gateway gated.
+    let tail = dispatch_path.strip_prefix('/').unwrap_or(&dispatch_path);
 
     // CORS preflight short-circuit. The browser sends `OPTIONS` with
     // `Origin` and `Access-Control-Request-Method` *before* the actual
@@ -2063,6 +2112,49 @@ mod tests {
     // Resource-tree request-level tests — exercise the per-resource policy
     // gates on synthetic requests built via ntex's `TestRequest`.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn canonicalize_dispatch_path_rejects_traversal_and_normalizes() {
+        // SEC-2: the dispatch layer rejects (400) any path carrying a
+        // traversal / empty-interior-segment form a browser's `new URL` would
+        // rewrite, and otherwise forwards the CANONICAL form (so the worker
+        // re-parses the exact path the gateway matched auth on). Pre-fix the
+        // helper forwards the raw path and never rejects → RED.
+        for traversal in [
+            "/api/foo/../admin",
+            "/api/%2e/admin",
+            "/api/%2E/admin",
+            "/api/./admin",
+            "/api//admin",
+            "/api/foo/%2e%2e/admin",
+            "/%2e%2e/etc/passwd",
+        ] {
+            assert_eq!(
+                canonicalize_dispatch_path(traversal),
+                CanonicalPath::Reject,
+                "traversal {traversal:?} must be rejected (400), not forwarded raw"
+            );
+        }
+
+        // Benign forms forward under their canonical normalization. A single
+        // trailing slash is a normalize case (not a traversal), and an already
+        // -canonical path is forwarded unchanged.
+        assert_eq!(
+            canonicalize_dispatch_path("/api/admin/"),
+            CanonicalPath::Use("/api/admin".to_string()),
+            "a lone trailing slash normalizes (single-slash policy), not 400"
+        );
+        assert_eq!(
+            canonicalize_dispatch_path("/api/admin"),
+            CanonicalPath::Use("/api/admin".to_string()),
+            "an already-canonical path forwards unchanged"
+        );
+        assert_eq!(
+            canonicalize_dispatch_path("/__zeroship/v1/todos.list"),
+            CanonicalPath::Use("/__zeroship/v1/todos.list".to_string()),
+            "RPC wire paths are canonical and forward unchanged"
+        );
+    }
 
     #[test]
     fn lookup_finds_rpc_resource_after_strip_prefix() {
