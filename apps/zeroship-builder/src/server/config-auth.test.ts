@@ -90,8 +90,9 @@ function discoverProcedures(
 // (crates/gateway/src/compiled.rs `build_inheritance_chain` +
 // `resolve_effective_policy`): walk root `*` → declared dot-segment
 // ancestors → self; stricter auth wins; a resource may only weaken via
-// a self-declared `override: ["auth"]`; the default with no
-// declarations anywhere in the chain is "anon".
+// a self-declared `override: ["auth"]`. SEC-5 fail-closed default: a `rpc:`
+// procedure with no auth declared anywhere in its chain resolves to "user"
+// (not the silent "anon"); url/web keys keep the "anon" default.
 
 const AUTH_RANK: Record<string, number> = { anon: 0, user: 1, admin: 2 };
 
@@ -124,11 +125,13 @@ function effectiveAuth(
   resources: Record<string, WireResource>,
 ): "anon" | "user" | "admin" {
   let auth: "anon" | "user" | "admin" = "anon";
+  let declared = false;
   for (const ancestorKey of inheritanceChain(key, resources)) {
     const node = resources[ancestorKey];
     if (!node) continue;
     const a = node.auth;
     if (typeof a !== "string" || !(a in AUTH_RANK)) continue;
+    declared = true;
     if (AUTH_RANK[a] > AUTH_RANK[auth]) {
       auth = a as "anon" | "user" | "admin";
     } else if (
@@ -139,6 +142,9 @@ function effectiveAuth(
       auth = a as "anon" | "user" | "admin";
     }
   }
+  // SEC-5 fail-closed default: a `rpc:` procedure with no auth anywhere in its
+  // chain resolves to "user", mirroring resolve_effective_policy.
+  if (!declared && key.startsWith("rpc:")) return "user";
   return auth;
 }
 
