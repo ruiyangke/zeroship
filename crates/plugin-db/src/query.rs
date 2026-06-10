@@ -2714,6 +2714,48 @@ pub(crate) fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool 
     kind != "none"
 }
 
+/// **SEC-4** — the column SQL expression to read for `field` inside an
+/// aggregate, substituting the `<field>_masked` sibling when `field` is a
+/// masked column.
+///
+/// For a mask-only column the plaintext lives in `<field>` and the masked
+/// string in `<field>_masked`. The normal read path and `build_distinct`
+/// alias the sibling back to the logical name (`"<field>_masked" AS
+/// "<field>"`); the aggregate builder must do the same so `$group.by` /
+/// `$sum` / `$avg` / `$min` / `$max` / `$first` / `$sort` / `$having`
+/// never lower to the bare plaintext column. Returns a quoted identifier
+/// (the sibling when masked, the field itself otherwise) — NOT aliased,
+/// since the aggregate builder applies its own `AS` where appropriate.
+pub(crate) fn aggregate_read_ident(field: &str, schema_hint: Option<&Value>) -> String {
+    if column_is_masked(field, schema_hint) {
+        quote_ident(&format!("{field}_masked"))
+    } else {
+        quote_ident(field)
+    }
+}
+
+/// **SEC-4** — push one `$group.by` field's SELECT projection and GROUP
+/// BY term. A masked column projects `"<col>_masked" AS "<col>"` (so the
+/// row carries the masked string under the logical name, exactly like
+/// `build_distinct`) and groups by the masked sibling; an unmasked
+/// column projects + groups by the bare quoted column.
+fn push_group_by_field(
+    field: &str,
+    schema_hint: Option<&Value>,
+    select_cols: &mut Vec<String>,
+    group_by_cols: &mut Vec<String>,
+) {
+    let logical = quote_ident(field);
+    if column_is_masked(field, schema_hint) {
+        let sibling = quote_ident(&format!("{field}_masked"));
+        select_cols.push(format!("{sibling} AS {logical}"));
+        group_by_cols.push(sibling);
+    } else {
+        select_cols.push(logical.clone());
+        group_by_cols.push(logical);
+    }
+}
+
 /// Build a SELECT COUNT(*) query.
 ///
 /// **P7 PR 5** — thin shim around [`build_count_with_soft_delete`]
@@ -3889,9 +3931,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                 match by_val {
                     Value::String(s) => {
                         validate_read_identifier(s, schema_hint)?;
-                        let col = quote_ident(s);
-                        select_cols.push(col.clone());
-                        group_by_cols.push(col);
+                        push_group_by_field(s, schema_hint, &mut select_cols, &mut group_by_cols);
                     }
                     Value::Array(arr) => {
                         for item in arr {
@@ -3902,9 +3942,12 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 )
                             })?;
                             validate_read_identifier(s, schema_hint)?;
-                            let col = quote_ident(s);
-                            select_cols.push(col.clone());
-                            group_by_cols.push(col);
+                            push_group_by_field(
+                                s,
+                                schema_hint,
+                                &mut select_cols,
+                                &mut group_by_cols,
+                            );
                         }
                     }
                     _ => {
@@ -3942,7 +3985,8 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("SUM({})", quote_ident(field))
+                        // SEC-4: read the masked sibling for masked columns.
+                        format!("SUM({})", aggregate_read_ident(field, schema_hint))
                     }
                     "$avg" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -3951,7 +3995,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("AVG({})", quote_ident(field))
+                        format!("AVG({})", aggregate_read_ident(field, schema_hint))
                     }
                     "$min" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -3960,7 +4004,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("MIN({})", quote_ident(field))
+                        format!("MIN({})", aggregate_read_ident(field, schema_hint))
                     }
                     "$max" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -3969,7 +4013,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
-                        format!("MAX({})", quote_ident(field))
+                        format!("MAX({})", aggregate_read_ident(field, schema_hint))
                     }
                     "$first" => {
                         let field = op_val.as_str().ok_or_else(|| {
@@ -3978,18 +4022,24 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
+                        // SEC-4: read the masked sibling for masked columns.
+                        let read_ident = aggregate_read_ident(field, schema_hint);
                         if last_sort.is_empty() {
-                            format!("(array_agg({}))[1]", quote_ident(field))
+                            format!("(array_agg({read_ident}))[1]")
                         } else {
                             let order_parts: Vec<String> = last_sort
                                 .iter()
                                 .map(|(col, descending)| {
-                                    build_order_term(col, *descending, dialect)
+                                    build_order_term_with_schema(
+                                        col,
+                                        *descending,
+                                        dialect,
+                                        schema_hint,
+                                    )
                                 })
                                 .collect();
                             format!(
-                                "(array_agg({} ORDER BY {}))[1]",
-                                quote_ident(field),
+                                "(array_agg({read_ident} ORDER BY {}))[1]",
                                 order_parts.join(", ")
                             )
                         }
@@ -4018,13 +4068,11 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                     last_sort.push((key.clone(), descending));
                 }
             }
-            order_clause = build_order_by_with_validator(sort_val, dialect, |field| {
-                if agg_exprs.contains_key(field) {
-                    Ok(())
-                } else {
-                    validate_read_identifier(field, schema_hint)
-                }
-            })?;
+            // SEC-4: aggregate $sort on a masked base column must order by
+            // the masked sibling, not plaintext. Aggregate aliases
+            // (`agg_exprs`) order by the alias name as-is.
+            order_clause =
+                build_aggregate_order_by(sort_val, dialect, &agg_exprs, schema_hint)?;
         } else if let Some(limit_val) = obj.get("$limit") {
             let n = limit_val.as_i64().ok_or_else(|| {
                 QueryError::InvalidFilter("aggregate: $limit must be an integer".to_string())
@@ -4449,12 +4497,14 @@ fn build_having_inner(
                         }
                     }
                 } else {
-                    // Resolve alias → aggregate expression, or fall back to quoted column
+                    // Resolve alias → aggregate expression, or fall back to
+                    // the quoted column. SEC-4: a masked base column in
+                    // HAVING reads its masked sibling, never plaintext.
                     let col = if let Some(expr) = agg_exprs.get(key) {
                         expr.clone()
                     } else {
                         validate_read_identifier(key, schema_hint)?;
-                        quote_ident(key)
+                        aggregate_read_ident(key, schema_hint)
                     };
                     let cond = build_having_condition(&col, value, params)?;
                     conditions.push(cond);
@@ -4843,6 +4893,61 @@ where
     }
 }
 
+/// **SEC-4** — ORDER BY builder for the aggregate `$sort` stage.
+///
+/// Keys that name an aggregate alias (`agg_exprs`) order by the alias as
+/// a bare quoted identifier (the SELECT already projected `<expr> AS
+/// <alias>`). Any other key is a base column, validated as readable and
+/// — when masked — lowered to its `<col>_masked` sibling so the sort
+/// never touches the plaintext column.
+fn build_aggregate_order_by(
+    order: &Value,
+    dialect: SqlDialect,
+    agg_exprs: &std::collections::HashMap<String, String>,
+    schema_hint: Option<&Value>,
+) -> Result<String, QueryError> {
+    let term = |field: &str, descending: bool| -> Result<String, QueryError> {
+        if agg_exprs.contains_key(field) {
+            Ok(build_order_term_expr(&quote_ident(field), descending, dialect))
+        } else {
+            validate_read_identifier(field, schema_hint)?;
+            Ok(build_order_term_with_schema(field, descending, dialect, schema_hint))
+        }
+    };
+    match order {
+        Value::Object(map) => {
+            let mut parts = Vec::with_capacity(map.len());
+            for (key, val) in map {
+                let descending = matches!(val.as_i64(), Some(n) if n < 0);
+                parts.push(term(key, descending)?);
+            }
+            Ok(parts.join(", "))
+        }
+        Value::Array(arr) => {
+            let mut parts = Vec::new();
+            for item in arr {
+                let pair = item.as_array().ok_or_else(|| {
+                    QueryError::InvalidFilter("orderBy array entries must be [field, dir]".to_string())
+                })?;
+                if pair.len() != 2 {
+                    return Err(QueryError::InvalidFilter(
+                        "orderBy array entries must be [field, dir]".to_string(),
+                    ));
+                }
+                let field = pair[0].as_str().ok_or_else(|| {
+                    QueryError::InvalidFilter("orderBy field must be a string".to_string())
+                })?;
+                let descending = matches!(pair[1].as_i64(), Some(n) if n < 0);
+                parts.push(term(field, descending)?);
+            }
+            Ok(parts.join(", "))
+        }
+        _ => Err(QueryError::InvalidFilter(
+            "orderBy must be an object or array".to_string(),
+        )),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ClauseBudgetKind {
     Filter,
@@ -4941,7 +5046,25 @@ fn count_clause_budget(
 }
 
 fn build_order_term(field: &str, descending: bool, dialect: SqlDialect) -> String {
-    let col = quote_ident(field);
+    build_order_term_expr(&quote_ident(field), descending, dialect)
+}
+
+/// **SEC-4** — like [`build_order_term`] but substitutes the masked
+/// sibling for masked columns, so an aggregate `$sort` (or a `$first`
+/// ORDER BY) on a mask-only column never orders by — and thereby leaks
+/// the ordering of — the plaintext column.
+fn build_order_term_with_schema(
+    field: &str,
+    descending: bool,
+    dialect: SqlDialect,
+    schema_hint: Option<&Value>,
+) -> String {
+    build_order_term_expr(&aggregate_read_ident(field, schema_hint), descending, dialect)
+}
+
+/// Shared ORDER BY term renderer over an already-quoted column
+/// expression (`col`).
+fn build_order_term_expr(col: &str, descending: bool, dialect: SqlDialect) -> String {
     match dialect {
         SqlDialect::Postgres => {
             let dir = if descending { "DESC" } else { "ASC" };
@@ -5645,6 +5768,112 @@ mod tests {
         let q = build_aggregate("app1", "users", &pipeline).unwrap();
         assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
+    }
+
+    // -----------------------------------------------------------------------
+    // SEC-4 — aggregation pipeline must NOT leak masked-column plaintext.
+    //
+    // For a mask-only column (`.mask({...})` without `.encrypted()`),
+    // plaintext lives in `<col>` and the masked string in `<col>_masked`.
+    // `build_distinct` substitutes the sibling; the aggregate builder used
+    // a bare `quote_ident(field)` against the base plaintext column, so
+    // `$group.by:"ssn"` / `$max:"ssn"` returned PLAINTEXT. These pin the
+    // sibling substitution at the SQL-builder level (BASE column, not the
+    // already-rejected `ssn_masked` sibling name).
+    // -----------------------------------------------------------------------
+
+    fn mask_only_ssn_schema() -> Value {
+        json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "tenant": { "type": "string" }
+        })
+    }
+
+    #[test]
+    fn sec4_aggregate_group_by_masked_field_reads_masked_sibling() {
+        let pipeline = json!([
+            {"$group": {"by": "ssn", "n": {"$count": true}}}
+        ]);
+        let schema = mask_only_ssn_schema();
+        let q = build_aggregate_with_soft_delete_with_dialect(
+            "app1", "users", &pipeline, false, Some(&schema), SqlDialect::Postgres,
+        )
+        .expect("build aggregate with schema");
+
+        assert!(
+            q.sql.contains(r#""ssn_masked" AS "ssn""#),
+            "SEC-4: $group.by on a masked column must select the masked \
+             sibling, not plaintext: {}",
+            q.sql
+        );
+        // The bare plaintext column must not appear in the SELECT or the
+        // GROUP BY (the sibling alias `"ssn"` is fine, the bare quoted
+        // `"ssn"` projection is not).
+        assert!(
+            !q.sql.contains(r#"SELECT "ssn","#) && !q.sql.contains(r#"SELECT "ssn" "#),
+            "SEC-4: aggregate must not project the bare plaintext ssn column: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#"GROUP BY "ssn_masked""#),
+            "SEC-4: GROUP BY on a masked column must group by the masked \
+             sibling: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn sec4_aggregate_max_on_masked_field_reads_masked_sibling() {
+        let pipeline = json!([
+            {"$group": {"by": "tenant", "top": {"$max": "ssn"}}}
+        ]);
+        let schema = mask_only_ssn_schema();
+        let q = build_aggregate_with_soft_delete_with_dialect(
+            "app1", "users", &pipeline, false, Some(&schema), SqlDialect::Postgres,
+        )
+        .expect("build aggregate with schema");
+
+        assert!(
+            q.sql.contains(r#"MAX("ssn_masked") AS "top""#),
+            "SEC-4: $max on a masked column must aggregate the masked \
+             sibling, not plaintext: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#"MAX("ssn")"#),
+            "SEC-4: $max must not read the bare plaintext ssn column: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn sec4_aggregate_sum_min_first_on_masked_field_read_masked_sibling() {
+        // $sum / $min / $first all lower a field reference and must each
+        // substitute the masked sibling.
+        let schema = mask_only_ssn_schema();
+        for op in ["$sum", "$min", "$first"] {
+            let pipeline = json!([
+                {"$group": {"by": "tenant", "v": {op: "ssn"}}}
+            ]);
+            let q = build_aggregate_with_soft_delete_with_dialect(
+                "app1", "users", &pipeline, false, Some(&schema), SqlDialect::Postgres,
+            )
+            .unwrap_or_else(|e| panic!("build aggregate {op}: {e:?}"));
+            assert!(
+                q.sql.contains(r#""ssn_masked""#),
+                "SEC-4: {op} on a masked column must reference the masked \
+                 sibling: {}",
+                q.sql
+            );
+            assert!(
+                !q.sql.contains(r#"("ssn")"#) && !q.sql.contains(r#"("ssn" "#),
+                "SEC-4: {op} must not read the bare plaintext ssn column: {}",
+                q.sql
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
