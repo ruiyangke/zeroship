@@ -435,22 +435,27 @@ fn sanitize_app_response_headers(headers: &[(String, String)]) -> Vec<(String, S
 /// `name=value` pair) are preserved in order. Cookie attributes are
 /// `;`-delimited and the attribute name is case-insensitive.
 fn strip_cookie_domain(set_cookie: &str) -> String {
-    let kept: Vec<&str> = set_cookie
-        .split(';')
-        .filter(|part| {
-            let trimmed = part.trim();
-            // `Domain` is an `=`-valued attribute (`Domain=example.com`); match
-            // the attribute name case-insensitively up to the `=`.
-            let attr = trimmed.split('=').next().unwrap_or(trimmed).trim();
-            !attr.eq_ignore_ascii_case("domain")
-        })
-        .collect();
-    // Rejoin with the canonical `; ` separator, trimming each surviving part so
-    // the output is stable regardless of the app's original spacing.
-    kept.iter()
-        .map(|p| p.trim())
-        .collect::<Vec<_>>()
-        .join("; ")
+    let mut parts = set_cookie.split(';');
+    // The first `;`-segment is the cookie's `name=value` pair — ALWAYS
+    // preserved, even if the cookie is literally named `domain`. Only the
+    // trailing ATTRIBUTE segments are subject to the Domain strip.
+    let Some(name_value) = parts.next() else {
+        return String::new();
+    };
+    let mut kept: Vec<&str> = vec![name_value.trim()];
+    for part in parts {
+        let trimmed = part.trim();
+        // `Domain` is an `=`-valued attribute (`Domain=example.com`); match the
+        // attribute name case-insensitively up to the `=`.
+        let attr = trimmed.split('=').next().unwrap_or(trimmed).trim();
+        if attr.eq_ignore_ascii_case("domain") {
+            continue;
+        }
+        kept.push(trimmed);
+    }
+    // Rejoin with the canonical `; ` separator so the output is stable
+    // regardless of the app's original spacing.
+    kept.join("; ")
 }
 
 fn build_request(
@@ -935,6 +940,27 @@ mod app_response_cookie_tests {
                 .any(|(k, v)| k == "Content-Type" && v == "text/html"),
             "non-cookie headers pass through: {out:?}"
         );
+    }
+
+    #[test]
+    fn app_set_cookie_named_domain_is_preserved() {
+        // SEC-9 regression: the Domain STRIP must apply only to the `Domain`
+        // ATTRIBUTE, never to a cookie literally NAMED `domain`. The first
+        // `;`-segment is the cookie's name=value pair; dropping it (as a naive
+        // attribute filter does) silently breaks the app's cookie.
+        let out = strip_cookie_domain("domain=abc123; Path=/; Domain=evil.zeroship.ai");
+        // The name=value pair (cookie named `domain`) survives...
+        assert!(
+            out.starts_with("domain=abc123"),
+            "cookie named `domain` lost its name=value pair: {out:?}"
+        );
+        // ...the Domain ATTRIBUTE is stripped...
+        assert!(
+            !out.to_ascii_lowercase().contains("domain=evil"),
+            "Domain attribute must still be stripped: {out:?}"
+        );
+        // ...and other attributes are kept.
+        assert!(out.contains("Path=/"), "Path preserved: {out:?}");
     }
 
     #[test]
