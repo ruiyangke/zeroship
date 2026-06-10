@@ -444,10 +444,13 @@ pub async fn clear_migration_lock_for_tests() {
     // before drop. Best-effort: a connection that's already dead is
     // expected during the panic-recovery path and not worth treating
     // as an error.
-    if let Some(client) = ctx_mut(|c| c.take_mig_client()) {
+    // Forced teardown: drain whatever lock client is parked regardless
+    // of owner (production code uses the owner-scoped accessor).
+    if let Some(client) = ctx_mut(|c| c.take_mig_client_any_for_tests()) {
         let _ = client.batch_execute("ROLLBACK; SELECT pg_advisory_unlock_all();").await;
         drop(client);
     }
+    ctx_mut(|c| c.clear_mig_lock());
     migrations::release_active_lock();
 }
 
@@ -463,7 +466,7 @@ pub async fn clear_migration_lock_for_tests() {
 /// [`uninstall_tx_marker_for_tests`] to release the slot.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub async fn install_tx_marker_for_tests(url: &str) {
+pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
     let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await
         .expect("install_tx_marker_for_tests: connect failed");
@@ -473,11 +476,12 @@ pub async fn install_tx_marker_for_tests(url: &str) {
     .detach();
     // Issue a real BEGIN so the dummy connection behaves like a real
     // tx — not strictly required (the queueing path keys off
-    // `IsolateDbContext::has_tx`), but matches the production state
+    // `IsolateDbContext::has_tx_for`), but matches the production state
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
-        let _previous = c.install_tx_client(crate::context::TxConnection::Postgres(client));
+        let _previous =
+            c.install_tx_client(app_id, crate::context::TxConnection::Postgres(client));
         debug_assert!(_previous.is_none(), "install_tx_marker_for_tests: slot already occupied");
     });
 }
@@ -500,8 +504,8 @@ pub async fn install_tx_marker_for_tests(url: &str) {
 /// the p8a2 ordering hang.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub async fn uninstall_tx_marker_for_tests() {
-    if let Some(client) = ctx_mut(|c| c.take_tx_client()) {
+pub async fn uninstall_tx_marker_for_tests(app_id: &str) {
+    if let Some(client) = ctx_mut(|c| c.take_tx_client_for(app_id)) {
         match client {
             crate::context::TxConnection::Postgres(client) => {
                 // Best-effort: a connection already torn down (panic recovery)
@@ -532,16 +536,16 @@ pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
 /// transaction settle path's commit branch without standing up V8.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn drain_pending_emits_for_tests() {
-    exec::drain_pending_emits_on_commit();
+pub fn drain_pending_emits_for_tests(app_id: &str) {
+    exec::drain_pending_emits_on_commit(app_id);
 }
 
 /// **Test-only**: clear the pending-emits queue without firing
 /// (rollback branch).
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn clear_pending_emits_for_tests() {
-    exec::clear_pending_emits();
+pub fn clear_pending_emits_for_tests(app_id: &str) {
+    exec::clear_pending_emits(app_id);
 }
 
 /// **Test-only**: acquire a real pooled Postgres `LockGuard` against a

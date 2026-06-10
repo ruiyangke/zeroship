@@ -177,6 +177,10 @@ struct TxFinalizer {
     /// `ROLLBACK TO SAVEPOINT zs_sp_N`, connection stays open for the
     /// enclosing tx).
     savepoint: Option<String>,
+    /// Owning app. SEC-1: the settle path (COMMIT / ROLLBACK / RELEASE /
+    /// ROLLBACK TO + pending-emit drain) operates strictly on this app's
+    /// slot, so one app's transaction can never settle another's.
+    app_id: String,
     /// One-shot guard. Set the first time either handler fires.
     settled: Cell<bool>,
 }
@@ -213,17 +217,20 @@ pub fn transaction_dispatch<'s>(
     // the pump scope.
     let user_fn_global = v8::Global::new(scope, user_fn);
 
-    // Decide BEGIN vs SAVEPOINT from the *current* tx state. `has_tx()`
-    // is true whenever an enclosing explicit `transaction()` holds the
-    // slot. A nested call therefore emits `SAVEPOINT` and reuses the open
+    // Decide BEGIN vs SAVEPOINT from the *current* tx state.
+    // `has_tx_for(app_id)` is true whenever an enclosing explicit
+    // `transaction()` for THIS app holds the slot. SEC-1: a co-resident
+    // app's parked tx reads `false`, so this app correctly opens its own
+    // top-level BEGIN rather than nesting into the other app's tx. A
+    // nested call therefore emits `SAVEPOINT` and reuses the open
     // connection.
-    let nested = crate::context::with(|c| c.has_tx());
+    let nested = crate::context::with(|c| c.has_tx_for(&app_id));
 
     // Savepoint-depth cap: refuse the (MAX+1)-th level up front, before
     // any SQL runs. The depth that *would* be opened is the current
     // depth + 1.
     if nested {
-        let would_be = crate::context::with(|c| c.savepoint_depth()) + 1;
+        let would_be = crate::context::with(|c| c.savepoint_depth_for(&app_id)) + 1;
         if would_be > MAX_SAVEPOINT_DEPTH {
             let err = DbError::validation_hinted(
                 "savepoint_depth_exceeded",
@@ -257,6 +264,7 @@ pub fn transaction_dispatch<'s>(
                     outer: outer_global,
                     request_id,
                     savepoint,
+                    app_id: app_id.clone(),
                     settled: Cell::new(false),
                 };
                 OpResult::JsValue {
@@ -329,14 +337,14 @@ async fn exec_begin_or_savepoint(
         // name that wasn't yet allocated — V8 is single-threaded so
         // there is no real race, but the ordering keeps the invariant
         // legible.)
-        let depth = crate::context::with_mut(|c| c.push_savepoint());
+        let depth = crate::context::with_mut(|c| c.push_savepoint_for(app_id));
         let name = savepoint_name(depth);
         let sql = format!("SAVEPOINT {name}");
-        if let Err(e) = run_on_tx_conn(&sql).await {
+        if let Err(e) = run_on_tx_conn(app_id, &sql).await {
             // SAVEPOINT failed — undo the depth bump so the slot stays
             // consistent (the enclosing tx is untouched; nothing was
             // opened).
-            crate::context::with_mut(|c| c.pop_savepoint());
+            crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
             return Err(e);
         }
         return Ok(Some(name));
@@ -365,12 +373,12 @@ async fn exec_begin_or_savepoint(
             apply_per_app_role(&client, app_id).await?;
 
             crate::context::with_mut(|c| {
-                let _previous = c.install_tx_client(TxConnection::Postgres(client));
+                let _previous = c.install_tx_client(app_id, TxConnection::Postgres(client));
                 debug_assert!(
                     _previous.is_none(),
-                    "exec_begin_or_savepoint: tx_conn slot already occupied"
+                    "exec_begin_or_savepoint: tx_conn slot already occupied for this app"
                 );
-                c.reset_savepoint_depth();
+                c.reset_savepoint_depth_for(app_id);
             });
         }
         crate::backend::BackendHandle::Sqlite(sq) => {
@@ -386,18 +394,18 @@ async fn exec_begin_or_savepoint(
             };
 
             crate::context::with_mut(|c| {
-                let _previous = c.install_tx_client(TxConnection::Sqlite(client));
+                let _previous = c.install_tx_client(app_id, TxConnection::Sqlite(client));
                 debug_assert!(
                     _previous.is_none(),
-                    "exec_begin_or_savepoint: tx_conn slot already occupied"
+                    "exec_begin_or_savepoint: tx_conn slot already occupied for this app"
                 );
-                c.reset_savepoint_depth();
+                c.reset_savepoint_depth_for(app_id);
             });
         }
     }
     // Defensive: drop any broker residue from an interrupted prior run so
-    // it cannot leak into this tx's drain.
-    clear_pending_emits();
+    // it cannot leak into this app's tx drain.
+    clear_pending_emits(app_id);
     Ok(None)
 }
 
@@ -438,12 +446,16 @@ fn savepoint_name(depth: u32) -> String {
 /// handle itself is just an `Rc` clone of the actor and dropping it does
 /// not touch the live transaction on the worker thread.
 pub(super) struct TxTeardownGuard {
+    app_id: String,
     client: Option<TxConnection>,
 }
 
 impl TxTeardownGuard {
-    pub(super) fn new(client: TxConnection) -> Self {
-        Self { client: Some(client) }
+    pub(super) fn new(app_id: String, client: TxConnection) -> Self {
+        Self {
+            app_id,
+            client: Some(client),
+        }
     }
 
     pub(super) fn client(&self) -> &TxConnection {
@@ -473,26 +485,29 @@ impl Drop for TxTeardownGuard {
                         "sqlite tx teardown cancelled before completion; failed to enqueue \
                          fallback ROLLBACK, restoring tx slot for reuse"
                     );
-                    crate::context::with_mut(|c| c.put_tx_client(TxConnection::Sqlite(handle.clone())));
+                    // SEC-1: restore to THIS app's slot only.
+                    crate::context::with_mut(|c| {
+                        c.put_tx_client_for(&self.app_id, TxConnection::Sqlite(handle.clone()))
+                    });
                     return;
                 }
             }
             TxConnection::Postgres(_) => {}
         }
 
-        clear_pending_emits();
+        clear_pending_emits(&self.app_id);
         drop(client);
     }
 }
 
 /// Run a single non-returning statement (`SAVEPOINT` / `RELEASE` /
-/// `ROLLBACK TO` / `COMMIT` / `ROLLBACK`) against the pinned tx
+/// `ROLLBACK TO` / `COMMIT` / `ROLLBACK`) against `app_id`'s pinned tx
 /// connection, holding the client across the await and putting it back.
 /// Used for savepoint statements that must NOT drain the connection.
-async fn run_on_tx_conn(sql: &str) -> Result<(), DbError> {
+async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let client = crate::context::TxClientSlotGuard::take()?;
+    let client = crate::context::TxClientSlotGuard::take(app_id)?;
     let result = client_exec_on_tx(&backend, client.client(), sql, &[]).await;
     result.map(|_| ())
 }
@@ -705,6 +720,7 @@ fn settle_after_body(
         outer,
         request_id,
         savepoint,
+        app_id,
         ..
     } = *finalizer;
 
@@ -712,7 +728,7 @@ fn settle_after_body(
     let body = if success { body_ok } else { body_err };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(success, savepoint.as_deref()).await;
+        let settle_result = exec_settle(&app_id, success, savepoint.as_deref()).await;
         let value = build_settle_resolve_value(settle_result, success, body);
         OpResult::JsValue {
             resolver: outer,
@@ -738,6 +754,7 @@ fn settle_failed_before_body(
         outer,
         request_id,
         savepoint,
+        app_id,
         ..
     } = finalizer;
     let err_global = {
@@ -748,7 +765,7 @@ fn settle_failed_before_body(
     };
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Roll back (best-effort); the body already failed.
-        let _ = exec_settle(false, savepoint.as_deref()).await;
+        let _ = exec_settle(&app_id, false, savepoint.as_deref()).await;
         OpResult::JsValue {
             resolver: outer,
             value: ResolveValue::Reject(err_global),
@@ -785,50 +802,51 @@ enum SettleOutcome {
 ///   - success → `RELEASE SAVEPOINT name` (keeps the connection open).
 ///   - failure → `ROLLBACK TO SAVEPOINT name` (keeps the connection
 ///     open; the enclosing tx continues).
-async fn exec_settle(success: bool, savepoint: Option<&str>) -> SettleOutcome {
+async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> SettleOutcome {
     match savepoint {
         Some(name) => {
             // Nested — pop the depth first so a sibling/enclosing level
             // sees the correct count, then run RELEASE / ROLLBACK TO.
-            crate::context::with_mut(|c| c.pop_savepoint());
+            crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
             let sql = if success {
                 format!("RELEASE SAVEPOINT {name}")
             } else {
                 format!("ROLLBACK TO SAVEPOINT {name}")
             };
-            match run_on_tx_conn(&sql).await {
+            match run_on_tx_conn(app_id, &sql).await {
                 Ok(()) => SettleOutcome::Ok,
                 Err(e) => SettleOutcome::SettleErr(e),
             }
         }
-        None => exec_settle_top_level(success).await,
+        None => exec_settle_top_level(app_id, success).await,
     }
 }
 
-/// Top-level COMMIT / ROLLBACK. Drains the connection out of the slot,
-/// runs the statement, drops the client, and settles the broker queue.
-async fn exec_settle_top_level(success: bool) -> SettleOutcome {
+/// Top-level COMMIT / ROLLBACK. Drains `app_id`'s connection out of the
+/// slot, runs the statement, drops the client, and settles that app's
+/// broker queue.
+async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
     let backend = match crate::context::with(|c| c.backend()) {
         Some(backend) => backend,
         None => {
-            crate::context::with_mut(|c| c.reset_savepoint_depth());
-            clear_pending_emits();
+            crate::context::with_mut(|c| c.reset_savepoint_depth_for(app_id));
+            clear_pending_emits(app_id);
             return SettleOutcome::Ok;
         }
     };
     let client_opt = crate::context::with_mut(|c| {
-        let client = c.take_tx_client();
-        c.reset_savepoint_depth();
+        let client = c.take_tx_client_for(app_id);
+        c.reset_savepoint_depth_for(app_id);
         client
     });
     let Some(client) = client_opt else {
         // Slot already drained (e.g. a concurrent teardown). Treat as
         // settled — clear residual state.
-        clear_pending_emits();
+        clear_pending_emits(app_id);
         return SettleOutcome::Ok;
     };
 
-    let teardown = TxTeardownGuard::new(client);
+    let teardown = TxTeardownGuard::new(app_id.to_string(), client);
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
     let result = client_exec_on_tx(&backend, teardown.client(), cmd, &[]).await;
     if success && result.is_err() && matches!(teardown.client(), TxConnection::Sqlite(_)) {
@@ -840,7 +858,7 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
     match (success, result) {
         (true, Ok(_)) => {
             // Commit succeeded — fire the deferred broker events.
-            drain_pending_emits_on_commit();
+            drain_pending_emits_on_commit(app_id);
             SettleOutcome::Ok
         }
         (true, Err(e)) => {
@@ -849,12 +867,12 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
             // best-effort `ROLLBACK` above because the actor outlives the
             // handle. Drop the queued events so subscribers never see
             // writes that may not have landed.
-            clear_pending_emits();
+            clear_pending_emits(app_id);
             SettleOutcome::CommitIndeterminate(e)
         }
         (false, Ok(_)) => {
             // Rollback succeeded — drop the queued events.
-            clear_pending_emits();
+            clear_pending_emits(app_id);
             SettleOutcome::Ok
         }
         (false, Err(_)) => {
@@ -862,7 +880,7 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
             // SQLite arm already attempted an explicit `ROLLBACK`.
             // Treat as rolled back (the body error still governs the
             // outer rejection).
-            clear_pending_emits();
+            clear_pending_emits(app_id);
             SettleOutcome::Ok
         }
     }
@@ -936,9 +954,9 @@ mod tests {
     impl Drop for ContextReset {
         fn drop(&mut self) {
             crate::context::with_mut(|c| {
-                let _ = c.take_tx_client();
-                c.reset_savepoint_depth();
-                c.clear_pending_emits();
+                let _ = c.take_tx_client_for("app_sqlite");
+                c.reset_savepoint_depth_for("app_sqlite");
+                c.clear_pending_emits_for("app_sqlite");
                 c.clear_pool();
             });
         }
@@ -951,9 +969,9 @@ mod tests {
         );
         let reset = ContextReset;
         crate::context::with_mut(|c| {
-            let _ = c.take_tx_client();
-            c.reset_savepoint_depth();
-            c.clear_pending_emits();
+            let _ = c.take_tx_client_for("app_sqlite");
+            c.reset_savepoint_depth_for("app_sqlite");
+            c.clear_pending_emits_for("app_sqlite");
             c.set_sqlite_backend(Rc::clone(&backend));
         });
         (backend, dir, reset)
@@ -1048,7 +1066,7 @@ mod tests {
                 .await
                 .expect("insert inside sqlite tx");
 
-            match exec_settle(true, None).await {
+            match exec_settle("app_sqlite", true, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
@@ -1058,7 +1076,7 @@ mod tests {
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("1"));
-            assert!(!crate::context::with(|c| c.has_tx()));
+            assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
         });
     }
 
@@ -1087,7 +1105,7 @@ mod tests {
                 .await
                 .expect("insert inside sqlite tx");
 
-            match exec_settle(false, None).await {
+            match exec_settle("app_sqlite", false, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
@@ -1097,7 +1115,7 @@ mod tests {
                 .await
                 .expect("count notes after rollback");
             assert_eq!(rows[0][0].as_deref(), Some("0"));
-            assert!(!crate::context::with(|c| c.has_tx()));
+            assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
         });
     }
 }

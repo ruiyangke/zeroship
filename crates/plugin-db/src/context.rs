@@ -57,6 +57,10 @@ pub(crate) enum BackendInitState {
 /// allows only `context.rs` and `backend/postgres.rs` to name the
 /// underlying driver type.
 pub(crate) struct MigrationLock {
+    /// Owning app. A worker thread hosts many isolates (one per app);
+    /// migration ops presented by app B must never observe — let alone
+    /// drive — a lock app A parked here (SEC-1 sibling hazard).
+    pub(crate) app_id: String,
     pub(crate) name: String,
     pub(crate) collection: String,
     pub(crate) audit_id: i64,
@@ -128,15 +132,22 @@ pub(crate) enum TxConnection {
 /// typed place.
 #[must_use = "TxClientSlotGuard restores the tx slot on Drop unless consumed via into_inner()"]
 pub(crate) struct TxClientSlotGuard {
+    app_id: String,
     client: Option<TxConnection>,
 }
 
 impl TxClientSlotGuard {
-    /// Drain the transaction client out of the per-isolate slot.
-    pub(crate) fn take() -> Result<Self, DbError> {
-        let client = with_mut(|c| c.take_tx_client())
+    /// Drain `app_id`'s transaction client out of the per-isolate slot.
+    /// SEC-1: the guard restores it to the *same* app's slot on drop, so
+    /// a cancellation mid-await can never re-park one app's client under
+    /// another's key.
+    pub(crate) fn take(app_id: &str) -> Result<Self, DbError> {
+        let client = with_mut(|c| c.take_tx_client_for(app_id))
             .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
-        Ok(Self { client: Some(client) })
+        Ok(Self {
+            app_id: app_id.to_string(),
+            client: Some(client),
+        })
     }
 
     /// Borrow the pinned client while the guard owns restoration.
@@ -150,7 +161,8 @@ impl TxClientSlotGuard {
 impl Drop for TxClientSlotGuard {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
-            with_mut(|c| c.put_tx_client(client));
+            let app_id = std::mem::take(&mut self.app_id);
+            with_mut(|c| c.put_tx_client_for(&app_id, client));
         }
     }
 }
@@ -176,54 +188,76 @@ pub struct IsolateDbContext {
     /// redundant DDL on subsequent cold starts within the same deploy.
     registered_models: HashSet<String>,
 
-    /// Active transaction client. Only one transaction at a time per
-    /// isolate (V8 is single-threaded). If `Some`, CRUD routes through
-    /// this pinned client instead of the pool/backend autocommit path.
+    /// Active transaction clients, **keyed by owning `app_id`**.
     ///
-    /// Postgres stores a raw [`Client`] rather than
+    /// SEC-1: a worker OS thread multiplexes up to ~200 isolates (one
+    /// per app), and a creator's `env.db.transaction(async () => await
+    /// fetch(slow))` parks its tx client here across the `await`. If
+    /// this were a single per-thread slot, a co-resident app B's plain
+    /// `env.db.*` would run B's SQL on A's pinned connection — inside
+    /// A's transaction, snapshot, and per-app PG role. Keying by
+    /// `app_id` makes A's parked tx invisible and untouchable to B, and
+    /// lets A and B each hold their own concurrent tx without clobbering
+    /// (B's BEGIN does not abort A's).
+    ///
+    /// V8 is single-threaded per isolate, so a given app still has at
+    /// most one entry. Postgres stores a raw [`Client`] rather than
     /// `compio_postgres::Transaction<'_>` because the latter borrows the
     /// former and cannot live in thread-local state. SQLite stores a
     /// [`SqliteSessionHandle`] pointing at the single writer actor; the
     /// actor outlives the handle, so rollback on reject must be explicit
     /// rather than relying on handle drop.
-    tx_conn: Option<TxConnection>,
+    tx_conns: HashMap<String, TxConnection>,
 
-    /// **P9 PR 3** — number of nested `SAVEPOINT`s currently open within
-    /// the active explicit transaction. `0` means either no transaction
-    /// is active, or the only open transaction is the outermost one (the
+    /// **P9 PR 3** — number of nested `SAVEPOINT`s open within each
+    /// app's active explicit transaction, **keyed by owning `app_id`**
+    /// (SEC-1: a shared counter would let one app's savepoint
+    /// bookkeeping corrupt another's `zs_sp_<N>` naming). A missing
+    /// entry (or `0`) means either no transaction is active for that
+    /// app, or the only open transaction is the outermost one (the
     /// `BEGIN`). Each nested `env.db.transaction(...)` call that finds
-    /// `has_tx() == true` emits `SAVEPOINT zs_sp_<depth+1>` and increments
-    /// this; the matching `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
-    /// decrements it.
+    /// `has_tx_for(app) == true` emits `SAVEPOINT zs_sp_<depth+1>` and
+    /// increments this; the matching `RELEASE SAVEPOINT` /
+    /// `ROLLBACK TO SAVEPOINT` decrements it.
     ///
     /// The native transaction module (`transaction`) is the only
     /// writer: the savepoint name `zs_sp_<N>` is derived from this counter
     /// so RELEASE/ROLLBACK TO always target the savepoint the matching
     /// nested call opened. Capped at [`crate::transaction::MAX_SAVEPOINT_DEPTH`]
     /// (a 9th level throws `savepoint_depth_exceeded`).
-    savepoint_depth: u32,
+    savepoint_depths: HashMap<String, u32>,
 
-    /// Broker events queued during an active transaction.
+    /// Broker events queued during an active transaction, **keyed by
+    /// owning `app_id`**.
     ///
-    /// While [`Self::tx_conn`] is `Some`, every successful CRUD
-    /// mutation pushes its `ChangeEvent` here instead of calling
+    /// While an app has a tx parked in [`Self::tx_conns`], every
+    /// successful CRUD mutation pushes its `ChangeEvent` here (under the
+    /// event's own `app_id`) instead of calling
     /// [`crate::wal_consumer::emit_local`] directly. The transaction
     /// settle path (the native `Db.transaction(fn)` orchestrator) drains
-    /// the queue and either fires every event through `emit_local` on
-    /// COMMIT or clears it on ROLLBACK. This closes the
+    /// the owning app's queue and either fires every event through
+    /// `emit_local` on COMMIT or clears it on ROLLBACK. This closes the
     /// "emit-before-commit" dual-write window where a subscriber could
     /// `find()` rows that don't yet exist on disk (or that a ROLLBACK is
     /// about to undo).
     ///
-    /// `None` outside a transaction; non-empty `Some(Vec<_>)` only
-    /// while a tx is active. Drained atomically by `Vec::take`.
-    pending_emits: Option<Vec<ChangeEvent>>,
+    /// SEC-1: keying by `app_id` keeps app B's COMMIT from firing app
+    /// A's pre-commit events early (and B's ROLLBACK from silently
+    /// dropping A's). A missing entry means no events are queued for
+    /// that app.
+    pending_emits: HashMap<String, Vec<ChangeEvent>>,
 
     /// Active migration owner state. `Some` after a successful
     /// `migrationBegin`; `None` once `migrationCommitBatch` with
     /// `isDone=true` (or `migrationCancel` on the owner thread)
     /// clears it. Single-isolate invariant — only one migration may
-    /// be active per V8 thread at a time (mirrors [`Self::tx_conn`]).
+    /// be active per V8 thread at a time. The slot carries
+    /// [`MigrationLock::app_id`] so the per-op accessors
+    /// ([`Self::mig_lock_snapshot_for`] / [`Self::take_mig_client_for`]
+    /// / [`Self::return_mig_client_for`]) can refuse a stale wrapper
+    /// owned by a *different* app (SEC-1): the capacity gate
+    /// ([`Self::has_mig_lock`]) stays app-agnostic, but app B must
+    /// never drive SQL on app A's parked lock client.
     mig_lock: Option<MigrationLock>,
 
     /// Per-thread "is the consumer already running for this app?"
@@ -300,9 +334,9 @@ impl IsolateDbContext {
             pool: None,
             db_url: None,
             registered_models: HashSet::new(),
-            tx_conn: None,
-            savepoint_depth: 0,
-            pending_emits: None,
+            tx_conns: HashMap::new(),
+            savepoint_depths: HashMap::new(),
+            pending_emits: HashMap::new(),
             mig_lock: None,
             running_consumers: HashSet::new(),
             schemas: HashMap::new(),
@@ -513,96 +547,115 @@ impl IsolateDbContext {
 
     // ----- TX_CONN / SAVEPOINT_DEPTH ------
 
-    /// `true` if a transaction connection is currently parked in the
-    /// slot (`tx_conn = Some`). Note: returns `true` even between an
-    /// in-flight take/return on the same tx client (`take_tx_client` →
-    /// `put_tx_client`), because callers wrap the await in those two
-    /// calls and the slot is conceptually still "active". See
-    /// [`Self::has_tx`] for the conservative caller-facing predicate.
-    pub(crate) fn has_tx(&self) -> bool {
-        self.tx_conn.is_some()
+    /// `true` if a transaction connection is currently parked **for
+    /// `app_id`** (`tx_conns[app_id] = Some`). Returns `true` even
+    /// between an in-flight take/return on the same tx client
+    /// ([`Self::take_tx_client_for`] → [`Self::put_tx_client_for`]),
+    /// because callers wrap the await in those two calls and the slot is
+    /// conceptually still "active".
+    ///
+    /// SEC-1: a parked tx owned by another app reads as `false` here, so
+    /// a co-resident app falls through to its own autocommit path under
+    /// its own role rather than executing inside the owner's tx.
+    pub(crate) fn has_tx_for(&self, app_id: &str) -> bool {
+        self.tx_conns.contains_key(app_id)
     }
 
-    /// Park a connection in the transaction slot. Returns the
-    /// previous occupant, if any (callers should ensure this is `None`
-    /// — every begin path checks [`Self::has_tx`] first).
+    /// Park a connection in `app_id`'s transaction slot. Returns the
+    /// previous occupant for that app, if any (callers should ensure
+    /// this is `None` — every begin path checks [`Self::has_tx_for`]
+    /// first). A different app's parked tx is never disturbed (SEC-1).
     pub(crate) fn install_tx_client(
         &mut self,
+        app_id: &str,
         client: TxConnection,
     ) -> Option<TxConnection> {
-        self.tx_conn.replace(client)
+        self.tx_conns.insert(app_id.to_string(), client)
     }
 
-    /// Take the transaction client out of the slot. The caller must
-    /// either return it via [`Self::put_tx_client`] (when the await
-    /// is short and the slot should remain "in transaction") or drop
-    /// the client (when settling the tx).
-    pub(crate) fn take_tx_client(&mut self) -> Option<TxConnection> {
-        self.tx_conn.take()
+    /// Take `app_id`'s transaction client out of the slot. The caller
+    /// must either return it via [`Self::put_tx_client_for`] (when the
+    /// await is short and the slot should remain "in transaction") or
+    /// drop the client (when settling the tx). Returns `None` when no tx
+    /// is parked for `app_id` — including when another app owns the only
+    /// parked tx (SEC-1: app B cannot drain app A's client).
+    pub(crate) fn take_tx_client_for(&mut self, app_id: &str) -> Option<TxConnection> {
+        self.tx_conns.remove(app_id)
     }
 
-    /// Return a client previously taken via [`Self::take_tx_client`].
-    pub(crate) fn put_tx_client(&mut self, client: TxConnection) {
-        self.tx_conn = Some(client);
+    /// Return a client previously taken via [`Self::take_tx_client_for`]
+    /// to `app_id`'s slot.
+    pub(crate) fn put_tx_client_for(&mut self, app_id: &str, client: TxConnection) {
+        self.tx_conns.insert(app_id.to_string(), client);
     }
 
-    /// **P9 PR 3** — read the current nested-savepoint depth (zero when
-    /// no savepoint is open above the outermost `BEGIN`).
-    pub(crate) fn savepoint_depth(&self) -> u32 {
-        self.savepoint_depth
+    /// **P9 PR 3** — read `app_id`'s current nested-savepoint depth
+    /// (zero when no savepoint is open above the outermost `BEGIN`, or
+    /// when the app has no active tx).
+    pub(crate) fn savepoint_depth_for(&self, app_id: &str) -> u32 {
+        self.savepoint_depths.get(app_id).copied().unwrap_or(0)
     }
 
-    /// **P9 PR 3** — bump the nested-savepoint depth on `SAVEPOINT
-    /// zs_sp_N`. Returns the new depth, which is also the `N` in the
-    /// savepoint name the caller just opened. Requires an active
-    /// transaction connection (a savepoint without an enclosing `BEGIN`
-    /// is a state-machine bug).
-    pub(crate) fn push_savepoint(&mut self) -> u32 {
+    /// **P9 PR 3** — bump `app_id`'s nested-savepoint depth on
+    /// `SAVEPOINT zs_sp_N`. Returns the new depth, which is also the `N`
+    /// in the savepoint name the caller just opened. Requires an active
+    /// transaction connection for that app (a savepoint without an
+    /// enclosing `BEGIN` is a state-machine bug).
+    pub(crate) fn push_savepoint_for(&mut self, app_id: &str) -> u32 {
         debug_assert!(
-            self.tx_conn.is_some(),
-            "push_savepoint called without an active tx_conn",
+            self.tx_conns.contains_key(app_id),
+            "push_savepoint_for called without an active tx for the app",
         );
-        self.savepoint_depth = self.savepoint_depth.saturating_add(1);
-        self.savepoint_depth
+        let depth = self.savepoint_depths.entry(app_id.to_string()).or_insert(0);
+        *depth = depth.saturating_add(1);
+        *depth
     }
 
-    /// **P9 PR 3** — decrement the nested-savepoint depth on `RELEASE
-    /// SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Saturates at zero so a
-    /// double-settle (handler + finalizer race) cannot underflow.
-    pub(crate) fn pop_savepoint(&mut self) {
-        self.savepoint_depth = self.savepoint_depth.saturating_sub(1);
+    /// **P9 PR 3** — decrement `app_id`'s nested-savepoint depth on
+    /// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Saturates at zero
+    /// so a double-settle (handler + finalizer race) cannot underflow.
+    pub(crate) fn pop_savepoint_for(&mut self, app_id: &str) {
+        if let Some(depth) = self.savepoint_depths.get_mut(app_id) {
+            *depth = depth.saturating_sub(1);
+        }
     }
 
-    /// **P9 PR 3** — reset the nested-savepoint depth to zero. Called by
-    /// the top-level settle path (COMMIT / ROLLBACK) so a fresh
-    /// transaction on the same isolate starts from a clean slate even if
+    /// **P9 PR 3** — reset `app_id`'s nested-savepoint depth to zero.
+    /// Called by the top-level settle path (COMMIT / ROLLBACK) so a
+    /// fresh transaction for that app starts from a clean slate even if
     /// an inner savepoint settle was skipped (e.g. the whole tx is being
-    /// torn down by a top-level rollback).
-    pub(crate) fn reset_savepoint_depth(&mut self) {
-        self.savepoint_depth = 0;
+    /// torn down by a top-level rollback). A different app's depth is
+    /// untouched (SEC-1).
+    pub(crate) fn reset_savepoint_depth_for(&mut self, app_id: &str) {
+        self.savepoint_depths.remove(app_id);
     }
 
     // ----- PENDING_EMITS ---------------------------------------------
 
-    /// Push a `ChangeEvent` onto the pending-emits queue (initialises
-    /// the slot to `Some(Vec::new())` on first push within a tx).
+    /// Push a `ChangeEvent` onto the owning app's pending-emits queue
+    /// (keyed by the event's own `app_id`; the queue is allocated
+    /// lazily on first push within that app's tx).
     pub(crate) fn push_pending_emit(&mut self, ev: ChangeEvent) {
-        self.pending_emits.get_or_insert_with(Vec::new).push(ev);
+        self.pending_emits
+            .entry(ev.app_id.clone())
+            .or_default()
+            .push(ev);
     }
 
-    /// Drain the pending-emits queue (returns `Vec::new()` if the
-    /// slot was empty). Called by the transaction settle path on
-    /// COMMIT.
-    pub(crate) fn drain_pending_emits(&mut self) -> Vec<ChangeEvent> {
-        self.pending_emits.take().unwrap_or_default()
+    /// Drain `app_id`'s pending-emits queue (returns `Vec::new()` if the
+    /// app has none queued). Called by the transaction settle path on
+    /// COMMIT. SEC-1: only the committing app's events are returned, so
+    /// one app's COMMIT cannot fire another's pre-commit events.
+    pub(crate) fn drain_pending_emits_for(&mut self, app_id: &str) -> Vec<ChangeEvent> {
+        self.pending_emits.remove(app_id).unwrap_or_default()
     }
 
-    /// Clear the pending-emits queue without firing any events.
+    /// Clear `app_id`'s pending-emits queue without firing any events.
     /// Called by the transaction settle path on ROLLBACK and by
-    /// `exec_begin` to drop any stale residue from an interrupted
-    /// prior run.
-    pub(crate) fn clear_pending_emits(&mut self) {
-        self.pending_emits = None;
+    /// `exec_begin` to drop any stale residue from an interrupted prior
+    /// run. A different app's queue is untouched (SEC-1).
+    pub(crate) fn clear_pending_emits_for(&mut self, app_id: &str) {
+        self.pending_emits.remove(app_id);
     }
 
     // ----- MIG_LOCK ---------------------------------------------------
@@ -642,34 +695,55 @@ impl IsolateDbContext {
         self.mig_lock = None;
     }
 
-    /// Take the lock client out of the active migration state for an
-    /// await; the caller's future is responsible for putting it back
-    /// via [`Self::return_mig_client`].
-    pub(crate) fn take_mig_client(&mut self) -> Option<Client> {
+    /// **Test-only forced teardown** — take whatever lock client is
+    /// parked, regardless of owner, so `clear_migration_lock_for_tests`
+    /// can ROLLBACK + unlock and reset the slot between tests. Never
+    /// reachable from a production path (the owner-scoped
+    /// [`Self::take_mig_client_for`] is the only production drain).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn take_mig_client_any_for_tests(&mut self) -> Option<Client> {
         self.mig_lock.as_mut().and_then(|l| l.client.take())
     }
 
-    /// Restore the lock client after an await. No-op if the migration
-    /// state has been cleared in the meantime (e.g. by an operator
-    /// cancel). The slot-empty case is observable but rare — log it
-    /// at `warn` so we can distinguish a real cancel race from a
-    /// state-machine bug that silently dropped the client (paired
+    /// Take the lock client out of the active migration state for an
+    /// await, **only if the active migration is owned by `app_id`**;
+    /// the caller's future is responsible for putting it back via
+    /// [`Self::return_mig_client_for`]. Returns `None` when no migration
+    /// is active or a *different* app owns it (SEC-1: a stale wrapper
+    /// from app B must not drive SQL on app A's parked lock client).
+    pub(crate) fn take_mig_client_for(&mut self, app_id: &str) -> Option<Client> {
+        self.mig_lock
+            .as_mut()
+            .filter(|l| l.app_id == app_id)
+            .and_then(|l| l.client.take())
+    }
+
+    /// Restore the lock client after an await to `app_id`'s active
+    /// migration. No-op if the migration state has been cleared in the
+    /// meantime (e.g. by an operator cancel) or is now owned by a
+    /// different app. The slot-empty / not-owner case is observable but
+    /// rare — log it at `warn` so we can distinguish a real cancel race
+    /// from a state-machine bug that silently dropped the client (paired
     /// with the `tracing::error!` on `set_mig_lock`'s shadow-replace
     /// branch above).
-    pub(crate) fn return_mig_client(&mut self, client: Client) {
-        match self.mig_lock.as_mut() {
+    pub(crate) fn return_mig_client_for(&mut self, app_id: &str, client: Client) {
+        match self.mig_lock.as_mut().filter(|l| l.app_id == app_id) {
             Some(lock) => lock.client = Some(client),
             None => tracing::warn!(
-                "return_mig_client: mig_lock slot empty — client dropped (expected only on operator-cancel race)",
+                "return_mig_client_for: mig_lock slot empty or owned by another app — client dropped (expected only on operator-cancel race)",
             ),
         }
     }
 
     /// Snapshot the migration lock's identifying fields (name,
-    /// collection, audit_id, dry_run, start_generation). Returns
-    /// `None` outside an active run.
-    pub(crate) fn mig_lock_snapshot(&self) -> Option<(String, String, i64, bool, i64)> {
-        self.mig_lock.as_ref().map(|l| {
+    /// collection, audit_id, dry_run, start_generation) **only when the
+    /// active migration is owned by `app_id`**. Returns `None` outside
+    /// an active run, or when a different app owns it (SEC-1).
+    pub(crate) fn mig_lock_snapshot_for(
+        &self,
+        app_id: &str,
+    ) -> Option<(String, String, i64, bool, i64)> {
+        self.mig_lock.as_ref().filter(|l| l.app_id == app_id).map(|l| {
             (
                 l.name.clone(),
                 l.collection.clone(),
@@ -819,13 +893,13 @@ mod tests {
         assert!(!ctx.pool_initialised());
         assert!(ctx.backend().is_none());
         assert!(ctx.db_url().is_none());
-        assert!(!ctx.has_tx());
-        assert_eq!(ctx.savepoint_depth(), 0);
+        assert!(!ctx.has_tx_for("a"));
+        assert_eq!(ctx.savepoint_depth_for("a"), 0);
         assert!(!ctx.has_mig_lock());
-        assert!(ctx.mig_lock_snapshot().is_none());
-        // pending_emits starts as None (the slot is allocated lazily on
-        // first push).
-        assert!(ctx.pending_emits.is_none());
+        assert!(ctx.mig_lock_snapshot_for("a").is_none());
+        // pending_emits starts empty (each app's queue is allocated
+        // lazily on first push).
+        assert!(ctx.pending_emits.is_empty());
         // Both registries empty.
         assert!(!ctx.is_model_registered("a", "c"));
         assert!(!ctx.is_consumer_running("a"));
@@ -837,8 +911,8 @@ mod tests {
         let b = IsolateDbContext::new();
         // Compare observable state (no PartialEq on the struct).
         assert_eq!(a.pool_initialised(), b.pool_initialised());
-        assert_eq!(a.savepoint_depth(), b.savepoint_depth());
-        assert_eq!(a.has_tx(), b.has_tx());
+        assert_eq!(a.savepoint_depth_for("a"), b.savepoint_depth_for("a"));
+        assert_eq!(a.has_tx_for("a"), b.has_tx_for("a"));
         assert_eq!(a.has_mig_lock(), b.has_mig_lock());
         assert_eq!(a.db_url(), b.db_url());
     }
@@ -971,20 +1045,20 @@ mod tests {
 
     #[test]
     fn savepoint_depth_pop_and_reset_saturate_at_zero() {
-        // `push_savepoint` carries a `debug_assert!(tx_conn.is_some())`
-        // and so needs a real Client (see module-level note) — covered
-        // by the integration/V8 end-to-end paths. The decrement / reset
+        // `push_savepoint_for` carries a `debug_assert!(tx parked)` and
+        // so needs a real Client (see module-level note) — covered by
+        // the integration/V8 end-to-end paths. The decrement / reset
         // arms have no such precondition: a double-settle (handler +
         // finalizer race) must NOT underflow the unsigned counter.
         let mut ctx = IsolateDbContext::new();
-        assert_eq!(ctx.savepoint_depth(), 0);
+        assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
         // pop on an already-zero depth saturates rather than wrapping to
         // u32::MAX.
-        ctx.pop_savepoint();
-        assert_eq!(ctx.savepoint_depth(), 0, "pop must saturate at zero");
+        ctx.pop_savepoint_for("app_t");
+        assert_eq!(ctx.savepoint_depth_for("app_t"), 0, "pop must saturate at zero");
         // reset on zero is a no-op.
-        ctx.reset_savepoint_depth();
-        assert_eq!(ctx.savepoint_depth(), 0);
+        ctx.reset_savepoint_depth_for("app_t");
+        assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
     }
 
     // ----- PENDING_EMITS state machine -----------------------------------
@@ -992,16 +1066,17 @@ mod tests {
     #[test]
     fn pending_emits_start_empty() {
         let ctx = IsolateDbContext::new();
-        assert!(ctx.pending_emits.is_none());
+        assert!(ctx.pending_emits.is_empty());
     }
 
     #[test]
     fn push_pending_emit_allocates_slot_lazily() {
+        // dummy_event tags app_id "app_t"; the queue keys on that.
         let mut ctx = IsolateDbContext::new();
-        assert!(ctx.pending_emits.is_none());
+        assert!(ctx.pending_emits.is_empty());
         ctx.push_pending_emit(dummy_event("c1"));
-        assert!(ctx.pending_emits.is_some());
-        assert_eq!(ctx.pending_emits.as_ref().unwrap().len(), 1);
+        assert!(ctx.pending_emits.contains_key("app_t"));
+        assert_eq!(ctx.pending_emits.get("app_t").unwrap().len(), 1);
     }
 
     #[test]
@@ -1010,7 +1085,7 @@ mod tests {
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
         ctx.push_pending_emit(dummy_event("c3"));
-        let evs = ctx.pending_emits.as_ref().unwrap();
+        let evs = ctx.pending_emits.get("app_t").unwrap();
         assert_eq!(evs.len(), 3);
         assert_eq!(evs[0].collection, "c1");
         assert_eq!(evs[1].collection, "c2");
@@ -1022,28 +1097,28 @@ mod tests {
         let mut ctx = IsolateDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
-        let drained = ctx.drain_pending_emits();
+        let drained = ctx.drain_pending_emits_for("app_t");
         assert_eq!(drained.len(), 2);
-        // After drain the slot is cleared back to None — subsequent
-        // pushes re-allocate.
-        assert!(ctx.pending_emits.is_none());
+        // After drain the app's queue is cleared — subsequent pushes
+        // re-allocate.
+        assert!(!ctx.pending_emits.contains_key("app_t"));
     }
 
     #[test]
     fn drain_pending_emits_on_empty_returns_empty_vec() {
         let mut ctx = IsolateDbContext::new();
-        let drained = ctx.drain_pending_emits();
+        let drained = ctx.drain_pending_emits_for("app_t");
         assert!(drained.is_empty());
-        assert!(ctx.pending_emits.is_none());
+        assert!(ctx.pending_emits.is_empty());
     }
 
     #[test]
     fn drain_then_push_starts_fresh() {
         let mut ctx = IsolateDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
-        let _ = ctx.drain_pending_emits();
+        let _ = ctx.drain_pending_emits_for("app_t");
         ctx.push_pending_emit(dummy_event("c2"));
-        let evs = ctx.pending_emits.as_ref().unwrap();
+        let evs = ctx.pending_emits.get("app_t").unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].collection, "c2");
     }
@@ -1053,24 +1128,35 @@ mod tests {
         let mut ctx = IsolateDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
-        ctx.clear_pending_emits();
-        assert!(ctx.pending_emits.is_none());
-        // A subsequent drain returns empty (slot is None).
-        assert!(ctx.drain_pending_emits().is_empty());
+        ctx.clear_pending_emits_for("app_t");
+        assert!(!ctx.pending_emits.contains_key("app_t"));
+        // A subsequent drain returns empty (queue is gone).
+        assert!(ctx.drain_pending_emits_for("app_t").is_empty());
     }
 
     #[test]
     fn clear_pending_emits_on_empty_is_idempotent() {
         let mut ctx = IsolateDbContext::new();
-        ctx.clear_pending_emits();
-        ctx.clear_pending_emits();
-        assert!(ctx.pending_emits.is_none());
+        ctx.clear_pending_emits_for("app_t");
+        ctx.clear_pending_emits_for("app_t");
+        assert!(ctx.pending_emits.is_empty());
     }
 
     // ----- MIG_LOCK state machine ----------------------------------------
 
     fn mig_lock(name: &str, collection: &str, audit_id: i64, dry_run: bool) -> MigrationLock {
+        mig_lock_for_app("app_t", name, collection, audit_id, dry_run)
+    }
+
+    fn mig_lock_for_app(
+        app_id: &str,
+        name: &str,
+        collection: &str,
+        audit_id: i64,
+        dry_run: bool,
+    ) -> MigrationLock {
         MigrationLock {
+            app_id: app_id.to_string(),
             name: name.to_string(),
             collection: collection.to_string(),
             audit_id,
@@ -1093,7 +1179,7 @@ mod tests {
         assert!(prev.is_none());
         assert!(ctx.has_mig_lock());
 
-        let snap = ctx.mig_lock_snapshot().expect("snapshot present");
+        let snap = ctx.mig_lock_snapshot_for("app_t").expect("snapshot present");
         assert_eq!(snap.0, "m1");
         assert_eq!(snap.1, "users");
         assert_eq!(snap.2, 42);
@@ -1105,7 +1191,7 @@ mod tests {
     fn set_mig_lock_dry_run_flag_round_trips() {
         let mut ctx = IsolateDbContext::new();
         ctx.set_mig_lock(mig_lock("dry", "msgs", 1, true));
-        let snap = ctx.mig_lock_snapshot().unwrap();
+        let snap = ctx.mig_lock_snapshot_for("app_t").unwrap();
         assert!(snap.3, "dry_run flag should round-trip via snapshot");
     }
 
@@ -1123,7 +1209,7 @@ mod tests {
         assert_eq!(prev.name, "first");
         assert_eq!(prev.audit_id, 1);
 
-        let snap = ctx.mig_lock_snapshot().unwrap();
+        let snap = ctx.mig_lock_snapshot_for("app_t").unwrap();
         assert_eq!(snap.0, "second");
         assert_eq!(snap.2, 2);
     }
@@ -1135,7 +1221,7 @@ mod tests {
         assert!(ctx.has_mig_lock());
         ctx.clear_mig_lock();
         assert!(!ctx.has_mig_lock());
-        assert!(ctx.mig_lock_snapshot().is_none());
+        assert!(ctx.mig_lock_snapshot_for("app_t").is_none());
     }
 
     #[test]
@@ -1154,18 +1240,18 @@ mod tests {
     #[test]
     fn mig_lock_snapshot_outside_run_returns_none() {
         let ctx = IsolateDbContext::new();
-        assert!(ctx.mig_lock_snapshot().is_none());
+        assert!(ctx.mig_lock_snapshot_for("app_t").is_none());
     }
 
     #[test]
     fn take_mig_client_on_empty_lock_returns_none() {
         // No active migration: take is a no-op.
         let mut ctx = IsolateDbContext::new();
-        assert!(ctx.take_mig_client().is_none());
+        assert!(ctx.take_mig_client_for("app_t").is_none());
         // With a lock present but `client: None` (our test mig_lock
         // helper), take still returns None — there is nothing to take.
         ctx.set_mig_lock(mig_lock("m", "c", 1, false));
-        assert!(ctx.take_mig_client().is_none());
+        assert!(ctx.take_mig_client_for("app_t").is_none());
     }
 
     #[test]
@@ -1316,6 +1402,148 @@ mod tests {
             events.is_empty(),
             "first install must not emit; got {events:?}"
         );
+    }
+
+    // ----- SEC-1: per-app scoping of the tx / savepoint / emit / mig slots
+
+    // A worker thread multiplexes up to ~200 isolates (one per app).
+    // Every slot below used to be a single per-OS-thread cell shared by
+    // ALL co-resident apps: app B could observe and drain app A's
+    // parked transaction client (running B's SQL inside A's
+    // transaction, snapshot, and per-app role), corrupt A's savepoint
+    // bookkeeping, drain A's pre-commit broker queue, and take A's
+    // migration lock client. These tests pin the per-app ownership
+    // contract.
+
+    fn run_async<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
+
+    /// Build a parkable [`TxConnection`] without a live Postgres: the
+    /// embedded SQLite backend hands out a real session handle from a
+    /// tempdir-backed store. No SQL is executed on it — these tests
+    /// exercise the slot state machine only.
+    async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
+        use crate::backend::SqlExecutor as _;
+        let backend = crate::backend::sqlite::SqliteBackend::new(
+            std::path::PathBuf::from(dir.path()),
+        )
+        .expect("open sqlite backend");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire sqlite client");
+        TxConnection::Sqlite(client)
+    }
+
+    #[test]
+    fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
+        run_async(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut ctx = IsolateDbContext::new();
+            let prev = ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
+            assert!(prev.is_none(), "tx slot must start empty");
+
+            assert!(
+                ctx.has_tx_for("app_a"),
+                "the owning app must see its own parked tx",
+            );
+            assert!(
+                !ctx.has_tx_for("app_b"),
+                "SEC-1: app_b must NOT observe app_a's parked tx \
+                 (a hit here routes app_b's SQL onto app_a's tx connection)",
+            );
+            assert!(
+                ctx.take_tx_client_for("app_b").is_none(),
+                "SEC-1: app_b must NOT be able to drain app_a's tx client",
+            );
+            assert!(
+                ctx.has_tx_for("app_a"),
+                "app_a's parked tx must survive app_b's probe unmodified",
+            );
+            // The owner can still take its own client back out.
+            assert!(
+                ctx.take_tx_client_for("app_a").is_some(),
+                "the owner must still be able to take its own tx client",
+            );
+        });
+    }
+
+    #[test]
+    fn sec1_savepoint_depth_is_scoped_per_app() {
+        run_async(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut ctx = IsolateDbContext::new();
+            ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
+
+            ctx.push_savepoint_for("app_a");
+            ctx.push_savepoint_for("app_a");
+            assert_eq!(ctx.savepoint_depth_for("app_a"), 2);
+            assert_eq!(
+                ctx.savepoint_depth_for("app_b"),
+                0,
+                "SEC-1: app_b must not inherit app_a's savepoint depth \
+                 (shared depth corrupts both apps' savepoint names)",
+            );
+
+            // app_b settling its own (nonexistent) tx state must not
+            // clobber app_a's live savepoint bookkeeping.
+            ctx.reset_savepoint_depth_for("app_b");
+            assert_eq!(
+                ctx.savepoint_depth_for("app_a"),
+                2,
+                "SEC-1: app_b's settle must not zero app_a's savepoint depth",
+            );
+        });
+    }
+
+    #[test]
+    fn sec1_pending_emits_drain_is_scoped_per_app() {
+        let mut ctx = IsolateDbContext::new();
+        let mut ev_a = dummy_event("orders");
+        ev_a.app_id = "app_a".to_string();
+        let mut ev_b = dummy_event("messages");
+        ev_b.app_id = "app_b".to_string();
+        ctx.push_pending_emit(ev_a);
+        ctx.push_pending_emit(ev_b);
+
+        let drained_b = ctx.drain_pending_emits_for("app_b");
+        assert_eq!(
+            drained_b.len(),
+            1,
+            "SEC-1: app_b's commit drain must only fire app_b's queued events",
+        );
+        assert_eq!(drained_b[0].app_id, "app_b");
+
+        let drained_a = ctx.drain_pending_emits_for("app_a");
+        assert_eq!(
+            drained_a.len(),
+            1,
+            "SEC-1: app_a's queued events must survive app_b's drain \
+             (firing them early breaks the Gap-B pre-commit fence)",
+        );
+        assert_eq!(drained_a[0].app_id, "app_a");
+    }
+
+    #[test]
+    fn sec1_mig_lock_snapshot_is_owner_scoped() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_mig_lock(mig_lock_for_app("app_a", "m1", "users", 42, false));
+
+        assert!(
+            ctx.mig_lock_snapshot_for("app_a").is_some(),
+            "the owning app must see its own migration lock",
+        );
+        assert!(
+            ctx.mig_lock_snapshot_for("app_b").is_none(),
+            "SEC-1: app_b must NOT see app_a's migration lock \
+             (a hit hands app_b the platform-role lock client)",
+        );
+        // The any-app capacity gate (one migration per worker thread)
+        // is intentionally app-agnostic and unchanged.
+        assert!(ctx.has_mig_lock());
     }
 
     // ----- `return_mig_client` empty-slot WARN -------------------------
