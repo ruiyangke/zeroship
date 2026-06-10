@@ -204,6 +204,10 @@ async fn gateway_oidc_rp_full_dance() {
         db_url: db_url.clone(),
         hydra_admin_url: Some(hydra_admin_url.clone()),
         allow_remote_hydra_admin: false,
+        // Strict fail-closed framing for this RP↔IdP password-flow test (no
+        // console overlay origins). Field added when AuthConfig gained
+        // frame_ancestor_origins in the immersive-popup CSP work.
+        frame_ancestor_origins: vec![],
         hydra_public_url: Some(hydra_public.clone()),
         clients_config: "ops/auth-clients.example.toml".to_string(),
         bootstrap: false,
@@ -268,7 +272,7 @@ async fn gateway_oidc_rp_full_dance() {
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
-                .middleware(SecurityHeaders)
+                .middleware(SecurityHeaders::new(vec![]))
                 .configure(server::configure(false, false))
         }
     })
