@@ -373,11 +373,15 @@ async fn route_auth_host(
     // SEC-3: the auth/Hydra upstream keys per-IP rate limits on the forwarded
     // client address. Scrub any client-supplied `X-Forwarded-For` /
     // `Forwarded` / `X-Real-IP` and inject a SINGLE authoritative
-    // `X-Forwarded-For` derived from the real socket peer, so a creator app
-    // (or any inbound caller) cannot rotate a spoofed IP to bypass the auth
-    // service's credential-stuffing / email-amplification limits.
-    let peer_ip = req.peer_addr().map(|addr| addr.ip());
-    let headers = build_auth_upstream_headers(req.headers(), peer_ip);
+    // `X-Forwarded-For` derived from the gateway's own trust_proxy-aware
+    // client-IP policy (the immediate peer when the gateway is the edge; the
+    // fronting proxy's forwarded client when `trust_proxy` is set) — the SAME
+    // address the gateway keys its own rate limits on. A creator app (or any
+    // inbound caller) therefore cannot rotate a spoofed IP to bypass the auth
+    // service's limits, AND a legitimately-fronted (e.g. Caddy) deployment does
+    // not collapse every user onto the proxy's single IP.
+    let client_ip = auth_forward_client_ip(&req, state.config.trust_proxy);
+    let headers = build_auth_upstream_headers(req.headers(), client_ip);
 
     let method = req.method().as_str();
 
@@ -428,6 +432,22 @@ fn build_auth_upstream_headers(
         out.push(("X-Forwarded-For".to_string(), ip.to_string()));
     }
     out
+}
+
+/// The authoritative client IP the gateway forwards to the auth/Hydra upstream
+/// (SEC-3). Reuses the gateway's own [`client_ip`] policy so the auth service
+/// keys its per-IP rate-limit buckets on the SAME address the gateway keys its
+/// own limits on: the immediate socket peer when the gateway is the edge, or
+/// the fronting proxy's forwarded client when `trust_proxy` is enabled. Raw
+/// `peer_addr()` would be wrong behind a trusted proxy — it would hand the auth
+/// service the proxy's address and collapse every user onto one shared bucket.
+/// Returns `None` when no parseable IP is available, in which case no
+/// `X-Forwarded-For` is injected and the auth side falls back to its own peer.
+fn auth_forward_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
+    let ip = client_ip(req, trust_proxy);
+    ip.parse::<std::net::IpAddr>()
+        .ok()
+        .or_else(|| ip.parse::<std::net::SocketAddr>().ok().map(|sa| sa.ip()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2153,6 +2173,28 @@ mod tests {
     // Resource-tree request-level tests — exercise the per-resource policy
     // gates on synthetic requests built via ntex's `TestRequest`.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_forward_client_ip_follows_trust_proxy_not_raw_peer() {
+        // SEC-3: behind a trusted proxy the authoritative IP handed to the auth
+        // service must be the FORWARDED client (so per-IP buckets separate real
+        // users), not the gateway's immediate peer (which would be the proxy and
+        // collapse everyone onto one shared bucket). With trust_proxy=false the
+        // spoofable header is ignored and must NOT become the bucket key.
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "203.0.113.7")
+            .to_http_request();
+        assert_eq!(
+            auth_forward_client_ip(&req, true),
+            Some("203.0.113.7".parse().unwrap()),
+            "trust_proxy must forward the proxy-authored client IP"
+        );
+        assert_ne!(
+            auth_forward_client_ip(&req, false),
+            Some("203.0.113.7".parse().unwrap()),
+            "without trust_proxy the spoofable XFF must not become the bucket key"
+        );
+    }
 
     #[test]
     fn auth_upstream_headers_drop_spoofed_client_ip_and_inject_peer() {
