@@ -126,16 +126,24 @@ function controllerBase(): string {
 const DEV_SANDBOX_USER_UUID = "00000000-0000-7000-8000-000000000001";
 export const DEV_SANDBOX_USER_ID = typedIdFromUuid("usr", DEV_SANDBOX_USER_UUID);
 
-function isLocalDevRuntime(): boolean {
+/**
+ * POSITIVE dev signal only (SEC-6). The Vite dev runtime injects
+ * `ZEROSHIP_DEV=1` (sdks/vite-plugin dev-server, `constants.ENV_DEV`;
+ * the runtime's dev-auth tier keys on the same flag) and the deployed
+ * V8 worker never sets it — so the dev fallback is dev-only by
+ * construction. Never key dev behaviour on the ABSENCE of a variable
+ * (the old `NODE_ENV !== "production"` check was true in production
+ * because the runtime injects no NODE_ENV at all).
+ */
+export function isLocalDevRuntime(): boolean {
   const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  const env = proc?.env;
-  return env?.NODE_ENV !== "production" && env?.ZEROSHIP_BUILDER_DISABLE_DEV_USER !== "1";
+  return proc?.env?.ZEROSHIP_DEV === "1";
 }
 
 function readCurrentUserId(): string | null {
   try {
     const user = currentUser() as { id?: unknown } | null;
-    return typeof user?.id === "string" ? user.id : null;
+    return typeof user?.id === "string" && user.id.length > 0 ? user.id : null;
   } catch {
     return null;
   }
@@ -148,10 +156,21 @@ function assertTypedUserId(id: string): string {
   return id;
 }
 
-function typedUserIdOrNull(id: string): string | null {
-  if (isTypedId(id, "usr")) return id;
-  if (isLocalDevRuntime()) return null;
-  return assertTypedUserId(id);
+/**
+ * Project the platform subject onto the `usr_` typed-id shape the
+ * sandbox controller requires (crates/sandbox/src/handlers.rs
+ * `is_typed_id(user_id, "usr")`).
+ *
+ * In production the gateway forwards the per-app PAIRWISE subject —
+ * `pws_` + 20 base62 chars, deliberately NOT a 22-char typed-id — so a
+ * raw pass-through can never satisfy the controller. Hash the subject
+ * into a deterministic `usr_` id instead: stable per subject (the same
+ * creator always re-attaches to their own sandboxes) and distinct
+ * across subjects (no shared container/workspace/.env/shell).
+ */
+function sandboxOwnerIdFor(subject: string): string {
+  if (isTypedId(subject, "usr")) return subject;
+  return typedIdFromStableSeed("usr", `zeroship-builder:sandbox-owner:${subject}`);
 }
 
 // Identity comes from the PLATFORM session: the gateway forwards the
@@ -159,13 +178,16 @@ function typedUserIdOrNull(id: string): string | null {
 // as `currentUser()` (read here via `readCurrentUserId()`). There is no
 // bespoke RP fallback — that surface was removed when the console became a
 // regular app on the standard runtime.
-function resolveSandboxUserId(explicit?: string): string {
+//
+// Fail-closed (SEC-6): an unauthenticated request only ever resolves the
+// shared dev owner behind the explicit `ZEROSHIP_DEV=1` boot flag;
+// otherwise it throws.
+export function resolveSandboxUserId(explicit?: string): string {
   if (explicit) return assertTypedUserId(explicit);
 
   const platformUserId = readCurrentUserId();
   if (platformUserId) {
-    const typed = typedUserIdOrNull(platformUserId);
-    if (typed) return typed;
+    return sandboxOwnerIdFor(platformUserId);
   }
 
   if (isLocalDevRuntime()) {
