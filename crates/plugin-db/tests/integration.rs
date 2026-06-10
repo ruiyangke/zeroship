@@ -3462,7 +3462,7 @@ async fn gap_b_commit_drains_pending_emits_to_broker() {
     // Pre-drain: subscriber must observe nothing (events still queued).
     assert!(sub.pop().is_none(), "events must not leak before commit");
 
-    zeroship_plugin_db::drain_pending_emits_for_tests();
+    zeroship_plugin_db::drain_pending_emits_for_tests(app);
 
     let mut pks: Vec<String> = Vec::new();
     while let Some(zeroship_plugin_db::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
@@ -3484,7 +3484,7 @@ async fn gap_b_rollback_clears_pending_emits_silently() {
 
     zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
     zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
-    zeroship_plugin_db::clear_pending_emits_for_tests();
+    zeroship_plugin_db::clear_pending_emits_for_tests(app);
 
     assert!(
         sub.pop().is_none(),
@@ -3529,7 +3529,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
     // Install a real Client into TX_CONN with BEGIN issued; matches
     // production exec_begin's effect on the queue/drain machinery.
-    zeroship_plugin_db::install_tx_marker_for_tests(&url).await;
+    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
 
     // Insert via the production helper.
     let bq = zeroship_plugin_db::query::build_insert(
@@ -3554,8 +3554,8 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     );
 
     // Simulate commit: drain pending emits.
-    zeroship_plugin_db::drain_pending_emits_for_tests();
-    zeroship_plugin_db::uninstall_tx_marker_for_tests().await;
+    zeroship_plugin_db::drain_pending_emits_for_tests(app);
+    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
 
     let got = sub.pop();
     match got {

@@ -335,15 +335,23 @@ fn mask_date_year(plaintext: &str) -> String {
 /// Preserves only the first three digits of the year; the units digit
 /// becomes `?`. Same fall-back as [`mask_date_year`] for non-date
 /// inputs.
+///
+/// **Idempotent** (SEC-4): the 4th year position may already be the `?`
+/// sentinel from a prior masking, so re-masking the function's own
+/// output (`"198?-**-**"`) is a no-op rather than collapsing to `"***"`.
+/// `wrap_row_on_read` re-applies the mask transform defensively, and the
+/// aliased-SELECT read path feeds it the already-masked string; this
+/// keeps that legitimate value intact while still redacting plaintext.
 fn mask_date_decade(plaintext: &str) -> String {
     if plaintext.is_empty() {
         return String::new();
     }
     let bytes = plaintext.as_bytes();
-    if bytes.len() < 10
-        || !bytes[0..4].iter().all(|b| b.is_ascii_digit())
-        || bytes[4] != b'-'
-    {
+    let year_ok = bytes.len() >= 10
+        && bytes[0..3].iter().all(|b| b.is_ascii_digit())
+        && (bytes[3].is_ascii_digit() || bytes[3] == b'?')
+        && bytes[4] == b'-';
+    if !year_ok {
         return "***".to_string();
     }
     let decade = &plaintext[0..3];
@@ -433,16 +441,29 @@ pub(crate) fn wrap_row_on_read(
             .and_then(|v| v.as_str())
             .unwrap_or("pii")
             .to_string();
+        let kind = parse_mask_kind(kind).unwrap_or(MaskKind::Full);
 
-        // Pick the masked value: prefer the sibling (RETURNING-`*`
-        // dual-write shape); fall back to the parent slot when the
-        // SELECT already aliased the sibling back to the parent name
-        // (P5.5 read-side flip).
+        // Pick the masked value:
+        //
+        //  1. Sibling present (RETURNING-`*` dual-write shape) → it
+        //     already holds the masked string; use it verbatim.
+        //  2. No sibling, but the parent slot holds a string → the SELECT
+        //     aliased the sibling back to the parent name (`"<col>_masked"
+        //     AS "<col>"`, the P5.5 read-side flip / aggregate
+        //     substitution), OR — the SEC-4 hazard — a builder lowered a
+        //     masked column to plaintext. We CANNOT distinguish "already
+        //     masked" from "raw plaintext" by value, so we MUST NOT trust
+        //     the parent slot as already-masked: re-apply the mask
+        //     transform. Re-masking an already-masked string is
+        //     idempotent for the built-in kinds (the masked form has no
+        //     more plaintext to reveal), so this is safe for the
+        //     legitimate aliased-SELECT path and closes the leak for the
+        //     dangerous one.
         let sibling_key = format!("{col}_masked");
         let masked_value: Option<String> = if let Some(sib) = obj.get(&sibling_key) {
             sib.as_str().map(|s| s.to_string())
         } else if let Some(parent) = obj.get(col) {
-            parent.as_str().map(|s| s.to_string())
+            parent.as_str().map(|s| apply_mask_kind(kind, s))
         } else {
             None
         };
@@ -996,6 +1017,48 @@ mod tests {
         let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
         assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some(""));
         assert_eq!(meta.get("collection").and_then(|v| v.as_str()), Some("users"));
+    }
+
+    #[test]
+    fn sec4_wrap_row_on_read_never_returns_parent_plaintext_when_no_sibling() {
+        // SEC-4: an aggregate that grouped on a masked column WITHOUT
+        // substituting the sibling lands here with the parent slot
+        // holding PLAINTEXT and no `<col>_masked` sibling present. The
+        // old code wrapped the parent value verbatim — i.e. it surfaced
+        // plaintext to JS as if it were the masked display string. The
+        // wrap must NOT trust the parent slot as already-masked: it must
+        // either re-mask or refuse, never emit the raw value.
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        // Parent holds plaintext; no sibling — the dangerous shape.
+        let mut row = json!({ "id": "usr_01", "ssn": "123-45-6789" });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        // Whatever shape the parent slot now carries, it must not be the
+        // raw plaintext string.
+        let surfaced = row.get("ssn").cloned().unwrap_or(Value::Null);
+        if let Some(s) = surfaced.as_str() {
+            assert_ne!(
+                s, "123-45-6789",
+                "SEC-4: wrap_row_on_read must never surface the parent \
+                 plaintext verbatim as if already masked: {row}"
+            );
+        }
+        // If it did wrap into a sentinel, the masked payload must be the
+        // re-masked value, not plaintext.
+        if let Some(obj) = surfaced.as_object() {
+            assert_eq!(
+                obj.get("masked").and_then(Value::as_str),
+                Some("***-**-6789"),
+                "SEC-4: a parent-only masked column must be re-masked, not \
+                 echoed as plaintext: {row}"
+            );
+        }
     }
 
     #[test]

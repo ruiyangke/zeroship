@@ -205,17 +205,21 @@ pub(crate) fn err_not_active() -> OpError {
 
 /// Take the lock client out for an await; the caller's future is
 /// responsible for putting it back via [`return_lock_client`].
-fn take_lock_client() -> Option<LockClient> {
-    crate::context::with_mut(|c| c.take_mig_client())
+///
+/// SEC-1: scoped to `app_id` so a stale `Migration` wrapper owned by a
+/// *different* app cannot drain (and then drive SQL on) this app's
+/// parked lock client.
+fn take_lock_client(app_id: &str) -> Option<LockClient> {
+    crate::context::with_mut(|c| c.take_mig_client_for(app_id))
 }
 
 /// Restore the lock client after an await.
-fn return_lock_client(client: LockClient) {
-    crate::context::with_mut(|c| c.return_mig_client(client));
+fn return_lock_client(app_id: &str, client: LockClient) {
+    crate::context::with_mut(|c| c.return_mig_client_for(app_id, client));
 }
 
-fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
-    crate::context::with(|c| c.mig_lock_snapshot())
+fn lock_snapshot(app_id: &str) -> Option<(String, String, i64, bool, i64)> {
+    crate::context::with(|c| c.mig_lock_snapshot_for(app_id))
 }
 
 /// Begin a migration run. Routes connection / SQL execution through
@@ -451,6 +455,7 @@ where
 
     crate::context::with_mut(|c| {
         let _previous = c.set_mig_lock(MigrationLock {
+            app_id: app_id.to_string(),
             name: name.to_string(),
             collection: collection.to_string(),
             audit_id,
@@ -498,7 +503,7 @@ pub async fn exec_fetch_batch(
         ));
     }
 
-    let Some((name, collection, _audit_id, _dry_run, _start_gen)) = lock_snapshot() else {
+    let Some((name, collection, _audit_id, _dry_run, _start_gen)) = lock_snapshot(app_id) else {
         return Err(coded(
             "no_active_migration",
             "migrationFetchBatch called without migrationBegin",
@@ -507,7 +512,7 @@ pub async fn exec_fetch_batch(
     };
 
     // Re-check cancel state under the lock client.
-    let client = take_lock_client().ok_or_else(|| {
+    let client = take_lock_client(app_id).ok_or_else(|| {
         coded(
             "no_active_migration",
             "lock client missing — migration not active",
@@ -518,12 +523,12 @@ pub async fn exec_fetch_batch(
     match crate::audit::peek_latest_backfill_status(&client, app_id, &collection, &name).await {
         Ok(status) => {
             if status.as_deref() == Some("cancelled") {
-                return_lock_client(client);
+                return_lock_client(app_id, client);
                 return Err(err_cancelled_mid_run());
             }
         }
         Err(e) => {
-            return_lock_client(client);
+            return_lock_client(app_id, client);
             return Err(coded_db("status read", e));
         }
     }
@@ -546,7 +551,7 @@ pub async fn exec_fetch_batch(
     // Heartbeat — best-effort.
     let _ = crate::audit::heartbeat_backfill(&client, app_id, &collection, &name).await;
 
-    return_lock_client(client);
+    return_lock_client(app_id, client);
 
     let rows = rows_result.map_err(|e| coded_db("migration fetch", crate::error::DbError::from_pg(&e)))?;
     let row_jsons: Vec<Value> = rows.iter().map(crate::v8_bridge::row_to_json).collect();
@@ -578,7 +583,7 @@ pub async fn exec_commit_batch<B>(
 where
     B: PgSqlExecutor + LockManager<Client = compio_postgres::Client>,
 {
-    let Some((name, collection, audit_id, dry_run, start_generation)) = lock_snapshot() else {
+    let Some((name, collection, audit_id, dry_run, start_generation)) = lock_snapshot(app_id) else {
         return Err(coded(
             "no_active_migration",
             "migrationCommitBatch called without migrationBegin",
@@ -633,7 +638,7 @@ where
                 // ready with the BEGIN/audit-lock/COMMIT failure
                 // rails below.
                 let release_scope = LockScope::migration(app_id, &name);
-                if let Some(client) = take_lock_client() {
+                if let Some(client) = take_lock_client(app_id) {
                     let _guard: OwnedLockGuard<'_, B> = OwnedLockGuard::assume_held(
                         backend,
                         client,
@@ -657,7 +662,7 @@ where
         None
     };
 
-    let client = take_lock_client().ok_or_else(|| {
+    let client = take_lock_client(app_id).ok_or_else(|| {
         coded("no_active_migration", "lock client missing", None)
     })?;
 
@@ -707,7 +712,7 @@ where
     // the client back into the slot. The lock stays held by the
     // parked client's session; subsequent `commitBatch` / `cancel`
     // calls on this wrapper re-wrap via `assume_held`.
-    async fn rollback_and_return<'b, B>(backend: &B, guard: OwnedLockGuard<'b, B>)
+    async fn rollback_and_return<'b, B>(app_id: &str, backend: &B, guard: OwnedLockGuard<'b, B>)
     where
         B: SqlExecutor<Client = compio_postgres::Client>
             + LockManager<Client = compio_postgres::Client>,
@@ -719,7 +724,7 @@ where
             .client_exec(guard.client(), "ROLLBACK", &[])
             .await;
         let client = guard.into_held();
-        return_lock_client(client);
+        return_lock_client(app_id, client);
     }
 
     // BEGIN — [I3] rail #1.
@@ -767,7 +772,7 @@ where
     };
     if let Some(row) = locked {
         if row.status == "cancelled" {
-            rollback_and_return(backend, guard).await;
+            rollback_and_return(app_id, backend, guard).await;
             return Err(err_cancelled_mid_run());
         }
         // Gap X: an operator's `migrations.reset` bumps
@@ -775,7 +780,7 @@ where
         // advance the cursor past the new reset point — abort with a
         // coded error so the SDK mints a fresh wrapper.
         if row.audit_generation != start_generation {
-            rollback_and_return(backend, guard).await;
+            rollback_and_return(app_id, backend, guard).await;
             return Err(err_reset_externally());
         }
     }
@@ -783,7 +788,7 @@ where
     // Apply each update.
     for upd in updates_arr {
         let Some(obj) = upd.as_object() else {
-            rollback_and_return(backend, guard).await;
+            rollback_and_return(app_id, backend, guard).await;
             return Err(coded(
                 "invalid_argument",
                 "each update entry must be an object",
@@ -793,7 +798,7 @@ where
         let id = match obj.get("id").and_then(Value::as_i64) {
             Some(v) => v,
             None => {
-                rollback_and_return(backend, guard).await;
+                rollback_and_return(app_id, backend, guard).await;
                 return Err(coded(
                     "invalid_argument",
                     "each update entry must have a numeric id",
@@ -838,7 +843,7 @@ where
         );
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         if let Err(e) = backend.client_exec(guard.client(), &sql, &param_refs).await {
-            rollback_and_return(backend, guard).await;
+            rollback_and_return(app_id, backend, guard).await;
             return Err(coded_db(&format!("migration row UPDATE (id={id})"), e));
         }
     }
@@ -864,7 +869,7 @@ where
         )
         .await
         {
-            rollback_and_return(backend, guard).await;
+            rollback_and_return(app_id, backend, guard).await;
             return Err(coded_db("audit row update", e));
         }
     }
@@ -945,7 +950,7 @@ where
     // suppresses the guard's Drop warn (this is the success shape)
     // and hands the still-locked client off to `return_lock_client`.
     let client = guard.into_held();
-    return_lock_client(client);
+    return_lock_client(app_id, client);
     Ok(serde_json::json!({ "committed": !dry_run, "done": false }).to_string())
 }
 

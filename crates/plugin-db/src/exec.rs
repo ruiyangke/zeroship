@@ -83,21 +83,24 @@ pub(crate) async fn run_sql(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    // Check if there's an active transaction
-    let has_tx = context::with(|c| c.has_tx());
+    // Check if there's an active transaction *owned by this app*.
+    // SEC-1: a tx parked by a co-resident app must NOT capture this
+    // app's SQL — `has_tx_for(app_id)` reads `false` for another app's
+    // slot, so we fall through to this app's own autocommit path.
+    let has_tx = context::with(|c| c.has_tx_for(app_id));
     if has_tx {
-        // Use transaction connection
-        let client = context::with_mut(|c| c.take_tx_client())
+        // Use this app's transaction connection
+        let client = context::with_mut(|c| c.take_tx_client_for(app_id))
             .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
         let result = match &client {
             TxConnection::Postgres(client) => client.query_text_params(sql, params).await,
             TxConnection::Sqlite(_) => {
-                context::with_mut(|c| c.put_tx_client(client));
+                context::with_mut(|c| c.put_tx_client_for(app_id, client));
                 return Err(sqlite_shared_crud_unavailable());
             }
         };
         // Put it back
-        context::with_mut(|c| c.put_tx_client(client));
+        context::with_mut(|c| c.put_tx_client_for(app_id, client));
         return result.map_err(|e| DbError::from_pg(&e));
     }
 
@@ -118,7 +121,7 @@ pub(crate) async fn run_sql(
 pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        return exec_sqlite_json(&sq, &bq.sql, &param_refs).await;
+        return exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await;
     }
     let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
     Ok(rows_to_json_value(&rows))
@@ -132,7 +135,7 @@ pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value
 pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(&sq, &bq.sql, &param_refs).await?;
+        let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
         return Ok(rows
             .first()
             .and_then(|row| row.get("count"))
@@ -158,7 +161,7 @@ pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbEr
 pub(crate) async fn exec_mutation(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        return exec_sqlite_json(&sq, &bq.sql, &param_refs).await;
+        return exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await;
     }
     let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
     Ok(rows_to_json_value(&rows))
@@ -233,18 +236,22 @@ pub(crate) async fn query_postgres_pool_with_autocommit_role(
 }
 
 async fn exec_sqlite_json(
+    app_id: &str,
     backend: &crate::backend::sqlite::SqliteBackend,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
-    let has_tx = context::with(|c| c.has_tx());
+    // SEC-1: only this app's parked tx routes its SQL through the tx
+    // client; a co-resident app's tx is invisible here and we use the
+    // shared autocommit path instead.
+    let has_tx = context::with(|c| c.has_tx_for(app_id));
     if !has_tx {
         #[cfg(test)]
         tests::record_sqlite_shared_route();
         return backend.query_json(sql, params).await;
     }
 
-    let client = context::TxClientSlotGuard::take()?;
+    let client = context::TxClientSlotGuard::take(app_id)?;
     let result = match client.client() {
         TxConnection::Sqlite(client) => {
             #[cfg(test)]
@@ -418,7 +425,11 @@ fn queue_or_emit(
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    let in_tx = context::with(|c| c.has_tx());
+    // SEC-1: queue only while THIS app's tx is open. If a co-resident
+    // app holds the only parked tx, this app is effectively in
+    // autocommit and must emit immediately (its event would otherwise
+    // sit unfired — there is no settle path for it).
+    let in_tx = context::with(|c| c.has_tx_for(app_id));
     if !in_tx {
         crate::wal_consumer::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
@@ -443,12 +454,13 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
     }
 }
 
-/// Drain the per-isolate `pending_emits` queue and fire every queued
-/// event through the broker. Called by the transaction settle path
-/// on COMMIT.
-pub(crate) fn drain_pending_emits_on_commit() {
+/// Drain `app_id`'s `pending_emits` queue and fire every queued event
+/// through the broker. Called by the transaction settle path on COMMIT.
+/// SEC-1: scoped to the committing app so one app's COMMIT can never
+/// fire a co-resident app's pre-commit events.
+pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
     let queued: Vec<crate::broker::ChangeEvent> =
-        context::with_mut(|c| c.drain_pending_emits());
+        context::with_mut(|c| c.drain_pending_emits_for(app_id));
     for ev in queued {
         crate::wal_consumer::emit_local(
             &ev.app_id,
@@ -461,12 +473,13 @@ pub(crate) fn drain_pending_emits_on_commit() {
     }
 }
 
-/// Clear the per-isolate `pending_emits` queue without firing any
-/// events. Called by the transaction settle path on ROLLBACK (and by
+/// Clear `app_id`'s `pending_emits` queue without firing any events.
+/// Called by the transaction settle path on ROLLBACK (and by
 /// `exec_begin` to drop any stale residue from an interrupted prior
-/// run).
-pub(crate) fn clear_pending_emits() {
-    context::with_mut(|c| c.clear_pending_emits());
+/// run). SEC-1: scoped to the app so a ROLLBACK never drops a
+/// co-resident app's queued events.
+pub(crate) fn clear_pending_emits(app_id: &str) {
+    context::with_mut(|c| c.clear_pending_emits_for(app_id));
 }
 
 /// Lazy pool accessor shared by every async helper that needs the
@@ -684,9 +697,9 @@ mod tests {
     #[test]
     fn queue_or_emit_no_tx_emits_immediately() {
         reset_world();
-        // Defensive: make sure no tx is parked on the slot from an
+        // Defensive: make sure no tx is parked for this app from an
         // earlier test on the same OS thread.
-        context::with(|c| assert!(!c.has_tx(), "precondition: no tx"));
+        context::with(|c| assert!(!c.has_tx_for("app_active"), "precondition: no tx"));
 
         let sub = crate::broker::subscribe("app_active", "messages");
 
@@ -742,7 +755,7 @@ mod tests {
         // Sanity: nothing has been delivered before drain.
         assert!(sub.pop().is_none(), "drain must not have happened yet");
 
-        drain_pending_emits_on_commit();
+        drain_pending_emits_on_commit("app_active");
 
         let mut pks = Vec::new();
         while let Some(msg) = sub.pop() {
@@ -755,7 +768,7 @@ mod tests {
 
         // Drain a second time → nothing left (queue is consumed, not
         // copied).
-        drain_pending_emits_on_commit();
+        drain_pending_emits_on_commit("app_active");
         assert!(sub.pop().is_none(), "second drain must be a no-op");
         reset_world();
     }
@@ -779,14 +792,14 @@ mod tests {
         };
         context::with_mut(|c| c.push_pending_emit(ev));
 
-        clear_pending_emits();
+        clear_pending_emits("app_active");
 
         assert!(
             sub.pop().is_none(),
             "ROLLBACK path must drop queued events silently",
         );
         // After clear, drain must also be a no-op (queue is empty).
-        drain_pending_emits_on_commit();
+        drain_pending_emits_on_commit("app_active");
         assert!(sub.pop().is_none(), "post-clear drain must publish nothing");
         reset_world();
     }
@@ -915,7 +928,7 @@ mod tests {
                 .await
                 .expect("BEGIN");
             context::with_mut(|c| {
-                let prev = c.install_tx_client(TxConnection::Sqlite(client));
+                let prev = c.install_tx_client("app_exec", TxConnection::Sqlite(client));
                 assert!(prev.is_none(), "tx slot should start empty");
             });
 
@@ -966,10 +979,90 @@ mod tests {
             );
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("tx-row"));
 
-            if let Some(TxConnection::Sqlite(client)) = context::with_mut(|c| c.take_tx_client()) {
+            if let Some(TxConnection::Sqlite(client)) =
+                context::with_mut(|c| c.take_tx_client_for("app_exec"))
+            {
                 let _ = client.exec("ROLLBACK", &[]).await;
             } else {
                 panic!("sqlite tx client should still be parked for cleanup");
+            }
+            context::with_mut(|c| c.clear_pool());
+        });
+        reset_world();
+    }
+
+    // -------------------------------------------------------------------
+    // SEC-1 — cross-tenant transaction hijack via the thread-shared slot
+    // -------------------------------------------------------------------
+    //
+    // The worker multiplexes ~200 isolates (apps) per OS thread. When
+    // app A's `env.db.transaction(async () => await fetch(slow))` parks
+    // its tx client across the await, a co-resident app B's plain
+    // `env.db.*` call lands on the same thread-local context. `run_sql`
+    // / `exec_sqlite_json` must route B onto B's OWN autocommit path —
+    // never onto A's pinned transaction connection (A's snapshot, A's
+    // open tx, and — on Postgres — A's per-app role).
+
+    #[test]
+    fn sec1_app_b_query_must_not_route_through_app_a_parked_tx() {
+        reset_world();
+        run(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+            context::with_mut(|c| {
+                c.clear_pool();
+                c.set_sqlite_backend(Rc::clone(&backend));
+            });
+
+            // app_a opens an explicit transaction; its dedicated client
+            // is parked in the per-isolate slot — exactly the state a
+            // creator callback leaves behind across an `await`.
+            let client = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire tx client");
+            backend
+                .client_exec(&client, "BEGIN", &[])
+                .await
+                .expect("BEGIN");
+            context::with_mut(|c| {
+                let prev = c.install_tx_client("app_a", TxConnection::Sqlite(client));
+                assert!(prev.is_none(), "tx slot must start empty");
+            });
+
+            // Co-resident app_b now runs a plain (non-transactional)
+            // query on the same thread.
+            reset_sqlite_route();
+            let rows = exec_query("app_b", BuiltQuery {
+                sql: "SELECT 'b' AS title".to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("app_b query");
+            assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("b"));
+            assert_eq!(
+                sqlite_route(),
+                1,
+                "SEC-1: app_b's query must take its own shared/autocommit \
+                 route (1) — not app_a's parked tx connection (2)",
+            );
+
+            // app_a's parked transaction must still be present and
+            // untouched after app_b's access.
+            assert!(
+                context::with(|c| c.has_tx_for("app_a")),
+                "app_a's parked tx must survive app_b's access",
+            );
+
+            // Cleanup: roll app_a's tx back and drop the client.
+            if let Some(TxConnection::Sqlite(client)) =
+                context::with_mut(|c| c.take_tx_client_for("app_a"))
+            {
+                let _ = client.exec("ROLLBACK", &[]).await;
+            } else {
+                panic!("app_a's tx client should still be parked for cleanup");
             }
             context::with_mut(|c| c.clear_pool());
         });
@@ -1024,7 +1117,7 @@ mod tests {
                 .await
                 .expect("BEGIN");
             context::with_mut(|c| {
-                let prev = c.install_tx_client(TxConnection::Sqlite(client));
+                let prev = c.install_tx_client("app_exec_cancel", TxConnection::Sqlite(client));
                 assert!(prev.is_none(), "tx slot should start empty");
             });
 
@@ -1044,7 +1137,7 @@ mod tests {
             compio::time::sleep(Duration::from_millis(20)).await;
 
             assert!(
-                context::with(|c| c.has_tx()),
+                context::with(|c| c.has_tx_for("app_exec_cancel")),
                 "dropping the in-flight future must restore the tx slot"
             );
 
@@ -1056,7 +1149,9 @@ mod tests {
             .expect("subsequent query must reuse restored tx slot");
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("persisted"));
 
-            if let Some(TxConnection::Sqlite(client)) = context::with_mut(|c| c.take_tx_client()) {
+            if let Some(TxConnection::Sqlite(client)) =
+                context::with_mut(|c| c.take_tx_client_for("app_exec_cancel"))
+            {
                 let _ = client.exec("ROLLBACK", &[]).await;
             } else {
                 panic!("sqlite tx client should still be parked for cleanup");
