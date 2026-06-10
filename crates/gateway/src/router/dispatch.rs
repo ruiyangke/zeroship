@@ -370,12 +370,18 @@ async fn route_auth_host(
         .map(|p| p.as_str())
         .unwrap_or("/");
 
-    let mut headers: Vec<(String, String)> = Vec::new();
-    for (name, value) in req.headers() {
-        if let Ok(v) = value.to_str() {
-            headers.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
+    // SEC-3: the auth/Hydra upstream keys per-IP rate limits on the forwarded
+    // client address. Scrub any client-supplied `X-Forwarded-For` /
+    // `Forwarded` / `X-Real-IP` and inject a SINGLE authoritative
+    // `X-Forwarded-For` derived from the gateway's own trust_proxy-aware
+    // client-IP policy (the immediate peer when the gateway is the edge; the
+    // fronting proxy's forwarded client when `trust_proxy` is set) — the SAME
+    // address the gateway keys its own rate limits on. A creator app (or any
+    // inbound caller) therefore cannot rotate a spoofed IP to bypass the auth
+    // service's limits, AND a legitimately-fronted (e.g. Caddy) deployment does
+    // not collapse every user onto the proxy's single IP.
+    let client_ip = auth_forward_client_ip(&req, state.config.trust_proxy);
+    let headers = build_auth_upstream_headers(req.headers(), client_ip);
 
     let method = req.method().as_str();
 
@@ -389,9 +395,95 @@ async fn route_auth_host(
     }
 }
 
+/// Inbound client-IP spoofing vectors the gateway MUST strip before forwarding
+/// to the trusted auth/Hydra upstream (SEC-3). The auth service derives its
+/// per-IP rate-limit bucket key from a forwarded client address; if a creator
+/// app's request could carry these verbatim, an attacker would rotate the
+/// value to evade credential-stuffing / email-amplification limits and mint an
+/// unbounded number of `zeroship.rate_limits` rows. Matching is
+/// case-insensitive (HTTP header names are case-insensitive).
+const CLIENT_IP_SPOOF_HEADERS: &[&str] = &["x-forwarded-for", "forwarded", "x-real-ip"];
+
+/// Build the header set forwarded to the auth/Hydra upstream: drop any
+/// client-supplied forwarding headers ([`CLIENT_IP_SPOOF_HEADERS`]) and inject
+/// a SINGLE authoritative `X-Forwarded-For` carrying the real socket peer.
+///
+/// The injected `X-Forwarded-For` is the ONLY client-IP signal the auth
+/// service sees, so its per-IP rate-limit buckets key on an address the
+/// inbound caller cannot forge. When the peer address is unknown (exotic
+/// transport / test fixture) NO `X-Forwarded-For` is injected — the auth side
+/// falls back to its own socket peer rather than trusting a forged header.
+fn build_auth_upstream_headers(
+    headers: &ntex::http::HeaderMap,
+    peer_ip: Option<std::net::IpAddr>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in headers {
+        let lname = name.as_str().to_ascii_lowercase();
+        if CLIENT_IP_SPOOF_HEADERS.contains(&lname.as_str()) {
+            // Drop the inbound copy — we re-author the authoritative value.
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            out.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+    if let Some(ip) = peer_ip {
+        out.push(("X-Forwarded-For".to_string(), ip.to_string()));
+    }
+    out
+}
+
+/// The authoritative client IP the gateway forwards to the auth/Hydra upstream
+/// (SEC-3). Reuses the gateway's own [`client_ip`] policy so the auth service
+/// keys its per-IP rate-limit buckets on the SAME address the gateway keys its
+/// own limits on: the immediate socket peer when the gateway is the edge, or
+/// the fronting proxy's forwarded client when `trust_proxy` is enabled. Raw
+/// `peer_addr()` would be wrong behind a trusted proxy — it would hand the auth
+/// service the proxy's address and collapse every user onto one shared bucket.
+/// Returns `None` when no parseable IP is available, in which case no
+/// `X-Forwarded-For` is injected and the auth side falls back to its own peer.
+fn auth_forward_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
+    let ip = client_ip(req, trust_proxy);
+    ip.parse::<std::net::IpAddr>()
+        .ok()
+        .or_else(|| ip.parse::<std::net::SocketAddr>().ok().map(|sa| sa.ip()))
+}
+
 // ---------------------------------------------------------------------------
 // Unified request handler
 // ---------------------------------------------------------------------------
+
+/// Outcome of canonicalizing an inbound dispatch path (SEC-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CanonicalPath {
+    /// The path is safe to dispatch under this canonical form. Auth matching
+    /// AND the worker-forwarded URL both use this exact string, so the
+    /// gateway's resource match can never disagree with the worker's
+    /// WHATWG `new URL` re-parse.
+    Use(String),
+    /// The path carried a traversal / empty-segment form (`.`/`..`, literal or
+    /// `%2e`-encoded, or `//`) that a browser's `new URL` would silently
+    /// rewrite. Rather than guess the worker's normalization, reject (400).
+    Reject,
+}
+
+/// Canonicalize an inbound dispatch path for SEC-2.
+///
+/// Fails CLOSED on the gateway↔worker path-disagreement class: a path that
+/// carries a dot-segment (`.`/`..`, literal or `%2e`-encoded) or an empty
+/// interior segment (`//`) is `Reject`ed (the caller answers 400) — a browser's
+/// `new URL` would silently rewrite those, so matching auth on one form while
+/// forwarding another is the bypass. Every other path is returned as its
+/// [`canonicalize_path`] normal form (e.g. a lone trailing slash is stripped),
+/// and the caller forwards THAT canonical string to the worker so the worker's
+/// `new URL(req.url).pathname` reproduces exactly what the gateway matched.
+pub(crate) fn canonicalize_dispatch_path(dispatch_path: &str) -> CanonicalPath {
+    if crate::compiled::path_has_traversal_or_empty_segment(dispatch_path) {
+        return CanonicalPath::Reject;
+    }
+    CanonicalPath::Use(crate::compiled::canonicalize_path(dispatch_path))
+}
 
 async fn handle_request(
     req: HttpRequest,
@@ -413,7 +505,25 @@ async fn handle_request(
 
     // Normalize tail: strip leading slash
     let tail = tail.strip_prefix('/').unwrap_or(tail);
-    let dispatch_path = format!("/{tail}");
+    let raw_dispatch_path = format!("/{tail}");
+
+    // SEC-2: canonicalize the request path BEFORE any resource matching, and
+    // derive the worker-forwarded path from the SAME canonical form so the
+    // gateway's auth match can never disagree with the worker's WHATWG
+    // `new URL(req.url).pathname`. A traversal / empty-segment form (`.`/`..`,
+    // literal or `%2e`-encoded, or `//`) — which a browser would silently
+    // rewrite — is rejected (400) rather than guessed.
+    let dispatch_path = match canonicalize_dispatch_path(&raw_dispatch_path) {
+        CanonicalPath::Use(p) => p,
+        CanonicalPath::Reject => {
+            return HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "request path is not canonical (path traversal or empty segment)",
+            }));
+        }
+    };
+    // The forwarded `tail` is the canonical path minus its leading slash, so
+    // the URL the worker re-parses matches the resource the gateway gated.
+    let tail = dispatch_path.strip_prefix('/').unwrap_or(&dispatch_path);
 
     // CORS preflight short-circuit. The browser sends `OPTIONS` with
     // `Origin` and `Access-Control-Request-Method` *before* the actual
@@ -2063,6 +2173,125 @@ mod tests {
     // Resource-tree request-level tests — exercise the per-resource policy
     // gates on synthetic requests built via ntex's `TestRequest`.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_forward_client_ip_follows_trust_proxy_not_raw_peer() {
+        // SEC-3: behind a trusted proxy the authoritative IP handed to the auth
+        // service must be the FORWARDED client (so per-IP buckets separate real
+        // users), not the gateway's immediate peer (which would be the proxy and
+        // collapse everyone onto one shared bucket). With trust_proxy=false the
+        // spoofable header is ignored and must NOT become the bucket key.
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "203.0.113.7")
+            .to_http_request();
+        assert_eq!(
+            auth_forward_client_ip(&req, true),
+            Some("203.0.113.7".parse().unwrap()),
+            "trust_proxy must forward the proxy-authored client IP"
+        );
+        assert_ne!(
+            auth_forward_client_ip(&req, false),
+            Some("203.0.113.7".parse().unwrap()),
+            "without trust_proxy the spoofable XFF must not become the bucket key"
+        );
+    }
+
+    #[test]
+    fn auth_upstream_headers_drop_spoofed_client_ip_and_inject_peer() {
+        // SEC-3: forwarding to the auth/Hydra upstream must strip ANY
+        // client-supplied X-Forwarded-For / Forwarded / X-Real-IP and inject a
+        // single authoritative X-Forwarded-For from the real socket peer.
+        // Pre-fix the helper copies headers verbatim and injects nothing → the
+        // spoofed 1.2.3.4 survives and the authoritative peer is absent → RED.
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("forwarded", "for=1.2.3.4")
+            .header("x-real-ip", "1.2.3.4")
+            .header("cookie", "zsidp_csrf=keep")
+            .header("user-agent", "keep-me/1")
+            .to_http_request();
+
+        let peer: std::net::IpAddr = "9.9.9.9".parse().unwrap();
+        let fwd = build_auth_upstream_headers(req.headers(), Some(peer));
+        let lc: Vec<(String, String)> = fwd
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect();
+
+        // The spoofed value never reaches the auth upstream under any of the
+        // three client-IP header names.
+        for spoof in ["x-forwarded-for", "forwarded", "x-real-ip"] {
+            assert!(
+                !lc.iter().any(|(k, v)| k == spoof && v.contains("1.2.3.4")),
+                "spoofed client IP leaked via `{spoof}`: {lc:?}"
+            );
+        }
+
+        // Exactly one authoritative X-Forwarded-For, set to the real peer.
+        let xff: Vec<&String> = lc
+            .iter()
+            .filter(|(k, _)| k == "x-forwarded-for")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            xff,
+            vec![&"9.9.9.9".to_string()],
+            "auth upstream must receive exactly one authoritative X-Forwarded-For (peer): {lc:?}"
+        );
+
+        // Benign headers survive the scrub.
+        assert!(
+            lc.iter().any(|(k, v)| k == "user-agent" && v == "keep-me/1"),
+            "benign header dropped: {lc:?}"
+        );
+        assert!(
+            lc.iter().any(|(k, _)| k == "cookie"),
+            "auth cookies must still be forwarded: {lc:?}"
+        );
+    }
+
+    #[test]
+    fn canonicalize_dispatch_path_rejects_traversal_and_normalizes() {
+        // SEC-2: the dispatch layer rejects (400) any path carrying a
+        // traversal / empty-interior-segment form a browser's `new URL` would
+        // rewrite, and otherwise forwards the CANONICAL form (so the worker
+        // re-parses the exact path the gateway matched auth on). Pre-fix the
+        // helper forwards the raw path and never rejects → RED.
+        for traversal in [
+            "/api/foo/../admin",
+            "/api/%2e/admin",
+            "/api/%2E/admin",
+            "/api/./admin",
+            "/api//admin",
+            "/api/foo/%2e%2e/admin",
+            "/%2e%2e/etc/passwd",
+        ] {
+            assert_eq!(
+                canonicalize_dispatch_path(traversal),
+                CanonicalPath::Reject,
+                "traversal {traversal:?} must be rejected (400), not forwarded raw"
+            );
+        }
+
+        // Benign forms forward under their canonical normalization. A single
+        // trailing slash is a normalize case (not a traversal), and an already
+        // -canonical path is forwarded unchanged.
+        assert_eq!(
+            canonicalize_dispatch_path("/api/admin/"),
+            CanonicalPath::Use("/api/admin".to_string()),
+            "a lone trailing slash normalizes (single-slash policy), not 400"
+        );
+        assert_eq!(
+            canonicalize_dispatch_path("/api/admin"),
+            CanonicalPath::Use("/api/admin".to_string()),
+            "an already-canonical path forwards unchanged"
+        );
+        assert_eq!(
+            canonicalize_dispatch_path("/__zeroship/v1/todos.list"),
+            CanonicalPath::Use("/__zeroship/v1/todos.list".to_string()),
+            "RPC wire paths are canonical and forward unchanged"
+        );
+    }
 
     #[test]
     fn lookup_finds_rpc_resource_after_strip_prefix() {

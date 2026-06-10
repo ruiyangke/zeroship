@@ -211,3 +211,61 @@ async fn cleanup(
         .await
         .ok();
 }
+
+/// SEC-3: the token sweep also reaps idle `zeroship.rate_limits` rows (and the
+/// relay dedup sentinels that share the table) so a forged-IP flood cannot
+/// leave permanent rows. A bucket idle past the 24h grace window is deleted; a
+/// freshly-touched one survives. Live PG — skip when `AUTH_DB_URL` unset.
+#[compio::test]
+async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping token_sweep rate_limits test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let tag = Uuid::new_v4().simple().to_string();
+    let stale_key = format!("login:ip:sec3-stale-{tag}");
+    let fresh_key = format!("login:ip:sec3-fresh-{tag}");
+
+    // Seed one row idle 25h (reapable) and one just-touched (kept).
+    client
+        .execute(
+            "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) VALUES \
+                ($1, 0::REAL, NOW() - INTERVAL '25 hours'), \
+                ($2, 0::REAL, NOW())",
+            &[&stale_key, &fresh_key],
+        )
+        .await
+        .expect("seed rate_limits rows");
+
+    token_sweep::tick(&client).await.expect("tick");
+
+    let stale_remaining: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS count FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&stale_key],
+        )
+        .await
+        .expect("count stale")
+        .get("count");
+    let fresh_remaining: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS count FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&fresh_key],
+        )
+        .await
+        .expect("count fresh")
+        .get("count");
+
+    // Cleanup before asserting so a failure doesn't leak fixtures.
+    client
+        .execute(
+            "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1 OR bucket_key = $2",
+            &[&stale_key, &fresh_key],
+        )
+        .await
+        .ok();
+
+    assert_eq!(stale_remaining, 0, "idle (>24h) rate-limit bucket must be reaped");
+    assert_eq!(fresh_remaining, 1, "freshly-touched rate-limit bucket must survive");
+}

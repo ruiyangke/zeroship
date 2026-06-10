@@ -231,12 +231,10 @@ pub async fn post(
         );
     }
 
-    // 2. Resolve the remote IP (rate-limit bucket + audit).
-    let ip = req
-        .connection_info()
-        .remote()
-        .unwrap_or("0.0.0.0")
-        .to_string();
+    // 2. Resolve the remote IP (rate-limit bucket + audit). Use the trusted,
+    //    gateway-authored client IP (SEC-3) — never the spoofable leftmost
+    //    X-Forwarded-For token `connection_info().remote()` returns.
+    let ip = crate::headers::client_ip(&req);
 
     // 3–4 + failure arms: the constant-time, fail-closed credential check
     // (rate-limit → lookup → dummy-hash defense → Argon2 verify → eligibility

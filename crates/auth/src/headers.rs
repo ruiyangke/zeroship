@@ -147,22 +147,36 @@ fn framed_route_csp(origins: &[String]) -> String {
 
 /// Client IP for rate-limiting and audit, as a string.
 ///
-/// The auth service runs behind the gateway, so the socket peer is the
-/// gateway, not the end user. We therefore prefer the forwarded client
-/// address (`Forwarded` / `X-Forwarded-For`, via ntex `connection_info`)
-/// and only fall back to the raw socket peer when no proxy header is
-/// present. Mirrors [`RequestContext`]'s IP derivation so per-IP rate
-/// limits and audit records agree on who the caller is.
-///
-/// Returns `"0.0.0.0"` when neither source yields an address (e.g. unit
-/// tests with no peer and no forwarded header).
+/// The auth service runs behind the gateway, the SOLE trusted hop. The
+/// gateway strips any client-supplied `X-Forwarded-For` / `Forwarded` /
+/// `X-Real-IP` and re-authors a SINGLE authoritative `X-Forwarded-For` token =
+/// the real socket peer (SEC-3, see the gateway's `build_auth_upstream_headers`).
+/// We therefore read the RIGHTMOST (closest-hop, gateway-authored) XFF token —
+/// NOT the leftmost, which `connection_info().remote()` returns and which a
+/// caller can prepend to spoof a per-IP rate-limit bucket — and REQUIRE it to
+/// parse as an IP before it is used as a bucket key (an unvalidated value would
+/// let an attacker mint unbounded `zeroship.rate_limits` rows). When the
+/// forwarded value is absent or unparseable we fall back to the raw socket
+/// peer, then the `"0.0.0.0"` sentinel (e.g. unit tests with neither).
 #[must_use]
 pub(crate) fn client_ip(req: &HttpRequest) -> String {
-    req.connection_info()
-        .remote()
-        .map(str::to_owned)
-        .or_else(|| req.peer_addr().map(|addr| addr.ip().to_string()))
-        .unwrap_or_else(|| "0.0.0.0".to_string())
+    trusted_forwarded_ip(req.headers())
+        .or_else(|| req.peer_addr().map(|addr| addr.ip()))
+        .map_or_else(|| "0.0.0.0".to_string(), |ip| ip.to_string())
+}
+
+/// Extract the trusted client IP from `X-Forwarded-For`: the RIGHTMOST
+/// non-empty token (the value the closest trusted hop — the gateway — authored)
+/// that parses as an [`IpAddr`]. Returns `None` when the header is absent,
+/// empty, or its trusted token is not a valid IP.
+fn trusted_forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    let value = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let token = value.rsplit(',').map(str::trim).find(|t| !t.is_empty())?;
+    // A bare IP, or an `ip:port` SocketAddr (some proxies append the port).
+    token
+        .parse::<IpAddr>()
+        .ok()
+        .or_else(|| token.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
 }
 
 #[must_use]
@@ -308,10 +322,9 @@ impl RequestContext {
     pub fn from_http_request(req: &HttpRequest) -> Self {
         Self {
             request_id: request_id(req.headers()),
-            ip: req
-                .connection_info()
-                .remote()
-                .and_then(parse_ip)
+            // SEC-3: the trusted gateway-authored client IP (rightmost
+            // validated XFF token), not the spoofable leftmost.
+            ip: trusted_forwarded_ip(req.headers())
                 .or_else(|| req.peer_addr().map(|addr| addr.ip())),
             user_agent: req
                 .headers()
@@ -325,10 +338,8 @@ impl RequestContext {
     fn from_web_request<Err>(req: &WebRequest<Err>) -> Self {
         Self {
             request_id: request_id(req.headers()),
-            ip: req
-                .connection_info()
-                .remote()
-                .and_then(parse_ip)
+            // SEC-3: trusted gateway-authored client IP, as above.
+            ip: trusted_forwarded_ip(req.headers())
                 .or_else(|| req.peer_addr().map(|addr| addr.ip())),
             user_agent: req
                 .headers()
@@ -349,18 +360,6 @@ fn request_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
-fn parse_ip(value: &str) -> Option<IpAddr> {
-    value
-        .split(',')
-        .next()
-        .map(str::trim)
-        .and_then(|candidate| {
-            candidate
-                .parse::<IpAddr>()
-                .ok()
-                .or_else(|| candidate.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
-        })
-}
 
 /// ntex middleware factory that stows [`RequestContext`] in request extensions.
 #[derive(Clone, Copy, Debug, Default)]
@@ -477,6 +476,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntex::web::test;
 
     /// Pure-helper exercise of the route-aware framing builder (design §9): the
     /// framing logic is testable WITHOUT booting Hydra (the live `GET /login`
@@ -662,6 +662,63 @@ mod tests {
             csp.contains("frame-ancestors 'none'"),
             "no concrete origin ⇒ strict default; got {csp}"
         );
+    }
+
+    #[test]
+    fn client_ip_takes_trusted_rightmost_xff_token_and_validates_ip() {
+        // SEC-3: the gateway is the only trusted hop. It strips any
+        // client-supplied X-Forwarded-For and re-authors a single token = the
+        // real peer. The auth service must therefore read the RIGHTMOST
+        // (closest-hop, gateway-authored) X-Forwarded-For token, NOT the
+        // leftmost (client-spoofable) one — `connection_info().remote()` takes
+        // the leftmost and is unsafe here.
+        //
+        // Pre-fix `client_ip` returns the leftmost `1.2.3.4` (the spoofed
+        // value an attacker prepends) → RED.
+        let req = test::TestRequest::default()
+            // Attacker prepends a forged leftmost token; the gateway-authored
+            // real peer is the rightmost.
+            .header("x-forwarded-for", "1.2.3.4, 203.0.113.7")
+            .to_http_request();
+        assert_eq!(
+            client_ip(&req),
+            "203.0.113.7",
+            "must use the rightmost (gateway-authored) XFF token, not the spoofable leftmost"
+        );
+    }
+
+    #[test]
+    fn client_ip_rejects_non_ip_bucket_key() {
+        // SEC-3: a non-IP X-Forwarded-For value must NEVER be used verbatim as
+        // a rate-limit bucket key (that lets an attacker mint unbounded
+        // `zeroship.rate_limits` rows). With no socket peer in the test
+        // fixture, an unparseable value falls back to the `0.0.0.0` sentinel.
+        //
+        // Pre-fix `client_ip` returns the raw `not-an-ip` string → RED.
+        let req = test::TestRequest::default()
+            .header("x-forwarded-for", "not-an-ip")
+            .to_http_request();
+        assert_eq!(
+            client_ip(&req),
+            "0.0.0.0",
+            "a non-IP forwarded value must be rejected, not used as a bucket key"
+        );
+
+        // A garbage token that would balloon the key space is likewise rejected.
+        let req2 = test::TestRequest::default()
+            .header("x-forwarded-for", "'; DROP TABLE rate_limits; --")
+            .to_http_request();
+        assert_eq!(client_ip(&req2), "0.0.0.0");
+    }
+
+    #[test]
+    fn client_ip_accepts_single_valid_token() {
+        // The common gateway-authored single-token case still resolves to that
+        // IP (unchanged behavior for the trusted path).
+        let req = test::TestRequest::default()
+            .header("x-forwarded-for", "198.51.100.9")
+            .to_http_request();
+        assert_eq!(client_ip(&req), "198.51.100.9");
     }
 
     #[test]

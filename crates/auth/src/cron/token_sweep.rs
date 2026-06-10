@@ -15,6 +15,24 @@ use crate::error::{AuthError, Result};
 
 const INTERVAL_SECS: u64 = 60 * 60;
 
+/// Idle window after which a `zeroship.rate_limits` row is reapable (SEC-3).
+///
+/// A leaky bucket is fully refilled — and therefore lossless to delete — once
+/// it has been idle long enough to reach capacity; the slowest profile in
+/// `ratelimit.rs` refills within an hour, so a 24h idle window is amply safe.
+/// 24h also matches the relay `relay_seen:` dedup sentinel's own TTL (those
+/// rows live in this same table), so one sweep correctly reaps both.
+const RATE_LIMITS_GRACE_HOURS: i64 = 24;
+
+/// Retention predicate backing the `zeroship.rate_limits` sweep: a row whose
+/// last update is older than [`RATE_LIMITS_GRACE_HOURS`] is stale and reapable.
+/// The cron's DELETE mirrors this exact boundary in SQL (it binds the same
+/// constant as the interval). Test-only — the production reap is the SQL.
+#[cfg(test)]
+fn rate_limit_row_is_stale(idle_hours: i64) -> bool {
+    idle_hours > RATE_LIMITS_GRACE_HOURS
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenSweepReport {
     pub magic_links_deleted: u64,
@@ -22,6 +40,7 @@ pub struct TokenSweepReport {
     pub magic_completions_deleted: u64,
     pub email_verifications_deleted: u64,
     pub token_revocations_deleted: u64,
+    pub rate_limits_deleted: u64,
 }
 
 impl TokenSweepReport {
@@ -31,6 +50,7 @@ impl TokenSweepReport {
             + self.magic_completions_deleted
             + self.email_verifications_deleted
             + self.token_revocations_deleted
+            + self.rate_limits_deleted
     }
 }
 
@@ -54,6 +74,7 @@ pub async fn run(db: Arc<Client>) {
                     magic_completions_deleted = report.magic_completions_deleted,
                     email_verifications_deleted = report.email_verifications_deleted,
                     token_revocations_deleted = report.token_revocations_deleted,
+                    rate_limits_deleted = report.rate_limits_deleted,
                     total_deleted = report.total(),
                     "token_sweep completed"
                 );
@@ -93,12 +114,27 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
             .await
             .map_err(|e| AuthError::Db(format!("token_sweep zeroship.token_revocations: {e}")))?;
 
+    // SEC-3: reap idle rate-limit buckets (and relay dedup sentinels, which
+    // share this table) so a forged-IP flood can't leave permanent rows. The
+    // window is the single-source-of-truth `RATE_LIMITS_GRACE_HOURS` (mirrored
+    // by `rate_limit_row_is_stale`); we bind it as a parameter rather than
+    // string-formatting an INTERVAL literal.
+    let rate_limits_deleted = db
+        .execute(
+            "DELETE FROM zeroship.rate_limits \
+             WHERE updated_at < NOW() - (make_interval(hours => $1::INT))",
+            &[&i32::try_from(RATE_LIMITS_GRACE_HOURS).unwrap_or(24)],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("token_sweep zeroship.rate_limits: {e}")))?;
+
     Ok(TokenSweepReport {
         magic_links_deleted,
         password_resets_deleted,
         magic_completions_deleted,
         email_verifications_deleted,
         token_revocations_deleted,
+        rate_limits_deleted,
     })
 }
 
@@ -133,4 +169,43 @@ async fn delete_table(db: &Client, table: &str, sql: &str) -> Result<u64> {
     db.execute(sql, &[])
         .await
         .map_err(|e| AuthError::Db(format!("token_sweep {table}: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limits_retention_predicate_boundary() {
+        // SEC-3: the rate-limit sweep reaps a bucket only once it is idle
+        // STRICTLY longer than the 24h grace window. A bucket touched within
+        // the window (or exactly at it) is kept; an older one is reaped. The
+        // cron's `INTERVAL '24 hours'` DELETE mirrors this boundary.
+        assert_eq!(RATE_LIMITS_GRACE_HOURS, 24);
+        assert!(!rate_limit_row_is_stale(0), "a just-touched bucket is kept");
+        assert!(!rate_limit_row_is_stale(1), "a recently-used bucket is kept");
+        assert!(
+            !rate_limit_row_is_stale(24),
+            "a bucket exactly at the grace window is kept (boundary inclusive)"
+        );
+        assert!(
+            rate_limit_row_is_stale(25),
+            "a bucket idle past the grace window is reaped"
+        );
+        assert!(rate_limit_row_is_stale(48));
+    }
+
+    #[test]
+    fn total_includes_rate_limits_deleted() {
+        // The aggregate the cron logs must count reaped rate-limit rows.
+        let report = TokenSweepReport {
+            magic_links_deleted: 1,
+            password_resets_deleted: 1,
+            magic_completions_deleted: 1,
+            email_verifications_deleted: 1,
+            token_revocations_deleted: 1,
+            rate_limits_deleted: 3,
+        };
+        assert_eq!(report.total(), 8, "rate_limits_deleted must be summed in total()");
+    }
 }
