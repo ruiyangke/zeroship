@@ -58,6 +58,15 @@ When present, it sits at the head of each resource's inheritance chain and contr
 
 Policy flattening is done once per route update. The compiled policy carries auth, rate-limit, CORS, CSRF origins, cache metadata, idempotency flags, middleware names, procedure kind, schemas, and the resolved action.
 
+### Auth resolution default (secure by default)
+
+When a resource's inheritance chain declares no `auth` at all, the default depends on the surface:
+
+- **`rpc:` procedures fail closed — they default to `auth: user`.** A server function nobody gave an explicit policy still requires an authenticated session, so a forgotten or mistyped resource key can never *silently* expose it. This is the root-cause fix for the SEC-5 class (a drifted `rpc:apps` vs `projects.*` family key had left the whole surface anonymous); see `crates/gateway/src/compiled.rs::resolve_effective_policy`.
+- **URL / SSR / static resources stay public by default (`auth: anon`)** — the web norm: a creator's blog, landing page, or static asset is readable without login.
+
+To expose an RPC procedure publicly, opt in **explicitly** with `auth: "anon"` + `publicly_accessible: true` on the procedure or a `rpc:<prefix>` family policy (the `publicly_accessible` flag is the deliberate confirmation the manifest validator requires alongside `auth: anon`). Manifest auth is enforced only by the gateway — the single-tenant CLI `serve` and the dev runtime do not gate by manifest policy.
+
 ## Pre-dispatch gates
 
 `execute_resource_tree` enforces these checks before the worker is touched:

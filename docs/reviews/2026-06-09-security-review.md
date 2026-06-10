@@ -17,6 +17,17 @@
 > `0033` apply. Out of scope / pre-existing: the stale gateway `oidc_rp_e2e.rs`
 > integration test (old `SecurityHeaders`/`AuthConfig` API) and the uninstalled
 > `lucide-react` dep break `tsc`/integration compiles independently of these fixes.
+>
+> **Follow-up landed (root-cause fix for the SEC-5 *class*):** the gateway now
+> resolves an `rpc:` procedure with no declared `auth` to **`auth: user`
+> (fail-closed)** instead of the silent `Anon` default — a forgotten or mistyped
+> resource policy now yields a `401`, never an unauthenticated endpoint
+> (`crates/gateway/src/compiled.rs::resolve_effective_policy`). URL/SSR/static keep
+> public-by-default; opt into public RPC with `auth: anon` + `publicly_accessible`.
+> This supersedes the originally-proposed manifest-validator rule (which would have
+> been ineffective — the build does not populate `aliases` — and a resources-keyed
+> version would have rejected the zero-config example apps). See
+> `docs/architecture/gateway-routing.md` → "Auth resolution default".
 
 ## 1. Method
 

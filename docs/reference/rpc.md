@@ -66,6 +66,36 @@ not change HTTP paths. The active wrapper helpers are:
 transport has a WebSocket helper, but the public generated/manual client shape
 does not expose subscriptions yet. Use `stream(...)` for shipped live feeds.
 
+## Procedure auth (authenticated by default)
+
+When deployed behind the gateway, **every RPC procedure requires an authenticated
+end-user by default** — a procedure with no auth policy resolves to `auth: user`,
+not public. This is fail-closed by design: forgetting to set auth yields a loud
+`401`, never a silent public endpoint. (Per-request identity *inside* a handler is
+still read explicitly with `auth.getUser()` / `auth.requireUser()`; the gateway
+default just guarantees the caller is authenticated before the handler runs.)
+
+To make a procedure **publicly reachable**, opt in explicitly in the app's
+resource policy (`src/server/config.ts`):
+
+```ts
+import { defineApp } from "@zeroship/server";
+
+export default defineApp({
+  resources: {
+    // A whole namespace public: every `wizard.*` procedure resolves to anon.
+    "rpc:wizard": { auth: "anon", publiclyAccessible: true },
+  },
+});
+```
+
+`publiclyAccessible: true` is the deliberate confirmation the manifest validator
+requires alongside `auth: "anon"` — it makes "this endpoint is intentionally
+public" explicit and reviewable. `auth: "admin"` restricts a procedure (or family)
+to platform admins. Manifest auth is enforced only by the gateway; the
+single-tenant `zeroship serve` and `pnpm dev` runtimes do not gate by policy, so
+local runs reach every procedure regardless of its declared auth.
+
 ## Vite-generated calls
 
 With `@zeroship/vite-plugin`, client code imports the server export directly:
