@@ -39,8 +39,10 @@ services:
       - /verdaccio/conf/config.yaml
       - --listen
       - 0.0.0.0:4873
+    # Loopback-only publication (SEC-8): the registry must not be reachable
+    # from the LAN or from sandbox guests via the host's external interfaces.
     ports:
-      - "4873:4873"
+      - "127.0.0.1:4873:4873"
     volumes:
       - ./config/verdaccio/config.yaml:/verdaccio/conf/config.yaml:ro
       - verdaccio_storage:/verdaccio/conf/storage

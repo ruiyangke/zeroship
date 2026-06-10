@@ -5,23 +5,28 @@ web:
 
 auth:
   htpasswd:
+    # Self-registration is disabled (SEC-8). Publisher accounts are
+    # provisioned out of band by an operator editing the htpasswd file.
     file: storage/htpasswd
-    max_users: 1000
+    max_users: -1
 
 uplinks:
   npmjs:
     url: https://registry.npmjs.org/
 
+# Reads stay open; publish/unpublish are restricted to the named
+# operator-provisioned publisher account (SEC-8) — never $authenticated,
+# which any self-registered or sandbox-held token would satisfy.
 packages:
   '@zeroship/*':
     access: $all
-    publish: $authenticated
-    unpublish: $authenticated
+    publish: zeroship-publisher
+    unpublish: zeroship-publisher
 
   '**':
     access: $all
-    publish: $authenticated
-    unpublish: $authenticated
+    publish: zeroship-publisher
+    unpublish: zeroship-publisher
     proxy: npmjs
 
 server:
