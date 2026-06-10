@@ -748,13 +748,17 @@ async fn load_on_demand(
         crate::sync::remove_env(envs, app_id);
         return Err("failed to parse bundle".into());
     }
-    // Track the deploy_hash (if any) so the reconcile loop can detect
-    // future swaps. Synthesize-on-load: we have bundle_hash here, but
-    // the worker's reconcile compares against `info.deploy_hash` (the
-    // canonical manifest hash), not the per-blob hash, so use that.
-    if let Some(dh) = app_version.deploy_hash.clone() {
-        cache::set_hash(*app_id, dh);
-    }
+    // Record what this isolate was loaded against so the reconcile loop
+    // can detect future swaps: the deploy_hash (the canonical manifest
+    // hash, NOT the per-blob bundle hash) and the env version the env we
+    // just committed was fetched at. The env half matters for SEC-7 —
+    // without it, a later env-only rotation would be invisible to
+    // `sync::needs_reload` and the isolate would keep serving revoked
+    // credentials.
+    cache::set_loaded_meta(*app_id, cache::LoadedMeta {
+        deploy_hash: app_version.deploy_hash.clone(),
+        env_version: app_version.env_version,
+    });
     tracing::info!(
         app_id = %app_id,
         blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],

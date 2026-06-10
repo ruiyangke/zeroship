@@ -201,7 +201,7 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
     })
 }
 
-fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
+pub fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
     RuntimeLimits {
         cpu_limit: limits.cpu_limit_ms.map(std::time::Duration::from_millis),
         wall_timeout: limits.wall_timeout_ms.map(std::time::Duration::from_millis),
@@ -242,35 +242,47 @@ pub fn all_app_ids() -> Vec<Uuid> {
     })
 }
 
-// Deploy hash tracking — kept thread_local because it pairs 1:1 with
-// `CACHE` (which holds the `!Send` V8 Runtime). Env data + version
-// both live in the process-wide `SharedEnvs` so cross-thread reconcile
-// sees a single source of truth — see `sync::CachedEnv`.
+// Loaded-state tracking — kept thread_local because it pairs 1:1 with
+// `CACHE` (which holds the `!Send` V8 Runtime). The env DATA + its
+// current version live in the process-wide `SharedEnvs` (see
+// `sync::CachedEnv`); `LoadedMeta.env_version` is deliberately separate:
+// it records which env version THIS thread's isolate was hydrated
+// against, so reconcile can tell "SharedEnvs is fresh" apart from "the
+// running isolate has actually materialized it" (SEC-7).
+
+/// What a cached isolate was loaded against: the deploy hash (code) and
+/// the env version (vars/secrets). `sync::needs_reload` compares both
+/// with the control plane's current `AppVersionInfo` to decide whether
+/// the isolate must be swapped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedMeta {
+    /// Canonical manifest hash of the deploy the isolate runs. `None`
+    /// when the control plane reported no deploy hash at load time.
+    pub deploy_hash: Option<String>,
+    /// Control-plane monotonic env counter the isolate's env was
+    /// hydrated against.
+    pub env_version: i64,
+}
+
 thread_local! {
-    static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
+    static LOADED_META: RefCell<HashMap<Uuid, LoadedMeta>> = RefCell::new(HashMap::new());
 }
 
-pub fn get_hash(app_id: &Uuid) -> Option<String> {
-    HASHES.with(|h| h.borrow().get(app_id).cloned())
+pub fn get_loaded_meta(app_id: &Uuid) -> Option<LoadedMeta> {
+    LOADED_META.with(|m| m.borrow().get(app_id).cloned())
 }
 
-pub fn set_hash(app_id: Uuid, hash: String) {
-    HASHES.with(|h| {
-        h.borrow_mut().insert(app_id, hash);
+pub fn set_loaded_meta(app_id: Uuid, meta: LoadedMeta) {
+    LOADED_META.with(|m| {
+        m.borrow_mut().insert(app_id, meta);
     });
 }
 
-#[allow(dead_code)]
-pub fn remove_hash(app_id: &Uuid) {
-    HASHES.with(|h| {
-        h.borrow_mut().remove(app_id);
+pub fn remove_loaded_meta(app_id: &Uuid) {
+    LOADED_META.with(|m| {
+        m.borrow_mut().remove(app_id);
     });
 }
-
-// Env get/put + version moved to crate::sync (SharedEnvs). See
-// put_env_from_json, get_env, cached_env_version there. Version no
-// longer needs a per-thread tracker because it's bundled with the env
-// data in CachedEnv — cross-thread reconciles dedupe correctly.
 
 fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
@@ -291,7 +303,7 @@ fn evict_lru(cache: &mut AppCache) {
         }
 
         cache.isolates.remove(&oldest_id);
-        HASHES.with(|h| { h.borrow_mut().remove(&oldest_id); });
+        LOADED_META.with(|m| { m.borrow_mut().remove(&oldest_id); });
         // Env in `SharedEnvs` is process-wide and may still be needed
         // by other threads — DON'T evict it here. The version_poll_loop
         // GCs SharedEnvs against the known-app set every cycle, so an

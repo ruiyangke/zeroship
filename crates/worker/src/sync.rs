@@ -146,6 +146,44 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
     }
 }
 
+/// PHASE 2 swap decision: does this thread's cached isolate need to be
+/// torn down and reloaded to match the control plane's current app
+/// state? True when any of:
+///
+/// - the deploy hash changed (new code),
+/// - the runtime limits changed (CPU / wall / heap),
+/// - the env version changed (var/secret rotation).
+///
+/// The env arm is SEC-7: a pure env bump (dashboard secret rotation, no
+/// redeploy) must reload the isolate. The runtime materializes the `env`
+/// argument object and `process.env` once per isolate (first dispatch),
+/// so refreshing `SharedEnvs` alone never reaches an already-running
+/// isolate — a revoked credential would keep being served until LRU
+/// eviction or the next code deploy. A full isolate swap also destroys
+/// user-code module state that captured the old credential (e.g. a
+/// module-level API client), which an in-place `env_obj` rebuild wouldn't.
+///
+/// `loaded` is the per-thread record of what the isolate was loaded
+/// against (`cache::LoadedMeta`) — NOT the process-wide `SharedEnvs`
+/// entry, which PHASE 1 refreshes independently of any isolate (by the
+/// time PHASE 2 runs, `SharedEnvs` usually already matches
+/// `info.env_version`, so comparing against it would mask the rotation).
+/// `loaded == None` (isolate cached but nothing recorded) is treated as
+/// "unknown state" → reload, never "assume current".
+pub fn needs_reload(
+    loaded: Option<&cache::LoadedMeta>,
+    local_limits: Option<RuntimeLimits>,
+    info: &AppVersionInfo,
+) -> bool {
+    let hash_changed = match loaded.and_then(|m| m.deploy_hash.as_deref()) {
+        Some(lh) => info.deploy_hash.as_deref().is_some_and(|rh| lh != rh),
+        None => info.deploy_hash.is_some(),
+    };
+    let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
+    let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
+    hash_changed || limits_changed || env_changed
+}
+
 async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &SharedEnvs) -> Result<(), String> {
     // PHASE 1: env-only refresh for any app whose env is in SharedEnvs
     // (not just locally cached). Without this, an app loaded only on
@@ -185,26 +223,9 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
         match versions.get(local_id) {
             // App still exists — check if deploy hash, limits, or env_version changed.
             Some(info) => {
-                let remote_hash = &info.deploy_hash;
-                let local_hash = cache::get_hash(local_id);
+                let loaded = cache::get_loaded_meta(local_id);
                 let local_limits = cache::get_limits(local_id);
-                let target_limits = RuntimeLimits {
-                    cpu_limit: info.runtime.cpu_limit_ms.map(std::time::Duration::from_millis),
-                    wall_timeout: info.runtime.wall_timeout_ms.map(std::time::Duration::from_millis),
-                    heap_limit_bytes: info.runtime.heap_limit_mb.map(|mb| (mb as usize) * 1024 * 1024),
-                };
-                let needs_update = match &local_hash {
-                    Some(lh) => remote_hash.as_ref().is_some_and(|rh| lh != rh),
-                    None => remote_hash.is_some(),
-                } || local_limits != Some(target_limits);
-
-                // Env-only refresh handled in PHASE 1 above (covers
-                // apps not on this thread too). Local computation here
-                // just decides whether the bundle needs swap.
-                let cached_version = cached_env_version(envs, local_id);
-                let env_changed = cached_version != Some(info.env_version);
-
-                if needs_update {
+                if needs_reload(loaded.as_ref(), local_limits, info) {
                     // Resolve the worker-bundle blob hash from the manifest
                     // shipped in `info`. The platform's invariant is that
                     // a deployed app has `manifest.worker.modules[entry]` —
@@ -222,20 +243,23 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             // the LRU slot is freed and on-demand load
                             // doesn't fall back to a stale runtime.
                             cache::evict_app(local_id);
-                            cache::remove_hash(local_id);
+                            cache::remove_loaded_meta(local_id);
                             continue;
                         }
                     };
                     match config.blob_store.get_blob(&bundle_hash).await {
                         Ok(bytes) => {
-                            // Order: fetch+parse env BEFORE the V8 swap.
-                            // Otherwise concurrent dispatches on the same
-                            // thread between cache::load_app and
+                            // Order: make sure SharedEnvs is current BEFORE
+                            // the V8 swap. Otherwise concurrent dispatches
+                            // on the same thread between cache::load_app and
                             // put_env_from_json see new code with stale env
-                            // (or 503 with no env at all). Skip the env
-                            // fetch when env_changed is false — the
-                            // existing SharedEnvs entry is still valid.
-                            let env_for_load: Option<String> = if env_changed {
+                            // (or 503 with no env at all). PHASE 1 normally
+                            // refreshed SharedEnvs already; re-fetch only
+                            // when it is still stale (e.g. PHASE 1's fetch
+                            // failed this cycle).
+                            let shared_env_stale =
+                                cached_env_version(envs, local_id) != Some(info.env_version);
+                            let env_for_load: Option<String> = if shared_env_stale {
                                 match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
                                     Ok(json) => Some(json),
                                     Err(e) => {
@@ -256,9 +280,13 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             }
 
                             if cache::load_app(*local_id, &bytes, info.runtime.clone()) {
-                                if let Some(remote_hash) = remote_hash {
-                                    cache::set_hash(*local_id, remote_hash.clone());
-                                }
+                                // Record what the fresh isolate was loaded
+                                // against — the reload decision above keys
+                                // off this on the next cycle.
+                                cache::set_loaded_meta(*local_id, cache::LoadedMeta {
+                                    deploy_hash: info.deploy_hash.clone(),
+                                    env_version: info.env_version,
+                                });
                                 tracing::info!(
                                     app_id = %local_id,
                                     plan_id = %info.plan_id,
@@ -278,7 +306,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
             None => {
                 tracing::info!(app_id = %local_id, "worker-sync: evicting deleted app");
                 cache::evict_app(local_id);
-                cache::remove_hash(local_id);
+                cache::remove_loaded_meta(local_id);
                 // Env entry GC'd centrally by version_poll_loop's
                 // retain step; no per-thread removal needed.
                 if let Ok(mut e) = envs.write() {
@@ -446,11 +474,311 @@ async fn http_get_bytes_inner(url: &str, auth_key: &str) -> Result<Vec<u8>, Stri
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, RwLock};
+
+    use ntex::http::StatusCode;
+    use ntex::web::{self, test};
+    use sha2::{Digest, Sha256};
+    use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+    use zeroship_core::types::AppRuntimeLimits;
+
     use super::*;
 
     #[test]
     fn control_timeout_defaults_to_five_seconds() {
         assert_eq!(CONTROL_REQUEST_TIMEOUT, std::time::Duration::from_secs(5));
         assert_eq!(control_timeout_error(), "control request timed out after 5s");
+    }
+
+    // -----------------------------------------------------------------------
+    // needs_reload — the PHASE 2 isolate-swap decision
+    // -----------------------------------------------------------------------
+
+    fn version_info(deploy_hash: Option<&str>, env_version: i64, runtime: AppRuntimeLimits) -> AppVersionInfo {
+        AppVersionInfo {
+            deploy_hash: deploy_hash.map(str::to_string),
+            plan_id: "starter".to_string(),
+            runtime,
+            env_version,
+            manifest: None,
+        }
+    }
+
+    fn loaded_meta(deploy_hash: Option<&str>, env_version: i64) -> cache::LoadedMeta {
+        cache::LoadedMeta {
+            deploy_hash: deploy_hash.map(str::to_string),
+            env_version,
+        }
+    }
+
+    fn matching_limits(runtime: &AppRuntimeLimits) -> RuntimeLimits {
+        cache::runtime_limits_from_app(runtime)
+    }
+
+    #[test]
+    fn needs_reload_false_when_state_matches() {
+        let info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+        let loaded = loaded_meta(Some("h1"), 7);
+        assert!(
+            !needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+            "no hash / limits / env change must NOT reload (reload churn would \
+             drop module state + in-flight work for nothing)"
+        );
+    }
+
+    /// SEC-7 regression: a pure env-version bump — deploy hash unchanged,
+    /// limits unchanged — MUST trigger an isolate reload. The V8 side
+    /// materializes the `env` argument object and `process.env` once per
+    /// isolate, so without a reload a rotated/removed credential keeps
+    /// being served until LRU eviction or the next code deploy, defeating
+    /// revocation. Pre-fix this fails: the decision only consulted the
+    /// deploy hash and the limits.
+    #[test]
+    fn needs_reload_true_when_only_env_version_bumps() {
+        let info = version_info(Some("h1"), 2, AppRuntimeLimits::default());
+        let loaded = loaded_meta(Some("h1"), 1);
+        assert!(
+            needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+            "SEC-7: env-only version bump (hash + limits unchanged) must \
+             reload the isolate so secret rotation actually applies"
+        );
+    }
+
+    #[test]
+    fn needs_reload_true_when_deploy_hash_changes() {
+        let info = version_info(Some("h2"), 7, AppRuntimeLimits::default());
+        let loaded = loaded_meta(Some("h1"), 7);
+        assert!(needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info));
+    }
+
+    #[test]
+    fn needs_reload_true_when_limits_change() {
+        let info = version_info(
+            Some("h1"),
+            7,
+            AppRuntimeLimits {
+                cpu_limit_ms: Some(123),
+                ..AppRuntimeLimits::default()
+            },
+        );
+        let loaded = loaded_meta(Some("h1"), 7);
+        assert!(needs_reload(
+            Some(&loaded),
+            Some(matching_limits(&AppRuntimeLimits::default())),
+            &info
+        ));
+    }
+
+    /// Isolate cached but no per-thread record of what it was loaded
+    /// against (both load paths record one, so this is defensive):
+    /// unknown state → reload, never "assume current".
+    #[test]
+    fn needs_reload_true_when_isolate_meta_missing() {
+        let info = version_info(Some("h1"), 0, AppRuntimeLimits::default());
+        assert!(needs_reload(None, Some(matching_limits(&info.runtime)), &info));
+    }
+
+    // -----------------------------------------------------------------------
+    // SEC-7 faithful end-to-end: env-only rotation reaches a live isolate
+    // -----------------------------------------------------------------------
+
+    fn tmpdir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "zs-worker-sync-{label}-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&path).expect("mkdir tmp");
+        path
+    }
+
+    fn dispatch_req(app_id: &Uuid) -> ntex::http::Request {
+        let envelope = serde_json::json!({
+            "method": "GET",
+            "url": "http://example.test/env-probe",
+            "headers": [],
+            "body": "",
+        });
+        test::TestRequest::post()
+            .uri(&format!("/dispatch/{app_id}"))
+            .set_payload(serde_json::to_vec(&envelope).unwrap())
+            .to_request()
+    }
+
+    /// SEC-7 regression, full pipeline: an env-var/secret rotation that
+    /// bumps ONLY the env version (no code redeploy, no limits change)
+    /// must swap the running isolate so the rotated values actually reach
+    /// JS. Pre-fix, `reconcile_once` refreshed `SharedEnvs` (PHASE 1) but
+    /// never reloaded the isolate (the PHASE 2 swap decision ignored the
+    /// env version), so the already-materialized `env` argument object and
+    /// `process.env` kept serving the revoked credential indefinitely.
+    ///
+    /// Drives the REAL path: `cache::load_app` → ntex `/dispatch/{app_id}`
+    /// → V8 env materialization → `reconcile_once` (the production
+    /// reconcile decision, real `LocalDiskBlobStore`) → `/dispatch` again.
+    /// The only seeded step is the `SharedEnvs` refresh itself
+    /// (`put_env_from_json` at the bumped version) — byte-for-byte what
+    /// PHASE 1 does after its control-plane fetch, minus the HTTP round
+    /// trip (the control URL points at a dead port, so any unexpected
+    /// HTTP dependence fails loudly instead of silently passing).
+    #[test]
+    fn reconcile_swaps_isolate_on_env_only_rotation() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            // Internally idempotent (guarded by a Once in the runtime crate),
+            // so safe alongside handler.rs tests in the same process.
+            zeroship_runtime::init::init_v8();
+
+            let app_id = Uuid::new_v4();
+            // Reads one var and one secret off the materialized `env`
+            // argument, plus the var again via `process.env` — the two
+            // V8 surfaces SEC-7 is about.
+            let source: &[u8] = br#"
+                export default {
+                  fetch(req, env) {
+                    return new Response(
+                      [env.API_TOKEN, env.SIGNING_SECRET, process.env.API_TOKEN].join("|")
+                    );
+                  }
+                }
+            "#;
+
+            crate::cache::init_cache(
+                10,
+                crate::cache::KernelConfig {
+                    db_url: None,
+                    kv_url: None,
+                    storage_root: None,
+                },
+            );
+
+            // Seed the blob store with the (unchanged) worker bundle, keyed
+            // by its real sha256 — `get_blob` verifies content hashes.
+            let blob_root = tmpdir("blob");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let blob_hash = hex::encode(Sha256::digest(source));
+            blob_store.put_blob(&blob_hash, source).await.expect("seed blob");
+
+            // Load the app the way the worker does, recording that the
+            // isolate was hydrated against env version 1.
+            assert!(crate::cache::load_app(app_id, source, AppRuntimeLimits::default()));
+            crate::cache::set_loaded_meta(
+                app_id,
+                crate::cache::LoadedMeta {
+                    deploy_hash: Some("deploy-h1".to_string()),
+                    env_version: 1,
+                },
+            );
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            put_env_from_json(
+                &envs,
+                app_id,
+                r#"{"vars":{"API_TOKEN":"var-old"},"secrets":{"SIGNING_SECRET":"sec-old"},"expose":[]}"#,
+                1,
+            )
+            .expect("insert env v1");
+
+            let logs = crate::logs::new_store();
+            let config = Arc::new(crate::WorkerConfig {
+                // Dead port: this scenario must not need the control plane
+                // (SharedEnvs is already current when PHASE 2 swaps).
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_url: None,
+                kv_url: None,
+                storage_root: None,
+                max_isolates: 10,
+                poll_interval_secs: 60,
+                worker_key: String::new(),
+                shutdown_timeout_secs: 0,
+                blob_store,
+            });
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config.clone())
+                    .state(envs.clone())
+                    .state(logs)
+                    .service(
+                        web::resource("/dispatch/{app_id}")
+                            .route(web::post().to(crate::handler::dispatch)),
+                    ),
+            )
+            .await;
+
+            // 1. First dispatch materializes env v1 inside the isolate.
+            let resp = test::call_service(&app, dispatch_req(&app_id)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            assert_eq!(&body[..], b"var-old|sec-old|var-old", "isolate boots on env v1");
+
+            // 2. Rotation: control bumps env_version to 2; some thread's
+            //    PHASE 1 refreshes the process-wide SharedEnvs. This is
+            //    exactly `put_env_from_json` with the new payload+version.
+            put_env_from_json(
+                &envs,
+                app_id,
+                r#"{"vars":{"API_TOKEN":"var-new"},"secrets":{"SIGNING_SECRET":"sec-new"},"expose":[]}"#,
+                2,
+            )
+            .expect("insert env v2");
+
+            // 3. The live isolate does NOT see the refresh — `env` and
+            //    `process.env` were materialized once. This pins the
+            //    mechanism that makes the reload necessary.
+            let resp = test::call_service(&app, dispatch_req(&app_id)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            assert_eq!(
+                &body[..],
+                b"var-old|sec-old|var-old",
+                "pre-reconcile, an already-materialized isolate still serves the old env \
+                 (this is why the reconcile swap must fire)"
+            );
+
+            // 4. Reconcile against a version map where ONLY env_version
+            //    changed: same deploy hash, same limits.
+            let manifest: Manifest = serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "worker": { "entry": "index.js", "modules": { "index.js": blob_hash } },
+            }))
+            .expect("manifest");
+            let mut versions: VersionMap = HashMap::new();
+            versions.insert(
+                app_id,
+                AppVersionInfo {
+                    deploy_hash: Some("deploy-h1".to_string()),
+                    plan_id: "starter".to_string(),
+                    runtime: AppRuntimeLimits::default(),
+                    env_version: 2,
+                    manifest: Some(manifest),
+                },
+            );
+            reconcile_once(&config, &versions, &envs).await.expect("reconcile");
+
+            // 5. The rotated credentials must now reach JS. Pre-fix this
+            //    fails with the old values: reconcile never swapped the
+            //    isolate on an env-only bump.
+            let resp = test::call_service(&app, dispatch_req(&app_id)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            assert_eq!(
+                &body[..],
+                b"var-new|sec-new|var-new",
+                "SEC-7: env-only rotation must reach the running isolate after reconcile"
+            );
+            assert_eq!(
+                crate::cache::get_loaded_meta(&app_id).map(|m| m.env_version),
+                Some(2),
+                "reload must record the env version the new isolate was hydrated against"
+            );
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
     }
 }
