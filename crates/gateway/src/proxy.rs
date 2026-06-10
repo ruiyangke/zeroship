@@ -302,17 +302,15 @@ async fn forward_to_worker_dispatch(
     };
     let _ = from_pool;
 
-    let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
-                      "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
-
     let mut builder = HttpResponse::build(
         ntex::http::StatusCode::from_u16(parsed.status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
     );
-    for (name, value) in &parsed.headers {
-        let lname = name.to_ascii_lowercase();
-        if !hop_by_hop.contains(&lname.as_str()) {
-            builder.set_header(name.as_str(), value.as_str());
-        }
+    // SEC-9: the worker response is creator-controlled (untrusted). Drop
+    // hop-by-hop headers, force every app `Set-Cookie` host-only (strip any
+    // `Domain` so it can't be scoped to a sibling `*.zeroship.ai` app or the
+    // platform), and cap cookie count + total size to block a cookie-bomb DoS.
+    for (name, value) in sanitize_app_response_headers(&parsed.headers) {
+        builder.set_header(name.as_str(), value.as_str());
     }
 
     if parsed.is_chunked {
@@ -362,6 +360,97 @@ async fn forward_to_worker_dispatch(
         CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
         Ok(builder.body(response_body))
     }
+}
+
+// ---------------------------------------------------------------------------
+// App response header sanitation (SEC-9)
+// ---------------------------------------------------------------------------
+
+/// Hop-by-hop headers stripped from the worker (app) response before it is
+/// forwarded to the browser. RFC 7230 §6.1.
+const APP_RESPONSE_HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+    "proxy-authorization",
+    "proxy-authenticate",
+];
+
+/// Max number of `Set-Cookie` headers a single app response may emit. Beyond
+/// this the extras are dropped — a creator app cannot flood the browser (and
+/// every subsequent request's `Cookie` header) with unbounded cookies.
+const MAX_APP_SET_COOKIES: usize = 16;
+
+/// Max total bytes (summed `Set-Cookie` header VALUES) a single app response
+/// may emit. Once the running total would exceed this, further `Set-Cookie`
+/// headers are dropped. Bounds the cookie-bomb / request-header-bloat DoS.
+const MAX_APP_SET_COOKIE_TOTAL_BYTES: usize = 8 * 1024;
+
+/// Sanitize a creator-app (worker) HTTP response's headers before they reach
+/// the browser (SEC-9).
+///
+/// * drops hop-by-hop headers ([`APP_RESPONSE_HOP_BY_HOP`]),
+/// * forces every `Set-Cookie` host-only by stripping its `Domain` attribute
+///   ([`strip_cookie_domain`]) — so a creator app cannot scope a cookie to the
+///   parent `zeroship.ai` or a sibling `*.zeroship.ai` app (cross-tenant
+///   injection / fixation),
+/// * caps the number ([`MAX_APP_SET_COOKIES`]) and total value size
+///   ([`MAX_APP_SET_COOKIE_TOTAL_BYTES`]) of `Set-Cookie` headers, dropping the
+///   overflow to block a cookie-bomb / request-header-bloat DoS.
+///
+/// Non-cookie headers pass through unchanged (apart from the hop-by-hop drop).
+fn sanitize_app_response_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut cookie_count: usize = 0;
+    let mut cookie_bytes: usize = 0;
+    for (name, value) in headers {
+        let lname = name.to_ascii_lowercase();
+        if APP_RESPONSE_HOP_BY_HOP.contains(&lname.as_str()) {
+            continue;
+        }
+        if lname == "set-cookie" {
+            let scrubbed = strip_cookie_domain(value);
+            // Enforce both caps; drop the overflow rather than truncating a
+            // cookie mid-value (a partial Set-Cookie is worse than none).
+            if cookie_count >= MAX_APP_SET_COOKIES
+                || cookie_bytes.saturating_add(scrubbed.len()) > MAX_APP_SET_COOKIE_TOTAL_BYTES
+            {
+                continue;
+            }
+            cookie_count += 1;
+            cookie_bytes += scrubbed.len();
+            out.push((name.clone(), scrubbed));
+            continue;
+        }
+        out.push((name.clone(), value.clone()));
+    }
+    out
+}
+
+/// Remove the `Domain` attribute from a single `Set-Cookie` header value,
+/// forcing the cookie host-only (SEC-9). All other attributes (and the
+/// `name=value` pair) are preserved in order. Cookie attributes are
+/// `;`-delimited and the attribute name is case-insensitive.
+fn strip_cookie_domain(set_cookie: &str) -> String {
+    let kept: Vec<&str> = set_cookie
+        .split(';')
+        .filter(|part| {
+            let trimmed = part.trim();
+            // `Domain` is an `=`-valued attribute (`Domain=example.com`); match
+            // the attribute name case-insensitively up to the `=`.
+            let attr = trimmed.split('=').next().unwrap_or(trimmed).trim();
+            !attr.eq_ignore_ascii_case("domain")
+        })
+        .collect();
+    // Rejoin with the canonical `; ` separator, trimming each surviving part so
+    // the output is stable regardless of the app's original spacing.
+    kept.iter()
+        .map(|p| p.trim())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn build_request(
@@ -795,5 +884,105 @@ mod forward_http_tests {
         assert!(s.contains("Connection: close\r\n"));
         // Body follows the blank line.
         assert!(s.ends_with("\r\n\r\nx=1"));
+    }
+}
+
+#[cfg(test)]
+mod app_response_cookie_tests {
+    use super::*;
+
+    fn set_cookies(out: &[(String, String)]) -> Vec<String> {
+        out.iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
+    #[test]
+    fn app_set_cookie_domain_is_stripped_to_host_only() {
+        // SEC-9: a creator app at evil.zeroship.ai must not be able to scope a
+        // cookie to the parent domain (or any sibling). The forwarded
+        // Set-Cookie is forced host-only — its `Domain` attribute is removed —
+        // while the rest of the cookie (name=value, Path, Secure, HttpOnly,
+        // SameSite) is preserved.
+        //
+        // Pre-fix the helper forwards Set-Cookie verbatim → the `Domain`
+        // survives → RED.
+        let headers = vec![
+            (
+                "Set-Cookie".to_string(),
+                "sid=abc; Domain=zeroship.ai; Path=/; Secure; HttpOnly; SameSite=Lax".to_string(),
+            ),
+            ("Content-Type".to_string(), "text/html".to_string()),
+        ];
+        let out = sanitize_app_response_headers(&headers);
+        let cookies = set_cookies(&out);
+        assert_eq!(cookies.len(), 1, "the one app cookie is forwarded");
+        let c = &cookies[0];
+        assert!(
+            !c.to_ascii_lowercase().contains("domain="),
+            "Domain must be stripped (host-only cookie); got {c:?}"
+        );
+        // The non-Domain attributes survive so the app's cookie still works.
+        assert!(c.contains("sid=abc"), "cookie name=value preserved: {c:?}");
+        assert!(c.contains("Path=/"), "Path preserved: {c:?}");
+        assert!(c.contains("Secure"), "Secure preserved: {c:?}");
+        assert!(c.contains("HttpOnly"), "HttpOnly preserved: {c:?}");
+        assert!(c.contains("SameSite=Lax"), "SameSite preserved: {c:?}");
+        // A non-cookie header is untouched.
+        assert!(
+            out.iter()
+                .any(|(k, v)| k == "Content-Type" && v == "text/html"),
+            "non-cookie headers pass through: {out:?}"
+        );
+    }
+
+    #[test]
+    fn app_set_cookie_count_is_capped() {
+        // SEC-9: an app cannot flood the browser with unbounded cookies.
+        // Pre-fix all 40 are forwarded → RED.
+        let mut headers = Vec::new();
+        for i in 0..40 {
+            headers.push(("Set-Cookie".to_string(), format!("c{i}=v{i}; Path=/")));
+        }
+        let out = sanitize_app_response_headers(&headers);
+        assert!(
+            set_cookies(&out).len() <= MAX_APP_SET_COOKIES,
+            "Set-Cookie count must be capped at {MAX_APP_SET_COOKIES}; got {}",
+            set_cookies(&out).len()
+        );
+    }
+
+    #[test]
+    fn app_set_cookie_total_size_is_capped() {
+        // SEC-9: a few enormous cookies are a cookie-bomb DoS — cap the total
+        // forwarded Set-Cookie bytes. Pre-fix every megabyte cookie is
+        // forwarded → RED.
+        let big = "x".repeat(4096);
+        let mut headers = Vec::new();
+        for i in 0..8 {
+            headers.push(("Set-Cookie".to_string(), format!("big{i}={big}")));
+        }
+        let out = sanitize_app_response_headers(&headers);
+        let total: usize = set_cookies(&out).iter().map(String::len).sum();
+        assert!(
+            total <= MAX_APP_SET_COOKIE_TOTAL_BYTES,
+            "total Set-Cookie bytes must be capped at {MAX_APP_SET_COOKIE_TOTAL_BYTES}; got {total}"
+        );
+    }
+
+    #[test]
+    fn app_set_cookie_without_domain_is_unchanged() {
+        // The common host-only cookie is forwarded byte-for-byte (no Domain to
+        // strip) — sanitation must not corrupt a well-behaved app cookie.
+        let headers = vec![(
+            "Set-Cookie".to_string(),
+            "theme=dark; Path=/; Secure; SameSite=Strict".to_string(),
+        )];
+        let out = sanitize_app_response_headers(&headers);
+        assert_eq!(
+            set_cookies(&out),
+            vec!["theme=dark; Path=/; Secure; SameSite=Strict".to_string()]
+        );
     }
 }
