@@ -21,6 +21,7 @@
 import { query, mutation } from "@zeroship/rpc/server";
 import { z } from "zod";
 import { persistGet, persistSet } from "./internal/persist";
+import { issuesKey, qualityKey } from "./internal/creator-scope";
 import {
   CRITIC_DIMENSION_LABELS,
   CRITIC_DIMENSIONS,
@@ -49,14 +50,15 @@ export interface Issue {
   comments: Array<{ author: string; body: string; at: string }>;
 }
 
-// KV key shape — namespaced per appId so different projects don't
-// step on each other's issue lists.
-const issuesKey = (appId: string) => `issues:${appId}`;
+// KV key shape — `issues:${creatorId}:${appId}` via
+// `internal/creator-scope.ts` (SEC-10): `appId` is client-supplied, so
+// the creator namespace is what actually isolates tenants; the appId
+// segment only separates one creator's own projects.
 
 function nextId(): string {
   // Cheap unique id — no uuid lib available server-side here. Random
   // suffix only needs to be stable for the lifetime of the issue (no
-  // cross-tenant collision risk; keys are namespaced by appId).
+  // cross-tenant collision risk; keys are namespaced by creator+appId).
   return `iss_${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -115,10 +117,10 @@ function seedIssues(appId: string): Issue[] {
 }
 
 /**
- * Read-or-seed: pull the per-appId issue list from KV; if missing,
- * synthesise the starter set, persist it, and return. Keeps issue
- * autocomplete from starting empty on a brand-new project before the
- * PM agent has filed anything.
+ * Read-or-seed: pull the creator-scoped per-app issue list from KV; if
+ * missing, synthesise the starter set, persist it, and return. Keeps
+ * issue autocomplete from starting empty on a brand-new project before
+ * the PM agent has filed anything.
  */
 async function loadIssuesOrSeed(appId: string): Promise<Issue[]> {
   const existing = await persistGet<Issue[] | null>(issuesKey(appId), null);
@@ -143,7 +145,7 @@ export const listIssues = mutation(async (
 // ─── quality scorecard ──────────────────────────────────────────
 //
 // Spec §11.1 plus the UI design-flow gates define the quality dimensions.
-// KV-backed per appId via
+// KV-backed per creator+appId (`internal/creator-scope.ts`, SEC-10) via
 // `internal/persist.ts`. The Critic loop now writes here on every round (see
 // `internal/middleware.ts` data-critic-round handler — the middleware fires
 // `setQualityScores` via `waitUntil()` after extracting the round
@@ -170,8 +172,6 @@ export interface QualityScores {
   /** ISO-8601 of the last scorecard run. null = never scored. */
   last_run_at: string | null;
 }
-
-const qualityKey = (appId: string) => `quality:${appId}`;
 
 function defaultScores(): QualityScores {
   return {

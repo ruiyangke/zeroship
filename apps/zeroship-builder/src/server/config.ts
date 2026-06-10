@@ -19,7 +19,15 @@ export default defineApp({
       // manifest validator (crates/bundle Manifest::validate) accepts it.
       override: ["auth", "rate_limit"],
     },
-    "rpc:apps": {
+    // SEC-5: this family policy MUST be keyed by the procedures' actual
+    // wireId prefix. The procedures in projects.ts carry `projects.*`
+    // ids; the key was `rpc:apps` (a relic of the module being apps.ts),
+    // which matched nothing and left all ten procedures — including
+    // getEnv/setEnv/getLogs over sandbox env + secrets — resolving to
+    // the gateway's Anon default with no rate limit. The auto-derived
+    // per-procedure resources (`rpc:projects.<name>`) inherit auth +
+    // rateLimit from this `rpc:projects` ancestor.
+    "rpc:projects": {
       auth: "user",
       rateLimit: { rpm: 600, per: "user" },
     },

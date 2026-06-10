@@ -19,11 +19,10 @@
 //                 command redirects the dev-server stdout/stderr there).
 
 import { action, mutation } from "@zeroship/rpc/server";
-import { currentUser } from "zeroship";
 import { typedIdFromUuid } from "@zeroship/server/typed-id";
 import { persistGet, persistSet } from "./internal/persist.js";
+import { currentCreatorId } from "./internal/creator-scope.js";
 import { readSandboxFileFor, writeSandboxFileFor } from "./sandbox.js";
-import { DEV_SANDBOX_USER_ID } from "./internal/sandbox-backend.js";
 
 // ─── project registry: KV-backed ────────────────────────────────
 //
@@ -48,20 +47,10 @@ export interface ProjectRecord {
   archived?: boolean;
 }
 
-/** The acting creator's id, or a stable dev fallback. The registry key
- *  is scoped to it so different creators don't see each other's
- *  projects. */
-function currentCreatorId(): string {
-  try {
-    const user = currentUser() as { id?: unknown } | null;
-    if (typeof user?.id === "string" && user.id.length > 0) return user.id;
-  } catch {
-    // currentUser() throws outside a request handler (dev/test).
-  }
-  // Single-sourced with the sandbox's dev owner so a dev creator's
-  // project registry and their sandboxes share one identity.
-  return DEV_SANDBOX_USER_ID;
-}
+// The acting creator's id resolves via `internal/creator-scope.ts`
+// (shared with the issues/quality namespaces, SEC-10): platform subject
+// when authenticated, the stable dev id behind `ZEROSHIP_DEV=1`, and a
+// fail-closed throw otherwise.
 
 function projectsKey(creatorId: string): string {
   return `projects:${creatorId}`;
