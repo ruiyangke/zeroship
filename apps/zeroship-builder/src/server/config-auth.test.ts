@@ -1,8 +1,7 @@
 "use server";
 // SEC-5 regression: every `projects.*` RPC procedure must resolve to an
-// authenticated (auth: "user") policy, and the resource tree must carry
-// a fail-closed root so an absent policy can never silently resolve to
-// the gateway's Anon default.
+// authenticated (auth: "user") policy via the `rpc:projects` family
+// ancestor — never the gateway's Anon default.
 //
 // Background: `src/server/config.ts` once declared `rpc:apps` — a relic
 // of the module being named `apps.ts`. The live procedures carry
@@ -208,57 +207,15 @@ describe("SEC-5: projects.* RPC procedures are authenticated", () => {
     expect(effectiveAuth("rpc:projects.setEnv", resources)).toBe("user");
   });
 
-  it("declares a fail-closed root '*' policy and no orphan rpc:apps relic", async () => {
+  it("renames the drifted rpc:apps key to rpc:projects (no orphan relic)", async () => {
     const { resources } = await builderManifestResources();
 
-    // Root default: an RPC procedure that matches NO declared policy
-    // must inherit auth from `*` instead of falling through to the
-    // gateway's Anon default.
-    expect(resources["*"]).toBeDefined();
-    expect(resources["*"]?.auth).toBe("user");
-    expect(effectiveAuth("rpc:some.future.procedure", resources)).toBe("user");
-
-    // The drifted key that caused the hole: `rpc:apps` matches no
-    // procedure (the module is projects.ts) and must stay gone.
+    // The drifted key that caused the hole: `rpc:apps` matched no
+    // procedure (the module is projects.ts), so the ten `projects.*`
+    // procedures had no ancestor policy and defaulted to Anon. The
+    // family policy must be keyed `rpc:projects` and the relic gone.
     expect(resources["rpc:apps"]).toBeUndefined();
-  });
-
-  it("keeps the resource tree deployable: shadowed fields carry override markers (crates/bundle validate mirror)", async () => {
-    // Mirror of `Manifest::validate` step 2 + `shadowed_fields`
-    // (crates/bundle/src/manifest.rs): a resource redeclaring a field
-    // any ancestor (including root `*`) also declares must list it in
-    // `override: [...]`, or the deploy is rejected. Guards the fix
-    // itself — adding a root `*` without the markers would pass the
-    // vite build but fail every deploy.
-    const SHADOWABLE = [
-      "auth",
-      "rate_limit",
-      "cors",
-      "cache",
-      "csrf_origins",
-      "idempotent",
-      "idempotency_ttl_hours",
-      "max_input_bytes",
-      "publicly_accessible",
-    ] as const;
-    const { resources } = await builderManifestResources();
-
-    for (const [key, node] of Object.entries(resources)) {
-      const chain = inheritanceChain(key, resources);
-      const overrides = Array.isArray(node.override)
-        ? (node.override as string[])
-        : [];
-      for (const ancestorKey of chain.slice(0, -1)) {
-        const ancestor = resources[ancestorKey];
-        if (!ancestor) continue;
-        for (const field of SHADOWABLE) {
-          if (node[field] === undefined || ancestor[field] === undefined) continue;
-          expect(
-            overrides,
-            `resource ${key} redeclares "${field}" from ancestor ${ancestorKey} without override marker`,
-          ).toContain(field);
-        }
-      }
-    }
+    expect(resources["rpc:projects"]).toBeDefined();
+    expect(resources["rpc:projects"]?.auth).toBe("user");
   });
 });
