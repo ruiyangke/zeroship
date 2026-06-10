@@ -10,8 +10,8 @@
 -- forgot_ip:{ip}, …): a forged-IP flood minted a PERMANENT row per distinct
 -- value, a storage / write-load DoS on the shared auth Postgres. The gateway
 -- now strips inbound forwarding headers and the auth service validates the
--- bucket key parses as an IP, so the key space is bounded to real IPs; this
--- changeset adds the durable reaping so genuinely idle buckets (and the relay
+-- bucket key parses as an IP, so the key space is bounded to real IPs. This
+-- migration adds the durable reaping so genuinely idle buckets (and the relay
 -- `relay_seen:` dedup sentinels, which share this table) do not accumulate
 -- forever.
 --
