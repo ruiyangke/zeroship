@@ -10,14 +10,13 @@
 // read-only from the client — only server agents should write here.
 
 import { persistSet } from "./persist";
+import { qualityKey } from "./creator-scope";
 import {
   CRITIC_DIMENSION_LABELS,
   CRITIC_DIMENSIONS,
   type CriticDimensionKey,
 } from "../../shared/review-contract";
 import type { QualityDimension, QualityGrade, QualityScores } from "../agents";
-
-const qualityKey = (appId: string) => `quality:${appId}`;
 
 export interface CriticIssue {
   dimension: string;
