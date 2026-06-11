@@ -64,7 +64,7 @@ The control plane runs an identical RP flow on `console.zeroship.ai`, terminatin
 | GET | `/consent?consent_challenge=…` | First-party skip-consent fast path |
 | GET | `/healthz`, `/readyz` | Health checks |
 
-The federation routes (`/oauth/google/*`, `/oauth/github/*`), magic-link redemption (`/magic/verify`), email verification (`/verify`), password reset (`/forgot`, `/reset`), profile (`/me`), logout confirmation (`/logout`), and webhook receivers are designed in `docs/proposals/auth-server.md` §6 and ship in Phases 4–5. They are **not registered today.**
+The federation routes (`/oauth/google/*`, `/oauth/github/*`), magic-link redemption (`/magic/verify`), email verification (`/verify`), password reset (`/forgot`, `/reset`), profile (`/me`), logout confirmation (`/logout`), and webhook receivers are designed in `docs/archive/auth-server.md` §6 and ship in Phases 4–5. They are **not registered today.**
 
 ### Owned by `crates/gateway` (per hosted-app host)
 
@@ -204,7 +204,7 @@ A plain `Authorization: Bearer <hydra_access_token>` (no proof) is also accepted
 
 ## See also
 
-- `docs/proposals/auth-server.md` — full design proposal (decisions, threat model, deferred work)
+- `docs/archive/auth-server.md` — full design proposal (decisions, threat model, deferred work)
 - `docs/superpowers/plans/2026-05-26-auth-server-phase-1-foundation.md` — Phase 1 plan (crate skeleton, hydra wiring, schema)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-2-password-login.md` — Phase 2 plan (password identity, login UI)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-3-oidc-rps.md` — Phase 3 plan (gateway + control plane as RPs)

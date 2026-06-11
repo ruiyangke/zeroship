@@ -1,6 +1,6 @@
 # RPC client inferred contracts
 
-**Status:** Shipped subset; live reference is [`docs/reference/rpc.md`](../reference/rpc.md)
+**Status:** Shipped subset — archived 2026-06-11 (design history); live reference is [`docs/reference/rpc.md`](../reference/rpc.md)
 **Scope:** `@zeroship/rpc`, `@zeroship/vite-plugin`
 
 This proposal is retained as design history. The shipped package path is

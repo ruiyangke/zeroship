@@ -9,7 +9,7 @@
 **Tech Stack:** Continuing from Phases 1-3: compio, ntex, cyper, compio-postgres, hydra v25.4, argon2, askama. New surfaces: `crates/auth/src/identity/oauth/{google,github}.rs`, `crates/auth/src/ui/{link,me,consent}.rs`, `auth.identities` CRUD.
 
 **Reference docs:**
-- `docs/proposals/auth-server.md` §8.2 (Google), §8.3 (GitHub), §10.3 (third-party consent UI)
+- `docs/archive/auth-server.md` §8.2 (Google), §8.3 (GitHub), §10.3 (third-party consent UI)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-3-oidc-rps.md` — pattern reference
 - Phase 1 deleted `crates/auth/src/oauth/{google,github}.rs` — those files can be raided for the Google PKCE shape (git log will recover them if needed)
 

@@ -4,7 +4,7 @@ The zeroship Identity Provider login surface + identity flows + hydra admin clie
 
 Companion process: `oryd/hydra` (OIDC kernel). Public host: `auth.zeroship.ai`.
 
-See `docs/proposals/auth-server.md` for the design.
+See `docs/archive/auth-server.md` for the design.
 
 ## Build & run (local dev)
 

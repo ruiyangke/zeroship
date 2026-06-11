@@ -14,7 +14,7 @@
 - `cookie = "0.18"` (cookie parsing)
 
 **Reference docs to keep open:**
-- `docs/proposals/auth-server.md` §8.1 (password flow) and §13 (threat model — ours rows)
+- `docs/archive/auth-server.md` §8.1 (password flow) and §13 (threat model — ours rows)
 - `docs/superpowers/plans/2026-05-26-auth-server-phase-1-foundation.md` — Phase 1 task layout for pattern reference
 - `crates/control/src/auth_handlers.rs` — legacy login/signup pattern, for cookie + ntex idioms only (we are NOT carrying logic over; just the shape of ntex handlers)
 

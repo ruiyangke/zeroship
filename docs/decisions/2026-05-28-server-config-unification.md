@@ -2,7 +2,7 @@
 
 - **Date:** 2026-05-28
 - **Status:** Accepted
-- **References:** `docs/proposals/server-config-unification.md`
+- **References:** `docs/archive/server-config-unification.md`
 
 ## Context
 
@@ -88,4 +88,4 @@ starting a binary.
 Future cross-binary config has a clear home, but new TOML sections should be
 added only when a binary actually consumes them.
 
-The as-built reference remains `docs/proposals/server-config-unification.md`.
+The as-built reference remains `docs/archive/server-config-unification.md`.

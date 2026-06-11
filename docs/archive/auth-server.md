@@ -1,6 +1,6 @@
 # zeroship auth server (`auth.zeroship.ai`) — proposal
 
-**Status:** proposal, in review (revision 2 — hydra-based)
+**Status:** Shipped — archived 2026-06-11. Built as `crates/auth/`; living docs: `docs/reference/auth.md`, `docs/reference/auth-dev-tier.md`, `docs/runbooks/auth-deploy.md`.
 **Date:** 2026-05-26
 **Branch:** `proposal/auth-server`
 **Worktree:** `.claude/worktrees/auth-server`

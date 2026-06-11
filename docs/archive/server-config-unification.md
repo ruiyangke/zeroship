@@ -1,8 +1,8 @@
 # Server configuration unification
 
-**Status:** Implemented on `feat/server-config-unification` (units U10a–U10g + a consolidation/hardening polish pass; 8 commits, unmerged). This document is the as-built design.
+**Status:** Shipped — merged to main (`966266bf`); archived 2026-06-11. ADR: `docs/decisions/2026-05-28-server-config-unification.md`. This document is the as-built design.
 
-> Grounded in `docs/proposals/server-config-inventory.md` (whole-codebase audit, 2026-05-28). Every file:line claim below traces to that inventory.
+> Grounded in `docs/archive/server-config-inventory.md` (whole-codebase audit, 2026-05-28). Every file:line claim below traces to that inventory.
 
 ## Goal
 

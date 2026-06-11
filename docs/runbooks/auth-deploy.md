@@ -5,7 +5,7 @@ Operator guide for deploying `crates/auth` + `oryd/hydra` in production
 
 For the architectural picture (sequence diagrams, cookies, SDK surface)
 see [`docs/reference/auth.md`](../reference/auth.md). For the design
-rationale see [`docs/proposals/auth-server.md`](../proposals/auth-server.md).
+rationale see [`docs/archive/auth-server.md`](../archive/auth-server.md).
 
 ## 1 · Topology
 
@@ -278,7 +278,7 @@ set is populated, then scale.
 
 If CPU is the binding cost and Argon2id verification dominates, the
 OWASP-2026 "second-recommended" Argon2id parameter set (m = 12 MiB,
-t = 3, p = 1) is the floor — see `docs/proposals/auth-server.md` §8.
+t = 3, p = 1) is the floor — see `docs/archive/auth-server.md` §8.
 
 ## 9 · Operational tasks
 
@@ -324,7 +324,7 @@ in the TOML.
 
 ## 10 · Reference
 
-- Design proposal — `docs/proposals/auth-server.md` (§16 covers operational concerns end-to-end).
+- Design proposal — `docs/archive/auth-server.md` (§16 covers operational concerns end-to-end).
 - Architecture summary — `docs/reference/auth.md`.
 - Phase plans — `docs/superpowers/plans/2026-05-{26,27}-auth-server-phase-{1..6}.md`.
 - Hydra config — `ops/hydra.yaml`.

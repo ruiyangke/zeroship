@@ -14,7 +14,7 @@
 - `lettre` (added in Phase 5; not used in Phase 1)
 
 **Reference docs to keep open:**
-- `docs/proposals/auth-server.md` — the proposal this plan implements.
+- `docs/archive/auth-server.md` — the proposal this plan implements.
 - `crates/control/src/auth_*.rs` and `crates/control/src/oauth.rs` — the existing creator-auth code that gets retired in Phase 3.
 - `crates/control/src/main.rs` — pattern for ntex routes + compio-postgres + tracing init.
 - `crates/gateway/src/user_auth.rs` — the JWT-cookie path being replaced in Phase 3.
@@ -104,7 +104,7 @@ Verify these dependencies exist in the workspace `Cargo.toml`. If `cyper`, `toml
 ```rust
 //! zeroship-auth — the OIDC IdP login UI + identity flows + hydra admin client.
 //!
-//! Companion process: `oryd/hydra` (OIDC kernel). See docs/proposals/auth-server.md.
+//! Companion process: `oryd/hydra` (OIDC kernel). See docs/archive/auth-server.md.
 
 use clap::Parser;
 
@@ -213,7 +213,7 @@ The zeroship Identity Provider login surface + identity flows + hydra admin clie
 
 Companion process: `oryd/hydra` (OIDC kernel). Public host: `auth.zeroship.ai`.
 
-See `docs/proposals/auth-server.md` for the design.
+See `docs/archive/auth-server.md` for the design.
 
 ## Build & run (local dev)
 

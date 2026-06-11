@@ -12,7 +12,7 @@
 - Adds a small in-memory JWKS cache in each RP.
 
 **Reference docs to keep open:**
-- `docs/proposals/auth-server.md` §2.2 (end-user login sequence), §9 (sessions), §11 (migration), §13 (threat model)
+- `docs/archive/auth-server.md` §2.2 (end-user login sequence), §9 (sessions), §11 (migration), §13 (threat model)
 - `docs/superpowers/plans/2026-05-27-auth-server-phase-2-password-login.md` — Phase 2 task layout for pattern reference
 - `crates/gateway/src/user_auth.rs` — the existing JWT path (gets deleted)
 - `crates/gateway/src/router/dispatch.rs:963-971` — the call site that `extract_user` + `encode_user_header` are wired through

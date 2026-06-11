@@ -1,6 +1,6 @@
 # Configuration inventory — whole codebase
 
-**Status:** Reference audit (2026-05-28). Companion to `docs/proposals/server-config-unification.md`. Catalogs every configuration input — CLI flag, env var, config file, compile-time `env!` — across all Rust crates, the Go ch-driver, the TS apps/SDKs, and the ops/deploy tooling.
+**Status:** Spent audit — archived 2026-06-11 (the unification it grounded merged to main). Companion to `docs/archive/server-config-unification.md`. Catalogs every configuration input — CLI flag, env var, config file, compile-time `env!` — across all Rust crates, the Go ch-driver, the TS apps/SDKs, and the ops/deploy tooling.
 
 **Method.** Six parallel audit agents, one per slice (web-tier binaries · auth · sandbox+agent · lib crates/CLI/platform · TS apps/SDKs · ops/infra/Go). Each ran exhaustive ripgrep over its scope and read every hit for default/type/semantics. Cross-checked against a ground-truth grep of the whole tree (`env::var`/`env::var_os`/`std::env::var`, clap `env =`, `env!`/`option_env!`, `process.env`/`import.meta.env`, Go `os.Getenv`).
 

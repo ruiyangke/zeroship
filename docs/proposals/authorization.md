@@ -4,7 +4,7 @@
 **Date:** 2026-05-27
 **Branch:** `proposal/auth-server`
 **Worktree:** `.claude/worktrees/auth-server`
-**Companion to:** `docs/proposals/auth-server.md` (the IdP). This document layers authorization on top of the identities that auth-server proves out.
+**Companion to:** `docs/archive/auth-server.md` (the IdP). This document layers authorization on top of the identities that auth-server proves out.
 
 This file lives in a fresh worktree off main and is committed in the same PR that lands the implementing code (per the project's proposal workflow). It encodes locked design decisions — engineers implement from this; reviewers verify against it.
 
@@ -752,7 +752,7 @@ The user_code → device_code mapping is hydra's responsibility; `crates/auth` o
 
 ### 12.3 Refresh-token rotation
 
-Existing hydra mechanism (already documented in `docs/proposals/auth-server.md` §7). No change in P9.
+Existing hydra mechanism (already documented in `docs/archive/auth-server.md` §7). No change in P9.
 
 ---
 

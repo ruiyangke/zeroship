@@ -2,7 +2,7 @@
 
 - **Date:** 2026-05-05
 - **Status:** Accepted
-- **References:** `docs/proposals/sandbox-pg-state.md` § II.0 §4 + Q-12; round-4 admin-API review IMPORTANT #6.
+- **References:** `docs/archive/sandbox-pg-state.md` § II.0 §4 + Q-12; round-4 admin-API review IMPORTANT #6.
 
 ## Context
 
