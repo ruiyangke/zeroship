@@ -274,7 +274,10 @@ Issues surfaced while exercising the framework end-to-end. Detail + ledger:
 `docs/reviews/2026-06-11-e2e-test-log.md`.
 
 ### ISS-53 · `tests/e2e_platform.sh` is broken against current code
-**Status:** open · **Effort:** S–M · **Tier:** T2 (test infra)
+**Status:** superseded (2026-06-11) · **Effort:** S–M · **Tier:** T2 (test infra)
+> Superseded by the new `tests/e2e_app_primitives.sh` + `e2e_app_primitives_kv_storage.sh`, which start
+> the current stack correctly (`--dev-insecure`, real flags, clean ephemeral PG/Redis). The stale
+> `e2e_platform.sh` can be deleted or rewritten to match; not blocking now.
 
 The platform's own multi-node E2E harness has rotted and silently can't start the stack:
 control refuses to boot because `WORKER_KEY` (≥32B) and `SIGNING_KEY_FILE` are now required
@@ -298,11 +301,11 @@ example** (G2), **`env.auth` has zero example** so the gateway `ZeroShip-User`�
 **Fix:** a gateway-E2E harness (`e2e_app_primitives.sh`) deploying a real built example through
 control→gateway→worker + asserting the primitives over the edge, plus `storage-gallery` /
 `auth-notes` examples + a kv runner.
-**Update (2026-06-11):** the harness landed (`tests/e2e_app_primitives.sh`) and is the first test to
-drive a real app's primitives over the multi-node edge — it deploys+serves db-todos through the gateway
-(routing/dispatch/cold-load/V8 fetch all proven). It immediately surfaced **ISS-63** (CRITICAL: env.db
-apps don't init on the worker) and **ISS-64** (no headless auth) as its two known-fails. Remaining
-coverage work: `storage-gallery` + `auth-notes` examples + kv runner once ISS-63/64 unblock the edge.
+**Update (2026-06-11) — largely CLOSED.** `tests/e2e_app_primitives.sh` (+ `e2e_app_primitives_kv_storage.sh`)
+now drive real apps over the multi-node edge. After ISS-63 + ISS-66, **env.db, env.kv, and env.storage
+all work end-to-end over the worker `/dispatch`** (db-todos / kv-dashboard / the new storage-gallery —
+20/20 + Stage-5c GREEN). Created the missing storage example (G2) + kv runner (G4). Remaining: env.auth
+E2E (G3) and the gateway-auth path (ISS-64, by decision uses Hydra not a bypass).
 
 ### ISS-55 · `"use server"` named exports don't dispatch under `zeroship serve`
 **Status:** example-side fixed (`53b51413`); contract by-design · **Effort:** S–M · **Tier:** T3 (DX/contract)
