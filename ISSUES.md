@@ -20,9 +20,10 @@ exposure missing).
 
 ## Status at a glance
 
-**Auth:** ISS-12b (erase blob cleanup) — only remainder. **Shipped 2026-06-11:** ISS-12
-(GDPR erase, `3a9b2315`+`a0d23e8c`), ISS-10 (session visibility, `de38f943`), ISS-11
-(TOTP 2FA, `7ab11964`).
+**Auth — all shipped 2026-06-11:** ISS-12 (GDPR erase, `3a9b2315`+`a0d23e8c`), ISS-10
+(session visibility, `de38f943`), ISS-11 (TOTP 2FA, `7ab11964`), ISS-12b (orphaned-app
+reaper, `42efc20a`). No open auth issues remain — the rest are platform epics + deferred
+builder.
 
 **Platform capability gaps (from the gap analysis):**
 
@@ -38,18 +39,9 @@ exposure missing).
 
 ---
 
-## Auth follow-up
-
-### ISS-12b · Owned-app blob/bundle cleanup on account erase
-**Status:** open (follow-up to ISS-12) · **Effort:** S–M · **Tier:** T3
-
-The ISS-12 erase reaper drops the user row + cascades DB dependents but does NOT delete the
-blobs/bundles of apps the user owned (cross-crate, behind the control plane / blob store).
-Low urgency (orphaned blobs are not a PII leak once the user row is gone). **Fix:** enumerate
-owned apps on erase and delete their bundles/assets from the blob store.
-
 > **Operator decision still open (ISS-12):** confirm the billing-retention default in
 > `account_reaper::user_has_financial_history` (anonymize creators-with-Stripe vs hard-delete).
+> And confirm the dedicated `AUTH_TOTP_ENC_KEY` choice (ISS-11) vs HKDF from an existing secret.
 
 ---
 

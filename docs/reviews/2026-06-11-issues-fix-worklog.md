@@ -23,13 +23,22 @@ T1: ISS-12 (GDPR delete) · T2: ISS-10 (session visibility) → ISS-11 (2FA)
 | 3b | ISS-12 gateway_sessions privilege bug | (pilot) | DONE | a0d23e8c | review found UPDATE on gateway_sessions fails under zeroship_auth role (SELECT,DELETE only); switched to DELETE (matches reset.rs). |
 | 4 | ISS-11 (2FA / TOTP) | opus | DONE | 7ab11964 | enroll/confirm/disable + login challenge (signed stash, credential_version recheck, race-safe single-use backup, fail-closed gate); changeset 0035; totp-rs dep; 11/11 PG + 19 lib unit; 212/0 lib, regression clean. Pilot re-verified. AUTH_TOTP_ENC_KEY flagged for operator. |
 
-## Loop wind-down (2026-06-11)
-The three auth issues the loop was scoped to are DONE (ISS-12, ISS-10, ISS-11) + one latent
-bug fixed (ISS-12 gateway_sessions privilege, a0d23e8c). Each: subagent TDD → pilot re-verified
-RED→GREEN → committed (commit-only, never pushed). The remaining ISSUES.md items are (a) ISS-12b
-(small cross-crate follow-up) and (b) the new T0–T4 platform-gap epics (object storage, metering/
-billing engine, prod TLS, DB proxy, …) — large, design-bearing efforts that warrant explicit
-prioritization, not autonomous loop execution. Loop paused pending operator direction.
+| 5 | ISS-12b (orphaned-app reaper) | opus | DONE | 42efc20a | control-side reaper + system flag (changeset 0036); purge_app extracted from delete_app; console-safety test (system app never reaped) + 4 more, 5/5 PG; regression green. Pilot found+guarded the console-owner-less landmine in the design phase. |
+
+## Loop wind-down (2026-06-11) — auth/erase scope COMPLETE
+All loop-sized auth work is done — 4 issues shipped + 1 latent bug fixed, each via subagent TDD
+→ pilot re-verified RED→GREEN → committed (commit-only, never pushed):
+- ISS-12 GDPR account erase (3a9b2315) + gateway_sessions privilege fix caught in review (a0d23e8c)
+- ISS-10 session visibility/revoke (de38f943)
+- ISS-11 TOTP 2FA (7ab11964)
+- ISS-12b orphaned-app reaper, closes the erase epic (42efc20a)
+
+Remaining ISSUES.md items are the **T0–T4 platform-gap epics** (object storage, metering/billing
+engine, prod TLS, DB connection proxy, …) — large, design-bearing efforts that warrant explicit
+prioritization + specs, NOT autonomous loop execution. **Loop ended; operator to direct the next
+epic.** Two operator decisions pending (ISS-12 billing-retention default, ISS-11 TOTP key source).
+Local-DB hygiene: reconcile Liquibase 0034 checksum drift on :5440 (changesets validate; applied
+via execute-sql during testing) so a clean `liquibase update` confirms 0034/0035/0036 end-to-end.
 
 ### Iter 2 review notes (ISS-12)
 - Verified: changeset 0034 auto-included via `includeAll`, format matches repo, all written
