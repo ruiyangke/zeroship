@@ -1,38 +1,34 @@
 # Known Issues
 
-Platform-level gaps with no full fix landed. Each live entry is a self-contained
-note: what's actually wrong today, the fix + rough effort, and dependencies.
+Open platform-level gaps with no full fix landed. Each entry is a self-contained note:
+what's actually wrong today, the fix + rough effort, and dependencies. Closed and
+removed-surface entries were dropped on 2026-06-11; they live in git history (this file
+before commit `9fdf9904`).
 
-> **Re-verified 2026-06-11.** A five-agent pass re-checked every entry against `main`
-> HEAD; the prior list (2026-05-23) was badly stale. Two architectural shifts moot ~half
-> of it, and several old "control-plane table" fix-paths are now *forbidden* by the
-> current design:
+> **Context (re-verified 2026-06-11).** Two architectural shifts shape how the entries
+> below are scoped — and invalidated several older "control-plane table" fix-paths:
 >
 > 1. **The data/health/plan/media canvases were deleted** (`4110071f`, 2026-05-27 —
->    workspace re-cut to a tier-gated `preview/files/logs/env/settings` surface). The
->    hardcoded-stub entries describe UI that no longer ships → **closed-by-removal**.
+>    workspace re-cut to a tier-gated `preview/files/logs/env/settings` surface). Some
+>    issues below are gated on such a surface returning.
 > 2. **The console is a pure creator app** (2026-05-31 — zero control-plane calls,
 >    enforced by `apps/zeroship-builder/src/server/no-control-import.test.ts`). So
 >    "add a control-plane table/column" is the wrong shape; creator-scoped
->    `@zeroship/kv` is the sanctioned store. Dev KV is redb + prod KV is Redis, so the
->    old "KV vanishes on restart" severity premise is dead.
->
-> Full original symptom/root-cause text for trimmed entries is in git history
-> (this file before commit `e3d7deb2`).
+>    `@zeroship/kv` is the sanctioned store, and it is durable now (redb dev / Redis prod).
 
 ## Legend
 
-**Status** — `open` · `re-scoped` (open, but corrected 2026-06-11) · `closed` (fix landed) ·
-`closed-by-removal` (the surface was deleted; obsolete as written).
+**Status** — `open` · `re-scoped` (open, but corrected 2026-06-11 — the title/severity/
+fix-path were updated) · `partial` (substrate exists, exposure missing).
 
 **Tiers** — `T1` pre-launch, small, actively harmful · `T2` GA-blocking (compliance) ·
 `T3` post-launch power/security · `T4` dormant or gated on a product decision.
 
 ## Status at a glance
 
-Of the original 21 entries: **9 live, 12 closed/obsolete.**
+**11 open issues.**
 
-| Tier | Issue | Verdict | Effort |
+| Tier | Issue | Status | Effort |
 |---|---|---|---|
 | **T1** | ISS-14 · de-fake seeded issues | re-scoped | S |
 | **T1** | ISS-16 · kill fake `defaultScores()` "B+" | re-scoped | S |
@@ -45,8 +41,6 @@ Of the original 21 entries: **9 live, 12 closed/obsolete.**
 | T4 | ISS-13 · skill registry (only launch-visible) | open | L |
 | T4 | ISS-15 · deploy history (gated on deploy returning) | open | M |
 | T4 | ISS-24 · migration-log exposure (journal exists) | partial | S–M |
-| — | ISS-01 · ISS-02 · ISS-09 · ISS-19 | closed | — |
-| — | ISS-20 · ISS-21 · ISS-22 · ISS-23 · ISS-25 · ISS-26 | closed-by-removal | — |
 
 ---
 
@@ -96,7 +90,7 @@ manually within the ~30-day window. The ToS/privacy pages already promise it.
 
 **Fix:** request → grace-period → hard-delete job (host in the `crates/auth` `cron/` module);
 a SET-NULL/anonymize decision for the 5 non-cascade FKs; Stripe-Connect retention handling;
-blob/bundle cleanup for owned apps. Confirm/undo email is free now (ISS-09 shipped the mailer).
+blob/bundle cleanup for owned apps. The confirm/undo email is free now that the mailer exists.
 
 ## T3 — post-launch · power / security
 
@@ -175,41 +169,5 @@ when console deploy returns. ISS-16's per-deploy scorecard depends on this.
 
 Substrate now exists: plugin-db persists a per-app `__zeroship_migrations` journal in each app
 schema (`register_model/bootstrap.rs`, read/updated by `migration_sweeper.rs:267,322`). Only an
-RPC to read it + a surface are missing — the cheapest of the old data-canvas family. Same
-access-path decision as the (removed) introspection family.
-
----
-
-## Closed / obsolete (history)
-
-### Closed — fix landed
-- **ISS-01** · native `AsyncLocalStorage` not propagated by the vite-plugin — **closed 2026-05-04**
-  (`bc9f18e` runtime + `da3fe20` vite-plugin; native class backed by V8
-  `ContinuationPreservedEmbedderData`; tests in `crates/runtime/tests/async_local_storage.rs`).
-- **ISS-02** · vite-plugin registered every export as an RPC procedure — **closed 2026-05-04**
-  (opt-in marker convention; silent-publish of internal helpers fixed).
-- **ISS-09** · password recovery not exposed — **closed.** Shipped in the auth service (not the
-  control plane the title assumed): `GET/POST /forgot`+`/reset` (`crates/auth/src/server.rs:121`),
-  CSPRNG token SHA-256-at-rest single-use bound to immutable `user_id`
-  (`identity/password_reset.rs`), real email via the `Mailer` trait, redeem revokes all sessions,
-  login page links it, tests in `crates/auth/tests/password_reset_test.rs`. *Residual (S): delete
-  the vestigial `apps/zeroship-builder/src/client/pages/ForgotPassword.tsx` stub.*
-- **ISS-19** · project archive — **closed (architecture changed).** Archive is a first-class
-  `archived` flag on the KV `ProjectRecord` (`projects.ts:40-48,122-143`); the old `archive-set:`
-  key is gone. Projects are builder-local `prj_` ids with no control plane, so the
-  "control-plane column" fix path is invalid by design.
-
-### Closed-by-removal — the surface was deleted (`4110071f`, 2026-05-27)
-The DataCanvas/MediaCanvas and their hardcoded `SAMPLE_*` stubs no longer ship; re-file as
-feature proposals if a data/media surface returns at the ops/code tier. Several shared one
-missing capability — per-app-schema Postgres introspection reachable from a pure creator app.
-
-- **ISS-20** · pg_catalog table introspection (Tables tab was hardcoded).
-- **ISS-21** · table row pagination over real per-app schema.
-- **ISS-22** · schema visualizer (Schema tab placeholder).
-- **ISS-23** · `pg_indexes` index introspection (Indexes tab hardcoded).
-- **ISS-25** · backup trigger + history (the UI stub is gone; *operational platform backups*
-  remain a separate infra/runbook concern, tracked elsewhere).
-- **ISS-26** · media canvas (KV data-URL stub). `plugin-storage` exists as a backend primitive
-  but nothing consumes it dashboard-side; this was the most plausibly happy-path of the set
-  (creator uploading a logo) — re-file as a storage-backed upload feature if a media surface returns.
+RPC to read it + a surface are missing — the cheapest of the old data-canvas family. Needs the
+same per-app-schema access-path decision the (removed) DataCanvas introspection family did.
