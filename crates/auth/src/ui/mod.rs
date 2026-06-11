@@ -22,6 +22,7 @@ pub mod oauth_github;
 pub mod oauth_google;
 pub mod oauth_stash;
 pub mod reset;
+pub mod sessions;
 pub mod signup;
 pub mod verify;
 pub mod webhooks;

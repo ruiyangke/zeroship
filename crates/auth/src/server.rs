@@ -92,6 +92,20 @@ pub fn configure(
                 web::resource("/me/unlink/{provider}")
                     .route(web::post().to(ui::me::unlink)),
             )
+            // ISS-10: active-session visibility + single-session revoke. Same
+            // authenticated `__Host-zsidp_session` gate as `/me` (the handlers
+            // resolve the caller from the cookie). `GET /me/sessions` lists the
+            // caller's active sessions across both session tables;
+            // `POST /me/sessions/{id}/revoke` revokes ONE of the caller's own
+            // sessions (scoped `user_id = caller` — the IDOR guard).
+            .service(
+                web::resource("/me/sessions")
+                    .route(web::get().to(ui::sessions::list)),
+            )
+            .service(
+                web::resource("/me/sessions/{id}/revoke")
+                    .route(web::post().to(ui::sessions::revoke)),
+            )
             // ISS-12: account deletion (GDPR Art. 17). `/me/delete` begins the
             // request (soft-disable + 30-day schedule + confirm email);
             // `/me/delete/cancel` reverses it within the grace window. The
