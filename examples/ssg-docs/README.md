@@ -54,9 +54,21 @@ What you should see:
 
 ## Notes
 
-### Trailing-slash matching is exact-only
+### Trailing slashes normalize to the canonical resource
 
-`Match::Exact` requires the path to be exactly equal. So `GET /about/` (with the trailing slash) won't match the rule for `/about`. The catch-all then resolves it via `$path` → `/about/`, which isn't an asset, then falls back to `/index.html`. Result: the home page renders for `/about/`. This is a gateway-side limitation, not a vite-plugin bug — a future enhancement would emit two rules per route, or use `Match::Prefix` with normalization.
+`GET /about/` (with the trailing slash) resolves to the `/about` static
+resource — it serves the about page, not the home page. The gateway
+canonicalizes every request path *before* resource matching (the SEC-2
+path-canonicalization step): a single trailing slash is stripped
+(`/about/` → `/about`), so the literal `/about` resource is hit and its
+`["/about.html"]` try-chain serves. The catch-all (`/[...rest]` → index)
+is reached only for paths that match no declared resource.
+
+The canonical form is also what the gateway forwards to the worker and
+matches its auth policy against, so the trailing-slash normalization can
+never desync the auth match from the forwarded path. Interior dot-segments
+or empty segments (`/a/./b`, `/a//b`, `..`, `%2e`) are *rejected* (400),
+not silently rewritten — only a lone trailing slash is normalized.
 
 ## Files
 

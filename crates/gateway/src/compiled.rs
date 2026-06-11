@@ -863,6 +863,77 @@ mod tests {
         );
     }
 
+    /// ISS-60 (SSG trailing-slash): a prerendered docs site declares a static
+    /// `/about` resource and a catch-all `/[...rest]` SPA/index fallback.
+    /// `GET /about/` (trailing slash) must resolve to the `/about` static
+    /// resource — NOT fall through to the catch-all and render the index page.
+    /// The fix rides on the SEC-2 `canonicalize_path` trailing-slash strip:
+    /// `/about/` → `/about` BEFORE matching, so the literal hits and the same
+    /// canonical path is forwarded to the worker (no auth/forward desync).
+    #[test]
+    fn ssg_trailing_slash_resolves_to_static_resource() {
+        let mut resources = HashMap::new();
+        // The static page (what `vite build` emits for an SSG route).
+        resources.insert(
+            "/about".into(),
+            ResourceEntry {
+                r#static: Some(StaticAction {
+                    r#try: vec!["/about.html".into()],
+                }),
+                ..Default::default()
+            },
+        );
+        // The SPA/index catch-all fallback.
+        resources.insert(
+            "/[...rest]".into(),
+            ResourceEntry {
+                r#static: Some(StaticAction {
+                    r#try: vec!["$path".into(), "/index.html".into()],
+                }),
+                ..Default::default()
+            },
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+
+        // Without the slash, the literal resolves (baseline).
+        assert_eq!(
+            c.lookup_resource_key("/about").as_deref(),
+            Some("/about"),
+            "the literal /about resource resolves directly"
+        );
+        // WITH the trailing slash, it must STILL resolve to /about — not the
+        // catch-all. This is the ISS-60 bug: pre-canonicalization `/about/`
+        // missed the literal and fell through to `/[...rest]` (the index page).
+        assert_eq!(
+            c.lookup_resource_key("/about/").as_deref(),
+            Some("/about"),
+            "/about/ (trailing slash) must resolve to the /about static resource, \
+             not the SPA/index catch-all"
+        );
+        // The matched policy carries the static action for the page, not the
+        // catch-all's `$path`/index try-chain.
+        let policy = c.lookup_resource("/about/").expect("policy resolves");
+        match &policy.action {
+            ResolvedAction::Static { try_chain } => assert_eq!(
+                try_chain,
+                &vec!["/about.html".to_string()],
+                "/about/ serves the about page's try-chain, not the index fallback"
+            ),
+            other => panic!("expected the /about static action, got {other:?}"),
+        }
+        // An unrelated path still falls through to the catch-all (no regression).
+        assert_eq!(
+            c.lookup_resource_key("/nonexistent/page").as_deref(),
+            Some("/[...rest]"),
+            "unrelated paths still reach the SPA/index catch-all"
+        );
+    }
+
     #[test]
     fn resource_tree_glob_url_lookup() {
         let mut resources = HashMap::new();
