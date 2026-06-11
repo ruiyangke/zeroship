@@ -93,4 +93,19 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 
 ## TRIAGE FULLY DRAINED — 2026-05-25.
 
+## Round 2 — 2026-06-11 (docs consolidation pass)
+
+Six proposals accumulated since round 1; all triaged against code + git:
+
+- auth-server.md — SHIPPED (crates/auth/ extracted 0de2091f; living docs reference/auth.md + auth-dev-tier.md + runbooks/auth-deploy.md) — **archived**, 18 inbound refs repointed.
+- server-config-unification.md — SHIPPED (merged 966266bf; ADR 2026-05-28) — **archived**, ADR refs repointed.
+- server-config-inventory.md — spent companion audit — **archived**.
+- rpc-client-inferred-contracts.md — shipped subset, self-declared design history — **archived**.
+- authorization.md — PARTIALLY SHIPPED: P9 platform RBAC live (crates/authz/, control integration); P12 end-user authz unbuilt — **kept** as the forward P12 spec.
+- zeroship-builder-roadmap.md — LIVING — **kept** (broken specs/ paths fixed).
+
+Standing residents of docs/proposals/: feature-roadmap.md (living), zeroship-builder-roadmap.md (living), rpc.md (active), plugins-workers-distributed.md (active; kv leg shipped 5b17dc39), authorization.md (P12 active), TRIAGE.md (this worklist).
+
+Same pass also: archived docs/perf/ + docs/benchmarks/ → archive/, retired docs/briefs/ (74 merged UI work orders deleted, 7 strategy briefs archived), archived 18 completed superpowers specs/plans, archived 10 resolved review reports (reviews/ keeps only the live audit ledger + freshest review).
+
 ## Phase 2 ENHANCEMENT pass (beyond verify) — 2026-05-25: all 7 architecture docs got a "Read next"/"Related docs" navigation footer (repo-root-relative cross-links to siblings + relevant reference contracts) plus 1-2 code-grounded clarifying sentences each (CHWBL + polling tradeoff in distributed; compile-step rationale + `*` inheritance root in gateway-routing; master-key vs control-key + polling in control-plane; thread-bound isolate JIT enter/exit + pump event-batching in runtime, verified vs runtime.rs:1044; global-by-hash dedup in blob-store). Mix of lean codex agents (gateway-routing/control-plane/runtime) and direct edits (overview/distributed/blob-store/builder; codex companion dropped several jobs mid-run). All verified: links resolve, fences balanced, single H1, no abs paths. Commits cf1cf952, e9130c87, ec0bd0c7, c6c0188e, f385dfe3, e0c3467b, + runtime.

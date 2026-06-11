@@ -7,13 +7,17 @@ what each top-level subdirectory holds.
 | Directory | What lives here |
 | --- | --- |
 | `architecture/` | Long-form architecture write-ups (one file per major subsystem). Stable. Update when the shape of the system changes. |
-| `archive/` | Frozen documents kept for history: superseded perf snapshots, completed review-loop artifacts, design critiques whose findings have shipped. Mirrors the original subdirectory layout (`archive/perf/`, `archive/reviews/`, `archive/proposals/`). |
-| `benchmarks/` | Cross-runtime benchmark output dumps (txt). One file per session. |
-| `decisions/` | ADRs — date-prefixed, immutable once landed (`YYYY-MM-DD-topic.md`). The entry surface for "what shipped, when, and why" — each ADR is a short pointer plus link to its long-form proposal in `proposals/`. |
-| `perf/` | Active performance investigations: regression notes, time-distribution decompositions, microbenches, flamegraphs (`perf/flamegraphs/*.svg`). Snapshots are dated and superseded files move to `archive/perf/`. |
-| `proposals/` | Long-form design docs (pre-ship or shipped specs with no equivalent reference doc). Each carries an explicit **Status** line at the top (Draft / In progress / Shipped / Partially shipped). For a navigability layer over shipped designs, start at `decisions/`. |
+| `archive/` | Frozen documents kept for history: shipped proposals, completed design specs/plans, resolved review reports, superseded perf snapshots and benchmark dumps. Mirrors the original subdirectory layout (`archive/perf/`, `archive/benchmarks/`, `archive/reviews/`, `archive/briefs/`, `archive/superpowers/`). Nothing in here is load-bearing; the living surface is `decisions/` + `reference/`. |
+| `decisions/` | ADRs — date-prefixed, immutable once landed (`YYYY-MM-DD-topic.md`). The entry surface for "what shipped, when, and why" — each ADR is a short pointer plus link to its long-form design doc (usually now in `archive/`). |
+| `design/` | Design-system process docs (how UI work flows from brief to shipped component). |
+| `proposals/` | Long-form design docs that are still pre-ship or actively guiding work. Each carries an explicit **Status** line at the top. Shipped proposals move to `archive/`; `TRIAGE.md` is the standing triage worklist. |
 | `reference/` | Stable user-facing contracts (db, kv, rpc, auth, billing, websocket, plugin-system, …). The "API surface" of the platform. |
 | `research/` | Competitive landscape and ecosystem research. |
-| `reviews/` | Active critique reports for in-flight design work. Completed review loops move to `archive/reviews/<topic>/`. |
-| `runbooks/` | Operational how-tos: local dev, multi-node Compose, sandbox backends, k3s/crun/krun host. |
-| `superpowers/` | Builder skill definitions and plans (`specs/`, `plans/`) plus zeroship-builder branch artifacts (status, spec-compliance, accessibility audit). |
+| `reviews/` | Active review reports only (in-flight audits, the freshest security review). Resolved reviews move to `archive/reviews/`. |
+| `runbooks/` | Operational how-tos: local dev, multi-node Compose, DB migrations, auth deploy, sandbox backends, private registry, k3s/crun/krun host. |
+| `superpowers/` | Specs and plans still referenced by live code or docs (builder design spec, console-app specs, auth-server phase plans). Completed ones move to `archive/superpowers/`. |
+
+Dated perf investigations and cross-runtime benchmark dumps live under
+`archive/perf/` and `archive/benchmarks/`; new investigations should be
+committed straight to those archive paths once closed (there is no
+top-level `perf/` anymore).
