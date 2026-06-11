@@ -342,13 +342,15 @@ and/or namespace the platform health check so it can't shadow an app route.
 support a server-only build mode in the vite-plugin that emits a worker bundle without requiring a
 client `index.html`.
 
-### ISS-60 · Gateway: SSG trailing-slash renders the SPA fallback, not the page
-**Status:** open · **Effort:** S · **Tier:** T3 (routing)
+### ISS-60 · Gateway: SSG trailing-slash — RESOLVED (was a stale doc, not a bug)
+**Status:** closed (2026-06-11, `verify`) · **Effort:** — · **Tier:** T3 (routing)
 
-`GET /about/` serves the home/index fallback instead of `/about` — the gateway `Match::Exact` does not
-normalize trailing slashes, so the trailing-slash form misses the static resource and hits the
-catch-all (documented in `ssg-docs/README.md`). **Fix:** trailing-slash normalization in static
-resource matching.
+The `/about/` → home-page claim came from a **stale `ssg-docs/README.md`**, not live behavior. The
+dispatch path is the compiled resource tree, and the SEC-2 `canonicalize_path` already strips a single
+trailing slash before matching (`/about/` → `/about`), with the same canonical string feeding the
+auth-policy match and the worker-forwarded URL (no desync). Added the regression test
+`ssg_trailing_slash_resolves_to_static_resource` and corrected the README. `Match::Exact` in
+`crates/bundle` is dead for dispatch.
 
 ### ISS-61 · Example + doc hygiene (test-surfaced)
 **Status:** open · **Effort:** S · **Tier:** T4
