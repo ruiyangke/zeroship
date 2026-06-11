@@ -35,6 +35,7 @@ builder.
 | **T3** capability | ISS-28 cron/scheduled primitive · ISS-41 end-user authz (P12) · ISS-42 `@zeroship/{email,ai}` SDKs · ISS-44 non-additive migrations · ISS-45 node-compat align · ISS-46 per-tenant fairness/quotas · ISS-47 `env.assets` writes |
 | **T4** scale/later | ISS-48 teams/orgs · ISS-49 V8 snapshots · ISS-50 multi-region/HA · ISS-51 sandbox scale · ISS-52 stateless-worker migration |
 | **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
+| **test-surfaced (serve/build/CLI)** | ISS-55 `"use server"` dead in serve · ISS-56 env undefined in serve · ISS-57 CLI port parse/panic · ISS-58 `/health` shadows user routes · ISS-59 server-only build fails · ISS-60 SSG trailing-slash · ISS-61 example/doc hygiene |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -295,6 +296,68 @@ example** (G2), **`env.auth` has zero example** so the gateway `ZeroShip-User`�
 **Fix:** a gateway-E2E harness (`e2e_app_primitives.sh`) deploying a real built example through
 control→gateway→worker + asserting the primitives over the edge, plus `storage-gallery` /
 `auth-notes` examples + a kv runner.
+
+### ISS-55 · `"use server"` named exports don't dispatch under `zeroship serve`
+**Status:** open · **Effort:** S–M · **Tier:** T3 (DX/contract)
+
+`"use server"` RPC discovery is a **vite-plugin build-time transform**; raw `zeroship serve <file>.js`
+runs no build, so `"use server"` named exports are never registered and `/__zeroship/v1/<name>`
+404s. Only the dict shape `export default { rpc: {...} }` works in serve mode. This silently breaks
+`weather-proxy.js` + `ai-streaming.js` (all routes 404 — they have only `"use server"` exports, no
+`export default`) and `jwt-validator.js`'s RPC surface. **Fix:** make the contract explicit — either
+document that `"use server"` requires the build (and fix the examples to use `export default {rpc}`),
+or have serve mode reject/warn on `"use server"` files. The inconsistency between the serve and build
+paths is the real gap.
+
+### ISS-56 · `zeroship serve`: app `env.*` vars/secrets are always undefined
+**Status:** open · **Effort:** S–M · **Tier:** T3 (DX)
+
+The `zeroship` module's `env` object is built from control-plane `env_json` (empty in serve mode), so
+`env.JWT_SECRET` etc. are always `undefined`; process env vars land in `process.env`, not `env`. There
+is no documented way to inject app vars/secrets for local single-file `serve` testing. **Fix:** map
+selected process env (or a `--env`/`.env` source) into the app `env` in serve mode, and document it.
+
+### ISS-57 · CLI robustness: silent `--port` parse + panic on port-in-use
+**Status:** open · **Effort:** S · **Tier:** T3 (DX)
+
+`--port=3000` works but `--port 3000` (space form) is **silently ignored** (binds the default). And
+when the port is occupied, all worker threads **panic with an `AddrInUse` unwrap stacktrace** instead
+of a clean "port in use" error + exit. **Fix:** accept both `--port` forms (or error on the unknown
+arg), and turn bind failures into a graceful message.
+
+### ISS-58 · `GET /health` is an undocumented kernel-reserved route that shadows user handlers
+**Status:** open · **Effort:** S · **Tier:** T3
+
+The runtime intercepts `GET /health` and returns `{"status":"ok"}` before user code
+(`crates/runtime/src/core/serve.rs:191`); an app's own `/health` route is silently unreachable.
+Not listed as reserved in `zeroship-standard.md`. **Fix:** document the reserved path (and any others),
+and/or namespace the platform health check so it can't shadow an app route.
+
+### ISS-59 · Server-only Vite apps fail to build (no `index.html` → `dist not found`)
+**Status:** open · **Effort:** S–M · **Tier:** T3 (build pipeline)
+
+`db-chat` and `db-migrations-playground` (backend-only: `src/server.ts`, no client entry) fail
+`pnpm build` with `zship: dist dir not found` — the Vite client build emits nothing without a root
+`index.html`. A pure-backend app (fetch/rpc only, no SPA) should be buildable to `.zship`. **Fix:**
+support a server-only build mode in the vite-plugin that emits a worker bundle without requiring a
+client `index.html`.
+
+### ISS-60 · Gateway: SSG trailing-slash renders the SPA fallback, not the page
+**Status:** open · **Effort:** S · **Tier:** T3 (routing)
+
+`GET /about/` serves the home/index fallback instead of `/about` — the gateway `Match::Exact` does not
+normalize trailing slashes, so the trailing-slash form misses the static resource and hits the
+catch-all (documented in `ssg-docs/README.md`). **Fix:** trailing-slash normalization in static
+resource matching.
+
+### ISS-61 · Example + doc hygiene (test-surfaced)
+**Status:** open · **Effort:** S · **Tier:** T4
+
+Cleanups found while building the examples: (a) the `csr-todo`/`ssr-blog`/`ssg-docs` READMEs document
+the **old `rules/match/action` manifest** (now a flat `resources` map); (b) `url-shortener.js` uses
+`env.KV` (Cloudflare-style uppercase) but the plugin registers `env.kv` → crash; (c) `weather-proxy.js`
++ `ai-streaming.js` lack an `export default` so raw serve can't dispatch them (ties to ISS-55);
+(d) a `@zeroship/bootstrap ↔ @zeroship/db` cyclic-dependency warning on every `pnpm install`.
 
 ---
 
