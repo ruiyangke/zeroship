@@ -133,47 +133,6 @@ export interface SetKeyValueInput {
   value: string;
 }
 
-export interface AuthUser {
-  id: string;
-  email: string;
-  name: string;
-  avatar_url: string | null;
-}
-
-export interface RegisterInput {
-  email: string;
-  password: string;
-  name: string;
-}
-
-export interface LoginInput {
-  email: string;
-  password: string;
-  app_id?: string;
-}
-
-export interface AuthUserResult {
-  user: AuthUser;
-}
-
-export interface UserInfo {
-  user: AuthUser;
-  app: string | null;
-}
-
-export interface ConsentInput {
-  app_id: string;
-}
-
-export interface ConsentResult {
-  granted: boolean;
-  app_id: string;
-}
-
-export interface LogoutResult {
-  logged_out: boolean;
-}
-
 export type DeployBody =
   | string
   | ArrayBuffer
@@ -267,18 +226,6 @@ export class ControlClient {
       this.request(`/api/apps/${pathPart(appId)}/audit`, {
         query: { limit: options.limit },
       }),
-  };
-
-  readonly auth = {
-    register: (input: RegisterInput): Promise<AuthUserResult> =>
-      this.request("/auth/register", { method: "POST", body: input }),
-    login: (input: LoginInput): Promise<AuthUserResult> =>
-      this.request("/auth/login", { method: "POST", body: input }),
-    logout: (): Promise<LogoutResult> =>
-      this.request("/auth/logout", { method: "POST" }),
-    userinfo: (): Promise<UserInfo> => this.request("/auth/userinfo"),
-    consent: (input: ConsentInput): Promise<ConsentResult> =>
-      this.request("/auth/consent", { method: "POST", body: input }),
   };
 
   constructor(options: ControlClientOptions) {

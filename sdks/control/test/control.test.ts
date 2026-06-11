@@ -29,7 +29,7 @@ test("apps.create sends bearer auth and JSON", async () => {
   assert.deepEqual(await req.json(), { name: "demo", plan_id: "free" });
 });
 
-test("auth.login forwards cookies and mirrors set-cookie", async () => {
+test("request forwards cookies and mirrors set-cookie", async () => {
   const mirrored: string[] = [];
   const client = createControlClient({
     baseUrl: "http://control.local/",
@@ -40,28 +40,16 @@ test("auth.login forwards cookies and mirrors set-cookie", async () => {
     fetch: async (input, init) => {
       const req = new Request(input, init);
       assert.equal(req.headers.get("cookie"), "a=b");
-      return json(
-        {
-          user: {
-            id: "usr_1",
-            email: "a@example.com",
-            name: "A",
-            avatar_url: null,
-          },
-        },
-        200,
-        { "set-cookie": "__zs_session=token; HttpOnly" },
-      );
+      return json({ id: "app_1", name: "demo" }, 200, {
+        "set-cookie": "session=token; HttpOnly",
+      });
     },
   });
 
-  const result = await client.auth.login({
-    email: "a@example.com",
-    password: "secret",
-  });
+  const result = await client.apps.get("app_1");
 
-  assert.equal(result.user.id, "usr_1");
-  assert.deepEqual(mirrored, ["__zs_session=token; HttpOnly"]);
+  assert.equal(result.id, "app_1");
+  assert.deepEqual(mirrored, ["session=token; HttpOnly"]);
 });
 
 test("env mutations treat 204 as void", async () => {

@@ -58,14 +58,9 @@ await control.env.listAudit(appId, { limit: 100 });
 
 ```
 
-> **Dead surface — pending removal.** The SDK still exports a
-> `control.auth.*` namespace (`register`/`login`/`logout`/`userinfo`/
-> `consent` against `/auth/*`), but the control plane no longer registers
-> those routes: control became a pure API resource server in the R5
-> cutover and console auth moved to `@zeroship/auth` (BFF) — see
-> `crates/control/src/lib.rs` and `docs/reference/auth.md`. Calling these
-> methods 404s. Don't use them; the namespace should be deleted from the
-> SDK.
+There is no auth namespace: control is a pure API resource server (R5
+cutover) — login/identity lives in `@zeroship/auth` against the auth
+service, never against control. See `docs/reference/auth.md`.
 
 `control.request<T>(path, options)` is the escape hatch for endpoints that do
 not yet deserve a typed wrapper. Prefer adding a typed method once a caller
