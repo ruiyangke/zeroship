@@ -55,6 +55,12 @@ pub struct ServerOptions {
     /// pull in heavy dependencies (LangChain, SDKs, etc).
     pub heap_limit_bytes: Option<usize>,
     /// Env vars exposed to JS as `process.env.*`. Cloned into each worker.
+    ///
+    /// In serve mode this map also seeds the app-facing `env` object (the
+    /// `zeroship` module's `env` import / `fetch`'s 2nd arg): any key
+    /// carrying the [`ZS_VAR_PREFIX`] prefix is surfaced as `env.<NAME>`
+    /// (prefix stripped). See [`app_env_from_prefixed_vars`]. Non-prefixed
+    /// host vars stay in `process.env` only — they do NOT leak into `env`.
     pub env_vars: HashMap<String, String>,
     /// Native plugins to register on each worker's `zeroship.*` namespace.
     /// Each worker thread gets its own `Runtime`, so each plugin instance
@@ -88,6 +94,45 @@ impl Default for ServerOptions {
     }
 }
 
+/// Prefix that marks a process-env var for injection into the app-facing
+/// `env` object under `zeroship serve` (single-tenant dev).
+///
+/// `ZS_VAR_API_KEY=xyz zeroship serve app.js` makes `env.API_KEY === "xyz"`
+/// reachable from the app (the `zeroship` module's `env` import and
+/// `fetch(req, env, ctx)`'s 2nd arg) — the same surface the control plane
+/// populates from a creator app's configured vars/secrets in production.
+///
+/// Only prefixed vars cross into `env`. Every other host var (`HOME`,
+/// `PATH`, `OPENAI_API_KEY`, …) stays in `process.env` exclusively, so the
+/// blanket host environment is never handed to untrusted app code by
+/// default — injection is explicit and opt-in per key.
+pub const ZS_VAR_PREFIX: &str = "ZS_VAR_";
+
+/// Build the app-facing [`EnvSnapshot`] from the process-env map by
+/// selecting only [`ZS_VAR_PREFIX`]-prefixed keys and stripping the prefix.
+///
+/// The selected vars land in the snapshot's `vars` half (plaintext —
+/// there is no encryption boundary in single-tenant dev). An empty
+/// selection yields `EnvSnapshot::empty()`, matching the prior serve-mode
+/// behavior where the app `env` was `{}`.
+pub fn app_env_from_prefixed_vars(env_vars: &HashMap<String, String>) -> EnvSnapshot {
+    let vars: std::collections::BTreeMap<String, String> = env_vars
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix(ZS_VAR_PREFIX)
+                // An empty name (bare `ZS_VAR_=…`) is meaningless — drop it.
+                .filter(|name| !name.is_empty())
+                .map(|name| (name.to_string(), v.clone()))
+        })
+        .collect();
+
+    if vars.is_empty() {
+        EnvSnapshot::empty()
+    } else {
+        EnvSnapshot::new(vars, std::collections::BTreeMap::new(), Vec::new())
+    }
+}
+
 /// Start the compio HTTP server. This function blocks forever.
 ///
 /// - Single worker: runs on the calling thread.
@@ -112,7 +157,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
     }
 
     if num_workers <= 1 {
-        run_single_worker(
+        if let Err(e) = run_single_worker(
             options.port,
             false,
             None,
@@ -122,7 +167,11 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             modules,
             options.env_vars,
             options.plugins,
-        );
+        ) {
+            // Clean exit on a bind failure (e.g. port already in use)
+            // instead of an `.unwrap()` panic + worker-thread stacktrace.
+            exit_bind_error(options.port, &e);
+        }
     } else {
         tracing::info!(workers = num_workers, port = options.port, "runtime spawning workers");
         let mut handles = Vec::new();
@@ -147,17 +196,45 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
                         worker_modules,
                         worker_env,
                         worker_plugins,
-                    );
+                    )
                 })
                 .unwrap();
             handles.push(handle);
         }
         for h in handles {
-            h.join().unwrap();
+            // A worker that returns Err couldn't bind — surface it as a
+            // clean exit. `join()` returning Err means the worker panicked
+            // for some other reason; re-raise that the original way.
+            match h.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => exit_bind_error(options.port, &e),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
         }
     }
 
     // The server loop never returns, but if it somehow does (all workers crashed):
+    std::process::exit(1);
+}
+
+/// Build the operator-facing diagnostic for a listener-bind failure.
+/// `AddrInUse` is the common case — another process (or a stale instance)
+/// already holds the port — so it gets a more actionable message.
+fn bind_error_message(port: u16, err: &std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::AddrInUse {
+        format!(
+            "[zeroship] error: port {port} is already in use. \
+             Stop the process using it or pass a different --port."
+        )
+    } else {
+        format!("[zeroship] error: failed to bind port {port}: {err}")
+    }
+}
+
+/// Print a clean diagnostic for a listener-bind failure and exit non-zero,
+/// instead of an `.unwrap()` panic + worker-thread stacktrace.
+fn exit_bind_error(port: u16, err: &std::io::Error) -> ! {
+    eprintln!("{}", bind_error_message(port, err));
     std::process::exit(1);
 }
 
@@ -189,6 +266,21 @@ async fn recv_with_timeout<T>(
 // ===========================================================================
 
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
+
+/// Reserved platform health-probe paths, served by the kernel without
+/// entering V8. Both spellings are accepted (`/__zeroship/health` and the
+/// k8s-idiomatic `/__zeroship/healthz`). These live under the already-
+/// reserved `/__zeroship/*` prefix so they never collide with a user app's
+/// own routes — in particular the app keeps full ownership of `/health`
+/// (ISS-58).
+const KERNEL_HEALTH_PATHS: [&str; 2] = ["/__zeroship/health", "/__zeroship/healthz"];
+
+/// True when `path` (which may carry a `?query` suffix) is one of the
+/// reserved kernel health-probe paths.
+fn is_kernel_health_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    KERNEL_HEALTH_PATHS.contains(&path)
+}
 const HEADERS_TOO_LARGE_RESPONSE: &[u8] =
     b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const PAYLOAD_TOO_LARGE_RESPONSE: &[u8] =
@@ -253,6 +345,7 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 async fn handle_connection(
     mut stream: TcpStream,
     runtime: Runtime,
+    app_env: Rc<EnvSnapshot>,
 ) {
     let mut data = Vec::with_capacity(8192);
     let mut read_buf = Vec::with_capacity(4096);
@@ -372,13 +465,16 @@ async fn handle_connection(
 
             let total_len = total_input_consumed;
 
-            // `/health` is the only kernel-level route — a liveness
-            // probe for process managers, served without touching V8.
-            // Every other request flows through `handle_request` →
-            // `call_fetch_handler`, which dispatches to default.rpc /
-            // default.fetchFast / default.fetch in that order. URL
-            // routing within those tiers is user-space.
-            if method == "GET" && path == "/health" {
+            // The platform health probe lives under the reserved
+            // `/__zeroship/*` namespace — a liveness probe for process
+            // managers, served without touching V8. It does NOT squat the
+            // bare `/health` route, so an app's own `/health` handler is
+            // reachable (ISS-58). Every request that isn't the reserved
+            // probe flows through `handle_request` → `call_fetch_handler`,
+            // which dispatches to default.rpc / default.fetchFast /
+            // default.fetch in that order. URL routing within those tiers
+            // is user-space.
+            if method == "GET" && is_kernel_health_path(path) {
                 let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
                 if write_result.is_err() { return; }
             } else {
@@ -409,7 +505,7 @@ async fn handle_connection(
                 );
 
                 let wrote_ok = handle_request(
-                    &mut stream, method, &full_url, &request_headers, body_str, &runtime,
+                    &mut stream, method, &full_url, &request_headers, body_str, &runtime, &app_env,
                 ).await;
                 if !wrote_ok { return; }
                 if is_upgrade { return; }
@@ -717,12 +813,14 @@ async fn handle_request(
     request_headers: &[(String, String)],
     body: &str,
     runtime: &Runtime,
+    app_env: &EnvSnapshot,
 ) -> bool {
-    // Env is empty in the standalone server — there's no control plane in
-    // front of it providing per-app secrets / vars. `call_fetch_handler`
-    // still reads it (as `fetch(req, env, ctx)`'s second arg), just as
-    // `{}`.
-    let env = EnvSnapshot::empty();
+    // The app-facing env. In the standalone server there's no control plane
+    // supplying per-app secrets/vars, so this is seeded from process-env
+    // vars carrying the `ZS_VAR_` prefix (see `app_env_from_prefixed_vars`)
+    // — empty when none are set. `call_fetch_handler` reads it as
+    // `fetch(req, env, ctx)`'s 2nd arg and the `zeroship` module's `env`.
+    let env = app_env.clone();
     let cancel = CancelFlag::new();
     let ctx = RequestCtx::new(cancel.clone());
 
@@ -1373,23 +1471,22 @@ fn deliver_ws_close(runtime: &Runtime, ws_id: u32, code: u16, reason: &str) {
 // SO_REUSEPORT listener
 // ===========================================================================
 
-fn create_reuseport_listener(port: u16) -> std::net::TcpListener {
+fn create_reuseport_listener(port: u16) -> std::io::Result<std::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
 
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-    socket.set_reuse_port(true).unwrap();
-    socket.set_reuse_address(true).unwrap();
-    socket
-        .bind(
-            &format!("0.0.0.0:{port}")
-                .parse::<std::net::SocketAddr>()
-                .unwrap()
-                .into(),
-        )
-        .unwrap();
-    socket.listen(1024).unwrap();
-    socket.set_nonblocking(true).unwrap();
-    socket.into()
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_port(true)?;
+    socket.set_reuse_address(true)?;
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // The bind is the failure point worth surfacing cleanly — e.g. another
+    // process already holds the port (`AddrInUse`). Propagate instead of
+    // `.unwrap()`-panicking so the caller can exit with a readable message.
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
 }
 
 const ACCEPT_ERROR_BASE_BACKOFF: Duration = Duration::from_millis(10);
@@ -1403,16 +1500,20 @@ fn accept_error_backoff(consecutive_errors: u32) -> Duration {
         .min(ACCEPT_ERROR_MAX_BACKOFF)
 }
 
-async fn accept_loop(listener: TcpListener, runtime: Runtime) {
+async fn accept_loop(listener: TcpListener, runtime: Runtime, app_env: Rc<EnvSnapshot>) {
     let mut consecutive_errors = 0_u32;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 consecutive_errors = 0;
                 let rt = runtime.clone();
+                let env = app_env.clone();
                 compio::runtime::spawn(async move {
-                    crate::panic_util::guard("handle_connection", handle_connection(stream, rt))
-                        .await;
+                    crate::panic_util::guard(
+                        "handle_connection",
+                        handle_connection(stream, rt, env),
+                    )
+                    .await;
                 })
                 .detach();
             }
@@ -1435,6 +1536,13 @@ async fn accept_loop(listener: TcpListener, runtime: Runtime) {
 // Single-worker entry point
 // ===========================================================================
 
+/// Run one worker: bind the listener, build the runtime, and serve until
+/// the process exits.
+///
+/// Returns `Err(io::Error)` if the listener can't be bound (e.g. the port
+/// is already in use). On success it blocks forever inside the accept loop
+/// and never returns `Ok` — the `Ok(())` arm is reached only if the accept
+/// loop itself unwinds, which the caller treats as a crash.
 fn run_single_worker(
     port: u16,
     use_reuseport: bool,
@@ -1445,19 +1553,24 @@ fn run_single_worker(
     modules: Vec<ModuleEntry>,
     env_vars: HashMap<String, String>,
     plugins: Vec<Arc<dyn NativePlugin>>,
-) {
+) -> std::io::Result<()> {
+    // Seed the app-facing env once per worker from the `ZS_VAR_`-prefixed
+    // process vars. Shared (read-only) across all connections this worker
+    // accepts; an `Rc` clone is one refcount bump per connection.
+    let app_env = Rc::new(app_env_from_prefixed_vars(&env_vars));
+
     compio::runtime::RuntimeBuilder::new()
         .build()
         .unwrap()
-        .block_on(async {
+        .block_on(async move {
             let listener = if use_reuseport {
-                let std_listener = create_reuseport_listener(port);
+                let std_listener = create_reuseport_listener(port)?;
                 unsafe {
                     use std::os::fd::{FromRawFd, IntoRawFd};
                     TcpListener::from_raw_fd(std_listener.into_raw_fd())
                 }
             } else {
-                TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap()
+                TcpListener::bind(format!("0.0.0.0:{port}")).await?
             };
 
             if let Some(id) = worker_id {
@@ -1484,8 +1597,105 @@ fn run_single_worker(
             runtime.start_pump();
 
             // Accept loop
-            crate::panic_util::guard("runtime_accept_loop", accept_loop(listener, runtime)).await;
-        });
+            crate::panic_util::guard(
+                "runtime_accept_loop",
+                accept_loop(listener, runtime, app_env),
+            )
+            .await;
+            Ok(())
+        })
+}
+
+#[cfg(test)]
+mod serve_gaps_tests {
+    //! Unit coverage for the `zeroship serve` dev-gap fixes:
+    //!   - ISS-58: the kernel health probe lives under `/__zeroship/*` and
+    //!     does NOT match the bare `/health` route (which the app owns).
+    //!   - ISS-56: app `env` is seeded only from `ZS_VAR_`-prefixed process
+    //!     vars (prefix stripped); non-prefixed host vars never leak.
+    use super::*;
+
+    #[test]
+    fn kernel_health_path_is_namespaced_only() {
+        // Reserved probe paths match (with or without a query string)…
+        assert!(is_kernel_health_path("/__zeroship/health"));
+        assert!(is_kernel_health_path("/__zeroship/healthz"));
+        assert!(is_kernel_health_path("/__zeroship/health?probe=1"));
+        // …and the bare `/health` route belongs to the user app now.
+        assert!(!is_kernel_health_path("/health"));
+        assert!(!is_kernel_health_path("/healthz"));
+        assert!(!is_kernel_health_path("/"));
+        assert!(!is_kernel_health_path("/__zeroship/healthx"));
+    }
+
+    #[test]
+    fn app_env_selects_prefixed_vars_and_strips_prefix() {
+        let mut vars = HashMap::new();
+        vars.insert("ZS_VAR_API_KEY".to_string(), "xyz".to_string());
+        vars.insert("ZS_VAR_DATABASE_URL".to_string(), "postgres://x".to_string());
+        // Non-prefixed host vars must not cross into the app env.
+        vars.insert("HOME".to_string(), "/home/leak".to_string());
+        vars.insert("PATH".to_string(), "/usr/bin".to_string());
+        // A bare prefix with an empty name is meaningless — dropped.
+        vars.insert("ZS_VAR_".to_string(), "empty-name".to_string());
+
+        let snap = app_env_from_prefixed_vars(&vars);
+        let parsed: serde_json::Value = serde_json::from_str(snap.as_json()).unwrap();
+        let v = parsed.get("vars").and_then(|m| m.as_object()).unwrap();
+
+        assert_eq!(v.get("API_KEY").and_then(|x| x.as_str()), Some("xyz"));
+        assert_eq!(
+            v.get("DATABASE_URL").and_then(|x| x.as_str()),
+            Some("postgres://x")
+        );
+        // Prefix is stripped — the prefixed key name does not survive.
+        assert!(v.get("ZS_VAR_API_KEY").is_none());
+        // Host vars and the empty-name entry are absent.
+        assert!(v.get("HOME").is_none());
+        assert!(v.get("PATH").is_none());
+        assert!(v.get("").is_none());
+        assert_eq!(v.len(), 2, "exactly the two well-formed prefixed vars");
+    }
+
+    #[test]
+    fn app_env_empty_when_no_prefixed_vars() {
+        let mut vars = HashMap::new();
+        vars.insert("HOME".to_string(), "/home/x".to_string());
+        let snap = app_env_from_prefixed_vars(&vars);
+        // Matches the prior serve-mode behavior: app env is `{}`.
+        assert_eq!(snap.as_json(), EnvSnapshot::empty().as_json());
+    }
+
+    // ISS-57 (runtime half): a bind failure must surface as a clean,
+    // actionable message — not the prior `.unwrap()` panic stacktrace.
+    #[test]
+    fn bind_error_message_calls_out_addr_in_use() {
+        let in_use = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let msg = bind_error_message(3000, &in_use);
+        assert!(msg.contains("3000"), "message names the port: {msg}");
+        assert!(
+            msg.contains("already in use"),
+            "AddrInUse gets the actionable hint: {msg}"
+        );
+        assert!(msg.contains("--port"), "suggests a remedy: {msg}");
+    }
+
+    #[test]
+    fn bind_error_message_falls_back_for_other_errors() {
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = bind_error_message(80, &denied);
+        assert!(msg.contains("failed to bind port 80"), "generic path: {msg}");
+    }
+
+    // The reuseport listener constructor is now fallible (returns
+    // `io::Result`) instead of `.unwrap()`-panicking — binding a free port
+    // succeeds.
+    #[test]
+    fn reuseport_listener_binds_free_port() {
+        // Port 0 lets the OS choose a free port — always bindable.
+        let listener = create_reuseport_listener(0).expect("free port must bind");
+        assert!(listener.local_addr().is_ok());
+    }
 }
 
 #[cfg(test)]

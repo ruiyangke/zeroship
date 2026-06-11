@@ -48,6 +48,27 @@ builds reject implicit names.
 
 `subscription` is currently server-side metadata plus lower-level transport work; the generic `@zeroship/rpc/client` API intentionally excludes it until the public subscription client shape is finalized.
 
+## Reserved paths
+
+The `/__zeroship/*` URL prefix is platform-reserved — user code does not route
+it. Paths under it today:
+
+- `/__zeroship/v1/<wireId>` — runtime-owned RPC dispatch (see RPC authoring above).
+- `GET /__zeroship/health` (alias `GET /__zeroship/healthz`) — the `zeroship serve`
+  (single-tenant dev) liveness probe, answered by the kernel without entering V8.
+  The bare `GET /health` route is **not** reserved: it reaches the user app's
+  own handler.
+
+## Local env injection (`zeroship serve`)
+
+Under `zeroship serve` there is no control plane to supply per-app vars/secrets,
+so the app-facing `env` (the `zeroship` module's `env` import and `fetch`'s 2nd
+argument) is seeded from process-env vars carrying the `ZS_VAR_` prefix, with the
+prefix stripped: `ZS_VAR_API_KEY=xyz zeroship serve app.js` makes
+`env.API_KEY === "xyz"`. Only prefixed vars cross into `env`; every other host
+var stays in `process.env` exclusively, so the host environment is never handed
+to app code wholesale.
+
 ## Current source of truth
 
 `default.schema` is the active schema discovery path. The manifest-side
