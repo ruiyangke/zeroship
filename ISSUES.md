@@ -4,10 +4,30 @@ Tracking known platform-level issues with no immediate fix landed. Each entry
 is a self-contained workaround note for downstream work plus a `Fix path:`
 pointer for whoever picks it up.
 
+> ## ⚠️ Re-verified 2026-06-11 — this list was badly stale; read this first
+>
+> A five-agent pass re-checked every entry against `main` HEAD. **Two
+> architectural shifts since the 2026-05-23 snapshot mooted ~8 entries**, and
+> several "Fix path"s below now point at approaches the architecture has since
+> forbidden. Per-entry verdicts are stamped `**Re-verified 2026-06-11:**`.
+>
+> 1. **The data/health/plan/media canvases were deleted** (commit `4110071f`,
+>    2026-05-27 — workspace re-cut to a tier-gated `preview/files/logs/env/settings`
+>    surface). The hardcoded-stub entries (ISS-20/21/22/23/25/26) describe UI that
+>    **no longer ships** → closed-by-removal.
+> 2. **The console became a pure creator app** (2026-05-31 — zero control-plane
+>    calls, enforced by `apps/zeroship-builder/src/server/no-control-import.test.ts`).
+>    So "add a control-plane table/column" fix paths (ISS-14/15/16/17/19) are now
+>    **wrong** — creator-scoped `@zeroship/kv` is the sanctioned store. And dev KV is
+>    now redb (persistent file) + prod KV is Redis, so the "KV vanishes on restart"
+>    severity premise is **dead**.
+
 ## Status legend
 
 - **open** — not yet fixed; the workaround in this entry is still in use.
 - **closed** — fix landed in tree; entry kept for the historical record.
+- **closed-by-removal** — the surface this described was deleted; obsolete as written.
+- **re-scoped** — still open, but the title/severity/fix-path were corrected on 2026-06-11.
 - **superseded** — replaced by a newer entry with a wider fix path.
 
 ## Severity legend
@@ -22,29 +42,34 @@ pointer for whoever picks it up.
   for one user / one session, broken across nodes / restarts.
 - **low** — power-user / polish feature; not in the V1 critical path.
 
-## Index (by severity, then ID)
+## Current status (re-verified 2026-06-11)
 
-| Severity | Issues |
-|---|---|
-| medium | ISS-09 · ISS-12 · ISS-13 · ISS-14 · ISS-15 · ISS-16 · ISS-17 · ISS-18 · ISS-20 · ISS-21 · ISS-23 · ISS-24 · ISS-25 · ISS-26 · ISS-28 |
-| low-medium | ISS-19 |
-| low | ISS-10 · ISS-11 · ISS-22 |
-| closed | ISS-01 · ISS-02 |
+Of the original 21 entries, **9 are live**; 12 are closed/obsolete.
 
-All entries below are **open** as of 2026-05-01, except **ISS-01**
-(native `AsyncLocalStorage` backed by V8's `ContinuationPreservedEmbedderData`)
-and **ISS-02** (vite-plugin path-convention drop), both closed
-2026-05-04 — see the entries for implementing commits. The
-foundation-polish pass (plan-01 follow-on) promoted **ISS-14**,
-**ISS-16**, **ISS-19**, and **ISS-26** from "in-memory Map" to
-"KV-backed via `@zeroship/kv`" without closing them — the real fix
-(Postgres-backed table / control-plane endpoint / object-store
-wiring) is still the listed **Fix path** for each. The KV step
-shrinks the visible blast radius (state survives HMR cycles in dev)
-but doesn't replace the real backing.
+| Priority | Issue | Verdict | Effort |
+|---|---|---|---|
+| **T1 · pre-launch (active harm)** | **ISS-14** de-fake seeded issues | re-scoped | S |
+| **T1 · pre-launch (active harm)** | **ISS-16** kill fake `defaultScores()` "B+" | re-scoped | S |
+| **T2 · GA-blocking (compliance)** | **ISS-12** account deletion / GDPR | open (unblocked) | M |
+| T3 · post-launch | ISS-10 session visibility on `/me` | re-scoped | S–M |
+| T3 · post-launch | ISS-11 2FA / TOTP | open | M–L |
+| T4 · dormant / gated | ISS-28 cron / scheduled-worker harness | open | M |
+| T4 · dormant / gated | ISS-18 perf metering / `env.meter` | open | L |
+| T4 · dormant / gated | ISS-17 incidents (needs 18 + 28) | open | L |
+| T4 · dormant / gated | ISS-13 skill registry (only launch-visible) | open | L |
+| T4 · gated on deploy/data surface returning | ISS-15 deploy history · ISS-24 migration-log exposure | open / partial | M / S–M |
+| — closed | ISS-01 · ISS-02 | closed 2026-05-04 | — |
+| — closed (fix landed) | ISS-09 forgot/reset (backend wired in `crates/auth`) | closed | — |
+| — closed (architecture) | ISS-19 archive (first-class KV `archived` flag) | closed | — |
+| — closed-by-removal | ISS-20 · ISS-21 · ISS-22 · ISS-23 · ISS-25 · ISS-26 | obsolete | — |
 
-Entries are listed below in the same order as the index above (severity
-descending; ties broken by issue id). Anchor links are preserved by ID.
+The two T1 items are the highest leverage: both are S-effort and both currently
+feed **fabricated data to the PM/SRE agents** (`seedIssues()` invents 3 issues;
+`defaultScores()` invents a "B+" scorecard), so the platform reasons over fiction.
+
+Entries below retain their original detail (symptom / root cause / fix path) for
+history; the `**Re-verified 2026-06-11:**` stamp on each is the current truth and
+overrides any stale "Fix path" that predates the two shifts above.
 
 ---
 
@@ -295,7 +320,17 @@ emit a one-time warning per file pointing to this entry.
 
 ## ISS-09 · `/auth/forgot-password` endpoint not exposed by control plane
 
-**Status:** open
+**Status:** closed (fix landed; re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED. The flow shipped in the auth service (not the
+control plane the title assumed): `GET/POST /forgot` + `/reset` registered at
+`crates/auth/src/server.rs:121-132`, token primitive in
+`crates/auth/src/identity/password_reset.rs` (256-bit CSPRNG, SHA-256-at-rest,
+60-min single-use, bound to immutable `user_id`), real email via the `Mailer` trait
+(`crates/auth/src/ui/forgot.rs`), redeem revokes all sessions
+(`crates/auth/src/ui/reset.rs`), login page links it, tests in
+`crates/auth/tests/password_reset_test.rs`. Only residual: delete the vestigial
+`apps/zeroship-builder/src/client/pages/ForgotPassword.tsx` stub (S).
+~~**Status:** open~~
 **Severity:** medium — password recovery is unavailable; users locked out
 of their account have no self-serve path back in.
 **First observed:** 2026-05-01, polishing the auth UI surfaces in
@@ -342,7 +377,19 @@ visible reply.
 
 ## ISS-12 · Account-deletion endpoint not exposed
 
-**Status:** open
+**Status:** open — T2, GA-blocking, now unblocked (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** STILL OPEN; the highest-priority *real work* item. No
+delete/erase path in `crates/auth` or `crates/control` (only a `disabled_at` soft-disable
+column with no user-space setter). Schema readiness is partial: 10/15 FKs to
+`zeroship.users` are `ON DELETE CASCADE`, but 5 are not (`0004_control.sql:93,224,256,270`
+creator/billing + attribution rows; `0003_platform.sql:12`), so a hard DELETE is blocked
+for any creator with a Stripe/billing row. GA-blocking for EU sign-ups (Art. 17), not
+launch-blocking (early requests can be fulfilled manually within ~30 days). **Unblocked**
+now that the mailer exists (ISS-09) for the confirm/undo email. **Effort M:**
+request→grace→hard-delete job (host in the `crates/auth` `cron/` module), a SET-NULL/
+anonymize decision for the 5 non-cascade FKs, Stripe-Connect retention handling, and
+blob/bundle cleanup for owned apps.
+~~**Status:** open~~
 **Severity:** medium — GDPR/right-to-be-forgotten, but not in the
 critical path for V1 launch.
 **First observed:** 2026-05-01, building the Account page (spec §6.5).
@@ -381,7 +428,15 @@ tomato (danger) tone and points at this issue:
 
 ## ISS-13 · Skill registry not implemented (catalogue-only)
 
-**Status:** open
+**Status:** open — T4, the only launch-VISIBLE gap (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** STILL OPEN, unchanged. `apps/zeroship-builder/src/client/pages/Skills.tsx:169`
+ships a "Coming soon" badge + disabled "Add to project →" on the public `/skills` funnel page;
+static catalogue at `client/lib/skills.ts`; no registry table, no install RPC. The only one of
+this group an unauthenticated prospect actually sees. **Effort L** (control registry + install
+endpoint + a sanctioned builder→control call path that doesn't break the pure-creator-app
+invariant + project-manifest wiring + agent prompt fragments). **Pre-launch cheap option (S):
+hide the disabled CTA** and defer the real registry.
+~~**Status:** open~~
 **Severity:** medium — blocks the "Add to project" CTA on `/skills`;
 the public catalogue ships as a static list until the registry lands.
 **First observed:** 2026-05-01, building the public skill catalogue
@@ -437,7 +492,16 @@ roadmap, not vapor) and unblocks signup-funnel work.
 
 ## ISS-14 · Issues table missing — PlanCanvas reads from KV stub
 
-**Status:** open (partial — KV-backed, no real table)
+**Status:** re-scoped → "stop seeding fake issues" (T1, S; re-verified 2026-06-11)
+**Re-verified 2026-06-11:** RE-SCOPED. PlanCanvas (the composer) is deleted, so there is
+no create/update/comment path anymore — a real table is NOT the fix. The live problem is
+narrower and a pre-launch **trust bug**: `apps/zeroship-builder/src/server/agents.ts`
+`seedIssues()` lazily injects 3 **fabricated** issues ("Welcome to your project plan",
+"Wire up password reset", "Initial deploy") on first read, and that fiction is consumed by
+the PM digest agent (`pm-worker.ts:125`) and the @-mention list (`MentionDropdown.tsx`).
+**Fix (S):** drop the seeds — return an empty list for an ungraded/new project. A real
+write path, if ever wanted, is creator-scoped KV (NOT a control-plane table — pure-creator-app).
+~~**Status:** open (partial — KV-backed, no real table)~~
 **Severity:** medium — every issue (filed by the user, the PM agent,
 the Critic, or the SRE agent) lives in the worker's `@zeroship/kv`
 namespace, which IS in-memory in dev (so it survives HMR module
@@ -497,7 +561,13 @@ v0.2 / v0.3 render with empty progress bars.
 
 ## ISS-15 · Deploy-history table missing — PlanCanvas shows current deploy only
 
-**Status:** open
+**Status:** open — T4, gated on console deploy returning (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** STILL OPEN at the control plane (`0004_control.sql:28` apps has a
+single `deploy_hash TEXT`; `registry.rs:296` is overwrite-only; no `deploys` table, no rollback
+handler). But the builder symptom is moot: deploy was removed from the console (pure-creator-app)
+and PlanCanvas is deleted, so nothing renders history. **Low pre-launch** (no consumer); becomes
+medium when console deploy returns. ISS-16 per-deploy scorecard depends on this. **Effort M.**
+~~**Status:** open~~
 **Severity:** medium — rollback is impossible without history; a
 multi-environment release narrative (v0.11 → v0.12) is the entire
 point of spec §9.8 Deployments.
@@ -537,8 +607,15 @@ yet — ship something first.") fires when `deploy_hash` is null.
 
 ## ISS-16 · Critic → quality scoreboard wiring missing
 
-**Status:** open (partial — Critic-loop wire shipped, no per-deploy
-persistence yet)
+**Status:** re-scoped → "stop inventing a B+ scorecard" (T1, S; re-verified 2026-06-11)
+**Re-verified 2026-06-11:** RE-SCOPED. The writer is wired (`internal/middleware.ts:193`
+→ `setQualityFromCritic`) and the reader exists (`agents.ts:233 getQualityScores`, KV).
+HealthCanvas (the grid) is deleted, so per-deploy persistence is moot. The live problem is
+a pre-launch **trust bug**: `agents.ts defaultScores()` returns a hardcoded **"B+"** overall
+with invented per-dimension grades for never-graded apps, and that fiction feeds the PM
+agent (`pm-worker.ts:126`). **Fix (S):** replace `defaultScores()` with an honest
+"not graded yet" shape. Per-deploy keying depends on ISS-15 and is deferred.
+~~**Status:** open (partial — Critic-loop wire shipped, no per-deploy persistence yet)~~
 **Severity:** medium — HealthCanvas's quality grid now updates from
 real Critic rounds via the chat middleware (`_middleware.ts` →
 `setQualityFromCritic` via `waitUntil()` after every
@@ -595,7 +672,13 @@ graded the project (or "Not graded yet" when never).
 
 ## ISS-17 · Incidents table missing — HealthCanvas shows empty state only
 
-**Status:** open
+**Status:** open — T4, dormant (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** STILL OPEN and fully dormant — no incidents RPC anywhere
+(only a comment at `internal/sre.ts:17`), HealthCanvas deleted so even the empty state is
+gone, no `incidents` table, nothing fires the SRE monitor. Nothing fake is shown. **Effort L**,
+and gated: needs ISS-18 (metering/probes as the detection signal) + ISS-28 (a scheduler to run
+the monitor) + a resurrected Health surface.
+~~**Status:** open~~
 **Severity:** medium — spec §9.9 promises a timeline of incidents
 (detection → mitigated → resolved) with a root-cause analysis from
 the SRE agent. Without a backing table the SRE agent has nowhere to
@@ -636,7 +719,15 @@ A trailing italic line points readers at this issue.
 
 ## ISS-18 · Performance metering pipeline missing — HealthCanvas signals derived from log lines
 
-**Status:** partial — sparklines wired from log-text parsing; structured metering still pending
+**Status:** open — T4, dormant; the "partial" log-regex mitigation is gone (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** the log-parsing sparkline mitigation died with HealthCanvas, so this
+is back to fully open — but honestly so: `sre-worker.ts:134` emits the literal placeholder
+"Performance metrics: <pipeline not wired yet>" (truthful, not fabricated). `crates/control/src/metering.rs`
+is a 1-line stub; `crates/platform`'s metering is **workspace-excluded dead code** with no live
+consumer; no `MeterPlugin`/`env.meter.*` is registered (worker registers only db/kv/storage/auth).
+**Effort L** (runtime instrumentation + time-series store + aggregation API + UI). Platform-primitive
+pair with ISS-28; feeds ISS-17. Low pre-launch (no surface renders perf).
+~~**Status:** partial — sparklines wired from log-text parsing; structured metering still pending~~
 **Severity:** medium — the HealthCanvas Performance section now shows
 real numbers, but they're derived from defensive log-line parsing
 rather than a structured metering pipeline.
@@ -694,7 +785,13 @@ metering (the proper fix below) replaces this once landed.
 
 ## ISS-20 · pg_catalog table introspection missing — DataCanvas Tables list is hardcoded
 
-**Status:** open
+**Status:** closed-by-removal (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED-BY-REMOVAL. DataCanvas + its `SAMPLE_TABLES` stub
+were deleted in commit `4110071f` — no hardcoded data ships. The underlying feature
+(per-app-schema pg introspection reachable from a pure creator app) is unbuilt; re-file
+as a feature proposal if a data canvas returns at the ops/code tier. Shares one missing
+capability with ISS-21/22/23/24 (a sanctioned introspection access path).
+~~**Status:** open~~
 **Severity:** medium — every project's Tables tab shows the same three
 sample rows (`users`, `posts`, `comments`). Without real introspection
 the canvas can't reflect what the project actually wrote.
@@ -733,7 +830,11 @@ nothing the user does in the canvas mutates it.
 
 ## ISS-21 · Table row pagination over real per-app schema missing
 
-**Status:** open
+**Status:** closed-by-removal (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED-BY-REMOVAL. DataCanvas + `SAMPLE_ROWS` deleted in
+`4110071f`. Unbuilt feature; would stack on ISS-20's introspection access path plus an
+identifier-safe row reader. Re-file if a data canvas returns.
+~~**Status:** open~~
 **Severity:** medium — clicking into a table on the Data canvas opens
 a row browser sourced from the same hardcoded sample data. There's
 no path to read actual rows from the per-app schema.
@@ -776,7 +877,10 @@ correctly so the UI's prev/next behaves like the real thing.
 
 ## ISS-23 · Index introspection (`pg_indexes`) missing — DataCanvas Indexes tab is hardcoded
 
-**Status:** open
+**Status:** closed-by-removal (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED-BY-REMOVAL. DataCanvas + `SAMPLE_INDEXES` deleted in
+`4110071f`. Same shape as ISS-20; re-file with that family if a data canvas returns.
+~~**Status:** open~~
 **Severity:** medium — same shape as ISS-20 but for indexes.
 **First observed:** 2026-05-01, building the Data canvas Indexes tab.
 **Component:** `crates/control` + `apps/zeroship-builder/src/server/agents.ts`
@@ -809,7 +913,15 @@ tables).
 
 ## ISS-24 · Migration log not persisted — DataCanvas Migrations tab is hardcoded
 
-**Status:** open
+**Status:** partial — substrate now EXISTS, only exposure missing (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** RE-SCOPED. The core claim ("no migrations table") is no longer true:
+plugin-db persists a per-app `__zeroship_migrations` journal in each app schema
+(`crates/plugin-db/src/register_model/bootstrap.rs`, read/updated by `migration_sweeper.rs:267,322`).
+The UI tab + `SAMPLE_MIGRATIONS` stub were deleted with DataCanvas. Remaining gap: an RPC to read
+the journal + a surface — the cheapest of the old data-canvas family since the data already exists.
+**Effort S–M**, gated on a data surface returning + the same access-path decision as ISS-20. Low
+pre-launch.
+~~**Status:** open~~
 **Severity:** medium — the timeline is the user's audit trail of
 what changed when. Without persistence the only record of a
 migration is in the deploy bundle's git history (which the dashboard
@@ -844,7 +956,13 @@ exercise the status dot variants).
 
 ## ISS-25 · Backup trigger + history not wired to actual pg_dump
 
-**Status:** open
+**Status:** closed-by-removal (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED-BY-REMOVAL for the *UI* — the fake trigger/Map stub
+was deleted with DataCanvas (`4110071f`); grep for `backup|pg_dump` across control + the
+builder server is empty. The real pre-launch concern this masked is **operational
+platform backups** (an infra/runbook item, not a builder feature) — track that
+separately, not here.
+~~**Status:** open~~
 **Severity:** medium — the "Trigger backup" button and snapshot list
 are pure UI today. No real backup is taken; restore doesn't exist.
 **First observed:** 2026-05-01, building the Data canvas Backups tab.
@@ -883,7 +1001,14 @@ the lifetime of the V8 isolate.
 
 ## ISS-26 · Media canvas backed by KV (data URLs), not real `@zeroship/storage`
 
-**Status:** open (partial — KV-backed, no real storage backend yet)
+**Status:** closed-by-removal (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED-BY-REMOVAL. MediaCanvas + its KV/data-URL stub RPCs
+were deleted in `4110071f`; there is no media surface in the builder today. `plugin-storage`
+exists as a registered primitive (backend ready), but nothing consumes it dashboard-side.
+NOTE: of the deleted set this was the most plausibly happy-path (a creator uploading a
+logo/hero) — re-file as a storage-backed upload feature if/when a media surface returns;
+current answer is agent-written assets via the Files flow.
+~~**Status:** open (partial — KV-backed, no real storage backend yet)~~
 **Severity:** medium — uploads now persist to the V8 worker's KV
 namespace as base64 data URLs (capped at 1 MB so the KV store can't be
 DOS'd by a single large drop). Files survive HMR cycles, vanish on
@@ -935,7 +1060,16 @@ app.
 
 ## ISS-28 · Cron / scheduled-worker harness missing — PM digest + SRE monitor are RPC-only
 
-**Status:** open
+**Status:** open — T4, dormant (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** STILL OPEN, confirmed by the code's own comments (`sre-worker.ts:5-21`
+"the cron itself … no scheduler in crates/control yet"). `pmDigest`/`sreMonitor` procs work
+standalone but **never fire** — shipped-but-inert, no fake data shown. `crates/control/src/cron`
+and `crates/auth/src/cron` are process-lifetime platform sweeps (audit-retention, token-sweep),
+NOT an app-job scheduler; no app-level scheduled-worker primitive exists in runtime/bundle.
+**Effort M:** the scheduler loop is small (copy the `cron::spawn_all` pattern); the genuinely new
+work is the out-of-band chat-thread write path (`data-pm-recommendation` chunks without a `useChat`
+round-trip). Platform-primitive pair with ISS-18.
+~~**Status:** open~~
 **Severity:** medium — the dual-shape PM/SRE design (spec §4.8.3.2)
 calls for periodic background passes (PM digest, SRE monitor) that
 post into the project chat thread on a cadence. The procs exist
@@ -1027,7 +1161,15 @@ now" affordance.
 
 ## ISS-19 · Project archive — control-plane backing missing
 
-**Status:** open (partial — KV-backed, no control-plane column yet)
+**Status:** closed (architecture changed; re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED / fix-path obsolete. Archive is now a first-class
+`archived` flag on the KV `ProjectRecord` (`apps/zeroship-builder/src/server/projects.ts:40-48`,
+`archiveProject`/`unarchiveProject`/`setArchived` at `:122-143`) — the old separate
+`archive-set:` key is gone ("one source of truth"). Projects are builder-local `prj_`
+ids minted with NO control plane (pure-creator-app), so there is no apps row to add a
+column to — the "control-plane column" fix path is invalid by design. KV is durable
+now (redb dev / Redis prod).
+~~**Status:** open (partial — KV-backed, no control-plane column yet)~~
 **Severity:** low-medium — archive is a reversible UI affordance and
 the spec (§8.3) explicitly frames it as a soft alternative to delete.
 Archive state now lives in the V8 worker's KV store keyed
@@ -1078,7 +1220,16 @@ session.
 
 ## ISS-10 · `/auth/sessions` list/revoke endpoints not exposed
 
-**Status:** open
+**Status:** re-scoped → "session visibility on /me" (T3, S–M; re-verified 2026-06-11)
+**Re-verified 2026-06-11:** RE-SCOPED. The `auth_sessions` table the title assumed is
+gone; the model is now `idp_sessions` + per-app `gateway_sessions`. The security-critical
+revocation already exists: password-reset cascade (`ui/reset.rs`), RP-/backchannel-logout
+(`crates/gateway/src/backchannel_logout.rs`), and `credential_version` bumps. What's missing
+is only the **visibility/granularity** layer — list a user's active sessions (device/IP/UA)
+and revoke one without a password change. **Fix (S–M):** a `list_by_user` union over the two
+session tables + two handlers on the existing auth-service `/me` page; target `crates/auth`,
+NOT control. Post-launch.
+~~**Status:** open~~
 **Severity:** low — power-user feature; not blocking sign-up/sign-in.
 **First observed:** 2026-05-01, building the Account page (spec §6.5).
 **Component:** `crates/control` + gateway `/auth/*` proxy
@@ -1118,7 +1269,15 @@ The stub keeps the layout from collapsing and signposts the gap.
 
 ## ISS-11 · Two-factor (TOTP) enrollment not wired
 
-**Status:** open
+**Status:** open — T3, post-launch (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** STILL OPEN, zero MFA code (grep of auth+control finds only a
+`token_handlers.rs:512` placeholder "MFA policy conditions are not yet enforced" and an
+unrelated "two factors" comment in `ui/link.rs`). Not a sign-up blocker (password + Google/
+GitHub OAuth + magic-link all work). Good GA hardening since creators control money via
+Stripe Connect. **Effort M–L:** challenge belongs in the auth-service `/login` flow before
+`accept_login`, + encrypted-at-rest secret storage + backup codes + enrollment on `/me`
+(benefits from ISS-10's `/me` security card landing first).
+~~**Status:** open~~
 **Severity:** low — security upgrade, not a blocker for V1.
 **First observed:** 2026-05-01, building the Account page (spec §6.5).
 **Component:** `crates/control` + gateway `/auth/*` proxy
@@ -1157,7 +1316,11 @@ The Account page renders a **deferred-section stub** for Two-factor:
 
 ## ISS-22 · Schema visualizer not built — DataCanvas Schema tab is a placeholder
 
-**Status:** open
+**Status:** closed-by-removal (re-verified 2026-06-11)
+**Re-verified 2026-06-11:** CLOSED-BY-REMOVAL. The placeholder `SchemaPane` no longer
+exists (DataCanvas deleted in `4110071f`). Was already "low"; re-file with the data-canvas
+family (strictly after ISS-20's introspection path) if that surface returns.
+~~**Status:** open~~
 **Severity:** low — the Data canvas's Schema tab is a "coming soon"
 card. Tables / Indexes / Migrations cover the day-one introspection
 surface; a graph visualizer is a polish piece.
