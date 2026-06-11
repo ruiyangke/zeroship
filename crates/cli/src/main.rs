@@ -48,23 +48,23 @@ fn cmd_serve(args: &[String]) {
     let input = args.get(2).expect(
         "Usage: zeroship serve <file> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
     );
-    let port = flag_u16(args, "--port=").unwrap_or(3000);
-    let workers: usize = flag_str(args, "--workers=")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let cpu_limit = flag_str(args, "--cpu-limit=")
-        .and_then(|s| s.parse::<u64>().ok())
+    if let Err(e) = check_unknown_serve_flags(args) {
+        eprintln!("zeroship serve: {e}");
+        eprintln!("Usage: zeroship serve <file> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]");
+        std::process::exit(1);
+    }
+    let port = parse_flag_u16(args, "--port").unwrap_or(3000);
+    let workers: usize = parse_flag_usize(args, "--workers").unwrap_or(0);
+    let cpu_limit = parse_flag_u64(args, "--cpu-limit")
         .map(std::time::Duration::from_millis);
-    let wall_timeout = flag_str(args, "--wall-timeout=")
-        .and_then(|s| s.parse::<u64>().ok())
+    let wall_timeout = parse_flag_u64(args, "--wall-timeout")
         .map(std::time::Duration::from_millis);
     // Dev default: 512 MB. Single-tenant dev apps routinely load big libraries
     // (LangChain + provider SDKs = ~100 MB by themselves). The production
     // worker's 128 MB default is sized for multi-tenant isolation, not for
     // single-process dev. CLI flag or ZEROSHIP_HEAP_LIMIT_MB overrides.
-    let heap_limit_bytes = flag_str(args, "--heap-limit-mb=")
-        .or_else(|| std::env::var("ZEROSHIP_HEAP_LIMIT_MB").ok())
-        .and_then(|s| s.parse::<usize>().ok())
+    let heap_limit_bytes = parse_flag_usize(args, "--heap-limit-mb")
+        .or_else(|| std::env::var("ZEROSHIP_HEAP_LIMIT_MB").ok().and_then(|s| s.parse().ok()))
         .map(|mb| mb * 1024 * 1024)
         .or(Some(512 * 1024 * 1024));
 
@@ -97,6 +97,22 @@ fn cmd_serve(args: &[String]) {
         source,
     }];
 
+    // Pre-check port availability so a bind failure surfaces as a clean error
+    // message instead of a panic stacktrace. We briefly bind the port with the
+    // standard library (synchronously, before spinning up V8 / compio), then
+    // immediately drop the socket. The window between this probe and the real
+    // bind inside `start_server` is tiny; a race is benign (both paths produce
+    // "address in use") and vastly better than the previous panic stacktrace.
+    if let Err(e) = std::net::TcpListener::bind(format!("0.0.0.0:{port}")) {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            eprintln!("zeroship serve: port {port} is already in use");
+            eprintln!("Hint: use --port=<N> to choose a different port.");
+        } else {
+            eprintln!("zeroship serve: cannot bind port {port}: {e}");
+        }
+        std::process::exit(1);
+    }
+    // Socket is released here so `start_server` can bind the real listener.
     eprintln!("[zeroship] Starting server on port {port}");
 
     // Opt-in db plugin: when DATABASE_URL is set, register the db plugin
@@ -320,13 +336,78 @@ fn exit_on_error(command: &str, result: Result<(), String>) {
     }
 }
 
-fn flag_u16(args: &[String], prefix: &str) -> Option<u16> {
-    args.iter()
-        .find(|a| a.starts_with(prefix))
-        .and_then(|a| a.strip_prefix(prefix))
-        .and_then(|s| s.parse().ok())
+/// Parse a named flag that accepts both `--flag=VALUE` and `--flag VALUE` forms.
+/// Returns the raw string value, or `None` if the flag is absent.
+///
+/// `flag_name` must be the bare name including the leading `--` (e.g. `"--port"`).
+/// Matching is exact: `"--port"` does NOT match `"--port-extra"`.
+fn parse_flag(args: &[String], flag_name: &str) -> Option<String> {
+    let prefix_eq = format!("{flag_name}=");
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(val) = arg.strip_prefix(&*prefix_eq) {
+            return Some(val.to_string());
+        }
+        if arg == flag_name {
+            // Space form: value is the NEXT argument.
+            return iter.next().cloned();
+        }
+    }
+    None
 }
 
+fn parse_flag_u16(args: &[String], flag_name: &str) -> Option<u16> {
+    parse_flag(args, flag_name).and_then(|s| s.parse().ok())
+}
+
+fn parse_flag_usize(args: &[String], flag_name: &str) -> Option<usize> {
+    parse_flag(args, flag_name).and_then(|s| s.parse().ok())
+}
+
+fn parse_flag_u64(args: &[String], flag_name: &str) -> Option<u64> {
+    parse_flag(args, flag_name).and_then(|s| s.parse().ok())
+}
+
+/// Known flags accepted by `zeroship serve` (bare names, no `=`).
+const SERVE_KNOWN_FLAGS: &[&str] = &[
+    "--port",
+    "--workers",
+    "--cpu-limit",
+    "--wall-timeout",
+    "--heap-limit-mb",
+];
+
+/// Return `Err` if any `--flag` argument in `args[2..]` is not a known `serve` flag.
+/// Positional args (no leading `--`) and the values after a space-separated flag
+/// are left unchecked.
+pub(crate) fn check_unknown_serve_flags(args: &[String]) -> Result<(), String> {
+    // args[0] = binary, args[1] = "serve", args[2] = <file>; flags start at index 3.
+    let mut iter = args.iter().skip(3);
+    while let Some(arg) = iter.next() {
+        if !arg.starts_with("--") {
+            // positional arg — skip (also covers numeric values from space-form flags)
+            continue;
+        }
+        // Strip any `=value` suffix so `--port=3000` matches `--port`.
+        let flag_name = match arg.find('=') {
+            Some(idx) => &arg[..idx],
+            None => arg.as_str(),
+        };
+        if !SERVE_KNOWN_FLAGS.contains(&flag_name) {
+            return Err(format!(
+                "unknown flag `{flag_name}`; run `zeroship serve --help` or see the usage above"
+            ));
+        }
+        // If this is the space form (no `=`), consume the next token as the value.
+        if !arg.contains('=') {
+            iter.next(); // skip the value token
+        }
+    }
+    Ok(())
+}
+
+/// Legacy equals-only flag parser kept for callers that have not been migrated
+/// to `parse_flag`. New code should use `parse_flag` / `parse_flag_u16` etc.
 pub(crate) fn flag_str(args: &[String], prefix: &str) -> Option<String> {
     args.iter()
         .find(|a| a.starts_with(prefix))
@@ -377,6 +458,67 @@ fn non_empty_token(token: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // ISS-57: arg-parser robustness
+    // -----------------------------------------------------------------------
+
+    /// `--port=N` and `--port N` (space form) must both resolve to N.
+    #[test]
+    fn flag_u16_accepts_both_equals_and_space_forms() {
+        // equals form
+        let args = s(&["zeroship", "serve", "app.js", "--port=8080"]);
+        assert_eq!(parse_flag_u16(&args, "--port"), Some(8080));
+
+        // space form
+        let args = s(&["zeroship", "serve", "app.js", "--port", "8080"]);
+        assert_eq!(parse_flag_u16(&args, "--port"), Some(8080));
+
+        // absent → None
+        let args = s(&["zeroship", "serve", "app.js"]);
+        assert_eq!(parse_flag_u16(&args, "--port"), None);
+    }
+
+    /// `--workers=N` and `--workers N` must both resolve to N.
+    #[test]
+    fn flag_usize_accepts_both_equals_and_space_forms() {
+        let args = s(&["zeroship", "serve", "app.js", "--workers=4"]);
+        assert_eq!(parse_flag_usize(&args, "--workers"), Some(4usize));
+
+        let args = s(&["zeroship", "serve", "app.js", "--workers", "4"]);
+        assert_eq!(parse_flag_usize(&args, "--workers"), Some(4usize));
+
+        let args = s(&["zeroship", "serve", "app.js"]);
+        assert_eq!(parse_flag_usize(&args, "--workers"), None);
+    }
+
+    /// An unrecognized `--flag` in the `serve` command must surface as an error,
+    /// not be silently swallowed so the user gets the default instead.
+    #[test]
+    fn unknown_serve_flag_is_rejected() {
+        // Typo: `--prot` instead of `--port`.
+        let args = s(&["zeroship", "serve", "app.js", "--prot=9000"]);
+        let result = check_unknown_serve_flags(&args);
+        assert!(result.is_err(), "typo'd flag should be rejected");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("--prot"), "error should name the unknown flag: {msg}");
+
+        // Known flags are accepted.
+        let args = s(&[
+            "zeroship", "serve", "app.js",
+            "--port=3000", "--workers=2", "--cpu-limit=500",
+            "--wall-timeout=2000", "--heap-limit-mb=512",
+        ]);
+        assert!(check_unknown_serve_flags(&args).is_ok());
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn resolves_bearer_token_from_flag_env_then_credentials() {
