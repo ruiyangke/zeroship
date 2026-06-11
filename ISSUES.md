@@ -37,7 +37,7 @@ builder.
 | **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
 | **test-surfaced — FIXED** | ✅ ISS-56 (serve env) · ✅ ISS-57 (CLI port) · ✅ ISS-58 (`/health`) · ✅ ISS-60 (trailing-slash, was stale doc) |
 | **test-surfaced — open** | ISS-55 `"use server"` dead in serve · ISS-59 server-only build fails · ISS-61 example/doc hygiene · ISS-62 auth `--check-config` can't dry-run |
-| **🔴 gateway-E2E (real edge)** | ✅ ISS-63 (env.db init on worker — FIXED) · **ISS-66 built-app RPC 404s on worker dispatch** (next env.db blocker) · ISS-65 build doesn't ship install-schema · ISS-64 no headless dev-auth |
+| **gateway-E2E (real edge)** | ✅ ISS-63 (env.db init) + ✅ ISS-66 (env.db RPC dispatch — **env.db works over the worker edge**) · ISS-64 headless dev-auth (gateway path) · ISS-65 build-alignment (low, backstopped) |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -391,26 +391,23 @@ known-fail). **Fix:** inject installSchema as a synthetic module on the worker (
 `index.js`/`__user__.js`/`zeroship` in `init.rs`) or register it native so the import resolves.
 init.rs:305/354 already document the *intended* resolution — it isn't reaching the worker.
 
-### ISS-66 · Built-app RPC procedures 404 on the worker dispatch (next env.db edge blocker)
-**Status:** open · **Effort:** M · **Tier:** T1 (launch-blocking)
+### ISS-66 · Built-app RPC procedures 404 on the worker dispatch — FIXED (env.db works over the edge)
+**Status:** fixed (2026-06-11, `0918536f`) · **Tier:** T1 (launch-blocking)
 
-After ISS-63, db-todos's module init succeeds but a built-app RPC call (`users.public`) on the worker
-`/dispatch` returns **404 "No default.fetch handler exported"** — i.e. the dispatcher doesn't find the
-`rpc:` procedure and falls through to `default.fetch` (absent). So **env.db apps init but their RPC
-doesn't dispatch through the real stack**. Likely a bundle/dispatch-registry concern (the `__zsDispatch`
-rpc registry not reaching the worker, related to ISS-65) or a worker-dispatch routing gap. **Fix:**
-investigate whether the built `.zship` carries the rpc registry the worker dispatcher needs, and make a
-built RPC procedure dispatchable over the worker `/dispatch` + gateway `/__zeroship/v1/<id>`. This is
-the remaining blocker (with ISS-64 for auth) to fully E2E env.db over the edge.
+Two compounding gaps: (1) the production SSR build inlined the `zeroship` *stub* (zeroshipModulePlugin
+was dev-only) so `env.db` was undefined; (2) the schema-install DDL was a top-level await that left the
+bootstrap module pending (runtime can't drive the compio loop during eval) so `default.{fetch,rpc}` were
+never set. Fix: prod build now uses zeroshipModulePlugin; installSchema plants collections synchronously
+and defers the DDL to a `__zsSchemaReady` gate the dispatcher awaits. **E2E Stage 5c GREEN — env.db works
+end-to-end over the worker dispatch** (users.public/todos.create/list). Remaining edge work: ISS-64
+(headless auth) for the gateway path.
 
-### ISS-65 · Vite-plugin build doesn't ship `install-schema`/`@zeroship/db/internal` in the bundle
-**Status:** open · **Effort:** S–M · **Tier:** T3 (build pipeline)
+### ISS-65 · Vite-plugin build doesn't ship `install-schema` in the bundle — backstopped, low
+**Status:** open (low — backstopped by ISS-63) · **Tier:** T3 (build pipeline)
 
-The production `.zship` tree-shakes out `installSchema` + `@zeroship/db/internal` (the user app never
-references them; Phase-1 synthetic entry omits the `/install-schema` subpath, Phase-2 imports both but
-was tree-shaken). ISS-63's runtime fix backstops this so apps work regardless, but the build path should
-be aligned (carry/side-effect-import the schema machinery, or document that the runtime provides it).
-`sdks/vite-plugin/src/rpc-registry.ts:229` (Phase-2 entry). No bootstrap *dist* change needed.
+The production `.zship` tree-shakes out `installSchema` + `@zeroship/db/internal` — but ISS-63's runtime
+fix now *provides* them as runtime modules, so apps work regardless. This is now an optional
+build-alignment nicety (carry/document the schema machinery), not a blocker. Low priority.
 
 ### ISS-64 · No headless / dev auth path for E2E testing the stack
 **Status:** open · **Effort:** M · **Tier:** T2 (test infra)
