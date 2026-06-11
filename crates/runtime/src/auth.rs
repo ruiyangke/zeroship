@@ -148,9 +148,27 @@ pub fn require_user_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
+    // The thrown error carries an explicit `status: 401` (+ a stable
+    // `code`) as own properties. The kernel dispatch error rail
+    // (`core/dispatch.rs::v8_exception_to_*` → `build_error_body`)
+    // reads `.status`/`.code` off the exception and renders the
+    // envelope: a 4xx so the 5xx body-sanitizer leaves the message
+    // intact (ISS-67). Without `.status`, a bare `Error` defaults to 500
+    // and the anon case gets masked as "internal error" — a misleading
+    // 500 for what is plainly an authentication failure. Mirrors the
+    // `rpc::build_capability_violation` shape.
     let throw_auth_required = |scope: &mut v8::PinScope| {
         let msg = v8::String::new(scope, "Authentication required").unwrap();
         let exc = v8::Exception::error(scope, msg);
+        if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
+            let status_key = v8::String::new(scope, "status").unwrap();
+            let status_val = v8::Integer::new_from_unsigned(scope, 401);
+            obj.set(scope, status_key.into(), status_val.into());
+
+            let code_key = v8::String::new(scope, "code").unwrap();
+            let code_val = v8::String::new(scope, "unauthenticated").unwrap();
+            obj.set(scope, code_key.into(), code_val.into());
+        }
         scope.throw_exception(exc);
     };
 

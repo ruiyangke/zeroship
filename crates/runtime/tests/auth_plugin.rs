@@ -238,6 +238,71 @@ fn require_user_throws_when_anonymous() {
     );
 }
 
+/// ISS-67: an UNCAUGHT `env.auth.requireUser()` throw on an anonymous request
+/// must surface as a clean **401** through the real dispatch error rail — NOT a
+/// masked 500. The throw carries an explicit `status: 401` (+ `code`), so the
+/// kernel dispatcher honors it as a 4xx and the body-sanitization rail (which
+/// only blanks 5xx) leaves the "Authentication required" message intact.
+///
+/// This drives the REAL path: the handler does NOT catch, so the exception
+/// propagates through `call_fetch_handler_with_user` → `build_error_body`
+/// exactly as a production anon RPC would. Pre-fix this returned 500 with a
+/// `{"message":"internal error"}` body.
+#[test]
+fn require_user_anonymous_surfaces_as_401_not_masked_500() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                // Uncaught on purpose: let the dispatch error rail render it.
+                env.auth.requireUser();
+                return Response.json({ unreachable: true });
+            }
+        };
+    "#,
+    );
+
+    let (status, body) = dispatch_with_user(&runtime, None);
+    assert_eq!(
+        status, 401,
+        "anon requireUser() must surface as 401, not a masked 500; body: {body}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+    assert_eq!(
+        v["message"], "Authentication required",
+        "the 401 body must carry the real message (4xx is not masked); body: {body}"
+    );
+    assert_ne!(
+        v["message"], "internal error",
+        "the message must NOT be the 5xx mask sentinel; body: {body}"
+    );
+    assert_eq!(
+        v["code"], "unauthenticated",
+        "the throw should carry a stable machine code; body: {body}"
+    );
+}
+
+/// Sibling guard: an authenticated `requireUser()` that returns its value
+/// uncaught still yields a normal 200 — the 401 path is anon-only and the
+/// happy path is unchanged.
+#[test]
+fn require_user_authenticated_uncaught_is_200() {
+    let runtime = build_runtime_with_auth(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                const u = env.auth.requireUser();
+                return Response.json({ id: u.id });
+            }
+        };
+    "#,
+    );
+
+    let (status, body) = dispatch_with_user(&runtime, Some(USER_JSON.to_string()));
+    assert_eq!(status, 200, "body: {body}");
+    assert!(body.contains(r#""id":"usr_abc123""#), "body: {body}");
+}
+
 /// The `auth` namespace is actually exposed on the composite `env` object
 /// (both the `fetch` arg and the `zeroship` module export), with the two
 /// expected callables. Guards the plugin wiring itself, independent of the

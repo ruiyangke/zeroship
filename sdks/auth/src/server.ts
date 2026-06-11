@@ -54,16 +54,22 @@ export const auth = {
   },
 
   /**
-   * Returns the authenticated user, or throws "Authentication required". The
-   * kernel primitive throws; the gateway/worker dispatch path translates that
-   * into a 401 for the requesting client.
+   * Returns the authenticated user, or throws an "Authentication required"
+   * error carrying `status: 401` (+ `code: "unauthenticated"`). The kernel
+   * primitive throws the same status-bearing shape; the gateway/worker
+   * dispatch path reads `.status` and surfaces a clean 401 (a 4xx, so the
+   * 5xx body-sanitizer does NOT mask the message). A status-less throw would
+   * default to 500 and be masked as "internal error" (ISS-67).
    */
   requireUser(): User {
     const ea = envAuth();
     if (ea?.requireUser) {
       return ea.requireUser();
     }
-    throw new Error("Authentication required");
+    throw Object.assign(new Error("Authentication required"), {
+      status: 401,
+      code: "unauthenticated",
+    });
   },
 
   /** Returns `true` if the current request is authenticated. */

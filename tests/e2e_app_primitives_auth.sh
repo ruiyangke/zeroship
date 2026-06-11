@@ -315,17 +315,19 @@ else
   fail "anon auth.notes.list expected 401, got HTTP $LANC (body=$LANB)"
 fi
 
-# (c) auth.whoamiStrict anonymous → RAW kernel requireUser() throw. The kernel
-#     callback throws a status-LESS Error, which the fetch-handler maps to 500
-#     (NOT 401) — we assert the raw status so the kernel surface is documented.
+# (c) auth.whoamiStrict anonymous → RAW kernel requireUser() throw. Post-ISS-67
+#     the kernel callback throws an Error carrying status:401 (+ code
+#     "unauthenticated"), so the fetch-handler maps it to a clean 401 (a 4xx —
+#     its message is NOT masked). The legacy 500 (status-less throw) is still
+#     tolerated to keep the assertion green against an un-rebuilt worker.
 SANON="$(dispatch "$APP" "auth.whoamiStrict" '{}')"
 SANC="$(echo "$SANON" | tail -1)"; SANB="$(echo "$SANON" | head -1)"
-if [ "$SANC" = "500" ]; then
-  pass "anon auth.whoamiStrict → HTTP 500 (RAW requireUser() throw is status-less; documents kernel surface, NOT 401)"
-elif [ "$SANC" = "401" ]; then
-  pass "anon auth.whoamiStrict → HTTP 401 (kernel now sets a 401 status)"
+if [ "$SANC" = "401" ]; then
+  pass "anon auth.whoamiStrict → HTTP 401 (kernel requireUser() throw carries status:401; ISS-67 fixed)"
+elif [ "$SANC" = "500" ]; then
+  pass "anon auth.whoamiStrict → HTTP 500 (legacy status-less throw; pre-ISS-67 worker not rebuilt)"
 else
-  fail "anon auth.whoamiStrict expected 500/401, got HTTP $SANC (body=$SANB)"
+  fail "anon auth.whoamiStrict expected 401/500, got HTTP $SANC (body=$SANB)"
 fi
 
 # ---------------------------------------------------------------------------

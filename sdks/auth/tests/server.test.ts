@@ -74,6 +74,23 @@ describe("server auth — env.auth absent", () => {
   test("requireUser throws", () => {
     assert.throws(() => auth.requireUser(), /Authentication required/);
   });
+
+  // ISS-67: the fallback throw must carry an explicit 401 so the dispatcher's
+  // `statusFromError` renders a clean 401 (4xx → not masked) rather than a
+  // status-less Error that defaults to 500 and gets blanked to "internal
+  // error". `code` gives clients a stable machine-readable handle.
+  test("requireUser throw carries status:401 + code so the dispatcher 401s it", () => {
+    let thrown: (Error & { status?: unknown; code?: unknown }) | undefined;
+    try {
+      auth.requireUser();
+    } catch (e) {
+      thrown = e as Error & { status?: unknown; code?: unknown };
+    }
+    assert.ok(thrown, "requireUser must throw when env.auth is absent");
+    assert.equal(thrown!.message, "Authentication required");
+    assert.equal(thrown!.status, 401, "throw must carry status 401, not be status-less (→500)");
+    assert.equal(thrown!.code, "unauthenticated");
+  });
 });
 
 describe("server auth — no client-side signOut", () => {

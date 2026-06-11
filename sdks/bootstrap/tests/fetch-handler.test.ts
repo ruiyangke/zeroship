@@ -105,6 +105,44 @@ describe("createFetchHandler — superjson wire", () => {
     });
   });
 
+  // ISS-67: a `requireUser()`-shaped throw carries an explicit `status: 401`.
+  // The fetch-handler's `statusFromError` must honor it (4xx), and because the
+  // body-sanitizer only blanks 5xx, the "Authentication required" message and
+  // the `unauthenticated` code reach the client intact — NOT masked to 500 /
+  // "internal error".
+  test("honors a requireUser 401 throw and does NOT mask its message", async () => {
+    await withDispatch(async () => {
+      const handler = createFetchHandler(async () => ({
+        userDefault: {},
+        fetch: undefined,
+        rpc: {
+          guarded() {
+            // The exact shape the kernel/SDK requireUser throws.
+            throw Object.assign(new Error("Authentication required"), {
+              status: 401,
+              code: "unauthenticated",
+            });
+          },
+        },
+      }));
+
+      const res = await handler(
+        new Request("https://app.test/__zeroship/v1/guarded", {
+          method: "POST",
+          body: JSON.stringify({ json: null }),
+        }),
+        {},
+        {},
+      );
+      const body = (await res.json()) as Record<string, unknown>;
+
+      assert.equal(res.status, 401, "401 throw must surface as 401, not 500");
+      assert.equal(body.message, "Authentication required", "4xx message must NOT be masked");
+      assert.notEqual(body.message, "internal error");
+      assert.equal(body.code, "unauthenticated");
+    });
+  });
+
   test("serializes rich output values with meta", async () => {
     await withDispatch(async () => {
       const handler = createFetchHandler(async () => ({

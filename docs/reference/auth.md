@@ -163,7 +163,7 @@ The `*_stash` cookies carry the HMAC-signed PKCE verifier + state + original req
 The npm package exposes:
 
 - `auth.getUser()` — the authenticated user, or `null` if anonymous
-- `auth.requireUser()` — the user, or throws a 401-shaped Error
+- `auth.requireUser()` — the user, or throws an `Authentication required` error carrying `status: 401` (+ `code: "unauthenticated"`). The kernel dispatch error rail reads the `.status` off the throw and renders a clean **401**; because the 5xx body-sanitizer only blanks 5xx bodies, the message survives to the client (a status-less throw would default to 500 and be masked as `"internal error"`). An anonymous `requireUser()` therefore returns a real 401, not a misleading 500.
 - `auth.isLoggedIn()` — convenience boolean
 - `auth.signOut(returnTo?)` — returns a 302 `Response` to `/__zeroship/auth/signout`
 
