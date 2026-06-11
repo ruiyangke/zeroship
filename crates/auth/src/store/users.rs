@@ -391,14 +391,20 @@ async fn request_deletion_tx(
         )
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion revoke idp_sessions: {e}")))?;
+    // DELETE (not UPDATE revoked_at): the `zeroship_auth` role has only
+    // SELECT,DELETE on gateway_sessions (no UPDATE — changeset 0025), so an
+    // `UPDATE` here fails permission-denied under the real role (it passed
+    // tests only because they run as superuser). DELETE matches the existing
+    // password-reset cascade (`ui/reset.rs`) and also clears the rows that
+    // would otherwise be orphaned on a later hard-delete (gateway_sessions has
+    // no FK to users, so CASCADE never reaches them).
     let gateway_sessions_revoked = conn
         .execute(
-            "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() \
-             WHERE user_id = $1 AND revoked_at IS NULL",
+            "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
             &[&id],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("request_deletion revoke gateway_sessions: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("request_deletion delete gateway_sessions: {e}")))?;
 
     Ok(Some(DeletionRequest {
         user_id: id,
