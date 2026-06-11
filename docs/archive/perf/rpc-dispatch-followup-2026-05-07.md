@@ -26,8 +26,8 @@ this round; anything else is marked "not measured".
 | Measured gap this run | 1,067K − 846K = **221K req/s** (the report header's quoted "844K vs 1162K" framing was prior-day; today the gap is real but smaller than the 318K cited in the prompt — probably noise + minor commits between 48dad91 and the 2026-05-04 1.16M sample) |
 
 Flamegraphs:
-- `docs/perf/flamegraphs/2026-05-07-ping-844k.svg` — HEAD (846K)
-- `docs/perf/flamegraphs/2026-05-07-ping-baseline-1067k.svg` — `48dad91` (1067K)
+- `docs/archive/perf/flamegraphs/2026-05-07-ping-844k.svg` — HEAD (846K)
+- `docs/archive/perf/flamegraphs/2026-05-07-ping-baseline-1067k.svg` — `48dad91` (1067K)
 
 Raw `perf report` text dumps live in `/tmp/perf-microbench/`
 (`top-self-clean.txt`, `top-inclusive-clean.txt`, `baseline-self.txt`,

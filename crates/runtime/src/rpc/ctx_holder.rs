@@ -1,6 +1,6 @@
 //! `RpcCtx` — a per-request native holder exposing lazy accessors for
 //! `requestId`, `traceId`, `method`, `url`, `headers`, `signal`, `user`,
-//! `idempotencyKey`. See `docs/perf/rpc-ctx-regression-2026-05-07.md` §4
+//! `idempotencyKey`. See `docs/archive/perf/rpc-ctx-regression-2026-05-07.md` §4
 //! S10 for the design rationale (avoids ~4 µs/request of eager Headers /
 //! URL / AbortController construction on procedures that never read ctx).
 //!

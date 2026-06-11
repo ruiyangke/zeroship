@@ -784,7 +784,7 @@ Ranked by measured savings + likelihood of clean implementation:
 
 ## Files
 
-- Report: `docs/perf/response-request-microbench-2026-05-08.md`
+- Report: `docs/archive/perf/response-request-microbench-2026-05-08.md`
 - JS bench fixture: `/tmp/perf-microbench/op-bench-v2.js` (NOT in repo)
 - JS bench raw runs: `/tmp/op-bench-results/v3/all.tsv` (15 runs ×
   40 benches = 600 datapoints)

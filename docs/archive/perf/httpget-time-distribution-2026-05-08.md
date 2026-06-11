@@ -56,7 +56,7 @@ Source: `/tmp/httpget-distrib/macrobench-final-{1,2,3}.txt`. Brief's
 
 `perf record -F 999 -p $PID -g --call-graph dwarf,16384 sleep 10`
 during saturate: 159,003 samples, 159.16 G event count. Flamegraph at
-`docs/perf/flamegraphs/2026-05-08-httpget-352k.svg`.
+`docs/archive/perf/flamegraphs/2026-05-08-httpget-352k.svg`.
 
 ### Microbench harness
 
@@ -315,8 +315,8 @@ Request shortcuts for the small known set of common headers
 
 ## Files
 
-- Report: `docs/perf/httpget-time-distribution-2026-05-08.md`
-- Flamegraph: `docs/perf/flamegraphs/2026-05-08-httpget-352k.svg` (1.94 MB)
+- Report: `docs/archive/perf/httpget-time-distribution-2026-05-08.md`
+- Flamegraph: `docs/archive/perf/flamegraphs/2026-05-08-httpget-352k.svg` (1.94 MB)
 - Raw perf data: `/tmp/httpget-distrib/perf.data` (2.65 GB, 159,003 samples)
 - Folded stacks: `/tmp/httpget-distrib/collapsed.txt`
 - Self-time (full): `/tmp/httpget-distrib/self-full.tsv`

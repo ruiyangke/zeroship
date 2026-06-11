@@ -681,7 +681,7 @@ impl Headers {
     /// re-routed through CallbackScope::new(options) + throw_exception,
     /// which deopts and re-routes to the slow path next iteration.
     /// Promoted to Tier 1 by the 2026-05-04 httpGet regression bisect
-    /// (`docs/perf/httpget-regression-2026-05-04.md`): scenarios.js
+    /// (`docs/archive/perf/httpget-regression-2026-05-04.md`): scenarios.js
     /// does `request.headers.get("upgrade")` per request, but
     /// `headers.has` is a hot enough close-relative on the fetch
     /// dispatch path that fastcalling it delivers measurable savings

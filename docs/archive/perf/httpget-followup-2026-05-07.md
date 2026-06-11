@@ -1,6 +1,6 @@
 # httpGet macrobench follow-up — 2026-05-07
 
-Follow-up to `docs/perf/httpget-regression-2026-05-04.md`. Re-measures the
+Follow-up to `docs/archive/perf/httpget-regression-2026-05-04.md`. Re-measures the
 current state and identifies optimization candidates with measured costs only.
 **No estimates** — every percentage cited is `perf record` self-time, every
 ns figure is microbench output, every req/s figure is `run_zerobench.sh`
@@ -140,7 +140,7 @@ FastByteStringWriter adapter that has not been written.
 
 Aggregated across all 16 worker threads (perf report --no-children
 --sort=symbol --percent-limit=0.2). Full SVG at
-`docs/perf/flamegraphs/2026-05-07-httpget-298k.svg`.
+`docs/archive/perf/flamegraphs/2026-05-07-httpget-298k.svg`.
 
 | % self | Symbol |
 |---|---|
@@ -588,6 +588,6 @@ whether gap is closed).
    header reads to mint-on-demand.
 
 End of report. Flamegraph SVG at
-`/home/ruiyang/Projects/appbase/docs/perf/flamegraphs/2026-05-07-httpget-298k.svg`.
+`docs/archive/perf/flamegraphs/2026-05-07-httpget-298k.svg`.
 Raw perf data at `/tmp/perf-httpget.data` (will be cleaned at next reboot;
 preserve via `cp` if needed for follow-up).

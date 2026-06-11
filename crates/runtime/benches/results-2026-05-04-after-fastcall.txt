@@ -54,7 +54,7 @@ Honest interpretation
 ---------------------
 
 +2.3% recovery is well below the ~50-80k req/s estimate in
-docs/perf/httpget-regression-2026-05-04.md and within run-to-run
+docs/archive/perf/httpget-regression-2026-05-04.md and within run-to-run
 noise. The fastcall path's macro plumbing is verified working by
 the v8_fastcall_smoke.rs tests (TurboFan-compiles + 1000-iter steady
 state without deopt) — but **scenarios.js doesn't exercise
@@ -101,7 +101,7 @@ To realise the regression report's +50-80k req/s estimate, EITHER:
      check — diverges from WinterCG idiom and is rejected per the
      task spec.
 
-  3. **Migrate Response.json** (referenced by docs/perf/httpget-
+  3. **Migrate Response.json** (referenced by docs/archive/perf/httpget-
      regression-2026-05-04.md as the second hot crossing). Less
      typed than (1) — body is an arbitrary JS value. Would need a
      mixed-shape fastcall + slow fallback.

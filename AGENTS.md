@@ -45,7 +45,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
 | **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/core/init.rs` |
-| **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/benchmarks/` |
+| **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
 | **Nomad + Cloud Hypervisor sandbox backend** | `docs/runbooks/sandbox-nomad-ch.md` · `crates/sandbox/src/backend/nomad_ch.rs` · `crates/sandbox/scripts/nomad-vm-wrapper.sh` |

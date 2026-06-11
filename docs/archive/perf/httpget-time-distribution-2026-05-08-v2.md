@@ -51,7 +51,7 @@ the system level.
 dwarf,16384 sleep 10` during a saturate run (378,165 req/s under
 perf overhead). 142,031 samples, 142.17 G event count. Folded via
 `perf script | inferno-collapse-perf` → 21,158 stacks. Flamegraph:
-`docs/perf/flamegraphs/2026-05-08-httpget-397k.svg` (1.71 MB).
+`docs/archive/perf/flamegraphs/2026-05-08-httpget-397k.svg` (1.71 MB).
 
 **JS microbench.** `/tmp/perf-microbench/op-bench-v2.js`, single-
 worker `zeroship serve` pinned to NUMA 0. Each named bench: 500-iter
@@ -518,9 +518,9 @@ roughly 470–520K req/s if all three land. The remaining gap to the
 
 ## Files
 
-- Report: `docs/perf/httpget-time-distribution-2026-05-08-v2.md`
-- Flamegraph (current): `docs/perf/flamegraphs/2026-05-08-httpget-397k.svg` (1.71 MB)
-- Flamegraph (prior, 348K): `docs/perf/flamegraphs/2026-05-08-httpget-352k.svg`
+- Report: `docs/archive/perf/httpget-time-distribution-2026-05-08-v2.md`
+- Flamegraph (current): `docs/archive/perf/flamegraphs/2026-05-08-httpget-397k.svg` (1.71 MB)
+- Flamegraph (prior, 348K): `docs/archive/perf/flamegraphs/2026-05-08-httpget-352k.svg`
 - Raw perf data: `/tmp/httpget-distrib-v2/perf.data` (2.36 GB, 142,031 samples)
 - perf top-self: `/tmp/httpget-distrib-v2/top-self-full.tsv`
 - Cluster summary: `/tmp/httpget-distrib-v2/clusters.txt`

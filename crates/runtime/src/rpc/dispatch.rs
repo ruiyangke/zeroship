@@ -107,7 +107,7 @@ pub fn with_rpc_context_lazy<'s, R>(
     // Snapshot CPED so we can restore on every exit path. We
     // intentionally allocate a Global here (matches the eager path's
     // contract) — skipping it when prev is undefined is a separate
-    // optimisation (C3 in `docs/perf/rpc-dispatch-followup-2026-05-07.md`).
+    // optimisation (C3 in `docs/archive/perf/rpc-dispatch-followup-2026-05-07.md`).
     let prev_slot = scope.get_continuation_preserved_embedder_data();
     let prev_global = v8::Global::new(scope, prev_slot);
 
