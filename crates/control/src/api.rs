@@ -213,6 +213,67 @@ pub async fn get_app(
     }
 }
 
+/// Why a single `purge_app`-delete failed. Lets the HTTP handler map a faithful
+/// status code while the cron reaper logs + isolates per-app.
+///
+/// `pub` (not `pub(crate)`): the orphaned-app reaper integration test drives the
+/// REAL shared `purge_app` path (no shim), so the symbol must cross the crate
+/// boundary into the test crate.
+#[derive(Debug)]
+pub enum PurgeError {
+    /// The blob/bundle VFS delete failed (NotFound is swallowed, not an error).
+    Vfs(zeroship_bundle::VfsError),
+    /// The atomic DB cascade delete failed.
+    Registry(RegistryError),
+}
+
+/// Tear down an app and all of its side-effecting state, in the ONE canonical
+/// order used by both the `delete_app` HTTP handler and the orphaned-app reaper:
+///
+///   1. VFS delete (blob/bundle) — `NotFound` swallowed (the bundle may never
+///      have been deployed).
+///   2. `registry.delete_app` — the ATOMIC DB cascade (apps row + per-app
+///      `oauth_clients` row in one txn; the real FK chain tears down every
+///      dependent row in the `zeroship` schema). Returns `false` if the row was
+///      already gone.
+///   3. Per-app Hydra OAuth client delete — best-effort + idempotent (Hydra is a
+///      separate source of truth, not reachable by a DB FK). Ordered AFTER the
+///      DB delete so a Hydra outage can never strand a live app with no client;
+///      a failure here is logged, not fatal (the route is already dead).
+///
+/// Returns `Ok(true)` if a DB row was deleted, `Ok(false)` if it was already
+/// gone. There is ONE deletion path; two callers (the `delete_app` HTTP handler
+/// and the `orphaned_app_reaper` cron).
+pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeError> {
+    // 1. Delete from VFS first (ignore NotFound — bundle may not exist yet).
+    let app_id_str = app_id.to_string();
+    if let Err(e) = state.vfs.delete(&app_id_str) {
+        match e {
+            zeroship_bundle::VfsError::NotFound(_) => { /* ok */ }
+            other => return Err(PurgeError::Vfs(other)),
+        }
+    }
+
+    // 2. Atomic DB cascade.
+    let deleted = state
+        .registry
+        .delete_app(app_id)
+        .await
+        .map_err(PurgeError::Registry)?;
+
+    if deleted {
+        // 3. Per-app Hydra OAuth client delete — best-effort + idempotent.
+        if let Err(e) = state.delete_app_oauth_client(app_id).await {
+            tracing::error!(
+                app_id = %app_id,
+                error = %e,
+                "control: per-app OAuth client delete failed on app purge (Hydra client leaked — GC later)"
+            );
+        }
+    }
+    Ok(deleted)
+}
+
 pub async fn delete_app(
     id: Path<String>,
     authz: AuthzGuard,
@@ -231,56 +292,17 @@ pub async fn delete_app(
     {
         return resp;
     }
-    // Delete from VFS first (ignore NotFound — bundle may not exist yet).
-    let app_id_str = uid.to_string();
-    if let Err(e) = state.vfs.delete(&app_id_str) {
-        match e {
-            zeroship_bundle::VfsError::NotFound(_) => { /* ok */ }
-            other => {
-                return infrastructure_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "delete app bundle",
-                    other,
-                );
-            }
-        }
-    }
-    match state.registry.delete_app(&uid).await {
-        Ok(true) => {
-            // Slice 1d (§1.1): on app delete, DELETE the per-app OAuth client
-            // from Hydra. The DB rows cascade with the apps row, but Hydra is a
-            // separate source of truth — without this, every deleted app leaks a
-            // live public PKCE client (oac_<base62>) with valid redirect_uris.
-            // Best-effort + idempotent (Hydra 404 → Ok): a hiccup here is logged,
-            // not fatal — the app row is already gone, so the route is dead. The
-            // residual client can be GC'd later, never minting codes for a live
-            // app. Ordered AFTER the DB delete so a Hydra outage can't strand a
-            // live app with no client.
-            if let Err(e) = state.delete_app_oauth_client(&uid).await {
-                tracing::error!(
-                    app_id = %uid,
-                    error = %e,
-                    "control: per-app OAuth client delete failed on app delete (Hydra client leaked — GC later)"
-                );
-            }
-            // App deletion is now ATOMIC at the DB layer: `registry.delete_app`
-            // removes the `zeroship.apps` row AND the per-app
-            // `zeroship.oauth_clients` row in ONE transaction, so the real FK
-            // cascades tear down every dependent row in the single `zeroship`
-            // schema — apps → {gateway_sessions, app_members, app_session_anchors
-            // (by app_id)} and oauth_clients → {oauth_grants, app_user_identities,
-            // app_session_anchors (by client_id)}. The former best-effort relay
-            // alias-revoke companion (and its `deleted:true, aliases_revoked:false`
-            // 500 path) is GONE: there are no orphaned live aliases to sweep
-            // because `app_user_identities` cascade-deletes with the oauth_clients
-            // row. The Hydra-client delete above stays (Hydra is a separate source
-            // of truth, not reachable by a DB FK).
-            web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true}))
-        }
+    match purge_app(&state, &uid).await {
+        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"deleted": true})),
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
-        Err(e) => error_response(e),
+        Err(PurgeError::Vfs(e)) => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "delete app bundle",
+            e,
+        ),
+        Err(PurgeError::Registry(e)) => error_response(e),
     }
 }
 

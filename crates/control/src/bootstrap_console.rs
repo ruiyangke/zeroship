@@ -370,12 +370,20 @@ async fn upsert_console_app_row(
     // gateway's `lookup_by_name` resolves `console.*` to. One console per
     // deployment on a shared DB, so the `apps.name` UNIQUE constraint never
     // collides.
+    //
+    // `system = true` (ISS-12b): the console is OWNER-LESS by construction —
+    // this seed creates NO `app_members` owner row. The control-side
+    // orphaned-app reaper purges owner-less apps; without this flag it would
+    // reap the platform's own console. The reaper excludes `system = true`. Set
+    // on both the INSERT and the ON CONFLICT branch so the flag is idempotently
+    // (re)asserted on every control boot.
     pg.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, system) \
+         VALUES ($1, $2, $3, $4, $5, true) \
          ON CONFLICT (id) DO UPDATE SET \
             name = EXCLUDED.name, \
-            plan_id = EXCLUDED.plan_id",
+            plan_id = EXCLUDED.plan_id, \
+            system = true",
         &[app_id, &app_name, &CONSOLE_PLAN_ID, &api_key, &api_key_hash],
     )
     .await

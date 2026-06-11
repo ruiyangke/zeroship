@@ -925,22 +925,24 @@ fn main() -> std::io::Result<()> {
         pairwise_salt,
     });
 
-    // Spawn the in-process retention cron. It is the sanctioned deleter for the
-    // append-only `zeroship.app_audit` + `zeroship.authz_decisions` tables —
-    // without it they would grow unbounded with no deleter. Peer of the auth
-    // `audit_events` sweep; both flag their connection with the shared
-    // `zeroship.audit_retention` GUC the tamper triggers honor. The cron holds
-    // its own `Arc<Registry>` (cheap String clone of the one in `AppState`) and
-    // opens a fresh connection per tick.
+    // Spawn the in-process control crons:
+    //   - audit_retention: sanctioned deleter for the append-only
+    //     `zeroship.app_audit` + `zeroship.authz_decisions` tables (peer of the
+    //     auth `audit_events` sweep; shares the `zeroship.audit_retention` GUC).
+    //   - orphaned_app_reaper: purges apps left owner-less by the ISS-12
+    //     account-erase reaper (DB row + blobs + Hydra client), excluding the
+    //     `system = true` platform console.
+    // Both hold an `Arc<AppState>` clone (cheap) and open fresh per-tick
+    // connections.
     zeroship_control::cron::spawn_all(
-        Arc::new(state.registry.clone()),
+        Arc::clone(&state),
         audit_retention_months,
         audit_retention_check_secs,
     );
     tracing::info!(
         retention_months = audit_retention_months,
         check_secs = audit_retention_check_secs,
-        "control: audit-retention cron spawned"
+        "control: audit-retention + orphaned-app-reaper crons spawned"
     );
 
     let bind_addr = format!("{bind_host}:{port}");
