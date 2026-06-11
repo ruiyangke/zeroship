@@ -32,6 +32,13 @@ declare const globalThis: {
   __zsEnterKind?: (kind: string) => number;
   __zsExitKind?: (token: number) => void;
   __zsValidateOutput?: boolean;
+  // Schema-readiness promise set by `runtime-entry.ts` (production) — the
+  // async DDL + mask-flush chain. The DDL is kept OFF the module-eval
+  // critical path (a top-level await on it 404s the dispatch — ISS-66), so
+  // the dispatcher gates the first procedure on it here. Undefined for
+  // schema-less apps and the dev path (dev-entry awaits its own
+  // `schemaReady` before calling through).
+  __zsSchemaReady?: Promise<unknown>;
   [key: string]: unknown;
 };
 
@@ -90,6 +97,18 @@ declare const globalThis: {
       | undefined;
     if (typeof fn !== "function") {
       throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
+    }
+
+    // Schema-readiness gate (ISS-66). The production `runtime-entry`
+    // installs the Collection wrappers synchronously but defers the async
+    // DDL chain to `__zsSchemaReady` (awaiting it at module top-level
+    // would 404 the dispatch). Gate the first procedure on it so handlers
+    // don't race `registerModel`. A rejected chain (DDL/mask-flush
+    // failure) surfaces here, through the RPC error envelope. No-op for
+    // schema-less apps (undefined) and on the warm path (settled promise).
+    const schemaReady = globalScope.__zsSchemaReady;
+    if (schemaReady && typeof (schemaReady as { then?: unknown }).then === "function") {
+      await schemaReady;
     }
 
     const cfg = (fn as { config?: { input?: unknown; output?: unknown; kind?: string } }).config;

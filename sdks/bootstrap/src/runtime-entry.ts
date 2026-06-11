@@ -9,14 +9,29 @@
 // content is pure top-level JS suitable for splicing.
 //
 // Stage 7 of the @zeroship/db refactor moved `installSchema` into the
-// `@zeroship/bootstrap` package. This entry awaits the dynamic import
-// of that package (bundle-resident; the bundle includes it because the
-// Vite plugin's synthetic SSR entry side-effect-imports it).
+// `@zeroship/bootstrap` package. This entry dynamic-imports that package
+// (runtime-provided — `crates/runtime/src/core/bootstrap_modules.rs`
+// satisfies the specifier, so the import resolves synchronously through
+// the microtask checkpoint `load_modules` invokes after
+// `module.evaluate()`).
 //
-// Top-level-await pattern: V8's module evaluation runs the dynamic
-// `import("@zeroship/bootstrap")` synchronously through the microtask
-// checkpoint that `load_modules` invokes after `module.evaluate()`,
-// because the package is bundle-resident.
+// Schema-readiness MUST NOT block module evaluation. `installSchema`
+// plants the typed `Collection` wrappers on `env.db` SYNCHRONOUSLY (so
+// `default.{fetch,rpc}` and `env.db.<collection>.find(...)` are live the
+// instant evaluation completes); the async DDL chain (`registerModel`
+// advisory-lock + the mask-policy flush) resolves later. We stash that
+// chain on `globalThis.__zsSchemaReady` and the shared dispatcher
+// (`dispatcher.ts`) AWAITS it before running any procedure — mirroring
+// the dev path (`dev-entry.ts`, which gates on `schemaReady` per request).
+//
+// Why not `await` here: the dynamic `import("@zeroship/db/internal")`
+// settles synchronously, but the DDL chain does real async Postgres I/O.
+// A top-level `await` on it leaves the bootstrap module's evaluation
+// PENDING after `load_modules`' single microtask checkpoint (which cannot
+// drive the compio event loop). `default.fetch` / `default.rpc` would
+// then be unread (exports unpopulated) and every dispatch 404s with
+// "No default.fetch handler exported". Deferring readiness to the
+// dispatch path keeps init synchronous and exports available. (ISS-66)
 //
 // Guards:
 //   - `__zs_env()?.db` missing → no DbPlugin registered on this runtime.
@@ -27,10 +42,11 @@
 //     `default` carries `{ fetch, rpc }` only — schema installs lazily
 //     on first request via the dev-entry's path).
 //
-// Errors thrown by `installSchema` (validation, naming collisions)
-// re-raise — module evaluation rejects, the runtime surfaces it as an
-// init failure, and the worker refuses to serve until the bundle is
-// re-deployed.
+// Errors from the synchronous `installSchema` call (validation, naming
+// collisions) re-raise — module evaluation rejects, the runtime surfaces
+// it as an init failure. DDL-chain errors surface on the first dispatch
+// (the dispatcher awaits `__zsSchemaReady` and lets the rejection through
+// to the RPC error envelope) — same as the dev path.
 
 // Module marker — stripped by the post-build script. See dispatcher.ts
 // for the same pattern.
@@ -45,6 +61,10 @@ declare const globalThis: {
   // DELETES this global so no creator handler (which runs only after
   // module evaluation completes) can reach it.
   __zsDbPlatform?: (db: unknown) => unknown;
+  // Schema-readiness promise — set here (the DDL + mask-flush chain) and
+  // awaited by the shared dispatcher (`dispatcher.ts`) before running any
+  // procedure. Keeps the DDL off the module-eval critical path. (ISS-66)
+  __zsSchemaReady?: Promise<unknown>;
   [key: string]: unknown;
 };
 
@@ -83,33 +103,38 @@ if (schema && typeof schema === "object") {
         ? globalThis.__zsDbPlatform(envDb)
         : undefined;
 
+      // `installSchema` plants the Collection wrappers SYNCHRONOUSLY; the
+      // returned `ready` is the async DDL chain. We do NOT await it here —
+      // awaiting would leave module evaluation pending and 404 the
+      // dispatch (see the header note). Build the full readiness chain
+      // (DDL → mask-policy flush) and stash it on `__zsSchemaReady`; the
+      // shared dispatcher awaits it before the first procedure runs.
       const { ready } = sdk.installSchema(schema, envDb, { platform: plat });
-      // Await the DDL chain so the bootstrap module's top-level
-      // promise doesn't resolve until registerModel has settled.
-      try {
-        await ready;
-      } catch (e) {
-        const err = e as { message?: string };
-        console.error(
-          "[zeroship] schema DDL failed:",
-          (err && err.message) ? err.message : String(e),
-        );
-        throw e;
-      }
 
-      // **P5.5 PR 5** — flush the pending mask policy (declared via
-      // `defineMaskPolicy()` at app top-level) through the native
-      // `setMaskPolicy` op. Single shot at boot — re-declares after
-      // this point do not propagate to the platform until the next
-      // worker cold start. A failure here surfaces as a rejected
-      // module evaluation (same shape as the schema DDL failure
-      // above) so a creator's typo in `defineMaskPolicy({...})` is
-      // loud, not silent.
-      //
-      // **P9 §8** — `setMaskPolicy` moved off `env.db` to the
-      // `__platform` handle. Call it on `plat` (resolved above), not on
-      // `envDb`.
-      try {
+      globalThis.__zsSchemaReady = (async () => {
+        // DDL (registerModel advisory-lock chain).
+        try {
+          await ready;
+        } catch (e) {
+          const err = e as { message?: string };
+          console.error(
+            "[zeroship] schema DDL failed:",
+            (err && err.message) ? err.message : String(e),
+          );
+          throw e;
+        }
+
+        // **P5.5 PR 5** — flush the pending mask policy (declared via
+        // `defineMaskPolicy()` at app top-level) through the native
+        // `setMaskPolicy` op. Single shot at boot — re-declares after
+        // this point do not propagate to the platform until the next
+        // worker cold start. A failure here rejects `__zsSchemaReady`, so
+        // a creator's typo in `defineMaskPolicy({...})` surfaces on the
+        // first dispatch (loud, not silent).
+        //
+        // **P9 §8** — `setMaskPolicy` moved off `env.db` to the
+        // `__platform` handle. Call it on `plat` (resolved above), not on
+        // `envDb`.
         const policyMod = await import("@zeroship/db/internal") as {
           _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
         };
@@ -128,14 +153,7 @@ if (schema && typeof schema === "object") {
             ) => Promise<unknown>).call(plat, pending);
           }
         }
-      } catch (e) {
-        const err = e as { message?: string };
-        console.error(
-          "[zeroship] mask policy flush failed:",
-          (err && err.message) ? err.message : String(e),
-        );
-        throw e;
-      }
+      })();
     }
   }
 }

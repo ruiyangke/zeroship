@@ -14,7 +14,10 @@ import {
   computeManifestExtras,
   type DiscoveredProcedure,
 } from "./manifest.js";
-import { zeroshipBootstrapResolverPlugin } from "./zeroship-module.js";
+import {
+  zeroshipBootstrapResolverPlugin,
+  zeroshipModulePlugin,
+} from "./zeroship-module.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 
@@ -451,6 +454,18 @@ export function buildPlugin(
           // the polyfill path before Vite tries to load `node:crypto`
           // etc. as bare specifiers.
           nodeCompatPlugin(),
+          // Intercept the bare `zeroship` specifier so user code's
+          // `import { env } from "zeroship"` resolves to the runtime
+          // virtual module (`Object.freeze(__zs_env())`) instead of the
+          // file-linked `zeroship-stub` package (`export const env = {}`).
+          // Without this, `noExternal: true` inlines the stub and
+          // `env.db` is `undefined` at runtime — every env.db (and
+          // env.auth/kv/storage) RPC procedure throws `Cannot read
+          // properties of undefined`. This mirrors the dev pipeline,
+          // which installs the same plugin (`index.ts`). `enforce: "pre"`
+          // makes it win the `zeroship` specifier before node-compat or
+          // the default resolver. (ISS-66)
+          zeroshipModulePlugin(),
           // transformPlugin rewrites server modules with procedure
           // metadata patches and records procedure
           // metadata into `state.discoveredProcedures` for the manifest
