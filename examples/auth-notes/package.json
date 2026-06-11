@@ -1,0 +1,23 @@
+{
+  "name": "auth-notes",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zeroship/auth": "workspace:*",
+    "@zeroship/kv": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "@zeroship/types": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}
