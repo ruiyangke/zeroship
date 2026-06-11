@@ -14,32 +14,20 @@ what's actually wrong today, the fix + rough effort, and dependencies.
 **Status** — `open` · `re-scoped` (open, but title/severity/fix-path corrected 2026-06-11).
 **Tiers** — `T1` GA-blocking (compliance) · `T2` post-launch power/security.
 
-## Active issues (2 + 1 remainder)
+## Active issues (1 + 1 remainder)
 
 | Tier | Issue | Status | Effort |
 |---|---|---|---|
-| T2 | ISS-10 · session visibility on `/me` | re-scoped | S–M |
 | T2 | ISS-11 · 2FA / TOTP | open | M–L |
 | T3 | ISS-12b · owned-app blob/bundle cleanup on erase | open (follow-up) | S–M |
 
 All live in `crates/auth` (ISS-12b spans auth → control/blob store) and are independent of
-the builder rewrite. **ISS-12 (the GDPR-erase lifecycle) shipped 2026-06-11** — see below.
+the builder rewrite. **Shipped 2026-06-11:** ISS-12 (GDPR-erase lifecycle, `3a9b2315` +
+`a0d23e8c`) and ISS-10 (session visibility/revoke on `/me`, `de38f943`).
 
 ---
 
 ## T2 — post-launch · power / security
-
-### ISS-10 · No active-session list / single-session revoke
-**Status:** re-scoped (was "/auth/sessions endpoints") · **Effort:** S–M
-
-The `auth_sessions` table the old title assumed is gone; the model is `idp_sessions` +
-per-app `gateway_sessions`. Security-critical revocation **already exists**: password-reset
-cascade (`ui/reset.rs`), RP-/backchannel-logout (`crates/gateway/src/backchannel_logout.rs`),
-`credential_version` bumps. Only the **visibility** layer is missing — list a user's active
-sessions (device/IP/UA) and revoke one without a password change.
-
-**Fix:** a `list_by_user` union over the two session tables + two handlers on the existing
-auth-service `/me` page. Target `crates/auth`, not control.
 
 ### ISS-11 · No two-factor (TOTP) enrollment
 **Status:** open · **Effort:** M–L
