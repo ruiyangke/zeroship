@@ -37,6 +37,7 @@ builder.
 | **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
 | **test-surfaced — FIXED** | ✅ ISS-56 (serve env) · ✅ ISS-57 (CLI port) · ✅ ISS-58 (`/health`) · ✅ ISS-60 (trailing-slash, was stale doc) |
 | **test-surfaced — open** | ISS-55 `"use server"` dead in serve · ISS-59 server-only build fails · ISS-61 example/doc hygiene · ISS-62 auth `--check-config` can't dry-run |
+| **🔴 gateway-E2E (real edge)** | **ISS-63 CRITICAL — env.db apps don't init on the worker** · ISS-64 no headless dev-auth for testing |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -297,6 +298,11 @@ example** (G2), **`env.auth` has zero example** so the gateway `ZeroShip-User`�
 **Fix:** a gateway-E2E harness (`e2e_app_primitives.sh`) deploying a real built example through
 control→gateway→worker + asserting the primitives over the edge, plus `storage-gallery` /
 `auth-notes` examples + a kv runner.
+**Update (2026-06-11):** the harness landed (`tests/e2e_app_primitives.sh`) and is the first test to
+drive a real app's primitives over the multi-node edge — it deploys+serves db-todos through the gateway
+(routing/dispatch/cold-load/V8 fetch all proven). It immediately surfaced **ISS-63** (CRITICAL: env.db
+apps don't init on the worker) and **ISS-64** (no headless auth) as its two known-fails. Remaining
+coverage work: `storage-gallery` + `auth-notes` examples + kv runner once ISS-63/64 unblock the edge.
 
 ### ISS-55 · `"use server"` named exports don't dispatch under `zeroship serve`
 **Status:** open · **Effort:** S–M · **Tier:** T3 (DX/contract)
@@ -357,6 +363,34 @@ the **old `rules/match/action` manifest** (now a flat `resources` map); (b) `url
 `env.KV` (Cloudflare-style uppercase) but the plugin registers `env.kv` → crash; (c) `weather-proxy.js`
 + `ai-streaming.js` lack an `export default` so raw serve can't dispatch them (ties to ISS-55);
 (d) a `@zeroship/bootstrap ↔ @zeroship/db` cyclic-dependency warning on every `pnpm install`.
+
+### ISS-63 · CRITICAL: every `env.db` (schema-bearing) app fails to init on the production worker
+**Status:** open · **Effort:** M · **Tier:** T1 (launch-blocking)
+
+The runtime's `runtime-entry.js` (`sdks/bootstrap/dist/runtime-entry.js:50`, embedded via
+`include_str!`) does `await import("@zeroship/bootstrap/install-schema")` to install the `default.schema`
+collections. On the **production worker** the module loader can't resolve it — it's inlined by the vite
+build under `noExternal` (so not separately addressable) and it's not a native module, so the
+dynamic-import host callback (`crates/runtime/src/core/dynamic_import.rs:158`) rejects with
+`TypeError: Cannot find module '@zeroship/bootstrap/install-schema'` → `Evaluate rejected: index.js` →
+HTTP 500. **Net: NO schema-bearing (env.db) app runs in production** — broken over both the gateway and
+the direct worker `/dispatch`. Reproduced with freshly rebuilt bootstrap dist + worker binary (not
+stale). Found by the first real-edge test of a schema app (the `tests/e2e_app_primitives.sh` G1
+known-fail). **Fix:** inject installSchema as a synthetic module on the worker (alongside
+`index.js`/`__user__.js`/`zeroship` in `init.rs`) or register it native so the import resolves.
+init.rs:305/354 already document the *intended* resolution — it isn't reaching the worker.
+
+### ISS-64 · No headless / dev auth path for E2E testing the stack
+**Status:** open · **Effort:** M · **Tier:** T2 (test infra)
+
+`--dev-insecure` does NOT bypass control's `AuthzGuard` or the gateway's SEC-5 RPC auth, and the old
+`--master-key` bearer is gone, so there is no headless way to (a) mint the first PAT for the control
+admin API (`POST /api/apps`/deploy require a `pat+jwt` verified against `zeroship.permission_tokens`, and
+minting one needs an interactive OAuth session) or (b) mint an app session/Bearer for authenticated RPC
+(all three gateway auth arms require Hydra). `e2e_app_primitives.sh` works around (a) by offline-signing
+a `pat+jwt` with a seeded admin role + `--signing-key-file`; (b) (the G3 known-fail) needs Hydra. **Fix:**
+a `--dev-insecure` shortcut that admits a headless admin PAT + an app session for local/test (gated to
+dev-only, like the dev-auth tier), so the full edge path is testable without standing up Hydra.
 
 ### ISS-62 · `zeroship-auth --check-config` can't dry-run config-from-file
 **Status:** open · **Effort:** S · **Tier:** T3 (DX/ops)
