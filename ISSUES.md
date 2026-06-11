@@ -392,15 +392,12 @@ a `pat+jwt` with a seeded admin role + `--signing-key-file`; (b) (the G3 known-f
 a `--dev-insecure` shortcut that admits a headless admin PAT + an app session for local/test (gated to
 dev-only, like the dev-auth tier), so the full edge path is testable without standing up Hydra.
 
-### ISS-62 · `zeroship-auth --check-config` can't dry-run config-from-file
-**Status:** open · **Effort:** S · **Tier:** T3 (DX/ops)
+### ISS-62 · `zeroship-auth --check-config` can't dry-run config-from-file — FIXED
+**Status:** fixed (2026-06-11) · **Tier:** T3 (DX/ops)
 
-Unlike control/gateway/worker, the auth binary's `--check-config` does NOT short-circuit before
-relay-mailer/SMTP validation, so it exits 1 (`AUTH_RELAY_SMTP_HOST is required when
---relay-forward-mailer=smtp`) and never prints the resolved config — making auth's config-from-file
-not dry-run-verifiable (4 `config_check_e2e.sh` auth cases fail; pre-existing, surfaced by the config
-migration). **Fix:** in `crates/auth/src/main.rs`, run `--check-config` (resolve + report) before the
-runtime-only mailer validation.
+The `--check-config` short-circuit now runs before mailer/SMTP construction (parity with
+control/gateway/worker); config-from-file is dry-run-verifiable. Real boot still fail-fasts on the
+missing SMTP host. `config_check_e2e.sh` auth cases 4/4 pass.
 
 > **Fixed in passing (config migration, `8c5a2f57`):** the compose **worker** `command: >` folded
 > scalar embedded a `# NOTE:` comment that YAML folded into argv as literal tokens, silently
