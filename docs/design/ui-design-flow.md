@@ -102,7 +102,7 @@ define → design → validate → ship → measure, collapsed to minutes and on
 
 | Enterprise pillar | zeroship-builder mechanism |
 |---|---|
-| Design system = source of truth | `@zeroship/ui` + `@zeroship/ui/styles.css` + `ThemeProvider` are baked into generated React apps; Builder composes governed primitives (`Button`, `Card`, `Dialog`, `Select`, `Tabs`, `Input`, `Textarea`, `Table`, `Badge`, `Toast`/`ToastViewport`, `EmptyState`, `Spinner`, `Checkbox`, `Switch`, `RadioGroup`, `Tooltip`, `Popover`, `Menu`, `Accordion`, `Separator`) and semantic `--zs-*` tokens, never hand-rolls covered controls |
+| Design system = source of truth | `@zeroship/ui` + `@zeroship/ui/styles.css` + `ThemeProvider` are baked into generated React apps; Builder composes governed primitives (`Button`, `Card`, `Dialog`, `Select`, `Tabs`, `Input`, `Field`, `DataTable`, `Badge`, `Toast`, `EmptyState`, `Spinner`, `Checkbox`, `Switch`, `RadioGroup`, `Tooltip`, `Popover`, `Menu`, `Accordion`, `Separator`) and semantic `--zs-*` tokens, never hand-rolls covered controls |
 | Gated, multi-role | Critic dimension keys (`composed-from-system`, `states`, `responsive`, `accessibility`, `content`, `correctness`, `security`, `performance`, `code_health`) → Reviewer hard gate |
 | Research / definition | Wizard (discovery) + PM (IA / plan) |
 | States + a11y + responsive by default | Scaffold templates ship empty/loading/error states, WCAG defaults, breakpoints — the agent *inherits* them |

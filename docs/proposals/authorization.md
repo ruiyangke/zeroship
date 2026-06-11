@@ -1,6 +1,6 @@
 # zeroship authorization — proposal
 
-**Status:** proposal, in review (revision 1)
+**Status:** partially shipped. The P9 platform-RBAC half shipped to main — `crates/authz/` (Cedar engine) wired into the control plane (commits `010476b5`, `cf3431ca`). The P12 end-user-authz half (worker/runtime Cedar, bundle `policies.cedar`, `env.authz`) is **not built**; this document remains the forward spec for P12.
 **Date:** 2026-05-27
 **Branch:** `proposal/auth-server`
 **Worktree:** `.claude/worktrees/auth-server`

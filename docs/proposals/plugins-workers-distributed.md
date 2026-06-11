@@ -1,6 +1,6 @@
 # Plugins + Workers in a distributed runtime
 
-**Status:** **In progress** — design active; correctness fixes for kv/storage backends and stateless-worker migration not yet shipped. Companion `docs/architecture/distributed.md` describes the current shipped state.
+**Status:** **In progress** — design active. Distributed KV has shipped (Redis-backed `env.kv`, commit `5b17dc39`, fixing multi-worker correctness). Distributed-correctness fixes for the storage/db backends and the stateless-worker migration are not yet shipped. Companion `docs/architecture/distributed.md` describes the current shipped state.
 
 > Companion to `2026-04-23-distributed-architecture.md`. That doc covers
 > the full stack; this one zooms in on the two layers that run user code:

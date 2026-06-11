@@ -14,8 +14,10 @@ Current internal endpoints are:
 
 - `GET /internal/routes`
 - `GET /internal/versions`
-- `GET /internal/env/{app_id}`
+- `GET /internal/apps/{app_id}`
+- `GET /internal/apps/{app_id}/env`
 - `POST /internal/usage`
+- `POST /internal/webhooks/stripe`
 
 Mutating `/api/*` endpoints accept either an authenticated admin session or the master-key bearer. `/internal/*` is gated by the control-key bearer unless `--dev-insecure` is enabled.
 The master-key is the human or automation credential for creator/admin control-plane mutations, while the control-key is the machine-to-machine bearer gateway and worker use for `/internal/*` feeds and usage reporting.
@@ -27,9 +29,12 @@ main.rs            boot, config, route registration
 lib.rs             `AppState`, shared services, secret wrappers
 api.rs             app CRUD, deploy, plan, usage reads
 internal.rs        route/version/env feeds, usage ingest
-auth_handlers.rs   login/signup/authorize/session flows
-auth_service.rs    cookie JWTs, password auth
-oauth.rs           Google OAuth config + flow helpers
+token_handlers.rs  PAT issuance (`/me/tokens`)
+oauth_handlers.rs  admin OAuth-client CRUD against hydra
+oauth_grants_handlers.rs  per-app OAuth grant management
+authz_guard.rs     Cedar-backed request authorization (crates/authz)
+admin_handlers.rs  platform-admin surface
+bootstrap_console.rs  R5 console seed (`--bootstrap-console`)
 env_handlers.rs    vars/secrets CRUD + process.env exposure list
 env_store.rs       encrypted-at-rest env/secrets storage
 registry.rs        PostgreSQL-backed app registry
@@ -61,18 +66,24 @@ The `apps` table currently carries the routing/deploy state the rest of the plat
 
 ```sql
 apps(
-  id uuid primary key,
-  name text unique,
-  plan_id text,
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  plan_id text not null default 'free',
   deploy_hash text,
-  api_key text,
-  api_key_hash text,
-  env_version bigint default 0,
+  api_key text not null,
+  api_key_hash text not null default '',
+  env_version bigint not null default 0,
+  suspended boolean not null default false,
+  audit_locked boolean not null default false,
   manifest_json text,
-  created_at timestamptz,
-  updated_at timestamptz
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 )
 ```
+
+The schema is Liquibase-owned (`db/changelog/`, changeset
+`0004_control.sql`); the registry consumes these tables but does not create
+them.
 
 ## Route and version feeds
 
@@ -80,7 +91,7 @@ apps(
 
 `Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
 
-Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/env/{app_id}` when `env_version` changes.
+Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/apps/{app_id}/env` when `env_version` changes.
 These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.
 
 ## Deploy ingest
@@ -101,15 +112,21 @@ The blob-store ingest path is current. The older raw bundle upload path is gone.
 
 ## Auth flow
 
-End-user auth still terminates in control:
+End-user auth does **not** terminate in control. The gateway is the OIDC
+RP of the auth service (`crates/auth` + hydra); control is a pure API
+resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
+`console_sessions` surface was removed in the R5 cutover
+(`crates/control/src/lib.rs`).
 
 ```text
-Gateway -> /auth/authorize?app_id=...&return=...
-Control -> login / OAuth / consent
-Control -> sets `__zs_session`
-Gateway -> validates cookie and forwards `ZeroShip-User`
+Gateway -> 302 to hydra /oauth2/auth (no session cookie)
+crates/auth -> login / OAuth / consent, accept_login against hydra
+Gateway -> /__zeroship/auth/callback: code exchange, sets `__Host-zeroship_app_session`
+Gateway -> validates the session and forwards `ZeroShip-User` (HMAC-signed)
 Worker/runtime -> reads the forwarded user context
 ```
+
+See `docs/reference/auth.md` for the full flow.
 
 ## Notes
 

@@ -32,7 +32,7 @@ The current system is pull-based:
 
 - gateway polls `/internal/routes` every 5 seconds
 - worker polls `/internal/versions` every 5 seconds
-- worker fetches `/internal/env/{app_id}` when `env_version` changes
+- worker fetches `/internal/apps/{app_id}/env` when `env_version` changes
 
 There is no event bus or push fanout in the current code path. Polling keeps the
 data flow one-directional (control is never called synchronously on the request

@@ -136,14 +136,29 @@ schema({
 
 ### 9. Use stable machine-readable error codes
 
-Zeroship SDK-facing error codes are canonical `SCREAMING_SNAKE`, not prose strings.
+Zeroship surfaces error codes from two namespaces:
+
+- **SDK error-class codes** — `SCREAMING_SNAKE` literals stamped by the typed
+  error classes in [`sdks/db/src/errors.ts`](../../sdks/db/src/errors.ts):
+  `VALIDATION` (`ValidationError`), `OPTIMISTIC_CONCURRENCY`
+  (`OptimisticLockError`), `NOT_FOUND` (`NotFoundError`), `NOT_UNIQUE`
+  (`NotUniqueError`).
+- **Native DB wire codes** — `lower_snake_case` strings the runtime stamps from
+  the `DbError` variant in [`crates/plugin-db/src/error.rs`](../../crates/plugin-db/src/error.rs):
+  `unique_violation`, `fk_violation`, `not_null_violation`, `check_violation`,
+  `serialization_failure`, `lock_not_available`, `transient`, …
+
+The SDK's `mapNativeError` rail runs caught errors through `canonicalErrorCode`,
+which upcases the wire code, so app code branches on the `SCREAMING_SNAKE` form
+either way:
 
 ```ts
-if (error?.code === "UNIQUE_VIOLATION") { /* ... */ }
-if (error?.code === "LOCK_NOT_AVAILABLE") { /* ... */ }
+if (error?.code === "UNIQUE_VIOLATION") { /* unique_violation, canonicalized */ }
+if (error?.code === "OPTIMISTIC_CONCURRENCY") { /* OptimisticLockError class */ }
 ```
 
-See the current database-side codes in [sdks/db/src/errors.ts](../../sdks/db/src/errors.ts) and [crates/plugin-db/src/backend/sqlite/error.rs](../../crates/plugin-db/src/backend/sqlite/error.rs).
+Whichever namespace an error originates in, prefer matching `error.code` over
+substring-matching the message.
 
 ### 10. Let query chains read left-to-right
 

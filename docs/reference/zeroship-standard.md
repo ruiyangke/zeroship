@@ -27,15 +27,10 @@ export default {
 
 ## RPC authoring
 
-`@zeroship/rpc/server` provides the current wrapper helpers in
-`sdks/rpc/src/server.ts`:
-
-- `procedure`
-- `query`
-- `mutation`
-- `action`
-- `stream`
-- `subscription`
+`@zeroship/rpc/server` (in `sdks/rpc/src/server.ts`) provides the wrapper
+helpers (`procedure`, `query`, `mutation`, `action`, `stream`,
+`subscription`) — see [docs/reference/rpc.md](./rpc.md) for the canonical
+list and signatures.
 
 Named exports are normalized into the runtime RPC object by the Vite plugin's
 synthetic server entry and `sdks/bootstrap/src/normalize.ts`. The runtime-owned

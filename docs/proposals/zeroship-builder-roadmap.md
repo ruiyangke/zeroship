@@ -12,8 +12,8 @@
 > | Doc | Keep | Replaced by this doc |
 > |---|---|---|
 > | `docs/proposals/feature-roadmap.md` | strategic thesis (monetization moat) | platform phase ordering (predates the built builder) |
-> | `specs/2026-04-30-zeroship-builder-design.md` | §0–§29 behavior/UX/architecture | §30 Release 0–3 phasing |
-> | `specs/2026-04-30-zeroship-builder-features.md` | the 580-feature inventory (A–JJ) | priority→release mapping |
+> | `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` | §0–§29 behavior/UX/architecture | §30 Release 0–3 phasing |
+> | `docs/archive/superpowers/specs/2026-04-30-zeroship-builder-features.md` | the 580-feature inventory (A–JJ) | priority→release mapping |
 > | `zeroship-builder-status.md` | the May-1 build-state snapshot | "recommended next focus" (folded into M1/M2/M4) |
 
 ---
@@ -80,8 +80,9 @@ clean `.zship` builds.
 
 Feature areas A–JJ from the inventory, with **priority span**, **current build
 status**, and **target tier**. Feature numbers are canonical IDs — full
-per-feature behavior lives in `specs/2026-04-30-zeroship-builder-features.md`
-and `…-design.md`.
+per-feature behavior lives in
+`docs/archive/superpowers/specs/2026-04-30-zeroship-builder-features.md`
+and `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md`.
 
 Status legend: ✅ shipped · 🟡 partial · 🔶 stubbed (UI-honest placeholder) ·
 ⬜ missing.

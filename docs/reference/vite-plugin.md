@@ -45,7 +45,7 @@ Today, a procedure is recorded for the manifest only when all of the following a
 2. The exported binding is initialized by a recognized wrapper call.
 3. The wrapper is a named import from `@zeroship/rpc/server`.
 
-Recognized wrappers: `procedure`, `query`, `mutation`, `action`, `stream`, `subscription`.
+The static matcher recognizes the full set of `@zeroship/rpc/server` wrappers as discovery markers — see [docs/reference/rpc.md](./rpc.md) for the canonical list and signatures.
 
 Namespace imports and default imports are ignored by the static matcher. Plain exports stay private to the server bundle.
 Client stubs for `subscription` preserve `{ kind: "subscription" }` metadata, but the generic `@zeroship/rpc/client` surface does not expose a public subscription API yet; invoking one fails with `UNIMPLEMENTED` instead of falling back to the stream transport.
