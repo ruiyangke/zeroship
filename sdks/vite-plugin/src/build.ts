@@ -313,31 +313,190 @@ export function buildPlugin(
   // when shipping a production build).
   let viteMode: "production" | "development" = "production";
 
+  /**
+   * Run the SSR server sub-build (`virtual:zeroship/_server-entry` →
+   * `dist/server/index.js`) exactly once per Vite invocation.
+   *
+   * Invoked from BOTH `writeBundle` and `closeBundle`. `writeBundle`
+   * fires per emitted client output bundle — but a SERVER-ONLY app (no
+   * `index.html`, no `rollupOptions.input`) produces ZERO client output,
+   * so Vite/rolldown never calls `writeBundle` (ISS-59). `closeBundle`
+   * always fires, so it calls this too; the `serverBuilt` guard keeps
+   * the build idempotent regardless of which hook reached it first.
+   */
+  async function runServerBuild(): Promise<void> {
+    if (isDev) return;
+    if (serverBuilt) return;
+    // Static-mode: skip the SSR sub-build entirely. closeBundle still
+    // runs the emitter, which walks dist/ as-is.
+    if (mode === "static") {
+      serverBuilt = true;
+      return;
+    }
+
+    const entry = findServerEntry(root, options.serverEntry);
+    if (!entry) {
+      console.warn("[zeroship] no server entry found — skipping server bundle");
+      // We still want to emit a static-only .zship in this case,
+      // so the closeBundle hook handles the SSG path.
+      return;
+    }
+    serverBuilt = true;
+
+    // Probe the user's untransformed entry source for `export default`.
+    // The synthetic SSR entry ALWAYS exports a default, so we can't
+    // probe the bundled output for this — we need the user's source.
+    // This drives the .zship's catch-all rule choice (Worker(SSR) vs
+    // Static SPA fallback). Conservative default is true on read
+    // failure: an unwanted Worker(SSR) 404s while an unwanted Static
+    // catch-all serves stale shell on intended SSR routes.
+    try {
+      const entrySource = readFileSync(entry, "utf8");
+      userHasDefaultFetch = probeUserDefaultExport(entrySource);
+    } catch {
+      userHasDefaultFetch = true;
+    }
+
+    console.log(`[zeroship] building server bundle from ${relative(root, entry)}`);
+
+    // Build via the synthetic server entry (`virtual:zeroship/_server-entry`)
+    // — that virtual module imports the user's entry, re-exports its
+    // bindings, and provides our own `default.{ fetch, rpc }`.
+    // Rolldown collapses everything into a single ESM file at
+    // `dist/server/index.js`. The synthetic entry's `_procedures`
+    // dispatch table is built at module-init time by iterating the
+    // user namespace's exports — no global registry, no side effects.
+    //
+    // Use the user's absolute entry path as the synthetic entry's
+    // import specifier — virtual modules have no parent path, so
+    // relative specifiers don't anchor to anything sensible.
+    const userEntryRel = entry.replace(/\\/g, "/");
+
+    // Stage 5c: schema discovery runs in the runtime bootstrap and
+    // reads `user.default.schema` directly off the loaded entry. The
+    // synthetic entry already re-exports `_zsUserDefault.schema` on
+    // its own `default.schema` (Stage 5b normaliser). No
+    // `manifest.exports.schema` field is written; no resolver runs.
+
+    const ssrConfig = buildSsrInlineConfig({
+      root,
+      ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
+      outDir: "dist/server",
+      ssrPlugins: [
+        // node-compat MUST come first so its `resolve.id` returns
+        // the polyfill path before Vite tries to load `node:crypto`
+        // etc. as bare specifiers.
+        nodeCompatPlugin(),
+        // Intercept the bare `zeroship` specifier so user code's
+        // `import { env } from "zeroship"` resolves to the runtime
+        // virtual module (`Object.freeze(__zs_env())`) instead of the
+        // file-linked `zeroship-stub` package (`export const env = {}`).
+        // Without this, `noExternal: true` inlines the stub and
+        // `env.db` is `undefined` at runtime — every env.db (and
+        // env.auth/kv/storage) RPC procedure throws `Cannot read
+        // properties of undefined`. This mirrors the dev pipeline,
+        // which installs the same plugin (`index.ts`). `enforce: "pre"`
+        // makes it win the `zeroship` specifier before node-compat or
+        // the default resolver. (ISS-66)
+        zeroshipModulePlugin(),
+        // transformPlugin rewrites server modules with procedure
+        // metadata patches and records procedure
+        // metadata into `state.discoveredProcedures` for the manifest
+        // emitter. It does NOT inject any registry side-effects any
+        // more — the synthetic SSR entry discovers procedures at
+        // module-init time from the user namespace's exports.
+        transformPlugin(DEFAULT_RPC_ENDPOINT, state),
+        // The synthetic server entry side-effect-imports
+        // @zeroship/bootstrap so the runtime can resolve its dynamic
+        // imports from the bundled worker. That package is
+        // framework-internal, so the nested SSR build must resolve it
+        // through the Vite plugin's dependency tree rather than the
+        // user's app root.
+        zeroshipBootstrapResolverPlugin(),
+        // Synthetic SSR entry virtual module owner. The entry's body
+        // is build-time-static and order-independent.
+        rpcRegistryPlugin({
+          root,
+          userEntryRel,
+          state,
+        }),
+        // Expose `virtual:zeroship/client-manifest` so SSR code can
+        // read hashed asset paths at build time. The client build's
+        // `writeBundle` (this hook) finishes BEFORE we kick off the
+        // SSR build, so `dist/.vite/manifest.json` is already on disk.
+        clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
+      ],
+    });
+    // Cast — buildSsrInlineConfig returns a record so it can be
+    // tested without importing Vite types into the test runner.
+    await viteBuild(ssrConfig as Parameters<typeof viteBuild>[0]);
+
+    // Strip the leading `"use server"` directive (a bare string
+    // expression that is a no-op but pollutes the output). Node-shaped
+    // globals (process, Buffer, setImmediate, etc.) are installed by
+    // the Rust runtime on every isolate before any user module
+    // evaluates — see `crates/runtime/src/embed/node-globals.js`.
+    const bundlePath = resolve(root, "dist/server/index.js");
+    try {
+      const stripped = stripUseServer(readFileSync(bundlePath, "utf8"));
+      writeFileSync(bundlePath, stripped, "utf8");
+    } catch (e) {
+      console.warn(`[zeroship] failed to strip use-server directive: ${(e as Error).message}`);
+    }
+
+    const totalFns = [...serverFunctionMap.values()].reduce((sum, fns) => sum + fns.size, 0);
+    console.log(
+      `[zeroship] server bundle complete — ${serverFunctionMap.size} modules, ${totalFns} server functions`
+    );
+  }
+
+  // Whether we injected the empty stub input into the CLIENT build.
+  // Set in `config`. Two situations need it:
+  //   - static mode (SSG): the user ships prerendered HTML themselves and
+  //     has no JS entry, so Vite's "needs at least one input" check fails.
+  //   - full mode, SERVER-ONLY app (no `index.html`, no `rollupOptions.input`,
+  //     e.g. a pure fetch/RPC backend): the client build defaults to
+  //     resolving `index.html` and errors `UNRESOLVED_ENTRY` (ISS-59).
+  // In both cases we feed an empty virtual module so the client build
+  // produces zero asset output, then delete the stub chunk in
+  // `generateBundle`. The worker bundle + manifest still come from the
+  // SSR sub-build.
+  let stubInjected = false;
+
   return {
     name: "zeroship:build",
 
     /**
-     * In static mode, satisfy Vite's "needs at least one input" check
-     * by injecting a virtual entry that resolves to an empty module.
-     * The matching `generateBundle` below deletes the empty chunk so
-     * the .zship emitter doesn't catalog a `_empty-<hash>.js` asset.
+     * Satisfy Vite's "needs at least one input" check by injecting a
+     * virtual entry that resolves to an empty module, when the client
+     * build would otherwise have NO input. The matching `generateBundle`
+     * below deletes the empty chunk so the .zship emitter doesn't catalog
+     * a `_empty-<hash>.js` asset.
      *
-     * Only runs when the user hasn't already configured an input; if
-     * they have an `index.html` or other entry, we leave it alone
-     * and the static-mode build still produces the JS chunks for it
-     * (see test `static_only_with_html_inputs_still_works`).
+     * We inject only when the user has NOT configured a client input —
+     * neither an explicit `rollupOptions.input` NOR a root `index.html`
+     * (Vite's implicit default entry). If either exists, the client build
+     * has real work to do and we leave it alone (CSR/SSR/SSG-with-HTML).
+     *
+     * This covers two cases:
+     *   - `mode === "static"` SSG (prerendered HTML copied in by a tool).
+     *   - `mode === "full"` server-only apps (ISS-59): a `default.fetch`/
+     *     `rpc` backend with no client entry. Without the stub the client
+     *     build errors `UNRESOLVED_ENTRY: Cannot resolve entry module
+     *     index.html`.
      */
     config(userConfig: any) {
-      if (mode !== "static") return;
-      const hasInput =
-        userConfig?.build?.rollupOptions?.input != null ||
-        // Vite auto-uses `index.html` in the project root if it exists.
-        // We can't check that here without the resolved root, so just
-        // err on the side of injecting our virtual entry only when the
-        // user explicitly has no rollupOptions.input. Vite falls back
-        // to its default for the index.html case.
-        false;
-      if (hasInput) return;
+      const hasExplicitInput =
+        userConfig?.build?.rollupOptions?.input != null;
+      if (hasExplicitInput) return;
+      // Vite auto-uses `<root>/index.html` as the entry when present.
+      // Resolve the root the same way Vite does (config.root || cwd) so
+      // we don't stub out a real client build.
+      const cfgRoot = resolve(userConfig?.root ?? process.cwd());
+      if (existsSync(resolve(cfgRoot, "index.html"))) return;
+      // No client entry of any kind — inject the empty stub so the client
+      // build has something to chew on and doesn't 404 on index.html.
+      stubInjected = true;
       return {
         build: {
           rollupOptions: {
@@ -353,22 +512,22 @@ export function buildPlugin(
      * which `generateBundle` then deletes.
      */
     resolveId(id: string) {
-      if (mode !== "static") return null;
+      if (!stubInjected) return null;
       if (id === STATIC_STUB_VIRTUAL_ID) return STATIC_STUB_RESOLVED_ID;
       return null;
     },
     load(id: string) {
-      if (mode !== "static") return null;
+      if (!stubInjected) return null;
       if (id !== STATIC_STUB_RESOLVED_ID) return null;
       // Empty module — no exports, no side effects.
-      return "// zeroship static-mode stub\n";
+      return "// zeroship empty client stub\n";
     },
     /**
      * After Rollup builds the (empty) stub chunk, delete its output so
      * the .zship doesn't end up shipping a `_empty-<hash>.js`.
      */
     generateBundle(_options: unknown, bundle: Record<string, { name?: string }>) {
-      if (mode !== "static") return;
+      if (!stubInjected) return;
       for (const [filename, chunk] of Object.entries(bundle)) {
         if (chunk.name === "__zeroship_static_stub") {
           delete bundle[filename];
@@ -392,129 +551,7 @@ export function buildPlugin(
     },
 
     async writeBundle() {
-      if (isDev) return;
-      if (serverBuilt) return;
-      // Static-mode: skip the SSR sub-build entirely. closeBundle still
-      // runs the emitter, which walks dist/ as-is.
-      if (mode === "static") {
-        serverBuilt = true;
-        return;
-      }
-
-      const entry = findServerEntry(root, options.serverEntry);
-      if (!entry) {
-        console.warn("[zeroship] no server entry found — skipping server bundle");
-        // We still want to emit a static-only .zship in this case,
-        // so the closeBundle hook handles the SSG path.
-        return;
-      }
-      serverBuilt = true;
-
-      // Probe the user's untransformed entry source for `export default`.
-      // The synthetic SSR entry ALWAYS exports a default, so we can't
-      // probe the bundled output for this — we need the user's source.
-      // This drives the .zship's catch-all rule choice (Worker(SSR) vs
-      // Static SPA fallback). Conservative default is true on read
-      // failure: an unwanted Worker(SSR) 404s while an unwanted Static
-      // catch-all serves stale shell on intended SSR routes.
-      try {
-        const entrySource = readFileSync(entry, "utf8");
-        userHasDefaultFetch = probeUserDefaultExport(entrySource);
-      } catch {
-        userHasDefaultFetch = true;
-      }
-
-      console.log(`[zeroship] building server bundle from ${relative(root, entry)}`);
-
-      // Build via the synthetic server entry (`virtual:zeroship/_server-entry`)
-      // — that virtual module imports the user's entry, re-exports its
-      // bindings, and provides our own `default.{ fetch, rpc }`.
-      // Rolldown collapses everything into a single ESM file at
-      // `dist/server/index.js`. The synthetic entry's `_procedures`
-      // dispatch table is built at module-init time by iterating the
-      // user namespace's exports — no global registry, no side effects.
-      //
-      // Use the user's absolute entry path as the synthetic entry's
-      // import specifier — virtual modules have no parent path, so
-      // relative specifiers don't anchor to anything sensible.
-      const userEntryRel = entry.replace(/\\/g, "/");
-
-      // Stage 5c: schema discovery runs in the runtime bootstrap and
-      // reads `user.default.schema` directly off the loaded entry. The
-      // synthetic entry already re-exports `_zsUserDefault.schema` on
-      // its own `default.schema` (Stage 5b normaliser). No
-      // `manifest.exports.schema` field is written; no resolver runs.
-
-      const ssrConfig = buildSsrInlineConfig({
-        root,
-        ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
-        outDir: "dist/server",
-        ssrPlugins: [
-          // node-compat MUST come first so its `resolve.id` returns
-          // the polyfill path before Vite tries to load `node:crypto`
-          // etc. as bare specifiers.
-          nodeCompatPlugin(),
-          // Intercept the bare `zeroship` specifier so user code's
-          // `import { env } from "zeroship"` resolves to the runtime
-          // virtual module (`Object.freeze(__zs_env())`) instead of the
-          // file-linked `zeroship-stub` package (`export const env = {}`).
-          // Without this, `noExternal: true` inlines the stub and
-          // `env.db` is `undefined` at runtime — every env.db (and
-          // env.auth/kv/storage) RPC procedure throws `Cannot read
-          // properties of undefined`. This mirrors the dev pipeline,
-          // which installs the same plugin (`index.ts`). `enforce: "pre"`
-          // makes it win the `zeroship` specifier before node-compat or
-          // the default resolver. (ISS-66)
-          zeroshipModulePlugin(),
-          // transformPlugin rewrites server modules with procedure
-          // metadata patches and records procedure
-          // metadata into `state.discoveredProcedures` for the manifest
-          // emitter. It does NOT inject any registry side-effects any
-          // more — the synthetic SSR entry discovers procedures at
-          // module-init time from the user namespace's exports.
-          transformPlugin(DEFAULT_RPC_ENDPOINT, state),
-          // The synthetic server entry side-effect-imports
-          // @zeroship/bootstrap so the runtime can resolve its dynamic
-          // imports from the bundled worker. That package is
-          // framework-internal, so the nested SSR build must resolve it
-          // through the Vite plugin's dependency tree rather than the
-          // user's app root.
-          zeroshipBootstrapResolverPlugin(),
-          // Synthetic SSR entry virtual module owner. The entry's body
-          // is build-time-static and order-independent.
-          rpcRegistryPlugin({
-            root,
-            userEntryRel,
-            state,
-          }),
-          // Expose `virtual:zeroship/client-manifest` so SSR code can
-          // read hashed asset paths at build time. The client build's
-          // `writeBundle` (this hook) finishes BEFORE we kick off the
-          // SSR build, so `dist/.vite/manifest.json` is already on disk.
-          clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
-        ],
-      });
-      // Cast — buildSsrInlineConfig returns a record so it can be
-      // tested without importing Vite types into the test runner.
-      await viteBuild(ssrConfig as Parameters<typeof viteBuild>[0]);
-
-      // Strip the leading `"use server"` directive (a bare string
-      // expression that is a no-op but pollutes the output). Node-shaped
-      // globals (process, Buffer, setImmediate, etc.) are installed by
-      // the Rust runtime on every isolate before any user module
-      // evaluates — see `crates/runtime/src/embed/node-globals.js`.
-      const bundlePath = resolve(root, "dist/server/index.js");
-      try {
-        const stripped = stripUseServer(readFileSync(bundlePath, "utf8"));
-        writeFileSync(bundlePath, stripped, "utf8");
-      } catch (e) {
-        console.warn(`[zeroship] failed to strip use-server directive: ${(e as Error).message}`);
-      }
-
-      const totalFns = [...serverFunctionMap.values()].reduce((sum, fns) => sum + fns.size, 0);
-      console.log(
-        `[zeroship] server bundle complete — ${serverFunctionMap.size} modules, ${totalFns} server functions`
-      );
+      await runServerBuild();
     },
 
     /**
@@ -534,6 +571,12 @@ export function buildPlugin(
      *   2. All asset hashes are stable on disk.
      *   3. We're outside of any Rollup/rolldown emit path — file
      *      operations don't have to thread through Vite's emitFile.
+     *
+     * `runServerBuild()` is idempotent (`serverBuilt` guard). It normally
+     * runs in `writeBundle`, but a SERVER-ONLY app (no `index.html`, no
+     * client inputs) emits zero client output, so Vite never fires
+     * `writeBundle`. Calling it here guarantees the SSR worker bundle +
+     * `dist/` exist before `emitZship` walks them (ISS-59).
      */
     async closeBundle() {
       if (isDev) return;
@@ -541,6 +584,10 @@ export function buildPlugin(
       zshipEmitted = true;
 
       try {
+        // Ensure the SSR worker bundle ran (no-op if writeBundle already
+        // did it). For server-only apps this is the ONLY place it runs.
+        await runServerBuild();
+
         // Compute the manifest's resource tree (auto-derived RPC
         // procedure entries plus any user-declared resources from
         // `src/server/config.ts`). WireIds are a pure function of
