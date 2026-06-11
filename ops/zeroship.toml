@@ -41,3 +41,31 @@ frame_ancestor_origins = ["http://console.zeroship.localhost"]
 [observability]
 rust_log   = "info,zeroship_=debug"
 log_format = "json"
+
+# Secret REFERENCES only — never a plaintext literal (a literal is rejected at
+# resolve by crates/core/src/config/secrets.rs::obtain_secret). Each value is a
+# `urn:zeroship:env:<VAR>` reference: the named env var is read PER BINARY from
+# that service's compose `environment:` block, so a binary backfills its secret
+# from this shared file instead of carrying it as a literal CLI flag. Precedence
+# is CLI/env-flag > [secrets] file reference > default, so any leftover literal
+# flag would silently win and defeat this indirection — keep them OFF the
+# command lines.
+#
+# DB URLs are PER BINARY (different least-priv PG roles: zeroship_control /
+# zeroship_gateway / zeroship_auth) yet the file is SHARED. The single
+# `database_url` reference points every platform binary at the SAME env var name
+# (ZEROSHIP_DATABASE_URL); each compose service sets its OWN role-specific DSN
+# under that name, so one shared reference resolves to four distinct DSNs. The
+# auth service uses its own `auth_db_url` reference (its flag is `--db-url`,
+# resolved from AUTH_DB_URL) so it can diverge from the worker/control/gateway
+# `--db` slot if ever needed.
+#
+# DEV ONLY: these resolve to the weak dev secrets supplied by docker-compose.yml
+# (every service runs --dev-insecure). The point is that the values flow through
+# this file's reference indirection, not that they are strong.
+[secrets]
+control_key  = "urn:zeroship:env:ZEROSHIP_CONTROL_KEY"
+master_key   = "urn:zeroship:env:ZEROSHIP_MASTER_KEY"
+worker_key   = "urn:zeroship:env:ZEROSHIP_WORKER_KEY"
+database_url = "urn:zeroship:env:ZEROSHIP_DATABASE_URL"
+auth_db_url  = "urn:zeroship:env:AUTH_DB_URL"

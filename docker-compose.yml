@@ -102,23 +102,28 @@ services:
     # Self-heal transient boot races (hydra-admin not ready yet; concurrent
     # first-boot migrations with auth on the shared control/authz schema).
     restart: on-failure
+    # Secrets (--db / --control-key / --master-key) and the Hydra URLs
+    # (--hydra-public-url / --hydra-admin-url) are NOT passed as flags: they come
+    # from ops/zeroship.toml ([secrets] env references + [auth]), mounted at the
+    # well-known path below. The flags that remain are genuinely per-binary
+    # operational args the config schema does not cover.
     command: >
       zeroship-control
         --port 9090
         --bind 0.0.0.0
-        --db postgres://zeroship_control:zeroship_control@postgres:5432/zeroship
         --blob-store /data/bundles
-        --control-key platform-key
-        --master-key master-key
         --dev-insecure
-        --hydra-public-url http://auth.zeroship.localhost
-        --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
         --app-base-domain zeroship.localhost
         --bootstrap-console
         --console-host console.zeroship.localhost
         --console-zship /opt/zeroship/console/app.zship
     environment:
+      # Role-specific DSN + shared secrets, resolved from ops/zeroship.toml's
+      # [secrets] `urn:zeroship:env:<VAR>` references (control's least-priv role).
+      ZEROSHIP_DATABASE_URL: postgres://zeroship_control:zeroship_control@postgres:5432/zeroship
+      ZEROSHIP_CONTROL_KEY: platform-key
+      ZEROSHIP_MASTER_KEY: master-key
       # Dedicated PERMANENT pairwise-salt secret (auth-sdk §6.2). MUST be
       # byte-identical on control + gateway — both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
@@ -181,15 +186,11 @@ services:
           --port 8000 \
           --bind 0.0.0.0 \
           --control http://control:9090 \
-          --control-key platform-key \
-          --worker-key worker-key \
           --workers "$$WORKERS" \
           --blob-store /data/bundles \
           --poll-interval 3 \
           --auth-ui-url http://auth.zeroship.localhost \
-          --hydra-public-url http://auth.zeroship.localhost \
           --gateway-public-url http://api.zeroship.localhost \
-          --db postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship \
           --dev-insecure
     volumes:
       # Same content-addressed blob store control writes to (asset proxy).
@@ -197,6 +198,13 @@ services:
       # mounted at the well-known path => auto-discovered, no --config needed
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     environment:
+      # Role-specific DSN + shared secrets, resolved from ops/zeroship.toml's
+      # [secrets] `urn:zeroship:env:<VAR>` references. The gateway's least-priv
+      # DSN; --control-key/--worker-key flow through the file, not literal flags.
+      # `--worker-key` MUST match the worker's WORKER_KEY.
+      ZEROSHIP_DATABASE_URL: postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship
+      ZEROSHIP_CONTROL_KEY: platform-key
+      ZEROSHIP_WORKER_KEY: worker-key
       # OAuth2 client_secret registered for the `gateway` client in
       # ops/auth-clients.example.toml. The gateway exchanges this on
       # the per-app OIDC code-exchange (Phase 3 §10.2).
@@ -232,29 +240,48 @@ services:
     # the key the worker refuses to bind a non-loopback address (to
     # avoid exposing unauthenticated code execution). The key must match
     # the gateway's `--worker-key`.
-    command: >
-      zeroship-worker
-        --port 8080
-        --worker-threads 4
-        --bind 0.0.0.0
-        --worker-key worker-key
-        --control http://control:9090
-        --control-key platform-key
-        --blob-store /data/bundles
-        # NOTE: the worker's --db is plugin-db's PROVISIONING connection, not a
-        # constrained system-table role. plugin-db's register_model creates
-        # per-app PG roles + schemas (CREATEROLE/CREATEDB) and manages the WAL
-        # replication slot, so this connection MUST stay a privileged principal
-        # (the postgres superuser here in dev). The `zeroship_worker` role from
-        # changeset 0025 exists (and owns ZERO zeroship.* system-table grants),
-        # but it is NOT the worker's login role — the worker never touches the
-        # system tables; its per-app tenant access is gated by plugin-db's own
-        # `SET LOCAL ROLE <per-app role>` mechanism, a separate trust boundary.
-        --db postgres://postgres:zeroship@postgres:5432/zeroship
-        --kv-url redis://redis:6379
-        --storage-root /data/app-storage
-        --max-isolates 200
-        --poll-interval 3
+    # Secrets (--control-key / --worker-key / --db) come from ops/zeroship.toml's
+    # [secrets] env references (resolved per-binary from this service's
+    # `environment:` block), not literal flags. WORKER_KEY must match the
+    # gateway's. NOTE on the worker's DSN: ZEROSHIP_DATABASE_URL here is
+    # plugin-db's PROVISIONING connection, NOT a constrained system-table role.
+    # plugin-db's register_model creates per-app PG roles + schemas
+    # (CREATEROLE/CREATEDB) and manages the WAL replication slot, so this
+    # connection MUST stay a privileged principal (the postgres superuser here in
+    # dev) — a DIFFERENT role than control/gateway's least-priv DSNs, which is
+    # exactly why the shared `[secrets].database_url` reference reads a PER-BINARY
+    # env value. The `zeroship_worker` role from changeset 0025 exists (and owns
+    # ZERO zeroship.* system-table grants), but it is NOT the worker's login role
+    # — the worker never touches the system tables; its per-app tenant access is
+    # gated by plugin-db's own `SET LOCAL ROLE <per-app role>` mechanism, a
+    # separate trust boundary.
+    command:
+      - zeroship-worker
+      - --port
+      - "8080"
+      - --worker-threads
+      - "4"
+      - --bind
+      - 0.0.0.0
+      - --control
+      - http://control:9090
+      - --blob-store
+      - /data/bundles
+      - --kv-url
+      - redis://redis:6379
+      - --storage-root
+      - /data/app-storage
+      - --max-isolates
+      - "200"
+      - --poll-interval
+      - "3"
+    environment:
+      # Resolved from ops/zeroship.toml [secrets] `urn:zeroship:env:<VAR>` refs.
+      # Worker DSN = privileged provisioning superuser (see NOTE above); distinct
+      # from control/gateway roles under the same shared `database_url` reference.
+      ZEROSHIP_DATABASE_URL: postgres://postgres:zeroship@postgres:5432/zeroship
+      ZEROSHIP_CONTROL_KEY: platform-key
+      ZEROSHIP_WORKER_KEY: worker-key
     volumes:
       # Same content-addressed blob store control writes to (deploy blobs).
       - bundles:/data/bundles
@@ -313,31 +340,28 @@ services:
     # Self-heal the transient race where auth starts before hydra's admin API
     # is accepting connections (client-side bootstrap of JWKs/clients).
     restart: on-failure
+    # Secret (--db-url), the Hydra URLs (--hydra-public-url / --hydra-admin-url),
+    # and the console `frame-ancestors` allowlist all come from ops/zeroship.toml
+    # ([secrets].auth_db_url env ref + [auth].{hydra_*,frame_ancestor_origins}),
+    # mounted at the well-known path below — not literal flags / env.
     command: >
       zeroship-auth
         --addr 0.0.0.0:9092
-        --db-url postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship
         --dev-insecure
-        --hydra-public-url http://auth.zeroship.localhost
-        --hydra-admin-url http://hydra:4445
         --allow-remote-hydra-admin
         --relay-forward-mailer stdout
         --bootstrap
     environment:
-      # Console origin(s) the auth login/signup/consent documents admit via CSP
-      # `frame-ancestors` so the console's immersive iframe login can embed them
-      # (design §4.3/§10.1). Browser-enforced anti-clickjacking — ONLY this origin
-      # may frame /login; everyone else is blocked and falls back to the popup.
-      # This dev compose serves the console at the Caddy host
-      # console.zeroship.localhost. A non-empty value here (CLI/env tier) wins
-      # over the [auth].frame_ancestor_origins overlay in ops/zeroship.toml; keep
-      # the two in sync. Comma-separated for multiple origins.
-      FRAME_ANCESTOR_ORIGINS: ${FRAME_ANCESTOR_ORIGINS:-http://console.zeroship.localhost}
+      # auth's least-priv DSN, resolved from ops/zeroship.toml's
+      # [secrets].auth_db_url = "urn:zeroship:env:AUTH_DB_URL" reference (auth's
+      # flag is --db-url, a separate slot from the control/gateway/worker --db).
+      AUTH_DB_URL: postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship
     ports:
       - "9092:9092"
     volumes:
-      # hydra_admin_url / hydra_public_url also come from the shared overlay,
-      # auto-discovered at the well-known path; the explicit flags above win.
+      # hydra_admin_url / hydra_public_url / frame_ancestor_origins all come from
+      # the shared [auth] overlay, auto-discovered at the well-known path (no
+      # --hydra-* flags, no FRAME_ANCESTOR_ORIGINS env — the file is the source).
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
       # Declarative OIDC client config (localhost dev variant); auth reconciles
       # it against hydra admin at boot. Mounted at the well-known

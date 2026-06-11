@@ -130,10 +130,15 @@ The `auth` service runs `zeroship-auth`, the OIDC IdP UI + RP that sits in front
 of the hydra kernel. The gateway redirects unauthenticated end users to it via
 the Caddy-fronted host (`--auth-ui-url http://auth.zeroship.localhost`). It runs
 with `--dev-insecure` (relaxes cookie/secret guards for the private compose
-network), `--bootstrap` (first-boot JWK + client creation),
-`--hydra-public-url http://auth.zeroship.localhost`,
-`--hydra-admin-url http://hydra:4445`, and `--allow-remote-hydra-admin` (the
-admin API lives at the non-loopback `http://hydra:4445`). It mounts the
+network), `--bootstrap` (first-boot JWK + client creation), and
+`--allow-remote-hydra-admin` (the admin API lives at the non-loopback
+`http://hydra:4445`). The hydra URLs are NOT passed as flags: `hydra_public_url`
+(`http://auth.zeroship.localhost`) and `hydra_admin_url` (`http://hydra:4445`)
+come from the `[auth]` section of `ops/zeroship.toml`, auto-discovered at the
+well-known `/etc/zeroship/zeroship.toml` mount — the same overlay that supplies
+`trusted_oauth_clients` and `frame_ancestor_origins`. The DB DSN comes from
+`[secrets].auth_db_url` (a `urn:zeroship:env:AUTH_DB_URL` reference resolved from
+the service's `AUTH_DB_URL` env), not a literal `--db-url`. It mounts the
 localhost OIDC client config, `ops/auth-clients-dev.toml`, at the well-known
 `--clients-config` path (`/etc/zeroship/auth-clients.toml`), which it reconciles
 against hydra admin at boot. That file declares the `console`, `cli`, and
@@ -177,20 +182,38 @@ were removed in the R5 cutover.
 `worker`, and `auth` at the well-known path `/etc/zeroship/zeroship.toml`. The
 compose stack relies on auto-discovery: because the file lives at the system
 well-known path, no service passes `--config` — each binary's config resolver
-finds it automatically. The worker reads only `[observability]` from it; `auth`
-reads the `[auth]` Hydra URLs. (Any service that does not mount the file simply
-falls back to compiled defaults — discovery only fires when the file is present
-at the well-known path.)
+finds it automatically. (Any service that does not mount the file simply falls
+back to compiled defaults — discovery only fires when the file is present at the
+well-known path.)
 
-The overlay provides the shared `[auth]` Hydra URLs, `trusted_oauth_clients`,
-and `[observability]` defaults so those values are defined once instead of per
-service. In this stack `[auth].hydra_public_url` is
-`http://auth.zeroship.localhost` (the Caddy-fronted issuer), while
-`hydra_admin_url` stays `http://hydra:4445` (admin API, network-internal).
-`control`, `gateway`, and `auth` also pass the public URL explicitly on the
-command line, which wins over the overlay. Copy `ops/zeroship.example.toml` to
-`ops/zeroship.toml` when customizing an environment. Secrets do not belong in
-this file; keep them in env, CLI flags, or secret file paths.
+The overlay is the source of truth for the config-covered values, so they are
+defined ONCE instead of being repeated as per-service flags:
+
+- `[auth]` — Hydra URLs (`hydra_public_url = http://auth.zeroship.localhost`,
+  the Caddy-fronted issuer; `hydra_admin_url = http://hydra:4445`, network-internal),
+  `trusted_oauth_clients`, and `frame_ancestor_origins`. `control`, `gateway`,
+  and `auth` no longer pass `--hydra-public-url` / `--hydra-admin-url`; `auth` no
+  longer passes `FRAME_ANCESTOR_ORIGINS`.
+- `[observability]` — shared `rust_log` / `log_format` (every service, worker
+  included).
+- `[secrets]` — REFERENCE-only (`urn:zeroship:env:<VAR>`, never a plaintext
+  literal). `control_key`, `master_key`, `worker_key`, `database_url`, and
+  `auth_db_url` are resolved per-binary from each service's `environment:` block,
+  so the command lines carry no literal `--control-key` / `--master-key` /
+  `--worker-key` / `--db` / `--db-url`. The single `database_url` reference points
+  every binary at `ZEROSHIP_DATABASE_URL`; each service sets its OWN role-specific
+  DSN under that name (control → `zeroship_control`, gateway → `zeroship_gateway`,
+  worker → the privileged `postgres` provisioning superuser), so one shared
+  reference resolves to distinct per-role DSNs. `auth` uses its own
+  `AUTH_DB_URL` (the `auth_db_url` slot, flag `--db-url`).
+
+Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
+leftover literal flag would silently WIN and defeat the file — keep config-covered
+values OFF the command lines. Copy `ops/zeroship.example.toml` to
+`ops/zeroship.toml` when customizing an environment. The file itself stays
+secret-free: it carries only `urn:`/`arn:` references, never a plaintext secret
+(a literal in `[secrets]` is rejected at resolve). The actual secret VALUES live
+in the compose `environment:` blocks (dev) or a real secret store (prod).
 
 Validate a web binary's resolved config by adding `--check-config` to the
 normal command. It runs the same startup guards, so include the same required
