@@ -35,7 +35,8 @@ builder.
 | **T3** capability | ISS-28 cron/scheduled primitive · ISS-41 end-user authz (P12) · ISS-42 `@zeroship/{email,ai}` SDKs · ISS-44 non-additive migrations · ISS-45 node-compat align · ISS-46 per-tenant fairness/quotas · ISS-47 `env.assets` writes |
 | **T4** scale/later | ISS-48 teams/orgs · ISS-49 V8 snapshots · ISS-50 multi-region/HA · ISS-51 sandbox scale · ISS-52 stateless-worker migration |
 | **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
-| **test-surfaced (serve/build/CLI)** | ISS-55 `"use server"` dead in serve · ISS-56 env undefined in serve · ISS-57 CLI port parse/panic · ISS-58 `/health` shadows user routes · ISS-59 server-only build fails · ISS-60 SSG trailing-slash · ISS-61 example/doc hygiene |
+| **test-surfaced — FIXED** | ✅ ISS-56 (serve env) · ✅ ISS-57 (CLI port) · ✅ ISS-58 (`/health`) · ✅ ISS-60 (trailing-slash, was stale doc) |
+| **test-surfaced — open** | ISS-55 `"use server"` dead in serve · ISS-59 server-only build fails · ISS-61 example/doc hygiene · ISS-62 auth `--check-config` can't dry-run |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -309,29 +310,25 @@ document that `"use server"` requires the build (and fix the examples to use `ex
 or have serve mode reject/warn on `"use server"` files. The inconsistency between the serve and build
 paths is the real gap.
 
-### ISS-56 · `zeroship serve`: app `env.*` vars/secrets are always undefined
-**Status:** open · **Effort:** S–M · **Tier:** T3 (DX)
+### ISS-56 · `zeroship serve`: app `env.*` vars/secrets are always undefined — FIXED
+**Status:** fixed (2026-06-11, `db031101`) · **Tier:** T3 (DX)
 
-The `zeroship` module's `env` object is built from control-plane `env_json` (empty in serve mode), so
-`env.JWT_SECRET` etc. are always `undefined`; process env vars land in `process.env`, not `env`. There
-is no documented way to inject app vars/secrets for local single-file `serve` testing. **Fix:** map
-selected process env (or a `--env`/`.env` source) into the app `env` in serve mode, and document it.
+Serve mode now populates the app `env` from process-env vars carrying the explicit `ZS_VAR_<NAME>`
+prefix (→ `env.<NAME>`); non-prefixed host env never leaks into the app's `env`. Documented in
+`zeroship-standard.md`. Operator: confirm the `ZS_VAR_` contract vs a `--env` flag.
 
-### ISS-57 · CLI robustness: silent `--port` parse + panic on port-in-use
-**Status:** mostly-fixed (2026-06-11) · **Effort:** S · **Tier:** T3 (DX)
+### ISS-57 · CLI robustness: silent `--port` parse + panic on port-in-use — FIXED
+**Status:** fixed (2026-06-11, `6b8f8ddf` cli + `db031101` runtime) · **Tier:** T3 (DX)
 
-FIXED: `serve` now accepts both `--port=N` and `--port N`, rejects unknown flags (no silent default),
-and a `TcpListener` pre-check turns port-in-use into a clean error + exit (no stacktrace). REMAINING:
-the runtime-side bind `.unwrap()` (`crates/runtime` serve.rs:1460) still panics on pathological OS
-errors (EACCES on `:<1024`) — folded into the runtime serve fix (ISS-56/58 agent).
+`serve` accepts both `--port=N` and `--port N`, rejects unknown flags (no silent default); the CLI
+pre-checks the port AND the runtime bind path is now fallible — port-in-use is a clean error + exit
+on both sides, no panic stacktrace.
 
-### ISS-58 · `GET /health` is an undocumented kernel-reserved route that shadows user handlers
-**Status:** open · **Effort:** S · **Tier:** T3
+### ISS-58 · `GET /health` shadows user handlers — FIXED
+**Status:** fixed (2026-06-11, `db031101`) · **Tier:** T3
 
-The runtime intercepts `GET /health` and returns `{"status":"ok"}` before user code
-(`crates/runtime/src/core/serve.rs:191`); an app's own `/health` route is silently unreachable.
-Not listed as reserved in `zeroship-standard.md`. **Fix:** document the reserved path (and any others),
-and/or namespace the platform health check so it can't shadow an app route.
+`/health` now reaches the user app; the platform liveness probe moved to the reserved
+`GET /__zeroship/health` (alias `/healthz`), documented under "Reserved paths" in `zeroship-standard.md`.
 
 ### ISS-59 · Server-only Vite apps fail to build (no `index.html` → `dist not found`)
 **Status:** open · **Effort:** S–M · **Tier:** T3 (build pipeline)
@@ -360,6 +357,21 @@ the **old `rules/match/action` manifest** (now a flat `resources` map); (b) `url
 `env.KV` (Cloudflare-style uppercase) but the plugin registers `env.kv` → crash; (c) `weather-proxy.js`
 + `ai-streaming.js` lack an `export default` so raw serve can't dispatch them (ties to ISS-55);
 (d) a `@zeroship/bootstrap ↔ @zeroship/db` cyclic-dependency warning on every `pnpm install`.
+
+### ISS-62 · `zeroship-auth --check-config` can't dry-run config-from-file
+**Status:** open · **Effort:** S · **Tier:** T3 (DX/ops)
+
+Unlike control/gateway/worker, the auth binary's `--check-config` does NOT short-circuit before
+relay-mailer/SMTP validation, so it exits 1 (`AUTH_RELAY_SMTP_HOST is required when
+--relay-forward-mailer=smtp`) and never prints the resolved config — making auth's config-from-file
+not dry-run-verifiable (4 `config_check_e2e.sh` auth cases fail; pre-existing, surfaced by the config
+migration). **Fix:** in `crates/auth/src/main.rs`, run `--check-config` (resolve + report) before the
+runtime-only mailer validation.
+
+> **Fixed in passing (config migration, `8c5a2f57`):** the compose **worker** `command: >` folded
+> scalar embedded a `# NOTE:` comment that YAML folded into argv as literal tokens, silently
+> **swallowing `--db`/`--kv-url`/`--storage-root`/`--max-isolates`/`--poll-interval`** — the worker
+> never received them. Now a YAML-list command.
 
 ---
 
