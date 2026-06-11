@@ -9,4 +9,5 @@ pub mod magic_link;
 pub mod oauth;
 pub mod password;
 pub mod password_reset;
+pub mod totp;
 pub mod verification;

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use zeroship_core::config::{
-    parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY,
+    parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY, DEV_TOTP_ENC_KEY,
 };
 
 use crate::mailer::SmtpTls;
@@ -105,6 +105,31 @@ pub struct AuthConfig {
         hide_env_values = true
     )]
     pub stash_signing_key: String,
+
+    /// AES-256-GCM key material for encrypting the TOTP shared secret at rest
+    /// (ISS-11). Sourced like every other auth secret (CLI/env > `[secrets]`
+    /// file reference). MUST decode (hex or base64url) to ≥32 bytes — validated
+    /// at boot by `validate_master_key_material`, identical to the bundle/master
+    /// key posture. A weak or absent key means an attacker with DB read access
+    /// recovers every user's TOTP seed and can mint valid codes, so production
+    /// MUST set it. Empty default keeps the dev sentinel out of `--help`; the
+    /// dev fallback (`DEV_TOTP_ENC_KEY`) is applied in code under
+    /// `--dev-insecure`. The encryption AAD binds the row's `user_id`, so a
+    /// ciphertext lifted onto another user's row fails to decrypt.
+    ///
+    /// OPERATOR NOTE (flagged for review): this is a DEDICATED key, NOT derived
+    /// from the stash/pairwise secrets, so 2FA seeds rotate independently of the
+    /// session-signing material. Rotating it without re-encrypting existing
+    /// `totp_credentials` rows invalidates every enrolled secret (users must
+    /// re-enroll); add it to the `[secrets]` rotation grace path when key
+    /// rotation lands.
+    #[arg(
+        long = "totp-enc-key",
+        env = "AUTH_TOTP_ENC_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub totp_enc_key: String,
 
     /// Console origin(s) allowed to FRAME the login/signup/consent documents
     /// via CSP `frame-ancestors` (immersive iframe login, design §4.3/§10.1).
@@ -547,6 +572,13 @@ impl AuthConfig {
         if self.insecure_dev && self.stash_signing_key.is_empty() {
             self.stash_signing_key = DEV_STASH_SIGNING_KEY.to_string();
         }
+        // TOTP at-rest key dev fallback (ISS-11), same posture as the stash key:
+        // the clap default is empty (no secret in --help); under --dev-insecure
+        // an empty value falls back to the shared dev sentinel. Outside dev the
+        // empty key is rejected at boot by `validate_master_key_material`.
+        if self.insecure_dev && self.totp_enc_key.is_empty() {
+            self.totp_enc_key = DEV_TOTP_ENC_KEY.to_string();
+        }
         // Console framing allowlist (immersive iframe login, §4.3/§10.1).
         // Precedence mirrors the deployment-injection pattern: a non-empty
         // CLI/env (`--frame-ancestor-origin` / `FRAME_ANCESTOR_ORIGINS`) wins;
@@ -631,6 +663,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("dev_insecure", &self.dev_insecure)
             .field("insecure_dev", &self.insecure_dev)
             .field("stash_signing_key", &"<redacted>")
+            .field("totp_enc_key", &"<redacted>")
             .field("frame_ancestor_origins", &self.frame_ancestor_origins)
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"<redacted>")

@@ -7,4 +7,5 @@ pub mod ratelimit;
 pub mod relay;
 pub mod sessions;
 pub mod suppressions;
+pub mod totp;
 pub mod users;

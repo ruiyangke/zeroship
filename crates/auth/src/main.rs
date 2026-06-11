@@ -10,8 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, obtain_secret, validate_stash_key, CheckConfigReport, CheckFormat,
-    CheckValue, SecretSection,
+    bootstrap_or_exit, is_secret_ref, obtain_secret, validate_master_key_material,
+    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, SecretSection,
 };
 use zeroship_core::oidc_verify::JwksCache;
 
@@ -68,8 +68,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // still the raw `urn:`/`arn:` string — running a strength check on it would
     // wrongly fail, so skip it for a reference in that mode only (format was
     // already validated by resolve_auth_secrets).
-    if !cfg.check_config || !zeroship_core::config::is_secret_ref(&cfg.stash_signing_key) {
+    if !cfg.check_config || !is_secret_ref(&cfg.stash_signing_key) {
         if let Err(message) = validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev) {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
+    }
+    // TOTP at-rest key (ISS-11) — same is_secret_ref/check-config gate as the
+    // stash key: skip the strength check for a raw `urn:`/`arn:` reference under
+    // --check-config (the format was already validated in resolve_auth_secrets),
+    // but always validate the resolved literal on real boot. Decodes (hex or
+    // base64url) to ≥32 bytes, identical to the bundle/master key posture.
+    if !cfg.check_config || !is_secret_ref(&cfg.totp_enc_key) {
+        if let Err(message) = validate_master_key_material(
+            "AUTH_TOTP_ENC_KEY / --totp-enc-key",
+            &cfg.totp_enc_key,
+            cfg.insecure_dev,
+        ) {
             tracing::error!("{message}");
             std::process::exit(1);
         }
@@ -235,6 +250,12 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
         &cfg.stash_signing_key,
         file_secrets.stash_signing_key.as_deref(),
+        check,
+    );
+    cfg.totp_enc_key = obtain_secret(
+        "AUTH_TOTP_ENC_KEY / --totp-enc-key",
+        &cfg.totp_enc_key,
+        file_secrets.totp_enc_key.as_deref(),
         check,
     );
 

@@ -6,3 +6,4 @@
 //! through hydra's `accept_login` call.
 
 pub mod login;
+pub mod totp_challenge;

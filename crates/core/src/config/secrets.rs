@@ -15,6 +15,14 @@ pub const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 /// Both gateway and control must be configured with the IDENTICAL value.
 pub const DEV_PAIRWISE_SALT: &str = "dev-pairwise-salt-never-rotate-in-prod";
 
+/// Development-only TOTP at-rest encryption key (ISS-11) used by the auth
+/// service when insecure dev is explicit. 64 hex chars → 32 bytes, the minimum
+/// `validate_master_key_material` accepts. In production this must be a strong,
+/// stable, high-entropy key set via `AUTH_TOTP_ENC_KEY`; rotating it without
+/// re-encrypting `zeroship.totp_credentials` invalidates every enrolled secret.
+pub const DEV_TOTP_ENC_KEY: &str =
+    "00000000000000000000000000000000000000000000000000000000000000ff";
+
 /// Require `value` to be non-empty unless insecure development mode is explicit.
 ///
 /// # Errors

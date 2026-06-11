@@ -59,6 +59,16 @@ impl Bucket {
         capacity: 30.0,
         refill_per_sec: 30.0 / 3600.0,
     };
+    /// TOTP code verification per-user (ISS-11): 5 attempts burst, refill 5/15min.
+    /// Bounds brute-force of a 6-digit code (and of the backup codes) on the
+    /// confirm + login-challenge verify paths. Keyed per-user since the caller is
+    /// already authenticated (enroll/confirm) or password-verified (login
+    /// challenge), so the email/IP is known and a per-user bucket is the right
+    /// scope.
+    pub const TOTP_VERIFY: Self = Self {
+        capacity: 5.0,
+        refill_per_sec: 5.0 / 900.0,
+    };
 }
 
 #[derive(Debug)]

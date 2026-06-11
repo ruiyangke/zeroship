@@ -25,9 +25,12 @@ use crate::hydra_client::types::{AcceptLoginRequest, RejectRequest};
 use crate::hydra_client::HydraAdmin;
 use crate::identity::credentials::{verify_password_credentials, CredentialError};
 use crate::identity::eligibility::{self, LoginIneligible};
+use crate::identity::totp;
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
-use crate::store::{sessions, users};
-use crate::ui::{LoginPage, PublicErrorMessage};
+use crate::sessions::totp_challenge::{self, TotpChallenge};
+use crate::store::{sessions, totp as totp_store, users};
+use crate::ui::{LoginPage, PublicErrorMessage, TotpChallengePage};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
@@ -284,17 +287,82 @@ pub async fn post(
         }
     };
 
-    // 5. Success path.
-    //
-    // 5a. Create the IdP session row.
+    // 5. Password verified. If the user has a CONFIRMED TOTP credential, do NOT
+    // mint a session / accept_login yet — require a second factor. We attest
+    // "factor 1 passed" in a short-lived, HMAC-signed `__Host-zsidp_2fa` cookie
+    // (bound to user_id + credential_version + this hydra challenge) and render
+    // the code-entry form. `/login/2fa` finishes the flow. A pending (un-
+    // confirmed) enrollment does NOT gate login (`is_enabled` is confirmed-only).
+    match totp_store::is_enabled(db.as_ref(), verified.id).await {
+        Ok(true) => {
+            let stash = TotpChallenge::new(
+                verified.id,
+                verified.credential_version,
+                challenge.clone(),
+            );
+            let cookie = stash.encode(cfg.stash_signing_key.as_bytes());
+            let csrf_token = csrf::generate_token();
+            let page = TotpChallengePage {
+                challenge: &challenge,
+                csrf: &csrf_token,
+                error: None,
+            };
+            let body = match page.render() {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(error = %e, "render totp_challenge.html failed");
+                    return render_error(PublicErrorMessage::ContactSupport);
+                }
+            };
+            let mut resp = HttpResponse::Ok();
+            resp.content_type("text/html; charset=utf-8");
+            resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+            resp.header(
+                SET_COOKIE,
+                totp_challenge::set_cookie(&cookie, cfg.insecure_dev),
+            );
+            return resp.body(body);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            // Fail CLOSED: if we cannot determine 2FA status we must not skip
+            // the second factor for a user who may have it enabled.
+            tracing::error!(error = %e, user_id = %verified.id, "totp is_enabled check failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    }
+
+    // 5'. No 2FA — finish the login (session + accept_login + 302).
+    finish_login(&req, &admin, &cfg, db.as_ref(), verified.id, verified.credential_version, &challenge, &["pwd"], None).await
+}
+
+/// Complete a verified login: create the IdP session row, bump `last_login_at`,
+/// `accept_login` to hydra, and 302 with the session cookie. `amr` records the
+/// methods used (`["pwd"]` or `["pwd", "otp"]`). `clear_challenge_cookie`, when
+/// set, additionally clears the `__Host-zsidp_2fa` cookie (the 2FA path).
+///
+/// Shared by the no-2FA login tail and the `/login/2fa` second-factor handler so
+/// there is ONE session-mint + accept_login body.
+#[allow(clippy::future_not_send, clippy::too_many_arguments)]
+async fn finish_login(
+    _req: &HttpRequest,
+    admin: &HydraAdmin,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+    user_id: uuid::Uuid,
+    credential_version: i64,
+    challenge: &str,
+    amr: &[&str],
+    clear_challenge_cookie: Option<()>,
+) -> HttpResponse {
     let session = match sessions::create(
-        db.as_ref(),
+        db,
         &sessions::CreateSession {
-            user_id: verified.id,
+            user_id,
             auth_method: "pwd",
-            amr: vec!["pwd".into()],
+            amr: amr.iter().map(|s| (*s).to_string()).collect(),
             acr: Some("urn:zeroship:pwd"),
-            expected_credential_version: Some(verified.credential_version),
+            expected_credential_version: Some(credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },
@@ -308,22 +376,19 @@ pub async fn post(
         }
     };
 
-    // 5b. Bump last_login_at (non-fatal on failure — we already audited the
-    // success; the user should still flow through to hydra).
-    if let Err(e) = users::touch_last_login(db.as_ref(), verified.id).await {
-        tracing::warn!(error = %e, user_id = %verified.id, "touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db, user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "touch_last_login failed");
     }
 
-    // 5c. Accept the hydra login challenge.
     let accept = AcceptLoginRequest {
-        subject: verified.id.to_string(),
+        subject: user_id.to_string(),
         remember: Some(true),
         remember_for: Some(3600),
         acr: Some("urn:zeroship:pwd".into()),
-        amr: Some(vec!["pwd".into()]),
+        amr: Some(amr.iter().map(|s| (*s).to_string()).collect()),
         ..Default::default()
     };
-    let redirect_to = match admin.accept_login(&challenge, &accept).await {
+    let redirect_to = match admin.accept_login(challenge, &accept).await {
         Ok(resp) => resp.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_login failed");
@@ -331,22 +396,220 @@ pub async fn post(
         }
     };
 
-    // (The `login_success` audit row is emitted inside
-    // `verify_password_credentials` — emitting it again here would
-    // double-count the success.)
-
-    // 5d. 302 with the session cookie + hydra's redirect_to as Location.
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
-        HeaderValue::from_str(&redirect_to)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    if clear_challenge_cookie.is_some() {
+        resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
+    }
     resp.finish()
+}
+
+// ─── POST /login/2fa ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct TotpForm {
+    pub csrf: String,
+    pub code: String,
+}
+
+/// `/login/2fa` POST — the second factor (ISS-11).
+///
+/// Reached only after `/login` POST verified the password for a TOTP-enabled
+/// user and set the signed `__Host-zsidp_2fa` cookie. Algorithm:
+///
+/// 1. CSRF (double-submit).
+/// 2. Decode + verify the signed challenge cookie (factor-1 attestation). A
+///    missing/forged/expired cookie → back to `/login`.
+/// 3. Re-check the cookie's `credential_version` against the live user row — a
+///    password change / forced logout since factor 1 invalidates the challenge.
+/// 4. Rate-limit the verify (per-user) so the 6-digit code + backup codes can't
+///    be brute-forced.
+/// 5. Accept a valid TOTP code (±1 step skew) OR an unused backup code (marked
+///    used on redeem). Only then `finish_login` (session + accept_login).
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+pub async fn post_2fa(
+    req: HttpRequest,
+    query: ntex::web::types::Query<LoginQuery>,
+    form: ntex::web::types::Form<TotpForm>,
+    admin: ntex::web::types::State<HydraAdmin>,
+    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+) -> HttpResponse {
+    let challenge = query.login_challenge.clone();
+
+    // 1. CSRF.
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    if cookie_token
+        .as_deref()
+        .is_none_or(|c| !csrf::matches(&form.csrf, c))
+    {
+        return redirect_to_login();
+    }
+
+    // 2. Decode + verify the factor-1 challenge cookie.
+    let Some(stash) = totp_challenge::parse_cookie(cookie_header, cfg.insecure_dev)
+        .and_then(|raw| TotpChallenge::decode(&raw, cfg.stash_signing_key.as_bytes()))
+    else {
+        return redirect_to_login();
+    };
+    // The cookie's challenge must match the form's challenge (no cross-flow
+    // replay onto a different hydra login challenge).
+    if stash.login_challenge != challenge {
+        return redirect_to_login();
+    }
+
+    // 3. Re-fetch the user; credential_version must still match (a password
+    // change / forced logout since factor 1 invalidates this challenge).
+    let user = match users::find_by_id(db.as_ref(), &stash.user_id.to_string()).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return redirect_to_login(),
+        Err(e) => {
+            tracing::error!(error = %e, "post_2fa find_by_id failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    if user.credential_version != stash.credential_version {
+        return render_2fa_error(&challenge, &cfg, "session expired, sign in again");
+    }
+
+    // 4. Rate-limit the verify (per-user).
+    let rl_key = format!("totp:verify:{}", user.id);
+    match ratelimit::consume(db.as_ref(), &rl_key, Bucket::TOTP_VERIFY).await {
+        Ok(RateLimitDecision::Allowed) => {}
+        Ok(RateLimitDecision::Throttled(_)) => {
+            return render_2fa_error(&challenge, &cfg, "too many attempts, try again later");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "post_2fa rate-limit consume failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    }
+
+    // 5. The credential must still be confirmed/enabled.
+    let cred = match totp_store::find_confirmed(db.as_ref(), user.id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return redirect_to_login(),
+        Err(e) => {
+            tracing::error!(error = %e, "post_2fa find_confirmed failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+
+    // 5a. Try the TOTP code first.
+    let key = match totp::key_from_config(&cfg.totp_enc_key) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!(error = %e, "totp enc key misconfigured");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let mut second_factor_ok = false;
+    if let Ok(secret) = totp::decrypt_secret(&key, user.id, &cred.encrypted_secret) {
+        if totp::verify_code(&secret, &form.code) {
+            second_factor_ok = true;
+        }
+    }
+
+    // 5b. Otherwise try an unused backup code (constant-time per-code via Argon2).
+    if !second_factor_ok {
+        match totp_store::unused_backup_codes(db.as_ref(), user.id).await {
+            Ok(codes) => {
+                for c in &codes {
+                    if totp::verify_backup_code(&form.code, &c.code_hash).unwrap_or(false) {
+                        // Single-use: mark it; only count the factor if WE won
+                        // the mark-used race.
+                        match totp_store::mark_backup_code_used(db.as_ref(), c.id).await {
+                            Ok(true) => second_factor_ok = true,
+                            Ok(false) => {} // already used concurrently — reject
+                            Err(e) => {
+                                tracing::error!(error = %e, "mark_backup_code_used failed");
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "unused_backup_codes failed");
+                return render_error(PublicErrorMessage::ContactSupport);
+            }
+        }
+    }
+
+    if !second_factor_ok {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "login_2fa_failure",
+                outcome: "failure",
+                user_id: Some(&user.id),
+                auth_method: Some("otp"),
+                detail: json!({ "reason": "invalid_second_factor" }),
+                ..AuditEvent::from_request(&req)
+            },
+        )
+        .await;
+        return render_2fa_error(&challenge, &cfg, "invalid code");
+    }
+
+    audit::emit(
+        db.as_ref(),
+        &AuditEvent {
+            event_type: "login_2fa_success",
+            outcome: "success",
+            user_id: Some(&user.id),
+            auth_method: Some("otp"),
+            detail: json!({}),
+            ..AuditEvent::from_request(&req)
+        },
+    )
+    .await;
+
+    finish_login(
+        &req,
+        &admin,
+        &cfg,
+        db.as_ref(),
+        user.id,
+        user.credential_version,
+        &challenge,
+        &["pwd", "otp"],
+        Some(()),
+    )
+    .await
+}
+
+/// Re-render the 2FA challenge page with an error banner + fresh CSRF cookie.
+fn render_2fa_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
+    let csrf_token = csrf::generate_token();
+    let page = TotpChallengePage {
+        challenge,
+        csrf: &csrf_token,
+        error: Some(err),
+    };
+    let body = page.render().unwrap_or_else(|_| format!("<h1>{err}</h1>"));
+    let mut resp = HttpResponse::build(ntex::http::StatusCode::UNAUTHORIZED);
+    resp.content_type("text/html; charset=utf-8");
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.body(body)
+}
+
+fn redirect_to_login() -> HttpResponse {
+    let mut r = HttpResponse::Found();
+    r.header(LOCATION, HeaderValue::from_static("/login"));
+    r.finish()
 }
 
 /// Re-render the login page with an error banner + fresh CSRF cookie, at the

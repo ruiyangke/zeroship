@@ -42,6 +42,14 @@ pub fn configure(
                     .route(web::get().to(ui::login::get))
                     .route(web::post().to(ui::login::post)),
             )
+            // ISS-11: TOTP second-factor step. Reached only after `/login` POST
+            // verified the password for a 2FA-enabled user and set the signed
+            // `__Host-zsidp_2fa` challenge cookie. POST-only (the challenge form
+            // is rendered by the `/login` POST response, not a GET).
+            .service(
+                web::resource("/login/2fa")
+                    .route(web::post().to(ui::login::post_2fa)),
+            )
             .service(
                 web::resource("/signup")
                     .route(web::get().to(ui::signup::get))
@@ -117,6 +125,24 @@ pub fn configure(
             .service(
                 web::resource("/me/delete/cancel")
                     .route(web::post().to(ui::account_deletion::cancel)),
+            )
+            // ISS-11: TOTP two-factor self-service. Same authenticated
+            // `__Host-zsidp_session` + CSRF gate as the rest of `/me` (the
+            // handlers resolve the caller from the cookie). `enroll` mints a
+            // pending secret + provisioning URI; `confirm` verifies the first
+            // code, activates 2FA, and returns one-time backup codes; `disable`
+            // removes the credential after a code/password re-auth.
+            .service(
+                web::resource("/me/2fa/enroll")
+                    .route(web::post().to(ui::totp::enroll)),
+            )
+            .service(
+                web::resource("/me/2fa/confirm")
+                    .route(web::post().to(ui::totp::confirm)),
+            )
+            .service(
+                web::resource("/me/2fa/disable")
+                    .route(web::post().to(ui::totp::disable)),
             )
             // Magic-link login (P5-U4). Universal — always registered,
             // no per-provider gating.

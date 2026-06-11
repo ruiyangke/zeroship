@@ -123,6 +123,11 @@ pub struct SecretSection {
     pub resend_api_key: Option<String>,
     /// Postmark inbound webhook basic-auth password reference.
     pub postmark_webhook_password: Option<String>,
+    /// TOTP at-rest encryption key reference (ISS-11). AES-256-GCM key material
+    /// for the auth service's `zeroship.totp_credentials.encrypted_secret`;
+    /// must decode (hex or base64url) to ≥32 bytes. Dedicated key, independent
+    /// of the stash/pairwise secrets.
+    pub totp_enc_key: Option<String>,
 }
 
 /// Observability values that can be supplied by the shared file overlay.

@@ -24,6 +24,7 @@ pub mod oauth_stash;
 pub mod reset;
 pub mod sessions;
 pub mod signup;
+pub mod totp;
 pub mod verify;
 pub mod webhooks;
 
@@ -45,6 +46,18 @@ pub struct LoginPage<'a> {
     pub client_name: &'a str,
     pub google_enabled: bool,
     pub github_enabled: bool,
+}
+
+/// `/login/2fa` challenge page (ISS-11). Rendered after a successful password
+/// verify for a user with a CONFIRMED TOTP credential, BEFORE `accept_login`.
+/// The `challenge` is hydra's pending `login_challenge`; the signed
+/// `__Host-zsidp_2fa` cookie (set alongside) attests factor 1 passed.
+#[derive(Debug, Template)]
+#[template(path = "totp_challenge.html")]
+pub struct TotpChallengePage<'a> {
+    pub challenge: &'a str,
+    pub csrf: &'a str,
+    pub error: Option<&'a str>,
 }
 
 /// `/signup` GET page. Same `login_challenge` carries through so that
