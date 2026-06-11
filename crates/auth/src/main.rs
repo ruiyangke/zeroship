@@ -94,18 +94,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Mailer config validation is cheap and should fail before any DB/Hydra
-    // work. The constructed driver is reused below on normal startup.
-    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
-    tracing::info!(driver = %cfg.mailer, "mailer ready");
-
-    // The SECOND, dedicated relay-forward mailer (sub-spec §5.2a). Built during
-    // the same cheap pre-boot validation pass so a misconfigured relay SMTP
-    // block fails fast with a named env var, exactly like the transactional
-    // mailer. Forced to SMTP/stdout — Resend can't pin envelope-from (§3.2).
-    let relay_forward_mailer: RelayForwardMailer = build_relay_forward_mailer(&cfg)?;
-    tracing::info!(driver = %cfg.relay_forward_mailer, "relay-forward mailer ready");
-
+    // --check-config is a read-only DRY-RUN: resolve + report the config and
+    // exit BEFORE any runtime-only validation (mailer/SMTP construction), exactly
+    // like control / gateway / worker. Building the mailers enforces the
+    // `AUTH_SMTP_HOST` / `AUTH_RELAY_SMTP_HOST` requirements, which are real-boot
+    // concerns — they must NOT gate a config dry-run (ISS-62). The report below
+    // references only `cfg.*` (e.g. `cfg.mailer`, a plain string), never the
+    // constructed drivers, so it stands alone ahead of mailer construction.
     if cfg.check_config {
         let mut report = CheckConfigReport::new();
         report.field("addr", CheckValue::Plain(cfg.addr.clone()));
@@ -159,6 +154,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.emit(fmt);
         return Ok(());
     }
+
+    // Real boot only (past the --check-config dry-run early-return above). Mailer
+    // config validation is cheap and should fail before any DB/Hydra work, with a
+    // named env var, so a misconfigured SMTP block (transactional or relay-forward)
+    // fails fast. The constructed drivers are threaded into `server::run` below.
+    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.mailer, "mailer ready");
+
+    // The SECOND, dedicated relay-forward mailer (sub-spec §5.2a). Forced to
+    // SMTP/stdout — Resend can't pin envelope-from (§3.2).
+    let relay_forward_mailer: RelayForwardMailer = build_relay_forward_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.relay_forward_mailer, "relay-forward mailer ready");
 
     ntex::rt::System::build()
         .name("zeroship-auth")
