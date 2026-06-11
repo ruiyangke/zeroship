@@ -34,6 +34,7 @@ builder.
 | **T2** GA | ISS-15 deploy history+rollback · ISS-36 custom domains · ISS-37 edge observability · ISS-38 CD + prod orchestration · ISS-39 prod secrets backend · ISS-40 dynamic worker fleet · ISS-43 WebSocket-in-gateway |
 | **T3** capability | ISS-28 cron/scheduled primitive · ISS-41 end-user authz (P12) · ISS-42 `@zeroship/{email,ai}` SDKs · ISS-44 non-additive migrations · ISS-45 node-compat align · ISS-46 per-tenant fairness/quotas · ISS-47 `env.assets` writes |
 | **T4** scale/later | ISS-48 teams/orgs · ISS-49 V8 snapshots · ISS-50 multi-region/HA · ISS-51 sandbox scale · ISS-52 stateless-worker migration |
+| **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -261,6 +262,39 @@ per-node capacity, no cross-node placement; egress unfiltered (SB-A1).
 KV→Redis: storage-S3 (ISS-32), PgBouncer (ISS-35), sharding, config-bus reconfigure, cross-worker
 realtime pub/sub, and the stateless-worker flip itself. In-flight work is also dropped on
 evict/redeploy (no drain — W-2).
+
+---
+
+## E2E test findings (2026-06-11)
+
+Issues surfaced while exercising the framework end-to-end. Detail + ledger:
+`docs/reviews/2026-06-11-e2e-test-log.md`.
+
+### ISS-53 · `tests/e2e_platform.sh` is broken against current code
+**Status:** open · **Effort:** S–M · **Tier:** T2 (test infra)
+
+The platform's own multi-node E2E harness has rotted and silently can't start the stack:
+control refuses to boot because `WORKER_KEY` (≥32B) and `SIGNING_KEY_FILE` are now required
+(server-config hardening) and the harness sets neither, using short keys (`test-ck`/`test-mk`).
+Also stale: `zeroship deploy --key=` (now `--token=`), and an **unqualified
+`DROP TABLE … apps CASCADE`** (line 108) that — with the `zeroship` search_path — drops
+`zeroship.apps` + dependents, corrupting the target schema. **Fix:** modernize the harness
+(`--dev-insecure` or real keys + a signing-key file; `--token`; schema-qualified / temp-DB
+cleanup; deploy against a clean Liquibase-migrated DB). Verified: control starts only with
+`--dev-insecure`.
+
+### ISS-54 · No end-to-end test coverage for app primitives through the gateway
+**Status:** open · **Effort:** M · **Tier:** T2 (test infra)
+
+Nothing exercises `env.db/kv/storage/auth` over the real multi-node edge. `e2e_platform.sh`
+deploys trivial inline JS (dispatch plumbing only); `examples/db-e2e` tests db richly but via
+single-tenant `zeroship serve` (bypasses the gateway, SQLite not PG). The whole
+"E2E-through-gateway" column is empty. Compounding coverage gaps: **`env.storage` has zero
+example** (G2), **`env.auth` has zero example** so the gateway `ZeroShip-User`→worker
+`AuthPlugin` identity chain is never tested (G3), and `kv-dashboard` has no test runner (G4).
+**Fix:** a gateway-E2E harness (`e2e_app_primitives.sh`) deploying a real built example through
+control→gateway→worker + asserting the primitives over the edge, plus `storage-gallery` /
+`auth-notes` examples + a kv runner.
 
 ---
 
