@@ -417,9 +417,13 @@ build-alignment nicety (carry/document the schema machinery), not a blocker. Low
 admin API (`POST /api/apps`/deploy require a `pat+jwt` verified against `zeroship.permission_tokens`, and
 minting one needs an interactive OAuth session) or (b) mint an app session/Bearer for authenticated RPC
 (all three gateway auth arms require Hydra). `e2e_app_primitives.sh` works around (a) by offline-signing
-a `pat+jwt` with a seeded admin role + `--signing-key-file`; (b) (the G3 known-fail) needs Hydra. **Fix:**
-a `--dev-insecure` shortcut that admits a headless admin PAT + an app session for local/test (gated to
-dev-only, like the dev-auth tier), so the full edge path is testable without standing up Hydra.
+a `pat+jwt` with a seeded admin role + `--signing-key-file`; (b) (the G3 known-fail) needs Hydra.
+
+> **Pilot decision (2026-06-11): not building a `--dev-insecure` gateway auth-bypass.** It adds an
+> auth-skip surface to the prod binaries for test convenience, when the worker `/dispatch` path already
+> proves the primitives (ISS-66, env.db green over the edge) and the prod gateway path uses Hydra
+> (covered by the auth-pipeline reviews). If headless gateway-auth E2E is wanted, prefer standing up
+> Hydra in the harness (faithful, no new bypass). Left as a harness-design call, not a runtime fix.
 
 ### ISS-62 · `zeroship-auth --check-config` can't dry-run config-from-file — FIXED
 **Status:** fixed (2026-06-11) · **Tier:** T3 (DX/ops)
