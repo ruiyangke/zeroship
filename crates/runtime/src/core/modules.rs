@@ -74,7 +74,12 @@ fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Opti
 }
 
 /// Compile a single module from source.
-fn compile_module(
+///
+/// `pub(crate)` so the dynamic-import host callback can compile
+/// runtime-provided JS modules (e.g. `@zeroship/bootstrap/install-schema`)
+/// on demand and feed them through the same registry the static
+/// `resolve_callback` reads.
+pub(crate) fn compile_module(
     scope: &mut v8::PinScope,
     specifier: &str,
     source: &str,
@@ -213,10 +218,22 @@ pub fn load_modules(
     }
 
     // Evaluate.
-    let eval_rejection: Option<v8::Global<v8::Value>> = {
+    //
+    // The registry borrow is released BEFORE `module.evaluate()`: a
+    // top-level `await import(...)` in the entry (e.g. the bootstrap
+    // `runtime-entry.js`'s `import("@zeroship/bootstrap/install-schema")`)
+    // fires the dynamic-import host callback synchronously during evaluate
+    // AND during the microtask checkpoint below. That callback may
+    // `borrow_mut()` the registry to cache a freshly-resolved module — so
+    // holding a shared borrow across evaluate would `RefCell`-panic
+    // (a non-unwinding abort). We only need the borrow to fetch the
+    // module handle; clone it out and drop the guard immediately.
+    let entry_module_g = {
         let reg = registry.borrow();
-        let module_global = reg.compiled.get(entrypoint).unwrap();
-        let module = v8::Local::new(scope, module_global);
+        reg.compiled.get(entrypoint).unwrap().clone()
+    };
+    let eval_rejection: Option<v8::Global<v8::Value>> = {
+        let module = v8::Local::new(scope, &entry_module_g);
 
         let (result_global, sync_exc) = {
             v8::tc_scope!(let tc, scope);
@@ -288,8 +305,12 @@ pub fn load_modules(
 /// V8 resolve callback — lookups only, never compiles.
 ///
 /// All transitively imported modules are pre-compiled before
-/// `instantiate_module`.
-fn resolve_callback<'a>(
+/// `instantiate_module`. `pub(crate)` so the dynamic-import host callback
+/// can reuse the exact same lookup when instantiating a runtime-provided
+/// module (e.g. `@zeroship/bootstrap/install-schema`), whose own static
+/// imports (`@zeroship/db/internal`, `zeroship`) must resolve against the
+/// registry the host callback pre-populated.
+pub(crate) fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,
     _import_attributes: v8::Local<'a, v8::FixedArray>,

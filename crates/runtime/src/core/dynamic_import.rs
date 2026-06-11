@@ -1,6 +1,6 @@
 //! V8 host callback for `await import(specifier)`.
 //!
-//! Bundle-resident only. Three resolution paths:
+//! Resolution paths, in order:
 //!
 //!   1. Registry hit — module already pre-compiled by `load_modules`'s
 //!      static-import BFS, OR previously cached by an earlier dynamic
@@ -11,8 +11,17 @@
 //!      via `native_modules::resolve_native`, instantiated, evaluated,
 //!      then cached into the registry so future dynamic OR static
 //!      imports of the same specifier hit path 1.
+//!   2.5. Runtime-provided module (`@zeroship/bootstrap/install-schema`,
+//!      `@zeroship/db/internal`, `zeroship`) — see `bootstrap_modules`.
+//!      The runtime injects the code that imports these (the bootstrap
+//!      `runtime-entry.js`), so it owns their resolution even when the
+//!      tree-shaken `.zship` bundle doesn't carry them (ISS-63). The
+//!      module + its transitive runtime-provided deps are compiled into
+//!      the registry, instantiated through the real static-graph
+//!      resolver, evaluated, and cached for path 1.
 //!   3. Miss — reject with `TypeError("Cannot find module '<spec>'")`.
-//!      No fetch, no compile-on-demand: the bundle is the closed world.
+//!      No fetch, no compile-on-demand for arbitrary bundle paths: outside
+//!      the runtime-provided set, the bundle is the closed world.
 //!
 //! V8's per-module evaluation cache makes `module.evaluate()` idempotent
 //! after the first call, so the registry's module handles are safe to
@@ -24,7 +33,8 @@
 
 #![allow(unsafe_code)]
 
-use crate::core::modules::SharedRegistry;
+use crate::core::bootstrap_modules;
+use crate::core::modules::{self, SharedRegistry};
 use crate::core::native_modules;
 
 /// Variants tried for an unknown specifier — same set as the static
@@ -76,6 +86,88 @@ fn instantiate_and_evaluate<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     if module.get_status() == v8::ModuleStatus::Uninstantiated {
         let _ = module.instantiate_module(scope, native_modules::empty_resolve);
+    }
+    if module.get_status() == v8::ModuleStatus::Instantiated {
+        let _ = module.evaluate(scope);
+    }
+    if module.get_status() == v8::ModuleStatus::Errored {
+        return None;
+    }
+    Some(module.get_module_namespace())
+}
+
+/// Resolve a runtime-provided module (`@zeroship/bootstrap/install-schema`,
+/// `@zeroship/db/internal`, `zeroship`) — see [`bootstrap_modules`].
+///
+/// The runtime, not the bundle, owns these: it injects the code that
+/// imports them (`runtime-entry.js` spliced into the bootstrap `index.js`),
+/// so it must guarantee they resolve regardless of what the tree-shaken
+/// `.zship` carries (ISS-63).
+///
+/// Strategy: compile the requested module AND its transitive
+/// runtime-provided dependency closure into the per-isolate registry, then
+/// instantiate with the SAME [`modules::resolve_callback`] the static graph
+/// uses — so the bootstrap module's own `import ... from "@zeroship/db/internal"`
+/// / `"zeroship"` lines resolve against the registry we just populated. The
+/// requested module is left cached in the registry, so a later static OR
+/// dynamic import of the same specifier hits path 1.
+///
+/// Returns `None` if `spec` isn't a runtime-provided module (caller falls
+/// through to the not-found rejection) or if compilation fails (treated as
+/// a not-found miss — a compile error here means the embedded dist drifted,
+/// which the resolution tests catch).
+fn resolve_bootstrap_module<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    spec: &str,
+) -> Option<v8::Local<'s, v8::Module>> {
+    if !bootstrap_modules::is_bootstrap_module(spec) {
+        return None;
+    }
+    let registry = scope.get_slot::<SharedRegistry>()?.clone();
+
+    // Walk the transitive runtime-provided closure (DFS) and compile each
+    // member into the registry if absent. `zeroship` is frequently already
+    // present (the user app statically imports it); install-schema /
+    // internal are not. Compiling a member doesn't evaluate it — that
+    // happens during the entry's `instantiate_module` + `evaluate` below,
+    // exactly as `load_modules` does for the static graph.
+    let mut stack: Vec<&str> = vec![spec];
+    let mut seen: Vec<&str> = Vec::new();
+    while let Some(cur) = stack.pop() {
+        if seen.contains(&cur) {
+            continue;
+        }
+        seen.push(cur);
+
+        let already = registry.borrow().get(cur).is_some();
+        if !already {
+            let source = bootstrap_modules::source_for(cur)?;
+            let module = modules::compile_module(scope, cur, source).ok()?;
+            registry.borrow_mut().insert(cur.to_string(), module);
+        }
+        for dep in bootstrap_modules::deps_of(cur) {
+            stack.push(dep);
+        }
+    }
+
+    // Hand back the requested module. The host callback instantiates it
+    // through `modules::resolve_callback`, which now finds every transitive
+    // import in the registry.
+    let g = registry.borrow().get(spec)?.clone();
+    Some(v8::Local::new(scope, &g))
+}
+
+/// Instantiate (via the real static-graph resolver, so transitive imports
+/// resolve) and evaluate a runtime-provided bootstrap module, returning its
+/// namespace. Distinct from [`instantiate_and_evaluate`] (which uses
+/// `empty_resolve` for import-less synthetics): bootstrap modules DO have
+/// static imports.
+fn instantiate_and_evaluate_bootstrap<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    module: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    if module.get_status() == v8::ModuleStatus::Uninstantiated {
+        let _ = module.instantiate_module(scope, modules::resolve_callback);
     }
     if module.get_status() == v8::ModuleStatus::Instantiated {
         let _ = module.evaluate(scope);
@@ -146,6 +238,23 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
         match instantiate_and_evaluate(scope, module) {
             Some(ns) => {
                 cache_into_registry(scope, &spec, module);
+                let promise = resolver.get_promise(scope);
+                resolver.resolve(scope, ns);
+                return Some(promise);
+            }
+            None => return Some(reject_module_error(scope, resolver, module)),
+        }
+    }
+
+    // Path 2.5: runtime-provided module (`@zeroship/bootstrap/install-schema`,
+    // `@zeroship/db/internal`, `zeroship`). The runtime injects the code
+    // that imports these (runtime-entry.js), so it owns their resolution
+    // even when the tree-shaken bundle doesn't carry them (ISS-63). The
+    // requested module is cached into the registry by
+    // `resolve_bootstrap_module`, so subsequent imports hit path 1.
+    if let Some(module) = resolve_bootstrap_module(scope, &spec) {
+        match instantiate_and_evaluate_bootstrap(scope, module) {
+            Some(ns) => {
                 let promise = resolver.get_promise(scope);
                 resolver.resolve(scope, ns);
                 return Some(promise);
