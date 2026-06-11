@@ -18,7 +18,7 @@ using the package.
 
 Sources read:
 
-- `docs/briefs/design-system.md`
+- `docs/archive/briefs/design-system.md`
 - `docs/design/ui-design-flow.md`
 - `apps/zeroship-builder/design/REDESIGN.md`
 - `apps/zeroship-builder/design/REDESIGN_FULL.md`
