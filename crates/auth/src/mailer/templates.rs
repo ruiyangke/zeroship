@@ -91,6 +91,26 @@ pub struct SuspiciousActivityText<'a> {
     pub action_link: Option<&'a str>,
 }
 
+// ─── account-deletion request (ISS-12) ───────────────────────
+
+#[derive(Template, Debug)]
+#[template(path = "account_deletion_requested.html")]
+pub struct AccountDeletionRequestedHtml<'a> {
+    pub name: &'a str,
+    pub link: &'a str,
+    pub scheduled_for: &'a str, // human-readable date, e.g. "2026-07-11"
+    pub grace_days: i64,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "account_deletion_requested.txt")]
+pub struct AccountDeletionRequestedText<'a> {
+    pub name: &'a str,
+    pub link: &'a str,
+    pub scheduled_for: &'a str,
+    pub grace_days: i64,
+}
+
 // ─── Render helper ───────────────────────────────────────────
 
 /// Render an html+txt template pair into an `Email` with the given recipient,

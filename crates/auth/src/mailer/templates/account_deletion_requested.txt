@@ -1,0 +1,15 @@
+Hi {{ name }},
+
+We received a request to permanently delete your zeroship account.
+
+Your account has been deactivated and is scheduled for permanent deletion
+on {{ scheduled_for }} ({{ grace_days }} days from now). After that date the
+deletion is irreversible.
+
+Changed your mind? Sign in before then and cancel the request, or use the
+link below:
+
+{{ link }}
+
+If you didn't request this, sign in and cancel immediately, then change your
+password.

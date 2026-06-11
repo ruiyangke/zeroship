@@ -9,6 +9,7 @@
 //! P6-U1 ships `jwk_rotation`; P6-U2 adds `audit_retention`;
 //! `token_sweep` drops expired one-shot token rows after their grace window.
 
+pub mod account_reaper;
 pub mod audit_retention;
 pub mod jwk_rotation;
 pub mod token_sweep;
@@ -45,9 +46,16 @@ pub fn spawn_all(
     })
     .detach();
 
-    let db_token_sweep = db;
+    let db_token_sweep = db.clone();
     compio::runtime::spawn(async move {
         token_sweep::run(db_token_sweep).await;
+    })
+    .detach();
+
+    // ISS-12: erase accounts whose deletion grace window has elapsed.
+    let db_reaper = db;
+    compio::runtime::spawn(async move {
+        account_reaper::run(db_reaper).await;
     })
     .detach();
 }

@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:1rem">
+<h2 style="color:#111">Account deletion scheduled</h2>
+<p>Hi {{ name }},</p>
+<p>We received a request to permanently delete your zeroship account. Your account has been deactivated and is scheduled for permanent deletion on <strong>{{ scheduled_for }}</strong> ({{ grace_days }} days from now). After that date the deletion is irreversible.</p>
+<p>Changed your mind? Sign in before then and cancel the request, or use the button below:</p>
+<p style="margin:2rem 0"><a href="{{ link }}" style="display:inline-block;padding:0.75rem 1.25rem;background:#111;color:#fff;text-decoration:none;border-radius:4px">Cancel deletion</a></p>
+<p style="font-size:0.875rem;color:#666">Or copy + paste this link into your browser:<br><code style="word-break:break-all">{{ link }}</code></p>
+<p style="font-size:0.875rem;color:#666">If you didn't request this, sign in and cancel immediately, then change your password.</p>
+</body></html>

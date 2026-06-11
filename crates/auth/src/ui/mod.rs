@@ -9,6 +9,7 @@
 //! resulting `String` into `ntex::web::HttpResponse::Ok().content_type(
 //! "text/html; charset=utf-8").body(rendered)`.
 
+pub mod account_deletion;
 pub mod consent;
 pub mod device;
 pub mod forgot;

@@ -14,35 +14,18 @@ what's actually wrong today, the fix + rough effort, and dependencies.
 **Status** — `open` · `re-scoped` (open, but title/severity/fix-path corrected 2026-06-11).
 **Tiers** — `T1` GA-blocking (compliance) · `T2` post-launch power/security.
 
-## Active issues (3)
+## Active issues (2 + 1 remainder)
 
 | Tier | Issue | Status | Effort |
 |---|---|---|---|
-| **T1** | ISS-12 · account deletion / GDPR | open (unblocked) | M |
 | T2 | ISS-10 · session visibility on `/me` | re-scoped | S–M |
 | T2 | ISS-11 · 2FA / TOTP | open | M–L |
+| T3 | ISS-12b · owned-app blob/bundle cleanup on erase | open (follow-up) | S–M |
 
-All three live in `crates/auth` and are independent of the builder rewrite.
+All live in `crates/auth` (ISS-12b spans auth → control/blob store) and are independent of
+the builder rewrite. **ISS-12 (the GDPR-erase lifecycle) shipped 2026-06-11** — see below.
 
 ---
-
-## T1 — GA-blocking (compliance)
-
-### ISS-12 · No account-deletion / GDPR-erase path
-**Status:** open · **Effort:** M · **Unblocked** (mailer now exists)
-
-No delete/erase path in `crates/auth` or `crates/control` (only a `disabled_at` soft-disable
-column with no user-space setter). Schema readiness is partial: 10/15 FKs to `zeroship.users`
-are `ON DELETE CASCADE`, but 5 are not (`0004_control.sql:93,224,256,270` creator/billing +
-attribution rows; `0003_platform.sql:12`), so a hard `DELETE` is blocked for any creator with
-a Stripe/billing row.
-
-GA-blocking for EU sign-ups (Art. 17), not launch-blocking — early requests can be fulfilled
-manually within the ~30-day window. The ToS/privacy pages already promise it.
-
-**Fix:** request → grace-period → hard-delete job (host in the `crates/auth` `cron/` module);
-a SET-NULL/anonymize decision for the 5 non-cascade FKs; Stripe-Connect retention handling;
-blob/bundle cleanup for owned apps. The confirm/undo email is free now that the mailer exists.
 
 ## T2 — post-launch · power / security
 
@@ -68,6 +51,25 @@ OAuth + magic-link all work. Good GA hardening since creators control money via 
 **Fix:** challenge in the auth-service `/login` flow before `accept_login`, + encrypted-at-rest
 secret storage + backup codes + enrollment on `/me` (benefits from ISS-10's `/me` security
 card landing first).
+
+## T3 — follow-up
+
+### ISS-12b · Owned-app blob/bundle cleanup on account erase
+**Status:** open (follow-up to ISS-12) · **Effort:** S–M
+
+The ISS-12 reaper (`crates/auth/src/cron/account_reaper.rs`) erases the user row + cascades
+DB dependents, but does NOT delete the blobs/bundles of apps the user owned — that lives
+behind the control plane / blob store (cross-crate from `crates/auth`). Left as a marked TODO
+in the reaper docs. **Fix:** on erase, enumerate the user's owned apps and delete their
+bundles/assets from the blob store (a control-plane call or a shared cleanup primitive).
+Low urgency (orphaned blobs are not a PII leak once the owning user row is gone), but needed
+for true storage hygiene.
+
+> **Operator decision still open (ISS-12):** confirm the billing-retention default in
+> `account_reaper::user_has_financial_history` — currently *anonymize* creators with a
+> `creator_accounts` row (retain financial records per GDPR Art. 17(3)(b)) vs hard-delete.
+> Change the predicate there if you want a different policy (e.g. block erase until the
+> Connect account is closed).
 
 ---
 

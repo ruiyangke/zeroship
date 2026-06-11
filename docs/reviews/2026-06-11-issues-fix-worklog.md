@@ -18,4 +18,15 @@ T1: ISS-12 (GDPR delete) · T2: ISS-10 (session visibility) → ISS-11 (2FA)
 | Iter | Issue(s) | Model | Status | Commit | Notes |
 |---|---|---|---|---|---|
 | 1 | ISS-14, ISS-16 | opus | ABANDONED | — | builder fix; killed on scope change, tree reverted |
-| 2 | ISS-12 (GDPR delete) | opus | in progress | — | crates/auth delete path; TDD |
+| 2 | ISS-12 (GDPR delete) | opus | DONE | (pending) | request/cancel + reaper + 0034 changeset; 6/6 PG tests (`--test-threads=1`); cargo check clean. Pilot re-verified (caught a 6/6→5/6 concurrency flake; passes single-threaded per repo convention). Billing-retention default flagged for operator. Remainder split to ISS-12b (blob cleanup). |
+| 3 | ISS-10 (session visibility) | tbd | next | — | list_by_user union + /me handlers |
+
+### Iter 2 review notes (ISS-12)
+- Verified: changeset 0034 auto-included via `includeAll`, format matches repo, all written
+  columns exist on `zeroship.users`, `creator_accounts`/`payouts` exist.
+- Reaper: per-user transactions, injection-safe constant FK list, idempotent anonymize, billing
+  branch isolated for operator policy change.
+- Test is faithful (drives real store/reaper vs live PG, PG-gated skip). DB tests require
+  `--test-threads=1` (AGENTS.md convention) — the reaper's `tick()` scans all due users, so
+  concurrent tests interfere; documented, not a defect.
+- Deferred: owned-app blob/bundle cleanup → ISS-12b (cross-crate).

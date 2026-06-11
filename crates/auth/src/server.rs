@@ -92,6 +92,18 @@ pub fn configure(
                 web::resource("/me/unlink/{provider}")
                     .route(web::post().to(ui::me::unlink)),
             )
+            // ISS-12: account deletion (GDPR Art. 17). `/me/delete` begins the
+            // request (soft-disable + 30-day schedule + confirm email);
+            // `/me/delete/cancel` reverses it within the grace window. The
+            // irreversible erasure runs later in `cron::account_reaper`.
+            .service(
+                web::resource("/me/delete")
+                    .route(web::post().to(ui::account_deletion::request)),
+            )
+            .service(
+                web::resource("/me/delete/cancel")
+                    .route(web::post().to(ui::account_deletion::cancel)),
+            )
             // Magic-link login (P5-U4). Universal — always registered,
             // no per-provider gating.
             .service(

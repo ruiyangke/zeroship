@@ -295,6 +295,151 @@ pub async fn reset_login_failures(conn: &Client, id: uuid::Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Contact details an [`request_deletion`] returns so the caller can send the
+/// confirm/undo email and audit the request. (`UserRow` would also carry these,
+/// but a dedicated struct documents exactly what the delete flow needs.)
+#[derive(Debug, Clone)]
+pub struct DeletionRequest {
+    pub user_id: uuid::Uuid,
+    pub email: String,
+    pub name: String,
+    pub scheduled_for: chrono::DateTime<chrono::Utc>,
+    /// Sessions torn down as part of the request (idp + gateway), for audit.
+    pub idp_sessions_revoked: u64,
+    pub gateway_sessions_revoked: u64,
+}
+
+/// Begin an account-deletion request (ISS-12 / GDPR Art. 17), atomically:
+///
+///   1. soft-disable the account (`disabled_at = NOW()`) so the existing
+///      login/eligibility gates reject it immediately,
+///   2. stamp `deletion_requested_at = NOW()` and
+///      `deletion_scheduled_for = NOW() + grace_days`,
+///   3. bump `credential_version` so any already-issued IdP/gateway session
+///      (which binds the version) stops validating, and
+///   4. mark every live `idp_sessions` / `gateway_sessions` row revoked.
+///
+/// Idempotent on an already-requested row: it leaves an existing
+/// `deletion_requested_at` untouched (the schedule does not slide) but still
+/// re-asserts the disable + revocation. Returns `Ok(None)` if no such user.
+///
+/// Hydra login-session teardown (a network call to the admin API) is NOT done
+/// here — it is the caller's responsibility, mirroring the password-reset flow
+/// (`ui/reset.rs`), so this function stays a pure DB transaction.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure (the transaction is rolled back).
+pub async fn request_deletion(
+    conn: &Client,
+    id: uuid::Uuid,
+    grace_days: i64,
+) -> Result<Option<DeletionRequest>> {
+    conn.execute("BEGIN", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("request_deletion begin: {e}")))?;
+    let result = request_deletion_tx(conn, id, grace_days).await;
+    match result {
+        Ok(value) => {
+            conn.execute("COMMIT", &[])
+                .await
+                .map_err(|e| AuthError::Db(format!("request_deletion commit: {e}")))?;
+            Ok(value)
+        }
+        Err(e) => {
+            if let Err(rb) = conn.execute("ROLLBACK", &[]).await {
+                tracing::error!(error = %rb, "request_deletion rollback failed");
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn request_deletion_tx(
+    conn: &Client,
+    id: uuid::Uuid,
+    grace_days: i64,
+) -> Result<Option<DeletionRequest>> {
+    let rows = conn
+        .query(
+            "UPDATE zeroship.users \
+             SET disabled_at = COALESCE(disabled_at, NOW()), \
+                 deletion_requested_at = COALESCE(deletion_requested_at, NOW()), \
+                 deletion_scheduled_for = COALESCE( \
+                     deletion_scheduled_for, NOW() + make_interval(days => $2::int)), \
+                 credential_version = credential_version + 1, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND anonymized_at IS NULL \
+             RETURNING email::text AS email, name, deletion_scheduled_for",
+            &[&id, &i32::try_from(grace_days).unwrap_or(30)],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("request_deletion update users: {e}")))?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let email: String = row.get("email");
+    let name: String = row.get("name");
+    let scheduled_for: chrono::DateTime<chrono::Utc> = row.get("deletion_scheduled_for");
+
+    let idp_sessions_revoked = conn
+        .execute(
+            "UPDATE zeroship.idp_sessions SET revoked_at = NOW() \
+             WHERE user_id = $1 AND revoked_at IS NULL",
+            &[&id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("request_deletion revoke idp_sessions: {e}")))?;
+    let gateway_sessions_revoked = conn
+        .execute(
+            "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() \
+             WHERE user_id = $1 AND revoked_at IS NULL",
+            &[&id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("request_deletion revoke gateway_sessions: {e}")))?;
+
+    Ok(Some(DeletionRequest {
+        user_id: id,
+        email,
+        name,
+        scheduled_for,
+        idp_sessions_revoked,
+        gateway_sessions_revoked,
+    }))
+}
+
+/// Cancel an in-flight account-deletion request within the grace window
+/// (ISS-12): clear `disabled_at`, `deletion_requested_at`, and
+/// `deletion_scheduled_for`, re-enabling the account. Returns `true` if a
+/// pending request was cancelled, `false` if there was nothing to cancel
+/// (no request in flight, or the account is already anonymized — terminal).
+///
+/// Sessions are NOT restored — the user signs in fresh, exactly as after a
+/// password reset.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure.
+pub async fn cancel_deletion(conn: &Client, id: uuid::Uuid) -> Result<bool> {
+    let n = conn
+        .execute(
+            "UPDATE zeroship.users \
+             SET disabled_at = NULL, \
+                 deletion_requested_at = NULL, \
+                 deletion_scheduled_for = NULL, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND deletion_requested_at IS NOT NULL \
+               AND anonymized_at IS NULL",
+            &[&id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("cancel_deletion: {e}")))?;
+    Ok(n > 0)
+}
+
 /// Bump `last_login_at` to `NOW()`.
 ///
 /// # Errors
