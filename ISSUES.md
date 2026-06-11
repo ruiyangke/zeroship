@@ -20,7 +20,9 @@ exposure missing).
 
 ## Status at a glance
 
-**Auth (in-flight):** ISS-11 (2FA, fix loop in progress) · ISS-12b (erase blob cleanup).
+**Auth:** ISS-12b (erase blob cleanup) — only remainder. **Shipped 2026-06-11:** ISS-12
+(GDPR erase, `3a9b2315`+`a0d23e8c`), ISS-10 (session visibility, `de38f943`), ISS-11
+(TOTP 2FA, `7ab11964`).
 
 **Platform capability gaps (from the gap analysis):**
 
@@ -36,14 +38,7 @@ exposure missing).
 
 ---
 
-## Auth (in-flight)
-
-### ISS-11 · No two-factor (TOTP) enrollment
-**Status:** open (fix loop in progress) · **Effort:** M–L · **Tier:** T2
-
-Zero MFA code. Not a sign-up blocker (password + OAuth + magic-link work); good GA hardening
-since creators control money. **Fix:** TOTP challenge in the auth `/login` flow before
-`accept_login` + encrypted-at-rest secret + backup codes + `/me` enrollment.
+## Auth follow-up
 
 ### ISS-12b · Owned-app blob/bundle cleanup on account erase
 **Status:** open (follow-up to ISS-12) · **Effort:** S–M · **Tier:** T3

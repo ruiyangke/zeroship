@@ -21,7 +21,15 @@ T1: ISS-12 (GDPR delete) · T2: ISS-10 (session visibility) → ISS-11 (2FA)
 | 2 | ISS-12 (GDPR delete) | opus | DONE | (pending) | request/cancel + reaper + 0034 changeset; 6/6 PG tests (`--test-threads=1`); cargo check clean. Pilot re-verified (caught a 6/6→5/6 concurrency flake; passes single-threaded per repo convention). Billing-retention default flagged for operator. Remainder split to ISS-12b (blob cleanup). |
 | 3 | ISS-10 (session visibility) | opus | DONE | de38f943 | list_by_user UNION + revoke_one (IDOR-guarded id+user_id) + /me/sessions routes; 7/7 PG tests; IDOR test proven to have teeth. |
 | 3b | ISS-12 gateway_sessions privilege bug | (pilot) | DONE | a0d23e8c | review found UPDATE on gateway_sessions fails under zeroship_auth role (SELECT,DELETE only); switched to DELETE (matches reset.rs). |
-| 4 | ISS-11 (2FA / TOTP) | opus | next | — | enroll/verify/backup-codes + encrypted secret + login challenge |
+| 4 | ISS-11 (2FA / TOTP) | opus | DONE | 7ab11964 | enroll/confirm/disable + login challenge (signed stash, credential_version recheck, race-safe single-use backup, fail-closed gate); changeset 0035; totp-rs dep; 11/11 PG + 19 lib unit; 212/0 lib, regression clean. Pilot re-verified. AUTH_TOTP_ENC_KEY flagged for operator. |
+
+## Loop wind-down (2026-06-11)
+The three auth issues the loop was scoped to are DONE (ISS-12, ISS-10, ISS-11) + one latent
+bug fixed (ISS-12 gateway_sessions privilege, a0d23e8c). Each: subagent TDD → pilot re-verified
+RED→GREEN → committed (commit-only, never pushed). The remaining ISSUES.md items are (a) ISS-12b
+(small cross-crate follow-up) and (b) the new T0–T4 platform-gap epics (object storage, metering/
+billing engine, prod TLS, DB proxy, …) — large, design-bearing efforts that warrant explicit
+prioritization, not autonomous loop execution. Loop paused pending operator direction.
 
 ### Iter 2 review notes (ISS-12)
 - Verified: changeset 0034 auto-included via `includeAll`, format matches repo, all written
