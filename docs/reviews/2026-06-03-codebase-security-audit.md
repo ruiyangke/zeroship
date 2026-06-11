@@ -53,9 +53,9 @@ offline (anything CRITICAL + trivially-safe is flagged for action on return).
 
 ## Prior deep reviews (this session — not repeated here)
 
-- **Auth pipeline** — `docs/reviews/2026-06-02-auth-pipeline-security-review.md`
+- **Auth pipeline** — `docs/archive/reviews/2026-06-02-auth-pipeline-security-review.md`
   (71-agent) + red-team rounds; fixed + merged.
-- **plugin-db** — `docs/reviews/2026-06-02-plugin-db-security-review.md` (5-lane);
+- **plugin-db** — `docs/archive/reviews/2026-06-02-plugin-db-security-review.md` (5-lane);
   17/18 findings fixed (DB-5 capability-ordering remains).
 
 ## Executive summary — audit complete (9 modules, ~40 reviewer-lanes)
