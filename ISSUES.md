@@ -305,7 +305,10 @@ apps don't init on the worker) and **ISS-64** (no headless auth) as its two know
 coverage work: `storage-gallery` + `auth-notes` examples + kv runner once ISS-63/64 unblock the edge.
 
 ### ISS-55 · `"use server"` named exports don't dispatch under `zeroship serve`
-**Status:** open · **Effort:** S–M · **Tier:** T3 (DX/contract)
+**Status:** example-side fixed (`53b51413`); contract by-design · **Effort:** S–M · **Tier:** T3 (DX/contract)
+> The examples now use `export default {rpc}` (serve-compatible) + document that `"use server"`
+> discovery requires the vite build. The deeper "make serve run the use-server transform" is a design
+> question (serve = no build = no transform), left as a documented limitation rather than a runtime change.
 
 `"use server"` RPC discovery is a **vite-plugin build-time transform**; raw `zeroship serve <file>.js`
 runs no build, so `"use server"` named exports are never registered and `/__zeroship/v1/<name>`
@@ -355,14 +358,14 @@ auth-policy match and the worker-forwarded URL (no desync). Added the regression
 `ssg_trailing_slash_resolves_to_static_resource` and corrected the README. `Match::Exact` in
 `crates/bundle` is dead for dispatch.
 
-### ISS-61 · Example + doc hygiene (test-surfaced)
-**Status:** open · **Effort:** S · **Tier:** T4
+### ISS-61 · Example + doc hygiene (test-surfaced) — mostly FIXED
+**Status:** mostly-fixed (2026-06-11, `53b51413`) · **Tier:** T4
 
-Cleanups found while building the examples: (a) the `csr-todo`/`ssr-blog`/`ssg-docs` READMEs document
-the **old `rules/match/action` manifest** (now a flat `resources` map); (b) `url-shortener.js` uses
-`env.KV` (Cloudflare-style uppercase) but the plugin registers `env.kv` → crash; (c) `weather-proxy.js`
-+ `ai-streaming.js` lack an `export default` so raw serve can't dispatch them (ties to ISS-55);
-(d) a `@zeroship/bootstrap ↔ @zeroship/db` cyclic-dependency warning on every `pnpm install`.
+FIXED: (a) 3 demo READMEs → the v1 `resources` map; (b) `url-shortener.js` `env.KV` → `env.kv`;
+(c) `weather-proxy.js` + `ai-streaming.js` → `export default {rpc}`/`{rpc,fetch}` (serve-compatible),
+all smoke-passing. REMAINING (sdks/ scope, reported): the `@zeroship/bootstrap ↔ @zeroship/db` devDep
+cycle — break by moving the `@zeroship/db/internal` symbols bootstrap imports into bootstrap and
+re-exporting, then dropping db's devDep on bootstrap.
 
 ### ISS-63 · CRITICAL: every `env.db` (schema-bearing) app fails to init on the production worker
 **Status:** open · **Effort:** M · **Tier:** T1 (launch-blocking)
