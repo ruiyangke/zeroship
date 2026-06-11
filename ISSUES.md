@@ -411,8 +411,12 @@ The production `.zship` tree-shakes out `installSchema` + `@zeroship/db/internal
 fix now *provides* them as runtime modules, so apps work regardless. This is now an optional
 build-alignment nicety (carry/document the schema machinery), not a blocker. Low priority.
 
-### ISS-67 · `env.auth.requireUser()` throws a status-less error → HTTP 500, not the documented 401
-**Status:** open · **Effort:** S · **Tier:** T3 (DX/correctness)
+### ISS-67 · `env.auth.requireUser()` throws a status-less error → HTTP 500, not the documented 401 — FIXED
+**Status:** fixed (2026-06-11, `a8a48d13`) · **Tier:** T3 (DX/correctness)
+
+The throw now carries `status: 401` + `code: "unauthenticated"` (both native + SDK paths), so an anon
+`requireUser()` renders a real 401 with the message intact (4xx isn't masked). e2e flipped 500→401.
+~~Original below.~~
 
 `requireUser()` throws `Error("Authentication required")` with no status; the RPC fetch-handler maps a
 status-less throw to **500**, and at 500 the wire envelope **masks the message** ("internal error",
