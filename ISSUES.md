@@ -339,14 +339,13 @@ on both sides, no panic stacktrace.
 `/health` now reaches the user app; the platform liveness probe moved to the reserved
 `GET /__zeroship/health` (alias `/healthz`), documented under "Reserved paths" in `zeroship-standard.md`.
 
-### ISS-59 · Server-only Vite apps fail to build (no `index.html` → `dist not found`)
-**Status:** open · **Effort:** S–M · **Tier:** T3 (build pipeline)
+### ISS-59 · Server-only Vite apps fail to build — FIXED
+**Status:** fixed (2026-06-11, `66e400ec`) · **Tier:** T3 (build pipeline)
 
-`db-chat` and `db-migrations-playground` (backend-only: `src/server.ts`, no client entry) fail
-`pnpm build` with `zship: dist dir not found` — the Vite client build emits nothing without a root
-`index.html`. A pure-backend app (fetch/rpc only, no SPA) should be buildable to `.zship`. **Fix:**
-support a server-only build mode in the vite-plugin that emits a worker bundle without requiring a
-client `index.html`.
+The vite-plugin now builds backend-only apps (no client `index.html`) to a valid `.zship`: the SSR
+build runs in `closeBundle` (the terminal hook) as well as `writeBundle` (which never fires for a
+zero-client-output app), and the empty-stub input is injected for any app lacking a client entry.
+db-chat + db-migrations-playground build; vite-plugin 205/205; CSR/SSR/SSG unchanged.
 
 ### ISS-60 · Gateway: SSG trailing-slash — RESOLVED (was a stale doc, not a bug)
 **Status:** closed (2026-06-11, `verify`) · **Effort:** — · **Tier:** T3 (routing)
