@@ -318,12 +318,12 @@ is no documented way to inject app vars/secrets for local single-file `serve` te
 selected process env (or a `--env`/`.env` source) into the app `env` in serve mode, and document it.
 
 ### ISS-57 · CLI robustness: silent `--port` parse + panic on port-in-use
-**Status:** open · **Effort:** S · **Tier:** T3 (DX)
+**Status:** mostly-fixed (2026-06-11) · **Effort:** S · **Tier:** T3 (DX)
 
-`--port=3000` works but `--port 3000` (space form) is **silently ignored** (binds the default). And
-when the port is occupied, all worker threads **panic with an `AddrInUse` unwrap stacktrace** instead
-of a clean "port in use" error + exit. **Fix:** accept both `--port` forms (or error on the unknown
-arg), and turn bind failures into a graceful message.
+FIXED: `serve` now accepts both `--port=N` and `--port N`, rejects unknown flags (no silent default),
+and a `TcpListener` pre-check turns port-in-use into a clean error + exit (no stacktrace). REMAINING:
+the runtime-side bind `.unwrap()` (`crates/runtime` serve.rs:1460) still panics on pathological OS
+errors (EACCES on `:<1024`) — folded into the runtime serve fix (ISS-56/58 agent).
 
 ### ISS-58 · `GET /health` is an undocumented kernel-reserved route that shadows user handlers
 **Status:** open · **Effort:** S · **Tier:** T3
