@@ -37,7 +37,7 @@ builder.
 | **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
 | **test-surfaced — FIXED** | ✅ ISS-56 (serve env) · ✅ ISS-57 (CLI port) · ✅ ISS-58 (`/health`) · ✅ ISS-60 (trailing-slash, was stale doc) |
 | **test-surfaced — open** | ISS-55 `"use server"` dead in serve · ISS-59 server-only build fails · ISS-61 example/doc hygiene · ISS-62 auth `--check-config` can't dry-run |
-| **🔴 gateway-E2E (real edge)** | **ISS-63 CRITICAL — env.db apps don't init on the worker** · ISS-64 no headless dev-auth for testing |
+| **🔴 gateway-E2E (real edge)** | ✅ ISS-63 (env.db init on worker — FIXED) · **ISS-66 built-app RPC 404s on worker dispatch** (next env.db blocker) · ISS-65 build doesn't ship install-schema · ISS-64 no headless dev-auth |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -367,8 +367,16 @@ all smoke-passing. REMAINING (sdks/ scope, reported): the `@zeroship/bootstrap �
 cycle — break by moving the `@zeroship/db/internal` symbols bootstrap imports into bootstrap and
 re-exporting, then dropping db's devDep on bootstrap.
 
-### ISS-63 · CRITICAL: every `env.db` (schema-bearing) app fails to init on the production worker
-**Status:** open · **Effort:** M · **Tier:** T1 (launch-blocking)
+### ISS-63 · CRITICAL: every `env.db` app fails to init on the production worker — FIXED
+**Status:** fixed (2026-06-11, `68ff15c6`) · **Tier:** T1 (launch-blocking)
+
+FIXED: `@zeroship/bootstrap/install-schema` + `@zeroship/db/internal` are now runtime-provided modules
+(`include_str!` the dist + a dynamic-import resolution path), so schema-init resolves on the worker —
+the production `.zship` had tree-shaken them out. Also fixed a SIGABRT from a `RefCell` borrow held
+across `module.evaluate()`. E2E: db-todos went SIGABRT/500 → module-init-OK. **Follow-ups: ISS-65,
+ISS-66.** Original (now-fixed) detail below.
+
+
 
 The runtime's `runtime-entry.js` (`sdks/bootstrap/dist/runtime-entry.js:50`, embedded via
 `include_str!`) does `await import("@zeroship/bootstrap/install-schema")` to install the `default.schema`
@@ -382,6 +390,27 @@ stale). Found by the first real-edge test of a schema app (the `tests/e2e_app_pr
 known-fail). **Fix:** inject installSchema as a synthetic module on the worker (alongside
 `index.js`/`__user__.js`/`zeroship` in `init.rs`) or register it native so the import resolves.
 init.rs:305/354 already document the *intended* resolution — it isn't reaching the worker.
+
+### ISS-66 · Built-app RPC procedures 404 on the worker dispatch (next env.db edge blocker)
+**Status:** open · **Effort:** M · **Tier:** T1 (launch-blocking)
+
+After ISS-63, db-todos's module init succeeds but a built-app RPC call (`users.public`) on the worker
+`/dispatch` returns **404 "No default.fetch handler exported"** — i.e. the dispatcher doesn't find the
+`rpc:` procedure and falls through to `default.fetch` (absent). So **env.db apps init but their RPC
+doesn't dispatch through the real stack**. Likely a bundle/dispatch-registry concern (the `__zsDispatch`
+rpc registry not reaching the worker, related to ISS-65) or a worker-dispatch routing gap. **Fix:**
+investigate whether the built `.zship` carries the rpc registry the worker dispatcher needs, and make a
+built RPC procedure dispatchable over the worker `/dispatch` + gateway `/__zeroship/v1/<id>`. This is
+the remaining blocker (with ISS-64 for auth) to fully E2E env.db over the edge.
+
+### ISS-65 · Vite-plugin build doesn't ship `install-schema`/`@zeroship/db/internal` in the bundle
+**Status:** open · **Effort:** S–M · **Tier:** T3 (build pipeline)
+
+The production `.zship` tree-shakes out `installSchema` + `@zeroship/db/internal` (the user app never
+references them; Phase-1 synthetic entry omits the `/install-schema` subpath, Phase-2 imports both but
+was tree-shaken). ISS-63's runtime fix backstops this so apps work regardless, but the build path should
+be aligned (carry/side-effect-import the schema machinery, or document that the runtime provides it).
+`sdks/vite-plugin/src/rpc-registry.ts:229` (Phase-2 entry). No bootstrap *dist* change needed.
 
 ### ISS-64 · No headless / dev auth path for E2E testing the stack
 **Status:** open · **Effort:** M · **Tier:** T2 (test infra)
