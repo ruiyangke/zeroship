@@ -34,20 +34,23 @@ mkdir -p /tmp/csr && tar -xf dist/app.zship -C /tmp/csr 2>/dev/null \
 jq . /tmp/csr/manifest.json
 ```
 
-You should see (rules excerpt):
+You should see (resources excerpt — v1 flat map shape):
 
 ```json
-[
-  { "match": { "kind": "prefix", "path": "/assets/" },
-    "action": { "kind": "static", "try": ["$path"], "cache": { "max_age": 31536000, "immutable": true } } },
-  { "match": { "kind": "prefix", "method": "POST", "path": "/_rpc/" },
-    "action": { "kind": "worker", "mode": "rpc" } },
-  { "match": { "kind": "any" },
-    "action": { "kind": "static", "try": ["$path", "/index.html"] } }
-]
+{
+  "/assets/*": {
+    "static": { "try": ["$path"] },
+    "cache": { "max_age": 31536000, "immutable": true }
+  },
+  "rpc:listTodos": { "kind": "query" },
+  "rpc:searchTodos": { "kind": "query" },
+  "/[...rest]": {
+    "static": { "try": ["$path", "/index.html"] }
+  }
+}
 ```
 
-`worker` is non-null with `entry: "index.js"` and a single module — the bundled server file. The catch-all is `Static`, not `Worker(ssr)`, because the server bundle has no user-defined `default.fetch` (only RPC handlers via `"use server"`).
+`worker` is non-null with `entry: "index.js"` and a single module — the bundled server file. The catch-all is a static fallback serving the SPA shell (`/index.html`), not a worker SSR entry, because the server bundle has no user-defined `default.fetch` (only RPC handlers via `"use server"`).
 
 ## Deploy
 

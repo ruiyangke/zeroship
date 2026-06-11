@@ -32,23 +32,20 @@ dist/
 
 ```bash
 zstd -dc dist/app.zship | tar -xC /tmp/ssg
-jq '.rules, .worker' /tmp/ssg/manifest.json
+jq '.resources, .worker' /tmp/ssg/manifest.json
 ```
 
-What you should see:
+What you should see (v1 flat `resources` map):
 
 ```json
-[
-  { "match": { "kind": "exact", "path": "/about" },
-    "action": { "kind": "static", "try": ["/about.html"] } },
-  { "match": { "kind": "exact", "path": "/docs/intro" },
-    "action": { "kind": "static", "try": ["/docs/intro.html"] } },
-  { "match": { "kind": "any" },
-    "action": { "kind": "static", "try": ["$path", "/index.html"] } }
-]
+{
+  "/about": { "static": { "try": ["/about.html"] } },
+  "/docs/intro": { "static": { "try": ["/docs/intro.html"] } },
+  "/[...rest]": { "static": { "try": ["$path", "/index.html"] } }
+}
 ```
 
-(Plus the `assets/`-prefix rule if Vite emitted any hashed chunks.)
+(Plus an `/assets/*` entry with `cache: { max_age: 31536000, immutable: true }` if Vite emitted any hashed chunks.)
 
 `worker` is **absent** from the JSON entirely (the spec says `null`/missing means SSG-only, and the emitter omits the field rather than writing `null`).
 

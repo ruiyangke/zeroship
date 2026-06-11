@@ -29,21 +29,27 @@ zstd -dc dist/app.zship | tar -xC /tmp/ssr
 jq . /tmp/ssr/manifest.json
 ```
 
-The shape we want:
+The shape we want (v1 flat `resources` map):
 
 ```json
 {
-  "rules": [
-    { "match": { "kind": "prefix", "path": "/assets/" },
-      "action": { "kind": "static", "try": ["$path"], "cache": { "max_age": 31536000, "immutable": true } } },
-    { "match": { "kind": "prefix", "method": "POST", "path": "/_rpc/" },
-      "action": { "kind": "worker", "mode": "rpc" } },
-    { "match": { "kind": "any" },
-      "action": { "kind": "worker", "mode": "ssr" } }
-  ],
-  "worker": { "entry": "index.js", "modules": { "index.js": "<hash>" } }
+  "version": 1,
+  "worker": { "entry": "index.js", "modules": { "index.js": "<hash>" } },
+  "resources": {
+    "/assets/*": {
+      "static": { "try": ["$path"] },
+      "cache": { "max_age": 31536000, "immutable": true }
+    },
+    "/[...rest]": {
+      "auth": "anon",
+      "publicly_accessible": true
+    }
+  },
+  "transformer": "json"
 }
 ```
+
+The `/[...rest]` catch-all has no `static` action — a URL-namespace resource without a routing action defaults to worker SSR dispatch. `auth: "anon"` + `publicly_accessible: true` satisfies the gateway's secure-by-default check.
 
 ## Client manifest
 
