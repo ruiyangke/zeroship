@@ -113,13 +113,13 @@ Notes:
   fine (defaults apply); a present-but-broken one is a hard startup error. Dev
   usually just passes `--config ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
   rather than installing into `/etc`.
-- To seed the Builder OAuth client in local dev, start control with
-  `BOOTSTRAP_BUILDER_OAUTH_CLIENT=1` or `--bootstrap-builder-client` while
-  Hydra admin is reachable. Control registers `zeroship-builder` in Hydra and
-  mirrors it in `control.oauth_clients`; the generated client secret is stored
-  at `data/builder-client-secret` by default. Override the callback with
-  `BUILDER_REDIRECT_URI` and the secret path with `BUILDER_CLIENT_SECRET_FILE`
-  if your Builder dev server is not on `http://localhost:3001/auth/callback`.
+- To seed the console (the AI app-builder, now a gateway-fronted zeroship app)
+  in local dev, start control with `--bootstrap-console` (env
+  `BOOTSTRAP_CONSOLE=1`) while Hydra admin is reachable. Control ingests the
+  prebuilt console `.zship` and registers it as a public-PKCE gateway-fronted
+  app. Override the served host with `--console-host` and the artifact path with
+  `--console-zship`. (The retired `builder` Vite service and its confidential
+  `--bootstrap-builder-client` / `BUILDER_REDIRECT_URI` knobs are gone.)
 
 ## Deploy an example app
 
@@ -147,8 +147,13 @@ Deploy it:
 ./target/release/zeroship deploy ./examples/db-todos/dist/app.zship \
   --app=<uuid> \
   --control=http://localhost:9090 \
-  --key=dev-master
+  --token=<PAT>
 ```
+
+The CLI resolves the bearer token from `--token=<PAT>`, the `ZEROSHIP_TOKEN`
+env var, or credentials saved by `zeroship login` — in that order. (The
+`curl` examples above use `Authorization: Bearer dev-master` because control's
+`--master-key` is itself a bearer principal; the deploy CLI does not read it.)
 
 Then open `http://localhost:8000/apps/db-todos/`.
 

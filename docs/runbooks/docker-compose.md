@@ -7,9 +7,9 @@ zeroship stack, fronted by a Caddy reverse proxy on the `*.zeroship.localhost`
 dev domain. From the repo root:
 
 ```bash
-# Build everything ahead (so `up` never builds): the shared runtime image
-# (control/gateway/worker/auth/sandbox) + the frontend image (builder), plus
-# the external images (postgres, hydra, caddy, verdaccio).
+# Build everything ahead (so `up` never builds): the single shared image
+# (control/gateway/worker/auth/sandbox + the `zeroship` CLI) plus the external
+# images (postgres, hydra, caddy, verdaccio).
 docker compose build                   # all Dockerfile-based services
 docker compose pull                    # external images
 
@@ -20,10 +20,10 @@ docker compose down -v
 ```
 
 `docker compose up --build` also works (builds on the fly the first time). The
-image compiles the SDKs (needed by the runtime crate) and all six binaries incl.
-`zeroship-auth` — see [Image build](#image-build). The `builder` service uses a
-separate `frontend` image target (the runtime image + Node 22) because its
-`vite dev` spawns the `zeroship` runtime for the app's server functions.
+single image compiles the SDKs (needed by the runtime crate) and all the native
+binaries incl. `zeroship-auth` — see [Image build](#image-build). There is no
+separate frontend image: the AI builder is now the **console**, a regular
+gateway-fronted zeroship app seeded by control (see [Console / AI builder](#console--ai-builder)).
 
 > First boot is heavy: the image does a full `pnpm build` + release `cargo build`
 > of the V8 runtime. Pre-building with `docker compose build` keeps later `up`s instant.
@@ -35,9 +35,10 @@ A `caddy` service listens on host `:80` and reverse-proxies the
 `127.0.0.1` automatically, so **no `/etc/hosts` edits are needed**. Once the
 stack is up, open:
 
-- **`http://builder.zeroship.localhost`** — the AI builder; describe an app and
-  it builds + deploys it (requires `OPENAI_API_KEY`, see below)
-- **`http://console.zeroship.localhost`** — creator dashboard / control plane
+- **`http://console.zeroship.localhost`** — the creator console / AI app-builder:
+  describe an app and it builds + deploys it (requires `OPENAI_API_KEY`, see
+  below). The console is a gateway-fronted zeroship app, so Caddy proxies this
+  host straight to the gateway.
 - **`http://auth.zeroship.localhost`** — login / OIDC (Caddy splits this host:
   `/oauth2/*` and `/.well-known/*` go to Hydra `:4444`, everything else to the
   `zeroship-auth` UI on `:9092`)
@@ -52,14 +53,14 @@ for `.localhost`. Config: `ops/Caddyfile`.
 
 #### Caddy network-alias trick (container-side OIDC)
 
-Server-side OIDC steps — control/gateway/builder exchanging codes, fetching
-JWKS, and verifying tokens against the issuer `http://auth.zeroship.localhost` —
-run *inside* the compose network, where that hostname would not otherwise
-resolve. The `caddy` service therefore carries **network aliases** for
-`auth.zeroship.localhost`, `console.zeroship.localhost`, `api.zeroship.localhost`,
-and `builder.zeroship.localhost` on the default network, so containers resolve
-those names to Caddy too. The net effect: the issuer URL the browser sees and
-the one the servers verify against are identical, which OIDC requires.
+Server-side OIDC steps — control/gateway exchanging codes, fetching JWKS, and
+verifying tokens against the issuer `http://auth.zeroship.localhost` — run
+*inside* the compose network, where that hostname would not otherwise resolve.
+The `caddy` service therefore carries **network aliases** for
+`auth.zeroship.localhost`, `console.zeroship.localhost`, and
+`api.zeroship.localhost` on the default network, so containers resolve those
+names to Caddy too. The net effect: the issuer URL the browser sees and the one
+the servers verify against are identical, which OIDC requires.
 
 Services and host ports from the live file (the proxy is the primary entry
 point; these raw ports remain mapped for direct debugging):
@@ -69,9 +70,13 @@ point; these raw ports remain mapped for direct debugging):
 - `control` (`zeroship-control`) → `localhost:9090`
 - `gateway` (`zeroship-gate`) → `localhost:8000`
 - `auth` (`zeroship-auth`) → `localhost:9092`
+- `hydra` (`oryd/hydra`) → `localhost:4444` (public) / `localhost:4445` (admin, dev-only)
 - `sandbox` (`zeroship-sandbox`) → `localhost:9091`
-- `builder` (`apps/zeroship-builder` Vite dev server) → `localhost:3001`
+- `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
+
+The one-shot `migrate` and `hydra-migrate` services run to completion and exit;
+`verdaccio` publishes loopback-only on `localhost:4873`.
 
 ### Image build
 
@@ -83,7 +88,9 @@ The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
    emit `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`. The runtime crate
    `include_str!`s those files at compile time
    (`crates/runtime/src/core/init.rs`), so they must exist before cargo touches
-   `zeroship-runtime`.
+   `zeroship-runtime`. This stage also builds the console app's `.zship`, which
+   the runtime stage copies to `/opt/zeroship/console/app.zship` for control's
+   `--bootstrap-console` seed.
 2. **`builder` (rust)** copies `crates/`, the freshly-built `sdks/`, and the
    `policies/` tree (`crates/authz/build.rs` parses `policies/*.cedar` at build
    time) and compiles the six binaries.
@@ -94,10 +101,13 @@ Because the SDK dist files are gitignored and absent from a fresh checkout, the
 image must be (re)built with `--build` the first time; `docker compose build`
 regenerates them inside the image.
 
-### OpenAI key (builder)
+### OpenAI key (console)
 
-The builder calls OpenAI to generate apps. Export `OPENAI_API_KEY` before
-`docker compose up` (it is passed through to the `builder` service):
+The console's AI codegen calls OpenAI to generate apps. Export `OPENAI_API_KEY`
+before `docker compose up`; the `control` service reads it from its own process
+env and `--bootstrap-console` writes it onto the seeded console app's server-side
+env store (never the browser). Absent, the stack still boots — the console's AI
+features degrade.
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -145,15 +155,21 @@ and writes the same content-addressed deploy blobs.
 
 The compose file already sets the current service names, keys, and sandbox env vars. Use it as the source of truth before copying flags into ad-hoc commands.
 
-Control starts with `--bootstrap-builder-client` in this stack. On first boot it
-registers the `zeroship-builder` OAuth client with Hydra admin (using the
-`BUILDER_REDIRECT_URI=http://builder.zeroship.localhost/auth/callback` env so
-the client's redirect matches the dev domain) and writes the generated dev
-client secret to `data/builder-client-secret`. That file is mounted into the
-Builder container, which exports it as `BUILDER_CLIENT_SECRET` before starting
-Vite. The file is local dev state and is ignored by git. The builder's Vite dev
-server allowlists `.zeroship.localhost` (`server.allowedHosts` in
-`apps/zeroship-builder/vite.config.ts`) so it accepts the proxied Host header.
+### Console / AI builder
+
+The AI builder is the **console** — a regular zeroship app, not a separate
+service. Control starts with `--bootstrap-console --console-host
+console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship` in
+this stack. On first boot it ingests that prebuilt `.zship` (emitted by the
+image's `sdks` stage) and registers it as a public-PKCE gateway-fronted app, so
+Caddy proxies `console.zeroship.localhost` to the gateway like any creator app.
+Its runtime config — `OPENAI_API_KEY`, `SANDBOX_URL`/`SANDBOX_TOKEN`,
+`ZEROSHIP_CONTROL_URL` — is forwarded from control's process env onto the seeded
+console app's server-side env store at install time (secrets encrypted, plain
+URLs as vars), replacing what the retired `builder` Vite service used to inject.
+The standalone Vite container and its confidential OIDC client
+(`--bootstrap-builder-client`, `BUILDER_REDIRECT_URI`, `BUILDER_CLIENT_SECRET`)
+were removed in the R5 cutover.
 
 ### Configuration overlay
 
@@ -200,7 +216,7 @@ The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host
 
 ## Database migrations
 
-The shared Postgres schema (`control`/`auth`/`platform`) is owned by Liquibase.
+The shared Postgres `zeroship` schema is owned by Liquibase.
 The one-shot `migrate` service runs `liquibase update` (changesets in
 `db/changelog/`) after Postgres is healthy and before control/auth start — they
 `depends_on` it with `service_completed_successfully`, so they only ever boot

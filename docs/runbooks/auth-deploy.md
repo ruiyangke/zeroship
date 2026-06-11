@@ -14,13 +14,13 @@ End user → gateway → ┬── hydra        (OIDC kernel,        public :444
                      └── crates/auth  (login UI + flows,            public :9092)
                           │
                           ▼
-                       Postgres (shared: hydra_* schema + auth.* schema)
+                       Postgres (shared: oauth_hydra schema + auth.* schema)
 ```
 
 Each "auth pod" runs two processes:
 
 - `oryd/hydra` v25.4.x — OIDC/OAuth 2.1 protocol kernel. Issues ID
-  tokens, access tokens, and refresh tokens. Owns its own `hydra_*`
+  tokens, access tokens, and refresh tokens. Owns its own `oauth_hydra`
   schema in Postgres.
 - `crates/auth` — login UI (`/login`, `/signup`, `/consent`), identity
   flows (password, Google, GitHub, magic-link), email verification +
@@ -52,7 +52,7 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 
 | Env var | Default | Required? | What it controls |
 |---|---|---|---|
-| `AUTH_ADDR` | `0.0.0.0:9092` | no | Bind address. |
+| `AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Loopback by default; compose passes `--addr 0.0.0.0:9092` to be reachable across the container network. |
 | `AUTH_PUBLIC_URL` | `http://localhost:9092` | **yes in prod** | Externally-reachable origin (scheme + host + optional port). Used to construct absolute URLs in outbound email (magic-link, verify, reset). Distinct from `AUTH_ADDR`. |
 | `AUTH_DB_URL` | — | yes | Postgres DSN. Same database as hydra. |
 | `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path. `[auth].hydra_admin_url` and `[auth].hydra_public_url` are read from this file when the env vars below are unset. |
@@ -60,7 +60,7 @@ Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
 | `HYDRA_PUBLIC_URL` | `https://auth.zeroship.ai` | yes | Hydra public base URL (issuer). |
 | `AUTH_CLIENTS_CONFIG` | `/etc/zeroship/auth-clients.toml` | yes | Path to the declarative OIDC client registry. |
 | `AUTH_BOOTSTRAP` | unset | first boot only | Boolean — set to `true` on first boot to allow JWK + client creation. Drop on subsequent restarts. Without it, an empty `hydra_jwk` set is a fatal startup error. |
-| `AUTH_INSECURE_DEV` | unset | dev only | Drops the `Secure` flag on cookies. **Never set in production.** |
+| `ZEROSHIP_DEV_INSECURE` (`--dev-insecure`) | unset | dev only | Drops the `Secure` flag on cookies and relaxes secret-strength/stash-key guards. **Never set in production.** |
 | `AUTH_STASH_SIGNING_KEY` | dev default | **yes in prod** | HMAC key (≥32 bytes) signing the federation stash cookies. The dev default is loud-warned at boot; a weak value lets an attacker forge stash cookies and bypass OAuth state/PKCE checks. |
 
 ### crates/gateway + crates/control — pairwise identity salt
@@ -244,7 +244,7 @@ aggregator. Notable targets:
 
 ## 7 · Backups + restore
 
-- `pg_dump` covers BOTH the `hydra_*` and `auth.*` schemas — one dump.
+- `pg_dump` covers BOTH the `oauth_hydra` and `auth.*` schemas — one dump.
 - **Critical:** back up `SECRETS_SYSTEM` and `SECRETS_COOKIE` separately
   (NOT in the same blob as the DB dump). Hydra encrypts JWK material at
   rest with `SECRETS_SYSTEM`; without it the `hydra_jwk` rows are

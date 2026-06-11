@@ -33,9 +33,9 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
 | **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
-| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/control/src/{api,auth_handlers,env_handlers}.rs` |
+| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/control/src/{api,env_handlers,token_handlers}.rs` |
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
-| **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` · `crates/control/src/oidc_rp.rs` |
+| **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
@@ -48,7 +48,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
-| **Nomad + Cloud Hypervisor sandbox backend** | `docs/runbooks/sandbox-nomad-ch.md` · `crates/sandbox/src/backend/nomad_ch.rs` · `crates/sandbox/scripts/nomad-vm-wrapper.sh` |
+| **Nomad + Cloud Hypervisor sandbox backend** | `docs/runbooks/sandbox-nomad-ch.md` · `crates/sandbox/src/backend/nomad_ch.rs` · `nomad-driver-ch/` |
 | **Why we made decision X** | `docs/decisions/` (date-prefixed ADRs, immutable once landed) |
 | **Pre-ship proposals** | `docs/proposals/` (active, may not have shipped) |
 | **AI-builder competitive landscape** | `docs/research/ai-builder-features.md` |
@@ -200,7 +200,7 @@ SDK packages call the `env.*` native primitives internally. Validation, query bu
 - `installSchema(schema, env.db)` — orchestrator behind `export default { schema }`
 - `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
 - `normalizeUserModule` — namespace → `{ schema, fetch, rpc }` shape
-- `createFetchHandler` — WinterCG fetch wrapper routing `/_zs/v1/<id>` through the dispatcher
+- `createFetchHandler` — WinterCG fetch wrapper routing `/__zeroship/v1/<id>` through the dispatcher
 - `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
 - `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
 
@@ -259,12 +259,12 @@ cargo build --release
 zeroship serve myapp.js --port 3000
 
 # Run platform (multi-node)
-zeroship-control --port 9090 --db postgres://... --bundles ./bundles --auth-secret <s>
-zeroship-worker --port 8080 --workers 16 --control http://localhost:9090
-zeroship-gate    --port 80   --control http://localhost:9090 --workers http://localhost:8080 --auth-secret <s>
+zeroship-control --port 9090 --db postgres://... --blob-store ./bundles --control-key <k>
+zeroship-worker --port 8080 --worker-threads 16 --control http://localhost:9090 --control-key <k> --blob-store ./bundles
+zeroship-gate    --port 80   --control http://localhost:9090 --control-key <k> --workers http://localhost:8080 --blob-store ./bundles
 
-# Deploy
-zeroship deploy ./src --app=<uuid> --control=http://localhost:9090 --key=<master>
+# Deploy (a pre-built .zship artifact; auth via `zeroship login`, --token=<PAT>, or ZEROSHIP_TOKEN)
+zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>
 
 # Docker Compose
 docker compose up -d --scale worker=10

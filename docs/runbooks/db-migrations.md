@@ -1,7 +1,7 @@
 # Database migrations (Liquibase)
 
-The platform's Postgres schema — the `control`, `auth`, and `platform`
-schemas — is managed by **[Liquibase](https://www.liquibase.com/)**. Migrations
+The platform's Postgres schema — the single `zeroship` schema that holds every
+platform/system table — is managed by **[Liquibase](https://www.liquibase.com/)**. Migrations
 are hand-authored SQL changesets in `db/changelog/`, version-controlled,
 reviewable, and rollback-able. Liquibase tracks what's applied in its
 `DATABASECHANGELOG` table (in `public`), so `update` only ever runs pending
@@ -21,11 +21,16 @@ code in the Rust crates.
 db/changelog/
   db.changelog-master.yaml      # entry point: includeAll of changesets/ (lexicographic)
   changesets/
-    0001_extensions_schemas.sql # citext + CREATE SCHEMA control/auth/platform
-    0002_auth.sql               # auth.* tables, append-only guards, cron tables
-    0003_platform.sql           # platform.roles
-    0004_control.sql            # control.* tables, append-only guards
+    0001_extensions_schemas.sql # citext + CREATE SCHEMA zeroship (the one platform schema)
+    …                           # 33 changesets today (0001–0033), each NNNN_<name>.sql
+    0004_control.sql            # the control-plane app/usage/env tables
+    0027_oauth_hydra_schema.sql # the separate oauth_hydra schema + least-priv role for Hydra
 ```
+
+`includeAll` pulls every `changesets/*.sql` in lexicographic (filename) order, so
+the list grows by adding the next-numbered file — no master-changelog edit. Every
+platform/system table lives under `zeroship.*`; the only other schema is the
+dedicated `oauth_hydra` (changeset 0027), which Hydra owns its tables inside.
 
 Each changeset is **formatted SQL**: a `--changeset author:id` header, the SQL,
 and a `--rollback`. Changesets that contain `DO $$ … $$` / `CREATE FUNCTION …
