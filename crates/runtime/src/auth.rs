@@ -1,6 +1,6 @@
 //! Auth primitives — `zeroship.auth.getUser()` and `zeroship.auth.requireUser()`.
 //!
-//! The gateway extracts the authenticated user from the `__zs_session` cookie
+//! The gateway extracts the authenticated user from the `__Host-zeroship_app_session` cookie
 //! and forwards it as the `ZeroShip-User` header (base64-encoded JSON, HMAC-
 //! signed with the shared worker key). The worker decodes + verifies the
 //! header before dispatching to V8 and stores the user JSON in the runtime's

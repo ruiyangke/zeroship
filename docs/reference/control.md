@@ -2,14 +2,14 @@
 
 `@zeroship/control` is the TypeScript client for the control-plane HTTP API.
 It is for platform-owned code: the Builder app, CLIs, internal agents, and
-tests that need to create apps, deploy `.zship` artifacts, manage environment
-configuration, or drive dashboard auth.
+tests that need to create apps, deploy `.zship` artifacts, or manage
+environment configuration.
 
 Creator apps should not import this package. Creator-facing app code talks to
 runtime SDKs such as `@zeroship/db`, `@zeroship/kv`, `@zeroship/auth`, and
 `@zeroship/rpc`; the control plane is an operator/admin surface.
 
-The Rust API lives in `crates/control/src/{api,auth_handlers,env_handlers}.rs`.
+The Rust API lives in `crates/control/src/{api,env_handlers,token_handlers}.rs`.
 The TypeScript client lives in `sdks/control/src/index.ts`.
 
 ## Client setup
@@ -56,10 +56,16 @@ await control.env.setSecret(appId, { key: "OPENAI_API_KEY", value: "sk-..." });
 await control.env.setExpose(appId, { keys: ["OPENAI_API_KEY"] });
 await control.env.listAudit(appId, { limit: 100 });
 
-await control.auth.login({ email, password });
-await control.auth.userinfo();
-await control.auth.logout();
 ```
+
+> **Dead surface — pending removal.** The SDK still exports a
+> `control.auth.*` namespace (`register`/`login`/`logout`/`userinfo`/
+> `consent` against `/auth/*`), but the control plane no longer registers
+> those routes: control became a pure API resource server in the R5
+> cutover and console auth moved to `@zeroship/auth` (BFF) — see
+> `crates/control/src/lib.rs` and `docs/reference/auth.md`. Calling these
+> methods 404s. Don't use them; the namespace should be deleted from the
+> SDK.
 
 `control.request<T>(path, options)` is the escape hatch for endpoints that do
 not yet deserve a typed wrapper. Prefer adding a typed method once a caller
@@ -85,7 +91,7 @@ Non-2xx responses throw `ControlError`:
 import { ControlError } from "@zeroship/control";
 
 try {
-  await control.auth.userinfo();
+  await control.apps.get(appId);
 } catch (error) {
   if (error instanceof ControlError && error.status === 401) {
     return null;
