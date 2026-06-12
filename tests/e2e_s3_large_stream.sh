@@ -286,9 +286,17 @@ PEAK_RSS_MB=$(( PEAK_RSS_KB / 1024 ))
 SAMPLES="$(wc -l < "$RSS_LOG" | tr -d ' ')"
 note "putLarge HTTP $PUT_CODE in ${PUT_ELAPSED}s; worker peak RSS over $SAMPLES samples = ${PEAK_RSS_MB} MiB (object = $(gib "$SIZE_BYTES") GiB)"
 
-# How much actually reached MinIO (parts may still be an in-progress multipart;
-# count both the finalized object and any multipart staging).
-MINIO_OBJ_SIZE="$(docker exec "$MINIO_CONTAINER" mc stat --json "local/$MINIO_BUCKET/storage/$SKEY" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).size||0)}catch(e){console.log(0)}})')"
+# How much actually reached MinIO. The on-disk S3 key is NOT `storage/$SKEY`:
+# the S3 backend stores under `<config-prefix>/<app_id>/<bucket>/<key>` (see
+# crates/plugin-storage/src/backend/s3.rs::object_key + compio-s3 config
+# prefix), i.e. `storage/$ST_APP/gallery/$SKEY` here — the app-level bucket is
+# `gallery` (the BUCKET const in examples/storage-gallery/src/server.ts). A
+# bare `mc stat storage/$SKEY` therefore ALWAYS reports "object does not
+# exist" even on a perfectly finalized upload — a harness false-negative, not
+# data loss. Stat the FULL prefixed key so we measure the finalized object.
+# (The passing e2e_s3_storage.sh sidesteps this via a recursive-ls basename
+# grep; here we stat the exact key directly, which is precise and faster.)
+MINIO_OBJ_SIZE="$(docker exec "$MINIO_CONTAINER" mc stat --json "local/$MINIO_BUCKET/storage/$ST_APP/gallery/$SKEY" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).size||0)}catch(e){console.log(0)}})')"
 MINIO_OBJ_SIZE="${MINIO_OBJ_SIZE:-0}"
 
 # Boundedness verdict — independent of pass/fail of the round-trip.
@@ -316,7 +324,7 @@ if [ "$PUT_CODE" = "200" ]; then
   [ -n "$PUT_SUM" ] && pass "putLarge returned a non-empty rolling checksum ($PUT_SUM)" || fail "putLarge checksum empty"
 
   if [ "${MINIO_OBJ_SIZE:-0}" = "$SIZE_BYTES" ]; then
-    pass "MinIO holds the finalized object at storage/$SKEY = $MINIO_OBJ_SIZE bytes (>4 GiB, multipart finalized)"
+    pass "MinIO holds the finalized object at storage/$ST_APP/gallery/$SKEY = $MINIO_OBJ_SIZE bytes (>4 GiB, multipart finalized)"
   else
     fail "MinIO object size mismatch: mc stat = ${MINIO_OBJ_SIZE} bytes, expected $SIZE_BYTES"
   fi
