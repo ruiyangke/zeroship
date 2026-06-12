@@ -6733,7 +6733,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "compio",
+ "compio-s3",
+ "futures",
  "serde_json",
  "v8",
  "zeroship-runtime",

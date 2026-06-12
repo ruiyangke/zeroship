@@ -386,7 +386,7 @@ impl S3Client {
     pub async fn get_stream(
         &self,
         key: &str,
-    ) -> S3Result<(ObjectMeta, impl futures::Stream<Item = S3Result<Bytes>>)> {
+    ) -> S3Result<(ObjectMeta, impl futures::Stream<Item = S3Result<Bytes>> + 'static)> {
         let stored = self.config.object_key(key);
         let (url, host, canonical_uri) = self.object_url(&stored);
         let headers = self.signed_headers(

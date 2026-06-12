@@ -4,12 +4,18 @@
 //! promise, push an async op into the runtime pump's spawned-ops queue,
 //! return the promise. The pump resolves/rejects via OpResult.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use base64::Engine;
 use serde_json::json;
-use zeroship_runtime::state::{OpResult, SharedState};
+use zeroship_runtime::channel::{stream_buffer, StreamReader};
+use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime::streams::response_forwarder;
 
+use crate::backend::{BoxByteStream, ChunkResult, ChunkSource, ObjectMeta};
 use crate::{Backend, STORAGE_BACKEND};
 
 // ---------------------------------------------------------------------------
@@ -279,5 +285,344 @@ pub fn list(
         }
     }));
 
+    rv.set(promise.into());
+}
+
+// ===========================================================================
+// Streaming through V8 — see the proposal's
+// "env.storage streaming through V8" section.
+//
+// Upload  (`putStream`): consume an app-supplied V8 ReadableStream via the
+//   runtime's `response_forwarder` pump (getReader + promise-reaction read
+//   loop into a Rust `StreamWriter`). A spawned op drains the paired
+//   `StreamReader` and feeds chunks to `Backend::put_stream` → S3 multipart
+//   (or LocalFs temp-file + rename). Memory is bounded by the part size on
+//   upload and the StreamWriter backpressure cap, not the object size.
+//
+// Download (`getStream` + `readChunk` + `cancelStream`): `getStream` opens a
+//   `Backend::get_stream` and parks the `(meta, source)` in a per-isolate
+//   registry under a fresh id, resolving `{ streamId, contentType, size }`
+//   (or `null`). The `@zeroship/storage` SDK builds a `new ReadableStream`
+//   whose `pull` calls `readChunk(streamId)` — each call pulls the next
+//   `Backend::get_stream` chunk and resolves a `Uint8Array` (or `undefined`
+//   at EOF). `cancelStream` drops a half-read source.
+// ===========================================================================
+
+thread_local! {
+    /// Per-isolate registry of in-flight download streams, keyed by id.
+    /// `Rc<RefCell<Option<…>>>` so `readChunk` can take the source out for
+    /// the duration of an async pull and put it back, without holding a
+    /// `RefCell` borrow across the await.
+    static GET_STREAMS: RefCell<HashMap<u32, Rc<RefCell<Option<BoxByteStream>>>>> =
+        RefCell::new(HashMap::new());
+    /// Monotonic id source for download streams (per isolate).
+    static NEXT_GET_STREAM_ID: RefCell<u32> = const { RefCell::new(1) };
+}
+
+fn alloc_get_stream_id() -> u32 {
+    NEXT_GET_STREAM_ID.with(|c| {
+        let mut n = c.borrow_mut();
+        let id = *n;
+        *n = n.wrapping_add(1).max(1);
+        id
+    })
+}
+
+fn drop_get_stream(stream_id: u32) {
+    GET_STREAMS.with(|m| {
+        m.borrow_mut().remove(&stream_id);
+    });
+}
+
+/// A [`ChunkSource`] over a runtime [`StreamReader`] — the consumer side of
+/// the `response_forwarder` pump used by `putStream`. Yields buffered chunks,
+/// blocks (waker-based) when the buffer is empty but the producer is still
+/// live, errors on backpressure overflow, and ends at producer EOF.
+struct StreamReaderSource {
+    reader: StreamReader,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ChunkSource for StreamReaderSource {
+    async fn next_chunk(&mut self) -> Option<ChunkResult> {
+        loop {
+            if let Some(chunk) = self.reader.pop() {
+                return Some(Ok(bytes::Bytes::from(chunk)));
+            }
+            if self.reader.is_overflow() {
+                return Some(Err(
+                    "storage: upload stream exceeded the buffer backpressure cap".to_string(),
+                ));
+            }
+            if self.reader.is_done() {
+                return None;
+            }
+            self.reader.wait_for_data().await;
+        }
+    }
+}
+
+/// Promise plumbing for the `OpResult::JsValue` path (real JS values like a
+/// `Uint8Array` chunk) — mirrors plugin-db's `setup_js_promise`.
+fn setup_js_promise<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    state: &SharedState,
+) -> (
+    v8::Global<v8::PromiseResolver>,
+    Option<u64>,
+    v8::Local<'s, v8::Promise>,
+) {
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let global_resolver = v8::Global::new(scope, resolver);
+    let request_id = state.borrow().executing_request_id;
+    (global_resolver, request_id, promise)
+}
+
+fn require_u32_arg(
+    scope: &mut v8::PinScope<'_, '_>,
+    args: &v8::FunctionCallbackArguments,
+    index: i32,
+    name: &str,
+) -> Option<u32> {
+    let val = if args.length() > index {
+        args.get(index)
+    } else {
+        return throw_type_u32(scope, name);
+    };
+    match val.uint32_value(scope) {
+        Some(n) => Some(n),
+        None => throw_type_u32(scope, name),
+    }
+}
+
+fn throw_type_u32(scope: &mut v8::PinScope, arg_name: &str) -> Option<u32> {
+    let msg = v8::String::new(scope, &format!("storage: argument '{arg_name}' must be a number"))
+        .unwrap();
+    let exc = v8::Exception::type_error(scope, msg);
+    scope.throw_exception(exc);
+    None
+}
+
+// ---------------------------------------------------------------------------
+// putStream(bucket, key, readableStream, contentType?) → { bucket, key, size }
+// ---------------------------------------------------------------------------
+
+pub fn put_stream(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+
+    let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
+    let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
+
+    // Arg 2 must be a ReadableStream (any object with the reader surface).
+    let stream_v = if args.length() > 2 {
+        args.get(2)
+    } else {
+        let _ = throw_type(scope, "stream");
+        return;
+    };
+    let Ok(stream_obj) = v8::Local::<v8::Object>::try_from(stream_v) else {
+        let _ = throw_type(scope, "stream");
+        return;
+    };
+    let content_type = optional_string_arg(scope, &args, 3);
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let backend = match current_backend() {
+        Ok(r) => r,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    // Lock the app's ReadableStream and start the read-loop pump. Chunks
+    // flow into `writer`; the spawned op drains `reader`.
+    let stream_id = match response_forwarder::begin_forward_stream(scope, stream_obj) {
+        Ok(id) => id,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed {
+                    op_id,
+                    error: format!("storage: put stream: {e}"),
+                    request_id,
+                }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+    let (writer, reader) = stream_buffer();
+    response_forwarder::attach_writer(&state, stream_id, writer);
+
+    let source = StreamReaderSource { reader };
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        match backend
+            .put_stream(&app_id, &bucket, &key, Box::new(source), content_type.as_deref())
+            .await
+        {
+            Ok(size) => OpResult::Completed {
+                op_id,
+                value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
+// getStream(bucket, key) → { streamId, contentType, size } | null
+// ---------------------------------------------------------------------------
+
+pub fn get_stream(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+
+    let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
+    let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let backend = match current_backend() {
+        Ok(r) => r,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        match backend.get_stream(&app_id, &bucket, &key).await {
+            Ok(None) => OpResult::Completed { op_id, value: "null".into(), request_id },
+            Ok(Some((meta, source))) => {
+                let stream_id = alloc_get_stream_id();
+                GET_STREAMS.with(|m| {
+                    m.borrow_mut()
+                        .insert(stream_id, Rc::new(RefCell::new(Some(source))));
+                });
+                OpResult::Completed {
+                    op_id,
+                    value: get_stream_handle_json(stream_id, &meta),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+
+    rv.set(promise.into());
+}
+
+fn get_stream_handle_json(stream_id: u32, meta: &ObjectMeta) -> String {
+    json!({
+        "streamId": stream_id,
+        "contentType": meta.content_type,
+        "size": meta.size,
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// readChunk(streamId) → Uint8Array | undefined  (undefined = EOF)
+// ---------------------------------------------------------------------------
+
+pub fn read_chunk(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+
+    let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    let slot = GET_STREAMS.with(|m| m.borrow().get(&stream_id).cloned());
+    let Some(slot) = slot else {
+        // Unknown / already-finished stream → resolve EOF (undefined) so the
+        // SDK's pull loop closes cleanly rather than rejecting.
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
+        }));
+        rv.set(promise.into());
+        return;
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // Take the source out for the pull, then put it back. compio is
+        // single-threaded and the SDK pulls sequentially, so no two
+        // `readChunk`s for the same id overlap.
+        let mut source = match slot.borrow_mut().take() {
+            Some(s) => s,
+            None => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Undefined,
+                    request_id,
+                };
+            }
+        };
+        let next = source.next_chunk().await;
+        match next {
+            Some(Ok(chunk)) => {
+                *slot.borrow_mut() = Some(source);
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Bytes(chunk.to_vec()),
+                    request_id,
+                }
+            }
+            Some(Err(e)) => {
+                drop_get_stream(stream_id);
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e)),
+                    request_id,
+                }
+            }
+            None => {
+                drop_get_stream(stream_id);
+                OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
+            }
+        }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
+// cancelStream(streamId) → undefined
+// ---------------------------------------------------------------------------
+
+pub fn cancel_stream(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    drop_get_stream(stream_id);
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
+    }));
     rv.set(promise.into());
 }

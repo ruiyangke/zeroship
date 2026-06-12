@@ -9,14 +9,28 @@ zeroship-runtime = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+bytes = { workspace = true }
 v8 = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
+
+# S3 backend deps — gated behind the `s3` feature so the default build
+# (LocalFs only) pulls nothing extra.
+compio-s3 = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 [features]
 default = []
 # S3-compatible backend (covers S3, R2, MinIO, Spaces, B2, etc.) via a
-# hand-rolled client on cyper + aws-sigv4. Adds no tokio.
-s3 = []
+# hand-rolled client on cyper + hand-rolled SigV4. Adds no tokio.
+s3 = ["dep:compio-s3", "dep:futures"]
+
+[dev-dependencies]
+# Backend-parity integration test drives the trait directly on a compio
+# runtime; the S3 leg (Docker-gated) needs the client to build a MinIO config.
+compio = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+compio-s3 = { workspace = true }
 
 [lints]
 workspace = true

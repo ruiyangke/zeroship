@@ -18,6 +18,18 @@ interface NativeStorage {
   get(bucket: string, key: string): Promise<string>;
   delete(bucket: string, key: string): Promise<string>;
   list(bucket: string, prefix?: string): Promise<string>;
+  // Streaming surface (proposal "env.storage streaming through V8"). These
+  // back the streaming put/get below; the buffered forms above stay for
+  // small objects.
+  putStream(
+    bucket: string,
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    contentType?: string,
+  ): Promise<string>;
+  getStream(bucket: string, key: string): Promise<string>;
+  readChunk(streamId: number): Promise<Uint8Array | undefined>;
+  cancelStream(streamId: number): Promise<void>;
 }
 
 function getNativeStorage(): NativeStorage {
@@ -59,6 +71,17 @@ export interface GetResult {
   size: number;
 }
 
+export interface GetStreamResult {
+  /**
+   * The object's bytes as a `ReadableStream<Uint8Array>`. Memory stays
+   * bounded by your read rate — the whole object is never buffered.
+   */
+  body: ReadableStream<Uint8Array>;
+  /** Server-recorded content-type (may be null until we add sidecar metadata). */
+  contentType: string | null;
+  size: number;
+}
+
 export interface ListEntry {
   key: string;
   size: number;
@@ -79,18 +102,60 @@ export class Bucket {
     this.#native = nativeOverride ?? getNativeStorage();
   }
 
-  /** Store bytes at `key`. Accepts Uint8Array, ArrayBuffer, string, Blob. */
+  /**
+   * Store an object at `key`.
+   *
+   * Accepts in-memory bodies (`Uint8Array` / `ArrayBuffer` / `string`) which
+   * go through the buffered native path, OR a `ReadableStream` / `Blob` which
+   * streams chunk-by-chunk into the backend (S3 multipart / LocalFs
+   * temp-file + atomic rename) with no whole-object buffering. Use a stream
+   * for large uploads.
+   */
   async put(
     key: string,
-    body: Uint8Array | ArrayBuffer | string | Blob,
+    body: Uint8Array | ArrayBuffer | string | Blob | ReadableStream<Uint8Array>,
     opts: { contentType?: string } = {},
   ): Promise<Result<PutResult>> {
     try {
+      // Stream sources go straight to the streaming native path; nothing is
+      // buffered whole-object.
+      if (body instanceof ReadableStream) {
+        return await this.#putStream(key, body, opts.contentType);
+      }
+      if (typeof Blob !== "undefined" && body instanceof Blob) {
+        return await this.#putStream(key, body.stream(), opts.contentType ?? (body.type || undefined));
+      }
       const bytes = await toBytes(body);
       const b64 = bytesToBase64(bytes);
       const raw = await this.#native.put(this.#name, key, b64, opts.contentType);
       const parsed = JSON.parse(raw) as PutResult;
       return ok(parsed);
+    } catch (e) {
+      return err(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  /**
+   * Stream an object up from a `ReadableStream<Uint8Array>`. The buffered
+   * `put` delegates here for stream / Blob bodies; call it directly when you
+   * already hold a stream (e.g. a `fetch` response body).
+   */
+  async putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    opts: { contentType?: string } = {},
+  ): Promise<Result<PutResult>> {
+    return this.#putStream(key, body, opts.contentType);
+  }
+
+  async #putStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    contentType?: string,
+  ): Promise<Result<PutResult>> {
+    try {
+      const raw = await this.#native.putStream(this.#name, key, body, contentType);
+      return ok(JSON.parse(raw) as PutResult);
     } catch (e) {
       return err(e instanceof Error ? e : new Error(String(e)));
     }
@@ -111,6 +176,45 @@ export class Bucket {
         contentType: parsed.contentType,
         size: parsed.size,
       });
+    } catch (e) {
+      return err(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  /**
+   * Fetch an object as a stream. Returns `{data: null}` if the key doesn't
+   * exist; otherwise `{ body, contentType, size }` where `body` is a
+   * `ReadableStream<Uint8Array>` you pull at your own pace — the whole object
+   * is never buffered in memory.
+   */
+  async getStream(key: string): Promise<Result<GetStreamResult | null>> {
+    try {
+      const raw = await this.#native.getStream(this.#name, key);
+      if (raw === "null" || raw === null) return ok(null);
+      const handle = JSON.parse(raw) as {
+        streamId: number;
+        contentType: string | null;
+        size: number;
+      };
+      const native = this.#native;
+      const streamId = handle.streamId;
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const chunk = await native.readChunk(streamId);
+          if (chunk === undefined || chunk === null) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+        async cancel() {
+          if (cancelled) return;
+          cancelled = true;
+          await native.cancelStream(streamId);
+        },
+      });
+      return ok({ body, contentType: handle.contentType, size: handle.size });
     } catch (e) {
       return err(e instanceof Error ? e : new Error(String(e)));
     }

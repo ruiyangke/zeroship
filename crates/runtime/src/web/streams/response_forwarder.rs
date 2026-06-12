@@ -136,6 +136,40 @@ pub fn begin_forward(
     let body_obj = v8::Local::<v8::Object>::try_from(body_v)
         .map_err(|_| "begin_forward: response.body is not an object".to_string())?;
 
+    let stream_id = forward_from_readable(scope, body_obj)?;
+
+    // Stamp the id on the response so the kernel can read it later
+    // for idempotent re-inspect — and so build_fetch_outcome can match
+    // this forwarder to the writer attach.
+    let id_v = v8::Integer::new_from_unsigned(scope, stream_id);
+    response_obj.set(scope, id_key.into(), id_v.into());
+    Ok(stream_id)
+}
+
+/// Start a forwarder over a **bare `ReadableStream`** (not a Response body).
+///
+/// Same pump as [`begin_forward`] — lock via `getReader()`, drive
+/// `reader.read()` in a Rust promise-reaction loop, push chunks through a
+/// registered [`ResponseForwarder`] — but the entry point is any object
+/// satisfying the WHATWG Streams reader surface. Used by `env.storage.put`
+/// to consume an app-supplied `ReadableStream` (or `Blob.stream()`) into a
+/// Rust channel feeding `Backend::put_stream`.
+///
+/// Returns the allocated `stream_id`; attach a [`StreamWriter`] with
+/// [`attach_writer`] to receive the chunks.
+pub fn begin_forward_stream(
+    scope: &mut v8::PinScope,
+    stream_obj: v8::Local<v8::Object>,
+) -> Result<u32, String> {
+    forward_from_readable(scope, stream_obj)
+}
+
+/// Shared core: lock `readable` via `getReader()`, register a forwarder,
+/// and schedule the first read. Returns the new `stream_id`.
+fn forward_from_readable(
+    scope: &mut v8::PinScope,
+    body_obj: v8::Local<v8::Object>,
+) -> Result<u32, String> {
     // Lock via getReader().
     let get_reader_key = v8::String::new(scope, "getReader").unwrap();
     let get_reader_v = body_obj
@@ -169,12 +203,6 @@ pub fn begin_forward(
         .expect("RuntimeState not in isolate slot")
         .clone();
     let stream_id = state.borrow_mut().alloc_stream_id();
-
-    // Stamp the id on the response so the kernel can read it later
-    // for idempotent re-inspect — and so build_fetch_outcome can match
-    // this forwarder to the writer attach.
-    let id_v = v8::Integer::new_from_unsigned(scope, stream_id);
-    response_obj.set(scope, id_key.into(), id_v.into());
 
     // Allocate forwarder and register.
     let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));

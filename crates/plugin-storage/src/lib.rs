@@ -5,10 +5,26 @@
 //! via the S3 API) is behind the `s3` feature flag.
 //!
 //! Native API surface (what `@zeroship/storage` SDK wraps):
+//!
+//! Buffered (small objects):
 //! - `zeroship.storage.put(bucket, key, bytesBase64, contentType?)` → Promise<{ bucket, key, size }>
 //! - `zeroship.storage.get(bucket, key)` → Promise<{ bytesBase64, contentType, size } | null>
 //! - `zeroship.storage.delete(bucket, key)` → Promise<{ deleted: bool }>
 //! - `zeroship.storage.list(bucket, prefix)` → Promise<[{ key, size, modifiedAt }]>
+//!
+//! Streaming (no whole-object buffering — see `callbacks` and the proposal's
+//! "env.storage streaming through V8" section):
+//! - `zeroship.storage.putStream(bucket, key, ReadableStream, contentType?)`
+//!   → Promise<{ bucket, key, size }>
+//! - `zeroship.storage.getStream(bucket, key)`
+//!   → Promise<{ streamId, contentType, size } | null>
+//! - `zeroship.storage.readChunk(streamId)` → Promise<Uint8Array | undefined>
+//! - `zeroship.storage.cancelStream(streamId)` → Promise<undefined>
+//!
+//! `put_stream` / `get_stream` on the `Backend` trait are the kernel ops;
+//! buffered `put` / `get` are conveniences built on the streaming path.
+//! The S3 backend turns `put_stream` into an S3 multipart upload, so memory
+//! is bounded by the part size, never the object size.
 //!
 //! Multi-tenancy: each app's keyspace is namespaced by app_id. Backends
 //! never see raw user input — `backend::validate_object_coords` gates
@@ -24,6 +40,8 @@ pub mod backend;
 pub mod callbacks;
 
 pub use backend::{Backend, LocalFs};
+#[cfg(feature = "s3")]
+pub use backend::S3;
 
 // ---------------------------------------------------------------------------
 // Thread-local backend handle
@@ -103,5 +121,11 @@ impl NativePlugin for StoragePlugin {
         r.add("get", callbacks::get);
         r.add("delete", callbacks::delete);
         r.add("list", callbacks::list);
+        // Streaming surface (proposal "env.storage streaming through V8"):
+        // the @zeroship/storage SDK wraps these into streaming put/get.
+        r.add("putStream", callbacks::put_stream);
+        r.add("getStream", callbacks::get_stream);
+        r.add("readChunk", callbacks::read_chunk);
+        r.add("cancelStream", callbacks::cancel_stream);
     }
 }
