@@ -166,6 +166,14 @@ fn s3_blob_store_roundtrip_and_parity() {
                 // S3 leg.
                 let s3 = s3_store();
                 run_contract(&s3, "s3").await;
+                // Parallel multipart: a many-part blob under concurrency > 1
+                // round-trips byte-exact AND keeps content-address integrity
+                // (parts finish out of order; the SHA-256 is over read order).
+                run_s3_parallel_many_parts(&s3).await;
+                // Content-address integrity under concurrency: a hash that
+                // does not match the streamed bytes must ABORT before
+                // complete_multipart — nothing committed, no orphaned upload.
+                run_s3_parallel_hash_mismatch_aborts().await;
                 // C1 regression: an error mid-multipart-upload must abort the
                 // upload explicitly, not leak orphaned parts or abort the
                 // process.
@@ -239,6 +247,96 @@ async fn run_c1_mid_upload_abort(store: &S3BlobStore) {
     assert!(
         uploads.is_empty(),
         "C1: mid-upload error left an orphaned multipart upload: {uploads:?}"
+    );
+}
+
+/// A `Read` source over a fixed byte vector, handing out at most 64 KiB per
+/// read (forcing the multi-read accumulate-into-part loop).
+struct VecReader {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl std::io::Read for VecReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = (self.data.len() - self.pos).min(out.len()).min(64 * 1024);
+        out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// Parallel multipart: put a MANY-part blob under concurrency > 1 and assert
+/// it round-trips byte-exact. `get_blob` re-verifies the content address on the
+/// way out, so a byte-exact round-trip proves BOTH the parts were uploaded in
+/// the correct order (sorted before complete, despite finishing out of order)
+/// AND the content address held. Pre-change this path was strictly sequential.
+async fn run_s3_parallel_many_parts(store: &S3BlobStore) {
+    std::env::set_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY", "4");
+
+    // 5 full parts + a remainder = 6 parts, past the concurrency of 4 so
+    // several waves overlap and finish out of order. Bounded by MAX_BLOB_BYTES
+    // (16 MiB), so use a 2-part-ish blob if PART_SIZE is large; here PART_SIZE
+    // is 8 MiB and MAX_BLOB_BYTES is 16 MiB, so cap at 2 full parts + a tail.
+    let big_len = PART_SIZE * 2 - 4096; // straddles a 64 KiB read boundary too
+    let big: Vec<u8> = (0..big_len).map(|i| (i % 251) as u8).collect();
+    let big_hash = sha256_hex(&big);
+
+    let mut reader = VecReader { data: big.clone(), pos: 0 };
+    let outcome = store
+        .put_blob_stream(&big_hash, big_len as u64, &mut reader)
+        .await
+        .expect("parallel many-part put_blob_stream");
+    assert_eq!(outcome, PutOutcome::Wrote, "parallel: first put writes");
+
+    let got = store.get_blob(&big_hash).await.expect("parallel: get_blob");
+    assert_eq!(got.len(), big_len, "parallel: size");
+    assert_eq!(got.as_ref(), &big[..], "parallel: byte-compare (part ordering?)");
+
+    std::env::remove_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY");
+}
+
+/// Content-address integrity under concurrency: declare a hash that does NOT
+/// match the streamed bytes. Even with several part-uploads finishing out of
+/// order, the whole-stream SHA-256 (computed in read order) is verified BEFORE
+/// `complete_multipart`; the mismatch must abort the upload — the object must
+/// NOT materialize under the wrong key, and no orphaned multipart remains.
+async fn run_s3_parallel_hash_mismatch_aborts() {
+    std::env::set_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY", "4");
+    let store = s3_store();
+
+    // A multipart-sized blob (≥ 1 full part so a real multipart upload runs),
+    // but we lie about its hash. declared size matches the real byte count so
+    // the size check passes and we reach the hash gate.
+    let big_len = PART_SIZE + 4096;
+    let big: Vec<u8> = (0..big_len).map(|i| ((i * 7) % 251) as u8).collect();
+    let wrong_hash = "ab".repeat(32); // 64 hex chars, never the real content
+    let key_prefix = format!("blobs/{wrong_hash}");
+
+    let mut reader = VecReader { data: big, pos: 0 };
+    let res = store
+        .put_blob_stream(&wrong_hash, big_len as u64, &mut reader)
+        .await;
+    std::env::remove_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY");
+    assert!(
+        matches!(res, Err(BlobError::HashMismatch { .. })),
+        "integrity: hash mismatch must fail with HashMismatch, got {res:?}"
+    );
+
+    // The wrong-key object must NOT exist (never completed).
+    assert!(
+        !store.has_blob(&wrong_hash).await.expect("integrity: has_blob"),
+        "integrity: object materialized under the wrong content hash"
+    );
+    // And no orphaned multipart upload was left behind.
+    let raw = s3_raw_client();
+    let uploads = raw
+        .list_multipart_uploads(&key_prefix)
+        .await
+        .expect("integrity: list multipart uploads");
+    assert!(
+        uploads.is_empty(),
+        "integrity: hash-mismatch left an orphaned multipart upload: {uploads:?}"
     );
 }
 

@@ -51,6 +51,34 @@ pub fn max_stream_object_bytes() -> u64 {
     env_u64(MAX_STREAM_OBJECT_BYTES_ENV).unwrap_or(DEFAULT_MAX_STREAM_OBJECT_BYTES)
 }
 
+// ---------------------------------------------------------------------------
+// Multipart upload concurrency
+// ---------------------------------------------------------------------------
+
+/// Default number of multipart `UploadPart` requests in flight at once.
+///
+/// The source stream is still read strictly sequentially into one part buffer
+/// at a time; only the network PUTs overlap. Bounded concurrency is the S3
+/// throughput lever (the official `@aws-sdk/lib-storage` runs ~4 parallel
+/// parts and is ~2× a sequential `upload_part().await` loop) while keeping
+/// memory bounded: at most `UPLOAD_CONCURRENCY × PART_SIZE` of part buffers
+/// can be in flight (4 × 8 MiB = 32 MiB), never the whole object.
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
+
+/// Environment variable overriding [`DEFAULT_UPLOAD_CONCURRENCY`]. Clamped to
+/// `1..=64` (1 reproduces the old strictly-sequential behaviour).
+pub const UPLOAD_CONCURRENCY_ENV: &str = "ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY";
+
+/// Resolve the in-flight multipart part-upload concurrency: the
+/// `ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY` env var (clamped to `1..=64`) if a
+/// valid positive integer, else [`DEFAULT_UPLOAD_CONCURRENCY`].
+#[must_use]
+pub fn upload_concurrency() -> usize {
+    env_u64(UPLOAD_CONCURRENCY_ENV)
+        .map(|n| n.clamp(1, 64) as usize)
+        .unwrap_or(DEFAULT_UPLOAD_CONCURRENCY)
+}
+
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()
@@ -70,5 +98,13 @@ mod tests {
     #[test]
     fn s3_part_ceiling_is_10000() {
         assert_eq!(MAX_MULTIPART_PARTS, 10_000);
+    }
+
+    #[test]
+    fn upload_concurrency_default_is_4() {
+        // No env override in this test process → default.
+        assert!(std::env::var(UPLOAD_CONCURRENCY_ENV).is_err());
+        assert_eq!(upload_concurrency(), DEFAULT_UPLOAD_CONCURRENCY);
+        assert_eq!(DEFAULT_UPLOAD_CONCURRENCY, 4);
     }
 }

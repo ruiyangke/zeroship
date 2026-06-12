@@ -82,7 +82,21 @@ impl S3BlobStore {
     /// address, then either single-PUT or complete the multipart. `upload` is
     /// borrowed mutably so the caller can abort the started upload on any error
     /// this returns. No abort happens here — the caller owns the error path.
-    #[allow(clippy::too_many_lines)] // single-pass stream → hash → parts → complete
+    ///
+    /// ## Bounded-concurrency part uploads + content-address integrity
+    ///
+    /// The source is read STRICTLY SEQUENTIALLY, and the whole-object SHA-256 is
+    /// updated in that READ order — independent of upload completion order — so
+    /// the content-address check stays exactly correct even though parts upload
+    /// concurrently. Each full `PART_SIZE` part's `UploadPart` PUT is dispatched
+    /// as a concurrent future; at most [`crate::limits::upload_concurrency`] run
+    /// at once (await one before dispatching the next → memory bounded by
+    /// `N × PART_SIZE`). All in-flight uploads are drained, and the full-stream
+    /// hash is verified against the caller's content address, BEFORE
+    /// `complete_multipart`; a mismatch (or any in-flight PUT error) propagates
+    /// without completing, and the caller's error path aborts the multipart so
+    /// nothing is ever committed under the wrong key.
+    #[allow(clippy::too_many_lines)] // single-pass stream → hash → concurrent parts → complete
     #[allow(clippy::future_not_send)] // BlobStore is (?Send); reader is !Send by design
     async fn put_blob_stream_inner(
         &self,
@@ -92,13 +106,24 @@ impl S3BlobStore {
         reader: &mut dyn std::io::Read,
         upload: &mut Option<UploadId>,
     ) -> Result<PutOutcome, BlobError> {
+        use futures::stream::FuturesUnordered;
+        use futures::StreamExt;
+
+        let concurrency = crate::limits::upload_concurrency();
+
         let mut hasher = sha2::Sha256::new();
         let mut total: u64 = 0;
         let mut parts: Vec<compio_s3::PartETag> = Vec::new();
         let mut part_number: u32 = 0;
 
-        // Read the source in bounded chunks; accumulate into the current
-        // part buffer and flush whole PART_SIZE parts.
+        // In-flight part-upload futures, at most `concurrency` live at once.
+        // Each is a self-contained `async move` over a cloned client + owned
+        // bytes, so the set can be polled concurrently on the single compio
+        // thread without borrowing `self`/`reader`.
+        let mut inflight = FuturesUnordered::new();
+
+        // Read the source in bounded chunks; accumulate into the current part
+        // buffer and dispatch whole PART_SIZE parts as they fill.
         let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
         let mut scratch = vec![0u8; 64 * 1024];
         loop {
@@ -117,6 +142,8 @@ impl S3BlobStore {
                     "blob exceeds MAX_BLOB_BYTES {MAX_BLOB_BYTES}"
                 )));
             }
+            // Hash in READ order — the content address is independent of upload
+            // completion order.
             hasher.update(&scratch[..n]);
             part_buf.extend_from_slice(&scratch[..n]);
 
@@ -130,16 +157,20 @@ impl S3BlobStore {
                         .map_err(|e| map_s3(hash, e))?;
                     *upload = Some(id);
                 }
+                // Backpressure: keep at most `concurrency` PUTs in flight, so
+                // live part memory is bounded by `concurrency × PART_SIZE`.
+                while inflight.len() >= concurrency {
+                    match inflight.next().await {
+                        Some(Ok(etag)) => parts.push(etag),
+                        Some(Err(e)) => return Err(e),
+                        None => break,
+                    }
+                }
                 let id = upload.as_ref().expect("multipart created");
                 let rest = part_buf.split_off(PART_SIZE);
                 let body = Bytes::from(std::mem::replace(&mut part_buf, rest));
                 part_number += 1;
-                let etag = self
-                    .client
-                    .upload_part(key, id, part_number, body)
-                    .await
-                    .map_err(|e| map_s3(hash, e))?;
-                parts.push(etag);
+                inflight.push(self.upload_part_owned(hash, key, id, part_number, body));
             }
         }
 
@@ -148,20 +179,20 @@ impl S3BlobStore {
                 "size mismatch: expected {expected_size}, observed {total}"
             )));
         }
-        // Verify the content address BEFORE committing anything.
-        let computed = hex::encode(hasher.finalize());
-        if computed != hash {
-            return Err(BlobError::HashMismatch {
-                expected: hash.to_string(),
-                got: computed,
-            });
-        }
 
         // NB: keep `upload` populated through the final part flush + complete
         // so a failure there is still abortable by the caller. Only clear it on
         // a clean complete (the object now exists; aborting would be wrong).
         if upload.is_none() {
             // Single-part path: object below PART_SIZE → ordinary PUT.
+            // Verify the content address BEFORE committing anything.
+            let computed = hex::encode(hasher.finalize());
+            if computed != hash {
+                return Err(BlobError::HashMismatch {
+                    expected: hash.to_string(),
+                    got: computed,
+                });
+            }
             // Durable content-address record. The client ALSO emits
             // `x-amz-checksum-sha256` (base64 body digest) when the provider
             // profile enables checksum mode; the user-meta sha256 here is the
@@ -183,18 +214,34 @@ impl S3BlobStore {
                 Err(e) => Err(map_s3(hash, e)),
             }
         } else {
-            // Multipart path: flush the final (short) part, then complete.
-            let id = upload.as_ref().expect("multipart created");
+            // Multipart path: dispatch the final (short) part too, then drain
+            // every in-flight upload. An error draining drops the rest
+            // (cancelling them); the caller aborts the multipart.
             if !part_buf.is_empty() {
+                let id = upload.as_ref().expect("multipart created");
                 part_number += 1;
                 let body = Bytes::from(std::mem::take(&mut part_buf));
-                let etag = self
-                    .client
-                    .upload_part(key, id, part_number, body)
-                    .await
-                    .map_err(|e| map_s3(hash, e))?;
-                parts.push(etag);
+                inflight.push(self.upload_part_owned(hash, key, id, part_number, body));
             }
+            while let Some(res) = inflight.next().await {
+                parts.push(res?);
+            }
+            // Uploads finish out of order — S3 requires the parts list in
+            // ascending part-number order at complete time.
+            parts.sort_by_key(|p| p.part_number);
+
+            // Verify the content address (computed in read order) BEFORE
+            // completing. A mismatch aborts (caller's error path) so nothing is
+            // ever committed under the wrong key.
+            let computed = hex::encode(hasher.finalize());
+            if computed != hash {
+                return Err(BlobError::HashMismatch {
+                    expected: hash.to_string(),
+                    got: computed,
+                });
+            }
+
+            let id = upload.as_ref().expect("multipart created");
             self.client
                 .complete_multipart(key, id, &parts)
                 .await
@@ -202,6 +249,30 @@ impl S3BlobStore {
             // Completed — the object exists; clear so the caller does NOT abort.
             *upload = None;
             Ok(PutOutcome::Wrote)
+        }
+    }
+
+    /// One concurrent `UploadPart`: an owned, self-contained future (cloned
+    /// client + owned `Bytes`) suitable for a `FuturesUnordered`. Errors are
+    /// mapped to the `BlobError` channel so the caller need only `?`.
+    #[allow(clippy::future_not_send)] // cyper client is !Send by design (per-thread)
+    fn upload_part_owned(
+        &self,
+        hash: &str,
+        key: &str,
+        id: &UploadId,
+        part_number: u32,
+        body: Bytes,
+    ) -> impl std::future::Future<Output = Result<compio_s3::PartETag, BlobError>> + '_ {
+        let client = self.client.clone();
+        let key = key.to_string();
+        let hash = hash.to_string();
+        let id = id.clone();
+        async move {
+            client
+                .upload_part(&key, &id, part_number, body)
+                .await
+                .map_err(|e| map_s3(&hash, e))
         }
     }
 }

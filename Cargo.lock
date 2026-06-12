@@ -6560,6 +6560,7 @@ dependencies = [
  "bytes",
  "compio",
  "compio-s3",
+ "futures",
  "hex",
  "serde",
  "serde_json",

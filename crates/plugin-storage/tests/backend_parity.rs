@@ -449,9 +449,16 @@ fn s3_parity_and_large_stream() {
             .block_on(async {
                 run_parity(&backend, "s3").await;
                 run_large_stream(&backend, "s3").await;
+                // Parallel multipart: a many-part object with concurrency > 1
+                // round-trips byte-exact (parts sorted by number before
+                // complete, despite finishing out of order).
+                run_s3_parallel_many_parts().await;
                 // C1: an error mid-multipart-upload must explicitly abort the
                 // upload (no orphaned parts, no process abort).
                 run_s3_mid_upload_abort(&backend).await;
+                // C1 under concurrency: an injected error with N part-uploads
+                // in flight must still abort — no orphaned multipart upload.
+                run_s3_parallel_mid_upload_abort().await;
                 // H2: a stream over the part/size limit fails fast + aborts.
                 run_s3_part_limit_fast_fail().await;
             });
@@ -576,5 +583,111 @@ async fn run_s3_part_limit_fast_fail() {
     assert!(
         uploads.is_empty(),
         "H2: fast-failed upload left orphaned multipart(s): {uploads:?}"
+    );
+}
+
+/// Parallel multipart: drive `put_stream` with MANY full parts under a
+/// concurrency > 1 and assert the object round-trips byte-exact. The parts
+/// finish out of completion order, so this proves the new code sorts the
+/// `(part_number, ETag)` list ascending before `complete_multipart` — a
+/// mis-sorted or duplicated list makes `complete_multipart` reject the upload.
+/// (Pre-change this path was strictly sequential, so the sort line is new.)
+#[cfg(feature = "s3")]
+async fn run_s3_parallel_many_parts() {
+    use zeroship_plugin_storage::limits::UPLOAD_CONCURRENCY_ENV;
+    const PART_SIZE: usize = 8 * 1024 * 1024;
+
+    // Force 4-way concurrency explicitly so the test does not depend on the
+    // default. SAFETY: single-threaded test; restored after the call.
+    std::env::set_var(UPLOAD_CONCURRENCY_ENV, "4");
+    let backend = make_s3();
+
+    let key = "parallel-many.bin";
+    // 6 full parts + a short last part = 7 parts, well past the concurrency of
+    // 4 so several waves of in-flight uploads overlap and finish out of order.
+    let total = PART_SIZE * 6 + 123_456;
+    // Deterministic, position-dependent bytes: any misordered/duplicated part
+    // fails the byte-compare, not just a length check.
+    let chunk_len = 1_000_000; // not a divisor of PART_SIZE → straddles parts
+    let mut chunks = Vec::new();
+    let mut produced = 0usize;
+    while produced < total {
+        let len = chunk_len.min(total - produced);
+        let mut buf = vec![0u8; len];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((produced + i) % 251) as u8;
+        }
+        chunks.push(Bytes::from(buf));
+        produced += len;
+    }
+    let expect: Vec<u8> = chunks.iter().flat_map(|c| c.to_vec()).collect();
+    assert_eq!(expect.len(), total);
+
+    let written = backend
+        .put_stream(APP, BUCKET, key, Box::new(VecChunks::new(chunks)), None)
+        .await
+        .unwrap_or_else(|e| panic!("parallel many-part put_stream: {e}"));
+    std::env::remove_var(UPLOAD_CONCURRENCY_ENV);
+    assert_eq!(written, total as u64, "parallel: written size");
+
+    let (meta, stream) = backend
+        .get_stream(APP, BUCKET, key)
+        .await
+        .unwrap()
+        .expect("parallel: get_stream None");
+    assert_eq!(meta.size, total as u64, "parallel: get meta size");
+    let got = drain(stream).await;
+    assert_eq!(got.len(), expect.len(), "parallel: length mismatch");
+    assert!(got == expect, "parallel: byte-compare mismatch (part ordering?)");
+
+    backend.delete(APP, BUCKET, key).await.unwrap();
+}
+
+/// C1 under concurrency: with several part-uploads in flight (concurrency = 4),
+/// an injected reader error must still abort the multipart explicitly — the
+/// other in-flight uploads are dropped/cancelled and no orphaned (billed)
+/// multipart upload remains listable.
+#[cfg(feature = "s3")]
+async fn run_s3_parallel_mid_upload_abort() {
+    use zeroship_plugin_storage::limits::UPLOAD_CONCURRENCY_ENV;
+    const PART_SIZE: usize = 8 * 1024 * 1024;
+
+    std::env::set_var(UPLOAD_CONCURRENCY_ENV, "4");
+    let backend = make_s3();
+
+    let obj_key = "c1-parallel-aborted.bin";
+    let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
+
+    // Precondition: the listing path can see a live upload (non-vacuous check).
+    let raw = s3_raw_client();
+    {
+        let up = raw
+            .create_multipart(&key_prefix, "application/octet-stream")
+            .await
+            .expect("sentinel create_multipart");
+        let listed = raw.list_multipart_uploads(&key_prefix).await.expect("sentinel list");
+        assert!(!listed.is_empty(), "precondition: list must see in-progress upload");
+        raw.abort_multipart(&key_prefix, &up).await.expect("sentinel abort");
+    }
+
+    // Yield ~4.25 parts of bytes, then error → create_multipart + several
+    // upload_part futures are in flight at the failure point.
+    let src = ErrAfterChunks {
+        remaining: PART_SIZE * 4 + PART_SIZE / 4,
+        errored: false,
+    };
+    let res = backend
+        .put_stream(APP, BUCKET, obj_key, Box::new(src), None)
+        .await;
+    std::env::remove_var(UPLOAD_CONCURRENCY_ENV);
+    assert!(res.is_err(), "C1/parallel: mid-upload error must propagate");
+
+    let uploads = raw
+        .list_multipart_uploads(&key_prefix)
+        .await
+        .expect("C1/parallel: list multipart uploads");
+    assert!(
+        uploads.is_empty(),
+        "C1/parallel: mid-upload error left an orphaned multipart upload: {uploads:?}"
     );
 }

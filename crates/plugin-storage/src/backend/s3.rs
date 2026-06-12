@@ -79,7 +79,23 @@ impl S3 {
     /// overrun at `complete`. `upload` is borrowed mutably so the caller can
     /// abort the started upload on any error this returns; no abort happens
     /// here — the caller owns the error path.
+    ///
+    /// ## Bounded-concurrency part uploads
+    ///
+    /// The source is still read STRICTLY SEQUENTIALLY into one `PART_SIZE`
+    /// buffer at a time, but each full part's `UploadPart` PUT is dispatched as
+    /// a concurrent future rather than awaited inline. At most
+    /// [`crate::limits::upload_concurrency`] PUTs run at once: when that many
+    /// are in flight we await the next one to finish before reading/dispatching
+    /// the next part. Memory stays bounded — at most `N × PART_SIZE` of part
+    /// buffers live (plus the reader's chunk). Uploads finish out of order, so
+    /// `(part_number, ETag)` results are sorted by part number before
+    /// `complete_multipart` (S3 requires ascending part order). Any in-flight
+    /// PUT error (or reader error, or a cap breach) propagates immediately; the
+    /// remaining in-flight futures are dropped (cancelled) and the caller's
+    /// error path aborts the multipart.
     #[allow(clippy::future_not_send)] // Backend is (?Send); body source is !Send by design
+    #[allow(clippy::too_many_lines)] // single-pass stream → concurrent parts → complete
     async fn put_stream_inner(
         &self,
         s3_key: &str,
@@ -87,14 +103,25 @@ impl S3 {
         mut body: BoxChunkSource,
         upload: &mut Option<UploadId>,
     ) -> Result<u64, String> {
+        use futures::stream::FuturesUnordered;
+        use futures::StreamExt;
+
         let max_total = crate::limits::max_stream_object_bytes();
+        let concurrency = crate::limits::upload_concurrency();
 
         let mut total: u64 = 0;
         let mut parts: Vec<PartETag> = Vec::new();
         let mut part_number: u32 = 0;
 
-        // Accumulate incoming chunks into a part buffer; flush whole
-        // PART_SIZE parts as they fill. Bounded memory, unbounded RAM.
+        // In-flight part-upload futures, at most `concurrency` live at once.
+        // Each is a self-contained `async move` over a cloned client + owned
+        // bytes, so it carries no borrow of `self`/`body` and the set can be
+        // polled concurrently on the single compio thread.
+        let mut inflight = FuturesUnordered::new();
+
+        // Accumulate incoming chunks into a part buffer; dispatch whole
+        // PART_SIZE parts as they fill. Bounded memory: at most
+        // `concurrency × PART_SIZE` part bytes in flight + one chunk.
         let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
         while let Some(chunk) = body.next_chunk().await {
             let chunk = chunk?;
@@ -128,21 +155,26 @@ impl S3 {
                         crate::limits::MAX_MULTIPART_PARTS
                     ));
                 }
+                // Backpressure: keep at most `concurrency` PUTs in flight.
+                // Awaiting one BEFORE dispatching the next bounds live memory.
+                while inflight.len() >= concurrency {
+                    match inflight.next().await {
+                        Some(Ok(etag)) => parts.push(etag),
+                        Some(Err(e)) => return Err(e),
+                        None => break,
+                    }
+                }
                 let id = upload.as_ref().expect("multipart created");
                 let rest = part_buf.split_off(PART_SIZE);
                 let part = Bytes::from(std::mem::replace(&mut part_buf, rest));
                 part_number += 1;
-                let etag = self
-                    .client
-                    .upload_part(s3_key, id, part_number, part)
-                    .await
-                    .map_err(|e| map_s3(s3_key, e))?;
-                parts.push(etag);
+                inflight.push(self.upload_part_owned(s3_key, id, part_number, part));
             }
         }
 
         if upload.is_none() {
             // Single-part path: object below PART_SIZE → ordinary PutObject.
+            // No multipart was started, so nothing is in flight here.
             let opts = PutOptions {
                 content_type,
                 ..PutOptions::default()
@@ -152,9 +184,10 @@ impl S3 {
                 .await
                 .map_err(|e| map_s3(s3_key, e))?;
         } else {
-            // Multipart path: flush the final (short) part, then complete.
-            // Keep `upload` populated through complete so a failure there is
-            // still abortable; clear only on a clean complete.
+            // Multipart path: dispatch the final (short) part too, then drain
+            // every in-flight upload before completing. Keep `upload`
+            // populated through complete so a failure there is still abortable;
+            // clear only on a clean complete.
             if !part_buf.is_empty() {
                 if part_number >= crate::limits::MAX_MULTIPART_PARTS {
                     return Err(format!(
@@ -165,13 +198,17 @@ impl S3 {
                 let id = upload.as_ref().expect("multipart created");
                 part_number += 1;
                 let part = Bytes::from(std::mem::take(&mut part_buf));
-                let etag = self
-                    .client
-                    .upload_part(s3_key, id, part_number, part)
-                    .await
-                    .map_err(|e| map_s3(s3_key, e))?;
-                parts.push(etag);
+                inflight.push(self.upload_part_owned(s3_key, id, part_number, part));
             }
+            // Drain all remaining in-flight part uploads. An error here drops
+            // the rest (cancelling them); the caller aborts the multipart.
+            while let Some(res) = inflight.next().await {
+                parts.push(res?);
+            }
+            // Uploads finish out of order — S3 requires the parts list in
+            // ascending part-number order at complete time.
+            parts.sort_by_key(|p| p.part_number);
+
             let id = upload.as_ref().expect("multipart created");
             self.client
                 .complete_multipart(s3_key, id, &parts)
@@ -182,6 +219,28 @@ impl S3 {
         }
 
         Ok(total)
+    }
+
+    /// One concurrent `UploadPart`: an owned, self-contained future (cloned
+    /// client + owned `Bytes`) suitable for a `FuturesUnordered`. Errors are
+    /// already mapped to the `String` channel so the caller need only `?`.
+    #[allow(clippy::future_not_send)] // cyper client is !Send by design (per-thread)
+    fn upload_part_owned(
+        &self,
+        s3_key: &str,
+        id: &UploadId,
+        part_number: u32,
+        part: Bytes,
+    ) -> impl std::future::Future<Output = Result<PartETag, String>> + '_ {
+        let client = self.client.clone();
+        let key = s3_key.to_string();
+        let id = id.clone();
+        async move {
+            client
+                .upload_part(&key, &id, part_number, part)
+                .await
+                .map_err(|e| map_s3(&key, e))
+        }
     }
 }
 
