@@ -1,0 +1,13 @@
+{
+  "name": "@zeroship/e2e-browser",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Browser-level (Playwright) E2E for zeroship render modes (CSR/SSR/SSG) over the real gateway.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
+  }
+}

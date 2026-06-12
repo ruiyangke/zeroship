@@ -484,6 +484,46 @@ missing SMTP host. `config_check_e2e.sh` auth cases 4/4 pass.
 
 ---
 
+### ISS-69 · CSR example's client-side RPC is anon, so it 401s through the gateway under the SEC-5 fail-closed default
+**Status:** open — **example/contract gap** · **Tier:** T2 (browser/client contract) · Surfaced by the browser-level E2E (`tests/e2e_browser/csr.spec.ts` + `streaming.spec.ts`)
+
+The `csr-todo` SPA fetches its data over typed RPC from the browser: `listTodos`
+(`GET /__zeroship/v1/listTodos?input=…`) on mount and `searchTodos`
+(`POST /__zeroship/v1/searchTodos`, SSE) from the search box. Both of those calls
+are **anonymous** (no session, no Bearer) — the example ships no auth. Since
+e919af51 / 6e239f12 RPC procedures default to **fail-closed (`auth: user`)**, and
+the csr-todo manifest declares its RPC resources with *no* `auth` override
+(`"rpc:listTodos":{"kind":"query"}`, `"rpc:searchTodos":{"kind":"stream"}`), the
+**gateway rejects the browser's RPC with HTTP 401 `UNAUTHENTICATED`**
+(`www-authenticate: Bearer realm="zeroship"`). The SPA mounts (shell + JS boot are
+fine), but the todo list and the search stream never populate.
+
+**Proven, not inferred — the procedure itself is healthy; only the gateway auth
+gate blocks it:**
+- Browser/gateway path (`GET …/__zeroship/v1/listTodos` with `Host: csr-todo-bx.localhost`)
+  → **401 UNAUTHENTICATED**. Same for the `searchTodos` SSE POST → **401**.
+- The identical call over the worker `/dispatch/<appId>` (no gateway auth gate, as
+  the curl harness uses) → **200** with the full 4-todo payload. So V8 init, the RPC
+  handler, validation, and serialization are all correct end-to-end. The *only*
+  difference is the gateway's fail-closed RPC default.
+
+This is the browser-side mirror of ISS-64 (the curl harness's authenticated
+env.db RPC known-fail) and the reason `e2e_app_primitives_render.sh` drives RPC
+streaming over `/dispatch` directly. It is **not a rendering/hydration bug** and
+**not a test bug** — the SSG (4/4) and SSR (2/2, incl. a real hydration-boot proof)
+browser specs pass; only the CSR client-RPC specs fail, all with 401-shaped
+empty-DOM timeouts.
+
+**Where the fix belongs (out of this task's scope — left for triage):** either the
+csr-todo example opts its read-only demo procedures into anon access (`auth: anon`
+/ `publicly_accessible` on those resources, the way URL/SSR/static already default),
+or the platform provides a first-class "public RPC" affordance the example can
+declare. Until then the four CSR browser specs are marked `test.fixme` pointing
+here; flip them back to `test` once anon (or test-authed) client RPC works through
+the gateway.
+
+---
+
 ## Deferred — the app-builder will be re-implemented
 
 **The `apps/zeroship-builder` is deferred for a from-scratch re-implementation** (operator

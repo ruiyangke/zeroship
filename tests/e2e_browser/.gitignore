@@ -1,0 +1,10 @@
+# Runtime-generated stack descriptor (written by scripts/up.sh).
+.stack.json
+
+# @playwright/test symlink to the on-PATH runner's copy, created at setup time
+# by scripts/link-playwright.sh (machine-specific nix store path — never committed).
+node_modules/
+
+# Playwright run artifacts.
+test-results/
+playwright-report/

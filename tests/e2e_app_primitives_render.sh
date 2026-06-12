@@ -39,29 +39,33 @@ BIN="$ROOT/target/release"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset from e2e_app_primitives.sh so the two can run back-to-back)
-CONTROL_PORT=9100
-WORKER_PORT=8088
-GATE_PORT=8002
-PG_PORT=5444
-PG_CONTAINER="zs-e2e-render-pg"
+# Exported BEFORE sourcing the shared bring-up library so stack_up uses them.
+export CONTROL_PORT=9100
+export WORKER_PORT=8088
+export GATE_PORT=8002
+export PG_PORT=5444
+export PG_CONTAINER="zs-e2e-render-pg"
 
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 
 PASS=0; FAIL=0; KNOWN=0
-PIDS=()
 WORK=""
 
 pass()  { PASS=$((PASS+1));  echo "  ✓ $1"; }
 fail()  { FAIL=$((FAIL+1));  echo "  ✗ $1"; }
 known() { KNOWN=$((KNOWN+1)); echo "  ⚠ $1"; if [ "$STRICT" = "1" ]; then FAIL=$((FAIL+1)); fi; }
 
+# Shared bring-up: ephemeral PG + Liquibase + control/worker/gateway + PAT mint +
+# deploy. Single source of truth in tests/lib/e2e_stack.sh — the same library the
+# browser-level E2E (tests/e2e_browser/) sources. It emits ✓/✗ via the pass()/fail()
+# defined above. (Stages 1–3 + deploy_app below are now thin wrappers over it.)
+# shellcheck source=tests/lib/e2e_stack.sh
+source "$ROOT/tests/lib/e2e_stack.sh"
+
 cleanup() {
   echo ""
   echo "=== Cleanup ==="
-  for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-  wait 2>/dev/null || true
-  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-  [ -n "$WORK" ] && rm -rf "$WORK"
+  stack_down
   echo "  stack down, ephemeral PG removed"
 }
 trap cleanup EXIT
@@ -73,130 +77,33 @@ echo "============================================"
 echo "  zeroship E2E — render modes + static + stream + fetch/node over the edge"
 echo "============================================"
 
-# --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
-  [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
-done
-[ -f "$JOSE_JS" ] || { echo "missing jose at $JOSE_JS"; exit 2; }
-command -v docker >/dev/null || { echo "docker required"; exit 2; }
-command -v openssl >/dev/null || { echo "openssl required"; exit 2; }
-command -v zstd   >/dev/null || { echo "zstd required"; exit 2; }
-
-WORK="$(mktemp -d -t zs-e2e-render-XXXXXX)"
-mkdir -p "$WORK/blobs" "$WORK/blob-cache"
+# --- preflight (zstd is render-specific; the rest is covered by stack_up) ---
+command -v zstd >/dev/null || { echo "zstd required"; exit 2; }
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 1: ephemeral Postgres + migrations ==="
-docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
-  -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
-  postgres:16 -c max_connections=300 >/dev/null
-for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG ready on :$PG_PORT" || { fail "PG never became ready"; exit 1; }
-
-if [ -f "$ROOT/ops/postgres-init.sql" ]; then
-  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-    && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
-fi
-
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly from scratch"
-else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
-fi
-
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== Stage 2: boot stack (--dev-insecure) ==="
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-
-openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
-chmod 600 "$WORK/signing-key.pem"
-
-for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
-
-"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DBURL" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
-  --dev-insecure > "$WORK/control.log" 2>&1 &
-PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
-
-"$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
-  --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
-  --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
-PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker unhealthy"; tail -20 "$WORK/worker.log"; exit 1; }
-
-"$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
-  --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
-  --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --dev-insecure > "$WORK/gate.log" 2>&1 &
-PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
+echo "=== Stage 1+2: ephemeral Postgres + migrations + boot stack (--dev-insecure) ==="
+# Shared bring-up (tests/lib/e2e_stack.sh): ephemeral PG on :$PG_PORT + the FULL
+# Liquibase changelog from scratch + control/worker/gateway --dev-insecure,
+# health-polled. Exports WORK / PIDFILE / DBURL. Emits its own ✓/✗ via pass()/fail().
+stack_up || { fail "stack bring-up failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 3: mint admin PAT (offline) ==="
-POLICY_JSON='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);
-if(typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$POLICY_JSON")"
-OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( $(date +%s) + 86400 ))
-docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.users (id, email, name, email_verified_at)
-VALUES ('$OWNER', 'e2e-$OWNER@zeroship.test'::citext, 'E2E Render Admin', NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
-VALUES ('$OWNER', 'admin', '$OWNER');
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$TOKID', '$OWNER', 'pat', 'e2e render harness', '$POLICY_JSON'::jsonb, '$POLICY_HASH', to_timestamp($EXP));
-SQL
-PAT="$(node --input-type=module -e '
-import { readFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
-import { importPKCS8, exportJWK, SignJWT } from "file://'"$JOSE_JS"'";
-const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-const x = (await exportJWK(key)).x;
-const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-  .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-  .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-  .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp))
-  .sign(key);
-process.stdout.write(jwt);
-' "$WORK/signing-key.pem" "$OWNER" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted pat+jwt" || { fail "PAT mint failed: $PAT"; exit 1; }
+mint_admin_pat || exit 1
 
 # --- helper: create an app, deploy a built .zship, return the app slug -------
 # usage: deploy_app <slug> <path-to-.zship>  → sets global APP_ID
+# Thin wrapper over the shared deploy_zship (which echoes the app id on success).
 deploy_app() {
-  local slug="$1" zship="$2"
-  local j id dep
-  j="$(curl -s -X POST "http://localhost:$CONTROL_PORT/api/apps" \
-        -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
-        -d "{\"name\":\"$slug\"}")"
-  id="$(echo "$j" | jget '.id')"
-  if [ -z "$id" ]; then echo "    create-app($slug) failed: $j" >&2; APP_ID=""; return 1; fi
-  dep="$("$BIN/zeroship" deploy "$zship" --app="$id" --control="http://localhost:$CONTROL_PORT" --token="$PAT" 2>&1)"
-  if ! echo "$dep" | grep -q "deploy_hash"; then echo "    deploy($slug) failed: $dep" >&2; APP_ID=""; return 1; fi
-  APP_ID="$id"
-  return 0
+  local slug="$1" zship="$2" id
+  if id="$(deploy_zship "$slug" "$zship")"; then
+    APP_ID="$id"
+    return 0
+  fi
+  APP_ID=""
+  return 1
 }
 
 # discover the dist artifacts (skip a scenario cleanly if not built)
