@@ -7,17 +7,15 @@ import { appSlug, appUrl } from "../helpers";
 // new <li>. searchTodos is declared `auth: anon, publiclyAccessible: true`
 // (ISS-69), so the anonymous browser reaches it through the gateway.
 //
-// What works (passing test below): a stream's data frame reaches the browser
-// DOM over the real gateway→worker→V8 SSE path.
-//
-// What's BROKEN — ISS-71 (fixme test below): the @zeroship/rpc browser stream
-// consumer never terminates on body-close and surfaces only the FIRST frame.
-// Evidence: curl through the gateway delivers every data frame (+ close) for a
-// 3-match query, but in the browser only frame 1 renders and the status stays
-// "streaming…" forever (even a 1-match stream never flips to "1 matches"). So
-// full incremental multi-frame rendering + done-status can't be asserted in a
-// browser until ISS-71 lands. The HTTP-layer incremental proof (3 frames ~30ms
-// apart) lives in the curl harness (tests/e2e_app_primitives_render.sh).
+// These specs caught ISS-71. Two distinct issues, isolated with raw-fetch probes:
+//   (a) a stale local `sdks/rpc/dist` shipped a stream consumer that stalled
+//       after the first frame — fixed by rebuilding the SDK (dist is gitignored;
+//       the source was already correct, so not a committed bug); and
+//   (b) a REAL server-side bug: only the FIRST streaming response per keep-alive
+//       connection works — every subsequent stream on the pooled connection
+//       hangs after one frame (the gateway doesn't terminate the chunked stream
+//       so the connection can't be reused). Separate curls each work; the
+//       browser's 2nd sequential stream hangs. (b) is still open.
 test.describe("RPC streaming (csr-todo searchTodos)", () => {
   test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
 
@@ -35,11 +33,13 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
     await expect(streamItems.nth(0)).toHaveText("Build the CSR demo");
   });
 
-  // FIXME(ISS-71): full incremental multi-frame rendering. The server streams
-  // 3 data frames for "the" ~30ms apart (curl-proven through the gateway), but
-  // the browser client surfaces only the first and never terminates the stream
-  // (status stuck "streaming…"). Flip back to `test(` once the @zeroship/rpc
-  // stream consumer yields every frame and ends on body-close.
+  // FIXME(ISS-71b): full incremental multi-frame rendering after a re-query.
+  // The mount "build" stream is the 1st on the connection (works); changing the
+  // query starts a 2nd stream on the same pooled keep-alive connection, which
+  // hangs after the first frame (server doesn't terminate the chunked stream for
+  // reuse). Raw-fetch proof: 1st stream EOFs, 2nd/3rd STALL after 1 frame. Flip
+  // back to `test(` once the gateway/worker streaming path releases the
+  // connection (terminates the chunked response) so sequential streams work.
   test.fixme("typing a query streams matches into the DOM one frame at a time", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.locator("h1")).toHaveText("csr-todo");
@@ -68,6 +68,10 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
     await expect(streamItems.nth(0)).toHaveText("Read the .zship spec");
     await expect(streamItems.nth(1)).toHaveText("Build the CSR demo");
     await expect(streamItems.nth(2)).toHaveText("Verify the manifest");
+
+    // The stream TERMINATES: status flips from "streaming…" to "3 matches"
+    // (the consumer ended the iterator on completion — the ISS-71 regression).
+    await expect(streamSection.getByText(/^3 matches$/)).toBeVisible();
 
     const intermediates = [...observed].filter((n) => n > 0 && n < 3);
     expect(

@@ -553,29 +553,46 @@ re-appends the raw query. Regression tests: `forward_url_preserves_query_string`
 `forward_url_omits_empty_or_absent_query` (gateway lib), and the now-green
 `tests/e2e_browser/csr.spec.ts` listTodos round-trip is the real-edge regression.
 
-### ISS-71 · Browser stream consumer never terminates / surfaces only the first frame
-**Status:** open — **real platform bug** · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
+### ISS-71 · Only the first streaming response per keep-alive connection works; subsequent streams hang
+**Status:** open — **real platform bug** (part b) · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
 
-A `stream()` RPC consumed client-side in the browser (`@zeroship/rpc` async iterator)
-**stalls after the first frame and never ends.** For csr-todo's `searchTodos`:
-- The **server side is correct** — `curl` through the gateway delivers every data
-  frame for a 3-match query ~30ms apart and then closes the connection (the AI-SDK
-  `2:[...]` data frames are all on the wire). The terminal `d:{}` *finish* frame is
-  delivered unreliably (gateway 2/5 runs, worker `/dispatch` 0/6 runs) — it races the
-  stream close — but the connection close itself is reliable.
-- The **browser client does not surface it**: only the first frame renders, and the
-  status sits at "streaming…" forever — *even a 1-match stream never flips to
-  "1 matches"*, i.e. the consumer never detects end-of-stream on body close. After a
-  re-query, only the first frame of the new stream appears.
+Browser-side streaming of a `stream()` RPC stalls after the first frame. Two distinct
+issues, isolated with raw-`fetch` reader probes in a real Chromium:
 
-So a deployed app that streams to the browser hangs at "loading" and shows only the
-first item. **Fix direction:** (1) make the `@zeroship/rpc` stream consumer yield each
-frame as it arrives and **terminate on response-body close** (not solely on the in-band
-`d:{}`); (2) make the server reliably flush the terminal finish frame before closing
-(runtime/gateway streaming path). Add a faithful regression: the browser must render all
-N frames and reach the done-state. The HTTP-layer incremental proof (3 frames, 30ms
-apart, through the gateway) already lives in `tests/e2e_app_primitives_render.sh`; the
-in-browser multi-frame spec is `test.fixme` in `streaming.spec.ts` pointing here.
+**(a) Stale local SDK build — FIXED, not a committed bug.** The local `sdks/rpc/dist`
+(gitignored, rebuilt by `pnpm build`) was stale and shipped a stream consumer that
+stalled after the first frame even on the *first* stream. Rebuilding the SDK
+(`pnpm --filter @zeroship/rpc build`) fixed it — the committed source (`transport.ts`
+`streamCall`) already handles EOF/termination correctly. Lesson: examples must be built
+*after* `pnpm build`, or they bundle a stale consumer. No source change.
+
+**(b) Server-side: streaming responses aren't terminated for connection reuse — REAL,
+OPEN.** With a fresh SDK, the FIRST streaming response on a browser keep-alive connection
+works end-to-end, but every SUBSEQUENT stream on that pooled connection **hangs after the
+first frame**. Proven with a raw-fetch probe (no SDK) issuing three sequential streams on
+one page:
+```
+[1st q=build] EOF after 2 frames      ← works
+[2nd q=the]   STALLED after 1 frame    ← hangs
+[3rd q=spec]  STALLED after 1 frame    ← hangs
+```
+Separate `curl` invocations each work because each is a *new* connection — which is why
+the curl harness (`e2e_app_primitives_render.sh`) never caught it. A single browser
+fetch+reader also gets all frames + clean EOF. The break is **connection reuse**: the
+gateway forwards the worker's SSE body but does not terminate the chunked response (the
+`0\r\n\r\n` terminator) / release the keep-alive connection, so the next request queued on
+that socket blocks behind the un-finished first response. Consistent with the earlier
+observation that the terminal `d:{}` finish frame is delivered unreliably (gateway 2/5,
+worker `/dispatch` 0/6).
+
+**Impact:** any deployed app that streams more than once over a browser session hangs on
+the 2nd+ stream (browsers pool connections) — i.e. effectively all streaming apps.
+**Fix direction:** in the gateway/worker streaming path, properly terminate the chunked
+streaming response and release the connection (or send `Connection: close` on streamed
+responses as a stopgap). Localize gateway-vs-worker by re-running the 3-sequential-stream
+probe against the worker `/dispatch` directly. **Regression:** the in-browser multi-frame
+spec (`streaming.spec.ts`, `test.fixme(ISS-71b)`) must go green — it re-queries, forcing a
+2nd stream on the reused connection. The single-stream browser spec already passes.
 
 ---
 
