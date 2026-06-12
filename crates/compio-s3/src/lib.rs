@@ -40,6 +40,7 @@ pub mod signer;
 
 pub use client::{
     ListEntry, ListPage, ObjectMeta, PartETag, PutOptions, PutResult, S3Client, UploadId,
+    UploadSession,
 };
 pub use clock::{Clock, FixedClock, SigningTime, SystemClock};
 pub use config::{AddressingStyle, ChecksumMode, Provider, S3Config, SseMode};

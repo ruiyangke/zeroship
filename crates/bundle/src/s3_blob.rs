@@ -116,10 +116,17 @@ impl S3BlobStore {
         let mut parts: Vec<compio_s3::PartETag> = Vec::new();
         let mut part_number: u32 = 0;
 
+        // ONE pooled HTTP client shared across this multipart session's part
+        // uploads. Concurrent parts reuse its kept-alive connections instead of
+        // each opening a fresh one — a fresh-client-per-part fan-out floods the
+        // host with TIME_WAIT sockets and trips transient connect failures. The
+        // client never outlives this call, so the per-thread invariant holds.
+        let session_client = self.client.open_upload_session();
+
         // In-flight part-upload futures, at most `concurrency` live at once.
-        // Each is a self-contained `async move` over a cloned client + owned
-        // bytes, so the set can be polled concurrently on the single compio
-        // thread without borrowing `self`/`reader`.
+        // Each is a self-contained `async move` over the cloned session client +
+        // owned bytes, so the set can be polled concurrently on the single
+        // compio thread without borrowing `self`/`reader`.
         let mut inflight = FuturesUnordered::new();
 
         // Read the source in bounded chunks; accumulate into the current part
@@ -170,7 +177,7 @@ impl S3BlobStore {
                 let rest = part_buf.split_off(PART_SIZE);
                 let body = Bytes::from(std::mem::replace(&mut part_buf, rest));
                 part_number += 1;
-                inflight.push(self.upload_part_owned(hash, key, id, part_number, body));
+                inflight.push(self.upload_part_owned(&session_client, hash, key, id, part_number, body));
             }
         }
 
@@ -221,7 +228,7 @@ impl S3BlobStore {
                 let id = upload.as_ref().expect("multipart created");
                 part_number += 1;
                 let body = Bytes::from(std::mem::take(&mut part_buf));
-                inflight.push(self.upload_part_owned(hash, key, id, part_number, body));
+                inflight.push(self.upload_part_owned(&session_client, hash, key, id, part_number, body));
             }
             while let Some(res) = inflight.next().await {
                 parts.push(res?);
@@ -255,27 +262,55 @@ impl S3BlobStore {
     /// One concurrent `UploadPart`: an owned, self-contained future (cloned
     /// client + owned `Bytes`) suitable for a `FuturesUnordered`. Errors are
     /// mapped to the `BlobError` channel so the caller need only `?`.
+    ///
+    /// Bounded retry-with-backoff on *retryable* transport/5xx errors. Part
+    /// uploads are idempotent (same `part_number` + bytes), and `Bytes` is
+    /// refcounted so retaining the body across attempts is cheap. N concurrent
+    /// PUTs churn connections fast enough that transient connect failures
+    /// (`hyper` Connect, ephemeral-port/`TIME_WAIT` pressure) are expected;
+    /// without this a single blip would abort the whole blob upload.
     #[allow(clippy::future_not_send)] // cyper client is !Send by design (per-thread)
     fn upload_part_owned(
         &self,
+        session: &compio_s3::UploadSession,
         hash: &str,
         key: &str,
         id: &UploadId,
         part_number: u32,
         body: Bytes,
     ) -> impl std::future::Future<Output = Result<compio_s3::PartETag, BlobError>> + '_ {
-        let client = self.client.clone();
+        let s3 = self.client.clone();
+        let http = session.clone(); // Arc-cheap; shared pooled connections
         let key = key.to_string();
         let hash = hash.to_string();
         let id = id.clone();
         async move {
-            client
-                .upload_part(&key, &id, part_number, body)
-                .await
-                .map_err(|e| map_s3(&hash, e))
+            let mut attempt: u32 = 0;
+            loop {
+                match s3
+                    .upload_part_on(&http, &key, &id, part_number, body.clone())
+                    .await
+                {
+                    Ok(etag) => return Ok(etag),
+                    Err(e) if e.is_retryable() && attempt + 1 < UPLOAD_PART_RETRIES => {
+                        attempt += 1;
+                        compio::time::sleep(std::time::Duration::from_millis(
+                            50 * u64::from(attempt),
+                        ))
+                        .await;
+                    }
+                    Err(e) => return Err(map_s3(&hash, e)),
+                }
+            }
         }
     }
 }
+
+/// Per-part upload attempt budget (1 initial try + retries on retryable
+/// transport/5xx errors). Concurrent uploads churn connections fast enough that
+/// transient connect failures are expected; a small bounded retry keeps a
+/// single blip from aborting a multi-part blob upload.
+const UPLOAD_PART_RETRIES: u32 = 5;
 
 /// Synchronous panic-backstop for an in-progress multipart upload.
 ///

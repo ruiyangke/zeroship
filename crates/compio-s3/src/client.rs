@@ -97,6 +97,20 @@ pub struct ListPage {
 #[derive(Debug, Clone)]
 pub struct UploadId(pub String);
 
+/// An opaque, pooled HTTP client scoped to a single multipart upload session.
+///
+/// Built by [`S3Client::open_upload_session`], handed back to
+/// [`upload_part_on`](S3Client::upload_part_on) for each part. Sharing one
+/// session across a multipart upload's concurrent parts lets the underlying
+/// connection pool be **reused** (kept-alive connections) instead of a fresh
+/// connection being opened per part — which under high concurrency would flood
+/// the host with `TIME_WAIT` sockets and trip transient connect failures. The
+/// inner transport type is intentionally not exposed; the session is cheap to
+/// clone (an `Arc` handle) and must not outlive the call site that owns it (the
+/// per-thread client invariant — see the module header).
+#[derive(Debug, Clone)]
+pub struct UploadSession(cyper::Client);
+
 /// A completed part's number + `ETag`, fed to `complete_multipart`.
 #[derive(Debug, Clone)]
 pub struct PartETag {
@@ -745,7 +759,11 @@ impl S3Client {
         Ok(UploadId(parse_upload_id(&xml)?))
     }
 
-    /// Upload one part (buffered `Bytes`, ≤ part size). Returns its `ETag`.
+    /// Upload one part (buffered `Bytes`, ≤ part size) on a **fresh**
+    /// per-operation client. Returns its `ETag`. Use
+    /// [`upload_part_on`](S3Client::upload_part_on) with an
+    /// [`open_upload_session`](S3Client::open_upload_session) handle to share
+    /// one pooled client across a multipart session's concurrent part uploads.
     pub async fn upload_part(
         &self,
         key: &str,
@@ -753,6 +771,41 @@ impl S3Client {
         part_number: u32,
         body: Bytes,
     ) -> S3Result<PartETag> {
+        let session = self.open_upload_session();
+        self.upload_part_on(&session, key, upload_id, part_number, body)
+            .await
+    }
+
+    /// Open a pooled [`UploadSession`] for a multipart upload — one client to be
+    /// shared across that upload's concurrent part PUTs so connections are
+    /// reused instead of a fresh one opened per part.
+    ///
+    /// This is the key to safe *concurrent* part uploads: N parts in flight
+    /// over ONE pooled session reuse ~N kept-alive connections, rather than each
+    /// `upload_part` opening (and tearing down) its own — which under high
+    /// concurrency floods the host with `TIME_WAIT` sockets and trips transient
+    /// connect failures. Like every other op the session never outlives the
+    /// call site, so the per-thread `SendWrapper` invariant holds. Buffered
+    /// PUTs have no early-cancel/dirty-connection concern (unlike streaming
+    /// GET, which deliberately keeps its own fresh client — see `get_stream`).
+    #[must_use]
+    pub fn open_upload_session(&self) -> UploadSession {
+        UploadSession(new_client())
+    }
+
+    /// Upload one part on a caller-provided [`UploadSession`]. Identical to
+    /// [`upload_part`](S3Client::upload_part) except the pooled HTTP client (and
+    /// thus its connection pool) is supplied by the caller, letting a multipart
+    /// session reuse one pooled client across all its concurrent parts.
+    pub async fn upload_part_on(
+        &self,
+        session: &UploadSession,
+        key: &str,
+        upload_id: &UploadId,
+        part_number: u32,
+        body: Bytes,
+    ) -> S3Result<PartETag> {
+        let client = &session.0;
         let stored = self.config.object_key(key);
         let (base_url, host, canonical_uri) = self.object_url(&stored);
         let query = vec![
@@ -764,7 +817,6 @@ impl S3Client {
             self.signed_headers("PUT", &host, &canonical_uri, &query, &payload, &[]);
         let cq = signer::canonical_query(&query);
         let url = format!("{base_url}?{cq}");
-        let client = new_client();
         let mut req = client.request(Method::PUT, &url)?;
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;
