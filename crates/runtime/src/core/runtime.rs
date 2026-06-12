@@ -1937,6 +1937,14 @@ impl RuntimeInner {
                     stream_id,
                     writer,
                 );
+                // Wake the pump so it drives the response body's read loop to
+                // completion in the background. The body's async generator
+                // yields the remaining chunks via setTimeout/await, which only
+                // advance while the pump is running; if the pump went idle after
+                // a PRIOR request, the 2nd+ stream on this isolate would deliver
+                // its first (sync) frame and then stall (ISS-71b). Mirrors the
+                // `Pending` path, which already notifies (see `track_pending`).
+                self.notify_pump();
                 crate::FetchOutcome::Stream { status, headers, body_reader: reader, logs }
             }
             ResponseInfo::WebSocket { ws_id, headers } => {

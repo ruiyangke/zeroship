@@ -553,11 +553,25 @@ re-appends the raw query. Regression tests: `forward_url_preserves_query_string`
 `forward_url_omits_empty_or_absent_query` (gateway lib), and the now-green
 `tests/e2e_browser/csr.spec.ts` listTodos round-trip is the real-edge regression.
 
-### ISS-71 · Runtime stream-lifecycle: the Nth (or post-abort) streamed response on an isolate stalls after one frame
-**Status:** open — **real platform bug** (part b) · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
+### ISS-71 · Runtime stream-lifecycle: the Nth streamed response on an isolate stalled after one frame — FIXED
+**Status:** FIXED (2026-06-11, TDD) · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
 
-Browser-side streaming of a `stream()` RPC stalls after the first frame. Two distinct
-issues, isolated with raw-`fetch` reader probes in a real Chromium:
+**Fix:** the streamed-dispatch outcome path didn't wake the runtime pump. The `Pending`
+(async non-stream) path called `self.notify_pump()` before returning, but the `Stream`
+path in `build_fetch_outcome` (`crates/runtime/src/core/runtime.rs`) did not. So after a
+prior request left the pump idle (blocked on `notify_rx`), the next streamed response
+delivered its first (sync) frame and then stalled — its body's async generator advances
+only while the pump runs, and nothing woke it. The 1st stream worked because the pump was
+still active; the 2nd+ (and any stream after an aborted one — the browser search-as-you-type
+re-query) stalled. Added `self.notify_pump()` on the `Stream` path, mirroring `Pending`.
+A pure-runtime RED test (`crates/runtime/tests/iss71_sequential_streams.rs`) dispatches the
+same async-generator stream 4× on one isolate and asserts every run yields all frames +
+`d:{}` — it stalled on attempt 2 pre-fix, passes post-fix. The browser multi-frame re-query
+spec now passes (12/12, was 11 + 1 fixme). `serve.rs:850`'s explicit `notify_pump` after a
+stream dispatch is now redundant (harmless) — it was the prior caller-side workaround.
+
+~~Original investigation below.~~ Browser-side streaming of a `stream()` RPC stalled after
+the first frame. Two issues, isolated with raw-`fetch` reader probes in a real Chromium:
 
 **(a) Stale local SDK build — FIXED, not a committed bug.** The local `sdks/rpc/dist`
 (gitignored, rebuilt by `pnpm build`) was stale and shipped a stream consumer that

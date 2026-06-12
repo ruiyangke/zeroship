@@ -11,13 +11,11 @@ import { appSlug, appUrl } from "../helpers";
 //   (a) a stale local `sdks/rpc/dist` shipped a stream consumer that stalled
 //       after the first frame — fixed by rebuilding the SDK (dist is gitignored;
 //       the source was already correct, so not a committed bug); and
-//   (b) a runtime/isolate stream-lifecycle bug (OPEN): the Nth streamed response
-//       on an isolate, and any stream started after a prior stream was aborted
-//       mid-flight, stalls after its first frame. A single stream on a fresh
-//       connection always works. H1 keep-alive connection reuse is a secondary
-//       aggravator, but `force_close()` on streamed responses did NOT fix the
-//       browser re-query, so the root is the runtime stream lifecycle, not the
-//       connection. See ISS-71b for the full evidence.
+//   (b) a runtime stream-lifecycle bug (FIXED): the 2nd+ streamed response on an
+//       isolate stalled after its first frame because a streamed dispatch didn't
+//       wake the pump when it had gone idle after a prior request. A pure-runtime
+//       RED test pinned it (crates/runtime/tests/iss71_sequential_streams.rs);
+//       fixed by `notify_pump()` on the Stream outcome path. Both specs now pass.
 test.describe("RPC streaming (csr-todo searchTodos)", () => {
   test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
 
@@ -35,13 +33,15 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
     await expect(streamItems.nth(0)).toHaveText("Build the CSR demo");
   });
 
-  // FIXME(ISS-71b): full incremental multi-frame rendering after a re-query.
-  // The mount "build" stream is aborted mid-flight when the query changes, then
-  // the "the" stream starts — and stalls after its first frame (a runtime/isolate
-  // stream-lifecycle bug; a single fresh stream always works). Flip back to
-  // `test(` once the runtime cleanly tears down an aborted/completed stream so a
-  // subsequent stream on the same isolate streams all its frames.
-  test.fixme("typing a query streams matches into the DOM one frame at a time", async ({ page }) => {
+  // Full incremental multi-frame rendering after a re-query (ISS-71b regression).
+  // The mount "build" stream is the 1st on the isolate; changing the query starts
+  // a 2nd stream — which used to deliver only its first frame and hang, because a
+  // streamed dispatch didn't wake the runtime pump if it had gone idle after the
+  // prior request (the pump drives the response body's async read loop). Fixed by
+  // `notify_pump()` on the Stream outcome path (crates/runtime/src/core/runtime.rs),
+  // mirroring the Pending path. Asserts the <li>s climb incrementally to 3 and the
+  // stream TERMINATES (status flips to "3 matches").
+  test("typing a query streams matches into the DOM one frame at a time", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.locator("h1")).toHaveText("csr-todo");
 
