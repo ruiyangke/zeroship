@@ -24,7 +24,12 @@ pub const MAX_BLOBS_PER_DEPLOY: usize = 10_000;
 /// throughput lever (the official `@aws-sdk/lib-storage` runs ~4 parallel
 /// parts, ~2× a sequential `upload_part().await` loop) while keeping memory
 /// bounded at `N × PART_SIZE`.
-pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
+// Default 1 (SEQUENTIAL) until parallel multipart is verified at scale. A clean
+// 5 GiB conc=8 e2e run crashed the worker (HTTP 000) at ~part 48 with RSS
+// climbing past the bounded N x PART_SIZE — a resource-accumulation bug in the
+// parallel path the pooled-client fix did not fully resolve. Opt into parallel
+// via ZEROSHIP_*_UPLOAD_CONCURRENCY once verified on a clean machine.
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 1;
 
 /// Environment variable overriding [`DEFAULT_UPLOAD_CONCURRENCY`]. Clamped to
 /// `1..=64` (1 reproduces the old strictly-sequential behaviour).

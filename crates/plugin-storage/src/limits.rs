@@ -63,7 +63,12 @@ pub fn max_stream_object_bytes() -> u64 {
 /// parts and is ~2× a sequential `upload_part().await` loop) while keeping
 /// memory bounded: at most `UPLOAD_CONCURRENCY × PART_SIZE` of part buffers
 /// can be in flight (4 × 8 MiB = 32 MiB), never the whole object.
-pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
+// Default 1 (SEQUENTIAL) until parallel multipart is verified at scale. A clean
+// 5 GiB conc=8 e2e run crashed the worker (HTTP 000) at ~part 48 with RSS
+// climbing past the bounded N x PART_SIZE — a resource-accumulation bug in the
+// parallel path the pooled-client fix did not fully resolve. Opt into parallel
+// via ZEROSHIP_*_UPLOAD_CONCURRENCY once verified on a clean machine.
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 1;
 
 /// Environment variable overriding [`DEFAULT_UPLOAD_CONCURRENCY`]. Clamped to
 /// `1..=64` (1 reproduces the old strictly-sequential behaviour).
@@ -101,10 +106,10 @@ mod tests {
     }
 
     #[test]
-    fn upload_concurrency_default_is_4() {
+    fn upload_concurrency_default_is_1() {
         // No env override in this test process → default.
         assert!(std::env::var(UPLOAD_CONCURRENCY_ENV).is_err());
         assert_eq!(upload_concurrency(), DEFAULT_UPLOAD_CONCURRENCY);
-        assert_eq!(DEFAULT_UPLOAD_CONCURRENCY, 4);
+        assert_eq!(DEFAULT_UPLOAD_CONCURRENCY, 1);
     }
 }
