@@ -11,11 +11,13 @@ import { appSlug, appUrl } from "../helpers";
 //   (a) a stale local `sdks/rpc/dist` shipped a stream consumer that stalled
 //       after the first frame — fixed by rebuilding the SDK (dist is gitignored;
 //       the source was already correct, so not a committed bug); and
-//   (b) a REAL server-side bug: only the FIRST streaming response per keep-alive
-//       connection works — every subsequent stream on the pooled connection
-//       hangs after one frame (the gateway doesn't terminate the chunked stream
-//       so the connection can't be reused). Separate curls each work; the
-//       browser's 2nd sequential stream hangs. (b) is still open.
+//   (b) a runtime/isolate stream-lifecycle bug (OPEN): the Nth streamed response
+//       on an isolate, and any stream started after a prior stream was aborted
+//       mid-flight, stalls after its first frame. A single stream on a fresh
+//       connection always works. H1 keep-alive connection reuse is a secondary
+//       aggravator, but `force_close()` on streamed responses did NOT fix the
+//       browser re-query, so the root is the runtime stream lifecycle, not the
+//       connection. See ISS-71b for the full evidence.
 test.describe("RPC streaming (csr-todo searchTodos)", () => {
   test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
 
@@ -34,12 +36,11 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
   });
 
   // FIXME(ISS-71b): full incremental multi-frame rendering after a re-query.
-  // The mount "build" stream is the 1st on the connection (works); changing the
-  // query starts a 2nd stream on the same pooled keep-alive connection, which
-  // hangs after the first frame (server doesn't terminate the chunked stream for
-  // reuse). Raw-fetch proof: 1st stream EOFs, 2nd/3rd STALL after 1 frame. Flip
-  // back to `test(` once the gateway/worker streaming path releases the
-  // connection (terminates the chunked response) so sequential streams work.
+  // The mount "build" stream is aborted mid-flight when the query changes, then
+  // the "the" stream starts — and stalls after its first frame (a runtime/isolate
+  // stream-lifecycle bug; a single fresh stream always works). Flip back to
+  // `test(` once the runtime cleanly tears down an aborted/completed stream so a
+  // subsequent stream on the same isolate streams all its frames.
   test.fixme("typing a query streams matches into the DOM one frame at a time", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.locator("h1")).toHaveText("csr-todo");

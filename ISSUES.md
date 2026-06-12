@@ -553,7 +553,7 @@ re-appends the raw query. Regression tests: `forward_url_preserves_query_string`
 `forward_url_omits_empty_or_absent_query` (gateway lib), and the now-green
 `tests/e2e_browser/csr.spec.ts` listTodos round-trip is the real-edge regression.
 
-### ISS-71 · Only the first streaming response per keep-alive connection works; subsequent streams hang
+### ISS-71 · Runtime stream-lifecycle: the Nth (or post-abort) streamed response on an isolate stalls after one frame
 **Status:** open — **real platform bug** (part b) · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
 
 Browser-side streaming of a `stream()` RPC stalls after the first frame. Two distinct
@@ -566,33 +566,40 @@ stalled after the first frame even on the *first* stream. Rebuilding the SDK
 `streamCall`) already handles EOF/termination correctly. Lesson: examples must be built
 *after* `pnpm build`, or they bundle a stale consumer. No source change.
 
-**(b) Server-side: streaming responses aren't terminated for connection reuse — REAL,
-OPEN.** With a fresh SDK, the FIRST streaming response on a browser keep-alive connection
-works end-to-end, but every SUBSEQUENT stream on that pooled connection **hangs after the
-first frame**. Proven with a raw-fetch probe (no SDK) issuing three sequential streams on
-one page:
-```
-[1st q=build] EOF after 2 frames      ← works
-[2nd q=the]   STALLED after 1 frame    ← hangs
-[3rd q=spec]  STALLED after 1 frame    ← hangs
-```
-Separate `curl` invocations each work because each is a *new* connection — which is why
-the curl harness (`e2e_app_primitives_render.sh`) never caught it. A single browser
-fetch+reader also gets all frames + clean EOF. The break is **connection reuse**: the
-gateway forwards the worker's SSE body but does not terminate the chunked response (the
-`0\r\n\r\n` terminator) / release the keep-alive connection, so the next request queued on
-that socket blocks behind the un-finished first response. Consistent with the earlier
-observation that the terminal `d:{}` finish frame is delivered unreliably (gateway 2/5,
-worker `/dispatch` 0/6).
+**(b) Runtime/isolate stream-lifecycle — REAL, OPEN.** With a fresh SDK, a *single* stream
+on a *fresh* connection always works (browser raw fetch: all 3 data frames + `d:{}` + clean
+EOF). But streams degrade with repetition / after an abort:
 
-**Impact:** any deployed app that streams more than once over a browser session hangs on
-the 2nd+ stream (browsers pool connections) — i.e. effectively all streaming apps.
-**Fix direction:** in the gateway/worker streaming path, properly terminate the chunked
-streaming response and release the connection (or send `Connection: close` on streamed
-responses as a stopgap). Localize gateway-vs-worker by re-running the 3-sequential-stream
-probe against the worker `/dispatch` directly. **Regression:** the in-browser multi-frame
-spec (`streaming.spec.ts`, `test.fixme(ISS-71b)`) must go green — it re-queries, forcing a
-2nd stream on the reused connection. The single-stream browser spec already passes.
+- **Worker `/dispatch` direct, clean sequential streams, forced single socket:** 1st works,
+  2nd stalls after 1 frame. So it reproduces *without* the gateway.
+- **Connection reuse is a SECONDARY aggravator, not the root.** I tried `force_close()` on
+  streamed responses (gateway + worker) so each stream gets a fresh connection. It shifted
+  the worker's clean-sequential stall from the 2nd to the 3rd stream — but the **3rd still
+  stalled on a fresh connection**, and it did **not** fix the browser re-query at all. So
+  the H1 keep-alive reuse is real but masks the true bug; `force_close` was reverted (no
+  observable user benefit, adds connection churn).
+- **Browser re-query (the user-visible case):** the mount "build" stream is aborted
+  mid-flight (the React effect's cleanup calls `iterator.return()` → `reader.cancel()` →
+  fetch abort) when the query changes; the new "the" stream then **stalls after its first
+  frame**, with or without `force_close`. So an **aborted prior stream** is a strong trigger.
+
+**Root (hypothesis, well-supported):** the runtime's response-stream machinery
+(`crates/runtime/src/web/streams/response_forwarder.rs` — the `stream_id` registry +
+`schedule_next_read` JS-read chain + the per-isolate pump) does not cleanly tear down a
+**completed or aborted** stream, so a subsequent stream on the same isolate only gets its
+first frame pumped and then never re-arms. The `stream_id`/forwarder cleanup
+(`remove`/`close_forwarder`) and the abort path (client `reader.cancel`) are the places to
+audit; add instrumentation to confirm whether the 2nd stream's `schedule_next_read` chain
+stops advancing.
+
+**Impact:** any deployed app that streams more than once (or re-issues a stream, e.g. a
+search-as-you-type or a chat that aborts+restarts) hangs after the first frame of the 2nd
+stream — i.e. effectively all interactive streaming apps. **Fix:** a focused runtime pass
+on the stream lifecycle (completion + abort teardown), with the 3-sequential-stream worker
+probe and the browser re-query spec as regressions. **Regression:** the in-browser
+multi-frame spec (`streaming.spec.ts`, `test.fixme(ISS-71b)`) must go green; the
+single-stream browser spec already passes. (The earlier unreliable terminal `d:{}` finish
+frame — gateway 2/5, worker `/dispatch` 0/6 — is likely the same teardown bug.)
 
 ---
 
