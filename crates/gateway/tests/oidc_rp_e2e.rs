@@ -213,6 +213,10 @@ async fn gateway_oidc_rp_full_dance() {
         bootstrap: false,
         dev_insecure: Some(true),
         insecure_dev: true,
+        // TOTP routes aren't exercised by this RP↔IdP password-flow test; empty
+        // is fine (the `insecure_dev` path substitutes `DEV_TOTP_ENC_KEY`). Field
+        // added when AuthConfig gained TOTP 2FA (ISS-11).
+        totp_enc_key: String::new(),
         stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
         google_client_id: None,
         google_client_secret: None,
