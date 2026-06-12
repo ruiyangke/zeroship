@@ -37,7 +37,7 @@ builder.
 | **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
 | **test-surfaced — FIXED** | ✅ ISS-56 (serve env) · ✅ ISS-57 (CLI port) · ✅ ISS-58 (`/health`) · ✅ ISS-60 (trailing-slash, was stale doc) |
 | **test-surfaced — open** | ISS-55 `"use server"` dead in serve · ISS-59 server-only build fails · ISS-61 example/doc hygiene · ISS-62 auth `--check-config` can't dry-run |
-| **gateway-E2E (real edge)** | ✅ ISS-63 (env.db init) + ✅ ISS-66 (env.db RPC dispatch — **env.db works over the worker edge**) · ISS-64 headless dev-auth (gateway path) · ISS-65 build-alignment (low, backstopped) |
+| **gateway-E2E (real edge)** | ✅ ISS-63 (env.db init) + ✅ ISS-66 (env.db RPC dispatch — **env.db works over the worker edge**) · ✅ ISS-64 (authed gateway RPC — offline-minted session, `e2e_auth_rpc.sh`) · ISS-65 build-alignment (low, backstopped) |
 
 **Deferred (builder rewrite):** ISS-13, ISS-14, ISS-16, ISS-17, ISS-24 (+ monetization UI).
 
@@ -454,21 +454,32 @@ secret/expose split — the dev tier has no secret store), so everything is impl
 - Fix (when prioritized): add `zeroship env set/secret/expose` CLI verbs + a config-&-secrets reference doc.
   No runtime change. Low severity (workaround = API/SDK call). Not blocking readiness.
 
-### ISS-64 · No headless / dev auth path for E2E testing the stack
-**Status:** open · **Effort:** M · **Tier:** T2 (test infra)
+### ISS-64 · No headless / dev auth path for E2E testing the stack — FIXED
+**Status:** FIXED (2026-06-12) · **Effort:** M · **Tier:** T2 (test infra)
 
-`--dev-insecure` does NOT bypass control's `AuthzGuard` or the gateway's SEC-5 RPC auth, and the old
-`--master-key` bearer is gone, so there is no headless way to (a) mint the first PAT for the control
-admin API (`POST /api/apps`/deploy require a `pat+jwt` verified against `zeroship.permission_tokens`, and
-minting one needs an interactive OAuth session) or (b) mint an app session/Bearer for authenticated RPC
-(all three gateway auth arms require Hydra). `e2e_app_primitives.sh` works around (a) by offline-signing
-a `pat+jwt` with a seeded admin role + `--signing-key-file`; (b) (the G3 known-fail) needs Hydra.
+**Fix (harness-side, no runtime bypass):** authenticated RPC through the gateway is now exercised by
+`tests/e2e_auth_rpc.sh`, which **offline-mints an app session** the same way the admin PAT is minted —
+sign a real `zeroship-sess+jwt` with the harness-controlled gateway Ed25519 key (`--signing-key-file`,
+now passed to the gateway in `tests/lib/e2e_stack.sh`) + seed the backing rows (`oauth_clients` +
+`app_oauth_clients` so the route carries `oauth_client_id`/`sector_identifier`). The gateway's REAL
+session-cookie validation + `ZeroShip-User` derivation then runs end-to-end. Honours the prior
+pilot decision (no `--dev-insecure` auth-skip in prod binaries): the offline-signed credential is the
+same pattern part (a) already used for the PAT, and the gateway validates it exactly as in prod.
 
-> **Pilot decision (2026-06-11): not building a `--dev-insecure` gateway auth-bypass.** It adds an
-> auth-skip surface to the prod binaries for test convenience, when the worker `/dispatch` path already
-> proves the primitives (ISS-66, env.db green over the edge) and the prod gateway path uses Hydra
-> (covered by the auth-pipeline reviews). If headless gateway-auth E2E is wanted, prefer standing up
-> Hydra in the harness (faithful, no new bypass). Left as a harness-design call, not a runtime fix.
+Closes the seam the other harnesses left open: `e2e_app_primitives_auth.sh` proves the WORKER side
+(signed `ZeroShip-User` → AuthPlugin → `requireUser`) over `/dispatch`, `oidc_rp_e2e` proves the gateway
+session mint/validate against Hydra, and this proves the JOIN — the gateway turning a session cookie into
+a signed `ZeroShip-User` and forwarding it so a SEC-5 `auth: user` RPC actually runs. Asserts (auth-notes,
+all RPCs `auth: user`): anon `auth.whoami`/`auth.whoamiStrict`/`auth.notes.list` → 401 at the gateway gate;
+authed `auth.whoami` → 200 with `env.auth.getUser()` == the minted user; authed `auth.whoamiStrict` → 200
+via `requireUser()`. 16/16. (Part (a) — offline PAT — was already solved by `mint_admin_pat`.)
+
+Minting details that bit during the build, recorded so the next author doesn't re-discover them: the
+dev cookie name is `zeroship_app_session` (NO `__Host-` prefix — that needs Secure; gateway runs http);
+`iss` must be the gateway's `--gateway-public-url` default `https://api.zeroship.ai`; `kid` is the
+RFC-7638 OKP thumbprint (`sha256({"crv":"Ed25519","kty":"OKP","x":…}).base64url`); `sub` must be a
+valid pairwise subject (`pws_` + exactly 20 alphanumeric — `is_pairwise_subject`); the gateway needs
+`--signing-key-file` (it had none in the harness ⇒ "signed session cookies disabled, fails closed").
 
 ### ISS-62 · `zeroship-auth --check-config` can't dry-run config-from-file — FIXED
 **Status:** fixed (2026-06-11) · **Tier:** T3 (DX/ops)

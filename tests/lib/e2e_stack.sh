@@ -139,6 +139,7 @@ stack_up() {
   "$E2E_BIN/zeroship-gate" --port "$GATE_PORT" --control "http://localhost:$CONTROL_PORT" \
     --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
+    --signing-key-file "$WORK/signing-key.pem" \
     --dev-insecure > "$WORK/gate.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
