@@ -71,6 +71,118 @@ impl S3 {
     fn list_prefix(app_id: &str, bucket: &str, user_prefix: &str) -> String {
         format!("{app_id}/{bucket}/{user_prefix}")
     }
+
+    /// The streaming body of `put_stream`: pull chunks, flush full
+    /// `PART_SIZE` parts, then single-PUT or complete the multipart. Enforces
+    /// the S3 10,000-part hard limit and a configurable total-size ceiling,
+    /// failing fast (so the caller can abort) instead of discovering the
+    /// overrun at `complete`. `upload` is borrowed mutably so the caller can
+    /// abort the started upload on any error this returns; no abort happens
+    /// here — the caller owns the error path.
+    #[allow(clippy::future_not_send)] // Backend is (?Send); body source is !Send by design
+    async fn put_stream_inner(
+        &self,
+        s3_key: &str,
+        content_type: &str,
+        mut body: BoxChunkSource,
+        upload: &mut Option<UploadId>,
+    ) -> Result<u64, String> {
+        let max_total = crate::limits::max_stream_object_bytes();
+
+        let mut total: u64 = 0;
+        let mut parts: Vec<PartETag> = Vec::new();
+        let mut part_number: u32 = 0;
+
+        // Accumulate incoming chunks into a part buffer; flush whole
+        // PART_SIZE parts as they fill. Bounded memory, unbounded RAM.
+        let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
+        while let Some(chunk) = body.next_chunk().await {
+            let chunk = chunk?;
+            if chunk.is_empty() {
+                continue;
+            }
+            total += chunk.len() as u64;
+            if total > max_total {
+                return Err(format!(
+                    "storage: object exceeds max stream size {max_total} bytes \
+                     (set {} to raise)",
+                    crate::limits::MAX_STREAM_OBJECT_BYTES_ENV
+                ));
+            }
+            part_buf.extend_from_slice(&chunk);
+
+            while part_buf.len() >= PART_SIZE {
+                if upload.is_none() {
+                    let id = self
+                        .client
+                        .create_multipart(s3_key, content_type)
+                        .await
+                        .map_err(|e| map_s3(s3_key, e))?;
+                    *upload = Some(id);
+                }
+                // Refuse to exceed S3's 10,000-part hard limit: such an upload
+                // can never `complete`, so fail fast (the caller aborts).
+                if part_number >= crate::limits::MAX_MULTIPART_PARTS {
+                    return Err(format!(
+                        "storage: multipart upload would exceed the S3 {}-part limit",
+                        crate::limits::MAX_MULTIPART_PARTS
+                    ));
+                }
+                let id = upload.as_ref().expect("multipart created");
+                let rest = part_buf.split_off(PART_SIZE);
+                let part = Bytes::from(std::mem::replace(&mut part_buf, rest));
+                part_number += 1;
+                let etag = self
+                    .client
+                    .upload_part(s3_key, id, part_number, part)
+                    .await
+                    .map_err(|e| map_s3(s3_key, e))?;
+                parts.push(etag);
+            }
+        }
+
+        if upload.is_none() {
+            // Single-part path: object below PART_SIZE → ordinary PutObject.
+            let opts = PutOptions {
+                content_type,
+                ..PutOptions::default()
+            };
+            self.client
+                .put(s3_key, &part_buf, opts)
+                .await
+                .map_err(|e| map_s3(s3_key, e))?;
+        } else {
+            // Multipart path: flush the final (short) part, then complete.
+            // Keep `upload` populated through complete so a failure there is
+            // still abortable; clear only on a clean complete.
+            if !part_buf.is_empty() {
+                if part_number >= crate::limits::MAX_MULTIPART_PARTS {
+                    return Err(format!(
+                        "storage: multipart upload would exceed the S3 {}-part limit",
+                        crate::limits::MAX_MULTIPART_PARTS
+                    ));
+                }
+                let id = upload.as_ref().expect("multipart created");
+                part_number += 1;
+                let part = Bytes::from(std::mem::take(&mut part_buf));
+                let etag = self
+                    .client
+                    .upload_part(s3_key, id, part_number, part)
+                    .await
+                    .map_err(|e| map_s3(s3_key, e))?;
+                parts.push(etag);
+            }
+            let id = upload.as_ref().expect("multipart created");
+            self.client
+                .complete_multipart(s3_key, id, &parts)
+                .await
+                .map_err(|e| map_s3(s3_key, e))?;
+            // Completed — clear so the caller does NOT abort the live object.
+            *upload = None;
+        }
+
+        Ok(total)
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -80,95 +192,43 @@ impl Backend for S3 {
         app_id: &str,
         bucket: &str,
         key: &str,
-        mut body: BoxChunkSource,
+        body: BoxChunkSource,
         content_type: Option<&str>,
     ) -> Result<u64, String> {
         validate_object_coords(app_id, bucket, key)?;
         let s3_key = Self::object_key(app_id, bucket, key);
         let content_type = content_type.unwrap_or("application/octet-stream");
 
-        let mut total: u64 = 0;
-        let mut parts: Vec<PartETag> = Vec::new();
+        // Shared with the explicit error-path abort below. `None` until the
+        // first part flush lazily creates the multipart upload.
         let mut upload: Option<UploadId> = None;
-        let mut part_number: u32 = 0;
 
-        // RAII guard: abort any started multipart on early return / drop.
-        // S3 bills orphaned parts, so an abort on every error path is
-        // mandatory. The happy path disarms it before drop.
-        let mut guard = MultipartGuard {
-            client: &self.client,
+        // Panic backstop only — the real orphaned-parts guarantee is the
+        // explicit, awaited abort on the error path. Panic-free, never spawns.
+        let mut backstop = PanicBackstop {
             key: &s3_key,
             upload: None,
         };
 
-        // Accumulate incoming chunks into a part buffer; flush whole
-        // PART_SIZE parts as they fill. Bounded memory, unbounded total.
-        let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
-        while let Some(chunk) = body.next_chunk().await {
-            let chunk = chunk?;
-            if chunk.is_empty() {
-                continue;
-            }
-            total += chunk.len() as u64;
-            part_buf.extend_from_slice(&chunk);
+        let result = self
+            .put_stream_inner(&s3_key, content_type, body, &mut upload)
+            .await;
 
-            while part_buf.len() >= PART_SIZE {
-                if upload.is_none() {
-                    let id = self
-                        .client
-                        .create_multipart(&s3_key, content_type)
-                        .await
-                        .map_err(|e| map_s3(&s3_key, e))?;
-                    upload = Some(id.clone());
-                    guard.upload = Some(id);
+        match result {
+            Ok(total) => {
+                backstop.upload = None;
+                Ok(total)
+            }
+            Err(e) => {
+                // Explicit, awaited, best-effort abort in async context (NOT a
+                // detached spawn) so orphaned (billed) parts are reclaimed.
+                if let Some(id) = upload.take() {
+                    let _ = self.client.abort_multipart(&s3_key, &id).await;
                 }
-                let id = upload.as_ref().expect("multipart created");
-                let rest = part_buf.split_off(PART_SIZE);
-                let part = Bytes::from(std::mem::replace(&mut part_buf, rest));
-                part_number += 1;
-                let etag = self
-                    .client
-                    .upload_part(&s3_key, id, part_number, part)
-                    .await
-                    .map_err(|e| map_s3(&s3_key, e))?;
-                parts.push(etag);
+                backstop.upload = None;
+                Err(e)
             }
         }
-
-        match upload.take() {
-            // Single-part path: object below PART_SIZE → ordinary PutObject.
-            None => {
-                let opts = PutOptions {
-                    content_type,
-                    ..PutOptions::default()
-                };
-                self.client
-                    .put(&s3_key, &part_buf, opts)
-                    .await
-                    .map_err(|e| map_s3(&s3_key, e))?;
-                guard.upload = None;
-            }
-            // Multipart path: flush the final (short) part, then complete.
-            Some(id) => {
-                if !part_buf.is_empty() {
-                    part_number += 1;
-                    let part = Bytes::from(std::mem::take(&mut part_buf));
-                    let etag = self
-                        .client
-                        .upload_part(&s3_key, &id, part_number, part)
-                        .await
-                        .map_err(|e| map_s3(&s3_key, e))?;
-                    parts.push(etag);
-                }
-                self.client
-                    .complete_multipart(&s3_key, &id, &parts)
-                    .await
-                    .map_err(|e| map_s3(&s3_key, e))?;
-                guard.upload = None;
-            }
-        }
-
-        Ok(total)
     }
 
     async fn get_stream(
@@ -273,25 +333,27 @@ impl ChunkSource for S3Chunks {
     }
 }
 
-/// RAII abort guard for an in-progress multipart upload. Mirrors the
-/// `bundle::s3_blob` guard: a detached best-effort `abort_multipart` fires
-/// on any early return / drop so orphaned (billed) parts are reclaimed. The
-/// happy path disarms it (`guard.upload = None`) before drop.
-struct MultipartGuard<'a> {
-    client: &'a S3Client,
+/// Synchronous panic backstop for an in-progress multipart upload. Mirrors the
+/// `bundle::s3_blob::PanicBackstop`: the real orphaned-parts guarantee is the
+/// EXPLICIT, AWAITED `abort_multipart` on the error path in `put_stream`. This
+/// guard only fires if the future unwinds (panics) mid-upload. It MUST NOT
+/// panic and MUST NOT spawn — spawning in `Drop` panics off-runtime, and a
+/// panic in `Drop` while already unwinding aborts the whole process. So it only
+/// logs that parts may be orphaned (S3 lifecycle rules reclaim them).
+struct PanicBackstop<'a> {
     key: &'a str,
     upload: Option<UploadId>,
 }
 
-impl Drop for MultipartGuard<'_> {
+impl Drop for PanicBackstop<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.upload.take() {
-            let client = self.client.clone();
-            let key = self.key.to_string();
-            compio::runtime::spawn(async move {
-                let _ = client.abort_multipart(&key, &id).await;
-            })
-            .detach();
+            tracing::warn!(
+                key = %self.key,
+                upload_id = %id.0,
+                "multipart upload dropped without explicit abort (likely a panic mid-upload); \
+                 parts may be orphaned until S3 lifecycle reclaims them",
+            );
         }
     }
 }

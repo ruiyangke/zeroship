@@ -165,16 +165,30 @@ fn percent_decode_key(s: &str) -> Result<String, S3Error> {
         .map_err(|_| err("invalid UTF-8 after percent-decoding Key"))
 }
 
-/// Inspect a `CompleteMultipartUpload` response body. S3 may answer `200 OK`
-/// whose body is an `<Error>` document; treat that as a typed error. A
-/// `<CompleteMultipartUploadResult>` is success.
+/// Inspect a `CompleteMultipartUpload` response body for in-200-body failures.
+///
+/// S3 may answer `200 OK` whose body is an `<Error>` document, OR a
+/// truncated/empty `<CompleteMultipartUploadResult>` (a TCP/connection cut
+/// after the 200 status line but before the result fields). Both must be
+/// treated as failures — returning `Ok` on either would commit a
+/// possibly-corrupt / zero-content object under a content hash.
+///
+/// Success therefore requires observing a NON-EMPTY confirmation inside the
+/// `<CompleteMultipartUploadResult>` element: a non-empty `<ETag>`, or both a
+/// non-empty `<Bucket>` and `<Key>`. Merely seeing the result start tag is not
+/// enough — a truncated body can carry the open tag and nothing else.
 pub fn check_complete_multipart_response(xml: &[u8]) -> Result<(), S3Error> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut in_error = false;
+    let mut in_result = false;
     let mut code = String::new();
     let mut message = String::new();
+    // Success-confirmation fields captured inside the result element.
+    let mut etag: Option<String> = None;
+    let mut bucket: Option<String> = None;
+    let mut key: Option<String> = None;
     let mut path: Vec<String> = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -184,7 +198,7 @@ pub fn check_complete_multipart_response(xml: &[u8]) -> Result<(), S3Error> {
                     in_error = true;
                 }
                 if name == "CompleteMultipartUploadResult" {
-                    return Ok(());
+                    in_result = true;
                 }
                 path.push(name);
             }
@@ -192,11 +206,18 @@ pub fn check_complete_multipart_response(xml: &[u8]) -> Result<(), S3Error> {
                 path.pop();
             }
             Ok(Event::Text(t)) => {
+                let text = t.decode().unwrap_or_default().into_owned();
                 if in_error {
-                    let text = t.decode().unwrap_or_default().into_owned();
                     match path.last().map(String::as_str) {
                         Some("Code") => code = text,
                         Some("Message") => message = text,
+                        _ => {}
+                    }
+                } else if in_result {
+                    match path.last().map(String::as_str) {
+                        Some("ETag") if !text.is_empty() => etag = Some(text),
+                        Some("Bucket") if !text.is_empty() => bucket = Some(text),
+                        Some("Key") if !text.is_empty() => key = Some(text),
                         _ => {}
                     }
                 }
@@ -211,6 +232,16 @@ pub fn check_complete_multipart_response(xml: &[u8]) -> Result<(), S3Error> {
         return Err(S3Error::InvalidResponse(format!(
             "complete-multipart in-body error: {code}: {message}"
         )));
+    }
+    if in_result {
+        // Only confirm success on observed payload: a non-empty ETag, or the
+        // Bucket+Key pair. A bare/truncated result element is NOT success.
+        if etag.is_some() || (bucket.is_some() && key.is_some()) {
+            return Ok(());
+        }
+        return Err(err(
+            "complete-multipart result lacked a non-empty ETag/Bucket+Key (truncated body)",
+        ));
     }
     // Neither a result nor an error element — treat as malformed.
     Err(err("complete-multipart response had no result or error element"))
@@ -231,6 +262,62 @@ pub fn build_complete_multipart_body(parts: &[(u32, String)]) -> String {
     }
     s.push_str("</CompleteMultipartUpload>");
     s
+}
+
+/// Extract every in-progress `(key, upload_id)` from a `ListMultipartUploads`
+/// response.
+///
+/// Each `<Upload>` element carries a `<Key>` and `<UploadId>`. Keys are still
+/// internal-prefixed and returned verbatim (this call does not set
+/// `encoding-type=url`). Used by tests to assert that an aborted multipart
+/// leaves no orphaned upload.
+pub fn parse_list_multipart_uploads(xml: &[u8]) -> Result<Vec<(String, String)>, S3Error> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut in_upload = false;
+    let mut cur_key: Option<String> = None;
+    let mut cur_id: Option<String> = None;
+    let mut out = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref());
+                if name == "Upload" {
+                    in_upload = true;
+                    cur_key = None;
+                    cur_id = None;
+                }
+                path.push(name);
+            }
+            Ok(Event::End(e)) => {
+                let name = local_name(e.name().as_ref());
+                path.pop();
+                if name == "Upload" {
+                    in_upload = false;
+                    if let (Some(k), Some(id)) = (cur_key.take(), cur_id.take()) {
+                        out.push((k, id));
+                    }
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if in_upload {
+                    let text = t.decode().unwrap_or_default().into_owned();
+                    match path.last().map(String::as_str) {
+                        Some("Key") => cur_key = Some(text),
+                        Some("UploadId") => cur_id = Some(text),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(err(format!("xml error: {e}"))),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(out)
 }
 
 /// Extract `<UploadId>` from a `CreateMultipartUpload` response.
@@ -366,6 +453,59 @@ mod tests {
         let xml = r"<Error><Code>InternalError</Code><Message>boom</Message></Error>";
         let e = check_complete_multipart_response(xml.as_bytes()).unwrap_err();
         assert!(format!("{e}").contains("InternalError"));
+    }
+
+    // --- H3 regression: a 200 response whose `<CompleteMultipartUploadResult>`
+    // is truncated/empty (no ETag, no Bucket+Key) must NOT be reported as a
+    // success — that would commit a possibly-corrupt object under a content
+    // hash. ---
+
+    #[test]
+    fn complete_multipart_truncated_empty_result_is_error() {
+        // Open + close result element, but no ETag / Bucket / Key payload.
+        let xml = r"<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
+        assert!(check_complete_multipart_response(xml.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn complete_multipart_result_with_empty_etag_is_error() {
+        let xml = r"<CompleteMultipartUploadResult><Location>x</Location><ETag></ETag></CompleteMultipartUploadResult>";
+        assert!(check_complete_multipart_response(xml.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn complete_multipart_result_with_bucket_and_key_is_ok() {
+        // No ETag, but Bucket+Key confirm a real assembled object.
+        let xml = r"<CompleteMultipartUploadResult><Location>x</Location><Bucket>b</Bucket><Key>k</Key></CompleteMultipartUploadResult>";
+        assert!(check_complete_multipart_response(xml.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn complete_multipart_result_with_etag_is_ok() {
+        let xml = r#"<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult>"#;
+        assert!(check_complete_multipart_response(xml.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn parse_list_multipart_uploads_works() {
+        let xml = r"<ListMultipartUploadsResult>
+  <Upload><Key>a/k1</Key><UploadId>UP1</UploadId></Upload>
+  <Upload><Key>a/k2</Key><UploadId>UP2</UploadId></Upload>
+</ListMultipartUploadsResult>";
+        let got = parse_list_multipart_uploads(xml.as_bytes()).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("a/k1".to_string(), "UP1".to_string()),
+                ("a/k2".to_string(), "UP2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_list_multipart_uploads_empty() {
+        let xml = r"<ListMultipartUploadsResult></ListMultipartUploadsResult>";
+        assert!(parse_list_multipart_uploads(xml.as_bytes()).unwrap().is_empty());
     }
 
     #[test]

@@ -76,29 +76,161 @@ impl S3BlobStore {
     fn manifest_prefix(app_id: &Uuid) -> String {
         format!("manifests/{app_id}/")
     }
+
+    /// The streaming body of `put_blob_stream`: read the source in `PART_SIZE`
+    /// chunks (hashing the whole object), flush full parts, verify the content
+    /// address, then either single-PUT or complete the multipart. `upload` is
+    /// borrowed mutably so the caller can abort the started upload on any error
+    /// this returns. No abort happens here — the caller owns the error path.
+    #[allow(clippy::too_many_lines)] // single-pass stream → hash → parts → complete
+    #[allow(clippy::future_not_send)] // BlobStore is (?Send); reader is !Send by design
+    async fn put_blob_stream_inner(
+        &self,
+        hash: &str,
+        key: &str,
+        expected_size: u64,
+        reader: &mut dyn std::io::Read,
+        upload: &mut Option<UploadId>,
+    ) -> Result<PutOutcome, BlobError> {
+        let mut hasher = sha2::Sha256::new();
+        let mut total: u64 = 0;
+        let mut parts: Vec<compio_s3::PartETag> = Vec::new();
+        let mut part_number: u32 = 0;
+
+        // Read the source in bounded chunks; accumulate into the current
+        // part buffer and flush whole PART_SIZE parts.
+        let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
+        let mut scratch = vec![0u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut scratch).map_err(BlobError::Io)?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            if total > expected_size {
+                return Err(BlobError::Backend(format!(
+                    "blob exceeds declared size {expected_size}"
+                )));
+            }
+            if total > MAX_BLOB_BYTES {
+                return Err(BlobError::Backend(format!(
+                    "blob exceeds MAX_BLOB_BYTES {MAX_BLOB_BYTES}"
+                )));
+            }
+            hasher.update(&scratch[..n]);
+            part_buf.extend_from_slice(&scratch[..n]);
+
+            while part_buf.len() >= PART_SIZE {
+                // Lazily create the multipart upload on the first flush.
+                if upload.is_none() {
+                    let id = self
+                        .client
+                        .create_multipart(key, "application/octet-stream")
+                        .await
+                        .map_err(|e| map_s3(hash, e))?;
+                    *upload = Some(id);
+                }
+                let id = upload.as_ref().expect("multipart created");
+                let rest = part_buf.split_off(PART_SIZE);
+                let body = Bytes::from(std::mem::replace(&mut part_buf, rest));
+                part_number += 1;
+                let etag = self
+                    .client
+                    .upload_part(key, id, part_number, body)
+                    .await
+                    .map_err(|e| map_s3(hash, e))?;
+                parts.push(etag);
+            }
+        }
+
+        if total != expected_size {
+            return Err(BlobError::Backend(format!(
+                "size mismatch: expected {expected_size}, observed {total}"
+            )));
+        }
+        // Verify the content address BEFORE committing anything.
+        let computed = hex::encode(hasher.finalize());
+        if computed != hash {
+            return Err(BlobError::HashMismatch {
+                expected: hash.to_string(),
+                got: computed,
+            });
+        }
+
+        // NB: keep `upload` populated through the final part flush + complete
+        // so a failure there is still abortable by the caller. Only clear it on
+        // a clean complete (the object now exists; aborting would be wrong).
+        if upload.is_none() {
+            // Single-part path: object below PART_SIZE → ordinary PUT.
+            // Durable content-address record. The client ALSO emits
+            // `x-amz-checksum-sha256` (base64 body digest) when the provider
+            // profile enables checksum mode; the user-meta sha256 here is the
+            // hex content address, not trusted as integrity proof (we always
+            // re-hash on read).
+            let meta: [(&str, String); 1] = [("sha256", hash.to_string())];
+            let opts = PutOptions {
+                content_type: "application/octet-stream",
+                if_none_match: true,
+                user_meta: &meta,
+                cache_control: None,
+            };
+            let body = std::mem::take(&mut part_buf);
+            match self.client.put(key, &body, opts).await {
+                Ok(_) => Ok(PutOutcome::Wrote),
+                // A concurrent writer won the conditional create — the object
+                // now exists under the SAME content hash, so this is a dedup.
+                Err(S3Error::PreconditionFailed) => Ok(PutOutcome::Deduped),
+                Err(e) => Err(map_s3(hash, e)),
+            }
+        } else {
+            // Multipart path: flush the final (short) part, then complete.
+            let id = upload.as_ref().expect("multipart created");
+            if !part_buf.is_empty() {
+                part_number += 1;
+                let body = Bytes::from(std::mem::take(&mut part_buf));
+                let etag = self
+                    .client
+                    .upload_part(key, id, part_number, body)
+                    .await
+                    .map_err(|e| map_s3(hash, e))?;
+                parts.push(etag);
+            }
+            self.client
+                .complete_multipart(key, id, &parts)
+                .await
+                .map_err(|e| map_s3(hash, e))?;
+            // Completed — the object exists; clear so the caller does NOT abort.
+            *upload = None;
+            Ok(PutOutcome::Wrote)
+        }
+    }
 }
 
-/// RAII guard that aborts an in-progress multipart upload on drop unless it
-/// was explicitly disarmed (by clearing `upload`). S3 bills orphaned parts,
-/// so every error/panic path must abort.
-struct MultipartGuard<'a> {
-    client: &'a S3Client,
+/// Synchronous panic-backstop for an in-progress multipart upload.
+///
+/// The error paths abort EXPLICITLY and AWAITED (see `put_blob_stream`), which
+/// is the real orphaned-parts guarantee. This guard only fires if the future
+/// is dropped *without* completing or erroring — e.g. an unwinding panic
+/// between `create_multipart` and the explicit abort. It must NEVER panic and
+/// MUST NOT spawn: spawning in `Drop` panics off-runtime, and a panic in `Drop`
+/// while already unwinding aborts the whole process. So it does the only sound
+/// thing in a sync, possibly-unwinding `Drop`: log that parts may be orphaned.
+/// (S3's own multipart lifecycle / bucket expiry rules reclaim them.)
+struct PanicBackstop<'a> {
     key: &'a str,
     upload: Option<UploadId>,
 }
 
-impl Drop for MultipartGuard<'_> {
+impl Drop for PanicBackstop<'_> {
     fn drop(&mut self) {
         if let Some(id) = self.upload.take() {
-            let client = self.client.clone();
-            let key = self.key.to_string();
-            // Best-effort abort. Detached so `Drop` stays sync; the happy
-            // path disarms the guard before drop, so this only fires on
-            // error/panic.
-            compio::runtime::spawn(async move {
-                let _ = client.abort_multipart(&key, &id).await;
-            })
-            .detach();
+            // Best-effort, panic-free. No spawn, no await.
+            tracing::warn!(
+                key = %self.key,
+                upload_id = %id.0,
+                "multipart upload dropped without explicit abort (likely a panic mid-upload); \
+                 parts may be orphaned until S3 lifecycle reclaims them",
+            );
         }
     }
 }
@@ -184,133 +316,43 @@ impl BlobStore for S3BlobStore {
             return Ok(PutOutcome::Deduped);
         }
 
-        // Stream the reader in PART_SIZE chunks, hashing the whole object.
-        let mut hasher = sha2::Sha256::new();
-        let mut total: u64 = 0;
-        let mut parts: Vec<compio_s3::PartETag> = Vec::new();
+        // The multipart upload id, shared between the inner worker and the
+        // explicit error-path abort below. `None` until the first part flush
+        // lazily creates the upload.
         let mut upload: Option<UploadId> = None;
-        let mut part_number: u32 = 0;
 
-        // RAII guard: abort any started multipart upload on early return /
-        // drop. S3 bills orphaned parts, so an abort on every error path is
-        // mandatory. The happy path disarms it before drop.
-        let mut guard = MultipartGuard {
-            client: &self.client,
+        // Panic backstop only: the real orphaned-parts guarantee is the
+        // EXPLICIT, AWAITED abort on the error path (see the match below). This
+        // guard fires solely if the future unwinds (panics) mid-upload — it is
+        // panic-free and does NOT spawn (spawning in Drop aborts off-runtime;
+        // panicking in Drop while unwinding aborts the process).
+        let mut backstop = PanicBackstop {
             key: &key,
             upload: None,
         };
 
-        // Read the source in bounded chunks; accumulate into the current
-        // part buffer and flush whole PART_SIZE parts.
-        let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
-        let mut scratch = vec![0u8; 64 * 1024];
-        loop {
-            let n = reader.read(&mut scratch).map_err(BlobError::Io)?;
-            if n == 0 {
-                break;
-            }
-            total += n as u64;
-            if total > expected_size {
-                return Err(BlobError::Backend(format!(
-                    "blob exceeds declared size {expected_size}"
-                )));
-            }
-            if total > MAX_BLOB_BYTES {
-                return Err(BlobError::Backend(format!(
-                    "blob exceeds MAX_BLOB_BYTES {MAX_BLOB_BYTES}"
-                )));
-            }
-            hasher.update(&scratch[..n]);
-            part_buf.extend_from_slice(&scratch[..n]);
+        // Run the stream → parts → complete body. On ANY error we must abort
+        // the multipart (if one was started) BEFORE propagating, so orphaned
+        // (billed) parts are reclaimed deterministically in async context.
+        let outcome = self
+            .put_blob_stream_inner(hash, &key, expected_size, reader, &mut upload)
+            .await;
 
-            while part_buf.len() >= PART_SIZE {
-                // Lazily create the multipart upload on the first flush.
-                if upload.is_none() {
-                    let id = self
-                        .client
-                        .create_multipart(&key, "application/octet-stream")
-                        .await
-                        .map_err(|e| map_s3(hash, e))?;
-                    upload = Some(id.clone());
-                    guard.upload = Some(id);
-                }
-                let id = upload.as_ref().expect("multipart created");
-                let rest = part_buf.split_off(PART_SIZE);
-                let body = Bytes::from(std::mem::replace(&mut part_buf, rest));
-                part_number += 1;
-                let etag = self
-                    .client
-                    .upload_part(&key, id, part_number, body)
-                    .await
-                    .map_err(|e| map_s3(hash, e))?;
-                parts.push(etag);
+        match outcome {
+            Ok(out) => {
+                // Completed (or deduped) cleanly — disarm the backstop.
+                backstop.upload = None;
+                Ok(out)
             }
-        }
-
-        if total != expected_size {
-            return Err(BlobError::Backend(format!(
-                "size mismatch: expected {expected_size}, observed {total}"
-            )));
-        }
-        // Verify the content address BEFORE committing anything.
-        let computed = hex::encode(hasher.finalize());
-        if computed != hash {
-            return Err(BlobError::HashMismatch {
-                expected: hash.to_string(),
-                got: computed,
-            });
-        }
-
-        match upload.take() {
-            // Single-part path: object below PART_SIZE → ordinary PUT.
-            None => {
-                // Durable content-address record. The client ALSO emits
-                // `x-amz-checksum-sha256` (base64 body digest) when the
-                // provider profile enables checksum mode; the user-meta
-                // sha256 here is the hex content address, not trusted as
-                // integrity proof (we always re-hash on read).
-                let meta: [(&str, String); 1] = [("sha256", hash.to_string())];
-                let opts = PutOptions {
-                    content_type: "application/octet-stream",
-                    if_none_match: true,
-                    user_meta: &meta,
-                    cache_control: None,
-                };
-                let body = std::mem::take(&mut part_buf);
-                match self.client.put(&key, &body, opts).await {
-                    Ok(_) => {
-                        guard.upload = None;
-                        Ok(PutOutcome::Wrote)
-                    }
-                    // A concurrent writer won the conditional create — the
-                    // object now exists under the SAME content hash, so this
-                    // is a dedup, not a failure.
-                    Err(S3Error::PreconditionFailed) => {
-                        guard.upload = None;
-                        Ok(PutOutcome::Deduped)
-                    }
-                    Err(e) => Err(map_s3(hash, e)),
+            Err(e) => {
+                // Explicit, awaited, best-effort abort. Guaranteed to run in
+                // async context (unlike a detached spawn). Ignore its error —
+                // the original failure is what the caller must see.
+                if let Some(id) = upload.take() {
+                    let _ = self.client.abort_multipart(&key, &id).await;
                 }
-            }
-            // Multipart path: flush the final (short) part, then complete.
-            Some(id) => {
-                if !part_buf.is_empty() {
-                    part_number += 1;
-                    let body = Bytes::from(std::mem::take(&mut part_buf));
-                    let etag = self
-                        .client
-                        .upload_part(&key, &id, part_number, body)
-                        .await
-                        .map_err(|e| map_s3(hash, e))?;
-                    parts.push(etag);
-                }
-                self.client
-                    .complete_multipart(&key, &id, &parts)
-                    .await
-                    .map_err(|e| map_s3(hash, e))?;
-                // Completed successfully — disarm the abort guard.
-                guard.upload = None;
-                Ok(PutOutcome::Wrote)
+                backstop.upload = None;
+                Err(e)
             }
         }
     }

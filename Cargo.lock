@@ -6739,6 +6739,7 @@ dependencies = [
  "futures",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
  "v8",
  "zeroship-runtime",
 ]

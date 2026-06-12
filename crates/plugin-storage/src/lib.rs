@@ -39,6 +39,7 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 pub mod backend;
 pub mod callbacks;
 pub mod config;
+pub mod limits;
 
 pub use backend::{Backend, LocalFs};
 #[cfg(feature = "s3")]

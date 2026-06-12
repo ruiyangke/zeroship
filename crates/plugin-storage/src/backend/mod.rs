@@ -176,20 +176,48 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         self.put_stream(app_id, bucket, key, src, content_type).await
     }
 
-    /// Buffered get — drains [`Backend::get_stream`] into a single `Vec<u8>`.
-    /// The convenience callback uses this for the base64 return shape.
+    /// Buffered get — drains [`Backend::get_stream`] into a single `Vec<u8>`,
+    /// capped at `max_bytes`. The convenience callback uses this for the base64
+    /// return shape; it materialises the whole object in RAM (and base64-encodes
+    /// it, ~2.3× peak), so an uncapped buffered `get` driven by an
+    /// attacker-controlled `Content-Length` is an OOM-DoS. The cap is enforced
+    /// against BOTH the advertised `meta.size` (rejected before allocating) AND
+    /// the running total (rejected if the body streams past the cap despite a
+    /// smaller/absent advertised size). The capacity hint is clamped to the cap
+    /// so a lying `Content-Length` cannot pre-allocate gigabytes.
+    ///
+    /// The streaming `get_stream` path stays unbounded by design — only this
+    /// buffered convenience is capped.
     async fn get(
         &self,
         app_id: &str,
         bucket: &str,
         key: &str,
+        max_bytes: u64,
     ) -> Result<Option<(Vec<u8>, ObjectMeta)>, String> {
         let Some((meta, mut stream)) = self.get_stream(app_id, bucket, key).await? else {
             return Ok(None);
         };
-        let mut buf = Vec::with_capacity(meta.size as usize);
+        if meta.size > max_bytes {
+            return Err(format!(
+                "storage: object size {} exceeds buffered-get cap {max_bytes} \
+                 (use streaming getStream for large objects)",
+                meta.size
+            ));
+        }
+        // Clamp the capacity hint to the cap — never trust the advertised size
+        // to pre-allocate beyond what we are willing to buffer.
+        let cap_hint = usize::try_from(meta.size.min(max_bytes)).unwrap_or(usize::MAX);
+        let mut buf = Vec::with_capacity(cap_hint);
         while let Some(chunk) = stream.next_chunk().await {
-            buf.extend_from_slice(&chunk?);
+            let chunk = chunk?;
+            if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+                return Err(format!(
+                    "storage: object body exceeds buffered-get cap {max_bytes} \
+                     (use streaming getStream for large objects)"
+                ));
+            }
+            buf.extend_from_slice(&chunk);
         }
         Ok(Some((buf, meta)))
     }

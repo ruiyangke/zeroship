@@ -18,12 +18,13 @@ thiserror = { workspace = true }
 # (LocalFs only) pulls nothing extra.
 compio-s3 = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [features]
 default = []
 # S3-compatible backend (covers S3, R2, MinIO, Spaces, B2, etc.) via a
 # hand-rolled client on cyper + hand-rolled SigV4. Adds no tokio.
-s3 = ["dep:compio-s3", "dep:futures"]
+s3 = ["dep:compio-s3", "dep:futures", "dep:tracing"]
 
 [dev-dependencies]
 # Backend-parity integration test drives the trait directly on a compio

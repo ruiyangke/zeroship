@@ -41,7 +41,8 @@ use crate::config::{ChecksumMode, S3Config, SseMode};
 use crate::credentials::S3Credentials;
 use crate::error::{S3Error, S3Result};
 use crate::list_xml::{
-    self, build_complete_multipart_body, check_complete_multipart_response, parse_upload_id,
+    self, build_complete_multipart_body, check_complete_multipart_response,
+    parse_list_multipart_uploads, parse_upload_id,
 };
 use crate::signer::{self, SignHeader, SignRequest, EMPTY_PAYLOAD_SHA256};
 
@@ -383,6 +384,19 @@ impl S3Client {
 
     /// `GET` an object as a streaming body. Returns the metadata plus a
     /// `Stream<Item = S3Result<Bytes>>` (cyper `bytes_stream()`).
+    ///
+    /// ## Early-cancel connection safety
+    ///
+    /// The returned stream owns a [`KeepAlive`] that holds the *fresh,
+    /// per-operation* `cyper::Client` built for this GET. That client's
+    /// connection pool therefore lives and dies with the stream: dropping the
+    /// stream before EOF (e.g. the V8 `ReadableStream` consumer calls
+    /// `cancelStream` mid-body) drops the half-read response AND the owning
+    /// `Client`, destroying the pool. A half-read (dirty) HTTP/1.1 connection
+    /// is consequently never returned to any pool a *later* request could draw
+    /// from — there is no shared, longer-lived client to desync. This is the
+    /// same fresh-client-per-op discipline the module header describes,
+    /// extended to the streaming path; see [`KeepAlive`].
     pub async fn get_stream(
         &self,
         key: &str,
@@ -836,6 +850,42 @@ impl S3Client {
         }
     }
 
+    /// List in-progress multipart uploads under `key_prefix`, returning their
+    /// `(stored_key, upload_id)` pairs. Primarily a test/diagnostic aid for
+    /// asserting that an aborted upload leaves no orphaned parts. The prefix is
+    /// joined with the configured `config.prefix` like any object key.
+    pub async fn list_multipart_uploads(
+        &self,
+        key_prefix: &str,
+    ) -> S3Result<Vec<(String, String)>> {
+        let stored_prefix = self.config.object_key(key_prefix);
+        let query = vec![
+            ("uploads".to_string(), String::new()),
+            ("prefix".to_string(), stored_prefix),
+        ];
+        let (url, host, canonical_uri, _cq) = self.bucket_url(&query);
+        let headers = self.signed_headers(
+            "GET",
+            &host,
+            &canonical_uri,
+            &query,
+            EMPTY_PAYLOAD_SHA256,
+            &[],
+        );
+        let client = new_client();
+        let resp = self
+            .send(client.request(Method::GET, &url)?, headers)
+            .await?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            return Err(self.error_from_response(status, resp).await);
+        }
+        let xml = self
+            .read_body_capped(resp, self.config.max_list_entries as u64 * 4096 + 65_536)
+            .await?;
+        parse_list_multipart_uploads(&xml)
+    }
+
     fn append_sse_headers(&self, extra: &mut Vec<(String, String)>) {
         match &self.config.sse {
             SseMode::None => {}
@@ -929,17 +979,33 @@ fn new_client() -> cyper::Client {
     cyper::Client::new()
 }
 
-/// A stream that keeps its source `cyper::Client` alive until fully drained.
+/// A stream that owns its source `cyper::Client` for the lifetime of the
+/// response body.
+///
+/// The client is built fresh for the single GET that produced `inner` and is
+/// held nowhere else, so the client's HTTP/1.1 connection pool lives and dies
+/// with this wrapper. Two consequences matter for early cancellation:
+///
+/// 1. **No dirty reuse across requests.** If the body is dropped before EOF,
+///    the half-read connection is dropped together with the only `Client` that
+///    pools it — it can never be handed to a later request and desync it.
+/// 2. **No premature close on the happy path.** Holding `_client` until the
+///    body drains keeps the connection alive long enough to read every chunk;
+///    without it the client (and its connection) could drop mid-read.
+///
+/// Dropping `KeepAlive` drops `inner` (the response body) first, then
+/// `_client`, in struct-field order — i.e. the body's connection is released
+/// before the pool that owned it is torn down.
 struct KeepAlive<S> {
-    _client: cyper::Client,
     inner: S,
+    _client: cyper::Client,
 }
 
 impl<S> KeepAlive<S> {
     const fn wrap(client: cyper::Client, inner: S) -> Self {
         Self {
-            _client: client,
             inner,
+            _client: client,
         }
     }
 }

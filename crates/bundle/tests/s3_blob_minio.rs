@@ -20,7 +20,7 @@ use zeroship_bundle::{
     sha256_hex, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome, S3BlobStore,
 };
 
-use compio_s3::{S3Config, S3Credentials};
+use compio_s3::{S3Client, S3Config, S3Credentials};
 
 const ACCESS_KEY: &str = "minioadmin";
 const SECRET_KEY: &str = "minioadmin";
@@ -95,12 +95,52 @@ fn start_minio() -> bool {
     false
 }
 
-fn s3_store() -> S3BlobStore {
-    let url = format!(
+fn s3_url() -> String {
+    format!(
         "s3://{BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{PORT}&region=us-east-1&style=path&dev_http=true"
-    );
-    let cfg = S3Config::parse_url(&url).expect("parse minio url");
+    )
+}
+
+fn s3_store() -> S3BlobStore {
+    let cfg = S3Config::parse_url(&s3_url()).expect("parse minio url");
     S3BlobStore::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
+}
+
+/// A raw `S3Client` over the same MinIO bucket, for asserting low-level state
+/// (e.g. that an aborted multipart leaves no orphaned upload).
+fn s3_raw_client() -> S3Client {
+    let cfg = S3Config::parse_url(&s3_url()).expect("parse minio url");
+    S3Client::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
+}
+
+/// A `Read` source that yields `before_err` bytes (in 64 KiB reads) and then
+/// fails with an I/O error — modelling a stream that dies mid-upload, after the
+/// multipart upload + first part(s) have been created. The C1 fix must abort
+/// that multipart explicitly (awaited), leaving no orphaned upload.
+struct ErrAfter {
+    remaining: usize,
+    errored: bool,
+}
+
+impl std::io::Read for ErrAfter {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            if self.errored {
+                return Ok(0);
+            }
+            self.errored = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected mid-upload read failure",
+            ));
+        }
+        let n = self.remaining.min(out.len()).min(64 * 1024);
+        for b in &mut out[..n] {
+            *b = 0xEE;
+        }
+        self.remaining -= n;
+        Ok(n)
+    }
 }
 
 fn local_store() -> (LocalDiskBlobStore, std::path::PathBuf) {
@@ -126,6 +166,10 @@ fn s3_blob_store_roundtrip_and_parity() {
                 // S3 leg.
                 let s3 = s3_store();
                 run_contract(&s3, "s3").await;
+                // C1 regression: an error mid-multipart-upload must abort the
+                // upload explicitly, not leak orphaned parts or abort the
+                // process.
+                run_c1_mid_upload_abort(&s3).await;
                 // Local-disk leg — identical assertions for parity.
                 let (local, root) = local_store();
                 run_contract(&local, "local").await;
@@ -136,6 +180,66 @@ fn s3_blob_store_roundtrip_and_parity() {
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
+}
+
+/// C1 regression: induce an error mid-multipart-upload and assert
+/// (a) `put_blob_stream` returns the error (no panic / process abort), and
+/// (b) the multipart upload was aborted — no orphaned upload remains listable.
+///
+/// The error is injected AFTER ≥ 1 full part, so a real multipart upload + part
+/// exist on the server before the failure; only an explicit awaited abort can
+/// reclaim them. (Pre-fix, the abort was a detached `spawn` in `Drop`, which
+/// could panic off-runtime / never be polled, leaking the upload.)
+async fn run_c1_mid_upload_abort(store: &S3BlobStore) {
+    // Declare a size big enough to force multipart (≥ 1 full part + more), but
+    // make the reader die partway. The hash is arbitrary (we never complete).
+    let declared = (PART_SIZE * 2) as u64;
+    // Yield 1.25 parts of bytes, then error — guarantees create_multipart +
+    // at least one upload_part have run before the failure.
+    let mut reader = ErrAfter {
+        remaining: PART_SIZE + PART_SIZE / 4,
+        errored: false,
+    };
+    let fake_hash = "ee".repeat(32); // 64 hex chars; never matches real content
+
+    // The store maps hash → logical key `blobs/<hash>`. List multipart uploads
+    // by the EXACT object-key prefix (MinIO's ListMultipartUploads only
+    // surfaces an upload when the prefix reaches the key, not a parent
+    // "directory" prefix). Sanity-check the listing path is non-vacuous first.
+    let key_prefix = format!("blobs/{fake_hash}");
+    {
+        let raw = s3_raw_client();
+        let up = raw
+            .create_multipart(&key_prefix, "application/octet-stream")
+            .await
+            .expect("sentinel create_multipart");
+        let listed = raw
+            .list_multipart_uploads(&key_prefix)
+            .await
+            .expect("sentinel list");
+        assert!(
+            !listed.is_empty(),
+            "precondition: list_multipart_uploads must see an in-progress upload"
+        );
+        raw.abort_multipart(&key_prefix, &up).await.expect("sentinel abort");
+    }
+
+    let result = store
+        .put_blob_stream(&fake_hash, declared, &mut reader)
+        .await;
+    assert!(result.is_err(), "C1: mid-upload error must propagate (no panic/abort)");
+
+    // The fix's guarantee: the multipart upload created mid-stream was aborted
+    // explicitly, so no orphaned (billed) upload remains.
+    let raw = s3_raw_client();
+    let uploads = raw
+        .list_multipart_uploads(&key_prefix)
+        .await
+        .expect("C1: list multipart uploads");
+    assert!(
+        uploads.is_empty(),
+        "C1: mid-upload error left an orphaned multipart upload: {uploads:?}"
+    );
 }
 
 /// Drive the full `BlobStore` contract against any backend. Run identically

@@ -242,4 +242,57 @@ async fn run_smoke() {
         c.head_object(abort_key).await.expect("head aborted").is_none(),
         "aborted multipart should not produce an object"
     );
+
+    // ---- H1: early-cancel of a streaming GET must not desync a later op ----
+    h1_early_cancel_is_clean(&c).await;
+}
+
+/// H1 regression: open a streaming GET, read ONE chunk, drop the stream before
+/// EOF (the V8 `cancelStream` path), then run another operation and assert it
+/// succeeds. A dirty (half-read) keep-alive connection reused by the next op
+/// would desync; the fresh-client-per-op + `KeepAlive` ownership guarantees it
+/// can't. Also asserts the early drop does not hang.
+async fn h1_early_cancel_is_clean(c: &S3Client) {
+    use futures::StreamExt;
+
+    // Store a multi-chunk object (> 1 MiB so the body arrives in several
+    // network reads, making a *partial* read meaningful).
+    let key = "stream-cancel.bin";
+    let body = vec![0x5Au8; 2 * 1024 * 1024];
+    c.put(
+        key,
+        &body,
+        PutOptions { content_type: "application/octet-stream", ..Default::default() },
+    )
+    .await
+    .expect("put stream-cancel object");
+
+    {
+        // Open the streaming GET and pull exactly one chunk, then drop.
+        let (_meta, stream) = c.get_stream(key).await.expect("get_stream");
+        futures::pin_mut!(stream);
+        let first = stream.next().await;
+        assert!(
+            matches!(first, Some(Ok(_))),
+            "H1: expected at least one streamed chunk, got {first:?}"
+        );
+        // `stream` (and the KeepAlive-owned client) drops here, mid-body.
+    }
+
+    // A fresh op on a brand-new client must be clean — no dirty-connection
+    // desync, no hang.
+    let meta = c
+        .head_object(key)
+        .await
+        .expect("H1: head after early-cancel")
+        .expect("H1: object still present");
+    assert_eq!(meta.len, body.len() as u64, "H1: post-cancel head size");
+
+    let (got, _m) = c
+        .get(key, body.len() as u64 + 1)
+        .await
+        .expect("H1: full get after early-cancel must succeed");
+    assert_eq!(got.len(), body.len(), "H1: post-cancel full get size");
+
+    c.delete(key).await.expect("delete stream-cancel object");
 }

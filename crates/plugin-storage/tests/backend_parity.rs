@@ -26,6 +26,10 @@ use zeroship_plugin_storage::backend::{
 const APP: &str = "app_test";
 const BUCKET: &str = "uploads";
 
+/// Generous buffered-get cap for the happy-path parity calls (well above any
+/// object they read). The C2 cap behaviour is exercised separately below.
+const GET_CAP: u64 = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Test chunk source / sink helpers
 // ---------------------------------------------------------------------------
@@ -72,7 +76,7 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
     assert_eq!(n, body.len() as u64, "[{label}] buffered put size");
 
     let (got, meta) = backend
-        .get(APP, BUCKET, key)
+        .get(APP, BUCKET, key, GET_CAP)
         .await
         .unwrap_or_else(|e| panic!("[{label}] buffered get: {e}"))
         .unwrap_or_else(|| panic!("[{label}] buffered get returned None"));
@@ -81,7 +85,7 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
 
     // get of a missing key => None
     assert!(
-        backend.get(APP, BUCKET, "missing.txt").await.unwrap().is_none(),
+        backend.get(APP, BUCKET, "missing.txt", GET_CAP).await.unwrap().is_none(),
         "[{label}] missing get must be None"
     );
 
@@ -106,7 +110,7 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
     assert_eq!(written, expect.len() as u64, "[{label}] streaming put size");
 
     let (sbuf, _m) = backend
-        .get(APP, BUCKET, skey)
+        .get(APP, BUCKET, skey, GET_CAP)
         .await
         .unwrap()
         .unwrap_or_else(|| panic!("[{label}] streaming object get None"));
@@ -150,7 +154,7 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
         "[{label}] delete absent must be false"
     );
     assert!(
-        backend.get(APP, BUCKET, key).await.unwrap().is_none(),
+        backend.get(APP, BUCKET, key, GET_CAP).await.unwrap().is_none(),
         "[{label}] object lingered after delete"
     );
 
@@ -207,6 +211,110 @@ async fn run_large_stream(backend: &dyn Backend, label: &str) {
     assert!(got == expect, "[{label}] large byte-compare mismatch");
 
     backend.delete(APP, BUCKET, key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// C2 regression: buffered `get` must cap allocation by `max_bytes`.
+//
+// A backend that advertises a huge `Content-Length` (`meta.size`) must NOT
+// drive `Vec::with_capacity(meta.size)` — the buffered `get` rejects it as a
+// `TooLarge`-style error before allocating. A second backend whose advertised
+// size is small but whose body streams past the cap must also be rejected
+// (running-total guard). The streaming `get_stream` path is unaffected.
+// ---------------------------------------------------------------------------
+
+use std::time::SystemTime;
+
+use zeroship_plugin_storage::backend::{ListEntry, ObjectMeta};
+
+/// A fake backend whose `get_stream` reports a chosen `advertised_size` but
+/// only ever yields `body` bytes. Lets the C2 test assert both the
+/// pre-allocation check (advertised size) and the running-total check.
+#[derive(Debug)]
+struct LyingSizeBackend {
+    advertised_size: u64,
+    body: Vec<u8>,
+}
+
+struct OneShot(Option<Bytes>);
+
+#[async_trait::async_trait(?Send)]
+impl ChunkSource for OneShot {
+    async fn next_chunk(&mut self) -> Option<ChunkResult> {
+        self.0.take().map(Ok)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Backend for LyingSizeBackend {
+    async fn put_stream(
+        &self,
+        _app_id: &str,
+        _bucket: &str,
+        _key: &str,
+        _body: zeroship_plugin_storage::backend::BoxChunkSource,
+        _content_type: Option<&str>,
+    ) -> Result<u64, String> {
+        Ok(0)
+    }
+
+    async fn get_stream(
+        &self,
+        _app_id: &str,
+        _bucket: &str,
+        _key: &str,
+    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, String> {
+        let meta = ObjectMeta {
+            size: self.advertised_size,
+            content_type: None,
+            modified_at: SystemTime::UNIX_EPOCH,
+        };
+        let stream: BoxByteStream = Box::new(OneShot(Some(Bytes::from(self.body.clone()))));
+        Ok(Some((meta, stream)))
+    }
+
+    async fn delete(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    async fn list(&self, _: &str, _: &str, _: &str) -> Result<Vec<ListEntry>, String> {
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn buffered_get_rejects_oversized_content_length() {
+    compio::runtime::Runtime::new().expect("compio runtime").block_on(async {
+        // (a) Advertised size far above the cap → reject before allocating.
+        let huge = LyingSizeBackend {
+            advertised_size: 8 * 1024 * 1024 * 1024, // 8 GiB advertised
+            body: vec![0u8; 16],
+        };
+        let cap = 1024u64;
+        let err = huge
+            .get(APP, BUCKET, "k", cap)
+            .await
+            .expect_err("oversized Content-Length must be rejected, not buffered");
+        assert!(err.contains("exceeds buffered-get cap"), "unexpected error: {err}");
+
+        // (b) Advertised size lies small but the body streams past the cap →
+        // the running-total guard rejects it.
+        let liar = LyingSizeBackend {
+            advertised_size: 4,
+            body: vec![0u8; 4096],
+        };
+        let err = liar
+            .get(APP, BUCKET, "k", cap)
+            .await
+            .expect_err("body exceeding the cap must be rejected mid-stream");
+        assert!(err.contains("buffered-get cap"), "unexpected error: {err}");
+
+        // Under-cap object still succeeds.
+        let ok = LyingSizeBackend { advertised_size: 5, body: b"hello".to_vec() };
+        let (buf, meta) = ok.get(APP, BUCKET, "k", cap).await.unwrap().unwrap();
+        assert_eq!(buf, b"hello");
+        assert_eq!(meta.size, 5);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +449,11 @@ fn s3_parity_and_large_stream() {
             .block_on(async {
                 run_parity(&backend, "s3").await;
                 run_large_stream(&backend, "s3").await;
+                // C1: an error mid-multipart-upload must explicitly abort the
+                // upload (no orphaned parts, no process abort).
+                run_s3_mid_upload_abort(&backend).await;
+                // H2: a stream over the part/size limit fails fast + aborts.
+                run_s3_part_limit_fast_fail().await;
             });
     });
 
@@ -348,4 +461,120 @@ fn s3_parity_and_large_stream() {
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
+}
+
+/// A raw `compio_s3::S3Client` over the same MinIO bucket, for asserting that an
+/// aborted multipart leaves no orphaned upload.
+#[cfg(feature = "s3")]
+fn s3_raw_client() -> compio_s3::S3Client {
+    use compio_s3::{S3Config, S3Credentials};
+    let url = format!(
+        "s3://{MINIO_BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{MINIO_PORT}&region=us-east-1&style=path&dev_http=true&checksum=none"
+    );
+    let cfg = S3Config::parse_url(&url).expect("parse minio url");
+    compio_s3::S3Client::new(cfg, S3Credentials::new(MINIO_ACCESS, MINIO_SECRET, None))
+}
+
+/// A `ChunkSource` that yields `before_err` bytes (in 64 KiB chunks) and then
+/// returns an error — a stream that dies mid-upload after the multipart upload
+/// + first part(s) exist.
+#[cfg(feature = "s3")]
+struct ErrAfterChunks {
+    remaining: usize,
+    errored: bool,
+}
+
+#[cfg(feature = "s3")]
+#[async_trait::async_trait(?Send)]
+impl ChunkSource for ErrAfterChunks {
+    async fn next_chunk(&mut self) -> Option<ChunkResult> {
+        if self.remaining == 0 {
+            if self.errored {
+                return None;
+            }
+            self.errored = true;
+            return Some(Err("injected mid-upload chunk failure".to_string()));
+        }
+        let n = self.remaining.min(64 * 1024);
+        self.remaining -= n;
+        Some(Ok(Bytes::from(vec![0xEEu8; n])))
+    }
+}
+
+/// C1 regression (plugin-storage `S3::put_stream`): a mid-upload error must
+/// abort the multipart explicitly — no panic/process-abort, no orphaned upload.
+#[cfg(feature = "s3")]
+async fn run_s3_mid_upload_abort(backend: &zeroship_plugin_storage::S3) {
+    // 8 MiB part size; yield 1.25 parts then error → create_multipart + ≥1
+    // upload_part have run before the failure.
+    const PART_SIZE: usize = 8 * 1024 * 1024;
+    let obj_key = "c1-aborted.bin";
+    // Exact stored-key prefix: MinIO's ListMultipartUploads only surfaces an
+    // upload when the prefix reaches the key, not a parent directory prefix.
+    let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
+
+    // Precondition: the listing path is non-vacuous (it can see a live upload).
+    let raw = s3_raw_client();
+    {
+        let up = raw
+            .create_multipart(&key_prefix, "application/octet-stream")
+            .await
+            .expect("sentinel create_multipart");
+        let listed = raw.list_multipart_uploads(&key_prefix).await.expect("sentinel list");
+        assert!(!listed.is_empty(), "precondition: list must see in-progress upload");
+        raw.abort_multipart(&key_prefix, &up).await.expect("sentinel abort");
+    }
+
+    let src = ErrAfterChunks { remaining: PART_SIZE + PART_SIZE / 4, errored: false };
+    let res = backend
+        .put_stream(APP, BUCKET, obj_key, Box::new(src), None)
+        .await;
+    assert!(res.is_err(), "C1: mid-upload error must propagate (no panic/abort)");
+
+    let uploads = raw
+        .list_multipart_uploads(&key_prefix)
+        .await
+        .expect("C1: list multipart uploads");
+    assert!(
+        uploads.is_empty(),
+        "C1: mid-upload error left an orphaned multipart upload: {uploads:?}"
+    );
+}
+
+/// H2 regression: a stream that would exceed the configured max object size
+/// fails fast (and the C1-style abort leaves no orphaned upload).
+#[cfg(feature = "s3")]
+async fn run_s3_part_limit_fast_fail() {
+    use zeroship_plugin_storage::limits::MAX_STREAM_OBJECT_BYTES_ENV;
+    // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
+    // multipart upload) before the running total trips the cap — exercising the
+    // fast-fail AND the C1 abort of an already-started upload.
+    // SAFETY: single-threaded test; restored immediately after the call.
+    std::env::set_var(MAX_STREAM_OBJECT_BYTES_ENV, &(12 * 1024 * 1024).to_string());
+    let backend = make_s3();
+
+    // 16 MiB of data through a 12 MiB cap → trips after the first 8 MiB part.
+    let obj_key = "h2-toobig.bin";
+    let chunks: Vec<Bytes> = (0..256).map(|_| Bytes::from(vec![0x11u8; 64 * 1024])).collect();
+    let res = backend
+        .put_stream(APP, BUCKET, obj_key, Box::new(VecChunks::new(chunks)), None)
+        .await;
+    std::env::remove_var(MAX_STREAM_OBJECT_BYTES_ENV);
+    let err = res.expect_err("H2: oversized stream must fail fast");
+    assert!(
+        err.contains("max stream size") || err.contains("part limit"),
+        "H2: unexpected error: {err}"
+    );
+
+    // The fast-fail must still abort any started multipart upload (C1 path).
+    let raw = s3_raw_client();
+    let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
+    let uploads = raw
+        .list_multipart_uploads(&key_prefix)
+        .await
+        .expect("H2: list multipart uploads");
+    assert!(
+        uploads.is_empty(),
+        "H2: fast-failed upload left orphaned multipart(s): {uploads:?}"
+    );
 }

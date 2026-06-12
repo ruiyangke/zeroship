@@ -172,8 +172,9 @@ pub fn get(
         }
     };
 
+    let max_bytes = crate::limits::max_object_bytes();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend.get(&app_id, &bucket, &key).await {
+        match backend.get(&app_id, &bucket, &key, max_bytes).await {
             Ok(None) => OpResult::Completed {
                 op_id,
                 value: "null".into(),
