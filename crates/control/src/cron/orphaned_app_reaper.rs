@@ -108,11 +108,11 @@ pub async fn tick(state: &AppState) -> Result<ReaperReport, RegistryError> {
                 // Already gone (raced with an explicit delete) — nothing to do.
                 tracing::debug!(app_id = %id, "orphaned_app_reaper: app already gone");
             }
-            Err(PurgeError::Vfs(e)) => {
+            Err(PurgeError::Manifests(e)) => {
                 tracing::error!(
                     app_id = %id,
                     error = %e,
-                    "orphaned_app_reaper: VFS delete failed; skipping (retried next tick)"
+                    "orphaned_app_reaper: manifest delete failed; skipping (retried next tick)"
                 );
             }
             Err(PurgeError::Registry(e)) => {

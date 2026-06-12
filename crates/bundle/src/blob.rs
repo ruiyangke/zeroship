@@ -88,6 +88,33 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
 
     async fn has_blob(&self, hash: &str) -> Result<bool, BlobError>;
 
+    /// Stream a blob by hash into an already-open temp file while hashing,
+    /// returning the verified byte count. This is the gateway's hot-path
+    /// refill primitive: the caller (`DiskBlobCache::reserve_temp`) owns an
+    /// open `compio::fs::File` created with `create_new`, and the store
+    /// streams the object's bytes into it WITHOUT buffering the whole object
+    /// in memory.
+    ///
+    /// Contract:
+    /// - `out` is positioned at offset 0 and is the sole writer.
+    /// - bytes are size-checked against `expected_size` (when `Some`) and
+    ///   `max_bytes`; the stream is aborted the moment either is exceeded.
+    /// - SHA-256 of the streamed bytes is verified against `hash` BEFORE
+    ///   returning `Ok`. A mismatch is [`BlobError::HashMismatch`]; nothing
+    ///   the caller publishes can be corrupt.
+    /// - On any error the temp file's contents are meaningless and the
+    ///   caller MUST discard it (the `DiskBlobTemp` guard unlinks on drop).
+    ///
+    /// There is intentionally no default implementation: every backend must
+    /// provide a real, byte-verified streaming refill (no hidden buffering).
+    async fn get_blob_to_file(
+        &self,
+        hash: &str,
+        out: &compio::fs::File,
+        expected_size: Option<u64>,
+        max_bytes: u64,
+    ) -> Result<u64, BlobError>;
+
     /// Manifest storage — separate keyspace from blobs.
     async fn put_manifest(
         &self,
@@ -101,6 +128,18 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         app_id: &Uuid,
         deploy_hash: &str,
     ) -> Result<Bytes, BlobError>;
+
+    /// Delete every manifest object owned by `app_id` (the
+    /// `manifests/<app_id>/` keyspace). Called by control's `purge_app`
+    /// BEFORE the registry cascade, replacing the legacy VFS delete.
+    ///
+    /// Idempotent: an empty/absent prefix, a repeated call after a full
+    /// success, and objects disappearing between list and delete all return
+    /// `Ok(())`. Content-addressed blobs under `blobs/` are NOT app-owned and
+    /// are never deleted here (shared-blob GC is a separate design). A
+    /// partial failure after bounded retries is [`BlobError::Backend`], and
+    /// the caller aborts the purge before the DB cascade.
+    async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,10 +253,12 @@ impl BlobStore for LocalDiskBlobStore {
 
         // Idempotent: pre-existing blob → drain the reader (so the
         // caller's stream cursor is advanced past the entry) and
-        // report dedup. Content-addressing means the bytes on disk are
-        // identical to whatever the caller would have written.
+        // report dedup. Metadata presence is NOT proof of bytes:
+        // size+hash-verify the on-disk file before trusting the dedup
+        // (a truncated/corrupt local file must not silently dedup).
         if let Ok(meta) = compio::fs::metadata(&path).await {
             if meta.is_file() {
+                verify_local_blob(&path, hash).await?;
                 std::io::copy(reader, &mut std::io::sink())
                     .map_err(BlobError::Io)?;
                 return Ok(PutOutcome::Deduped);
@@ -318,6 +359,87 @@ impl BlobStore for LocalDiskBlobStore {
         }
     }
 
+    async fn get_blob_to_file(
+        &self,
+        hash: &str,
+        out: &compio::fs::File,
+        expected_size: Option<u64>,
+        max_bytes: u64,
+    ) -> Result<u64, BlobError> {
+        use compio::io::{AsyncReadAt, AsyncWriteAtExt};
+        use sha2::Digest;
+
+        if !validate_hash_format(hash) {
+            return Err(BlobError::Backend(format!(
+                "malformed blob hash {hash:?}: expected 64-char lowercase hex"
+            )));
+        }
+        let src = self.blob_path(hash);
+        // Open the source blob. The local store does NOT hard-link through
+        // the supplied handle (the contract: it copies bytes into `out`),
+        // so a future hard-link fast path would need a separate
+        // path-publish API.
+        let file = match compio::fs::File::open(&src).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BlobError::NotFound(hash.to_string()));
+            }
+            Err(e) => return Err(BlobError::Io(e)),
+        };
+
+        let mut hasher = sha2::Sha256::new();
+        let mut offset: u64 = 0;
+        let chunk_size: usize = 256 * 1024;
+        loop {
+            let buf: Vec<u8> = Vec::with_capacity(chunk_size);
+            let compio::BufResult(res, buf) = file.read_at(buf, offset).await;
+            let n = res.map_err(BlobError::Io)?;
+            if n == 0 {
+                break;
+            }
+            offset += n as u64;
+            if offset > max_bytes {
+                return Err(BlobError::Backend(format!(
+                    "blob exceeds max_bytes {max_bytes}"
+                )));
+            }
+            if let Some(exp) = expected_size {
+                if offset > exp {
+                    return Err(BlobError::Backend(format!(
+                        "blob exceeds expected size {exp}"
+                    )));
+                }
+            }
+            hasher.update(&buf[..n]);
+            let mut chunk: Vec<u8> = Vec::with_capacity(n);
+            chunk.extend_from_slice(&buf[..n]);
+            // `write_all_at` is `&mut self` on `&File`; bind a fresh shared
+            // ref and borrow it mutably (the OS file offset is irrelevant —
+            // positional writes).
+            let mut wref: &compio::fs::File = out;
+            let compio::BufResult(wres, _) =
+                wref.write_all_at(chunk, offset - n as u64).await;
+            wres.map_err(BlobError::Io)?;
+        }
+
+        if let Some(exp) = expected_size {
+            if offset != exp {
+                return Err(BlobError::Backend(format!(
+                    "size mismatch: expected {exp}, observed {offset}"
+                )));
+            }
+        }
+        let computed = hex::encode(hasher.finalize());
+        if computed != hash {
+            return Err(BlobError::HashMismatch {
+                expected: hash.to_string(),
+                got: computed,
+            });
+        }
+        out.sync_all().await?;
+        Ok(offset)
+    }
+
     async fn put_manifest(
         &self,
         app_id: &Uuid,
@@ -351,4 +473,43 @@ impl BlobStore for LocalDiskBlobStore {
             Err(e) => Err(BlobError::Io(e)),
         }
     }
+
+    async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError> {
+        let dir = self
+            .root
+            .join("manifests")
+            .join(app_id.to_string());
+        // `remove_dir_all` removes the whole `manifests/<app_id>/` subtree.
+        // An absent directory is success (idempotent). Content-addressed
+        // blobs live under `blobs/` and are untouched. compio::fs has no
+        // recursive remove; std::fs is fine here — purge is a control-plane
+        // op over a small manifest subtree, not a hot path (mirrors
+        // `LocalFs::delete`).
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(BlobError::Io(e)),
+        }
+    }
+}
+
+/// Size/hash-verify a local blob file before trusting a dedup hit. Returns
+/// `HashMismatch` (or a backend error) on any divergence so a truncated or
+/// tampered local file never silently dedups.
+async fn verify_local_blob(path: &std::path::Path, hash: &str) -> Result<(), BlobError> {
+    let data = match compio::fs::read(path).await {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(BlobError::NotFound(hash.to_string()));
+        }
+        Err(e) => return Err(BlobError::Io(e)),
+    };
+    let actual = sha256_hex(&data);
+    if actual != hash {
+        return Err(BlobError::HashMismatch {
+            expected: hash.to_string(),
+            got: actual,
+        });
+    }
+    Ok(())
 }

@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
-use zeroship_bundle::{BlobStore, BundleStore};
+use zeroship_bundle::BlobStore;
 
 pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};
@@ -90,10 +90,10 @@ pub struct AppState {
     pub registry: Registry,
     pub env_store: EnvStore,
     pub stripe_store: StripeStore,
-    pub vfs: Arc<dyn BundleStore + Send + Sync>,
-    /// Content-addressed blob store. Backs `.zship` ingestion. The
-    /// gateway reads asset bytes from its own `BlobStore` instance,
-    /// so no asset-serving HTTP shim lives here.
+    /// Content-addressed blob store. The SOLE deploy-artifact store: backs
+    /// `.zship` ingestion (blobs + manifests) and is the SAME store the
+    /// gateway and worker read. App purge deletes the per-app manifest
+    /// keyspace via `BlobStore::delete_app_manifests`.
     pub blob_store: Arc<dyn BlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs, ScopeDef};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore, ScopeDef};
 use zeroship_control::app_oauth_client::{
     self, client_id_for_app, redirect_uris_for_hosts,
 };
@@ -310,15 +310,12 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let vfs: Arc<dyn BundleStore + Send + Sync> =
-        Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
     let control_pg = Arc::new(pg(db_url).await);
 
     Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
-        vfs,
         blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new("test-master-key-deadbeefcafebabe".to_string()),

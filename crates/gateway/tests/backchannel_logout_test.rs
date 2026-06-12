@@ -302,6 +302,16 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
         Ok(false)
     }
 
+    async fn get_blob_to_file(
+        &self,
+        _hash: &str,
+        _out: &compio::fs::File,
+        _expected_size: Option<u64>,
+        _max_bytes: u64,
+    ) -> Result<u64, zeroship_bundle::BlobError> {
+        Err(zeroship_bundle::BlobError::NotFound("unused".into()))
+    }
+
     async fn put_manifest(
         &self,
         _app_id: &Uuid,
@@ -317,6 +327,13 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
         _deploy_hash: &str,
     ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
+    }
+
+    async fn delete_app_manifests(
+        &self,
+        _app_id: &Uuid,
+    ) -> Result<(), zeroship_bundle::BlobError> {
+        Ok(())
     }
 }
 

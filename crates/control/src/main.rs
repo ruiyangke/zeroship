@@ -11,7 +11,7 @@ use zeroship_core::config::{
     resolve_overlay_string, validate_master_key_material, CheckConfigReport, CheckFormat,
     CheckValue,
 };
-use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
+use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_control::{
     admin_handlers, api, bootstrap_console, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
@@ -407,6 +407,17 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let blob_store_root = cli.blob_store;
+    // `s3://…` → remote S3 store (control writes deploys through the SAME
+    // store gateway/worker read), bare path → local disk (dev default).
+    // Validated now so a bad `s3://` URL fails fast.
+    let store_url = match StoreUrl::parse(&blob_store_root) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("control: invalid --blob-store: {e}");
+            std::process::exit(2);
+        }
+    };
+    let blob_store_is_remote = store_url.is_remote();
     let control_key = zeroship_core::config::obtain_secret(
         "CONTROL_KEY / --control-key",
         &cli.control_key,
@@ -689,6 +700,7 @@ fn main() -> std::io::Result<()> {
             );
         }
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
+        report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
             "deploy_tmp_dir",
             CheckValue::Plain(deploy_tmp_dir.display().to_string()),
@@ -761,20 +773,14 @@ fn main() -> std::io::Result<()> {
         .await
         .expect("failed to connect to database");
 
-    let vfs = Arc::new(
-        LocalFs::new(&blob_store_root).expect("failed to initialise bundle store"),
-    ) as Arc<dyn BundleStore + Send + Sync>;
-
-    // BlobStore lives alongside the legacy BundleStore on the same
-    // root. New `.zship` deploys land in `<blob_store_root>/blobs/` and
-    // `<blob_store_root>/manifests/`; legacy `<blob_store_root>/<app_id>/...`
-    // files stay where they are until the old BundleStore path is
-    // retired.
-    let blob_root = PathBuf::from(&blob_store_root);
-    let blob_store: Arc<dyn BlobStore> = Arc::new(
-        LocalDiskBlobStore::new(blob_root)
-            .expect("failed to initialise blob store"),
-    );
+    // The content-addressed `BlobStore` is the ONLY deploy-artifact store.
+    // `.zship` deploys land in `{prefix}/blobs/` + `{prefix}/manifests/`;
+    // control writes through the SAME store gateway + worker read (local disk
+    // for dev, S3 for production). The legacy per-app `BundleStore`/VFS is
+    // gone — app purge now deletes the app's manifest keyspace via
+    // `BlobStore::delete_app_manifests`.
+    let blob_store: Arc<dyn BlobStore> =
+        build_blob_store(&store_url).expect("failed to initialise blob store");
 
     if !legacy_keys.is_empty() {
         tracing::info!(
@@ -895,7 +901,6 @@ fn main() -> std::io::Result<()> {
         registry,
         env_store,
         stripe_store,
-        vfs,
         blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),

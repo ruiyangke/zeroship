@@ -154,51 +154,99 @@ pub(super) async fn fetch_static_bytes(
     }
 }
 
-/// Outcome of `ensure_disk_path` — the streaming path needs the file
-/// available locally, but on a backend-fetch fallback we may already
-/// have the bytes in hand and a disk insert may have failed. Callers
-/// fall back to a buffered response in that case.
+/// Outcome of `ensure_disk_path` — the streaming serve path needs the blob
+/// on disk. The streaming refill verifies bytes into a temp file and
+/// publishes it under the content-addressed path; there is no in-memory
+/// fallback (a refill failure is `Unavailable`, never a buffered serve of
+/// unverified bytes).
 pub(super) enum DiskAvailability {
     /// File is on disk at this path; safe to mmap or stream.
     OnDisk(PathBuf),
-    /// File is not on disk (insert failed) but we have the bytes —
-    /// caller must serve them buffered.
-    InMemoryOnly(bytes::Bytes),
     NotFound,
     Unavailable(String),
 }
 
-/// Make sure the blob is available on the disk LRU and return its
-/// path. On a disk miss we fetch from the backend and write to disk;
-/// if the disk insert fails (e.g. ENOSPC) we still hand back the
-/// bytes so the caller can serve a buffered response. The mem cache
-/// is intentionally NOT touched here — large blobs that take this
-/// path would otherwise either bypass the per-entry budget cap or
-/// silently fail to cache, neither of which is useful.
+/// Make sure the blob is available on the disk LRU and return its path,
+/// refilling from the backend on a miss by STREAMING the object through an
+/// already-open temp file (`reserve_temp` → `BlobStore::get_blob_to_file` →
+/// `publish_temp`) — never buffering the whole object in memory.
+///
+/// Concurrent cold misses on the same hash are collapsed by a per-process
+/// singleflight: the first caller leads the download; the rest await it and
+/// then re-check the disk cache. Duplicate downloads remain safe (temp
+/// uniqueness + no-clobber publish + final-file verification), so this is an
+/// optimisation, not a correctness requirement.
+///
+/// `expected_size` is the exact asset/variant size from the manifest;
+/// `MAX_BLOB_BYTES` bounds the stream so a hostile/corrupt backend cannot
+/// stream us out of disk.
 pub(super) async fn ensure_disk_path(
     disk: &crate::blob_cache::DiskBlobCache,
     store: &dyn zeroship_bundle::BlobStore,
     hash: &str,
+    expected_size: u64,
 ) -> DiskAvailability {
     if let Some(path) = disk.local_path(hash) {
         return DiskAvailability::OnDisk(path);
     }
-    match store.get_blob(hash).await {
-        Ok(b) => match disk.insert(hash, &b) {
-            Ok(()) => match disk.local_path(hash) {
-                Some(p) => DiskAvailability::OnDisk(p),
-                // Insert succeeded but the LRU dropped it on its way
-                // back out (e.g. another concurrent insert pushed it
-                // past the budget). Fall back to in-memory.
-                None => DiskAvailability::InMemoryOnly(b),
-            },
-            Err(e) => {
-                tracing::warn!(hash = %hash, error = %e, "gateway: disk cache insert failed");
-                DiskAvailability::InMemoryOnly(b)
+    // Coalesce concurrent cold misses. Loop so a follower that wakes to find
+    // the leader's refill failed can re-attempt as a fresh leader.
+    loop {
+        match disk.begin_refill(hash) {
+            crate::blob_cache::RefillRole::Leader(_leader) => {
+                // We own this refill; `_leader` deregisters on drop and wakes
+                // followers regardless of outcome.
+                return refill_disk_streaming(disk, store, hash, expected_size).await;
             }
-        },
-        Err(zeroship_bundle::BlobError::NotFound(_)) => DiskAvailability::NotFound,
-        Err(e) => DiskAvailability::Unavailable(e.to_string()),
+            crate::blob_cache::RefillRole::Follower(rx) => {
+                // Await the leader (Err = leader's sender dropped = done).
+                let _ = rx.recv_async().await;
+                if let Some(path) = disk.local_path(hash) {
+                    return DiskAvailability::OnDisk(path);
+                }
+                // Leader finished but the blob isn't on disk (its refill
+                // failed, or the entry was evicted). Re-loop: we'll either
+                // become the new leader or follow a newer attempt.
+            }
+        }
+    }
+}
+
+/// Stream one blob from the backend into the disk cache via the open-temp-file
+/// refill path. Caller holds singleflight leadership.
+async fn refill_disk_streaming(
+    disk: &crate::blob_cache::DiskBlobCache,
+    store: &dyn zeroship_bundle::BlobStore,
+    hash: &str,
+    expected_size: u64,
+) -> DiskAvailability {
+    let temp = match disk.reserve_temp(hash).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(hash = %hash, error = %e, "gateway: reserve_temp failed");
+            return DiskAvailability::Unavailable(e.to_string());
+        }
+    };
+    let verified = match store
+        .get_blob_to_file(
+            hash,
+            temp.file(),
+            Some(expected_size),
+            zeroship_bundle::MAX_BLOB_BYTES,
+        )
+        .await
+    {
+        Ok(n) => n,
+        // `temp` drops on early return → unlinks.
+        Err(zeroship_bundle::BlobError::NotFound(_)) => return DiskAvailability::NotFound,
+        Err(e) => return DiskAvailability::Unavailable(e.to_string()),
+    };
+    match disk.publish_temp(hash, temp, verified).await {
+        Ok(path) => DiskAvailability::OnDisk(path),
+        Err(e) => {
+            tracing::warn!(hash = %hash, error = %e, "gateway: publish_temp failed");
+            DiskAvailability::Unavailable(e.to_string())
+        }
     }
 }
 
@@ -227,14 +275,15 @@ async fn serve_static_streaming(
     etag: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    let path = match ensure_disk_path(&state.disk_cache, &*state.blob_store, &chosen.hash).await {
+    let path = match ensure_disk_path(
+        &state.disk_cache,
+        &*state.blob_store,
+        &chosen.hash,
+        chosen.size,
+    )
+    .await
+    {
         DiskAvailability::OnDisk(p) => p,
-        DiskAvailability::InMemoryOnly(b) => {
-            // Disk fill failed — fall back to buffered. Skip the
-            // mem cache: a multi-MB blob would either evict
-            // everything else or silently fail the budget check.
-            return build_buffered_response(req, hit, chosen, etag, &b, wall_start);
-        }
         DiskAvailability::NotFound => {
             return HttpResponse::NotFound()
                 .json(&serde_json::json!({"error": "asset bytes missing"}));
@@ -618,6 +667,49 @@ mod tests {
         async fn has_blob(&self, hash: &str) -> Result<bool, BlobError> {
             Ok(self.blobs.lock().unwrap().contains_key(hash))
         }
+        async fn get_blob_to_file(
+            &self,
+            hash: &str,
+            out: &compio::fs::File,
+            expected_size: Option<u64>,
+            max_bytes: u64,
+        ) -> Result<u64, BlobError> {
+            use compio::io::AsyncWriteAtExt;
+            // Count as a backend fetch (same bookkeeping the old get_blob
+            // miss path used) so the cache short-circuit assertions hold.
+            *self
+                .get_calls
+                .lock()
+                .unwrap()
+                .entry(hash.to_string())
+                .or_insert(0) += 1;
+            if *self.force_unavailable.lock().unwrap() {
+                return Err(BlobError::Backend("synthetic outage".into()));
+            }
+            let bytes = self
+                .blobs
+                .lock()
+                .unwrap()
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| BlobError::NotFound(hash.to_string()))?;
+            let len = bytes.len() as u64;
+            if len > max_bytes {
+                return Err(BlobError::Backend(format!("exceeds max_bytes {max_bytes}")));
+            }
+            if let Some(exp) = expected_size {
+                if len != exp {
+                    return Err(BlobError::Backend(format!(
+                        "size mismatch: expected {exp}, observed {len}"
+                    )));
+                }
+            }
+            let mut fref: &compio::fs::File = out;
+            let compio::BufResult(res, _) = fref.write_all_at(bytes.to_vec(), 0).await;
+            res.map_err(|e| BlobError::Backend(e.to_string()))?;
+            out.sync_all().await.map_err(BlobError::Io)?;
+            Ok(len)
+        }
         async fn put_manifest(
             &self,
             _app_id: &uuid::Uuid,
@@ -631,6 +723,9 @@ mod tests {
             _app_id: &uuid::Uuid,
             _deploy_hash: &str,
         ) -> Result<bytes::Bytes, BlobError> {
+            unimplemented!("not used by the gateway")
+        }
+        async fn delete_app_manifests(&self, _app_id: &uuid::Uuid) -> Result<(), BlobError> {
             unimplemented!("not used by the gateway")
         }
     }
@@ -806,7 +901,7 @@ mod tests {
         // calling the backend.
         disk.insert(&hash, &payload).expect("insert");
 
-        match ensure_disk_path(&disk, &store, &hash).await {
+        match ensure_disk_path(&disk, &store, &hash, payload.len() as u64).await {
             DiskAvailability::OnDisk(p) => assert!(p.exists(), "real path"),
             other => panic!("expected OnDisk, got {other:?}"),
         }
@@ -827,7 +922,7 @@ mod tests {
             .collect();
         store.put(&hash, &payload);
 
-        match ensure_disk_path(&disk, &store, &hash).await {
+        match ensure_disk_path(&disk, &store, &hash, payload.len() as u64).await {
             DiskAvailability::OnDisk(p) => {
                 assert!(p.exists(), "backend fill wrote the file");
                 let on_disk = std::fs::read(&p).expect("read back");
@@ -844,7 +939,7 @@ mod tests {
     async fn ensure_disk_path_propagates_not_found() {
         let (disk, root) = fresh_disk_cache("ensure-404");
         let store = MockBlobStore::new();
-        match ensure_disk_path(&disk, &store, &hex_hash(0x99)).await {
+        match ensure_disk_path(&disk, &store, &hex_hash(0x99), 4096).await {
             DiskAvailability::NotFound => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -858,7 +953,7 @@ mod tests {
         let hash = hex_hash(0x33);
         store.put(&hash, b"x");
         store.set_unavailable(true);
-        match ensure_disk_path(&disk, &store, &hash).await {
+        match ensure_disk_path(&disk, &store, &hash, 1).await {
             DiskAvailability::Unavailable(_) => {}
             other => panic!("expected Unavailable, got {other:?}"),
         }
@@ -1083,7 +1178,6 @@ mod tests {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::OnDisk(p) => f.debug_tuple("OnDisk").field(p).finish(),
-                Self::InMemoryOnly(b) => f.debug_tuple("InMemoryOnly").field(&b.len()).finish(),
                 Self::NotFound => f.write_str("NotFound"),
                 Self::Unavailable(s) => f.debug_tuple("Unavailable").field(s).finish(),
             }

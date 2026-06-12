@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_bundle::{
-    AssetEntry, AuthConfig, BlobStore, BundleStore, LocalDiskBlobStore, LocalFs, Manifest,
+    AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest,
     ManifestMetadata, ScopeDef, WorkerCode,
 };
 use zeroship_control::{
@@ -255,9 +255,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
 
     let blob_store: Arc<dyn BlobStore> = blob_store_concrete.clone();
-    let vfs: Arc<dyn BundleStore + Send + Sync> = Arc::new(
-        LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
-    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -273,7 +270,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         registry,
         env_store,
         stripe_store,
-        vfs,
         blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),

@@ -17,6 +17,10 @@ compio = { workspace = true, features = ["fs"] }
 zstd = { workspace = true }
 tar = { workspace = true }
 tracing = { workspace = true }
+compio-s3 = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true, features = ["fs", "macros", "runtime"] }
 
 [lints]
 workspace = true

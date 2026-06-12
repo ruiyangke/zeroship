@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
+use zeroship_bundle::{BlobError, BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::orphaned_app_reaper;
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -43,30 +43,24 @@ struct Fixture {
     state: Arc<AppState>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
-    bundle_root: PathBuf,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.blob_root);
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
-        let _ = std::fs::remove_dir_all(&self.bundle_root);
     }
 }
 
 async fn build_state(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
-    let bundle_root = tmpdir(&format!("vfs-{label}"));
-
     let registry = Registry::new(db_url).await.expect("registry");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
 
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let vfs: Arc<dyn BundleStore + Send + Sync> =
-        Arc::new(LocalFs::new(bundle_root.clone()).expect("vfs"));
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -82,7 +76,6 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         registry,
         env_store,
         stripe_store,
-        vfs,
         blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
@@ -115,7 +108,6 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         state,
         blob_root,
         deploy_tmp_dir,
-        bundle_root,
     }
 }
 
@@ -185,15 +177,15 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
     let name = format!("orphan-{}", &app_id.simple().to_string()[..12]);
     insert_app(state, &app_id, &name, false, "10 minutes").await;
 
-    // Write a bundle to the VFS for this app.
-    let app_id_str = app_id.to_string();
+    // Write a manifest for this app so purge has an artifact to delete.
     state
-        .vfs
-        .put(&app_id_str, b"bundle-bytes")
-        .expect("put bundle");
+        .blob_store
+        .put_manifest(&app_id, "deployone", br#"{"v":1}"#)
+        .await
+        .expect("put manifest");
     assert!(
-        state.vfs.exists(&app_id_str).expect("exists"),
-        "precondition: bundle exists"
+        state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
+        "precondition: manifest exists"
     );
 
     let report = orphaned_app_reaper::tick(state).await.expect("reaper tick");
@@ -208,8 +200,11 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
         "owner-less app row must be deleted"
     );
     assert!(
-        !state.vfs.exists(&app_id_str).expect("exists after"),
-        "owner-less app bundle must be deleted from the VFS"
+        matches!(
+            state.blob_store.get_manifest(&app_id, "deployone").await,
+            Err(BlobError::NotFound(_))
+        ),
+        "owner-less app manifests must be deleted from the blob store"
     );
 }
 
@@ -324,11 +319,11 @@ async fn purge_app_removes_db_row_and_vfs_blob() {
     let name = format!("purge-{}", &app_id.simple().to_string()[..12]);
     insert_app(state, &app_id, &name, false, "1 minute").await;
 
-    let app_id_str = app_id.to_string();
     state
-        .vfs
-        .put(&app_id_str, b"purge-bundle")
-        .expect("put bundle");
+        .blob_store
+        .put_manifest(&app_id, "deployone", br#"{"v":1}"#)
+        .await
+        .expect("put manifest");
 
     let deleted = api::purge_app(state, &app_id).await.expect("purge_app");
     assert!(deleted, "purge_app reports the DB row was deleted");
@@ -338,7 +333,10 @@ async fn purge_app_removes_db_row_and_vfs_blob() {
         "purge_app must delete the DB row"
     );
     assert!(
-        !state.vfs.exists(&app_id_str).expect("exists after"),
-        "purge_app must delete the VFS bundle"
+        matches!(
+            state.blob_store.get_manifest(&app_id, "deployone").await,
+            Err(BlobError::NotFound(_))
+        ),
+        "purge_app must delete the app's manifests"
     );
 }

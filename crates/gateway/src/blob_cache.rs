@@ -17,6 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use bytes::Bytes;
 use lru::LruCache;
+use sha2::{Digest, Sha256};
 
 /// Bounded-by-bytes LRU cache keyed by blob hash. Insert of a single
 /// entry larger than the budget is a no-op so one giant asset can't
@@ -143,6 +144,96 @@ pub struct DiskBlobCache {
     root: PathBuf,
     state: Mutex<DiskState>,
     max_bytes: u64,
+    /// Per-process singleflight registry keyed by blob hash. A cold refill
+    /// registers a sender here; concurrent refills of the SAME hash clone the
+    /// receiver and await it instead of launching their own download. When
+    /// the leader finishes it drops the sender, waking every follower, which
+    /// then re-checks the disk cache. Duplicate downloads remain safe
+    /// (temp-uniqueness + no-clobber publish + verify); this just avoids them
+    /// on the common concurrent-miss path.
+    inflight: InflightMap,
+}
+
+/// Shared singleflight registry. Held both by the cache and (cloned) by each
+/// `RefillLeader` so the leader can deregister itself on drop without owning
+/// the whole cache.
+type InflightMap =
+    std::sync::Arc<Mutex<std::collections::HashMap<String, flume::Receiver<()>>>>;
+
+/// Guard returned to a refill LEADER. Holds the sender open for the duration
+/// of the refill; dropping it (on success, error, or panic) wakes every
+/// follower and removes the inflight entry.
+pub struct RefillLeader {
+    inflight: InflightMap,
+    hash: String,
+    _sender: flume::Sender<()>,
+}
+
+impl Drop for RefillLeader {
+    fn drop(&mut self) {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inflight.remove(&self.hash);
+        // `_sender` drops after this, closing the channel and waking
+        // followers blocked on `recv_async`.
+    }
+}
+
+/// Outcome of `begin_refill`: either this caller is the LEADER (and must do
+/// the download), or a FOLLOWER that should await the leader then re-check.
+pub enum RefillRole {
+    /// This caller owns the refill; drop the guard when done.
+    Leader(RefillLeader),
+    /// Another caller is already refilling; await this then re-check disk.
+    Follower(flume::Receiver<()>),
+}
+
+/// A reserved, already-open temp file under the cache root, handed to the
+/// blob store's streaming refill (`BlobStore::get_blob_to_file`). The store
+/// streams + byte-verifies into `file`; the gateway then publishes it under
+/// the content-addressed final path.
+///
+/// Unlinks its temp file on drop UNLESS it was published (`publish_temp`
+/// takes ownership and clears `path`). This is what guarantees a dropped /
+/// failed refill never leaves an orphan in the cache root.
+pub struct DiskBlobTemp {
+    /// Unique temp path under the cache root. `None` once published/disarmed.
+    path: Option<PathBuf>,
+    /// The open compio file the store writes into.
+    file: compio::fs::File,
+}
+
+impl DiskBlobTemp {
+    /// Borrow the open file to hand to `BlobStore::get_blob_to_file`. The
+    /// store + S3 client never receive a raw path.
+    #[must_use]
+    pub const fn file(&self) -> &compio::fs::File {
+        &self.file
+    }
+
+    /// The temp path, for the no-clobber publish primitive.
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("temp path consumed before use")
+    }
+}
+
+impl Drop for DiskBlobTemp {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            // Best-effort unlink of an unpublished temp. A failure here only
+            // leaves a stray temp file (no correctness impact — temp names
+            // are unique and never serve as a final path).
+            if let Err(e) = std::fs::remove_file(&p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(path = ?p, error = %e, "gateway: temp blob unlink failed");
+                }
+            }
+        }
+    }
 }
 
 struct DiskState {
@@ -167,6 +258,7 @@ impl DiskBlobCache {
                 current_bytes: 0,
             }),
             max_bytes,
+            inflight: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -275,6 +367,205 @@ impl DiskBlobCache {
         Ok(())
     }
 
+    /// Reserve a unique, already-open temp file under the cache root for a
+    /// streaming refill. The caller hands `temp.file()` to
+    /// `BlobStore::get_blob_to_file`, which streams + byte-verifies the blob
+    /// into it WITHOUT buffering the whole object. On success the caller
+    /// publishes via [`Self::publish_temp`]; on any error it drops the
+    /// `DiskBlobTemp`, which unlinks the temp.
+    ///
+    /// The temp lives directly under the hash shard directory so the eventual
+    /// hard-link publish is same-directory (never cross-device).
+    pub async fn reserve_temp(&self, hash: &str) -> std::io::Result<DiskBlobTemp> {
+        let final_path = self.path_for(hash);
+        if let Some(parent) = final_path.parent() {
+            compio::fs::create_dir_all(parent).await?;
+        }
+        let tmp = final_path.with_extension(unique_tmp_suffix());
+        let file = compio::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create_new(true)
+            .open(&tmp)
+            .await?;
+        Ok(DiskBlobTemp {
+            path: Some(tmp),
+            file,
+        })
+    }
+
+    /// Publish a verified temp file under the content-addressed final path,
+    /// returning the path the static response should serve.
+    ///
+    /// The temp's bytes were already size/hash-verified by the store, so this
+    /// only has to commit them with a no-clobber primitive and keep the LRU
+    /// byte accounting correct:
+    ///
+    /// 1. `sync_all` + close the temp.
+    /// 2. If the hash is already a live LRU entry whose final file exists,
+    ///    promote it and discard the temp (a concurrent refill won).
+    /// 3. Otherwise hard-link temp → final (same directory, so no
+    ///    cross-device), then unlink temp. If hard-link is unsupported, copy
+    ///    into a freshly `create_new`'d final file. NEVER overwrite-rename.
+    /// 4. If the final path already exists, size/hash-verify it: valid ⇒
+    ///    trust it, discard temp; invalid ⇒ unlink the corrupt final and
+    ///    retry the no-clobber publish.
+    /// 5. Update byte accounting exactly once for the file that wins,
+    ///    subtracting any replaced corrupt entry first.
+    pub async fn publish_temp(
+        &self,
+        hash: &str,
+        temp: DiskBlobTemp,
+        verified_size: u64,
+    ) -> std::io::Result<PathBuf> {
+        // 1. Durably flush + close the temp before we link it into place.
+        temp.file.sync_all().await?;
+        // Take ownership of the temp path so its Drop does NOT unlink the
+        // file out from under the publish; we manage it explicitly here.
+        let mut temp = temp;
+        let temp_path = temp.path.take().expect("temp path present at publish");
+        // Closing the file: drop the compio handle now that it's synced.
+        drop(temp);
+
+        let final_path = self.path_for(hash);
+
+        // 2. Fast path: another refill already published this hash.
+        {
+            let mut state = self.lock_state();
+            if state.lru.get(hash).is_some() && final_path.exists() {
+                drop(state);
+                let _ = std::fs::remove_file(&temp_path);
+                return Ok(final_path);
+            }
+        }
+
+        // 3/4. No-clobber publish with final-file verification.
+        let mut size_delta_old: Option<u64> = None;
+        loop {
+            match std::fs::hard_link(&temp_path, &final_path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&temp_path);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Final already exists — verify it.
+                    match verify_file(&final_path, hash) {
+                        Ok(()) => {
+                            // Valid existing file wins; discard our temp.
+                            let _ = std::fs::remove_file(&temp_path);
+                            break;
+                        }
+                        Err(_) => {
+                            // Corrupt final — drop its bytes from accounting,
+                            // unlink it, and retry the no-clobber publish.
+                            let mut state = self.lock_state();
+                            if let Some(old) = state.lru.pop(hash) {
+                                state.current_bytes = state.current_bytes.saturating_sub(old);
+                                size_delta_old = Some(old);
+                            }
+                            drop(state);
+                            let _ = std::fs::remove_file(&final_path);
+                            continue;
+                        }
+                    }
+                }
+                Err(e) if is_hardlink_unsupported(&e) => {
+                    // Hard-link unsupported on this FS — copy into a freshly
+                    // created final file (no-clobber via create_new).
+                    match copy_no_clobber(&temp_path, &final_path) {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(&temp_path);
+                            break;
+                        }
+                        Err(ce) if ce.kind() == std::io::ErrorKind::AlreadyExists => {
+                            match verify_file(&final_path, hash) {
+                                Ok(()) => {
+                                    let _ = std::fs::remove_file(&temp_path);
+                                    break;
+                                }
+                                Err(_) => {
+                                    let _ = std::fs::remove_file(&final_path);
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(ce) => {
+                            let _ = std::fs::remove_file(&temp_path);
+                            return Err(ce);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(e);
+                }
+            }
+        }
+
+        // 5. Byte accounting — exactly once for the winning final file.
+        // Evict to fit, subtracting any corrupt entry we already removed.
+        self.account_published(hash, verified_size, size_delta_old);
+        Ok(final_path)
+    }
+
+    /// Claim singleflight leadership for refilling `hash`, or return a
+    /// receiver to await an in-progress refill. The first caller becomes the
+    /// `Leader` and must perform the download; concurrent callers become
+    /// `Follower`s that await the leader and then re-check the disk cache.
+    pub fn begin_refill(&self, hash: &str) -> RefillRole {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(rx) = inflight.get(hash) {
+            return RefillRole::Follower(rx.clone());
+        }
+        // Bounded(0): we never send; the channel is a drop-to-wake signal.
+        let (tx, rx) = flume::bounded(0);
+        inflight.insert(hash.to_string(), rx);
+        RefillRole::Leader(RefillLeader {
+            inflight: std::sync::Arc::clone(&self.inflight),
+            hash: hash.to_string(),
+            _sender: tx,
+        })
+    }
+
+    /// Insert/promote LRU bookkeeping for a freshly published final file,
+    /// evicting oldest entries to stay within budget. `already_subtracted`
+    /// is `Some(old_size)` if a corrupt prior entry's bytes were already
+    /// removed during the publish retry (so we don't double-subtract).
+    fn account_published(&self, hash: &str, size: u64, already_subtracted: Option<u64>) {
+        let mut state = self.lock_state();
+        // If the entry is still tracked (and wasn't the corrupt one we
+        // already popped), subtract its old size before re-adding.
+        if already_subtracted.is_none() {
+            if let Some(old) = state.lru.pop(hash) {
+                state.current_bytes = state.current_bytes.saturating_sub(old);
+            }
+        }
+        while state.current_bytes + size > self.max_bytes {
+            match state.lru.pop_lru() {
+                Some((evicted_hash, evicted_size)) => {
+                    if evicted_hash == hash {
+                        // Don't evict the entry we're publishing.
+                        state.lru.put(evicted_hash, evicted_size);
+                        break;
+                    }
+                    state.current_bytes = state.current_bytes.saturating_sub(evicted_size);
+                    let p = self.path_for(&evicted_hash);
+                    if let Err(e) = std::fs::remove_file(&p) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(path = ?p, error = %e, "gateway: disk cache evict — failed to remove");
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+        state.current_bytes += size;
+        state.lru.put(hash.to_string(), size);
+    }
+
     /// Total bytes currently tracked across all entries.
     #[must_use]
     pub fn current_bytes(&self) -> u64 {
@@ -321,6 +612,49 @@ fn unique_tmp_suffix() -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("tmp.{pid}.{n}")
+}
+
+/// Size/hash-verify an existing final file before trusting it during a
+/// publish race. Returns an error on any divergence so a corrupt or
+/// truncated final file is never promoted.
+fn verify_file(path: &Path, hash: &str) -> std::io::Result<()> {
+    let data = std::fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let actual = hex::encode(hasher.finalize());
+    if actual == hash {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("blob hash mismatch: expected {hash}, got {actual}"),
+        ))
+    }
+}
+
+/// Copy `src` into a freshly created `dst` (no-clobber: fails with
+/// `AlreadyExists` if `dst` exists). Used only when hard-link is unsupported.
+fn copy_no_clobber(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = std::fs::read(src)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    f.write_all(&bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Whether a `hard_link` error means the filesystem doesn't support links
+/// (EPERM/ENOSYS/Unsupported), in which case we fall back to a copy.
+fn is_hardlink_unsupported(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    // EPERM (1) and ENOSYS (38 on Linux) are the portable "links not allowed
+    // here" signals. Matching by raw code keeps this libc-free.
+    matches!(e.raw_os_error(), Some(1) | Some(38))
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +955,188 @@ mod tests {
         assert!(cache.local_path(&hash).is_none(), "no entry");
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.current_bytes(), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming refill: reserve_temp / publish_temp / begin_refill
+    // -----------------------------------------------------------------------
+
+    /// Real sha256 hex of `data` — needed for the publish verify-on-conflict
+    /// path (synthetic `h()` hashes wouldn't verify).
+    fn real_hash(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hex::encode(hasher.finalize())
+    }
+
+    /// Stream `bytes` into a reserved temp via direct writes (stands in for
+    /// `BlobStore::get_blob_to_file`), then return the temp ready to publish.
+    async fn fill_temp(cache: &DiskBlobCache, hash: &str, bytes: &[u8]) -> DiskBlobTemp {
+        use compio::io::AsyncWriteAtExt;
+        let temp = cache.reserve_temp(hash).await.expect("reserve");
+        let mut fref: &compio::fs::File = temp.file();
+        let compio::BufResult(res, _) = fref.write_all_at(bytes.to_vec(), 0).await;
+        res.expect("write temp");
+        temp
+    }
+
+    #[compio::test]
+    async fn reserve_publish_round_trip() {
+        let root = tmp_root("reserve-publish");
+        let cache = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("new");
+        let payload = b"streamed blob bytes";
+        let hash = real_hash(payload);
+
+        let temp = fill_temp(&cache, &hash, payload).await;
+        let final_path = cache
+            .publish_temp(&hash, temp, payload.len() as u64)
+            .await
+            .expect("publish");
+        assert!(final_path.exists(), "final published");
+        assert_eq!(std::fs::read(&final_path).unwrap(), payload, "bytes match");
+        // Published entry is in the LRU and serves via local_path.
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_bytes(), payload.len() as u64);
+        assert_eq!(cache.local_path(&hash), Some(final_path));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn dropped_temp_unlinks_and_does_not_publish() {
+        let root = tmp_root("drop-temp");
+        let cache = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("new");
+        let hash = real_hash(b"abandoned");
+        let temp = fill_temp(&cache, &hash, b"abandoned").await;
+        let temp_path = temp.path().to_path_buf();
+        assert!(temp_path.exists(), "temp present before drop");
+        drop(temp);
+        assert!(!temp_path.exists(), "temp unlinked on drop");
+        assert_eq!(cache.len(), 0, "nothing published");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn publish_no_clobber_trusts_valid_existing_final() {
+        // Simulate a duplicate download: a valid final file already exists
+        // (no LRU entry — e.g. another process wrote it). publish_temp must
+        // verify + trust it, discard our temp, and NOT corrupt the file.
+        let root = tmp_root("no-clobber-valid");
+        let cache = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("new");
+        let payload = b"shared content-addressed bytes";
+        let hash = real_hash(payload);
+
+        // Pre-create the final file out-of-band (valid bytes), no LRU entry.
+        let final_path = cache.path_for(&hash);
+        std::fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        std::fs::write(&final_path, payload).unwrap();
+
+        let temp = fill_temp(&cache, &hash, payload).await;
+        let temp_path = temp.path().to_path_buf();
+        let published = cache
+            .publish_temp(&hash, temp, payload.len() as u64)
+            .await
+            .expect("publish over valid existing");
+        assert_eq!(published, final_path);
+        assert!(!temp_path.exists(), "our temp discarded");
+        assert_eq!(std::fs::read(&final_path).unwrap(), payload, "final intact");
+        // Byte accounting added once for the winning file.
+        assert_eq!(cache.current_bytes(), payload.len() as u64);
+        assert_eq!(cache.len(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn publish_replaces_corrupt_existing_final() {
+        // A corrupt final file (wrong bytes for the hash) must be unlinked
+        // and replaced by the verified temp.
+        let root = tmp_root("no-clobber-corrupt");
+        let cache = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("new");
+        let payload = b"the real bytes for this hash";
+        let hash = real_hash(payload);
+
+        let final_path = cache.path_for(&hash);
+        std::fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        std::fs::write(&final_path, b"CORRUPT DIFFERENT BYTES").unwrap();
+
+        let temp = fill_temp(&cache, &hash, payload).await;
+        let published = cache
+            .publish_temp(&hash, temp, payload.len() as u64)
+            .await
+            .expect("publish over corrupt existing");
+        assert_eq!(published, final_path);
+        assert_eq!(
+            std::fs::read(&final_path).unwrap(),
+            payload,
+            "corrupt final replaced with verified bytes"
+        );
+        assert_eq!(cache.current_bytes(), payload.len() as u64, "accounting correct");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn begin_refill_leader_then_follower() {
+        let root = tmp_root("singleflight");
+        let cache = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("new");
+        let hash = h(0x7f);
+
+        // First caller leads.
+        let role1 = cache.begin_refill(&hash);
+        assert!(matches!(role1, RefillRole::Leader(_)), "first caller leads");
+        // Concurrent caller for the SAME hash follows.
+        let role2 = cache.begin_refill(&hash);
+        let rx = match role2 {
+            RefillRole::Follower(rx) => rx,
+            RefillRole::Leader(_) => panic!("second concurrent caller must follow"),
+        };
+        // A DIFFERENT hash leads independently.
+        let other = h(0x80);
+        assert!(matches!(cache.begin_refill(&other), RefillRole::Leader(_)));
+
+        // Dropping the leader wakes the follower (recv resolves with Err).
+        drop(role1);
+        let woke = rx.recv_async().await;
+        assert!(woke.is_err(), "follower woken by leader drop");
+        // After the leader finished, a fresh refill leads again.
+        assert!(matches!(cache.begin_refill(&hash), RefillRole::Leader(_)));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two independent caches over the SAME root (stand-in for two gateway
+    /// processes): both reserve distinct temps and publish; the no-clobber
+    /// primitive ensures exactly one final file with the correct bytes, and
+    /// no partial reads.
+    #[compio::test]
+    async fn two_process_same_root_no_clobber() {
+        let root = tmp_root("two-process");
+        let payload = vec![0x5Au8; 4096];
+        let hash = real_hash(&payload);
+
+        let cache_a = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("a");
+        let cache_b = DiskBlobCache::new(root.clone(), 1024 * 1024).expect("b");
+
+        let temp_a = fill_temp(&cache_a, &hash, &payload).await;
+        let temp_b = fill_temp(&cache_b, &hash, &payload).await;
+
+        // A publishes first (wins via hard-link).
+        let path_a = cache_a
+            .publish_temp(&hash, temp_a, payload.len() as u64)
+            .await
+            .expect("a publish");
+        // B publishes second; the final already exists with valid bytes, so
+        // B verifies + trusts it (no clobber, no partial).
+        let path_b = cache_b
+            .publish_temp(&hash, temp_b, payload.len() as u64)
+            .await
+            .expect("b publish");
+        assert_eq!(path_a, path_b, "same content-addressed final path");
+        assert_eq!(std::fs::read(&path_a).unwrap(), payload, "final bytes correct");
+
         std::fs::remove_dir_all(&root).ok();
     }
 }

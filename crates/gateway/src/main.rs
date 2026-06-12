@@ -12,7 +12,7 @@ use zeroship_core::config::{
     validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT,
     DEV_STASH_SIGNING_KEY,
 };
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::{
     auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
     router, session_token, signing, sync, GateConfig, GateState,
@@ -299,6 +299,17 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let blob_store_root = cli.blob_store;
+    // Classify the `--blob-store` value: `s3://…` → remote S3, bare path →
+    // local disk (dev default). An `s3://` URL is validated now so a
+    // misconfiguration fails fast at startup / check-config.
+    let store_url = match StoreUrl::parse(&blob_store_root) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("gateway: invalid --blob-store: {e}");
+            std::process::exit(2);
+        }
+    };
+    let blob_store_is_remote = store_url.is_remote();
     let blob_cache_mem_mb = cli.blob_cache_mem_mb;
     let blob_cache_disk_gb = cli.blob_cache_disk_gb;
     let blob_cache_disk_root = cli.blob_cache_disk_root;
@@ -505,6 +516,7 @@ fn main() -> std::io::Result<()> {
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
         report.field("blob_store", CheckValue::Plain(blob_store_root));
+        report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
             "blob_cache_mem_mb",
             CheckValue::Count(blob_cache_mem_mb),
@@ -549,10 +561,8 @@ fn main() -> std::io::Result<()> {
         .block_on(async move {
     let blob_cache_bytes: usize = blob_cache_mem_mb.saturating_mul(1024 * 1024);
     let disk_cache_bytes: u64 = blob_cache_disk_gb.saturating_mul(1024 * 1024 * 1024);
-    let blob_store: Arc<dyn BlobStore> = Arc::new(
-        LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
-            .expect("failed to initialise blob store"),
-    );
+    let blob_store: Arc<dyn BlobStore> =
+        build_blob_store(&store_url).expect("failed to initialise blob store");
     let disk_cache = blob_cache::DiskBlobCache::new(
         PathBuf::from(&blob_cache_disk_root),
         disk_cache_bytes,

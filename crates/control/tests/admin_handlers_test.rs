@@ -11,7 +11,7 @@ use compio_postgres::{connect, Client, NoTls};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     admin_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
@@ -65,14 +65,11 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let vfs: Arc<dyn BundleStore + Send + Sync> =
-        Arc::new(LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"));
 
     let state = Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
-        vfs,
         blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),

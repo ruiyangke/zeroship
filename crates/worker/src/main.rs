@@ -12,7 +12,7 @@ use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, require_unless_dev, CheckConfigReport, CheckFormat,
     CheckValue,
 };
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_runtime::init::init_v8;
 
 use crate::sync::{SharedEnvs, SharedVersions};
@@ -261,6 +261,16 @@ fn main() -> std::io::Result<()> {
     );
     let shutdown_timeout = cli.shutdown_timeout;
     let blob_store_root = cli.blob_store;
+    // `s3://…` → remote S3 store, bare path → local disk (dev default).
+    // Validated now so a bad `s3://` URL fails fast.
+    let store_url = match StoreUrl::parse(&blob_store_root) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("worker: invalid --blob-store: {e}");
+            std::process::exit(2);
+        }
+    };
+    let blob_store_is_remote = store_url.is_remote();
     // KV URL may embed credentials (`redis://user:pass@host`), so resolve it
     // through the secret indirection like the DSNs (env:/file:/vault: refs +
     // `[secrets]` overlay tier). The overlay's `kv_url` slot back-fills an
@@ -337,6 +347,7 @@ fn main() -> std::io::Result<()> {
         report.field("log_format", CheckValue::Plain(log_format));
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
+        report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
         report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
         // Surface the kernel-namespace wiring without leaking the KV URL
@@ -362,11 +373,13 @@ fn main() -> std::io::Result<()> {
         .block_on(async move {
     init_v8();
 
-    let blob_store: Arc<dyn BlobStore> = Arc::new(
-        LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
-            .expect("failed to initialise blob store"),
+    let blob_store: Arc<dyn BlobStore> =
+        build_blob_store(&store_url).expect("failed to initialise blob store");
+    tracing::info!(
+        blob_store_root = %blob_store_root,
+        blob_store_remote = blob_store_is_remote,
+        "worker blob store configured"
     );
-    tracing::info!(blob_store_root = %blob_store_root, "worker blob store configured");
 
     let kv_url_opt = if kv_url.is_empty() { None } else { Some(kv_url) };
     let storage_root_opt = if storage_root.is_empty() {

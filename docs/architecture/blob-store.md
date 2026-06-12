@@ -7,30 +7,45 @@ The `.zship` deploy path is content-addressed. `crates/bundle/src/blob.rs` defin
 Current `BlobStore` methods:
 
 - `get_blob(hash) -> Result<Bytes, BlobError>`
-- `local_path(hash) -> Option<PathBuf>`
+- `local_path(hash) -> Option<PathBuf>` — `None` for remote backends
 - `put_blob(hash, data) -> Result<PutOutcome, BlobError>`
 - `put_blob_stream(hash, expected_size, reader) -> Result<PutOutcome, BlobError>`
 - `has_blob(hash) -> Result<bool, BlobError>`
+- `get_blob_to_file(hash, out, expected_size, max_bytes) -> Result<u64, BlobError>` — streams a blob into an already-open temp file while byte-verifying SHA-256; the gateway's hot-path refill primitive (no whole-object buffering)
 - `put_manifest(app_id, deploy_hash, json)`
 - `get_manifest(app_id, deploy_hash)`
+- `delete_app_manifests(app_id)` — deletes the app's `manifests/<app_id>/` keyspace (shared `blobs/` are untouched); used by control's `purge_app`
 
-`PutOutcome` is part of the current contract. Ingest uses it to count fresh writes vs dedupe hits without a separate preflight call.
+`PutOutcome` is part of the current contract. Ingest uses it to count fresh writes vs dedupe hits without a separate preflight call. There are no default trait methods: every backend implements every method.
 
-## Current implementation
+## Implementations
 
-The shipping backend in this worktree is `LocalDiskBlobStore`.
+Two shipping backends, selected per process by `--blob-store` / `BLOB_STORE`:
+
+- a bare path (the dev default, e.g. `./bundles`) → `LocalDiskBlobStore`
+- an `s3://bucket/prefix?region=…` URL → `S3BlobStore` (over `compio-s3`)
+
+`LocalDiskBlobStore` layout:
 
 ```text
 <root>/blobs/<hash[0..2]>/<hash[2..]>
 <root>/manifests/<app_id>/<deploy_hash>.json
 ```
 
-Important current behavior:
+`S3BlobStore` keyspace (under the config prefix):
+
+```text
+{prefix}/blobs/<sha256>
+{prefix}/manifests/<app_id>/<deploy_hash>.json
+```
+
+Important behavior:
 
 - Blob keys are global by hash. There is no per-app blob namespace, so identical bytes (a shared dependency, an unchanged asset across deploys) are stored once and deduped across every app.
-- `put_blob_stream` re-hashes bytes while writing and rejects size/hash mismatches.
-- `LocalDiskBlobStore::local_path` is a cheap path computation; it does not check whether the file exists.
-- Reads validate the stored bytes again and return `BlobError::HashMismatch` if on-disk content is corrupt.
+- `put_blob_stream` re-hashes bytes while reading and rejects size/hash mismatches. On `S3BlobStore` it streams the single-pass reader through **multipart** in `PART_SIZE` (8 MiB) chunks while running a whole-object SHA-256 hasher, verifies `sha256(stream) == hash` BEFORE `complete_multipart` (aborting on mismatch so nothing is ever committed under the wrong key), and uses a single `PutObject` for objects below one part. This preserves the same content-addressing integrity guarantee `LocalDiskBlobStore` gives, across parts.
+- `LocalDiskBlobStore::local_path` is a cheap path computation; it does not check whether the file exists. `S3BlobStore::local_path` is always `None` — the gateway hot path uses the disk-cache refill below, not `local_path`.
+- Reads validate the stored bytes again (re-hash) and return `BlobError::HashMismatch` if content is corrupt. `get_blob_to_file` re-verifies SHA-256 on the way out before the caller publishes.
+- Manifest writes are immutable-key: the key embeds `deploy_hash`, so `put_manifest` uses a conditional create (`If-None-Match: *`); an identical replay is success, divergent content is a backend error.
 
 ## Current ingest path
 
@@ -55,24 +70,36 @@ Gateway adds two caches on top of `BlobStore`:
 
 Static serving lives in [static_serve.rs](../../crates/gateway/src/router/static_serve.rs):
 
-- small responses: memory LRU -> disk LRU/mmap -> blob store
-- large responses: ensure disk copy exists, then stream in chunks from disk
+- small responses: memory LRU -> disk LRU/mmap -> blob store (`get_blob`)
+- large responses: ensure a disk copy exists, then stream in chunks from disk
 - conditional requests, range requests, and pre-compressed variants are handled at this HTTP layer, not in `BlobStore`
+
+On a disk-cache miss the gateway does NOT use `BlobStore::local_path` (a remote store returns `None`). Instead it **streams** the blob from the store into the disk cache without buffering the whole object:
+
+1. `DiskBlobCache::reserve_temp(hash)` opens a unique temp file (`create_new`) under the cache root and returns a `DiskBlobTemp` guard that unlinks on drop unless published.
+2. `BlobStore::get_blob_to_file(hash, temp.file(), expected_size, MAX_BLOB_BYTES)` streams + byte-verifies into that open file (the store/S3 client never receive a raw path).
+3. `DiskBlobCache::publish_temp` `sync_all`s, then publishes under the content-addressed final path with a **no-clobber** primitive (hard-link → unlink temp; copy into a `create_new` final if hard-link is unsupported; never overwrite-rename) and verifies any pre-existing final file before trusting it.
+
+A per-process **singleflight** keyed by blob hash collapses concurrent cold misses; duplicate downloads remain safe because correctness comes from temp uniqueness + no-clobber publish + final-file verification (multi-process safe over a shared cache root).
 
 The control plane is not on the hot path for asset bytes.
 
 ## Current callers
 
-- [crates/control/src/main.rs](../../crates/control/src/main.rs): constructs `LocalDiskBlobStore`
-- [crates/gateway/src/main.rs](../../crates/gateway/src/main.rs): constructs `LocalDiskBlobStore` plus memory/disk caches
-- [crates/worker/src/main.rs](../../crates/worker/src/main.rs): constructs `LocalDiskBlobStore`
+All three services build their store from the SAME `--blob-store` grammar via `zeroship_bundle::build_blob_store` (`StoreUrl::parse` → `LocalDiskBlobStore` or `S3BlobStore`), so control's deploy ingest writes through exactly the store gateway and worker read.
+
+- [crates/control/src/main.rs](../../crates/control/src/main.rs): builds the store; the deploy ingest writes blobs + manifests through it. There is no separate per-app `BundleStore`/VFS — `purge_app` deletes the app's manifest keyspace via `delete_app_manifests`.
+- [crates/gateway/src/main.rs](../../crates/gateway/src/main.rs): builds the store plus memory/disk caches; refills the disk cache by streaming `get_blob_to_file`.
+- [crates/worker/src/main.rs](../../crates/worker/src/main.rs): builds the store.
 - [crates/worker/src/sync.rs](../../crates/worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
 
-## Current non-goals
+`s3://` credentials resolve from the standard AWS environment (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`); there is no provider chain.
+
+## Non-goals
 
 - No blob-serving API shaped like `GET /blobs/<hash>`
-- No shipping S3-backed `BlobStore` in this worktree
 - No blob-store-specific routing logic; URL/path/variant selection stays in the gateway
+- No shared-blob GC/refcounting: content-addressed blobs under `blobs/` are not app-owned and are not deleted on app purge
 
 ## Related docs
 

@@ -1854,6 +1854,15 @@ mod tests {
         async fn has_blob(&self, _hash: &str) -> Result<bool, zeroship_bundle::BlobError> {
             Ok(false)
         }
+        async fn get_blob_to_file(
+            &self,
+            _hash: &str,
+            _out: &compio::fs::File,
+            _expected_size: Option<u64>,
+            _max_bytes: u64,
+        ) -> Result<u64, zeroship_bundle::BlobError> {
+            Err(zeroship_bundle::BlobError::NotFound("unused".into()))
+        }
         async fn put_manifest(
             &self,
             _app_id: &uuid::Uuid,
@@ -1868,6 +1877,12 @@ mod tests {
             _deploy_hash: &str,
         ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
+        }
+        async fn delete_app_manifests(
+            &self,
+            _app_id: &uuid::Uuid,
+        ) -> Result<(), zeroship_bundle::BlobError> {
+            Ok(())
         }
     }
 

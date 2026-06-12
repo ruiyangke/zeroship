@@ -221,8 +221,10 @@ pub async fn get_app(
 /// boundary into the test crate.
 #[derive(Debug)]
 pub enum PurgeError {
-    /// The blob/bundle VFS delete failed (NotFound is swallowed, not an error).
-    Vfs(zeroship_bundle::VfsError),
+    /// Deleting the app's manifest keyspace failed. A `NotFound`/empty prefix
+    /// is success inside `delete_app_manifests`, so this only surfaces real
+    /// auth/config/transport failures that must block the DB cascade.
+    Manifests(zeroship_bundle::BlobError),
     /// The atomic DB cascade delete failed.
     Registry(RegistryError),
 }
@@ -230,8 +232,11 @@ pub enum PurgeError {
 /// Tear down an app and all of its side-effecting state, in the ONE canonical
 /// order used by both the `delete_app` HTTP handler and the orphaned-app reaper:
 ///
-///   1. VFS delete (blob/bundle) — `NotFound` swallowed (the bundle may never
-///      have been deployed).
+///   1. Manifest-keyspace delete — `BlobStore::delete_app_manifests` removes
+///      every `manifests/<app_id>/…` object (empty/absent prefix is success).
+///      Content-addressed blobs under `blobs/` are shared and NOT deleted
+///      here. This preserves today's "artifact purge first, DB cascade
+///      second" ordering: a manifest-delete failure blocks the DB cascade.
 ///   2. `registry.delete_app` — the ATOMIC DB cascade (apps row + per-app
 ///      `oauth_clients` row in one txn; the real FK chain tears down every
 ///      dependent row in the `zeroship` schema). Returns `false` if the row was
@@ -245,14 +250,15 @@ pub enum PurgeError {
 /// gone. There is ONE deletion path; two callers (the `delete_app` HTTP handler
 /// and the `orphaned_app_reaper` cron).
 pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeError> {
-    // 1. Delete from VFS first (ignore NotFound — bundle may not exist yet).
-    let app_id_str = app_id.to_string();
-    if let Err(e) = state.vfs.delete(&app_id_str) {
-        match e {
-            zeroship_bundle::VfsError::NotFound(_) => { /* ok */ }
-            other => return Err(PurgeError::Vfs(other)),
-        }
-    }
+    // 1. Delete the app's manifest keyspace first. `delete_app_manifests`
+    //    swallows empty/absent prefixes (the app may never have deployed) and
+    //    only returns an error on real auth/config/transport failures, which
+    //    must block the DB cascade so we never orphan live artifacts.
+    state
+        .blob_store
+        .delete_app_manifests(app_id)
+        .await
+        .map_err(PurgeError::Manifests)?;
 
     // 2. Atomic DB cascade.
     let deleted = state
@@ -297,9 +303,9 @@ pub async fn delete_app(
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
-        Err(PurgeError::Vfs(e)) => infrastructure_error_response(
+        Err(PurgeError::Manifests(e)) => infrastructure_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "delete app bundle",
+            "delete app manifests",
             e,
         ),
         Err(PurgeError::Registry(e)) => error_response(e),
