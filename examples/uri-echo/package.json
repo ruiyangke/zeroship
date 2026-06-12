@@ -1,0 +1,17 @@
+{
+  "name": "uri-echo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Echoes the exact URL (and parsed parts) the worker sees — used by the complex-URI gateway E2E (tests/e2e_uri.sh).",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@zeroship/vite-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}
