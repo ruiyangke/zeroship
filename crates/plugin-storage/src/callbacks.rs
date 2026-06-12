@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use serde_json::json;
-use zeroship_runtime::channel::{stream_buffer, StreamReader};
+use zeroship_runtime::channel::{stream_buffer_with_cap, StreamReader};
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime::streams::response_forwarder;
 
@@ -357,7 +357,10 @@ impl StreamReaderSource {
     /// paused producer. Cheap and idempotent — `request_resume` no-ops unless
     /// the forwarder is actually paused.
     fn maybe_resume_producer(&self) {
-        if self.reader.buffered_bytes() <= response_forwarder::RESUME_LOW_WATER {
+        // Per-stream low-water (quarter the stream's own cap), with hysteresis
+        // against the half-cap pause mark, so the large-cap upload stream
+        // re-arms proportionally rather than at the global default.
+        if self.reader.buffered_bytes() <= self.reader.cap() / 4 {
             response_forwarder::request_resume(&self.state, self.stream_id);
         }
     }
@@ -489,7 +492,12 @@ pub fn put_stream(
             return;
         }
     };
-    let (writer, reader) = stream_buffer();
+    // Dedicated upload buffer sized to 2× the S3 part size so the producer can
+    // fill a full NEXT part while the current part PUTs (overlapping V8 chunk
+    // generation with the in-flight upload), and so a single app chunk up to
+    // the cap is accepted rather than rejected at the 4 MiB default. RPC/SSE
+    // response streams keep the small default cap (they don't multipart).
+    let (writer, reader) = stream_buffer_with_cap(crate::backend::UPLOAD_STREAM_BUFFER_CAP);
     response_forwarder::attach_writer(&state, stream_id, writer);
 
     let source = StreamReaderSource { reader, state: state.clone(), stream_id };

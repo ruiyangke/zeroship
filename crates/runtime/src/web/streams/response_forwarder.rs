@@ -518,22 +518,20 @@ fn on_chunk_callback(
     );
 }
 
-/// High-water mark for upload backpressure: once the downstream writer buffer
-/// holds at least this many bytes, the read loop pauses. Half the per-stream
-/// cap leaves headroom for the in-flight chunk plus the consumer to catch up.
-const PAUSE_HIGH_WATER: usize = crate::channel::DEFAULT_STREAM_BUFFER_CAP / 2;
-
 /// True if the forwarder should pause its read loop for backpressure: it has a
 /// `direct_writer` (the consumer side is live) whose buffer is at/over the
-/// high-water mark. Pre-attach buffering (no `direct_writer`) never pauses —
-/// those chunks are drained synchronously by `attach_writer`.
+/// high-water mark. The mark is **per-stream** — half the writer's own cap — so
+/// a large-cap upload stream (`env.storage.putStream`, 2× the S3 part size)
+/// lets the producer run a full next part ahead while the current part PUTs,
+/// while a default-cap stream keeps the small mark. Pre-attach buffering (no
+/// `direct_writer`) never pauses — `attach_writer` drains those synchronously.
 fn should_pause(fwd: &ResponseForwarder) -> bool {
     let inner = fwd.borrow();
     inner.backpressure
         && inner
             .direct_writer
             .as_ref()
-            .is_some_and(|w| w.buffered_bytes() >= PAUSE_HIGH_WATER)
+            .is_some_and(|w| w.buffered_bytes() >= w.cap() / 2)
 }
 
 fn on_error_callback(
@@ -657,12 +655,6 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
         remove(state, stream_id);
     }
 }
-
-/// Low-water mark: the consumer requests a read-loop resume once the
-/// downstream buffer has drained to at most this many bytes. Below the
-/// high-water mark, with hysteresis so we don't thrash pause/resume on every
-/// chunk.
-pub const RESUME_LOW_WATER: usize = crate::channel::DEFAULT_STREAM_BUFFER_CAP / 4;
 
 /// Ask the pump to resume a paused upload forwarder. Called by the consumer of
 /// the paired `StreamReader` after it has drained the buffer. Idempotent and

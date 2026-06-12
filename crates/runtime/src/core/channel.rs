@@ -247,6 +247,13 @@ impl StreamWriter {
         self.inner.borrow().buffered_bytes
     }
 
+    /// The per-stream byte cap this buffer was created with. Backpressure
+    /// water-marks are derived from this (per-stream) so a large-cap upload
+    /// stream pauses/resumes proportionally, not at the global default.
+    pub fn cap(&self) -> usize {
+        self.inner.borrow().max_bytes
+    }
+
     /// True once `push` has rejected a chunk for exceeding the byte cap.
     pub fn is_overflow(&self) -> bool {
         self.inner.borrow().overflow
@@ -318,6 +325,13 @@ impl StreamReader {
     /// paused producer once the buffer has drained below a low-water mark).
     pub fn buffered_bytes(&self) -> usize {
         self.inner.borrow().buffered_bytes
+    }
+
+    /// The per-stream byte cap this buffer was created with. The streaming
+    /// consumer derives its resume low-water mark from this so a large-cap
+    /// upload stream re-arms proportionally, not at the global default.
+    pub fn cap(&self) -> usize {
+        self.inner.borrow().max_bytes
     }
 
     /// Wait until data is available or the stream is done.

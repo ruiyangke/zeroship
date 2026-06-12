@@ -32,6 +32,15 @@ pub mod s3;
 #[cfg(feature = "s3")]
 pub use s3::S3;
 
+/// Buffer cap for an `env.storage.putStream` upload stream — 2× the S3
+/// `PART_SIZE` (8 MiB) so the V8 producer can generate a full *next* part while
+/// the current part is mid-PUT (overlapping CPU with upload I/O), and so an app
+/// `ReadableStream` chunk up to this size is accepted rather than rejected at
+/// the 4 MiB default `DEFAULT_STREAM_BUFFER_CAP`. Backend-agnostic (the
+/// `LocalFs` upload path uses the same buffer) so it is not behind the `s3`
+/// feature. Keep in sync with `s3::PART_SIZE`.
+pub const UPLOAD_STREAM_BUFFER_CAP: usize = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Types shared by all backends
 // ---------------------------------------------------------------------------
