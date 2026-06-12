@@ -426,6 +426,34 @@ hand-roll a status-bearing throw to get a real 401. Surfaced by the env.auth E2E
 have the `requireUser` throw carry `status: 401` (a `.status`/`.code` the dispatcher's `statusFromError`
 honors), and align `docs/reference/auth.md`. Add a regression test (anon `requireUser` → 401, not 500).
 
+### ISS-68 · App secrets need explicit `expose` to reach `process.env` — BY DESIGN; DX/docs gap only
+**Status:** triaged — **not a platform bug** · **Tier:** T3 (DX/docs) · Surfaced by the render/streaming E2E (openai-demo)
+
+The render E2E flagged that an app reading `process.env.OPENAI_API_KEY` got `undefined` on the multi-node
+worker path (→ HTTP 500 from `new OpenAI({apiKey})`), while the same app on `zeroship serve` returned 200.
+**Triaged: this is correct, documented behavior, not a bug.** Control returns app env as `{vars, secrets,
+expose}` (`crates/control/src/internal.rs`); the runtime puts **vars** in `process.env` always but keeps
+**secrets out unless the name is opted into the per-app `expose` list** — a deliberate leak-prevention so
+`Object.keys(process.env)`/`JSON.stringify(process.env)`/dotenv-debug can't dump secret values (see
+`crates/runtime/src/fetch_outcome.rs:93-98`, the LangChain/`process.env.OPENAI_API_KEY` case is called out
+by name). Worker hydration is correct end-to-end: `handler.rs:213` reads the `EnvSnapshot` from `SharedEnvs`
+per request and passes it into `call_fetch_handler_with_user(&env)`; **vars + exposed secrets reach
+`process.env`**. openai-demo failed only because its key was stored as a *secret* and never exposed; the
+fix is at the example level (set it as a var, or `PUT /api/apps/{id}/env/expose ["OPENAI_API_KEY"]`). The
+`serve`↔worker divergence is expected: dev `serve` lifts all OS env via `EnvSnapshot::vars_only` (no
+secret/expose split — the dev tier has no secret store), so everything is implicitly "exposed".
+
+**Genuine (minor) gaps worth closing — DX/docs, not correctness:**
+- The `expose` opt-in is reachable via the control API (`GET/PUT /api/apps/{id}/env/expose`, `main.rs:1022`;
+  `env_store.{list,set}_expose`) and the `@zeroship/control` SDK (`sdks/control/src/index.ts:216`), but there
+  is **no CLI surface** (`crates/cli` has no `zeroship env`/`expose` command) — a creator on the CLI can't
+  opt a secret in without hand-calling the API.
+- No dedicated `docs/reference/` page for **env vars vs. secrets vs. expose** (mentions are scattered across
+  auth/db/rpc). A short "managing app config & secrets" reference would prevent exactly this confusion,
+  including the `serve`(all-as-vars) vs. deployed(expose-required) parity note.
+- Fix (when prioritized): add `zeroship env set/secret/expose` CLI verbs + a config-&-secrets reference doc.
+  No runtime change. Low severity (workaround = API/SDK call). Not blocking readiness.
+
 ### ISS-64 · No headless / dev auth path for E2E testing the stack
 **Status:** open · **Effort:** M · **Tier:** T2 (test infra)
 
