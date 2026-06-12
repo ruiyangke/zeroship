@@ -1,0 +1,34 @@
+[package]
+name = "compio-s3"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal compio-native S3 client — hand-rolled SigV4, multipart, streaming, zero tokio"
+
+[dependencies]
+compio = { workspace = true }
+cyper = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+url = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+# Crypto / encoding for hand-rolled SigV4 + content addressing
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+percent-encoding = { workspace = true }
+
+# XML (ListObjectsV2 / CompleteMultipartUpload) and date formats
+quick-xml = { workspace = true }
+time = { workspace = true }
+httpdate = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

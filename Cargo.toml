@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "crates/authz"]
+members = ["crates/*", "crates/authz", "crates/compio-s3"]
 resolver = "3"
 exclude = [
     "crates/platform",
@@ -93,6 +93,14 @@ sqlite-vec = "0.1"
 # IDs
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
+# S3 client (compio-s3) — pure parsing/formatting deps for the hand-rolled
+# SigV4 path. NONE of these may pull an async runtime; the zero-tokio
+# dependency guard (`cargo tree -i tokio -p compio-s3`) proves it. `aws-sigv4`
+# is BANNED here (it pulls tokio via aws-smithy-async); SigV4 is hand-rolled.
+quick-xml = "0.38"
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing"] }
+httpdate = "1"
+
 # Compression
 zstd = "0.13"
 tar = { version = "0.4", default-features = false }
@@ -171,6 +179,7 @@ zeroship-core = { path = "crates/core" }
 zeroship-bundle = { path = "crates/bundle" }
 compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
+compio-s3 = { path = "crates/compio-s3" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
