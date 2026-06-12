@@ -28,35 +28,38 @@ test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
     }
   });
 
-  // FIXME(ISS-69): the SPA mounts fine, but listTodos is an ANONYMOUS client
-  // RPC and the gateway fail-closes it with 401 UNAUTHENTICATED (SEC-5 default
-  // auth: user). The procedure itself is healthy over the worker /dispatch path
-  // (returns the 4 todos, 200) — only the browser→gateway RPC is blocked. This
-  // is a real platform/example contract finding, not a test bug. Flip back to
-  // `test(` once anon (or test-authed) client RPC works through the gateway.
-  test.fixme("SPA mounts and the todo list round-trips through the listTodos RPC", async ({ page }) => {
+  // The SPA mounts and the todo list round-trips through the PUBLIC listTodos
+  // RPC over the real browser→gateway→worker→V8 path. csr-todo declares
+  // `rpc:listTodos` as `auth: anon, publiclyAccessible: true` in
+  // src/server/config.ts (ISS-69), so the anonymous browser reaches it through
+  // the gateway. This is the only spec that proves PUBLIC client RPC over the
+  // gateway — the curl harness deliberately bypasses the gateway via /dispatch.
+  test("SPA mounts and the todo list round-trips through the listTodos RPC", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
 
     // Mount signal: the React-rendered heading appears (absent from the shell).
     await expect(page.locator("h1")).toHaveText("csr-todo");
 
     // The four hardcoded todos come back over the listTodos RPC and render as
-    // <li> items. Their presence proves the gateway→worker→V8 RPC round-trip
-    // landed in the real DOM.
-    await expect(page.getByText("Read the .zship spec")).toBeVisible();
-    await expect(page.getByText("Build the CSR demo")).toBeVisible();
-    await expect(page.getByText("Verify the manifest")).toBeVisible();
-    await expect(page.getByText("Stretch — wire up SSR")).toBeVisible();
+    // <li> items in the MAIN list. Their presence proves the gateway→worker→V8
+    // RPC round-trip landed in the real DOM. Scope to `main > ul` (the todo
+    // list is a direct child of <main>) so we don't collide with the search-
+    // stream <ul> inside <section>, which also renders "Build the CSR demo" for
+    // the default "build" query (a page-wide getByText would match two nodes).
+    const todoList = page.locator("main > ul");
+    await expect(todoList.getByText("Read the .zship spec")).toBeVisible();
+    await expect(todoList.getByText("Build the CSR demo")).toBeVisible();
+    await expect(todoList.getByText("Verify the manifest")).toBeVisible();
+    await expect(todoList.getByText("Stretch — wire up SSR")).toBeVisible();
 
     // The status line reflects the RPC-sourced count (4 todos).
     await expect(page.getByText(/^4 todos$/)).toBeVisible();
   });
 
-  // FIXME(ISS-69): the precondition "4 todos" comes from the listTodos RPC,
-  // which the gateway 401s for the anonymous browser (see ISS-69). The Add-local
-  // interaction itself is pure client state; this regains coverage once anon
-  // client RPC works and the initial count renders.
-  test.fixme("client interactivity: Add local appends a rendered item", async ({ page }) => {
+  // The initial "4 todos" precondition comes from the public listTodos RPC
+  // (ISS-69 fixed); Add-local then exercises pure client state on top of it,
+  // proving the mounted SPA re-renders interactively.
+  test("client interactivity: Add local appends a rendered item", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
     await expect(page.getByText(/^4 todos$/)).toBeVisible();
 
@@ -83,7 +86,7 @@ test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
     // proves both: the gateway served the index shell as the SPA fallback, AND
     // the client router mounted the App for that route. (The todo *list* on this
     // page is RPC-sourced and currently 401s — see ISS-69 — so we assert the
-    // router mount via the heading, which is independent of the RPC.)
+    // router mount via the heading.)
     await expect(page.locator("h1")).toHaveText("csr-todo");
     // The stream box's search input is part of the App view → confirms the App
     // (not the About view, not a blank shell) rendered on the deep route.

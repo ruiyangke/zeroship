@@ -484,8 +484,18 @@ missing SMTP host. `config_check_e2e.sh` auth cases 4/4 pass.
 
 ---
 
-### ISS-69 · CSR example's client-side RPC is anon, so it 401s through the gateway under the SEC-5 fail-closed default
-**Status:** open — **example/contract gap** · **Tier:** T2 (browser/client contract) · Surfaced by the browser-level E2E (`tests/e2e_browser/csr.spec.ts` + `streaming.spec.ts`)
+### ISS-69 · CSR example's client-side RPC is anon, so it 401s through the gateway under the SEC-5 fail-closed default — FIXED
+**Status:** fixed (2026-06-11) · **Tier:** T2 (browser/client contract) · Surfaced by the browser-level E2E (`tests/e2e_browser/csr.spec.ts` + `streaming.spec.ts`)
+
+**Fix:** csr-todo now declares its two read-only demo procedures public in
+`examples/csr-todo/src/server/config.ts` — `defineApp({ resources: { "rpc:listTodos":
+{ auth: "anon", publiclyAccessible: true }, "rpc:searchTodos": {...} } })` (the
+documented mechanism, `docs/reference/rpc.md` "Procedure auth"). The rebuilt manifest
+stamps both as `auth: anon, publicly_accessible: true`, so the anonymous browser SPA
+reaches them through the gateway. The CSR `listTodos` round-trip + the streamed-data
+browser specs now pass over the real edge. **Closing it surfaced two real platform
+bugs the curl harness had never exercised: ISS-70 (gateway dropped the query string)
+and ISS-71 (browser stream consumer never terminates).** ~~Original below.~~
 
 The `csr-todo` SPA fetches its data over typed RPC from the browser: `listTodos`
 (`GET /__zeroship/v1/listTodos?input=…`) on mount and `searchTodos`
@@ -514,13 +524,58 @@ streaming over `/dispatch` directly. It is **not a rendering/hydration bug** and
 browser specs pass; only the CSR client-RPC specs fail, all with 401-shaped
 empty-DOM timeouts.
 
-**Where the fix belongs (out of this task's scope — left for triage):** either the
-csr-todo example opts its read-only demo procedures into anon access (`auth: anon`
-/ `publicly_accessible` on those resources, the way URL/SSR/static already default),
-or the platform provides a first-class "public RPC" affordance the example can
-declare. Until then the four CSR browser specs are marked `test.fixme` pointing
-here; flip them back to `test` once anon (or test-authed) client RPC works through
-the gateway.
+**Where the fix belongs (DONE):** the csr-todo example opted its read-only demo
+procedures into anon access via `src/server/config.ts` (above). The authenticated
+client-RPC-through-the-gateway path (per-user procedures) remains ISS-64 (needs a
+Hydra dev-auth session for headless E2E).
+
+### ISS-70 · CRITICAL: the gateway drops the URL query string when forwarding to the worker — FIXED
+**Status:** fixed (2026-06-11, TDD) · **Tier:** T1 (correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/csr.spec.ts`)
+
+When the gateway forwards a request to a worker it rebuilt the URL from the ntex
+`{tail*}` path extractor **without re-appending the query string**
+(`crates/gateway/src/router/dispatch.rs`, `let url = format!("{scheme}://{host}/{tail}")`).
+The `{tail*}` capture is path-only, so `?...` was silently dropped before the worker's
+JS handler ever saw it. Impact — two classes, both invisible to the pre-existing tests:
+- **Every GET `query()` RPC loses its input.** The `@zeroship/rpc` transport sends a
+  `query()` as `GET /__zeroship/v1/<id>?input=<base64url>`; with the query gone the
+  dispatcher gets `input: undefined` → **400 INVALID_ARGUMENT** for every browser
+  query. (Mutations/streams POST the body, so they were unaffected — which is exactly
+  why `listTodos` failed but `searchTodos` worked, isolating the bug.)
+- **Any deployed app reading `request.url` query params** (search, pagination, filters,
+  `?code=` callbacks) silently received none.
+
+Never caught before because the curl harnesses POST envelopes straight to the worker
+`/dispatch` (input in the body), bypassing the gateway's URL reconstruction entirely.
+**Proof:** browser `GET …/listTodos?input=e30` → 400 (input undefined) pre-fix; the
+same over `/dispatch` → 200. **Fix:** `forward_url(scheme, host, tail, req.uri().query())`
+re-appends the raw query. Regression tests: `forward_url_preserves_query_string` +
+`forward_url_omits_empty_or_absent_query` (gateway lib), and the now-green
+`tests/e2e_browser/csr.spec.ts` listTodos round-trip is the real-edge regression.
+
+### ISS-71 · Browser stream consumer never terminates / surfaces only the first frame
+**Status:** open — **real platform bug** · **Tier:** T2 (streaming correctness) · Surfaced by the browser-level E2E (`tests/e2e_browser/streaming.spec.ts`)
+
+A `stream()` RPC consumed client-side in the browser (`@zeroship/rpc` async iterator)
+**stalls after the first frame and never ends.** For csr-todo's `searchTodos`:
+- The **server side is correct** — `curl` through the gateway delivers every data
+  frame for a 3-match query ~30ms apart and then closes the connection (the AI-SDK
+  `2:[...]` data frames are all on the wire). The terminal `d:{}` *finish* frame is
+  delivered unreliably (gateway 2/5 runs, worker `/dispatch` 0/6 runs) — it races the
+  stream close — but the connection close itself is reliable.
+- The **browser client does not surface it**: only the first frame renders, and the
+  status sits at "streaming…" forever — *even a 1-match stream never flips to
+  "1 matches"*, i.e. the consumer never detects end-of-stream on body close. After a
+  re-query, only the first frame of the new stream appears.
+
+So a deployed app that streams to the browser hangs at "loading" and shows only the
+first item. **Fix direction:** (1) make the `@zeroship/rpc` stream consumer yield each
+frame as it arrives and **terminate on response-body close** (not solely on the in-band
+`d:{}`); (2) make the server reliably flush the terminal finish frame before closing
+(runtime/gateway streaming path). Add a faithful regression: the browser must render all
+N frames and reach the done-state. The HTTP-layer incremental proof (3 frames, 30ms
+apart, through the gateway) already lives in `tests/e2e_app_primitives_render.sh`; the
+in-browser multi-frame spec is `test.fixme` in `streaming.spec.ts` pointing here.
 
 ---
 

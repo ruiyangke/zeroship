@@ -1286,6 +1286,17 @@ fn collect_forwarded_headers(headers: &ntex::http::HeaderMap) -> Vec<(String, St
 // ---------------------------------------------------------------------------
 
 /// Forward an HTTP request to the worker via `/dispatch/{app_id}`.
+/// Reconstruct the URL the worker's JS handler sees, re-appending the raw
+/// query string the ntex `{tail*}` path extractor drops. Preserving the query
+/// is load-bearing: `query()` RPC input rides in `?input=<base64url>` and apps
+/// read `request.url` query params directly. See ISS-70.
+fn forward_url(scheme: &str, host: &str, tail: &str, query: Option<&str>) -> String {
+    match query {
+        Some(q) if !q.is_empty() => format!("{scheme}://{host}/{tail}?{q}"),
+        _ => format!("{scheme}://{host}/{tail}"),
+    }
+}
+
 ///
 /// The full HTTP request (method, URL, headers, body) is packaged into the
 /// HttpEnvelope and handed to `Runtime::call_fetch_handler`, which invokes
@@ -1316,14 +1327,21 @@ async fn handle_dispatch(
         Err(resp) => return resp,
     };
 
-    // Reconstruct the URL the JS handler will see.
+    // Reconstruct the URL the JS handler will see. The query string MUST be
+    // preserved: the `@zeroship/rpc` transport sends `query()` calls as
+    // `GET /__zeroship/v1/<id>?input=<base64url>`, and deployed apps read
+    // `new URL(request.url).searchParams` for pagination/filters/search. The
+    // ntex `{tail*}` extractor yields the PATH only, so the raw query has to be
+    // re-appended here — dropping it makes every GET query-RPC arrive with
+    // `input: undefined` (→ 400 INVALID_ARGUMENT) and silently strips app query
+    // params (ISS-70).
     let scheme = if req.connection_info().scheme() == "https" { "https" } else { "http" };
     let host = req
         .headers()
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
-    let url = format!("{scheme}://{host}/{tail}");
+    let url = forward_url(scheme, host, tail, req.uri().query());
 
     // Collect request headers as [key, value] pairs, scrubbing the
     // platform-reserved set so a forged inbound `ZeroShip-User` /
@@ -1919,6 +1937,40 @@ mod tests {
         let req = ntex::web::test::TestRequest::default().to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false);
         assert_eq!(id, "unknown");
+    }
+
+    // -----------------------------------------------------------------------
+    // ISS-70: the worker-forward URL must carry the query string. Dropping it
+    // makes every GET `query()` RPC arrive with `input: undefined` (the input
+    // rides in `?input=<base64url>`) and silently strips app query params.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn forward_url_preserves_query_string() {
+        // GET query-RPC: the base64url input MUST survive into the worker URL.
+        assert_eq!(
+            forward_url("http", "app.localhost:8080", "__zeroship/v1/listTodos", Some("input=e30")),
+            "http://app.localhost:8080/__zeroship/v1/listTodos?input=e30",
+        );
+        // Arbitrary app query params (search/pagination) survive too.
+        assert_eq!(
+            forward_url("https", "shop.zeroship.ai", "products", Some("q=shoes&page=2")),
+            "https://shop.zeroship.ai/products?q=shoes&page=2",
+        );
+    }
+
+    #[test]
+    fn forward_url_omits_empty_or_absent_query() {
+        // No query → no trailing '?'.
+        assert_eq!(
+            forward_url("http", "h", "p", None),
+            "http://h/p",
+        );
+        // Empty query (e.g. a bare trailing '?') is treated as absent.
+        assert_eq!(
+            forward_url("http", "h", "p", Some("")),
+            "http://h/p",
+        );
     }
 
     // -----------------------------------------------------------------------
