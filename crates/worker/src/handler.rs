@@ -85,10 +85,18 @@ fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<Stri
 /// wasted compute, memory, and outbound network after the client left.
 async fn recv_with_timeout<T>(
     rx: &ResultReceiver<T>,
-    timeout: std::time::Duration,
+    timeout: Option<std::time::Duration>,
     cancel: &CancelFlag,
     runtime: &Runtime,
 ) -> Option<T> {
+    // No wall cap (the `unlimited`/`enterprise` plan reports `wall_timeout =
+    // None`): await the result indefinitely. A genuinely long request — a
+    // multi-GB streaming `env.storage` upload, say — must not be cut, which is
+    // exactly what the plan's opt-out promises. (Bounded plans still pass a
+    // `Some(_)` deadline below.)
+    let Some(timeout) = timeout else {
+        return Some(rx.recv().await);
+    };
     let recv = rx.recv().fuse();
     let sleep = compio::time::sleep(timeout).fuse();
     pin_mut!(recv, sleep);
@@ -102,10 +110,13 @@ async fn recv_with_timeout<T>(
     }
 }
 
-fn wall_limit(runtime: &Runtime) -> std::time::Duration {
-    runtime
-        .wall_timeout()
-        .unwrap_or(std::time::Duration::from_secs(30))
+/// The dispatch wall cap. `None` for the `unlimited`/`enterprise` plan
+/// (`wall_timeout` unset) ⇒ no cap. Previously this `unwrap_or(30s)`'d the
+/// `None`, silently capping every request at 30 s even on the unlimited plan —
+/// which made large single-request streaming uploads impossible regardless of
+/// plan. Bounded plans keep their configured `Some(_)` deadline.
+fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
+    runtime.wall_timeout()
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +412,45 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("mkdir tmp");
         path
+    }
+
+    // Regression: the `unlimited`/`enterprise` plan reports `wall_timeout =
+    // None`, and `wall_limit` must pass that `None` straight through (no cap) so
+    // a long single-request streaming upload isn't cut. Pre-fix this
+    // `unwrap_or(30s)`'d the `None` — capping every unlimited request at 30 s,
+    // which made >4 GiB `env.storage` streaming uploads time out at 30.37 s.
+    #[test]
+    fn wall_limit_passes_through_unlimited_none() {
+        use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
+        init_runtime();
+
+        // Unlimited plan → wall_timeout None → wall_limit None (NOT Some(30s)).
+        let unlimited = Runtime::builder()
+            .limits(RuntimeLimits {
+                cpu_limit: None,
+                wall_timeout: None,
+                heap_limit_bytes: None,
+            })
+            .build();
+        assert_eq!(
+            wall_limit(&unlimited),
+            None,
+            "unlimited plan must have no dispatch wall cap"
+        );
+
+        // Bounded plan → its configured deadline is preserved unchanged.
+        let bounded = Runtime::builder()
+            .limits(RuntimeLimits {
+                cpu_limit: None,
+                wall_timeout: Some(std::time::Duration::from_secs(5)),
+                heap_limit_bytes: None,
+            })
+            .build();
+        assert_eq!(
+            wall_limit(&bounded),
+            Some(std::time::Duration::from_secs(5)),
+            "bounded plan keeps its configured wall cap"
+        );
     }
 
     #[test]
