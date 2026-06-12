@@ -263,12 +263,7 @@ impl S3 {
                     Ok(etag) => return Ok(etag),
                     Err(e) if e.is_retryable() && attempt + 1 < UPLOAD_PART_RETRIES => {
                         attempt += 1;
-                        // Linear backoff: 50ms, 100ms, 150ms … keeps the
-                        // concurrent connect rate from sustaining a storm.
-                        compio::time::sleep(std::time::Duration::from_millis(
-                            50 * u64::from(attempt),
-                        ))
-                        .await;
+                        compio::time::sleep(upload_retry_backoff(attempt)).await;
                     }
                     Err(e) => return Err(map_s3(&key, e)),
                 }
@@ -278,10 +273,20 @@ impl S3 {
 }
 
 /// Per-part upload attempt budget (1 initial try + retries on retryable
-/// transport/5xx errors). Concurrent uploads churn connections fast enough that
-/// transient connect failures are expected; a small bounded retry keeps a
-/// single blip from aborting a multi-GiB upload.
-const UPLOAD_PART_RETRIES: u32 = 5;
+/// transport/5xx errors). Concurrent part PUTs churn connections fast enough
+/// that transient connect failures (`hyper` Connect, ephemeral-port/`TIME_WAIT`
+/// pressure on a busy host) are expected on multi-GiB uploads; a generous
+/// bounded retry keeps such blips from aborting the whole upload.
+const UPLOAD_PART_RETRIES: u32 = 8;
+
+/// Capped exponential backoff for a part-upload retry: 100ms, 200ms, 400ms …
+/// up to ~2s. Backing off (rather than hammering) lets the host recycle
+/// ephemeral ports / `TIME_WAIT` sockets and lets the endpoint drain its accept
+/// backlog before the next connect attempt.
+fn upload_retry_backoff(attempt: u32) -> std::time::Duration {
+    let ms = 100u64.saturating_mul(1u64 << attempt.min(5)); // cap shift at 32×
+    std::time::Duration::from_millis(ms.min(2000))
+}
 
 #[async_trait::async_trait(?Send)]
 impl Backend for S3 {

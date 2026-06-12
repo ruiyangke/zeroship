@@ -294,10 +294,7 @@ impl S3BlobStore {
                     Ok(etag) => return Ok(etag),
                     Err(e) if e.is_retryable() && attempt + 1 < UPLOAD_PART_RETRIES => {
                         attempt += 1;
-                        compio::time::sleep(std::time::Duration::from_millis(
-                            50 * u64::from(attempt),
-                        ))
-                        .await;
+                        compio::time::sleep(upload_retry_backoff(attempt)).await;
                     }
                     Err(e) => return Err(map_s3(&hash, e)),
                 }
@@ -307,10 +304,19 @@ impl S3BlobStore {
 }
 
 /// Per-part upload attempt budget (1 initial try + retries on retryable
-/// transport/5xx errors). Concurrent uploads churn connections fast enough that
-/// transient connect failures are expected; a small bounded retry keeps a
-/// single blip from aborting a multi-part blob upload.
-const UPLOAD_PART_RETRIES: u32 = 5;
+/// transport/5xx errors). Concurrent part PUTs churn connections fast enough
+/// that transient connect failures (`hyper` Connect, ephemeral-port/`TIME_WAIT`
+/// pressure on a busy host) are expected; a generous bounded retry keeps such
+/// blips from aborting a multi-part blob upload.
+const UPLOAD_PART_RETRIES: u32 = 8;
+
+/// Capped exponential backoff for a part-upload retry: 100ms, 200ms, 400ms …
+/// up to ~2s. Backing off lets the host recycle ephemeral ports / `TIME_WAIT`
+/// sockets and lets the endpoint drain its accept backlog before retrying.
+fn upload_retry_backoff(attempt: u32) -> std::time::Duration {
+    let ms = 100u64.saturating_mul(1u64 << attempt.min(5));
+    std::time::Duration::from_millis(ms.min(2000))
+}
 
 /// Synchronous panic-backstop for an in-progress multipart upload.
 ///
