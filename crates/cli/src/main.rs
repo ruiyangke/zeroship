@@ -126,15 +126,36 @@ fn cmd_serve(args: &[String]) {
         }
     }
 
-    // Storage plugin: always on in dev. Data lives under
-    // `$ZEROSHIP_STORAGE_ROOT` or (default) `<cwd>/.zeroship/storage`. The
-    // vite-plugin's scaffolded .gitignore already excludes `.zeroship/` so
-    // uploads aren't checked into git.
-    let storage_root: PathBuf = std::env::var_os("ZEROSHIP_STORAGE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".zeroship/storage"));
-    plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
-    eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
+    // Storage plugin: always on in dev. `$ZEROSHIP_STORAGE_URL` selects the
+    // backend through the SAME parser the worker uses (`--storage-url`): a
+    // bare path or `file://…` → LocalFs (default `<cwd>/.zeroship/storage`);
+    // `s3://…` → the S3 backend (creds from the AWS env vars). The
+    // vite-plugin's scaffolded .gitignore already excludes `.zeroship/`.
+    let storage_url = std::env::var("ZEROSHIP_STORAGE_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "file://.zeroship/storage".to_string());
+    // `file://` is config ergonomics for a local path; strip the scheme so
+    // the parser sees a bare path. `s3://` falls through to the S3 leg.
+    let storage_arg = storage_url.strip_prefix("file://").unwrap_or(&storage_url);
+    let storage_cfg = match zeroship_plugin_storage::StorageBackendConfig::parse(storage_arg) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[zeroship] invalid ZEROSHIP_STORAGE_URL: {e}");
+            std::process::exit(2);
+        }
+    };
+    let storage_kind = storage_cfg.kind();
+    match zeroship_plugin_storage::build_backend(&storage_cfg) {
+        Ok(backend) => {
+            plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::with_backend(backend)));
+            eprintln!("[zeroship] storage plugin registered (backend={storage_kind})");
+        }
+        Err(e) => {
+            eprintln!("[zeroship] storage backend init failed: {e}");
+            std::process::exit(2);
+        }
+    }
 
     // Auth plugin: always on. Stateless — the callbacks read the
     // per-request user from `RuntimeState` (set from the verified

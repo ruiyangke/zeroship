@@ -383,6 +383,7 @@ mod tests {
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_core::types::AppRuntimeLimits;
+    use zeroship_plugin_storage::StorageBackendConfig;
     use zeroship_runtime::init::init_v8;
 
     use super::*;
@@ -426,7 +427,7 @@ mod tests {
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
-                    storage_root: None,
+                    storage_backend: None,
                 },
             );
             assert!(crate::cache::load_app(
@@ -452,7 +453,7 @@ mod tests {
                 control_key: String::new(),
                 db_url: None,
                 kv_url: None,
-                storage_root: None,
+                storage_backend: None,
                 max_isolates: 10,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
@@ -594,7 +595,7 @@ mod tests {
                     // so `env.db` is installed without a live Postgres.
                     db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
                     kv_url: Some(kv_url),
-                    storage_root: Some(storage_root.clone()),
+                    storage_backend: Some(StorageBackendConfig::Local(storage_root.clone())),
                 },
             );
             assert!(crate::cache::load_app(
@@ -620,7 +621,7 @@ mod tests {
                 control_key: String::new(),
                 db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
                 kv_url: None,
-                storage_root: None,
+                storage_backend: None,
                 max_isolates: 10,
                 poll_interval_secs: 60,
                 worker_key: String::new(),

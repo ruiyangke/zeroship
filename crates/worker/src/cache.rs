@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use uuid::Uuid;
 
 use zeroship_core::types::AppRuntimeLimits;
+use zeroship_plugin_storage::StorageBackendConfig;
 use zeroship_runtime::ModuleEntry;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
@@ -29,26 +29,26 @@ thread_local! {
     /// backend-choice rationale on `init_cache`). When `None`, the `kv`
     /// namespace is simply absent (degrade, don't panic).
     static KV_URL: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// Root directory for the multi-node object-storage `LocalFs` backend.
+    /// Parsed object-storage backend config for the `env.storage` namespace.
     /// Held per-thread like `DB_URL`. When `Some`, `create_plugins` mints a
-    /// `StoragePlugin` rooted here; in the real stack the path is a SHARED
-    /// volume (the same multi-node pattern the deploy blob store uses), so
-    /// a put on node A is readable on node B. When `None`, the `storage`
+    /// `StoragePlugin` over the selected backend: `LocalFs` (a SHARED volume
+    /// across nodes — the same multi-node pattern the deploy blob store uses)
+    /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
-    static STORAGE_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
 }
 
 /// Per-thread runtime-kernel config the worker threads each install.
 ///
 /// All four backend handles degrade independently: an absent `db_url` /
-/// `kv_url` / `storage_root` means that `env.*` namespace is simply not
+/// `kv_url` / `storage_backend` means that `env.*` namespace is simply not
 /// registered (matching the long-standing DB behaviour), never a panic.
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
 pub struct KernelConfig {
     pub db_url: Option<String>,
     pub kv_url: Option<String>,
-    pub storage_root: Option<PathBuf>,
+    pub storage_backend: Option<StorageBackendConfig>,
 }
 
 pub fn init_cache(max_size: usize, kernel: KernelConfig) {
@@ -64,8 +64,8 @@ pub fn init_cache(max_size: usize, kernel: KernelConfig) {
     if let Some(url) = kernel.kv_url {
         KV_URL.with(|u| *u.borrow_mut() = Some(url));
     }
-    if let Some(root) = kernel.storage_root {
-        STORAGE_ROOT.with(|s| *s.borrow_mut() = Some(root));
+    if let Some(backend) = kernel.storage_backend {
+        STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
 }
 
@@ -88,13 +88,13 @@ pub fn init_cache(max_size: usize, kernel: KernelConfig) {
 ///   logical keyspace across every node — so KV stays consistent. The
 ///   `Redis` backend's URL transparently selects single-node
 ///   (`redis://host`) or cluster (`?cluster=true`) mode.
-/// - `storage` — pushed when a storage root is configured, backed by
-///   `LocalFs`. Multi-node consistency comes from rooting that path on a
-///   SHARED volume — the exact pattern the deploy blob store already uses
-///   (control/gateway/worker all mount the same `bundles` volume). An
-///   object written on node A is then readable on node B. (S3/R2 is the
-///   prod backend and slots in behind the same `Backend` trait once the
-///   `s3` feature is implemented; today only `LocalFs` exists.)
+/// - `storage` — pushed when a storage backend is configured (`--storage-url`).
+///   `LocalFs` gets multi-node consistency from rooting its path on a SHARED
+///   volume — the exact pattern the deploy blob store already uses
+///   (control/gateway/worker all mount the same `bundles` volume). `S3`
+///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
+///   inherently shared across nodes. An object written on node A is readable
+///   on node B in both cases.
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
@@ -105,8 +105,18 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
             Arc::new(zeroship_plugin_kv::Redis::new(url)),
         )));
     }
-    if let Some(root) = STORAGE_ROOT.with(|s| s.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::local(root)));
+    if let Some(cfg) = STORAGE_BACKEND.with(|s| s.borrow().clone()) {
+        match zeroship_plugin_storage::build_backend(&cfg) {
+            Ok(backend) => plugins.push(Arc::new(
+                zeroship_plugin_storage::StoragePlugin::with_backend(backend),
+            )),
+            Err(e) => {
+                // Credentials were validated at boot (see worker main); a
+                // failure here means the env changed under us. Degrade the
+                // namespace rather than crash the isolate.
+                tracing::error!(error = %e, "env.storage backend init failed; namespace absent");
+            }
+        }
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
@@ -313,6 +323,8 @@ fn evict_lru(cache: &mut AppCache) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// Slice 1a regression guard: every Runtime the worker builds must
@@ -352,7 +364,9 @@ mod tests {
                 KernelConfig {
                     db_url: Some("postgres://localhost/zs_unused".to_string()),
                     kv_url: Some("redis://127.0.0.1:6379".to_string()),
-                    storage_root: Some(PathBuf::from("/tmp/zs-cache-test-storage")),
+                    storage_backend: Some(StorageBackendConfig::Local(PathBuf::from(
+                        "/tmp/zs-cache-test-storage",
+                    ))),
                 },
             );
             let plugins = create_plugins();
@@ -381,7 +395,7 @@ mod tests {
                 KernelConfig {
                     db_url: None,
                     kv_url: None,
-                    storage_root: None,
+                    storage_backend: None,
                 },
             );
             let plugins = create_plugins();

@@ -6738,6 +6738,7 @@ dependencies = [
  "compio-s3",
  "futures",
  "serde_json",
+ "thiserror 2.0.18",
  "v8",
  "zeroship-runtime",
 ]

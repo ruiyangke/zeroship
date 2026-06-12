@@ -423,6 +423,16 @@ pub struct RuntimeState {
     /// `is_closed` / `drain_into_complete` in `runtime.rs`.
     pub response_forwarders: HashMap<u32, crate::streams::response_forwarder::ResponseForwarder>,
 
+    /// Stream-ids of paused upload forwarders awaiting resume. A forwarder
+    /// pauses its `reader.read()` loop when its downstream `StreamWriter`
+    /// buffer crosses the high-water mark (backpressure); the consumer of the
+    /// paired `StreamReader` (e.g. `env.storage.putStream` → S3 multipart)
+    /// enqueues the id here once it has drained the buffer below the low-water
+    /// mark. The pump services these inside its V8 scope (`resume_read`),
+    /// re-arming the read loop. This is what keeps a large streaming upload
+    /// bounded by the buffer cap instead of overflowing it.
+    pub forwarder_resumes: VecDeque<u32>,
+
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
     /// Timers queued to be armed on the next event-loop iteration.
@@ -620,6 +630,16 @@ pub struct RuntimeState {
 pub type SharedState = Rc<RefCell<RuntimeState>>;
 
 impl RuntimeState {
+    /// Wake the pump task so it drains newly added work (spawned ops,
+    /// forwarder resumes, …). Cheap and lossy: the channel is a 1-slot
+    /// notification, so a `try_send` that fails because one is already queued
+    /// is fine — the pump will see the work on its next turn.
+    pub fn notify_pump(&self) {
+        if let Some(tx) = &self.pump_notify_tx {
+            let _ = tx.clone().try_send(());
+        }
+    }
+
     /// Create a new `RuntimeState` seeded with the given environment variables.
     pub fn new(env_vars: HashMap<String, String>, _server_handle: Option<()>) -> Self {
         Self {
@@ -633,6 +653,7 @@ impl RuntimeState {
 
             next_stream_id: 1,
             response_forwarders: HashMap::new(),
+            forwarder_resumes: VecDeque::new(),
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),

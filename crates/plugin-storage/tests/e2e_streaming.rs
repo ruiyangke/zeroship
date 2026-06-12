@@ -148,7 +148,12 @@ fn run_app(app: &'static str) -> (u16, String) {
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
 
-        let dir = std::env::temp_dir().join(format!("zs-storage-e2e-{}", std::process::id()));
+        // Unique per call so concurrent tests in this binary never share a
+        // storage root (cargo runs test fns on parallel threads).
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("zs-storage-e2e-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut env_vars = HashMap::new();
@@ -204,5 +209,102 @@ fn e2e_storage_streaming_localfs() {
     assert!(
         body.contains(r#""ok":true"#),
         "storage e2e reported failure; body: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Backpressure regression (ISS-32 PR4): a `putStream` whose total size far
+// exceeds the StreamWriter buffer cap (4 MiB) MUST succeed. Before the
+// forwarder learned to pause/resume the V8 read loop on the buffer high/low
+// water marks, the eager read loop drained the whole source into the channel
+// in one microtask burst and overflowed at 4 MiB — the upload failed with
+// "upload stream exceeded the buffer backpressure cap". This drives 24 MiB of
+// 256 KiB chunks through the real V8 → response_forwarder → StreamReader →
+// LocalFs path and asserts the full round-trip, proving backpressure bounds
+// the buffer instead of overflowing it.
+const STORAGE_STREAM_BACKPRESSURE_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const s = env.storage;
+        const BUCKET = "uploads";
+        const KEY = "stream/big.bin";
+        const CHUNK = 256 * 1024;       // 256 KiB
+        const N = 96;                   // 96 * 256 KiB = 24 MiB ≫ 4 MiB cap
+        const total = CHUNK * N;
+
+        // Cheap, position-dependent pattern so a dropped/duplicated/reordered
+        // chunk changes the running checksum (no whole-object buffer).
+        function fillChunk(buf, c) {
+            const base = (c * 131) & 0xff;
+            for (let i = 0; i < buf.length; i++) buf[i] = (base + (i & 0x3f)) & 0xff;
+        }
+        // Fletcher-style rolling checksum, position-weighted.
+        function checksum(bytes, absStart, acc) {
+            let a = acc.a, b = acc.b;
+            for (let i = 0; i < bytes.length; i++) {
+                a = (a + bytes[i] * (((absStart + i) % 65521) + 1)) % 0xfffffffb;
+                b = (b + a) % 0xfffffffb;
+            }
+            acc.a = a; acc.b = b;
+        }
+
+        try {
+            const upAcc = { a: 1, b: 0 };
+            let produced = 0, c = 0;
+            const upload = new ReadableStream({
+                pull(controller) {
+                    if (produced >= total) { controller.close(); return; }
+                    const buf = new Uint8Array(CHUNK);
+                    fillChunk(buf, c);
+                    checksum(buf, produced, upAcc);
+                    produced += CHUNK; c += 1;
+                    controller.enqueue(buf);
+                },
+            });
+            const putRaw = await s.putStream(BUCKET, KEY, upload, "application/octet-stream");
+            const put = JSON.parse(putRaw);
+            if (put.size !== total) {
+                return Response.json({ ok: false, step: "put.size", got: put.size, want: total }, { status: 500 });
+            }
+
+            // Stream it back and re-checksum incrementally.
+            const handleRaw = await s.getStream(BUCKET, KEY);
+            if (!handleRaw || handleRaw === "null") {
+                return Response.json({ ok: false, step: "get.handle" }, { status: 500 });
+            }
+            const handle = JSON.parse(handleRaw);
+            const downAcc = { a: 1, b: 0 };
+            let read = 0;
+            for (;;) {
+                const chunk = await s.readChunk(handle.streamId);
+                if (chunk === undefined || chunk === null) break;
+                checksum(chunk, read, downAcc);
+                read += chunk.length;
+            }
+            if (read !== total) {
+                return Response.json({ ok: false, step: "get.totalRead", got: read, want: total }, { status: 500 });
+            }
+            if (downAcc.a !== upAcc.a || downAcc.b !== upAcc.b) {
+                return Response.json({ ok: false, step: "checksum",
+                    got: [downAcc.a, downAcc.b], want: [upAcc.a, upAcc.b] }, { status: 500 });
+            }
+            return Response.json({ ok: true, size: total });
+        } catch (e) {
+            return Response.json({ ok: false, message: (e && e.message) || String(e) }, { status: 500 });
+        }
+    },
+};
+"#;
+
+#[test]
+fn e2e_storage_streaming_backpressure_over_cap() {
+    let (status, body) = run_app(STORAGE_STREAM_BACKPRESSURE_APP);
+    assert_eq!(
+        status, 200,
+        "over-cap streaming upload failed (regression: backpressure not applied?); body: {body}"
+    );
+    assert!(
+        body.contains(r#""ok":true"#),
+        "over-cap streaming round-trip reported failure; body: {body}"
     );
 }

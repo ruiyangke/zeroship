@@ -338,8 +338,28 @@ fn drop_get_stream(stream_id: u32) {
 /// the `response_forwarder` pump used by `putStream`. Yields buffered chunks,
 /// blocks (waker-based) when the buffer is empty but the producer is still
 /// live, errors on backpressure overflow, and ends at producer EOF.
+///
+/// Backpressure (the reason a large upload doesn't overflow): the forwarder's
+/// V8 read loop PAUSES once the shared buffer crosses its high-water mark.
+/// After draining a chunk here, if the buffer has fallen to the low-water
+/// mark we ask the pump to resume the paused producer (`request_resume`), so
+/// the upload proceeds in bounded-memory waves instead of racing the read
+/// loop ahead of this S3-multipart consumer.
 struct StreamReaderSource {
     reader: StreamReader,
+    state: SharedState,
+    stream_id: u32,
+}
+
+impl StreamReaderSource {
+    /// Release backpressure if the buffer has drained enough: re-arm the
+    /// paused producer. Cheap and idempotent — `request_resume` no-ops unless
+    /// the forwarder is actually paused.
+    fn maybe_resume_producer(&self) {
+        if self.reader.buffered_bytes() <= response_forwarder::RESUME_LOW_WATER {
+            response_forwarder::request_resume(&self.state, self.stream_id);
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -347,6 +367,8 @@ impl ChunkSource for StreamReaderSource {
     async fn next_chunk(&mut self) -> Option<ChunkResult> {
         loop {
             if let Some(chunk) = self.reader.pop() {
+                // We just freed buffer space; let the producer refill it.
+                self.maybe_resume_producer();
                 return Some(Ok(bytes::Bytes::from(chunk)));
             }
             if self.reader.is_overflow() {
@@ -357,6 +379,11 @@ impl ChunkSource for StreamReaderSource {
             if self.reader.is_done() {
                 return None;
             }
+            // Buffer is empty and the producer may be paused (it pauses on
+            // high-water, but a final short chunk can leave it paused with the
+            // buffer already drained). Nudge a resume before parking so we
+            // never deadlock waiting for data the paused producer won't send.
+            self.maybe_resume_producer();
             self.reader.wait_for_data().await;
         }
     }
@@ -464,7 +491,7 @@ pub fn put_stream(
     let (writer, reader) = stream_buffer();
     response_forwarder::attach_writer(&state, stream_id, writer);
 
-    let source = StreamReaderSource { reader };
+    let source = StreamReaderSource { reader, state: state.clone(), stream_id };
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match backend
             .put_stream(&app_id, &bucket, &key, Box::new(source), content_type.as_deref())

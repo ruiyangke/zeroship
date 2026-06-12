@@ -156,9 +156,58 @@ verify tokens locally against the JWKS at
 
 `control`, `gateway`, and `worker` all mount the `bundles` volume at
 `/data/bundles` and pass `--blob-store /data/bundles`, so every service reads
-and writes the same content-addressed deploy blobs.
+and writes the same content-addressed deploy blobs. The worker also passes
+`--storage-url /data/app-storage` (the `app-storage` volume) for the
+creator-facing `env.storage` namespace.
 
 The compose file already sets the current service names, keys, and sandbox env vars. Use it as the source of truth before copying flags into ad-hoc commands.
+
+### Production object storage (S3 / R2 / MinIO)
+
+The local-volume defaults above are the dev path. For a production-like
+multi-node run — or to exercise the real S3 code path locally — point both the
+deploy blob store and `env.storage` at an S3-compatible provider. Both use the
+**same URL grammar** and the **same** AWS credentials (one S3 identity per
+process), differing only by prefix:
+
+```yaml
+# control / gateway / worker — deploy blobs:
+- --blob-store
+- s3://my-bucket/deploy?region=us-east-1
+
+# worker only — env.storage objects:
+- --storage-url
+- s3://my-bucket/storage?region=us-east-1
+```
+
+Credentials come from the standard AWS environment variables on each service:
+
+```yaml
+environment:
+  AWS_ACCESS_KEY_ID: "<key>"
+  AWS_SECRET_ACCESS_KEY: "<secret>"
+  # AWS_SESSION_TOKEN: "<token>"   # only for temporary/STS credentials
+```
+
+Provider-specific URL parameters:
+
+| Provider | Example URL suffix |
+| --- | --- |
+| **AWS S3** | `?region=us-east-1` (endpoint inferred; virtual-host style) |
+| **Cloudflare R2** | `?provider=r2&endpoint=https://<acct>.r2.cloudflarestorage.com&region=auto&style=path` |
+| **MinIO** (local) | `?provider=minio&endpoint=http://minio:9000&region=us-east-1&style=path&dev_http=true` |
+
+`dev_http=true` is loopback/localhost-only (plain HTTP is rejected for any
+non-loopback host). R2 must use `region=auto` and `checksum=none` (it rejects
+the AWS checksum headers); the parser enforces these.
+
+A self-contained MinIO smoke is available at `tests/e2e_s3_storage.sh`: it
+brings up a MinIO container, creates a bucket, boots control/worker/gateway
+with `--blob-store s3://…` and the worker with `--storage-url s3://…`, deploys
+a real app whose blobs now live in S3, asserts gateway→worker dispatch reading
+the bundle from S3, and byte-compares a large (> 8 MiB part size) multipart
+`env.storage` streaming round-trip. It skips cleanly when Docker is
+unavailable.
 
 ### Console / AI builder
 

@@ -98,13 +98,38 @@ no pricing model — add a server-side plan catalog (see the remediation plan).
 ## T1 — Launch-blocking infrastructure
 
 ### ISS-32 · No production object storage (S3/R2)
-**Status:** open · **Effort:** M–L · **Tier:** T1
+**Status:** FIXED (PR1–PR4, branch `design/s3-object-storage`) · **Effort:** M–L · **Tier:** T1
 
-`crates/plugin-storage` and `crates/bundle` ship **only `LocalFs`/`LocalDiskBlobStore`**;
-`S3BlobStore` + the `s3` plugin backend are comment-only (no `s3.rs`). All app bundles + every
-`env.storage` upload sit on one node's disk, no replication. **Fix:** implement `S3BlobStore` +
-the plugin-storage `s3` backend behind the documented flag; make `--blob-store` accept an S3/R2
-target. (Multi-worker `env.storage` correctness depends on this; today it needs a shared-FS hack.)
+Production S3/R2 object storage now backs **both** abstractions over one bespoke,
+zero-tokio, compio-native S3 client (`crates/compio-s3`: cyper transport + hand-rolled
+SigV4 + `quick-xml` LIST; aws-sdk-s3/rusoto/aws-sigv4 banned). Full streaming + multipart
+shipped in v1 — nothing deferred.
+
+- **PR1 — `crates/compio-s3`:** hand-rolled SigV4 signer, GET/PUT/HEAD/DELETE/LIST,
+  streaming `get_stream` (cyper `bytes_stream`), and **multipart** (create/upload-part/
+  complete/abort with mandatory abort-on-error). Request-scoped current-thread clients;
+  typed error taxonomy + retries; provider profiles (aws/r2/minio/generic), checksum/SSE
+  modes, `dev_http` loopback gate. SigV4 vectors + MinIO smoke (incl. multipart).
+- **PR2 — `S3BlobStore` + gateway/control/worker `--blob-store s3://…`:** content-addressed
+  blobs streamed up via multipart with whole-stream SHA-256 verify before `complete`;
+  immutable manifests with conditional PUT; `delete_app_manifests` paginated purge; gateway
+  disk-cache refill streams `get_blob_to_file` into a `create_new` temp + no-clobber publish.
+  Control's legacy `BundleStore`/VFS deleted; control writes S3 deploy artifacts.
+- **PR3 — `plugin-storage::S3` + `env.storage` streaming through V8:** `Backend` gains
+  `put_stream`/`get_stream`; S3 `put_stream` → multipart (bounded by 8 MiB part size);
+  LocalFs gains object/metadata-sidecar layout. Native `putStream`/`getStream`/`readChunk`/
+  `cancelStream` wired through the runtime's `response_forwarder` + `StreamWriter` bridges;
+  `@zeroship/storage` SDK grows streaming `put`/`getStream`.
+- **PR4 — E2E + parity + docs (this PR):** `tests/e2e_s3_storage.sh` (MinIO) proves the whole
+  edge — control writes deploy blobs to S3, gateway→worker dispatch reads the bundle FROM S3,
+  and a 20 MiB (> part size) multipart `env.storage` streaming round-trip is byte-compared
+  (18/18 green). Backend-parity (LocalFs vs S3, buffered + streaming + large multipart) wired
+  in. Worker `--storage-root` replaced by `--storage-url` (bare path/`file://` → LocalFs;
+  `s3://` → S3); `StoragePlugin::new` deleted. **Runtime fix:** the upload streaming
+  `response_forwarder` learned pause/resume backpressure on the buffer high/low-water marks,
+  so a > buffer-cap streaming upload no longer overflows (regression test in
+  `plugin-storage/tests/e2e_streaming.rs`). Docs: `blob-store.md`, `plugin-system.md`,
+  docker-compose runbook (MinIO/R2), design doc marked shipped.
 
 ### ISS-33 · No platform backups / disaster recovery
 **Status:** open · **Effort:** M · **Tier:** T1

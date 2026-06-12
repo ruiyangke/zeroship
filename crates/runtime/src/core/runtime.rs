@@ -1068,12 +1068,14 @@ impl RuntimeInner {
                     !s.spawned_ops.is_empty()
                         || !s.spawned_timers.is_empty()
                         || !s.ready_timers.is_empty()
+                        || !s.forwarder_resumes.is_empty()
                 };
 
                 if needs_drain {
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     rt.drain_new_tasks_into(&mut work);
+                    rt.service_forwarder_resumes();
                     rt.exit_isolate();
                 }
                 // `runtime` (strong Rc) dropped here — not held across the
@@ -1985,6 +1987,27 @@ impl RuntimeInner {
 
         // Fire zero-delay timers inline
         self.fire_ready_timers_pump(work);
+    }
+
+    /// Re-arm any upload forwarders that paused for backpressure and whose
+    /// consumer has since drained the buffer (it enqueued the stream-id in
+    /// `RuntimeState::forwarder_resumes`). Runs inside the pump's V8 scope —
+    /// `resume_read` needs a scope to call `reader.read()`. Called from the
+    /// pump's PHASE 1 with the isolate already entered.
+    fn service_forwarder_resumes(&mut self) {
+        let pending: Vec<u32> = {
+            let mut s = self.state.borrow_mut();
+            if s.forwarder_resumes.is_empty() {
+                return;
+            }
+            s.forwarder_resumes.drain(..).collect()
+        };
+        let state = self.state.clone();
+        enter_v8!(self, |scope| {
+            for stream_id in pending {
+                crate::streams::response_forwarder::resume_read(scope, &state, stream_id);
+            }
+        });
     }
 
     /// Handle an async event from the pump (op completed or timer fired).

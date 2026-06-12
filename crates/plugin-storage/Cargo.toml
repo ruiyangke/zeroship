@@ -12,6 +12,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 v8 = { workspace = true }
 async-trait = { workspace = true }
+thiserror = { workspace = true }
 
 # S3 backend deps — gated behind the `s3` feature so the default build
 # (LocalFs only) pulls nothing extra.

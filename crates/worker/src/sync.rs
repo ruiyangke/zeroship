@@ -651,7 +651,7 @@ mod tests {
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
-                    storage_root: None,
+                    storage_backend: None,
                 },
             );
 
@@ -691,7 +691,7 @@ mod tests {
                 control_key: String::new(),
                 db_url: None,
                 kv_url: None,
-                storage_root: None,
+                storage_backend: None,
                 max_isolates: 10,
                 poll_interval_secs: 60,
                 worker_key: String::new(),

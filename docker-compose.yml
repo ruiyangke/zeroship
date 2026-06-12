@@ -269,7 +269,11 @@ services:
       - /data/bundles
       - --kv-url
       - redis://redis:6379
-      - --storage-root
+      # env.storage backend: a bare path/`file://` is LocalFs (the shared
+      # volume below); an `s3://…` URL is S3/R2/MinIO (see the docker-compose
+      # runbook "Production object storage" section). Same grammar as
+      # --blob-store; S3 creds come from AWS_ACCESS_KEY_ID/SECRET in the env.
+      - --storage-url
       - /data/app-storage
       - --max-isolates
       - "200"

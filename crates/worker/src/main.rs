@@ -13,6 +13,7 @@ use zeroship_core::config::{
     CheckValue,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
+use zeroship_plugin_storage::StorageBackendConfig;
 use zeroship_runtime::init::init_v8;
 
 use crate::sync::{SharedEnvs, SharedVersions};
@@ -98,17 +99,18 @@ struct WorkerCli {
     #[arg(long = "kv-url", env = "ZEROSHIP_KV_URL", default_value = "", hide_env_values = true)]
     kv_url: String,
 
-    /// Root directory for the app `env.storage` object store (`LocalFs`).
+    /// Object-store location for the app `env.storage` namespace.
     ///
-    /// Multi-node storage MUST be a SHARED location so an object `put` on
-    /// one worker node is readable on another. In dev/single-host this is a
-    /// shared Docker volume mounted at the same path on every worker
-    /// replica — the same pattern the deploy blob store uses. (S3/R2 is the
-    /// prod backend and slots in behind the same `Backend` trait once the
-    /// storage crate's `s3` feature ships.) When empty the `env.storage`
-    /// namespace is absent.
-    #[arg(long = "storage-root", env = "ZEROSHIP_STORAGE_ROOT", default_value = "")]
-    storage_root: String,
+    /// A bare path or `file://…` selects the `LocalFs` backend; `s3://…`
+    /// selects the S3 backend (S3/R2/MinIO/Spaces/B2), parsed through the
+    /// same grammar as `--blob-store`. Multi-node storage MUST be shared so
+    /// an object `put` on one worker node is readable on another: a `LocalFs`
+    /// path is a shared volume mounted identically on every replica (the
+    /// deploy-blob-store pattern); S3/R2 is inherently shared. S3 credentials
+    /// resolve from the AWS env vars. When empty the `env.storage` namespace
+    /// is absent.
+    #[arg(long = "storage-url", env = "ZEROSHIP_STORAGE_URL", default_value = "")]
+    storage_url: String,
 
     /// HTTP bind host.
     #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
@@ -159,7 +161,7 @@ impl std::fmt::Debug for WorkerCli {
             .field("blob_store", &self.blob_store)
             // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
             .field("kv_url", &"<redacted>")
-            .field("storage_root", &self.storage_root)
+            .field("storage_url", &self.storage_url)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
             .field("config_path", &self.config_path)
@@ -187,10 +189,10 @@ pub struct WorkerConfig {
     /// Redis URL for the app `env.kv` namespace. `None` ⇒ namespace absent.
     /// Shared across worker nodes — see `WorkerCli::kv_url`.
     pub kv_url: Option<String>,
-    /// Root dir for the app `env.storage` (`LocalFs`) namespace. `None` ⇒
-    /// namespace absent. A shared volume across nodes — see
-    /// `WorkerCli::storage_root`.
-    pub storage_root: Option<PathBuf>,
+    /// Object-store backend for the app `env.storage` namespace. `None` ⇒
+    /// namespace absent. `LocalFs` (a shared volume across nodes) or `S3`
+    /// (inherently shared) — see `WorkerCli::storage_url`.
+    pub storage_backend: Option<StorageBackendConfig>,
     pub max_isolates: usize,
     pub poll_interval_secs: u64,
     /// Shared secret with the gateway. When non-empty, every /dispatch call
@@ -281,7 +283,25 @@ fn main() -> std::io::Result<()> {
         file_secrets.kv_url.as_deref(),
         cli.check_config,
     );
-    let storage_root = cli.storage_root;
+    // `env.storage` backend. Empty ⇒ namespace absent. A bare path/`file://`
+    // is `LocalFs`; `s3://…` is the S3 backend. Validated now (parse only —
+    // S3 credentials are resolved when the plugin is built per worker thread)
+    // so a malformed `s3://` URL fails fast.
+    let storage_raw = cli.storage_url;
+    let storage_backend = if storage_raw.is_empty() {
+        None
+    } else {
+        // `file://` is config ergonomics for a local path; strip it so the
+        // parser sees a bare path. `s3://` falls through to the S3 leg.
+        let arg = storage_raw.strip_prefix("file://").unwrap_or(&storage_raw);
+        match StorageBackendConfig::parse(arg) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("worker: invalid --storage-url: {e}");
+                std::process::exit(2);
+            }
+        }
+    };
     let bind_host = cli.bind;
     let socket_path = cli.socket;
 
@@ -355,7 +375,20 @@ fn main() -> std::io::Result<()> {
         report.field("kv_configured", CheckValue::Flag(!kv_url.is_empty()));
         report.field(
             "storage_configured",
-            CheckValue::Flag(!storage_root.is_empty()),
+            CheckValue::Flag(storage_backend.is_some()),
+        );
+        report.field(
+            "storage_kind",
+            CheckValue::Plain(
+                storage_backend
+                    .as_ref()
+                    .map_or("absent", StorageBackendConfig::kind)
+                    .to_string(),
+            ),
+        );
+        report.field(
+            "storage_remote",
+            CheckValue::Flag(storage_backend.as_ref().is_some_and(StorageBackendConfig::is_remote)),
         );
 
         let fmt = if cli.check_config_format == "json" {
@@ -382,11 +415,17 @@ fn main() -> std::io::Result<()> {
     );
 
     let kv_url_opt = if kv_url.is_empty() { None } else { Some(kv_url) };
-    let storage_root_opt = if storage_root.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(&storage_root))
-    };
+    // Resolve S3 credentials NOW (fail fast) for a remote storage backend, so
+    // a misconfigured worker refuses to start rather than degrading the
+    // namespace silently per thread.
+    if let Some(cfg) = &storage_backend {
+        if cfg.is_remote() {
+            if let Err(e) = zeroship_plugin_storage::build_backend(cfg) {
+                eprintln!("worker: --storage-url s3 backend init failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     // Announce the resolved app-kernel namespace surface so a deployment
     // that forgot to wire kv/storage is visible in the worker's boot log
     // (rather than only surfacing as a runtime "env.kv is undefined" in a
@@ -394,7 +433,8 @@ fn main() -> std::io::Result<()> {
     tracing::info!(
         db = !db_url.is_empty(),
         kv = kv_url_opt.is_some(),
-        storage = storage_root_opt.is_some(),
+        storage = storage_backend.is_some(),
+        storage_kind = storage_backend.as_ref().map_or("absent", StorageBackendConfig::kind),
         auth = true,
         "worker app-kernel namespaces"
     );
@@ -404,7 +444,7 @@ fn main() -> std::io::Result<()> {
         control_key,
         db_url: if db_url.is_empty() { None } else { Some(db_url) },
         kv_url: kv_url_opt,
-        storage_root: storage_root_opt,
+        storage_backend,
         max_isolates,
         poll_interval_secs: poll_interval,
         worker_key,
@@ -460,7 +500,7 @@ fn main() -> std::io::Result<()> {
             cache::KernelConfig {
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
-                storage_root: config.storage_root.clone(),
+                storage_backend: config.storage_backend.clone(),
             },
         );
         // Per-thread reconcile loop — reads from the shared version map,

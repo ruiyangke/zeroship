@@ -11,7 +11,7 @@
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/worker/src/cache.rs create_plugins()).
 #   3. Boot control + worker + gateway with `--dev-insecure`. The worker gets
-#      `--kv-url redis://...` (enables env.kv) AND `--storage-root <dir>`
+#      `--kv-url redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
 #      (enables env.storage). Without those flags the namespaces simply are
 #      not registered.
 #   4. Mint an admin PAT OFFLINE (ed25519 --signing-key-file + seeded
@@ -144,7 +144,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot stack (--dev-insecure, worker with --kv-url + --storage-root) ==="
+echo "=== Stage 2: boot stack (--dev-insecure, worker with --kv-url + --storage-url) ==="
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
@@ -160,11 +160,11 @@ PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$CONTROL_PORT/health" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
-# worker: env.kv ← --kv-url (Redis), env.storage ← --storage-root (LocalFs),
+# worker: env.kv ← --kv-url (Redis), env.storage ← --storage-url (LocalFs path),
 # env.db ← --db. Empty worker_key (dev) ⇒ /dispatch is unauthenticated on loopback.
 "$BIN/zeroship-worker" --port $WORKER_PORT --worker-threads 2 \
   --control "http://localhost:$CONTROL_PORT" --db "$DBURL" \
-  --kv-url "$KVURL" --storage-root "$WORK/storage" \
+  --kv-url "$KVURL" --storage-url "$WORK/storage" \
   --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done

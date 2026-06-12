@@ -62,6 +62,24 @@ pub struct ResponseForwarderInner {
     /// attach) and incoming chunks push straight to the writer's
     /// channel.
     pub direct_writer: Option<StreamWriter>,
+    /// The locked `reader` (from `getReader()`). Persisted so a paused
+    /// read loop can be re-armed by `resume_read` after the consumer drains
+    /// the downstream buffer. `None` for a wire-path (response-body)
+    /// forwarder that never pauses.
+    pub reader: Option<v8::Global<v8::Object>>,
+    /// True while the read loop is suspended for backpressure: the writer
+    /// buffer crossed the high-water mark, so we stopped re-arming
+    /// `reader.read()`. `resume_read` flips this back and schedules the next
+    /// read once the consumer has drained below the low-water mark.
+    pub paused: bool,
+    /// Whether this forwarder applies upload backpressure (pause/resume on
+    /// the buffer high/low-water marks). ONLY the `env.storage.putStream`
+    /// path (`begin_forward_stream`) enables it, because its consumer
+    /// (`StreamReaderSource`) calls `request_resume`. The wire response-body
+    /// path (`begin_forward`) leaves this `false`: its TCP consumer does not
+    /// re-arm, so it must keep the original eager read loop (overflow-capped),
+    /// never pausing.
+    pub backpressure: bool,
 }
 
 impl Default for ResponseForwarderInner {
@@ -70,8 +88,29 @@ impl Default for ResponseForwarderInner {
             buffer: VecDeque::new(),
             closed: false,
             direct_writer: None,
+            reader: None,
+            paused: false,
+            backpressure: false,
         }
     }
+}
+
+/// Resume the read loop on a forwarder that paused for backpressure. Called
+/// by the pump (which holds a V8 scope) after the consumer enqueues this
+/// `stream_id` in `RuntimeState::forwarder_resumes`. No-op if the forwarder
+/// is gone, closed, not paused, or has no persisted reader.
+pub fn resume_read(scope: &mut v8::PinScope, state: &SharedState, stream_id: u32) {
+    let Some(fwd) = get(state, stream_id) else { return };
+    let reader = {
+        let mut inner = fwd.borrow_mut();
+        if inner.closed || !inner.paused {
+            return;
+        }
+        let Some(reader) = inner.reader.clone() else { return };
+        inner.paused = false;
+        reader
+    };
+    schedule_next_read(scope, reader, fwd, stream_id, state.clone());
 }
 
 pub type ResponseForwarder = Rc<RefCell<ResponseForwarderInner>>;
@@ -136,7 +175,9 @@ pub fn begin_forward(
     let body_obj = v8::Local::<v8::Object>::try_from(body_v)
         .map_err(|_| "begin_forward: response.body is not an object".to_string())?;
 
-    let stream_id = forward_from_readable(scope, body_obj)?;
+    // Wire response-body path: NO upload backpressure (the TCP consumer does
+    // not re-arm a paused producer). Keeps the original eager read loop.
+    let stream_id = forward_from_readable(scope, body_obj, false)?;
 
     // Stamp the id on the response so the kernel can read it later
     // for idempotent re-inspect — and so build_fetch_outcome can match
@@ -161,7 +202,10 @@ pub fn begin_forward_stream(
     scope: &mut v8::PinScope,
     stream_obj: v8::Local<v8::Object>,
 ) -> Result<u32, String> {
-    forward_from_readable(scope, stream_obj)
+    // Upload path: ENABLE backpressure. The consumer (`StreamReaderSource`)
+    // re-arms the paused read loop via `request_resume` once it drains the
+    // buffer, so a large upload stays bounded by the buffer cap.
+    forward_from_readable(scope, stream_obj, true)
 }
 
 /// Shared core: lock `readable` via `getReader()`, register a forwarder,
@@ -169,6 +213,7 @@ pub fn begin_forward_stream(
 fn forward_from_readable(
     scope: &mut v8::PinScope,
     body_obj: v8::Local<v8::Object>,
+    backpressure: bool,
 ) -> Result<u32, String> {
     // Lock via getReader().
     let get_reader_key = v8::String::new(scope, "getReader").unwrap();
@@ -204,8 +249,14 @@ fn forward_from_readable(
         .clone();
     let stream_id = state.borrow_mut().alloc_stream_id();
 
-    // Allocate forwarder and register.
+    // Allocate forwarder and register. Persist the reader so a backpressure
+    // pause can be resumed later by `resume_read`.
     let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+    {
+        let mut inner = fwd.borrow_mut();
+        inner.reader = Some(reader_global.clone());
+        inner.backpressure = backpressure;
+    }
     register(&state, stream_id, fwd.clone());
 
     // Schedule the first read.
@@ -442,6 +493,19 @@ fn on_chunk_callback(
         return;
     }
 
+    // Backpressure: if the downstream buffer is now over the high-water mark,
+    // PAUSE the read loop instead of re-arming. The consumer of the paired
+    // StreamReader re-arms us via `resume_read` (pump-serviced) once it has
+    // drained below the low-water mark. This bounds a large streaming upload
+    // to the buffer cap instead of letting the read loop race ahead and
+    // overflow it. A wire-path forwarder (no high-water hit, or already
+    // direct-draining to the TCP channel faster than V8 produces) simply
+    // never pauses.
+    if should_pause(&captures.fwd) {
+        captures.fwd.borrow_mut().paused = true;
+        return;
+    }
+
     // Re-arm: schedule the next read. We clone the captures' fields
     // because schedule_next_read consumes them; the captures struct
     // itself stays alive for as long as the original Function does.
@@ -452,6 +516,24 @@ fn on_chunk_callback(
         captures.stream_id,
         captures.state.clone(),
     );
+}
+
+/// High-water mark for upload backpressure: once the downstream writer buffer
+/// holds at least this many bytes, the read loop pauses. Half the per-stream
+/// cap leaves headroom for the in-flight chunk plus the consumer to catch up.
+const PAUSE_HIGH_WATER: usize = crate::channel::DEFAULT_STREAM_BUFFER_CAP / 2;
+
+/// True if the forwarder should pause its read loop for backpressure: it has a
+/// `direct_writer` (the consumer side is live) whose buffer is at/over the
+/// high-water mark. Pre-attach buffering (no `direct_writer`) never pauses —
+/// those chunks are drained synchronously by `attach_writer`.
+fn should_pause(fwd: &ResponseForwarder) -> bool {
+    let inner = fwd.borrow();
+    inner.backpressure
+        && inner
+            .direct_writer
+            .as_ref()
+            .is_some_and(|w| w.buffered_bytes() >= PAUSE_HIGH_WATER)
 }
 
 fn on_error_callback(
@@ -574,6 +656,31 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
         // Forwarder is done — no more chunks coming. Drop from registry.
         remove(state, stream_id);
     }
+}
+
+/// Low-water mark: the consumer requests a read-loop resume once the
+/// downstream buffer has drained to at most this many bytes. Below the
+/// high-water mark, with hysteresis so we don't thrash pause/resume on every
+/// chunk.
+pub const RESUME_LOW_WATER: usize = crate::channel::DEFAULT_STREAM_BUFFER_CAP / 4;
+
+/// Ask the pump to resume a paused upload forwarder. Called by the consumer of
+/// the paired `StreamReader` after it has drained the buffer. Idempotent and
+/// cheap: enqueues the `stream_id` (skipping duplicates) and notifies the pump,
+/// which calls [`resume_read`] inside its V8 scope. No-op if the forwarder is
+/// not paused.
+pub fn request_resume(state: &SharedState, stream_id: u32) {
+    {
+        let Some(fwd) = get(state, stream_id) else { return };
+        if !fwd.borrow().paused {
+            return;
+        }
+    }
+    let mut s = state.borrow_mut();
+    if !s.forwarder_resumes.contains(&stream_id) {
+        s.forwarder_resumes.push_back(stream_id);
+    }
+    s.notify_pump();
 }
 
 /// Has the forwarder seen `done: true` from the underlying reader?

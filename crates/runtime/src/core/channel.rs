@@ -313,6 +313,13 @@ impl StreamReader {
         !self.inner.borrow().chunks.is_empty()
     }
 
+    /// Bytes currently queued in the shared buffer. Used by a streaming
+    /// consumer to decide when to release upload backpressure (re-arm a
+    /// paused producer once the buffer has drained below a low-water mark).
+    pub fn buffered_bytes(&self) -> usize {
+        self.inner.borrow().buffered_bytes
+    }
+
     /// Wait until data is available or the stream is done.
     /// Uses waker-based notification — no polling.
     pub fn wait_for_data(&self) -> WaitForData<'_> {

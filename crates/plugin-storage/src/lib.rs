@@ -38,10 +38,12 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 pub mod backend;
 pub mod callbacks;
+pub mod config;
 
 pub use backend::{Backend, LocalFs};
 #[cfg(feature = "s3")]
 pub use backend::S3;
+pub use config::{build_backend, StorageBackendConfig, StorageConfigError};
 
 // ---------------------------------------------------------------------------
 // Thread-local backend handle
@@ -101,11 +103,13 @@ impl StoragePlugin {
         Self { backend }
     }
 
-    /// Back-compat alias so existing CLI code (`StoragePlugin::new(path)`)
-    /// keeps working during the refactor. Equivalent to `::local(path)`.
+    /// Convenience: S3-compatible backend (S3/R2/MinIO/Spaces/B2) from a
+    /// parsed config + resolved credentials. The worker / CLI reach this via
+    /// [`config::build_backend`] after parsing `--storage-url`.
+    #[cfg(feature = "s3")]
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self::local(path)
+    pub fn s3(config: compio_s3::S3Config, credentials: compio_s3::S3Credentials) -> Self {
+        Self { backend: Arc::new(backend::S3::new(config, credentials)) }
     }
 }
 
