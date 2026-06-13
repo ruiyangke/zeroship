@@ -1,6 +1,6 @@
 # zeroship
 
-A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform takes 15%; the creator keeps the rest. Think Shopify for AI-generated apps.
+A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform earns two ways: creators pay for the infrastructure their apps consume (tiered plans + pay-as-you-go overage), and when a creator monetizes their app the platform takes a configurable application fee on end-user revenue (default 15%). Think Shopify for AI-generated apps.
 
 This file is the AI-agent landing page. Read the **task router** below first.
 
@@ -325,13 +325,28 @@ Conventions for writing `play()` interactions and using
 
 ## Revenue model
 
-```
-Creator's app earns $100/mo from subscribers:
-  Stripe fees:    -$3.20
-  Platform (15%): -$15.00
-  Creator keeps:  $81.80
+Two independent revenue streams, built as two sequenced epics.
 
-Infrastructure cost per app: ~$0.12/mo (98% gross margin)
-```
+**Stream 1 — infra usage billing (shipped).** Creators pay the platform for the
+infrastructure their apps consume. Pricing is a data-driven, operator-editable
+plan catalog — per tier: `base_fee`, `included_quota[metric]`,
+`overage_rate[metric]`, `spend_limit_default`. Exceeding the included quota
+accrues pay-as-you-go overage (the app keeps running, not blocked):
+`charge = base_fee + Σ max(0, usage[m] − included[m]) × overage_rate[m]`. A
+per-app configurable **spend limit** (not the quota) drives enforcement:
+Warn (~80%) → Degrade (gateway throttle — tighter concurrency + rate limit, app
+stays up) → Block (402 before dispatch). The free tier sets `spend_limit ≈ base`,
+so it is quota-capped by construction and needs no card. The platform computes
+line items from this policy and bills them as Stripe **invoice items** on a
+platform-side Customer (no Stripe-side price objects). Live across
+`plugin-meter` (producer) → `control` (idempotent ingest, aggregation, pricing,
+spend engine, Stripe reconciler) → `gateway` (edge enforcement). See
+`docs/reference/billing-metering.md`.
 
-The platform only earns when creators earn. Aligned incentives.
+**Stream 2 — application fee on creator revenue (separate upcoming epic).** When
+a creator monetizes their app, end-users pay via Stripe **Connect** (the creator
+connects their own Stripe). The platform takes a server-controlled,
+per-creator-configurable application fee, stamped server-side on the Connect
+charge so creator code cannot bypass it. `FeePolicy { Fixed { amount_cents } |
+Percent { percent, cap_cents?, floor_cents? } }`; the default for a new creator
+is `Percent { 15%, no cap, no floor }`.

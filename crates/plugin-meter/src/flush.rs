@@ -1,8 +1,8 @@
 //! Compio flush task — drains the per-worker [`Meter`] every ~10s and
 //! POSTs a `UsageReport` to control `/internal/usage`.
 //!
-//! Ported from the dead `crates/platform/src/metering/flusher.rs`: the
-//! tokio `spawn` + `tokio::time::sleep` loop becomes a `compio::runtime::
+//! Salvaged from the since-deleted `crates/platform` (`metering/flusher.rs`):
+//! the tokio `spawn` + `tokio::time::sleep` loop becomes a `compio::runtime::
 //! spawn` + `compio::time::interval` loop (zero tokio). The reset-after-ack
 //! discipline is preserved structurally by the meter API: `Meter::drain`
 //! snapshots AND zeroes; on a POST failure we `Meter::merge` the snapshot

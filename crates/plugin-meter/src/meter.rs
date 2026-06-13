@@ -1,7 +1,7 @@
 //! Per-worker usage meter — atomic per-`(app_id, metric)` counters.
 //!
-//! Ported from the dead `crates/platform/src/metering/meter.rs` (the
-//! tokio-era monolith): the atomic-counter + snapshot + reset logic
+//! Salvaged from the since-deleted `crates/platform` tokio-era monolith
+//! (`metering/meter.rs`): the atomic-counter + snapshot + reset logic
 //! survives; the tokio flush task, the plan/quota coupling, and the
 //! `CounterRegistry` indirection are dropped. This is a small,
 //! runtime-agnostic core: `increment` bumps a counter, `drain` takes a

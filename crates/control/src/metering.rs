@@ -14,8 +14,8 @@
 //!   `total = total + delta` into `zeroship.usage_aggregates`, for the five
 //!   fixed platform counters AND each `custom` metric. `period_start` is the
 //!   calendar-month boundary (00:00:00 UTC on the 1st) — a new month lands
-//!   in a new row automatically (month rollover, ported from the dead
-//!   `crates/platform/src/metering/rollover.rs`'s period-key logic).
+//!   in a new row automatically (month rollover, salvaged from the
+//!   since-deleted `crates/platform` `metering/rollover.rs` period-key logic).
 //!
 //! Storage is Postgres via `compio-postgres` (zero tokio). The dedup + apply
 //! is done in ONE transaction per report so a crash mid-apply can't leave a

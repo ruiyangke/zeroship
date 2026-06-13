@@ -1,6 +1,6 @@
 //! Pure tier math for the configurable pricing catalog (billing PR4).
 //!
-//! Ported from the dead `crates/platform/src/billing/pricing.rs`, converting
+//! Salvaged from the since-deleted `crates/platform` (`billing/pricing.rs`), converting
 //! **millicents → cents** (D3): the catalog and reconciler standardize on
 //! cents (Stripe's unit). All arithmetic is integer with a `u128` intermediate
 //! and **half-up rounding at the line-item boundary**, so a fractional cent

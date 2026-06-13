@@ -2,7 +2,6 @@
 members = ["crates/*", "crates/authz", "crates/compio-s3"]
 resolver = "3"
 exclude = [
-    "crates/platform",
     "crates/runtime/benches/ntex-bench",
     "refs",
 ]
