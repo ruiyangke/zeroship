@@ -484,13 +484,15 @@ fn main() -> std::io::Result<()> {
     // env entries for deleted apps don't leak forever.
     sync::start_version_poller(config.clone(), shared_versions.clone(), shared_envs.clone());
 
-    // ── Metering producer ────────────────────────────────────────────────
+    // ── Metering infrastructure ──────────────────────────────────────────
     // ONE process-wide meter, shared with every ntex worker thread's
     // `create_plugins` (via KernelConfig) AND the single flush task spawned
-    // here. `env.meter.increment` from any app on any thread accumulates
-    // into this instance; the flush task drains it every ~10s and POSTs a
+    // here. Metering is infrastructure: there is NO `env.meter` creator API.
+    // The worker emits the five platform counters (`record_request`) and the
+    // db/kv/storage primitives emit raw usage metrics at their op boundary —
+    // all into this instance. The flush task drains it every ~10s and POSTs a
     // `UsageReport` (idempotent, dedup'd on worker_id+sequence) to control.
-    let meter = Arc::new(zeroship_plugin_meter::Meter::new());
+    let meter = Arc::new(zeroship_metering::Meter::new());
     // Stable-ish worker identity for the dedup key. Prefer $HOSTNAME (stable
     // across restarts in k8s/compose); else bind addr; else a random id. A
     // restart with a fresh id simply forgoes cross-restart dedup — never a
@@ -499,13 +501,13 @@ fn main() -> std::io::Result<()> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{bind_addr}-{}", uuid::Uuid::new_v4()));
-    zeroship_plugin_meter::spawn_flush_task(
+    zeroship_metering::spawn_flush_task(
         Arc::clone(&meter),
-        zeroship_plugin_meter::FlushConfig {
+        zeroship_metering::FlushConfig {
             control_url: config.control_url.clone(),
             control_key: config.control_key.clone(),
             worker_id: worker_id.clone(),
-            interval: zeroship_plugin_meter::DEFAULT_FLUSH_INTERVAL,
+            interval: zeroship_metering::DEFAULT_FLUSH_INTERVAL,
         },
     );
     tracing::info!(worker_id = %worker_id, "metering flush task started");

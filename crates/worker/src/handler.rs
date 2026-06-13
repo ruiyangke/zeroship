@@ -560,7 +560,7 @@ mod tests {
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
-                    meter: std::sync::Arc::new(zeroship_plugin_meter::Meter::new()),
+                    meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
             );
             assert!(crate::cache::load_app(
@@ -670,7 +670,7 @@ mod tests {
 
             // Hold our own Arc<Meter> clone so we can drain what the handler
             // (which writes via the METER thread-local) recorded.
-            let meter = std::sync::Arc::new(zeroship_plugin_meter::Meter::new());
+            let meter = std::sync::Arc::new(zeroship_metering::Meter::new());
             crate::cache::init_cache(
                 10,
                 crate::cache::KernelConfig {
@@ -862,7 +862,7 @@ mod tests {
                     db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
                     kv_url: Some(kv_url),
                     storage_backend: Some(StorageBackendConfig::Local(storage_root.clone())),
-                    meter: std::sync::Arc::new(zeroship_plugin_meter::Meter::new()),
+                    meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
             );
             assert!(crate::cache::load_app(

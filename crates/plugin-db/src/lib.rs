@@ -239,6 +239,11 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
 /// The database plugin — registers `zeroship.db.*` methods.
 pub struct DbPlugin {
     url: String,
+    /// Process-wide usage meter (metering-as-infrastructure). Stamped into
+    /// the per-isolate context on `register`; the exec boundary emits
+    /// `db_reads` / `db_writes` / `db_rows_written` through it on success.
+    /// `None` in meter-less test harnesses.
+    meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
 }
 
 impl std::fmt::Debug for DbPlugin {
@@ -248,10 +253,16 @@ impl std::fmt::Debug for DbPlugin {
 }
 
 impl DbPlugin {
-    /// Create a new `DbPlugin` instance.
+    /// Create a new `DbPlugin` instance over a DB URL and (optionally) the
+    /// process-wide usage meter. Pass `None` for the meter in test harnesses
+    /// where metering is not under test; the worker / dev-serve vectors pass
+    /// `Some(meter)` so each db op emits a per-app usage metric.
     #[must_use]
-    pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+    pub fn new(
+        url: impl Into<String>,
+        meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
+    ) -> Self {
+        Self { url: url.into(), meter }
     }
 }
 
@@ -294,6 +305,9 @@ impl NativePlugin for DbPlugin {
             if c.set_db_url(&self.url) {
                 c.clear_pool();
             }
+            // Stamp the process-wide meter so the exec boundary can emit a
+            // per-app usage metric on each successful op.
+            c.set_meter(self.meter.clone());
         });
         // Every JS-visible entry point lives on the Db v8_class wrapper
         // (see `v8_classes::db`).
@@ -655,7 +669,7 @@ fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
 /// ```ignore
 /// // Inside a compio runtime:
 /// let runtime = Runtime::builder()
-///     .plugin(DbPlugin::new(url))
+///     .plugin(DbPlugin::new(url, None))
 ///     .build();
 /// zeroship_plugin_db::init_pool_async().await?;
 /// // Now safe to run JS that calls zeroship.db.*

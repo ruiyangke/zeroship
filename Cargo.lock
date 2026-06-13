@@ -6492,9 +6492,9 @@ dependencies = [
  "tempfile",
  "url",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
- "zeroship-plugin-meter",
  "zeroship-plugin-storage",
  "zeroship-runtime",
 ]
@@ -6688,6 +6688,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-metering"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "cyper",
+ "serde_json",
+ "tracing",
+ "uuid",
+ "zeroship-core",
+]
+
+[[package]]
 name = "zeroship-plugin-db"
 version = "0.1.0"
 dependencies = [
@@ -6710,6 +6722,7 @@ dependencies = [
  "v8",
  "zeroize",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
 ]
@@ -6725,22 +6738,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
- "v8",
- "zeroship-runtime",
- "zeroship-runtime-macros",
-]
-
-[[package]]
-name = "zeroship-plugin-meter"
-version = "0.1.0"
-dependencies = [
- "compio",
- "cyper",
- "serde_json",
- "tracing",
  "uuid",
  "v8",
- "zeroship-core",
+ "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
 ]
@@ -6758,7 +6758,9 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
  "v8",
+ "zeroship-metering",
  "zeroship-runtime",
 ]
 
@@ -6889,9 +6891,9 @@ dependencies = [
  "uuid",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-metering",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
- "zeroship-plugin-meter",
  "zeroship-plugin-storage",
  "zeroship-runtime",
 ]

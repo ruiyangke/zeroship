@@ -6,6 +6,10 @@ description = "Storage plugin — zeroship.storage.* native primitives (local FS
 
 [dependencies]
 zeroship-runtime = { workspace = true }
+# Metering infrastructure: put/get emit raw usage metrics (storage_ops,
+# storage_bytes, storage_egress_bytes) in their success arms via a
+# MeterHandle. Platform-measured, unforgeable by app code.
+zeroship-metering = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
@@ -33,6 +37,10 @@ compio = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 compio-s3 = { workspace = true }
+# The metering e2e asserts per-app counts off a real `Meter`, which keys
+# its drain by parsed UUID app_id — the test parses the UUID it stamps
+# into APP_ID.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

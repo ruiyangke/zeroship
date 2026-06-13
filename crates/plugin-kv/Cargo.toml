@@ -7,6 +7,10 @@ description = "Key-value plugin — zeroship.kv.* native primitives (redb embedd
 [dependencies]
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
+# Metering infrastructure: each kv op emits a raw usage metric
+# (kv_reads / kv_writes) in its success arm via a MeterHandle.
+# Platform-measured, unforgeable by app code (replaces env.meter).
+zeroship-metering = { workspace = true }
 compio = { workspace = true }
 compio-redis = { workspace = true, optional = true }
 # Pure-Rust embedded persistent KV — the single-process / self-host tier.
@@ -31,6 +35,10 @@ redb = ["dep:redb"]
 # Per-test temp dir for the embedded redb backend's test suite (each test
 # opens a throwaway database file; no external server needed).
 tempfile = { workspace = true }
+# The metering e2e tests assert per-app counts off a real `Meter`, which
+# keys its drain by parsed UUID app_id — so the test parses the UUID it
+# stamps into APP_ID.
+uuid = { workspace = true }
 
 [lints]
 workspace = true

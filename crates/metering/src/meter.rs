@@ -171,6 +171,13 @@ impl Meter {
     /// *per app* relative to that app's own increments). Cross-app drains
     /// are still independent.
     #[must_use]
+    // `readonly_write_lock`: the write guard is intentional, not redundant —
+    // `AppCounters::drain` mutates through `&self` (atomic `swap(0)` + a
+    // `Mutex`-guarded `mem::take`), so the borrow checker sees only `&` here,
+    // but the EXCLUSIVE outer lock is what serialises the per-app drain
+    // against that app's own `increment`s (the doc comment above). A read
+    // lock would let an increment interleave a partial reset.
+    #[allow(clippy::readonly_write_lock)]
     pub fn drain(&self) -> HashMap<Uuid, AppUsage> {
         let apps = self.apps.write().unwrap();
         let mut out = HashMap::new();

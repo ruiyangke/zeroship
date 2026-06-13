@@ -897,3 +897,181 @@ fn e2e_backend_unavailable() {
     let (status, body) = run_app(Arc::new(backend), KV_BACKEND_DOWN_APP);
     assert_ok(status, &body);
 }
+
+// ===========================================================================
+// `env.meter` is GONE (Refactor A): metering is infrastructure, so there is
+// no creator-facing `env.meter` namespace. App code must observe it as
+// `undefined` — it cannot self-report (forge/suppress) billing.
+// ===========================================================================
+
+/// Faithful: build a real Runtime with the kv plugin (a representative app
+/// kernel) and assert from inside the isolate that `env.meter` is undefined
+/// and not callable. RED before Refactor A (when `MeterPlugin` registered
+/// the `meter` namespace), GREEN after the deletion.
+#[cfg(feature = "redb")]
+#[test]
+fn env_meter_namespace_is_absent_from_app_code() {
+    const APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const present = typeof env.meter !== "undefined";
+        let calledOk = false;
+        try { env.meter.increment("x"); calledOk = true; } catch (_) { /* expected */ }
+        // ok iff env.meter is undefined AND there is no working increment.
+        return Response.json({ ok: !present && !calledOk, present, calledOk });
+    },
+};
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(
+        RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"),
+    );
+    // Use the production-shaped constructor (with a meter) to prove that even
+    // when the worker HAS a meter, no `env.meter` surface is exposed.
+    let (status, body, _meter) =
+        run_app_metered(backend, APP, "00000000-0000-7000-8000-0000000000f6");
+    assert_eq!(status, 200, "env.meter probe non-200; body: {body}");
+    assert!(
+        body.contains(r#""ok":true"#),
+        "env.meter must be undefined and uncallable from app code; body: {body}"
+    );
+}
+
+// ===========================================================================
+// Metering-as-infrastructure (Refactor A): each kv op emits a raw usage
+// metric (kv_reads / kv_writes) into the process-wide Meter at its op
+// boundary, scoped to the server-injected APP_ID. App code can neither forge
+// nor suppress these — they are emitted by trusted Rust inside the primitive,
+// not via a creator-facing `env.meter` API (which no longer exists).
+// ===========================================================================
+
+/// Build a Runtime around `app` + `backend` + a real Meter bound to
+/// `app_id`, pump it, run the fetch handler, and return
+/// `(status, body, meter)` so the test can drain what the kv ops recorded.
+/// Faithful: drives the REAL `KvPlugin::with_backend_and_meter` →
+/// `build_instance` → `mint_kv` → `dispatch_*` path an app sees.
+fn run_app_metered(
+    backend: Arc<dyn Backend>,
+    app: &'static str,
+    app_id: &str,
+) -> (u16, String, Arc<zeroship_metering::Meter>) {
+    let meter = Arc::new(zeroship_metering::Meter::new());
+    let meter_for_run = Arc::clone(&meter);
+    let app_id = app_id.to_string();
+    let (status, body) = compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("APP_ID".to_string(), app_id.clone());
+
+        let plugin: Arc<dyn NativePlugin> =
+            Arc::new(KvPlugin::with_backend_and_meter(backend, Some(meter_for_run)));
+
+        let runtime = Runtime::builder()
+            .modules(module(app))
+            .env_vars(env_vars)
+            .plugins(vec![plugin])
+            .build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let outcome =
+            runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+
+        match outcome {
+            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Pending { rx, cancel: _ } => {
+                let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
+                    .await
+                    .expect("kv metering: fetch pending timed out")
+                    .expect("kv metering: pending delivered DispatchError");
+                match settled {
+                    SettledFetch::Response { status, body, .. } => (status, body),
+                    _ => panic!("kv metering: expected SettledFetch::Response"),
+                }
+            }
+            _ => panic!("kv metering: unexpected outcome"),
+        }
+    });
+    (status, body, meter)
+}
+
+/// 3 writes (set, set, incr) + 2 reads (get, get-miss) — the handler returns
+/// ok:true. APP_ID is a real UUID so `Meter::drain` (which keys by parsed
+/// UUID) surfaces the exact per-app counts.
+#[cfg(feature = "redb")]
+const KV_METER_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const kv = env.kv;
+        const P = "meter:" + Math.random().toString(36).slice(2) + ":";
+        await kv.set(P + "a", "1");       // write
+        await kv.set(P + "b", "2");       // write
+        await kv.incr(P + "c");           // write
+        await kv.get(P + "a");            // read
+        await kv.get(P + "missing");      // read (miss still bills a read op)
+        return Response.json({ ok: true });
+    },
+};
+"#;
+
+#[cfg(feature = "redb")]
+#[test]
+fn metering_kv_ops_counts_are_exact_and_per_app() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(
+        RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"),
+    );
+    let app_id = "00000000-0000-7000-8000-0000000000a1";
+    let (status, body, meter) = run_app_metered(backend, KV_METER_APP, app_id);
+    assert_ok(status, &body);
+
+    let snap = meter.drain();
+    let id = uuid::Uuid::parse_str(app_id).unwrap();
+    let usage = snap.get(&id).expect("meter recorded usage for the app");
+    assert_eq!(
+        usage.custom.get("kv_writes").copied(),
+        Some(3),
+        "set + set + incr = 3 kv_writes; got {:?}",
+        usage.custom
+    );
+    assert_eq!(
+        usage.custom.get("kv_reads").copied(),
+        Some(2),
+        "get + get(miss) = 2 kv_reads; got {:?}",
+        usage.custom
+    );
+}
+
+/// A FAILED kv op must NOT emit a metric — billing only on success. Drive kv
+/// ops against a DOWN backend (dead Redis port): every op rejects, so the
+/// Meter stays empty for this app. Faithful: same dispatch path, real failure
+/// arm.
+#[cfg(feature = "redis")]
+#[test]
+fn metering_failed_kv_op_emits_nothing() {
+    const APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        try { await env.kv.set("k", "v"); } catch (e) { /* expected: backend down */ }
+        try { await env.kv.get("k"); } catch (e) { /* expected */ }
+        return Response.json({ ok: true });
+    },
+};
+"#;
+    // Dead port → every op rejects.
+    let backend: Arc<dyn Backend> = Arc::new(Redis::new("redis://127.0.0.1:6398"));
+    let app_id = "00000000-0000-7000-8000-0000000000b2";
+    let (status, body, meter) = run_app_metered(backend, APP, app_id);
+    assert_ok(status, &body);
+
+    let snap = meter.drain();
+    let id = uuid::Uuid::parse_str(app_id).unwrap();
+    // No successful op ⇒ no metric for this app at all (drain omits zero apps).
+    assert!(
+        snap.get(&id).is_none(),
+        "a failed kv op must emit no metric; got {:?}",
+        snap.get(&id)
+    );
+}

@@ -1,42 +1,65 @@
 // metering-probe — the smallest faithful billing/metering exercise app.
 //
-// A plain `{ fetch }` app (URL resources default to anon/public, so every
-// request dispatches through the gateway with no session). Each request:
+// Metering is INFRASTRUCTURE: there is no `env.meter` creator API. The
+// billing signal is platform-measured — the worker emits the five platform
+// counters per dispatch, and the trusted data primitives emit raw usage
+// metrics at their op boundary. App code can neither forge nor suppress
+// them. So this probe simply DRIVES a measurable primitive op per request;
+// the platform emits the metrics the E2E asserts on.
 //
+// Each request:
 //   * reads the request body (so ingress_bytes is measurable),
-//   * bumps a CUSTOM meter counter via `env.meter.increment("probe_hits")`
-//     — the producer side of the metering pipeline the E2E asserts on,
-//   * returns a fixed, measurable response body (so egress_bytes is non-zero),
-//     including the metric's new running total so a caller can sanity-check
-//     the synchronous increment.
+//   * inserts one row via `env.db` (→ platform-emitted `db_writes`),
+//   * reads it back via `env.db` (→ platform-emitted `db_reads`),
+//   * returns a fixed, measurable response body (so egress_bytes is non-zero).
 //
-// The five platform counters (requests, cpu_us, wall_us, egress_bytes,
-// ingress_bytes) are fed automatically by the worker for every dispatch;
-// this app only adds the custom one.
-//
-// The custom metric name is exported as a constant the harness greps for.
-export const CUSTOM_METRIC = "probe_hits";
+// The probe declares a `default.schema` so `env.db` is installed at app boot.
+
+import { env } from "zeroship";
+import { schema, t } from "@zeroship/db";
+
+export const dbSchema = {
+  // One tiny collection — a row per request bumps `db_writes`.
+  hits: schema({
+    path: t.string().required().max(256),
+  }),
+};
+
+// The platform-emitted metric the harness asserts on (greppable constant).
+export const PRIMARY_METRIC = "db_writes";
 
 export default {
-  async fetch(request: Request, env: any): Promise<Response> {
+  schema: dbSchema,
+
+  async fetch(request: Request, _env: any): Promise<Response> {
     // Drain the request body so the worker tallies ingress bytes.
     const inBody = await request.text();
-
-    // Synchronous atomic bump of the per-app custom counter. The return is
-    // the metric's new running total within this worker process.
-    const total = env.meter.increment(CUSTOM_METRIC);
-
     const u = new URL(request.url);
+
+    // Drive a real db write + read. `env.db` is installed from `schema`.
+    // The native primitive emits `db_writes` / `db_reads` on success —
+    // platform-measured, not reported by this app.
+    let wrote = false;
+    let readBack = 0;
+    try {
+      const ins = await env.db.hits.insert({ path: u.pathname });
+      wrote = !ins.error;
+      const { data } = await env.db.hits.find({}).limit(1);
+      readBack = Array.isArray(data) ? data.length : 0;
+    } catch (_e) {
+      // If the db namespace is unavailable in a degraded config, the
+      // platform counters still flow; the harness falls back to those.
+    }
+
     const payload = {
       ok: true,
       app: "metering-probe",
-      metric: CUSTOM_METRIC,
-      // The running in-process total (NOT the aggregated control-plane total).
-      meter_total_in_process: total,
+      metric: PRIMARY_METRIC,
+      wrote,
+      readBack,
       path: u.pathname,
       received_bytes: inBody.length,
-      // A chunk of fixed filler so egress_bytes is comfortably non-zero even
-      // for an empty request body.
+      // Fixed filler so egress_bytes is comfortably non-zero.
       filler: "z".repeat(256),
     };
     return new Response(JSON.stringify(payload), {

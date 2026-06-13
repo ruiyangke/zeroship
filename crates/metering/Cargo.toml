@@ -1,18 +1,15 @@
 [package]
-name = "zeroship-plugin-meter"
+name = "zeroship-metering"
 version = "0.1.0"
 edition = "2021"
-description = "Metering plugin — zeroship.meter.* native primitive (per-worker atomic usage counters + flush)"
+description = "Metering infrastructure — per-worker atomic usage counters + compio flush task. NO V8: the producer side is the trusted data plugins (db/kv/storage) + the worker's platform counters; there is NO creator-facing env.meter API."
 
 [dependencies]
-zeroship-runtime = { workspace = true }
-zeroship-runtime-macros = { workspace = true }
 zeroship-core = { workspace = true }
 compio = { workspace = true }
 cyper = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-v8 = { workspace = true }
 tracing = { workspace = true }
 
 [lints]

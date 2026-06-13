@@ -726,6 +726,9 @@ importers:
 
   examples/metering-probe:
     dependencies:
+      '@zeroship/db':
+        specifier: workspace:*
+        version: link:../../sdks/db
       '@zeroship/vite-plugin':
         specifier: workspace:*
         version: link:../../sdks/vite-plugin

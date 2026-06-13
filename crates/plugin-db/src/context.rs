@@ -30,6 +30,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use compio_postgres::{Client, Pool};
 
@@ -320,6 +321,14 @@ pub struct IsolateDbContext {
     /// same backing store independently; on SQLite dev DBs that can fail
     /// during PRAGMA bootstrap with `database is locked`.
     backend_init_in_progress: bool,
+
+    /// Process-wide usage meter (metering-as-infrastructure). `Some` on the
+    /// worker / dev-serve vectors, stamped on `DbPlugin::register`. The exec
+    /// boundary (`exec.rs`) emits a raw usage metric (`db_reads` /
+    /// `db_writes` / `db_rows_written`) into it — keyed by the op's
+    /// server-injected `app_id` — in the SUCCESS arm only. Platform-measured,
+    /// unforgeable by app code. `None` in meter-less test harnesses.
+    meter: Option<Arc<zeroship_metering::Meter>>,
 }
 
 impl IsolateDbContext {
@@ -343,7 +352,27 @@ impl IsolateDbContext {
             mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
+            meter: None,
         }
+    }
+
+    // ----- metering --------------------------------------------------
+
+    /// Stamp the process-wide usage meter (called from `DbPlugin::register`).
+    /// Idempotent overwrite — registration may fire multiple times per
+    /// worker thread.
+    pub(crate) fn set_meter(&mut self, meter: Option<Arc<zeroship_metering::Meter>>) {
+        self.meter = meter;
+    }
+
+    /// Build a per-`app_id` [`zeroship_metering::MeterHandle`] from the
+    /// stamped meter. `None` when no meter is configured (test harness) —
+    /// the exec layer then skips the emit. The handle binds the
+    /// server-injected `app_id` so a db op cannot meter another app.
+    pub(crate) fn meter_handle(&self, app_id: &str) -> Option<zeroship_metering::MeterHandle> {
+        self.meter
+            .as_ref()
+            .map(|m| zeroship_metering::MeterHandle::new(Arc::clone(m), app_id))
     }
 
     // ----- DB_POOL ----------------------------------------------------

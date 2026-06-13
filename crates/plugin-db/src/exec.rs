@@ -41,6 +41,29 @@ use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::v8_bridge::rows_to_json_value;
 
+/// Raw usage metrics a db op emits in its SUCCESS arm (metering-as-
+/// infrastructure). `db_reads` counts each read op (query/count),
+/// `db_writes` each mutation op, `db_rows_written` the affected/RETURNING
+/// row count of a mutation. Platform-measured — emitted by trusted Rust at
+/// the exec boundary, not by app code; none are fixed platform counters, so
+/// they flow through `AppUsage.custom`.
+const DB_READS: &str = "db_reads";
+const DB_WRITES: &str = "db_writes";
+const DB_ROWS_WRITTEN: &str = "db_rows_written";
+
+/// Emit a per-app db metric in the success arm. Pulls the meter handle from
+/// the per-isolate context (stamped on `DbPlugin::register`); a no-op when no
+/// meter is configured (test harness). Synchronous lock-free atomic bump —
+/// adds no await and cannot fail the op.
+fn emit_db_metric(app_id: &str, metric: &str, n: u64) {
+    if n == 0 {
+        return;
+    }
+    if let Some(h) = context::with(|c| c.meter_handle(app_id)) {
+        h.record(metric, n);
+    }
+}
+
 fn sqlite_shared_crud_unavailable() -> DbError {
     DbError::Configuration {
         code: "backend_unsupported",
@@ -121,9 +144,13 @@ pub(crate) async fn run_sql(
 pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        return exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await;
+        let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
+        // Success arm only: one read op. Unforgeable (emitted by the primitive).
+        emit_db_metric(app_id, DB_READS, 1);
+        return Ok(rows);
     }
     let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
+    emit_db_metric(app_id, DB_READS, 1);
     Ok(rows_to_json_value(&rows))
 }
 
@@ -136,6 +163,8 @@ pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbEr
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
         let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
+        // Success arm only: a count is a read op.
+        emit_db_metric(app_id, DB_READS, 1);
         return Ok(rows
             .first()
             .and_then(|row| row.get("count"))
@@ -143,6 +172,7 @@ pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbEr
             .unwrap_or(0));
     }
     let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
+    emit_db_metric(app_id, DB_READS, 1);
 
     Ok(rows
         .first()
@@ -161,10 +191,17 @@ pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbEr
 pub(crate) async fn exec_mutation(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        return exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await;
+        let rows = exec_sqlite_json(app_id, &sq, &bq.sql, &param_refs).await?;
+        // Success arm only: one write op + the affected/RETURNING row count.
+        emit_db_metric(app_id, DB_WRITES, 1);
+        emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
+        return Ok(rows);
     }
     let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
-    Ok(rows_to_json_value(&rows))
+    let values = rows_to_json_value(&rows);
+    emit_db_metric(app_id, DB_WRITES, 1);
+    emit_db_metric(app_id, DB_ROWS_WRITTEN, values.len() as u64);
+    Ok(values)
 }
 
 async fn exec_postgres_autocommit_with_role(
@@ -987,6 +1024,115 @@ mod tests {
                 panic!("sqlite tx client should still be parked for cleanup");
             }
             context::with_mut(|c| c.clear_pool());
+        });
+        reset_world();
+    }
+
+    // -------------------------------------------------------------------
+    // Metering-as-infrastructure (Refactor A) — the exec boundary emits a
+    // raw usage metric in the SUCCESS arm, scoped to app_id, and emits
+    // NOTHING on a failed op. Faithful: drives the REAL `exec_query` /
+    // `exec_mutation` / `exec_count` path against a live SqliteBackend with
+    // a `Meter` stamped into the per-isolate context (the same slot
+    // `DbPlugin::register` populates in production).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn metering_db_exec_emits_reads_writes_rows_and_skips_failures() {
+        use std::sync::Arc;
+        reset_world();
+        run(async {
+            let app_id = "00000000-0000-7000-8000-0000000000e5";
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+            backend
+                .ensure_app_schema(app_id)
+                .await
+                .expect("ensure app schema");
+            backend
+                .pool_exec(
+                    &format!(
+                        r#"CREATE TABLE "{app_id}"."notes" (
+                               id INTEGER PRIMARY KEY,
+                               title TEXT NOT NULL
+                           )"#
+                    ),
+                    &[],
+                )
+                .await
+                .expect("CREATE TABLE notes");
+
+            // Stamp a real Meter into the context — exactly what
+            // `DbPlugin::register` does in production.
+            let meter = Arc::new(zeroship_metering::Meter::new());
+            context::with_mut(|c| {
+                c.clear_pool();
+                c.set_sqlite_backend(Rc::clone(&backend));
+                c.set_meter(Some(Arc::clone(&meter)));
+            });
+
+            // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
+            exec_mutation(app_id, BuiltQuery {
+                sql: format!(
+                    r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
+                ),
+                params: vec![],
+            })
+            .await
+            .expect("insert");
+
+            // 1 query (read) → db_reads +1.
+            exec_query(app_id, BuiltQuery {
+                sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
+                params: vec![],
+            })
+            .await
+            .expect("select");
+
+            // 1 count (read) → db_reads +1.
+            exec_count(app_id, BuiltQuery {
+                sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
+                params: vec![],
+            })
+            .await
+            .expect("count");
+
+            // A FAILED op (bad SQL) must emit NOTHING.
+            let bad = exec_query(app_id, BuiltQuery {
+                sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
+                params: vec![],
+            })
+            .await;
+            assert!(bad.is_err(), "the bad query must fail");
+
+            let snap = meter.drain();
+            let id = uuid::Uuid::parse_str(app_id).unwrap();
+            let u = snap.get(&id).expect("meter recorded usage for the app");
+            assert_eq!(
+                u.custom.get("db_writes").copied(),
+                Some(1),
+                "one mutation = 1 db_writes; got {:?}",
+                u.custom
+            );
+            assert_eq!(
+                u.custom.get("db_rows_written").copied(),
+                Some(1),
+                "the insert returned 1 row; got {:?}",
+                u.custom
+            );
+            assert_eq!(
+                u.custom.get("db_reads").copied(),
+                Some(2),
+                "one query + one count = 2 db_reads (the FAILED query did NOT bill); got {:?}",
+                u.custom
+            );
+
+            context::with_mut(|c| {
+                c.set_meter(None);
+                c.clear_pool();
+            });
         });
         reset_world();
     }

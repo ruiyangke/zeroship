@@ -13,6 +13,11 @@ zeroship-runtime-macros = { workspace = true }
 # (no external crate) — flagged in the PR 3 commit body per the
 # "new Cargo dep" disclosure rule.
 zeroship-core = { workspace = true }
+# Metering infrastructure: exec.rs emits a raw usage metric
+# (db_reads / db_writes / db_rows_written) in the success arm of each
+# query / mutation / count via a MeterHandle. Platform-measured,
+# unforgeable by app code (replaces the deleted env.meter API).
+zeroship-metering = { workspace = true }
 compio-postgres = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }

@@ -63,6 +63,14 @@ pub use config::{build_backend, StorageBackendConfig, StorageConfigError};
 thread_local! {
     pub(crate) static STORAGE_BACKEND: RefCell<Option<Arc<dyn Backend>>> =
         const { RefCell::new(None) };
+    /// The process-wide usage meter, populated alongside `STORAGE_BACKEND`
+    /// in `StoragePlugin::register`. Metering is infrastructure: each
+    /// successful `put`/`get` emits a raw usage metric (`storage_ops`,
+    /// `storage_bytes`, `storage_egress_bytes`) through a per-app
+    /// `MeterHandle` built per-call from this meter + the request's APP_ID.
+    /// `None` in meter-less test harnesses (metering not under test).
+    pub(crate) static STORAGE_METER: RefCell<Option<Arc<zeroship_metering::Meter>>> =
+        const { RefCell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +84,9 @@ thread_local! {
 /// - `StoragePlugin::with_backend(backend)` — any `Backend` impl (S3, R2, etc.)
 pub struct StoragePlugin {
     backend: Arc<dyn Backend>,
+    /// Process-wide usage meter, stamped into `STORAGE_METER` on register.
+    /// `None` in meter-less test harnesses.
+    meter: Option<Arc<zeroship_metering::Meter>>,
 }
 
 impl std::fmt::Debug for StoragePlugin {
@@ -91,7 +102,7 @@ impl StoragePlugin {
     /// directory is created lazily on first write.
     #[must_use]
     pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self { backend: Arc::new(LocalFs::new(path)) }
+        Self { backend: Arc::new(LocalFs::new(path)), meter: None }
     }
 
     /// Use any `Backend` impl. Takes `Arc<dyn Backend>` so multiple plugin
@@ -101,7 +112,19 @@ impl StoragePlugin {
     /// but the futures it produces stay thread-local.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
-        Self { backend }
+        Self { backend, meter: None }
+    }
+
+    /// Like [`Self::with_backend`] but binds the process-wide usage meter
+    /// so each successful `put`/`get` emits a raw usage metric
+    /// (`storage_ops`, `storage_bytes`, `storage_egress_bytes`) scoped to
+    /// the request's APP_ID — platform-measured, unforgeable by app code.
+    #[must_use]
+    pub fn with_backend_and_meter(
+        backend: Arc<dyn Backend>,
+        meter: Option<Arc<zeroship_metering::Meter>>,
+    ) -> Self {
+        Self { backend, meter }
     }
 
     /// Convenience: S3-compatible backend (S3/R2/MinIO/Spaces/B2) from a
@@ -110,7 +133,7 @@ impl StoragePlugin {
     #[cfg(feature = "s3")]
     #[must_use]
     pub fn s3(config: compio_s3::S3Config, credentials: compio_s3::S3Credentials) -> Self {
-        Self { backend: Arc::new(backend::S3::new(config, credentials)) }
+        Self { backend: Arc::new(backend::S3::new(config, credentials)), meter: None }
     }
 }
 
@@ -121,6 +144,9 @@ impl NativePlugin for StoragePlugin {
     fn register(&self, r: &mut NativeRegistrar) {
         STORAGE_BACKEND.with(|cell| {
             *cell.borrow_mut() = Some(Arc::clone(&self.backend));
+        });
+        STORAGE_METER.with(|cell| {
+            *cell.borrow_mut() = self.meter.clone();
         });
         r.add("put", callbacks::put);
         r.add("get", callbacks::get);

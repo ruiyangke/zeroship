@@ -3,11 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Tiny billing/metering probe app: serves a measurable request/response body and bumps a custom meter counter. Used by the billing & metering multi-node E2E (tests/e2e_metering_billing.sh).",
+  "description": "Tiny billing/metering probe app: serves a measurable request/response body and drives an env.db write+read per request. The platform emits db_writes/db_reads + the five platform counters (metering is infrastructure — no env.meter). Used by the billing & metering multi-node E2E (tests/e2e_metering_billing.sh).",
   "scripts": {
     "build": "vite build"
   },
   "dependencies": {
+    "@zeroship/db": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {

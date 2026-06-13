@@ -72,7 +72,9 @@ Creator Dashboard (web UI)
 ```
 End Users → Gateway          JWT, rate-limit, manifest dispatch, asset proxy, CHWBL routing
            → Auth Service    Login/signup, OAuth, consent, sessions
-           → Workers (V8)    App code · env.{db,auth,kv,storage,meter} primitives
+           → Workers (V8)    App code · env.{db,auth,kv,storage} primitives
+                              (metering is infra: the primitives emit usage
+                              metrics; there is no env.meter)
 ```
 
 ### Shared
@@ -114,6 +116,7 @@ crates/
 ├── plugin-db/        env.db.* native ops
 ├── plugin-kv/        env.kv.* native ops
 ├── plugin-storage/   env.storage.* native ops
+├── metering/         Meter (atomic per-(app,metric) counters) + compio flush task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
 │
 │ System 1 — Creator Platform
 ├── control/          Control plane (app CRUD, deploy, billing, env, route registry)
@@ -170,11 +173,19 @@ Planned or platform-internal namespaces must be documented as such until the
 runtime actually registers them:
 
 ```
-env.meter.*    billing counter increment
 env.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
 
 Creators don't call these directly. SDK packages wrap them.
+
+**Metering is infrastructure — there is NO `env.meter`.** The billing signal
+is platform-measured so app code can neither forge nor suppress it: the worker
+emits the five platform counters (requests/cpu_us/wall_us/ingress/egress) per
+dispatch, and the trusted data primitives (`env.db`/`env.kv`/`env.storage`)
+emit raw usage metrics (`db_reads`, `db_writes`, `kv_reads`, `kv_writes`,
+`storage_ops`, `storage_bytes`, …) at their op boundary, in the success arm
+only. The `Meter` + flush task live in `crates/metering` (`MeterHandle` is the
+per-app injection vehicle the plugins stamp from the server-injected `app_id`).
 
 ### SDK packages (`@zeroship/*` npm scope)
 
@@ -338,10 +349,11 @@ Warn (~80%) → Degrade (gateway throttle — tighter concurrency + rate limit, 
 stays up) → Block (402 before dispatch). The free tier sets `spend_limit ≈ base`,
 so it is quota-capped by construction and needs no card. The platform computes
 line items from this policy and bills them as Stripe **invoice items** on a
-platform-side Customer (no Stripe-side price objects). Live across
-`plugin-meter` (producer) → `control` (idempotent ingest, aggregation, pricing,
-spend engine, Stripe reconciler) → `gateway` (edge enforcement). See
-`docs/reference/billing-metering.md`.
+platform-side Customer (no Stripe-side price objects). Live across the
+`metering` crate + the data primitives (producers: worker platform counters +
+`env.{db,kv,storage}` usage metrics) → `control` (idempotent ingest,
+aggregation, compute-unit pricing, spend engine, Stripe reconciler) →
+`gateway` (edge enforcement). See `docs/reference/billing-metering.md`.
 
 **Stream 2 — application fee on creator revenue (separate upcoming epic).** When
 a creator monetizes their app, end-users pay via Stripe **Connect** (the creator

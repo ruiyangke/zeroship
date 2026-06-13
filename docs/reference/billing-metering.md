@@ -2,24 +2,42 @@
 
 **Status: shipped (Stream 1 — infra usage billing).** The metering → aggregation
 → pricing → spend-enforcement → Stripe-invoicing pipeline is live across the
-`plugin-meter`, `control`, and `gateway` crates. The old monolithic
+`metering`, `control`, and `gateway` crates. The old monolithic
 `crates/platform` engine has been deleted; its salvageable domain logic was
 ported into the live compio stack (billing PR1–7). Stream 2 (application fee on
 creator revenue via Stripe Connect) is a separate upcoming epic — see "Revenue
 model" in `AGENTS.md`.
 
-## Producer — `env.meter` + the per-worker meter
+## Producer — metering is infrastructure (no `env.meter`)
 
-The `env.meter` namespace is registered by `MeterPlugin`
-([crates/plugin-meter/src/lib.rs](../../crates/plugin-meter/src/lib.rs)),
-mirroring `plugin-kv`. App code calls `env.meter.increment(metric, n?)`, a
-synchronous atomic bump (not a backend round trip). The five fixed platform
-counters (`requests`, `cpu_us`, `wall_us`, `egress_bytes`, `ingress_bytes`) and
-SDK-defined `custom` metrics share one per-`(app_id, metric)` atomic counter
-([crates/plugin-meter/src/meter.rs](../../crates/plugin-meter/src/meter.rs)).
+**There is no creator-facing `env.meter` API.** The billing signal is
+platform-measured so app code can neither forge nor suppress it. Two producers
+feed one process-wide `Meter`:
+
+1. **The worker** emits the five fixed platform counters (`requests`, `cpu_us`,
+   `wall_us`, `egress_bytes`, `ingress_bytes`) once per dispatched request via
+   `cache::record_request` → `Meter::record_request`.
+2. **The trusted data primitives** (`env.db`, `env.kv`, `env.storage`) emit raw
+   usage metrics at their op boundary, **in the success arm only** (a failed op
+   is not billable), through a `MeterHandle` bound to the isolate's
+   server-injected `app_id`:
+   - `plugin-db` ([exec.rs](../../crates/plugin-db/src/exec.rs)): `db_reads`
+     (query/count), `db_writes` + `db_rows_written` (mutations).
+   - `plugin-kv` ([dispatch.rs](../../crates/plugin-kv/src/dispatch.rs)):
+     `kv_reads` (get/list/ttl), `kv_writes` (set/delete/incr/setIfAbsent/
+     expire/persist).
+   - `plugin-storage` ([callbacks.rs](../../crates/plugin-storage/src/callbacks.rs)):
+     `storage_ops`, `storage_bytes` (put), `storage_egress_bytes` (get).
+
+The `Meter` (per-`(app_id, metric)` atomics; the five fixed counters as
+dedicated atomics, everything else in an open `custom` map) and the
+`MeterHandle` injection vehicle live in `crates/metering`
+([meter.rs](../../crates/metering/src/meter.rs),
+[lib.rs](../../crates/metering/src/lib.rs)) — a V8-free crate the worker owns
+and the three data plugins depend on.
 
 A compio flush task
-([crates/plugin-meter/src/flush.rs](../../crates/plugin-meter/src/flush.rs))
+([crates/metering/src/flush.rs](../../crates/metering/src/flush.rs))
 drains the meter every ~10s and POSTs a `UsageReport` to control's
 `/internal/usage`. `Meter::drain` snapshots AND zeroes; on POST failure the
 snapshot is merged back, so no counts are lost (zero tokio — `compio` interval +
