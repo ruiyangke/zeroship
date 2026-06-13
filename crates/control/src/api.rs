@@ -63,6 +63,11 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
                 msg,
             )
         }
+        RegistryError::FxUnresolved => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "pricing misconfigured",
+            "global default FX missing".to_string(),
+        ),
     }
 }
 
@@ -906,7 +911,34 @@ pub async fn upsert_plan(
     };
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     match catalog.upsert(&plan, archived).await {
-        Ok(written) => web::HttpResponse::Ok().json(&PlanDto::from(written)),
+        Ok(written) => {
+            // MINOR-1: a plan's FX/price is the highest-leverage money lever —
+            // audit WHO wrote it + the new price model (mirrors SetSpendLimit's
+            // actor logging), so an unexpected price change is attributable.
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: None,
+                    creator_id: None,
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
+                    action: crate::audit::Action::PlanUpserted,
+                    resource: Some(&written.id),
+                    source_ip: None,
+                },
+                &serde_json::json!({
+                    "plan_id": written.id,
+                    "name": written.name,
+                    "base_fee_cents": written.price.base_fee_cents,
+                    "included_units": written.price.included_units,
+                    "fx_pico_cents_per_unit": written.price.fx_pico_cents_per_unit,
+                    "spend_limit_default_cents": written.price.spend_limit_default_cents,
+                    "archived": written.archived,
+                }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&PlanDto::from(written))
+        }
         Err(e) => error_response(e),
     }
 }
@@ -919,9 +951,28 @@ pub async fn archive_plan(
     if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
         return resp;
     }
+    let id = id.into_inner();
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     match catalog.archive(&id).await {
-        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"archived": true})),
+        Ok(true) => {
+            // MINOR-1: archiving removes a tier from new-app assignment — a money
+            // lever change. Audit WHO archived which plan (mirrors SetSpendLimit).
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: None,
+                    creator_id: None,
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
+                    action: crate::audit::Action::PlanArchived,
+                    resource: Some(&id),
+                    source_ip: None,
+                },
+                &serde_json::json!({ "plan_id": id, "archived": true }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&serde_json::json!({"archived": true}))
+        }
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"plan not found"}))
         }

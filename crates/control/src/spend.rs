@@ -301,7 +301,36 @@ impl SpendEngine {
             // Price the current period's usage (from the batched fleet read).
             let usage = usage_by_app.get(&app_id).cloned().unwrap_or_default();
             let price = plan.price.with_effective_fx(default_fx);
-            let breakdown = charge_cents(&price, &usage, &weights);
+            // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
+            //   * UnresolvedFx (global default FX missing) ⇒ the platform cannot
+            //     price ANY app ⇒ ABORT the whole tick (bill/derive no one), not
+            //     a per-app base-only $0. Fail closed.
+            //   * ComputeUnitOverflow ⇒ skip THIS app with a warning (the loop
+            //     continues for everyone else), never a clamped spend figure.
+            let breakdown = match charge_cents(&price, &usage, &weights) {
+                Ok(b) => b,
+                Err(crate::pricing::PricingError::UnresolvedFx) => {
+                    tracing::error!(
+                        app_id = %app_id,
+                        plan_id = %plan_id,
+                        "spend: global default FX missing — cannot price; ABORTING sweep (no app derived)"
+                    );
+                    return Err(RegistryError::Database(
+                        "spend: global default FX missing — aborting sweep rather than deriving \
+                         spend state from an unpriceable $0"
+                            .to_string(),
+                    ));
+                }
+                Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
+                    tracing::warn!(
+                        app_id = %app_id,
+                        plan_id = %plan_id,
+                        error = %e,
+                        "spend: compute-unit overflow pricing app — skipping (not clamping spend)"
+                    );
+                    continue;
+                }
+            };
             let spend_cents = breakdown.total_cents;
 
             // Effective limit: override else plan default.

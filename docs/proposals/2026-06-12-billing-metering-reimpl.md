@@ -825,6 +825,18 @@ server-side only; RLS fail-closed on app-keyed tables; least-priv grants.
 > stays **raw-metric-keyed** (`0037`: `PRIMARY KEY (app_id, period_start, metric)`)
 > — verified; no schema change there, units are derived at pricing time.
 
+> **Deliberate billing-semantics change (MINOR-3 — not a regression).** Refactor
+> B replaces the original Stream-1 *per-metric* free quota `included_quota[metric]`
+> with a **single global `included_units`** applied to the summed compute-unit
+> total. This is intentional and follows directly from the CU model: once every
+> metric is converted into a common unit (CU) and accumulated into one total
+> before pricing, a per-metric quota no longer has a natural home — the included
+> allowance is now "N free CU per period," not "N free ops of metric X." Plans
+> that previously expressed `included_quota[requests]` etc. are re-expressed as a
+> single `included_units` budget. Flagged here so a reader comparing against the
+> earlier `included_quota[metric]` design does not mistake the drop for a lost
+> feature.
+
 ### A0 — Why these shapes (cross-cutting)
 
 - The CU is named **`compute_units` / CU**, never "token" — `token` collides

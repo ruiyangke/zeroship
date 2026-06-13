@@ -30,13 +30,32 @@
 //!
 //! Per-metric CU accumulation: `usage[m] (i64, ≤ ~9.2e18) × units_per_op (u64)`
 //! is done in `u128` (max ~3.4e38) then divided by `per_units` (≥ 1) — a single
-//! metric cannot overflow `u128`, and the summed `total_units` is clamped into
-//! `u64` (saturating) before pricing. The cents conversion `billable_units (u64,
-//! ≤ ~1.8e19) × fx_pico (u64, ≤ ~1.8e19)` is a `u128` product (≤ ~3.4e38, within
-//! `u128::MAX ≈ 3.4e38`) divided by `10¹²`, rounded half-up, then saturated into
-//! `u64` cents. Realistic magnitudes (billable ≤ ~1e12 CU, fx ≤ ~1e9 pico-cents)
-//! sit ~17 orders of magnitude below the `u128` ceiling; the saturating clamps
-//! make even adversarial inputs total-correct (no wrap), logged when they fire.
+//! metric cannot overflow `u128`. The cents conversion `billable_units (u64, ≤
+//! ~1.8e19) × fx_pico (u64, ≤ ~1.8e19)` is a `u128` product (≤ ~3.4e38, within
+//! `u128::MAX ≈ 3.4e38`) divided by `10¹²`, rounded half-up. Realistic magnitudes
+//! (billable ≤ ~1e12 CU, fx ≤ ~1e9 pico-cents) sit ~17 orders of magnitude below
+//! the `u128` ceiling.
+//!
+//! ## Money never silently clamps (MAJOR-1 / MAJOR-2)
+//!
+//! [`charge_cents`] is **fallible** on every path that could otherwise emit a
+//! wrong-but-plausible bill with no operator signal:
+//!
+//! - A per-metric CU total that does not fit `u64`, or a cross-metric sum that
+//!   overflows `u64`, is a hard [`PricingError::ComputeUnitOverflow`] (matching
+//!   `billing_reconcile`'s cents→i64 posture: skip-the-creator-with-a-warning,
+//!   never a clamped bill). [`total_units`] surfaces this via `Result` rather
+//!   than the old `unwrap_or(u64::MAX)` + `saturating_add` silent cap.
+//! - An **unresolved FX** (`fx == None` reaching the pricer) is a hard
+//!   [`PricingError::UnresolvedFx`] — the platform cannot price, so the sweep
+//!   aborts (bills no one) rather than silently charging base-only $0. The
+//!   catalog resolves `None` to the global default before pricing; a *missing
+//!   global default* is what makes this fire (see `pricing_store`), and it must
+//!   stop the tick, not leak revenue per-app.
+//! - A cents total that overflows `u64` is still saturated-with-`warn!` inside
+//!   the half-up conversion — that ceiling (~$1.8e17) is unreachable for any
+//!   real charge and the downstream `i64` clamp in `billing_reconcile` already
+//!   hard-errors, so it is the one documented saturated boundary.
 
 use std::collections::HashMap;
 
@@ -46,6 +65,48 @@ use serde::{Deserialize, Serialize};
 /// **pico-cents per CU** (10⁻¹² cent). `cents = round_half_up(billable_units ×
 /// fx_pico_cents_per_unit / FX_SCALE)`, computed once.
 pub const FX_SCALE: u128 = 1_000_000_000_000; // 10^12
+
+/// A pricing failure that MUST abort the charge rather than emit a silently
+/// wrong bill. Both variants are money-correctness guards (MAJOR-1 / MAJOR-2):
+/// the sweep propagates them — skipping the affected creator with a warning, or
+/// aborting the whole tick for the global-FX case — never clamping to a
+/// plausible-but-wrong number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PricingError {
+    /// The accumulated compute-unit total (per-metric, or the cross-metric sum)
+    /// exceeds `u64::MAX`. Carries the offending metric (or `total`) for the
+    /// operator. A clamp here would under- or over-bill silently.
+    ComputeUnitOverflow {
+        metric: String,
+        raw: i64,
+        units_per_op: u64,
+        per_units: u64,
+    },
+    /// The plan's FX reached the pricer unresolved (`None`). The catalog must
+    /// substitute the global default before pricing; an unresolved FX means the
+    /// platform CANNOT price (the global default is missing) — pricing $0 here
+    /// would be a silent revenue leak, so the sweep aborts instead.
+    UnresolvedFx,
+}
+
+impl std::fmt::Display for PricingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ComputeUnitOverflow { metric, raw, units_per_op, per_units } => write!(
+                f,
+                "compute-unit total overflowed u64 (metric={metric}, raw={raw}, \
+                 units_per_op={units_per_op}, per_units={per_units}) — refusing to clamp the bill"
+            ),
+            Self::UnresolvedFx => write!(
+                f,
+                "FX is unresolved (no per-plan fx and no global default) — platform cannot price; \
+                 aborting rather than billing $0"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PricingError {}
 
 /// One metric's global cost weight: `units_per_op` CU accrue per `per_units`
 /// operations of this metric, so a sub-unit weight is exact (e.g. 1 CU per 1000
@@ -83,27 +144,60 @@ pub struct PlanPrice {
     pub spend_limit_default_cents: u64,
 }
 
+/// Lower sanity floor for an explicitly-set FX (pico-cents per CU). An FX below
+/// this is so close to zero that all overage prices to ~$0 — almost certainly an
+/// operator fat-finger rather than a real "nearly free" tier. `1_000`
+/// pico-cents/CU = 10⁻⁹ cent/CU; at this floor even 1e15 CU bills < 1 cent, so
+/// anything below it cannot represent a real per-unit price. (To make a tier
+/// genuinely free, raise `included_units`, not the FX toward zero.) Operator
+/// guardrail only — not a back-compat constraint.
+pub const MIN_FX_PICO_CENTS_PER_UNIT: u64 = 1_000;
+
+/// Upper sanity ceiling for `included_units`. The `plans.included_units` column
+/// is `BIGINT` (i64), so a value above `i64::MAX` silently clamps at the catalog
+/// write boundary (`plan_catalog.rs`). We reject anything above `i64::MAX` so the
+/// stored value always round-trips exactly — an "effectively infinite" quota is
+/// an operator mistake (use the `unlimited` tier's `spend_limit_default = 0`
+/// uncapped posture instead). Operator guardrail only.
+pub const MAX_INCLUDED_UNITS: u64 = i64::MAX as u64;
+
 impl PlanPrice {
     /// Semantic validation of a catalog price model, run at the write boundary
     /// (the `PUT /api/plans/:id` handler) so a malformed price is a 400, not a
     /// silently-wrong charge at billing time.
     ///
-    /// Under CU pricing the price model is scalar, so the only structural
-    /// constraint is the FX: if set, it must be `> 0` (a `Some(0)` FX would price
-    /// all usage to base-only, which is almost certainly an operator mistake —
-    /// to make a tier free, leave `included_units` high or `fx = 0` is rejected
-    /// so the intent is explicit via the global default / weights, not a silent
-    /// zero). `None` (inherit the global default) is always valid.
+    /// Under CU pricing the price model is scalar; the operator guardrails are:
+    ///
+    /// - **FX floor (MAJOR-3):** if set, the FX must be `>=`
+    ///   [`MIN_FX_PICO_CENTS_PER_UNIT`]. `Some(0)` (prices all overage free) and
+    ///   any absurdly-low non-zero value (e.g. `Some(1)` ≈ 10⁻¹² cent/CU, free
+    ///   for all practical usage) are rejected so a "nearly free" tier is an
+    ///   explicit choice (high `included_units`), not a silent near-zero price.
+    ///   `None` (inherit the global default) is always valid.
+    /// - **`included_units` ceiling (MAJOR-3):** must be `<=`
+    ///   [`MAX_INCLUDED_UNITS`] (`i64::MAX`) so it round-trips the `BIGINT`
+    ///   column exactly instead of silently clamping at the i64 boundary.
     ///
     /// # Errors
-    /// Returns a human-readable message when the FX is explicitly zero.
+    /// Returns a human-readable message when the FX is below the floor or
+    /// `included_units` exceeds the ceiling.
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(0) = self.fx_pico_cents_per_unit {
-            return Err(
-                "fx_pico_cents_per_unit must be > 0 when set (omit it to inherit the global \
-                 default; a zero FX prices all usage to base-only)"
-                    .to_string(),
-            );
+        if let Some(fx) = self.fx_pico_cents_per_unit {
+            if fx < MIN_FX_PICO_CENTS_PER_UNIT {
+                return Err(format!(
+                    "fx_pico_cents_per_unit must be >= {MIN_FX_PICO_CENTS_PER_UNIT} when set \
+                     (got {fx}; omit it to inherit the global default — a near-zero FX prices \
+                     all overage to ~$0; to make a tier free raise included_units instead)"
+                ));
+            }
+        }
+        if self.included_units > MAX_INCLUDED_UNITS {
+            return Err(format!(
+                "included_units must be <= {MAX_INCLUDED_UNITS} (i64::MAX); got {} — a value \
+                 above the BIGINT column ceiling would silently clamp. For an uncapped tier use \
+                 spend_limit_default_cents = 0, not an effectively-infinite quota",
+                self.included_units
+            ));
         }
         Ok(())
     }
@@ -128,6 +222,13 @@ impl PlanPrice {
 pub struct ChargeBreakdown {
     pub base_cents: u64,
     /// Σ over metrics of `floor(usage × units_per_op / per_units)` (audit).
+    ///
+    /// The floor is applied **per metric, before summing** — so the sub-CU
+    /// remainder of each metric is dropped independently. This is a deliberate,
+    /// bounded (< 1 CU per weighted metric) systematic UNDER-count that favors
+    /// the creator: it can never over-bill from rounding. Summing raw then
+    /// flooring once would be marginally less generous; flooring per metric is
+    /// by design.
     pub total_units: u64,
     /// `max(0, total_units − included_units)`.
     pub billable_units: u64,
@@ -137,11 +238,22 @@ pub struct ChargeBreakdown {
 /// Accumulate total compute units for a usage map under the global weight table.
 ///
 /// `total_units = Σ_m floor( max(0, usage[m]) × units_per_op[m] / per_units[m] )`,
-/// integer throughout (`u128` intermediate, floored per metric, saturating-summed
-/// into `u64`). A metric with no weight — or a `per_units == 0` weight —
-/// contributes 0.
-#[must_use]
-pub fn total_units(weights: &MetricWeights, usage: &HashMap<String, i64>) -> u64 {
+/// integer throughout (`u128` intermediate, floored per metric). A metric with
+/// no weight — or a `per_units == 0` weight — contributes 0.
+///
+/// **MAJOR-1:** an overflow is NEVER a silent clamp. If a single metric's CU
+/// total does not fit `u64`, or the cross-metric sum overflows `u64`, this
+/// `warn!`s the offending `(metric, raw, units_per_op, per_units)` and returns
+/// [`PricingError::ComputeUnitOverflow`] so the caller can skip-with-a-warning
+/// instead of billing a wrong-but-plausible clamped number.
+///
+/// # Errors
+/// [`PricingError::ComputeUnitOverflow`] when a per-metric or cross-metric CU
+/// total exceeds `u64::MAX`.
+pub fn total_units(
+    weights: &MetricWeights,
+    usage: &HashMap<String, i64>,
+) -> Result<u64, PricingError> {
     let mut acc: u64 = 0;
     for (metric, &raw) in usage {
         let Some(w) = weights.get(metric) else {
@@ -153,10 +265,39 @@ pub fn total_units(weights: &MetricWeights, usage: &HashMap<String, i64>) -> u64
         let used = u128::from(raw.max(0) as u64);
         // floor(used × units_per_op / per_units), exact integer.
         let metric_units = used * u128::from(w.units_per_op) / u128::from(w.per_units);
-        let metric_units = u64::try_from(metric_units).unwrap_or(u64::MAX);
-        acc = acc.saturating_add(metric_units);
+        let metric_units = u64::try_from(metric_units).map_err(|_| {
+            tracing::warn!(
+                metric = %metric,
+                raw,
+                units_per_op = w.units_per_op,
+                per_units = w.per_units,
+                "pricing: per-metric compute-unit total exceeds u64::MAX — refusing to clamp"
+            );
+            PricingError::ComputeUnitOverflow {
+                metric: metric.clone(),
+                raw,
+                units_per_op: w.units_per_op,
+                per_units: w.per_units,
+            }
+        })?;
+        acc = acc.checked_add(metric_units).ok_or_else(|| {
+            tracing::warn!(
+                metric = %metric,
+                raw,
+                units_per_op = w.units_per_op,
+                per_units = w.per_units,
+                acc,
+                "pricing: cross-metric compute-unit sum overflowed u64 — refusing to clamp"
+            );
+            PricingError::ComputeUnitOverflow {
+                metric: metric.clone(),
+                raw,
+                units_per_op: w.units_per_op,
+                per_units: w.per_units,
+            }
+        })?;
     }
-    acc
+    Ok(acc)
 }
 
 /// Compute the full period charge for a plan price against a usage map and the
@@ -164,26 +305,41 @@ pub fn total_units(weights: &MetricWeights, usage: &HashMap<String, i64>) -> u64
 ///
 /// Accumulates integer CU across every metric ([`total_units`]), subtracts the
 /// plan's `included_units`, and converts the billable CU to cents **exactly
-/// once** via the FX lever (`× fx_pico ÷ FX_SCALE`, half-up). `fx == None` is
-/// treated as 0 here — the catalog is responsible for substituting the global
-/// default before calling (an unresolved FX prices to base-only, never panics).
-#[must_use]
+/// once** via the FX lever (`× fx_pico ÷ FX_SCALE`, half-up).
+///
+/// **MAJOR-2:** the FX must be resolved before pricing. `fx == None` reaching
+/// this function is a hard [`PricingError::UnresolvedFx`] — the platform cannot
+/// price, so the sweep aborts (bills no one) rather than silently charging
+/// base-only $0 (a revenue leak). The catalog substitutes the global default
+/// (`with_effective_fx`) before calling; a *missing global default* is what
+/// leaves `None` here.
+///
+/// # Errors
+/// - [`PricingError::ComputeUnitOverflow`] — see [`total_units`].
+/// - [`PricingError::UnresolvedFx`] — the FX was not resolved (no per-plan fx
+///   and no global default).
 pub fn charge_cents(
     price: &PlanPrice,
     usage: &HashMap<String, i64>,
     weights: &MetricWeights,
-) -> ChargeBreakdown {
-    let total = total_units(weights, usage);
+) -> Result<ChargeBreakdown, PricingError> {
+    let total = total_units(weights, usage)?;
     let billable = total.saturating_sub(price.included_units);
-    let fx_pico = price.fx_pico_cents_per_unit.unwrap_or(0);
+    let Some(fx_pico) = price.fx_pico_cents_per_unit else {
+        tracing::error!(
+            "pricing: charge_cents called with unresolved FX (None) — global default missing; \
+             refusing to bill $0"
+        );
+        return Err(PricingError::UnresolvedFx);
+    };
     let overage_cents = div_round_half_up(u128::from(billable) * u128::from(fx_pico), FX_SCALE);
     let total_cents = price.base_fee_cents.saturating_add(overage_cents);
-    ChargeBreakdown {
+    Ok(ChargeBreakdown {
         base_cents: price.base_fee_cents,
         total_units: total,
         billable_units: billable,
         total_cents,
-    }
+    })
 }
 
 /// `round(numer / denom)` half-up, in `u128`, saturating into `u64`. A zero
@@ -228,7 +384,7 @@ mod tests {
         usage.insert("requests".to_string(), 100); // 100 CU
         usage.insert("cpu_us".to_string(), 5_500); // floor(5500/1000) = 5 CU
         usage.insert("egress_bytes".to_string(), 2_999); // floor(2999/1000) = 2 CU
-        assert_eq!(total_units(&weights(), &usage), 107);
+        assert_eq!(total_units(&weights(), &usage).unwrap(), 107);
     }
 
     #[test]
@@ -238,7 +394,7 @@ mod tests {
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), 10);
         usage.insert("not_a_metric".to_string(), 999_999_999);
-        assert_eq!(total_units(&weights(), &usage), 10);
+        assert_eq!(total_units(&weights(), &usage).unwrap(), 10);
     }
 
     #[test]
@@ -256,7 +412,7 @@ mod tests {
         // Usage = 100 CU exactly (= included) ⇒ base only.
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), 100);
-        let b = charge_cents(&price, &usage, &weights());
+        let b = charge_cents(&price, &usage, &weights()).unwrap();
         assert_eq!(b.total_units, 100);
         assert_eq!(b.billable_units, 0, "at/under quota ⇒ nothing billable");
         assert_eq!(b.total_cents, 500, "base fee only");
@@ -264,7 +420,7 @@ mod tests {
         // Usage = 150 CU ⇒ 50 billable × 1 cent = 50 cents over the base.
         let mut usage2 = HashMap::new();
         usage2.insert("requests".to_string(), 150);
-        let b2 = charge_cents(&price, &usage2, &weights());
+        let b2 = charge_cents(&price, &usage2, &weights()).unwrap();
         assert_eq!(b2.total_units, 150);
         assert_eq!(b2.billable_units, 50);
         assert_eq!(b2.total_cents, 500 + 50);
@@ -280,7 +436,7 @@ mod tests {
         };
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), 999_999); // under the included CU
-        let b = charge_cents(&price, &usage, &weights());
+        let b = charge_cents(&price, &usage, &weights()).unwrap();
         assert_eq!(b.billable_units, 0);
         assert_eq!(b.total_cents, 900);
     }
@@ -310,7 +466,7 @@ mod tests {
         usage.insert("requests".to_string(), 1); // 1 CU
         usage.insert("cpu_us".to_string(), 1_000); // 1 CU
         usage.insert("egress_bytes".to_string(), 1_000); // 1 CU
-        let b = charge_cents(&price, &usage, &weights());
+        let b = charge_cents(&price, &usage, &weights()).unwrap();
         assert_eq!(b.total_units, 3, "CU accumulate across metrics");
         assert_eq!(
             b.total_cents, 2,
@@ -339,8 +495,8 @@ mod tests {
             ..cheap.clone()
         };
 
-        let bc = charge_cents(&cheap, &usage, &ws);
-        let bp = charge_cents(&pricey, &usage, &ws);
+        let bc = charge_cents(&cheap, &usage, &ws).unwrap();
+        let bp = charge_cents(&pricey, &usage, &ws).unwrap();
         assert_eq!(bc.total_units, 1_000, "CU is weight-derived, unchanged");
         assert_eq!(bp.total_units, 1_000, "same CU under the same weights");
         assert_eq!(bc.total_cents, 1_000, "1000 CU × 1c");
@@ -363,15 +519,18 @@ mod tests {
         };
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), 1_000_000);
-        let b = charge_cents(&price, &usage, &t);
+        let b = charge_cents(&price, &usage, &t).unwrap();
         assert_eq!(b.total_units, 1_000_000);
         assert_eq!(b.total_cents, 30, "1M CU × 0.00003c = 30c, rounded once");
     }
 
     #[test]
-    fn unresolved_fx_prices_base_only() {
-        // fx == None (catalog failed to substitute) must price to base-only, never
-        // panic. Defensive: the catalog always resolves the default in practice.
+    fn unresolved_fx_fails_closed_not_base_only() {
+        // MAJOR-2 REGRESSION: fx == None reaching the pricer is NOT base-only $0
+        // (a silent revenue leak); it is a hard UnresolvedFx error so the sweep
+        // aborts (bills no one) rather than charging the wrong amount. The catalog
+        // resolves None to the global default in practice; this fires only when
+        // the global default itself is missing.
         let price = PlanPrice {
             base_fee_cents: 700,
             included_units: 0,
@@ -380,9 +539,12 @@ mod tests {
         };
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), 5_000);
-        let b = charge_cents(&price, &usage, &weights());
-        assert_eq!(b.billable_units, 5_000);
-        assert_eq!(b.total_cents, 700, "no FX ⇒ base only, no panic");
+        let err = charge_cents(&price, &usage, &weights()).unwrap_err();
+        assert_eq!(
+            err,
+            PricingError::UnresolvedFx,
+            "unresolved FX must error (fail closed), never silently bill base-only $0"
+        );
     }
 
     #[test]
@@ -391,11 +553,71 @@ mod tests {
         // CU, not a wrapping huge value.
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), -5);
-        assert_eq!(total_units(&weights(), &usage), 0);
+        assert_eq!(total_units(&weights(), &usage).unwrap(), 0);
     }
 
     #[test]
-    fn validate_rejects_explicit_zero_fx_accepts_none_and_positive() {
+    fn total_units_overflow_is_loud_error_not_silent_clamp() {
+        // MAJOR-1 REGRESSION: a weight/usage pair that forces the per-metric CU
+        // total past u64::MAX must surface PricingError::ComputeUnitOverflow
+        // (loud, with a warn!), NOT a silent u64::MAX clamp + saturating_add that
+        // would emit a wrong-but-plausible bill.
+        //
+        // raw = i64::MAX (~9.2e18), units_per_op = 4, per_units = 1 ⇒
+        //   ~3.7e19 CU > u64::MAX (~1.8e19). Old code clamped to u64::MAX silently.
+        let mut t = MetricWeights::new();
+        t.insert("requests".to_string(), w(4, 1));
+        let mut usage = HashMap::new();
+        usage.insert("requests".to_string(), i64::MAX);
+        match total_units(&t, &usage) {
+            Err(PricingError::ComputeUnitOverflow { metric, units_per_op, per_units, .. }) => {
+                assert_eq!(metric, "requests");
+                assert_eq!(units_per_op, 4);
+                assert_eq!(per_units, 1);
+            }
+            other => panic!("expected ComputeUnitOverflow, got {other:?}"),
+        }
+        // And it propagates through charge_cents (the money path) rather than
+        // being swallowed into a clamped total.
+        let price = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(FX_SCALE as u64),
+            spend_limit_default_cents: 0,
+        };
+        assert_eq!(
+            charge_cents(&price, &usage, &t).unwrap_err(),
+            PricingError::ComputeUnitOverflow {
+                metric: "requests".to_string(),
+                raw: i64::MAX,
+                units_per_op: 4,
+                per_units: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn total_units_cross_metric_sum_overflow_is_loud_error() {
+        // MAJOR-1 REGRESSION (cross-metric arm): two metrics that each fit u64 but
+        // whose SUM overflows must error via checked_add, not silently saturate.
+        let mut t = MetricWeights::new();
+        // raw=i64::MAX, units_per_op=2 ⇒ ~1.84e19 CU each (just fits u64::MAX),
+        // so each metric passes the per-metric try_from but their SUM overflows.
+        t.insert("a".to_string(), w(2, 1));
+        t.insert("b".to_string(), w(2, 1));
+        let mut usage = HashMap::new();
+        usage.insert("a".to_string(), i64::MAX);
+        usage.insert("b".to_string(), i64::MAX);
+        assert!(
+            matches!(total_units(&t, &usage), Err(PricingError::ComputeUnitOverflow { .. })),
+            "cross-metric sum overflow must be a loud error, not a saturating clamp"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_and_near_zero_fx_accepts_none_and_above_floor() {
+        // MAJOR-3: zero AND absurdly-low non-zero FX are both rejected; None and
+        // any FX >= the floor are accepted.
         let mut p = PlanPrice {
             base_fee_cents: 0,
             included_units: 0,
@@ -403,10 +625,31 @@ mod tests {
             spend_limit_default_cents: 0,
         };
         assert!(p.validate().is_err(), "explicit zero FX is rejected");
+        p.fx_pico_cents_per_unit = Some(1); // ~10^-12 cent/CU — effectively free
+        assert!(p.validate().is_err(), "absurdly-low non-zero FX is rejected (MAJOR-3)");
+        p.fx_pico_cents_per_unit = Some(MIN_FX_PICO_CENTS_PER_UNIT - 1);
+        assert!(p.validate().is_err(), "just below the floor is rejected");
+        p.fx_pico_cents_per_unit = Some(MIN_FX_PICO_CENTS_PER_UNIT);
+        assert!(p.validate().is_ok(), "at the floor is valid");
         p.fx_pico_cents_per_unit = None;
         assert!(p.validate().is_ok(), "None (inherit default) is valid");
-        p.fx_pico_cents_per_unit = Some(30_000);
-        assert!(p.validate().is_ok(), "positive FX is valid");
+        p.fx_pico_cents_per_unit = Some(30_000_000);
+        assert!(p.validate().is_ok(), "the seeded default FX is valid");
+    }
+
+    #[test]
+    fn validate_rejects_included_units_above_i64_ceiling() {
+        // MAJOR-3: an included_units that would clamp at the BIGINT (i64) column
+        // boundary is rejected so the stored value always round-trips.
+        let p = PlanPrice {
+            base_fee_cents: 0,
+            included_units: u64::MAX, // would clamp to i64::MAX at the write boundary
+            fx_pico_cents_per_unit: Some(30_000_000),
+            spend_limit_default_cents: 0,
+        };
+        assert!(p.validate().is_err(), "included_units = u64::MAX is rejected");
+        let ok = PlanPrice { included_units: MAX_INCLUDED_UNITS, ..p.clone() };
+        assert!(ok.validate().is_ok(), "included_units = i64::MAX is the accepted ceiling");
     }
 
     #[test]
@@ -415,6 +658,6 @@ mod tests {
         t.insert("x".to_string(), w(1, 0)); // degenerate ⇒ free
         let mut usage = HashMap::new();
         usage.insert("x".to_string(), 999);
-        assert_eq!(total_units(&t, &usage), 0);
+        assert_eq!(total_units(&t, &usage).unwrap(), 0);
     }
 }

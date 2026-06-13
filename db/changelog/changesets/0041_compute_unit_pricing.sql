@@ -26,8 +26,11 @@
 --changeset zeroship:metric-weights splitStatements:true
 CREATE TABLE zeroship.metric_weights (
     metric        TEXT        PRIMARY KEY,
-    units_per_op  BIGINT      NOT NULL,                       -- CU per per_units ops
-    per_units     BIGINT      NOT NULL CHECK (per_units > 0), -- divisor (sub-unit weights)
+    -- units_per_op >= 0 (MINOR-2): a negative weight is meaningless (it would
+    -- credit CU). The loader coerces defensively + warns, but the CHECK makes a
+    -- negative weight unrepresentable at the source.
+    units_per_op  BIGINT      NOT NULL CHECK (units_per_op >= 0), -- CU per per_units ops
+    per_units     BIGINT      NOT NULL CHECK (per_units > 0),     -- divisor (sub-unit weights)
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

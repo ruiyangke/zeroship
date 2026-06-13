@@ -245,6 +245,18 @@ async fn sweep<S: StripeApi>(
         {
             Ok(true) => billed += 1,
             Ok(false) => { /* nothing to bill / already billed / no customer */ }
+            // MAJOR-2: a missing global default FX means the platform cannot
+            // price ANY inheriting plan — this is NOT a per-creator hiccup. Abort
+            // the WHOLE sweep (bill no one) so we never emit a mix of correct and
+            // silently-$0 invoices. Fail closed.
+            Err(e @ RegistryError::FxUnresolved) => {
+                tracing::error!(
+                    creator_id = %creator_id,
+                    error = %e,
+                    "billing_reconcile: global default FX missing — ABORTING sweep (no creator billed)"
+                );
+                return Err(e);
+            }
             Err(e) => {
                 // A per-creator failure must not abort the whole sweep — log and
                 // continue so one creator's Stripe hiccup doesn't starve others.
@@ -328,7 +340,29 @@ async fn bill_creator<S: StripeApi>(
         };
         let usage = metering.period_totals(app_id, period_start).await?;
         let price = plan.price.with_effective_fx(default_fx);
-        let breakdown = charge_cents(&price, &usage, weights);
+        // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
+        //   * UnresolvedFx (global default FX missing) ⇒ the platform cannot
+        //     price ⇒ propagate so the sweep ABORTS (see `sweep`), never a
+        //     base-only $0 invoice.
+        //   * ComputeUnitOverflow ⇒ a hard error that skips THIS creator (the
+        //     per-creator loop catches it + warns), never a clamped bill —
+        //     matching the cents→i64 hard-error posture below.
+        let breakdown = match charge_cents(&price, &usage, weights) {
+            Ok(b) => b,
+            Err(crate::pricing::PricingError::UnresolvedFx) => {
+                tracing::error!(
+                    app_id = %app_id,
+                    plan_id = %plan_id,
+                    "billing_reconcile: global default FX missing — cannot price; ABORTING sweep"
+                );
+                return Err(RegistryError::FxUnresolved);
+            }
+            Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
+                return Err(RegistryError::Database(format!(
+                    "billing_reconcile: {e} — refusing to bill app {app_id}"
+                )));
+            }
+        };
         if breakdown.total_cents == 0 {
             continue;
         }
@@ -605,7 +639,7 @@ mod tests {
         weights.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
         let mut usage = std::collections::HashMap::new();
         usage.insert("requests".to_string(), 750i64);
-        let breakdown = charge_cents(&price, &usage, &weights);
+        let breakdown = charge_cents(&price, &usage, &weights).expect("charge");
         assert_eq!(breakdown.total_cents, 750);
 
         let fake = RecordingStripe::default();

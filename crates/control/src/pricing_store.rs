@@ -42,6 +42,16 @@ impl PricingStore {
                 tracing::warn!(metric = %metric, per_units, "metric_weights: non-positive per_units — skipping");
                 continue;
             }
+            // MINOR-2: a negative units_per_op is forbidden by the DB CHECK
+            // (added in 0041) but we coerce defensively — warn! if it ever fires
+            // so a bad row is visible rather than silently treated as free.
+            if units_per_op < 0 {
+                tracing::warn!(
+                    metric = %metric,
+                    units_per_op,
+                    "metric_weights: negative units_per_op coerced to 0 (CHECK should forbid this)"
+                );
+            }
             table.insert(
                 metric,
                 MetricWeight {
@@ -54,8 +64,13 @@ impl PricingStore {
     }
 
     /// The global default FX (pico-cents per CU) — `pricing_config.id='global'`.
-    /// `None` if the singleton row is absent (treated as 0 ⇒ base-only pricing
-    /// by [`crate::pricing::charge_cents`]; logged so a missing seed is visible).
+    ///
+    /// `None` if the singleton row is absent. This is a PLATFORM
+    /// MISCONFIGURATION, not a benign default (MAJOR-2): a plan that inherits
+    /// (`fx == None`) cannot then be priced, and the sweeps fail closed (abort)
+    /// rather than billing base-only $0. We `tracing::error!` here so the missing
+    /// seed is loud — the previous "logged when missing" claim was false (there
+    /// was no log), letting a missing row silently leak revenue.
     pub async fn default_fx_pico_cents_per_unit(&self) -> Result<Option<u64>, RegistryError> {
         let conn = self.registry.conn().await?;
         let rows = conn
@@ -64,9 +79,14 @@ impl PricingStore {
                 &[],
             )
             .await?;
-        Ok(rows.first().map(|r| {
-            let fx: i64 = r.get("fx_pico_cents_per_unit");
-            fx.max(0) as u64
-        }))
+        let Some(row) = rows.first() else {
+            tracing::error!(
+                "pricing_config: global default FX row ('global') is MISSING — inheriting plans \
+                 cannot be priced; billing sweeps will abort (fail closed). Seed pricing_config."
+            );
+            return Ok(None);
+        };
+        let fx: i64 = row.get("fx_pico_cents_per_unit");
+        Ok(Some(fx.max(0) as u64))
     }
 }

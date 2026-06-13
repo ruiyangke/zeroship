@@ -787,6 +787,114 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
     assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "invoice id filled in");
 }
 
+/// MAJOR-2 (fail-closed) REGRESSION: weights present, a plan that INHERITS the
+/// global FX (`fx_pico_cents_per_unit = NULL`), and the global `pricing_config`
+/// default row REMOVED ⇒ the platform cannot price ⇒ the sweep must ABORT
+/// (error out) and produce NO invoice and NO `billing_runs` row — never a silent
+/// base-only $0 invoice (the revenue leak the critic flagged).
+///
+/// RED→GREEN: under the old `charge_cents` (fx None ⇒ 0 ⇒ base-only), this
+/// creator with 600 requests would bill $0 silently and `tick_with` would return
+/// `Ok`; here it returns `Err` and writes nothing.
+#[compio::test]
+async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "nofx").await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "nofx").await;
+
+    // Weights present (so usage WOULD accrue CU), but the plan inherits the FX
+    // (NULL) and we delete the global default — leaving the FX unresolvable.
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("seed weight");
+    let plan_id = format!("pln_nofx_{}", Uuid::new_v4().simple());
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.plans \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+                runtime_limits_json, spend_limit_default_cents) \
+             VALUES ($1, 'nofx', 0, 0, NULL, \
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', 100000)",
+            &[&plan_id],
+        )
+        .await
+        .expect("seed inheriting plan");
+    let app = make_owned_app(&fx.state, &plan_id, creator).await;
+    fx.state.stripe_store.set_customer(creator, "cus_test_nofx").await.unwrap();
+    ingest_at(&fx.state, app, 600, period, 1).await; // would be 600c IF priceable
+
+    // Capture the shared singleton so we can RESTORE it before any assertion —
+    // the pricing_config row is fleet-wide shared state across test binaries, so
+    // a mid-test panic must NOT leak the deletion into a sibling test's pricing.
+    let saved_fx: Option<i64> = fx
+        .state
+        .control_pg
+        .query("SELECT fx_pico_cents_per_unit FROM zeroship.pricing_config WHERE id = 'global'", &[])
+        .await
+        .expect("read saved fx")
+        .first()
+        .map(|r| r.get("fx_pico_cents_per_unit"));
+
+    // Remove the global default FX so the inheriting plan cannot resolve it.
+    fx.state
+        .control_pg
+        .execute("DELETE FROM zeroship.pricing_config WHERE id = 'global'", &[])
+        .await
+        .expect("delete global pricing_config");
+
+    // The sweep must FAIL CLOSED — abort with an error, not bill $0. Capture the
+    // observations FIRST, then restore the singleton, then assert (so a failing
+    // assert can never leak the deletion).
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    let items = fx.mock.count_path("POST", "/v1/invoiceitems");
+    let invoices = fx.mock.count_path("POST", "/v1/invoices");
+    let runs = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT amount_cents FROM zeroship.billing_runs \
+             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
+            &[&creator, &(period as f64)],
+        )
+        .await
+        .expect("read billing_runs");
+
+    // Restore the shared singleton BEFORE asserting.
+    let restore_fx = saved_fx.unwrap_or(30_000_000);
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
+             VALUES ('global', $1) \
+             ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit",
+            &[&restore_fx],
+        )
+        .await
+        .expect("restore global pricing_config");
+
+    assert!(
+        res.is_err(),
+        "missing global default FX must abort the sweep (fail closed), not bill base-only $0"
+    );
+    assert_eq!(items, 0, "no item posted");
+    assert_eq!(invoices, 0, "no invoice created");
+    assert!(runs.is_empty(), "no billing_runs row — bill no one when the platform can't price");
+}
+
 /// Build the real `StripeClient` pointed at the fixture's mock — used by the
 /// reconcile tests so the sweep drives the REAL cyper client (NOT a stub).
 fn dummy_passthrough(fx: &Fixture) -> StripeClient {

@@ -21,6 +21,12 @@ pub enum RegistryError {
     AlreadyExists(String),
     Database(String),
     InvalidInput(String),
+    /// The global default FX is missing, so the platform cannot price any
+    /// inheriting plan (billing-v2 MAJOR-2). A billing sweep that hits this
+    /// must ABORT (bill no one) rather than emit base-only $0 invoices — it is
+    /// surfaced as a distinct variant so the sweep can fail closed instead of
+    /// logging-and-continuing past a revenue leak.
+    FxUnresolved,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -30,6 +36,11 @@ impl std::fmt::Display for RegistryError {
             Self::AlreadyExists(s) => write!(f, "already exists: {s}"),
             Self::Database(s) => write!(f, "database: {s}"),
             Self::InvalidInput(s) => write!(f, "invalid input: {s}"),
+            Self::FxUnresolved => write!(
+                f,
+                "global default FX missing — platform cannot price; aborting billing sweep \
+                 rather than billing $0"
+            ),
         }
     }
 }

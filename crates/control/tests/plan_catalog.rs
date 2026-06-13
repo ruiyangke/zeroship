@@ -399,7 +399,7 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     let weights = pricing.weights().await.expect("weights");
     let default_fx = pricing.default_fx_pico_cents_per_unit().await.expect("default fx");
     let price = fetched_plan.price.with_effective_fx(default_fx);
-    let breakdown = charge_cents(&price, &totals, &weights);
+    let breakdown = charge_cents(&price, &totals, &weights).expect("charge");
 
     // 1.5M requests × 1 CU = 1.5M CU; included 1M ⇒ 0.5M billable CU.
     // 0.5M CU × 1 cent = 500_000c overage + 500c base = 500_500c.
@@ -428,4 +428,32 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
     t.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
     // sanity: the loaded table is non-empty (seeded platform counters)
     assert!(weights.contains_key("requests"), "platform-counter weight is seeded");
+}
+
+#[compio::test]
+async fn metric_weights_rejects_negative_units_per_op() {
+    // MINOR-2 REGRESSION: the 0041 CHECK (units_per_op >= 0) makes a negative
+    // weight unrepresentable at the source — a negative weight would credit CU
+    // (nonsensical). Without the CHECK this INSERT would succeed.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let metric = format!("neg_w_{}", Uuid::now_v7().simple());
+    let res = client
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ($1, -1, 1)",
+            &[&metric],
+        )
+        .await;
+    assert!(
+        res.is_err(),
+        "a negative units_per_op must be rejected by the CHECK constraint (MINOR-2)"
+    );
+    // Clean up any row that somehow landed (it shouldn't have).
+    let _ = client
+        .execute("DELETE FROM zeroship.metric_weights WHERE metric = $1", &[&metric])
+        .await;
 }
