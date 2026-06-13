@@ -48,7 +48,10 @@ fn control_event_delete_json() {
 #[test]
 fn usage_report_roundtrip() {
     let app_id = Uuid::new_v4();
+    let report_id = Uuid::new_v4();
 
+    let mut custom = HashMap::new();
+    custom.insert("emails_sent".to_string(), 7u64);
     let mut counters: HashMap<Uuid, AppUsage> = HashMap::new();
     counters.insert(app_id, AppUsage {
         requests: 42,
@@ -56,19 +59,43 @@ fn usage_report_roundtrip() {
         wall_us: 2000,
         egress_bytes: 512,
         ingress_bytes: 256,
+        custom,
     });
 
     let report = UsageReport {
         worker_id: "w1".to_string(),
+        report_id,
+        sequence: 9,
         counters,
     };
     let json = serde_json::to_string(&report).unwrap();
     let decoded: UsageReport = serde_json::from_str(&json).unwrap();
 
     assert_eq!(decoded.worker_id, "w1");
+    assert_eq!(decoded.report_id, report_id);
+    assert_eq!(decoded.sequence, 9);
     let usage = decoded.counters.get(&app_id).unwrap();
     assert_eq!(usage.requests, 42);
     assert_eq!(usage.cpu_us, 1000);
+    assert_eq!(usage.custom.get("emails_sent").copied(), Some(7));
+}
+
+#[test]
+fn app_usage_empty_custom_omitted_and_defaults() {
+    // Empty `custom` must not appear on the wire, and a payload without
+    // `custom` must deserialize with an empty map (pre-launch shape
+    // discipline — readers that omit it still load).
+    let usage = AppUsage {
+        requests: 1,
+        ..AppUsage::default()
+    };
+    let json = serde_json::to_string(&usage).unwrap();
+    assert!(!json.contains("\"custom\""), "empty custom omitted: {json}");
+
+    let legacy = r#"{"requests":3,"cpu_us":0,"wall_us":0,"egress_bytes":0,"ingress_bytes":0}"#;
+    let decoded: AppUsage = serde_json::from_str(legacy).unwrap();
+    assert_eq!(decoded.requests, 3);
+    assert!(decoded.custom.is_empty());
 }
 
 #[test]
