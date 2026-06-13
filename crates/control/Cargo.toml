@@ -8,6 +8,14 @@ description = "zeroship control plane — admin API, internal API, Postgres, VFS
 name = "zeroship-control"
 path = "src/main.rs"
 
+# Standalone mock-Stripe server for the billing & metering multi-node E2E
+# (tests/e2e_metering_billing.sh). Reuses the same Stripe-wire idiom as the
+# in-process mock in tests/billing_reconcile_test.rs, plus a /__mock/*
+# introspection surface for shell assertions.
+[[bin]]
+name = "zeroship-mock-stripe"
+path = "src/bin/mock_stripe.rs"
+
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }

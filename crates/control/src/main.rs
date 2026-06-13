@@ -1157,6 +1157,14 @@ fn main() -> std::io::Result<()> {
                     .route(web::post().to(internal::report_usage)),
             )
             .service(
+                web::resource("/internal/billing/reconcile")
+                    .route(web::post().to(internal::force_reconcile)),
+            )
+            .service(
+                web::resource("/internal/spend/reconcile")
+                    .route(web::post().to(internal::force_spend_reconcile)),
+            )
+            .service(
                 web::resource("/internal/webhooks/stripe")
                     .route(web::post().to(stripe_handlers::webhook)),
             )

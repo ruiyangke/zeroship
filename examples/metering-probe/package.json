@@ -1,0 +1,17 @@
+{
+  "name": "metering-probe",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tiny billing/metering probe app: serves a measurable request/response body and bumps a custom meter counter. Used by the billing & metering multi-node E2E (tests/e2e_metering_billing.sh).",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@zeroship/vite-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}

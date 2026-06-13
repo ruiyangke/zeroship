@@ -1013,3 +1013,102 @@ async fn billing_setup_allows_platform_operator_for_any_creator() {
 
     operator.cleanup(&fx.state).await;
 }
+
+// ===========================================================================
+// On-demand reconcile endpoint (POST /internal/billing/reconcile) — the
+// operator-gated trigger the billing & metering E2E (tests/e2e_metering_billing.sh)
+// drives so it can reconcile a chosen CLOSED period without waiting a month.
+// ===========================================================================
+
+/// Wire the `/internal/billing/reconcile` route onto a test App (same path +
+/// handler the prod router registers in `main.rs`).
+fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/internal/billing/reconcile")
+            .route(web::post().to(zeroship_control::internal::force_reconcile)),
+    );
+}
+
+/// The endpoint is GATED by the SAME `/internal/*` `check_auth` as every other
+/// internal route (control-key bearer or `--dev-insecure`) — it is NOT an
+/// unauthenticated bypass. With the fixture's `insecure_dev: false` + a
+/// non-empty `control_key`:
+///   * no bearer ⇒ 401 (the gate, RED if the handler skipped check_auth), and
+///   * the correct control-key bearer ⇒ it drives the REAL reconcile for the
+///     caller-chosen period, hitting the mock-Stripe over the wire EXACTLY once.
+///
+/// RED→GREEN: drop the `check_auth` call from `force_reconcile` and the
+/// no-bearer request would 200 + bill — a privilege bypass. Keeping the gate
+/// makes the no-bearer case 401 while the keyed case still reconciles.
+#[compio::test]
+async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "force").await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "force").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state.stripe_store.set_customer(creator, "cus_test_force").await.unwrap();
+    ingest_at(&fx.state, app, 600, period, 1).await; // 600c in the CLOSED period
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).configure(force_reconcile_route),
+    )
+    .await;
+
+    // (1) No bearer → 401. The gate, not the reconcile, answers.
+    let req = test::TestRequest::post()
+        .uri(&format!("/internal/billing/reconcile?period={now}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "force-reconcile without the control-key bearer must be rejected (gated, not a bypass)",
+    );
+    // Nothing was billed by the rejected call.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        0,
+        "the 401'd request must NOT have driven any Stripe call",
+    );
+
+    // (2) Correct control-key bearer → drives the real reconcile for `period`.
+    let req = test::TestRequest::post()
+        .uri(&format!("/internal/billing/reconcile?period={now}"))
+        .header("authorization", "Bearer test-control-key")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "the keyed request reconciles");
+
+    // The mock saw exactly one invoice-item create (the owned app) + the
+    // invoice create/finalize — the REAL cyper wire path, billing the chosen
+    // closed period.
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        1,
+        "the keyed reconcile created exactly one invoice item for the closed period",
+    );
+
+    // And it recorded a completed billing_runs row for THAT period.
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT stripe_invoice_id FROM zeroship.billing_runs \
+             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
+            &[&creator, &(period as f64)],
+        )
+        .await
+        .expect("read billing_runs");
+    assert_eq!(rows.len(), 1, "one billing_runs row for the reconciled period");
+    assert!(
+        rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(),
+        "the reconciled run carries a finalized invoice id",
+    );
+}
