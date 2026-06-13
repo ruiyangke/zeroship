@@ -97,6 +97,25 @@ no pricing model — add a server-side plan catalog (see the remediation plan).
 
 ## T1 — Launch-blocking infrastructure
 
+### ISS-72 · env.storage multipart: in-flight parts don't overlap a slow producer (mitigated, not fully fixed)
+**Status:** open — known limitation · **Effort:** M · **Tier:** T3 · Surfaced by the fable S3 review (HIGH-2)
+
+The parallel multipart loop (`put_stream`/`put_blob_stream`) only polls its `FuturesUnordered`
+of in-flight `UploadPart`s inside the `while inflight.len() >= concurrency` gate — so while the
+loop is suspended at `body.next_chunk().await` (an app/end-user-paced V8 ReadableStream), the
+mid-flight PUTs make no progress, yet their send-deadlines keep ticking. **Mitigated** (`7f441914`)
+by scaling the per-part timeout to part size (`S3Timeouts::send_for_body` ≈ 158 s for an 8 MiB
+part → ~52 KB/s floor) + a generous control-op timeout, so the common case is safe and the prior
+"slow producer → spurious 30 s timeout → 8 futile retries → fail" no longer bites above ~52 KB/s.
+**Not fully fixed:** the structural starvation remains (a producer slower than the floor still
+fails; objects < N×PART_SIZE get no producer/PUT overlap at all). True overlap (select producer
+vs `inflight`, or spawn parts as compio tasks) was **prototyped and reverted** — on this
+compio/cyper/io_uring stack, spawn-per-part corrupts the ring when the abort path drop-cancels a
+task with an in-flight op, and `select` left the post-upload Complete/get connection unable to
+establish in time. **Follow-up:** an io_uring-cancellation-safe overlap (or a connection-lifecycle
+fix in compio-s3/cyper — the deeper "fresh-connection send slowness after a long multipart upload"
+the review flagged). No regression test today (the slow-producer test exercised that env pathology).
+
 ### ISS-32 · No production object storage (S3/R2)
 **Status:** FIXED (PR1–PR4, branch `design/s3-object-storage`) · **Effort:** M–L · **Tier:** T1
 
