@@ -620,6 +620,164 @@ pub async fn set_plan(
 }
 
 // ---------------------------------------------------------------------------
+// Spend-limit override (billing PR5, M4) — the creator-facing cap.
+//
+// `PUT /api/apps/:id/spend-limit` body `{ "cents": <u64|null> }` sets (or, with
+// null, clears back to the plan default) the per-app spend-limit override.
+// `GET` returns the effective limit + current state. Authz is BillingWrite /
+// BillingRead on `Resource::App(id)` — the same app-membership gate `set_plan`
+// uses. A creator CANNOT raise the override beyond the plan's
+// `spend_limit_default_cents` (money stays server-bounded).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SetSpendLimitBody {
+    /// New override in cents, or `null` to clear back to the plan default.
+    pub cents: Option<u64>,
+}
+
+pub async fn set_spend_limit(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+    body: Json<SetSpendLimitBody>,
+) -> web::HttpResponse {
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+
+    // Resolve the app's plan default so an override can't exceed it.
+    let plan_default = match resolve_plan_default_cents(&state, &uid).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return web::HttpResponse::NotFound()
+                .json(&serde_json::json!({"error": "app not found"}))
+        }
+        Err(e) => return error_response(e),
+    };
+    if let Some(req_cents) = body.cents {
+        if req_cents > plan_default {
+            return web::HttpResponse::Forbidden().json(&serde_json::json!({
+                "error": "spend limit exceeds plan maximum",
+                "plan_max_cents": plan_default,
+            }));
+        }
+    }
+
+    let engine = crate::spend::SpendEngine::new(state.registry.clone());
+    match engine.set_limit(&uid, body.cents).await {
+        Ok(()) => {
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: Some(uid),
+                    creator_id: None,
+                    actor_user_id: None,
+                    actor_token_id: None,
+                    action: crate::audit::Action::SetSpendLimit,
+                    resource: Some("spend_limit"),
+                    source_ip: None,
+                },
+                &serde_json::json!({ "cents": body.cents }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&serde_json::json!({"updated": true}))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+pub async fn get_spend_limit(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+    let conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    let rows = match conn
+        .query(
+            "SELECT a.plan_id, s.spend_limit_cents, s.state \
+             FROM zeroship.apps a \
+             LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
+             WHERE a.id = $1",
+            &[&uid],
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+    let Some(row) = rows.first() else {
+        return web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "app not found"}));
+    };
+    let plan_id: String = row.get("plan_id");
+    let override_cents: Option<i64> = row.get("spend_limit_cents");
+    let state_str: Option<String> = row.get("state");
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    let plan_default = match catalog.get(&plan_id).await {
+        Ok(Some(p)) => p.price.spend_limit_default_cents,
+        Ok(None) => 0,
+        Err(e) => return error_response(e),
+    };
+    let effective = override_cents
+        .and_then(|o| u64::try_from(o).ok())
+        .unwrap_or(plan_default);
+    web::HttpResponse::Ok().json(&serde_json::json!({
+        "effective_limit_cents": effective,
+        "override_cents": override_cents,
+        "plan_default_cents": plan_default,
+        "state": state_str.as_deref().unwrap_or("allow"),
+    }))
+}
+
+/// Resolve an app's plan-default spend limit. `Ok(None)` when the app row is
+/// missing. Used to bound a creator override.
+async fn resolve_plan_default_cents(
+    state: &AppState,
+    app_id: &Uuid,
+) -> Result<Option<u64>, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let rows = conn
+        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[app_id])
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let plan_id: String = row.get("plan_id");
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    Ok(catalog
+        .get(&plan_id)
+        .await?
+        .map(|p| p.price.spend_limit_default_cents))
+}
+
+// ---------------------------------------------------------------------------
 // Plan catalog (billing PR4) — operator-editable, server-side pricing catalog.
 //
 // Reads (`GET /api/plans`, `GET /api/plans/:id`) require BillingRead on

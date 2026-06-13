@@ -506,13 +506,19 @@ impl Registry {
         // LEFT JOIN control.app_oauth_clients (§1.5): a provisioned app yields
         // Some(oauth_client_id)/Some(sector_identifier); an un-provisioned app
         // (no extension row) yields NULL ⇒ None. The join key is the app id.
+        // LEFT JOIN zeroship.app_spend_state (PR5): an app with a spend row
+        // carries its current `state` TEXT; an app without one yields NULL ⇒
+        // default `SpendState::Allow` (the common, unrestricted case). The
+        // gateway gates dispatch on this pulled value (decision D1 — spend
+        // state is PULLed on the RouteEntry, not pushed).
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
-                        c.sector_identifier \
+                        c.sector_identifier, s.state AS spend_state \
                  FROM zeroship.apps a \
-                 LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id",
+                 LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id \
+                 LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id",
                 &[],
             )
             .await?;
@@ -553,6 +559,14 @@ impl Registry {
                     // `CompiledRoute`/browser-auth/Bearer arm consume these.
                     oauth_client_id: row.get("oauth_client_id"),
                     sector_identifier: row.get("sector_identifier"),
+                    // PR5: spend state from the LEFT-JOINed app_spend_state.
+                    // NULL (no spend row) ⇒ Allow; an unrecognised TEXT value
+                    // fails closed to Block (defensive — should never happen,
+                    // the engine only writes the four known states).
+                    spend_state: row
+                        .get::<_, Option<String>>("spend_state")
+                        .as_deref()
+                        .map_or(zeroship_core::types::SpendState::Allow, crate::spend::parse_spend_state),
                 },
             );
         }

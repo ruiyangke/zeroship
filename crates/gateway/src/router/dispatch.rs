@@ -1189,10 +1189,17 @@ async fn handle_subscription_dispatch(
     _req: HttpRequest,
     state: &GateState,
     app_id: &Uuid,
-    _route: &zeroship_core::types::RouteEntry,
+    route: &zeroship_core::types::RouteEntry,
     _tail: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
+    // Spend gate (PR5): Block 402s the subscription before any accounting or
+    // worker proxy; Degrade passes (throttled by the degraded registries
+    // below); Warn passes (no body header on the 501 stub path).
+    if let Err(resp) = enforce::check_spend(route.spend_state) {
+        return resp;
+    }
+
     // Rate limit + concurrency: subscriptions count against the same
     // accounting as unary dispatch. A subscription that's been open
     // for hours holds one slot; that's intentional — the operator
@@ -1316,6 +1323,15 @@ async fn handle_dispatch(
     user_header_value: Option<String>,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
+    // Spend gate (PR5, decision D1): state is PULLed on the RouteEntry. Block
+    // → 402 SPEND_LIMIT BEFORE any rate-limit / concurrency / worker proxy.
+    // Degrade passes here (the throttle is applied by the degraded registries
+    // below); Warn passes and stamps an `x-zs-spend-warn: 1` response header.
+    if let Err(resp) = enforce::check_spend(route.spend_state) {
+        return resp;
+    }
+    let spend_warn = route.spend_state == zeroship_core::types::SpendState::Warn;
+
     // Rate limit
     if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
         return resp;
@@ -1396,6 +1412,14 @@ async fn handle_dispatch(
         ntex::http::header::HeaderName::from_static("x-request-id"),
         ntex::http::header::HeaderValue::from_str(&request_id.to_string()).unwrap(),
     );
+    // Spend Warn (~80%): served, but flag it so the SDK / dashboard can prompt
+    // the creator to raise their limit before Degrade/Block kicks in.
+    if spend_warn {
+        response.headers_mut().insert(
+            ntex::http::header::HeaderName::from_static("x-zs-spend-warn"),
+            ntex::http::header::HeaderValue::from_static("1"),
+        );
+    }
 
     response
 }
@@ -3231,5 +3255,194 @@ mod tests {
             html_escape(r#"<script>alert("x" & 'y')</script>"#),
             "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR5 — faithful spend-enforcement at the gateway edge.
+    //
+    // These drive the REAL path: a `RouteEntry` (carrying the pulled
+    // `spend_state`) is pushed through the REAL `RouteCache::update` (which
+    // flips the degraded registries), then either the real `handle_dispatch`
+    // is invoked (402 gate) or the real `acquire_concurrency` is driven
+    // against the flipped registry (degrade tightening) — no shims.
+    // -----------------------------------------------------------------------
+
+    fn spend_route(spend_state: zeroship_core::types::SpendState) -> zeroship_core::types::RouteEntry {
+        zeroship_core::types::RouteEntry {
+            name: "spend-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest: zeroship_bundle::Manifest::passthrough(),
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state,
+        }
+    }
+
+    /// Block → 402 SPEND_LIMIT BEFORE any worker proxy. Fed via the REAL
+    /// `RouteCache::update` and driven through the REAL `handle_dispatch`. The
+    /// stub hash-ring points at `0.0.0.0:0`; if the gate did NOT fire, the
+    /// proxy attempt would surface a 502 BadGateway — so a 402 proves the gate
+    /// short-circuited before the worker was ever contacted.
+    #[compio::test]
+    async fn over_limit_request_blocked_at_gateway() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, spend_route(SpendState::Block));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let (resolved_id, compiled) = state
+            .routes
+            .lookup_by_name("spend-app.zeroship.localhost")
+            .expect("route resolves");
+        assert_eq!(resolved_id, app_id);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/data")
+            .to_http_request();
+        let resp = handle_dispatch(
+            req,
+            &state,
+            &app_id,
+            &compiled.entry,
+            "api/data",
+            Uuid::new_v4(),
+            Bytes::new(),
+            None,
+            std::time::Instant::now(),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "a Blocked app must 402 before any worker proxy",
+        );
+        let mut resp = resp;
+        let body = collect_body(resp.take_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("402 body is JSON");
+        assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    /// Allow → the gate passes (so dispatch proceeds to the proxy, which fails
+    /// against the stub ring → 502, NOT 402). Pins that the gate only fires on
+    /// Block, so the Block 402 above isn't a blanket reject.
+    #[compio::test]
+    async fn allowed_request_passes_spend_gate() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+        let (_, compiled) = state
+            .routes
+            .lookup_by_name("spend-app.zeroship.localhost")
+            .expect("route resolves");
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/data")
+            .to_http_request();
+        let resp = handle_dispatch(
+            req,
+            &state,
+            &app_id,
+            &compiled.entry,
+            "api/data",
+            Uuid::new_v4(),
+            Bytes::new(),
+            None,
+            std::time::Instant::now(),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "an Allowed app must NOT be spend-blocked",
+        );
+    }
+
+    /// Degrade flipped via the REAL `RouteCache::update` tightens the app's
+    /// effective concurrency ceiling. With a global limit of DEGRADE_FACTOR and
+    /// DEGRADE_FACTOR=8 the effective ceiling becomes 1, so the FIRST acquire
+    /// succeeds and the SECOND is rejected — proving `set_degraded` is not a
+    /// no-op. A non-degraded control app at the same limit admits both.
+    #[compio::test]
+    async fn degraded_route_tightens_concurrency() {
+        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
+        use zeroship_core::types::SpendState;
+
+        let cache = crate::sync::RouteCache::new();
+        let rate = RateLimitRegistry::new(1000, 2000);
+        let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
+
+        let degraded_app = Uuid::new_v4();
+        let normal_app = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        let mut degraded = spend_route(SpendState::Degrade);
+        degraded.name = "degraded.zeroship.localhost".into();
+        let mut normal = spend_route(SpendState::Allow);
+        normal.name = "normal.zeroship.localhost".into();
+        routes.insert(degraded_app, degraded);
+        routes.insert(normal_app, normal);
+
+        cache.update(routes, &rate, &concurrency);
+        assert!(concurrency.is_degraded(&degraded_app));
+        assert!(!concurrency.is_degraded(&normal_app));
+
+        let g1 = acquire_concurrency(&concurrency, &degraded_app).expect("first admits");
+        let r2 = acquire_concurrency(&concurrency, &degraded_app);
+        assert!(r2.is_err(), "degraded app's 2nd concurrent request must be rejected");
+        if let Err(resp) = r2 {
+            assert_eq!(resp.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
+        }
+        drop(g1);
+
+        let _n1 = acquire_concurrency(&concurrency, &normal_app).expect("normal 1");
+        let _n2 = acquire_concurrency(&concurrency, &normal_app).expect("normal 2");
+    }
+
+    /// Degrade → Allow flipped via the REAL `RouteCache::update` restores full
+    /// throughput on the NEXT request with no warm-up — the gauge was never
+    /// rebuilt. Proves recovery is instant.
+    #[compio::test]
+    async fn degrade_clears_immediately_on_recovery() {
+        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
+        use zeroship_core::types::SpendState;
+
+        let cache = crate::sync::RouteCache::new();
+        let rate = RateLimitRegistry::new(1000, 2000);
+        let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
+        let app = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app, spend_route(SpendState::Degrade));
+        cache.update(routes, &rate, &concurrency);
+        assert!(concurrency.is_degraded(&app));
+        let g1 = acquire_concurrency(&concurrency, &app).expect("first admits");
+        assert!(
+            acquire_concurrency(&concurrency, &app).is_err(),
+            "degraded ceiling is 1",
+        );
+        drop(g1);
+
+        let mut routes2: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes2.insert(app, spend_route(SpendState::Allow));
+        cache.update(routes2, &rate, &concurrency);
+        assert!(!concurrency.is_degraded(&app));
+        let mut guards = Vec::new();
+        for i in 0..DEGRADE_FACTOR {
+            guards.push(
+                acquire_concurrency(&concurrency, &app)
+                    .unwrap_or_else(|_| panic!("recovered app admits request {i}")),
+            );
+        }
     }
 }

@@ -15,6 +15,7 @@
 
 pub mod audit_retention;
 pub mod orphaned_app_reaper;
+pub mod spend_reconcile;
 
 use std::sync::Arc;
 
@@ -39,6 +40,15 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     let reaper_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         orphaned_app_reaper::run(reaper_state, orphaned_app_reaper::DEFAULT_CHECK_SECS).await;
+    })
+    .detach();
+
+    // Spend-reconcile sweep (billing PR5) — prices each app's period usage,
+    // derives + persists its SpendState; the gateway pulls the new state on
+    // its next /internal/routes poll (decision D1).
+    let spend_state = Arc::clone(&state);
+    compio::runtime::spawn(async move {
+        spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
     })
     .detach();
 }

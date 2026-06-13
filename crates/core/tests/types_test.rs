@@ -3,7 +3,7 @@ use zeroship_bundle::{
     ProcedureKind, RedirectAction, ResourceEntry, StaticAction, WorkerCode,
 };
 use zeroship_core::types::{
-    AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent, RouteEntry, UsageReport,
+    AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent, RouteEntry, SpendState, UsageReport,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -110,12 +110,14 @@ fn route_entry_roundtrip() {
         manifest: Manifest::passthrough(),
         oauth_client_id: Some("oac_myapp".to_string()),
         sector_identifier: Some("https://my-app.zeroship.ai".to_string()),
+        spend_state: SpendState::Degrade,
     };
 
     let json = serde_json::to_string(&entry).unwrap();
     let decoded: RouteEntry = serde_json::from_str(&json).unwrap();
 
     assert_eq!(decoded.name, "my-app");
+    assert_eq!(decoded.spend_state, SpendState::Degrade);
     assert_eq!(decoded.plan_id, "pro");
     assert_eq!(decoded.deploy_hash, Some("abc123".to_string()));
     assert_eq!(decoded.oauth_client_id, Some("oac_myapp".to_string()));
@@ -144,11 +146,13 @@ fn route_entry_oauth_fields_none_round_trip() {
         manifest: Manifest::passthrough(),
         oauth_client_id: None,
         sector_identifier: None,
+        spend_state: SpendState::default(),
     };
     let json = serde_json::to_string(&entry).unwrap();
     let decoded: RouteEntry = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.oauth_client_id, None);
     assert_eq!(decoded.sector_identifier, None);
+    assert_eq!(decoded.spend_state, SpendState::Allow);
 }
 
 #[test]
@@ -166,6 +170,52 @@ fn route_entry_missing_manifest_field_synthesizes_passthrough() {
         !decoded.manifest.resources.is_empty(),
         "default to passthrough"
     );
+    assert_eq!(
+        decoded.spend_state,
+        SpendState::Allow,
+        "missing spend_state defaults to Allow (forward-load tolerance)"
+    );
+}
+
+#[test]
+fn spend_state_serde_is_snake_case_and_defaults_allow() {
+    // Wire / TEXT-column form is snake_case lower; Default is Allow.
+    assert_eq!(serde_json::to_string(&SpendState::Allow).unwrap(), "\"allow\"");
+    assert_eq!(serde_json::to_string(&SpendState::Warn).unwrap(), "\"warn\"");
+    assert_eq!(
+        serde_json::to_string(&SpendState::Degrade).unwrap(),
+        "\"degrade\""
+    );
+    assert_eq!(serde_json::to_string(&SpendState::Block).unwrap(), "\"block\"");
+    for (s, v) in [
+        ("\"allow\"", SpendState::Allow),
+        ("\"warn\"", SpendState::Warn),
+        ("\"degrade\"", SpendState::Degrade),
+        ("\"block\"", SpendState::Block),
+    ] {
+        assert_eq!(serde_json::from_str::<SpendState>(s).unwrap(), v);
+    }
+    assert_eq!(SpendState::default(), SpendState::Allow);
+}
+
+#[test]
+fn control_event_spend_state_json() {
+    let app_id = Uuid::new_v4();
+    let event = ControlEvent::SpendState {
+        app_id,
+        state: SpendState::Block,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("SpendState"));
+    assert!(json.contains("block"));
+    let decoded: ControlEvent = serde_json::from_str(&json).unwrap();
+    match decoded {
+        ControlEvent::SpendState { app_id: id, state } => {
+            assert_eq!(id, app_id);
+            assert_eq!(state, SpendState::Block);
+        }
+        other => panic!("expected SpendState, got {:?}", other),
+    }
 }
 
 #[test]

@@ -67,6 +67,32 @@ pub struct AppVersionInfo {
     pub manifest: Option<Manifest>,
 }
 
+/// Per-app spend-enforcement state, derived by the control-plane spend engine
+/// from period usage vs the app's effective spend limit and carried to the
+/// gateway on the pulled [`RouteEntry`].
+///
+/// Ordered most- to least-permissive so the gateway gate is a simple match:
+/// - `Allow` — under the warn threshold; serve normally.
+/// - `Warn` — past ~80%; serve but stamp an `x-zs-spend-warn` header.
+/// - `Degrade` — past the soft cap; serve but throttle the app's effective
+///   concurrency + rate (gateway-side, no bucket rebuild).
+/// - `Block` — at/over the hard cap; reject new requests with 402 before any
+///   worker proxy.
+///
+/// Serde is `snake_case` so the TEXT column / wire form is `"allow"` …
+/// `"block"`. `Default` is `Allow` — a `RouteEntry` with no spend row (the
+/// common case) is unrestricted, and the `#[serde(default)]` on the field
+/// keeps forward-loading a wire payload without the field tolerant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendState {
+    #[default]
+    Allow,
+    Warn,
+    Degrade,
+    Block,
+}
+
 /// A routing entry resolved from an incoming request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -99,6 +125,13 @@ pub struct RouteEntry {
     /// hard-fails closed (no `pws_` derivation, no header emitted).
     #[serde(default)]
     pub sector_identifier: Option<String>,
+    /// Current spend-enforcement state for the app, JOINed from
+    /// `zeroship.app_spend_state` by the control-plane registry. The gateway
+    /// gates on this BEFORE rate-limiting/dispatch (Block → 402, Degrade →
+    /// throttle, Warn → header, Allow → pass). `#[serde(default)]` ⇒ `Allow`
+    /// for an app with no spend row or a wire payload predating the field.
+    #[serde(default)]
+    pub spend_state: SpendState,
 }
 
 /// Map of app id → current deploy/config snapshot.
@@ -157,6 +190,12 @@ pub enum ControlEvent {
     Deploy { app_id: Uuid, hash: String },
     Delete { app_id: Uuid },
     PlanChange { app_id: Uuid, plan_id: String },
+    /// A spend-state transition for an app, emitted by the spend-reconcile
+    /// cron on each tick that changes an app's [`SpendState`]. Per decision
+    /// D1 this is for the audit log / future SSE fan-out ONLY — there is no
+    /// live `ControlEvent` delivery path today; enforcement rides the pulled
+    /// [`RouteEntry::spend_state`], not this event.
+    SpendState { app_id: Uuid, state: SpendState },
 }
 
 /// Canonical errors for zeroship-common operations.

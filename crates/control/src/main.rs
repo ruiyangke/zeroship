@@ -1003,6 +1003,12 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/plan")
                     .route(web::put().to(api::set_plan)),
             )
+            // --- Spend-limit override (PR5, M4): creator-facing cap ---
+            .service(
+                web::resource("/api/apps/{id}/spend-limit")
+                    .route(web::get().to(api::get_spend_limit))
+                    .route(web::put().to(api::set_spend_limit)),
+            )
             // --- Plan catalog (PR4): operator-editable pricing catalog ---
             .service(
                 web::resource("/api/plans")

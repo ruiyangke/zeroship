@@ -3,9 +3,30 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::collections::HashSet;
+
 use ntex::web::HttpResponse;
 use uuid::Uuid;
 use zeroship_bundle::{RateLimit, RateLimitPer};
+use zeroship_core::types::SpendState;
+
+/// Throttle multiplier applied to a Degraded app: its effective concurrency
+/// ceiling is divided by this, and each of its requests consumes this many
+/// rate-limit tokens instead of one — a `1/DEGRADE_FACTOR` throughput cut
+/// against the SAME immutable buckets (no rebuild, instant recovery).
+pub const DEGRADE_FACTOR: u32 = 8;
+
+/// Spend-limit gate. Run BEFORE rate-limit/dispatch (decision D1 — state is
+/// pulled on the `RouteEntry`). `Block` → 402 `SPEND_LIMIT`; every other state
+/// passes (Warn stamps a header at the call site; Degrade is throttled by the
+/// degraded registries). A blocked request never reaches the worker proxy.
+pub fn check_spend(state: SpendState) -> Result<(), HttpResponse> {
+    match state {
+        SpendState::Block => Err(HttpResponse::PaymentRequired()
+            .json(&serde_json::json!({"code": "SPEND_LIMIT"}))),
+        SpendState::Allow | SpendState::Warn | SpendState::Degrade => Ok(()),
+    }
+}
 
 // --- Token Bucket Rate Limiter ---
 
@@ -41,16 +62,26 @@ impl TokenBucket {
     }
 
     fn try_acquire(&self) -> bool {
+        self.try_acquire_n(1)
+    }
+
+    /// Consume `n` whole tokens (the token math is 1000-scaled internally, so
+    /// one logical token is `1000` units). A Degraded app calls this with
+    /// `DEGRADE_FACTOR`, so each request costs `DEGRADE_FACTOR` tokens — a
+    /// `1/DEGRADE_FACTOR` throughput cut against the SAME bucket with no
+    /// rebuild. `n == 0` is treated as `1` (never free).
+    fn try_acquire_n(&self, n: u32) -> bool {
+        let cost = u64::from(n.max(1)) * 1000;
         loop {
             let state = self.state.load(Ordering::Acquire);
             let (tokens, last) = unpack(state);
             let now = now_secs();
             let elapsed = u64::from(now.saturating_sub(last));
             let refilled = (tokens + elapsed * self.refill_rate).min(self.capacity);
-            if refilled < 1000 {
+            if refilled < cost {
                 return false;
             }
-            let new_state = pack(refilled - 1000, now);
+            let new_state = pack(refilled - cost, now);
             if self
                 .state
                 .compare_exchange(state, new_state, Ordering::AcqRel, Ordering::Acquire)
@@ -71,6 +102,11 @@ impl std::fmt::Debug for RateLimitRegistry {
 
 pub struct RateLimitRegistry {
     buckets: RwLock<HashMap<Uuid, Arc<TokenBucket>>>,
+    /// Apps in spend-Degrade. A request from a degraded app consumes
+    /// `DEGRADE_FACTOR` tokens instead of 1 (a `1/DEGRADE_FACTOR` throughput
+    /// cut) against the SAME immutable bucket — no rebuild, instant recovery
+    /// on `clear_degraded`.
+    degraded: RwLock<HashSet<Uuid>>,
     default_rate: u32,
     default_burst: u32,
 }
@@ -79,6 +115,7 @@ impl RateLimitRegistry {
     pub fn new(rate: u32, burst: u32) -> Self {
         Self {
             buckets: RwLock::new(HashMap::new()),
+            degraded: RwLock::new(HashSet::new()),
             default_rate: rate,
             default_burst: burst,
         }
@@ -96,6 +133,27 @@ impl RateLimitRegistry {
             .or_insert_with(|| Arc::new(TokenBucket::new(self.default_rate, self.default_burst)))
             .clone()
     }
+
+    /// Mark `app_id` degraded (`on = true`) or clear it. Idempotent.
+    pub fn set_degraded(&self, app_id: &Uuid, on: bool) {
+        let mut w = self.degraded.write().unwrap();
+        if on {
+            w.insert(*app_id);
+        } else {
+            w.remove(app_id);
+        }
+    }
+
+    /// Convenience: clear `app_id`'s degraded flag. Recovery is instant — the
+    /// bucket was never rebuilt, so it serves at its normal rate immediately.
+    pub fn clear_degraded(&self, app_id: &Uuid) {
+        self.set_degraded(app_id, false);
+    }
+
+    #[must_use]
+    pub fn is_degraded(&self, app_id: &Uuid) -> bool {
+        self.degraded.read().unwrap().contains(app_id)
+    }
 }
 
 pub fn check_rate_limit(
@@ -103,7 +161,9 @@ pub fn check_rate_limit(
     app_id: &Uuid,
 ) -> Result<(), HttpResponse> {
     let bucket = registry.get_or_create(app_id);
-    if bucket.try_acquire() {
+    // A spend-Degraded app pays DEGRADE_FACTOR tokens per request.
+    let cost = if registry.is_degraded(app_id) { DEGRADE_FACTOR } else { 1 };
+    if bucket.try_acquire_n(cost) {
         Ok(())
     } else {
         Err(HttpResponse::TooManyRequests()
@@ -247,6 +307,11 @@ impl std::fmt::Debug for ConcurrencyRegistry {
 
 pub struct ConcurrencyRegistry {
     gauges: RwLock<HashMap<Uuid, Arc<AtomicU32>>>,
+    /// Apps in spend-Degrade. A degraded app's EFFECTIVE ceiling is
+    /// `(limit / DEGRADE_FACTOR).max(1)` instead of `limit` — the same gauge
+    /// is compared against a smaller ceiling (no rebuild, instant recovery on
+    /// `clear_degraded`).
+    degraded: RwLock<HashSet<Uuid>>,
     limit: u32,
 }
 
@@ -254,6 +319,7 @@ impl ConcurrencyRegistry {
     pub fn new(limit: u32) -> Self {
         Self {
             gauges: RwLock::new(HashMap::new()),
+            degraded: RwLock::new(HashSet::new()),
             limit,
         }
     }
@@ -269,6 +335,37 @@ impl ConcurrencyRegistry {
         w.entry(*app_id)
             .or_insert_with(|| Arc::new(AtomicU32::new(0)))
             .clone()
+    }
+
+    /// Mark `app_id` degraded (`on = true`) or clear it. Idempotent.
+    pub fn set_degraded(&self, app_id: &Uuid, on: bool) {
+        let mut w = self.degraded.write().unwrap();
+        if on {
+            w.insert(*app_id);
+        } else {
+            w.remove(app_id);
+        }
+    }
+
+    /// Convenience: clear `app_id`'s degraded flag (instant recovery).
+    pub fn clear_degraded(&self, app_id: &Uuid) {
+        self.set_degraded(app_id, false);
+    }
+
+    #[must_use]
+    pub fn is_degraded(&self, app_id: &Uuid) -> bool {
+        self.degraded.read().unwrap().contains(app_id)
+    }
+
+    /// Effective ceiling for `app_id`: the tightened `(limit /
+    /// DEGRADE_FACTOR).max(1)` when degraded, else the global `limit`.
+    #[must_use]
+    fn effective_limit(&self, app_id: &Uuid) -> u32 {
+        if self.is_degraded(app_id) {
+            (self.limit / DEGRADE_FACTOR).max(1)
+        } else {
+            self.limit
+        }
     }
 }
 
@@ -287,9 +384,10 @@ pub fn acquire_concurrency(
     app_id: &Uuid,
 ) -> Result<ConcurrencyGuard, HttpResponse> {
     let gauge = registry.get_or_create(app_id);
+    let ceiling = registry.effective_limit(app_id);
     loop {
         let current = gauge.load(Ordering::Acquire);
-        if current >= registry.limit {
+        if current >= ceiling {
             return Err(HttpResponse::TooManyRequests()
                 .json(&serde_json::json!({"error": "concurrency limit exceeded"})));
         }

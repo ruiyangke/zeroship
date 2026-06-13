@@ -153,7 +153,11 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         .with_issuer(HYDRA_ISS);
 
     let routes = RouteCache::new();
-    routes.update(build_route_map(opts.provisioned));
+    routes.update(
+        build_route_map(opts.provisioned),
+        &zeroship_gateway::enforce::RateLimitRegistry::new(1000, 2000),
+        &zeroship_gateway::enforce::ConcurrencyRegistry::new(100),
+    );
 
     Arc::new(GateState {
         config: GateConfig {
@@ -206,6 +210,7 @@ fn build_route_map(provisioned: bool) -> zeroship_core::types::RouteMap {
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: provisioned.then(|| CLIENT_ID.to_string()),
             sector_identifier: provisioned.then(|| format!("https://{APP_HOST}")),
+            spend_state: zeroship_core::types::SpendState::Allow,
         },
     );
     m

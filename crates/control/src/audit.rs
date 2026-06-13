@@ -24,6 +24,12 @@ pub enum Action {
     LinkAccount,
     UnlinkAccount,
     RecordPayout,
+    /// A spend-enforcement state transition for an app, emitted by the
+    /// spend-reconcile cron (billing PR5). The detail JSON carries
+    /// `{ from, to, spend_cents, limit_cents }`.
+    SpendStateChange,
+    /// A creator changed an app's spend-limit override via the M4 endpoint.
+    SetSpendLimit,
 }
 
 impl Action {
@@ -37,6 +43,8 @@ impl Action {
             Self::LinkAccount => "link_account",
             Self::UnlinkAccount => "unlink_account",
             Self::RecordPayout => "record_payout",
+            Self::SpendStateChange => "spend_state_change",
+            Self::SetSpendLimit => "set_spend_limit",
         }
     }
 }

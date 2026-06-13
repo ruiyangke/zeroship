@@ -25,6 +25,7 @@ pub mod plan_catalog;
 pub mod pricing;
 pub mod rate_limit;
 pub mod registry;
+pub mod spend;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod token_handlers;
