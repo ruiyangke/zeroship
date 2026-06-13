@@ -24,6 +24,9 @@ pub enum StripeError {
     /// Callsite-level validation failure (bad shape, invalid amount, …).
     /// Maps to HTTP 400 — distinct from internal `Db` errors.
     Validation(String),
+    /// A non-2xx response from the Stripe REST API (billing PR6). `code` is the
+    /// machine-readable `error.code` from Stripe's JSON body when present.
+    Api { status: u16, code: Option<String> },
 }
 
 impl std::fmt::Display for StripeError {
@@ -33,6 +36,10 @@ impl std::fmt::Display for StripeError {
             Self::Duplicate => write!(f, "event already recorded"),
             Self::NotFound => write!(f, "creator not linked"),
             Self::Validation(m) => write!(f, "{m}"),
+            Self::Api { status, code } => match code {
+                Some(c) => write!(f, "stripe API error {status} ({c})"),
+                None => write!(f, "stripe API error {status}"),
+            },
         }
     }
 }
@@ -352,6 +359,67 @@ impl StripeStore {
                 occurred_at: r.get("occurred_at"),
             })
             .collect())
+    }
+
+    // ------------------------------------------------------------------
+    // Creator billing identity — the Stream-1 platform Customer (cus_…).
+    //
+    // Distinct from the Stream-2 Connect `acct_…` above: this is the
+    // PLATFORM-side Customer the infra-cost reconciler invoices. Keyed by
+    // creator_id (a user id), one row per creator, created lazily on first
+    // `billing/setup`. (billing PR6, changeset 0040.)
+    // ------------------------------------------------------------------
+
+    /// The creator's platform Stripe Customer id (`cus_…`), or `None` if no row
+    /// exists yet or the row has no customer id.
+    pub async fn get_customer(&self, creator_id: Uuid) -> Result<Option<String>, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT stripe_customer_id FROM zeroship.creator_billing WHERE creator_id = $1",
+                &[&creator_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.get::<_, Option<String>>("stripe_customer_id")))
+    }
+
+    /// Upsert the creator's platform Customer id. Idempotent: re-setting the
+    /// same id is a no-op write. The row is created if absent.
+    pub async fn set_customer(
+        &self,
+        creator_id: Uuid,
+        stripe_customer_id: &str,
+    ) -> Result<(), StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        conn.execute(
+            "INSERT INTO zeroship.creator_billing (creator_id, stripe_customer_id) \
+             VALUES ($1, $2) \
+             ON CONFLICT (creator_id) DO UPDATE \
+                SET stripe_customer_id = EXCLUDED.stripe_customer_id, updated_at = NOW()",
+            &[&creator_id, &stripe_customer_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Mark that the creator has a saved default PaymentMethod (set on the
+    /// `setup_intent.succeeded` webhook). Creates the row if absent so a webhook
+    /// arriving before any local row still records the fact.
+    pub async fn set_default_pm(&self, creator_id: Uuid) -> Result<(), StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        conn.execute(
+            "INSERT INTO zeroship.creator_billing (creator_id, default_pm_set) \
+             VALUES ($1, true) \
+             ON CONFLICT (creator_id) DO UPDATE SET default_pm_set = true, updated_at = NOW()",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(())
     }
 }
 

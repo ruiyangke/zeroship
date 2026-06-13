@@ -79,6 +79,8 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
+            stripe_secret_key: SecretString::new(String::new()),
+            stripe_base_url: "https://api.stripe.com".to_string(),
             worker_urls,
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),

@@ -22,6 +22,7 @@ use zeroship_authz::{Action as AuthzAction, Resource};
 use crate::audit::{self, Action, AuditEntry};
 use crate::authz_guard::AuthzGuard;
 use crate::http_util;
+use crate::stripe_client::StripeApi;
 use crate::AppState;
 use crate::stripe_store::{self, StripeError};
 
@@ -64,6 +65,12 @@ fn stripe_err_response(e: StripeError) -> web::HttpResponse {
             tracing::error!(error = %e, "stripe: store error");
             err_json(500, "internal error")
         }
+        StripeError::Api { .. } => {
+            // Upstream Stripe rejected the call. Log the detail; surface a
+            // generic 502 (bad upstream) without echoing Stripe internals.
+            tracing::error!(error = %e, "stripe: upstream API error");
+            err_json(502, "stripe upstream error")
+        }
     }
 }
 
@@ -98,6 +105,94 @@ pub async fn onboard(
         "url": url,
         "note": "placeholder — implement Stripe account_links call per docs/stripe-integration-todo.md",
     }))
+}
+
+// ----------------------------------------------------------------
+// Stream-1 infra-billing setup (billing PR6)
+// ----------------------------------------------------------------
+
+/// `POST /api/creators/:id/billing/setup` — ensure the creator has a platform
+/// Stripe **Customer** (`cus_…`), then return a Checkout **setup-mode** session
+/// URL so the dashboard can collect + save a PaymentMethod.
+///
+/// Idempotent on the Customer: if a `cus_…` already exists for the creator
+/// (`creator_billing.stripe_customer_id`), reuse it — a second call does NOT
+/// create a second Customer. This is the Stream-1 (infra cost) identity, wholly
+/// distinct from the Stream-2 Connect `acct_…` `onboard` flow above.
+pub async fn billing_setup(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
+
+    if state.stripe_secret_key.is_empty() {
+        tracing::error!("stripe: billing_setup called with no STRIPE_SECRET_KEY configured");
+        return err_json(500, "stripe not configured");
+    }
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+
+    // Ensure a Customer exists (create lazily, once).
+    let customer = match state.stripe_store.get_customer(creator_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let email = match creator_email(&state, creator_id).await {
+                Ok(Some(e)) => e,
+                Ok(None) => return err_json(404, "creator not found"),
+                Err(e) => return stripe_err_response(e),
+            };
+            let cus = match stripe.create_customer(&email, &creator_id.to_string()).await {
+                Ok(c) => c,
+                Err(e) => return stripe_err_response(e),
+            };
+            if let Err(e) = state.stripe_store.set_customer(creator_id, &cus).await {
+                return stripe_err_response(e);
+            }
+            cus
+        }
+        Err(e) => return stripe_err_response(e),
+    };
+
+    // Build the hosted setup session.
+    let base = format!("{}://console.{}", state.app_scheme(), state.app_base_domain);
+    let success_url = format!("{base}/billing?setup=success");
+    let cancel_url = format!("{base}/billing?setup=cancel");
+    match stripe
+        .create_checkout_setup_session(&customer, &success_url, &cancel_url)
+        .await
+    {
+        Ok(url) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "url": url,
+            "customer_id": customer,
+        })),
+        Err(e) => stripe_err_response(e),
+    }
+}
+
+/// Look up a creator's email (the creator is a user — D4). `None` if no such
+/// user row.
+async fn creator_email(state: &AppState, creator_id: Uuid) -> Result<Option<String>, StripeError> {
+    let conn = state
+        .registry
+        .conn()
+        .await
+        .map_err(|e| StripeError::Db(format!("{e}")))?;
+    let rows = conn
+        .query(
+            "SELECT email::text AS email FROM zeroship.users WHERE id = $1",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+    Ok(rows.first().map(|r| r.get::<_, String>("email")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,12 +529,26 @@ pub async fn webhook(
         }
     };
 
-    // Only invoice.paid moves money on the platform v1.
-    if event.event_type != "invoice.paid" {
-        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "ignored"}));
+    let obj = &event.data.object;
+
+    // Stream-1 (infra-billing) lifecycle events. These ride the SAME verified
+    // ingest path and resolve the creator via the same `extract_creator_id`
+    // (metadata.creator_id, stamped by `create_customer`).
+    match event.event_type.as_str() {
+        "setup_intent.succeeded" => {
+            return handle_setup_intent_succeeded(&req, &state, &event, obj).await;
+        }
+        "invoice.payment_failed" => {
+            return handle_invoice_payment_failed(&req, &state, &event, obj).await;
+        }
+        // Stream-2 (Connect revenue) — the only event that moves money on the
+        // platform payout ledger today.
+        "invoice.paid" => {}
+        _ => {
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "ignored"}));
+        }
     }
 
-    let obj = &event.data.object;
     let gross = obj.amount_paid.unwrap_or(0);
     let fee = obj.application_fee_amount.unwrap_or(0);
     let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
@@ -523,6 +632,83 @@ pub async fn webhook(
         }
         Err(e) => stripe_err_response(e),
     }
+}
+
+/// `setup_intent.succeeded` — the creator finished the Checkout setup flow and
+/// has a saved default PaymentMethod. Mark `creator_billing.default_pm_set`.
+async fn handle_setup_intent_succeeded(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(creator_id_str) = extract_creator_id(obj) else {
+        tracing::warn!(
+            event_id = %sanitize_event_id(&event.id),
+            "stripe: setup_intent.succeeded missing metadata.creator_id — ignored"
+        );
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_creator_id"}));
+    };
+    let Ok(creator_id) = Uuid::parse_str(&creator_id_str) else {
+        return err_json(400, "bad creator_id in metadata");
+    };
+    match state.stripe_store.set_default_pm(creator_id).await {
+        Ok(()) => {
+            let ip = source_ip(req, state);
+            audit::log_with_detail(
+                &state.registry,
+                AuditEntry {
+                    app_id: None,
+                    creator_id: Some(creator_id),
+                    actor_user_id: None,
+                    actor_token_id: None,
+                    action: Action::RecordPayout,
+                    resource: Some(&event.id),
+                    source_ip: ip.as_deref(),
+                },
+                &serde_json::json!({
+                    "stripe_event_type": "setup_intent.succeeded",
+                    "creator_id": creator_id.to_string(),
+                    "default_pm_set": true,
+                }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&serde_json::json!({"status": "default_pm_set"}))
+        }
+        Err(e) => stripe_err_response(e),
+    }
+}
+
+/// `invoice.payment_failed` — a finalized infra-billing invoice could not be
+/// charged. Audit it (future dunning hangs off this). We do NOT mutate billing
+/// state here; the invoice stays open and Stripe's own retry/dunning runs.
+async fn handle_invoice_payment_failed(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let creator_id = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok());
+    let ip = source_ip(req, state);
+    audit::log_with_detail(
+        &state.registry,
+        AuditEntry {
+            app_id: None,
+            creator_id,
+            actor_user_id: None,
+            actor_token_id: None,
+            action: Action::RecordPayout,
+            resource: Some(&event.id),
+            source_ip: ip.as_deref(),
+        },
+        &serde_json::json!({
+            "stripe_event_type": "invoice.payment_failed",
+            "creator_id": creator_id.map(|c| c.to_string()),
+            "stripe_invoice_id": obj.id.as_deref(),
+        }),
+    )
+    .await;
+    web::HttpResponse::Ok().json(&serde_json::json!({"status": "payment_failed_recorded"}))
 }
 
 fn invalid_json_message() -> &'static str {

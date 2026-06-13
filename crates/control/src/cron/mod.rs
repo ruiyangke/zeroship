@@ -14,6 +14,7 @@
 //!     client. Excludes `system = true` apps (the platform console). See ISS-12b.
 
 pub mod audit_retention;
+pub mod billing_reconcile;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
 
@@ -49,6 +50,16 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     let spend_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
+    })
+    .detach();
+
+    // Billing-reconcile sweep (billing PR6) — at month close, prices each
+    // creator's owned apps' CLOSED-period usage and pushes Stripe invoice items
+    // + a finalized invoice on the creator's platform Customer. Idempotent per
+    // (creator, period) via `billing_runs`. Infra-cost billing only (Stream-1).
+    let billing_state = Arc::clone(&state);
+    compio::runtime::spawn(async move {
+        billing_reconcile::run(billing_state, billing_reconcile::DEFAULT_TICK_SECS).await;
     })
     .detach();
 }

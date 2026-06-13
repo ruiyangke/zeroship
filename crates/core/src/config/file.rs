@@ -102,6 +102,9 @@ pub struct SecretSection {
     pub gateway_oidc_secret: Option<String>,
     /// Stripe webhook signing secret reference.
     pub stripe_webhook_secret: Option<String>,
+    /// Stripe secret API key (`sk_…`) reference — for OUTBOUND calls (the
+    /// billing reconciler + `billing/setup`).
+    pub stripe_secret_key: Option<String>,
     /// Primary database URL reference.
     pub database_url: Option<String>,
     /// Auth database URL reference.

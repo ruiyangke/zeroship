@@ -78,6 +78,26 @@ struct ControlCli {
     )]
     stripe_webhook_secret: String,
 
+    /// Stripe secret API key (`sk_…`) for OUTBOUND calls (the billing
+    /// reconciler + `billing/setup`). Required in prod; empty allowed only
+    /// under `--dev-insecure`.
+    #[arg(
+        long = "stripe-secret-key",
+        env = "STRIPE_SECRET_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    stripe_secret_key: String,
+
+    /// Stripe REST API base URL the outbound client targets. Defaults to
+    /// `https://api.stripe.com`; override only for testing against a mock.
+    #[arg(
+        long = "stripe-base-url",
+        env = "STRIPE_BASE_URL",
+        default_value = "https://api.stripe.com"
+    )]
+    stripe_base_url: String,
+
     /// Comma-separated previous master keys accepted during key rotation.
     #[arg(
         long = "legacy-master-keys",
@@ -444,6 +464,13 @@ fn main() -> std::io::Result<()> {
         file_secrets.stripe_webhook_secret.as_deref(),
         cli.check_config,
     );
+    let stripe_secret_key = zeroship_core::config::obtain_secret(
+        "STRIPE_SECRET_KEY / --stripe-secret-key",
+        &cli.stripe_secret_key,
+        file_secrets.stripe_secret_key.as_deref(),
+        cli.check_config,
+    );
+    let stripe_base_url = cli.stripe_base_url.clone();
     // Comma-separated list of previous master keys, tried as fallbacks on decrypt
     // failure during a rotation grace period. A CLI/env value is a comma-list where
     // EACH entry may be a literal or its own secret reference (resolved per entry); an
@@ -597,6 +624,20 @@ fn main() -> std::io::Result<()> {
                 "control: stripe_webhook_secret unset — /internal/webhooks/stripe will reject every request. \
                  Set --stripe-webhook-secret if you need Stripe integration."
             );
+        }
+        // The OUTBOUND Stripe secret key (sk_…) is REQUIRED in prod: the billing
+        // reconciler and `billing/setup` cannot bill without it, and silently
+        // running with an empty key would drop revenue on the floor. Empty is
+        // allowed ONLY under --dev-insecure (this block is the prod path). Skip
+        // when --check-config still holds a raw secret reference.
+        if stripe_secret_key.is_empty()
+            && (!cli.check_config || !zeroship_core::config::is_secret_ref(&stripe_secret_key))
+        {
+            tracing::error!(
+                "control: STRIPE_SECRET_KEY unset — the billing reconciler + /api/creators/:id/billing/setup \
+                 cannot call Stripe. Set --stripe-secret-key, or run with --dev-insecure for local dev."
+            );
+            std::process::exit(1);
         }
         // The dedicated pairwise-salt secret MUST be a strong, stable,
         // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
@@ -917,6 +958,8 @@ fn main() -> std::io::Result<()> {
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
+        stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
+        stripe_base_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)
@@ -1078,6 +1121,11 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/api/creators/{id}/stripe/callback")
                     .route(web::post().to(stripe_handlers::callback)),
+            )
+            // --- Stream-1 infra-billing setup (PR6): platform Customer + card ---
+            .service(
+                web::resource("/api/creators/{id}/billing/setup")
+                    .route(web::post().to(stripe_handlers::billing_setup)),
             )
             .service(
                 web::resource("/api/creators/{id}/stripe")

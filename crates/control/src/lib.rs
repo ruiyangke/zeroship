@@ -26,6 +26,7 @@ pub mod pricing;
 pub mod rate_limit;
 pub mod registry;
 pub mod spend;
+pub mod stripe_client;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod token_handlers;
@@ -103,6 +104,14 @@ pub struct AppState {
     /// Stripe webhook signing secret. Required in prod; empty +
     /// `insecure_dev=true` skips verification.
     pub stripe_webhook_secret: SecretString,
+    /// Stripe secret API key (`sk_…`) for OUTBOUND calls (the billing PR6
+    /// reconciler + `billing/setup`). Required in prod; empty allowed only
+    /// under `insecure_dev`. Never logged — `SecretString`.
+    pub stripe_secret_key: SecretString,
+    /// Stripe REST API base URL the outbound client targets. Defaults to
+    /// `https://api.stripe.com`; the integration tests override it to point the
+    /// REAL `cyper` client at a localhost mock-Stripe server.
+    pub stripe_base_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Shared secret for worker admin endpoints. Empty means dev-only
