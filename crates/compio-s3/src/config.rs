@@ -60,10 +60,28 @@ pub enum SseMode {
 /// Connection / timeout / cap knobs. Resolved with sane defaults.
 #[derive(Debug, Clone)]
 pub struct S3Timeouts {
-    /// Wall timeout wrapping `send()` (DNS/connect/TLS/upload/response headers).
+    /// Base wall timeout wrapping `send()` (DNS/connect/TLS/request/response
+    /// headers). For a body-carrying request (a multipart `UploadPart`) this is
+    /// the FLOOR; the effective deadline is extended in proportion to the body
+    /// size via [`S3Timeouts::send_for_body`] so a large-but-progressing upload
+    /// is not killed by a fixed wall clock.
     pub send: Duration,
     /// Total response-body read timeout.
     pub body: Duration,
+    /// Send timeout for multipart CONTROL ops (`CreateMultipartUpload`,
+    /// `CompleteMultipartUpload`, `AbortMultipartUpload`). These can follow a
+    /// long-running upload (a slow client streaming over many seconds), and on
+    /// some endpoints the fresh connection they open is slow to establish /
+    /// respond once the multipart has been open a while — a fixed 30s base would
+    /// spuriously fail the `complete` that finalizes an otherwise-good upload.
+    /// Decoupled from the base `send` so the control op gets headroom without
+    /// loosening every request's deadline.
+    pub send_control: Duration,
+    /// Minimum sustained upload throughput, in bytes/sec, used to extend the
+    /// send deadline for a body-carrying PUT. A fixed 30s `send` would fail any
+    /// 8 MiB part uploaded slower than ~270 KB/s; scaling by an assumed-floor
+    /// rate lets a legitimately slow-but-progressing connection finish.
+    pub send_min_throughput_bps: u64,
 }
 
 impl Default for S3Timeouts {
@@ -71,7 +89,29 @@ impl Default for S3Timeouts {
         Self {
             send: Duration::from_secs(30),
             body: Duration::from_secs(300),
+            // Generous control-op headroom (4× the base) so finalizing a
+            // long-running multipart upload doesn't spuriously time out.
+            send_control: Duration::from_secs(120),
+            // 64 KB/s floor: an 8 MiB part is allowed ~128s on top of the base
+            // send timeout before it is considered stalled. Generous enough for
+            // a constrained mobile/edge uplink, still bounded.
+            send_min_throughput_bps: 64 * 1024,
         }
+    }
+}
+
+impl S3Timeouts {
+    /// The send deadline for a request carrying `body_len` bytes: the base
+    /// `send` floor plus the time the body would take at the assumed minimum
+    /// throughput. Zero-length (control) requests get exactly the base `send`.
+    #[must_use]
+    pub const fn send_for_body(&self, body_len: u64) -> Duration {
+        if body_len == 0 || self.send_min_throughput_bps == 0 {
+            return self.send;
+        }
+        let extra_secs = body_len / self.send_min_throughput_bps;
+        self.send
+            .saturating_add(Duration::from_secs(extra_secs))
     }
 }
 
@@ -644,5 +684,34 @@ mod tests {
     fn object_key_without_prefix() {
         let c = S3Config::parse_url("s3://bucket?region=us-east-1").unwrap();
         assert_eq!(c.object_key("a/b"), "a/b");
+    }
+
+    #[test]
+    fn control_send_timeout_is_generous() {
+        // Multipart control ops (create/complete/abort) get headroom well above
+        // the 30s base so finalizing a long-running upload doesn't spuriously
+        // time out.
+        let t = S3Timeouts::default();
+        assert!(
+            t.send_control >= t.send * 2,
+            "control-op timeout must be well above the base send timeout"
+        );
+    }
+
+    #[test]
+    fn send_timeout_scales_with_body_size() {
+        let t = S3Timeouts::default();
+        // Control (zero-length) request: exactly the base send timeout.
+        assert_eq!(t.send_for_body(0), t.send);
+        // An 8 MiB part at the 64 KB/s floor adds 128s on top of the base —
+        // far more headroom than the old fixed 30s, which would have killed
+        // any part slower than ~270 KB/s.
+        let eight_mib = 8 * 1024 * 1024;
+        let scaled = t.send_for_body(eight_mib);
+        assert!(
+            scaled > t.send,
+            "a large part must get more than the base send deadline"
+        );
+        assert_eq!(scaled, t.send + std::time::Duration::from_secs(128));
     }
 }

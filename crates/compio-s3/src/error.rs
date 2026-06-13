@@ -52,16 +52,28 @@ pub enum S3Error {
         /// Computed hex SHA-256.
         computed: String,
     },
-    /// cyper/HTTP/TLS/socket transport error.
+    /// A transient transport failure (connect refused/reset, socket I/O,
+    /// hyper connection error, request timeout). Retrying the SAME request may
+    /// succeed once the network blip clears — `is_retryable()` is `true`.
     Transport(String),
+    /// A *deterministic* transport-layer failure that will recur on every
+    /// attempt: a request-build error, an invalid URL / bad scheme, a TLS
+    /// handshake/config error, or an HTTP redirect we cannot follow (e.g. a
+    /// wrong-region 301). Retrying burns the attempt budget for nothing, so
+    /// `is_retryable()` is `false`.
+    TransportTerminal(String),
 }
 
 impl S3Error {
-    /// Whether an idempotent operation (GET/HEAD/LIST/DELETE) may be retried.
+    /// Whether an idempotent operation (GET/HEAD/LIST/DELETE) or an idempotent
+    /// part-PUT may be retried.
     ///
-    /// `Retryable` and `Transport` are retryable; everything else (auth,
-    /// not-found, precondition, conflict, invalid-response, too-large,
-    /// integrity) is terminal for a single attempt.
+    /// `Retryable` (429/5xx/timeout) and `Transport` (transient connect/reset/
+    /// socket blips) are retryable. Everything else is terminal for a single
+    /// attempt — including `TransportTerminal` (build/URL/TLS/redirect errors
+    /// that will recur identically), auth, not-found, precondition, conflict,
+    /// invalid-response, too-large, integrity. Retrying a terminal transport
+    /// error just burns the whole attempt budget plus backoff for nothing.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         matches!(self, Self::Retryable { .. } | Self::Transport(_))
@@ -91,10 +103,20 @@ impl S3Error {
             },
             412 => Self::PreconditionFailed,
             409 => Self::Conflict,
-            429 | 500 | 502 | 503 | 504 => Self::Retryable {
+            // 408 Request Timeout is a server-side "you were too slow" — the
+            // same class as our own send/body timeouts, so it is retryable.
+            408 | 429 | 500 | 502 | 503 | 504 => Self::Retryable {
                 status: Some(status),
                 detail,
             },
+            // 3xx on an S3 data-plane request is virtually always a wrong-region
+            // / wrong-endpoint misconfiguration (e.g. AWS 301
+            // PermanentRedirect). We do NOT auto-follow; surface it clearly and
+            // terminally rather than burying it as a generic InvalidResponse or
+            // (worse) retrying it.
+            300..=399 => Self::TransportTerminal(format!(
+                "unexpected redirect (status {status}); check region/endpoint config: {detail}"
+            )),
             _ => Self::InvalidResponse(format!("unexpected status {status}: {detail}")),
         }
     }
@@ -154,6 +176,7 @@ impl fmt::Display for S3Error {
                 write!(f, "integrity: expected {expected}, computed {computed}")
             }
             Self::Transport(d) => write!(f, "transport: {d}"),
+            Self::TransportTerminal(d) => write!(f, "transport (terminal): {d}"),
         }
     }
 }
@@ -162,9 +185,67 @@ impl std::error::Error for S3Error {}
 
 impl From<cyper::Error> for S3Error {
     fn from(e: cyper::Error) -> Self {
+        use cyper::Error as C;
         match e {
-            cyper::Error::Timeout => Self::timeout("cyper request timeout"),
-            other => Self::Transport(other.to_string()),
+            // A timeout maps to the retryable timeout class.
+            C::Timeout => Self::timeout("cyper request timeout"),
+            // Transient transport blips — a connect/reset/socket error or a
+            // hyper connection error. Retrying the SAME idempotent request may
+            // clear the blip.
+            C::System(_) | C::Hyper(_) | C::HyperClient(_) => Self::Transport(e.to_string()),
+            // Deterministic, recur-on-every-attempt failures: no TLS backend, a
+            // malformed URL / bad scheme, an `http` crate build error, a URL
+            // parse/encode error, a JSON error, or a TLS handshake/config error.
+            // Retrying these just burns the attempt budget; classify terminal.
+            other => Self::TransportTerminal(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_is_retryable_terminal_is_not() {
+        assert!(S3Error::Transport("connection reset".into()).is_retryable());
+        assert!(!S3Error::TransportTerminal("no TLS backend".into()).is_retryable());
+    }
+
+    #[test]
+    fn timeout_408_and_5xx_are_retryable() {
+        assert!(S3Error::from_status(408, "").is_retryable());
+        assert!(S3Error::from_status(429, "slow down").is_retryable());
+        assert!(S3Error::from_status(503, "").is_retryable());
+        // Our own send/body timeout helper is retryable too.
+        assert!(S3Error::timeout("send timeout").is_retryable());
+    }
+
+    #[test]
+    fn redirect_is_terminal_and_surfaces_region_hint() {
+        let e = S3Error::from_status(301, "PermanentRedirect");
+        assert!(!e.is_retryable(), "a 3xx redirect must not be retried");
+        assert!(matches!(e, S3Error::TransportTerminal(_)));
+        assert!(
+            format!("{e}").contains("region"),
+            "redirect error should hint at region/endpoint config: {e}"
+        );
+    }
+
+    #[test]
+    fn cyper_build_class_errors_are_terminal() {
+        // A bad-scheme cyper error is deterministic → terminal, NOT retryable.
+        let e: S3Error = cyper::Error::BadScheme("ftp".into()).into();
+        assert!(matches!(e, S3Error::TransportTerminal(_)));
+        assert!(!e.is_retryable());
+    }
+
+    #[test]
+    fn cyper_io_class_errors_are_retryable() {
+        // A socket I/O error is a transient transport blip → retryable.
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let e: S3Error = cyper::Error::System(io).into();
+        assert!(matches!(e, S3Error::Transport(_)));
+        assert!(e.is_retryable());
     }
 }

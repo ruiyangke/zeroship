@@ -129,10 +129,7 @@ impl std::io::Read for ErrAfter {
                 return Ok(0);
             }
             self.errored = true;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "injected mid-upload read failure",
-            ));
+            return Err(std::io::Error::other("injected mid-upload read failure"));
         }
         let n = self.remaining.min(out.len()).min(64 * 1024);
         for b in &mut out[..n] {

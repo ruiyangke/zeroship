@@ -111,6 +111,17 @@ pub struct UploadId(pub String);
 #[derive(Debug, Clone)]
 pub struct UploadSession(cyper::Client);
 
+impl UploadSession {
+    /// A fresh, single-use upload session backed by its OWN `cyper::Client`
+    /// (and thus its own connection pool). Used for a part RETRY so a prior
+    /// attempt's possibly-dirty pooled connection is never reused — see
+    /// [`S3Client::open_upload_session`].
+    #[must_use]
+    pub fn fresh() -> Self {
+        Self(new_client())
+    }
+}
+
 /// A completed part's number + `ETag`, fed to `complete_multipart`.
 #[derive(Debug, Clone)]
 pub struct PartETag {
@@ -399,18 +410,22 @@ impl S3Client {
     /// `GET` an object as a streaming body. Returns the metadata plus a
     /// `Stream<Item = S3Result<Bytes>>` (cyper `bytes_stream()`).
     ///
-    /// ## Early-cancel connection safety
+    /// ## Early-cancel connection safety + per-chunk timeout
     ///
-    /// The returned stream owns a [`KeepAlive`] that holds the *fresh,
-    /// per-operation* `cyper::Client` built for this GET. That client's
-    /// connection pool therefore lives and dies with the stream: dropping the
-    /// stream before EOF (e.g. the V8 `ReadableStream` consumer calls
-    /// `cancelStream` mid-body) drops the half-read response AND the owning
-    /// `Client`, destroying the pool. A half-read (dirty) HTTP/1.1 connection
-    /// is consequently never returned to any pool a *later* request could draw
-    /// from — there is no shared, longer-lived client to desync. This is the
-    /// same fresh-client-per-op discipline the module header describes,
-    /// extended to the streaming path; see [`KeepAlive`].
+    /// The returned stream owns (via its `unfold` state — see
+    /// [`TimeoutStreamState`]) the *fresh, per-operation* `cyper::Client` built
+    /// for this GET. That client's connection pool therefore lives and dies
+    /// with the stream: dropping the stream before EOF (e.g. the V8
+    /// `ReadableStream` consumer calls `cancelStream` mid-body) drops the
+    /// half-read response AND the owning `Client`, destroying the pool. A
+    /// half-read (dirty) HTTP/1.1 connection is consequently never returned to
+    /// any pool a *later* request could draw from — there is no shared,
+    /// longer-lived client to desync. This is the same fresh-client-per-op
+    /// discipline the module header describes, extended to the streaming path.
+    ///
+    /// Each chunk pull is wrapped in the configured `timeouts.body` per-chunk
+    /// timeout (the SAME guard `get_object_to_file` applies), so a stalled
+    /// upstream connection can never wedge the downstream consumer forever.
     pub async fn get_stream(
         &self,
         key: &str,
@@ -433,9 +448,21 @@ impl S3Client {
         match status {
             200 => {
                 let meta = parse_object_meta(&resp)?;
-                let stream = resp.bytes_stream().map(|r| r.map_err(S3Error::from));
-                // The client must outlive the stream; move it in.
-                Ok((meta, KeepAlive::wrap(client, stream)))
+                // Per-chunk body-read timeout — the SAME `timeouts.body` guard
+                // `get_object_to_file` applies. Without it a stalled S3/R2
+                // connection wedges the downstream consumer (the V8
+                // `ReadableStream` reader, or the buffered `get` drain) forever
+                // — on the unlimited plan there is no outer wall clock to
+                // rescue it. `unfold` lets each pull await `next()` under a
+                // fresh `compio::time::timeout`; a stall yields one terminal
+                // timeout error and then ends the stream.
+                let body_to = self.config.timeouts.body;
+                let inner = resp.bytes_stream().map(|r| r.map_err(S3Error::from));
+                // The fresh per-op `client` must outlive the body stream (its
+                // connection pool dies with it — H1 invariant). It is carried
+                // in the unfold state so it drops only when the stream ends.
+                let stream = timeout_body_stream(inner, client, body_to);
+                Ok((meta, stream))
             }
             404 => {
                 drop(resp);
@@ -674,11 +701,13 @@ impl S3Client {
             Some(p) => format!("{p}/{prefix}"),
             None => prefix.to_string(),
         };
-        let strip_len = self
-            .config
-            .prefix
-            .as_ref()
-            .map_or(0, |p| p.len() + 1);
+        // The internal prefix to strip from each returned key, as a string
+        // (`<prefix>/`). Stripping by `strip_prefix` rather than a byte index
+        // is REQUIRED: `e.key` is server-supplied and a raw byte-index slice
+        // (`e.key[strip_len..]`) panics if `strip_len` lands mid-UTF-8 — a
+        // remote-controllable worker crash.
+        let internal_prefix: Option<String> =
+            self.config.prefix.as_ref().map(|p| format!("{p}/"));
 
         let mut out = Vec::new();
         let mut token: Option<String> = None;
@@ -687,16 +716,7 @@ impl S3Client {
                 .list_objects_v2(&stored_prefix, token.as_deref())
                 .await?;
             for e in page.entries {
-                let logical = if strip_len > 0 && e.key.len() >= strip_len {
-                    e.key[strip_len..].to_string()
-                } else if strip_len == 0 {
-                    e.key.clone()
-                } else {
-                    return Err(S3Error::InvalidResponse(format!(
-                        "listed key {} lacks internal prefix",
-                        e.key
-                    )));
-                };
+                let logical = strip_internal_prefix(&e.key, internal_prefix.as_deref())?;
                 out.push(ListEntry {
                     key: logical,
                     size: e.size,
@@ -750,7 +770,10 @@ impl S3Client {
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;
         }
-        let resp = self.send_built(req).await?;
+        // Multipart CONTROL op → generous control-op send timeout.
+        let resp = self
+            .send_built_with_timeout(req, self.config.timeouts.send_control)
+            .await?;
         let status = resp.status().as_u16();
         if status != 200 {
             return Err(self.error_from_response(status, resp).await);
@@ -788,6 +811,12 @@ impl S3Client {
     /// call site, so the per-thread `SendWrapper` invariant holds. Buffered
     /// PUTs have no early-cancel/dirty-connection concern (unlike streaming
     /// GET, which deliberately keeps its own fresh client — see `get_stream`).
+    ///
+    /// NB: the shared session is for the *happy path*. A part RETRY (after a
+    /// transport/timeout failure on a prior attempt) must NOT reuse this pooled
+    /// connection — a send future cancelled mid-body can leave the connection
+    /// dirty, and cyper's pool is not a proven dirty-connection barrier. Retries
+    /// open a [`UploadSession::fresh`] per attempt instead.
     #[must_use]
     pub fn open_upload_session(&self) -> UploadSession {
         UploadSession(new_client())
@@ -812,6 +841,7 @@ impl S3Client {
             ("partNumber".to_string(), part_number.to_string()),
             ("uploadId".to_string(), upload_id.0.clone()),
         ];
+        let body_len = body.len() as u64;
         let payload = signer::sha256_hex(&body);
         let headers =
             self.signed_headers("PUT", &host, &canonical_uri, &query, &payload, &[]);
@@ -822,7 +852,12 @@ impl S3Client {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;
         }
         req = req.body(body);
-        let resp = self.send_built(req).await?;
+        // Scale the send deadline with the part size: a fixed 30s wall clock
+        // would fail an 8 MiB part on any uplink under ~270 KB/s even though it
+        // is making steady progress. `send_for_body` adds headroom proportional
+        // to the body at an assumed minimum throughput.
+        let send_to = self.config.timeouts.send_for_body(body_len);
+        let resp = self.send_built_with_timeout(req, send_to).await?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             return Err(self.error_from_response(status, resp).await);
@@ -861,7 +896,11 @@ impl S3Client {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;
         }
         req = req.body(Bytes::from(body_bytes));
-        let resp = self.send_built(req).await?;
+        // Multipart CONTROL op (finalizes a possibly long-running upload) →
+        // generous control-op send timeout.
+        let resp = self
+            .send_built_with_timeout(req, self.config.timeouts.send_control)
+            .await?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             return Err(self.error_from_response(status, resp).await);
@@ -891,7 +930,10 @@ impl S3Client {
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;
         }
-        let resp = self.send_built(req).await?;
+        // Multipart CONTROL op → generous control-op send timeout.
+        let resp = self
+            .send_built_with_timeout(req, self.config.timeouts.send_control)
+            .await?;
         let status = resp.status().as_u16();
         match status {
             200 | 204 | 404 => {
@@ -900,6 +942,40 @@ impl S3Client {
             }
             other => Err(self.error_from_response(other, resp).await),
         }
+    }
+
+    /// Drain the process-thread-local orphaned-multipart queue, issuing a
+    /// best-effort `abort_multipart` for each entry.
+    ///
+    /// The queue is populated by a `Drop` guard when a multipart upload future
+    /// is DROP-cancelled mid-flight (wall-timeout cancel, client disconnect,
+    /// LRU eviction) — a `Drop` cannot await, so it only enqueues. This method
+    /// is the async drainer that performs the abort the `Drop` could not. Call
+    /// it from a background task or at the top of the next storage op.
+    ///
+    /// The queued key is the LOGICAL key (pre-`config.prefix`), the same key
+    /// the guard's owner passed to `create_multipart`; the abort re-joins the
+    /// configured prefix exactly as the original upload did. Returns the number
+    /// of uploads for which the abort succeeded; failures are logged and left
+    /// for an S3 lifecycle rule (the queue is best-effort, not a durable log).
+    pub async fn drain_orphaned_uploads(&self) -> usize {
+        let orphans = crate::orphan::take_orphans();
+        let mut aborted = 0;
+        for (logical_key, upload_id) in orphans {
+            match self.abort_multipart(&logical_key, &upload_id).await {
+                Ok(()) => aborted += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        key = %logical_key,
+                        upload_id = %upload_id.0,
+                        error = %e,
+                        "best-effort abort of an orphaned multipart upload failed; \
+                         leaving it for an S3 lifecycle rule",
+                    );
+                }
+            }
+        }
+        aborted
     }
 
     /// List in-progress multipart uploads under `key_prefix`, returning their
@@ -974,9 +1050,22 @@ impl S3Client {
         self.send_built(req).await
     }
 
-    /// Send a fully-built request under the send timeout.
+    /// Send a fully-built request under the base send timeout.
     async fn send_built(&self, req: cyper::RequestBuilder) -> S3Result<cyper::Response> {
-        match compio::time::timeout(self.config.timeouts.send, req.send()).await {
+        self.send_built_with_timeout(req, self.config.timeouts.send)
+            .await
+    }
+
+    /// Send a fully-built request under an explicit send timeout. The
+    /// body-carrying `UploadPart` path passes a size-scaled deadline (see
+    /// [`S3Timeouts::send_for_body`](crate::config::S3Timeouts::send_for_body));
+    /// every other op uses the base `send`.
+    async fn send_built_with_timeout(
+        &self,
+        req: cyper::RequestBuilder,
+        send_to: Duration,
+    ) -> S3Result<cyper::Response> {
+        match compio::time::timeout(send_to, req.send()).await {
             Err(_) => Err(S3Error::timeout("send timeout")),
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(e)) => Err(S3Error::from(e)),
@@ -1031,49 +1120,79 @@ fn new_client() -> cyper::Client {
     cyper::Client::new()
 }
 
-/// A stream that owns its source `cyper::Client` for the lifetime of the
-/// response body.
-///
-/// The client is built fresh for the single GET that produced `inner` and is
-/// held nowhere else, so the client's HTTP/1.1 connection pool lives and dies
-/// with this wrapper. Two consequences matter for early cancellation:
-///
-/// 1. **No dirty reuse across requests.** If the body is dropped before EOF,
-///    the half-read connection is dropped together with the only `Client` that
-///    pools it — it can never be handed to a later request and desync it.
-/// 2. **No premature close on the happy path.** Holding `_client` until the
-///    body drains keeps the connection alive long enough to read every chunk;
-///    without it the client (and its connection) could drop mid-read.
-///
-/// Dropping `KeepAlive` drops `inner` (the response body) first, then
-/// `_client`, in struct-field order — i.e. the body's connection is released
-/// before the pool that owned it is torn down.
-struct KeepAlive<S> {
+/// State carried through the `get_stream` body `unfold`: the inner body stream,
+/// an opaque "keep-alive" payload the stream must outlive (the fresh per-op
+/// `cyper::Client`, whose connection pool dies with the body — the H1
+/// invariant), and a latch that ends the stream after the first error/timeout.
+struct TimeoutStreamState<S, K> {
     inner: S,
-    _client: cyper::Client,
+    _keep_alive: K,
+    done: bool,
 }
 
-impl<S> KeepAlive<S> {
-    const fn wrap(client: cyper::Client, inner: S) -> Self {
-        Self {
-            inner,
-            _client: client,
+/// Wrap a body stream so each chunk pull is bounded by `body_to`, carrying
+/// `keep_alive` (the fresh per-op client) alive for the body's lifetime.
+///
+/// A stall longer than `body_to` yields exactly one terminal
+/// `Retryable`/timeout item, after which the stream ends — it can never wedge a
+/// downstream consumer indefinitely. Generic over the keep-alive payload so the
+/// adapter is unit-testable without a live `cyper::Client`.
+fn timeout_body_stream<S, K>(
+    inner: S,
+    keep_alive: K,
+    body_to: Duration,
+) -> impl futures::Stream<Item = S3Result<Bytes>> + 'static
+where
+    S: futures::Stream<Item = S3Result<Bytes>> + Unpin + 'static,
+    K: 'static,
+{
+    let state = TimeoutStreamState {
+        inner,
+        _keep_alive: keep_alive,
+        done: false,
+    };
+    futures::stream::unfold(state, move |mut st| async move {
+        if st.done {
+            return None;
         }
-    }
+        match compio::time::timeout(body_to, st.inner.next()).await {
+            Err(_) => {
+                st.done = true;
+                Some((Err(S3Error::timeout("body read timeout")), st))
+            }
+            Ok(None) => None,
+            Ok(Some(Ok(b))) => Some((Ok(b), st)),
+            Ok(Some(Err(e))) => {
+                st.done = true;
+                Some((Err(e), st))
+            }
+        }
+    })
 }
 
-impl<S: futures::Stream + Unpin> futures::Stream for KeepAlive<S> {
-    type Item = S::Item;
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+/// Strip the configured internal key prefix (`<prefix>/`) from a server-supplied
+/// list key, returning the logical key.
+///
+/// `key` is **server-controlled**, so this MUST NOT byte-index-slice it: a raw
+/// `key[n..]` panics (worker crash) when `n` lands mid-UTF-8. `strip_prefix`
+/// only ever splits on a real prefix boundary. A key that does not begin with
+/// the expected prefix is a protocol violation (the listing was scoped by that
+/// prefix), surfaced as a terminal `InvalidResponse` rather than a panic.
+fn strip_internal_prefix(key: &str, internal_prefix: Option<&str>) -> S3Result<String> {
+    match internal_prefix {
+        None => Ok(key.to_string()),
+        Some(pfx) => key.strip_prefix(pfx).map(str::to_string).ok_or_else(|| {
+            S3Error::InvalidResponse(format!("listed key {key} lacks internal prefix"))
+        }),
     }
 }
 
 fn map_build_err(e: cyper::Error) -> S3Error {
-    S3Error::Transport(format!("request build: {e}"))
+    // A request-build failure (bad header value, bad URL) is deterministic —
+    // it will recur on every retry — so it is a *terminal* transport error,
+    // not a transient one. Classifying it retryable would burn the whole
+    // attempt budget + backoff for nothing.
+    S3Error::TransportTerminal(format!("request build: {e}"))
 }
 
 /// Read a single header value as an owned `String`.
@@ -1252,5 +1371,69 @@ mod tests {
     fn base64_std_padded() {
         assert_eq!(base64_std(b"foo"), "Zm9v");
         assert_eq!(base64_std(&[0u8; 32]).len(), 44);
+    }
+
+    #[test]
+    fn strip_internal_prefix_no_prefix_passthrough() {
+        assert_eq!(strip_internal_prefix("a/b", None).unwrap(), "a/b");
+    }
+
+    #[test]
+    fn strip_internal_prefix_normal() {
+        assert_eq!(
+            strip_internal_prefix("data/app/obj", Some("data/")).unwrap(),
+            "app/obj"
+        );
+    }
+
+    #[compio::test]
+    async fn timeout_body_stream_fires_on_stall() {
+        use futures::StreamExt;
+        // A producer that delivers one chunk, then STALLS far longer than the
+        // per-chunk body timeout. Without the timeout wrapper the consumer
+        // would hang forever; with it, the second pull yields a terminal
+        // timeout error and the stream then ends.
+        let slow = futures::stream::unfold(0u32, |i| async move {
+            match i {
+                0 => Some((Ok(Bytes::from_static(b"first")), 1u32)),
+                1 => {
+                    compio::time::sleep(Duration::from_secs(60)).await;
+                    Some((Ok(Bytes::from_static(b"never")), 2u32))
+                }
+                _ => None,
+            }
+        });
+        let slow = Box::pin(slow); // make it Unpin for the adapter bound
+        // Consumers (e.g. plugin-storage `S3Chunks`) pin the returned stream;
+        // do the same here.
+        let mut s = Box::pin(timeout_body_stream(slow, (), Duration::from_millis(50)));
+        // First chunk arrives promptly.
+        let first = s.next().await.expect("first item");
+        assert_eq!(first.unwrap(), Bytes::from_static(b"first"));
+        // Second pull stalls past the 50ms deadline → terminal timeout.
+        let second = s.next().await.expect("timeout item");
+        match second {
+            Err(S3Error::Retryable { status: None, .. }) => {}
+            other => panic!("expected a body-read timeout, got {other:?}"),
+        }
+        // Stream ends after the terminal error (the `done` latch).
+        assert!(s.next().await.is_none(), "stream must end after a timeout");
+    }
+
+    #[test]
+    fn strip_internal_prefix_multibyte_non_boundary_does_not_panic() {
+        // Regression: a server-supplied key whose byte at `prefix.len()` is in
+        // the MIDDLE of a multi-byte UTF-8 char would panic a raw
+        // `key[strip_len..]` slice. `strip_prefix` splits on a real boundary,
+        // so a key that begins with the prefix is stripped cleanly...
+        let key = "p/é-data"; // 'é' is 2 bytes; raw index would have been unsafe
+        assert_eq!(strip_internal_prefix(key, Some("p/")).unwrap(), "é-data");
+
+        // ...and a key that does NOT begin with the prefix (e.g. a malicious /
+        // buggy server returning an out-of-scope key) yields a terminal error,
+        // never a panic, even when the divergence is mid-multibyte.
+        let rogue = "☃other/obj";
+        let err = strip_internal_prefix(rogue, Some("p/")).unwrap_err();
+        assert!(matches!(err, S3Error::InvalidResponse(_)));
     }
 }

@@ -36,6 +36,7 @@ pub mod config;
 pub mod credentials;
 pub mod error;
 pub mod list_xml;
+pub mod orphan;
 pub mod signer;
 
 pub use client::{
@@ -46,3 +47,4 @@ pub use clock::{Clock, FixedClock, SigningTime, SystemClock};
 pub use config::{AddressingStyle, ChecksumMode, Provider, S3Config, SseMode};
 pub use credentials::S3Credentials;
 pub use error::{S3Error, S3Result};
+pub use orphan::MultipartGuard;

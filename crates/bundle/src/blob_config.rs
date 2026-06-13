@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn absolute_path_is_local() {
         let u = StoreUrl::parse("/var/lib/zeroship/blobs").unwrap();
-        assert!(matches!(u, StoreUrl::Local(p) if p == PathBuf::from("/var/lib/zeroship/blobs")));
+        assert!(matches!(u, StoreUrl::Local(p) if p == std::path::Path::new("/var/lib/zeroship/blobs")));
     }
 
     #[test]
