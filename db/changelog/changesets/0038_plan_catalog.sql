@@ -7,9 +7,13 @@
 --
 -- Each plan is a row keyed by a `pln_<base62>` typed id. `apps.plan_id`
 -- becomes an FK into it, so an app can no longer pick an unpriced or
--- oversized plan. The price model, included quota, and runtime limits are
--- JSONB columns deserialized into the pure Rust types
--- (`crate::pricing::{PlanPrice, PricingRule}` + `AppRuntimeLimits`).
+-- oversized plan. Under billing-v2 compute-unit pricing (Refactor B) the
+-- price model is now SCALAR — `included_units` CU + a per-plan FX
+-- (`fx_pico_cents_per_unit`, NULLABLE ⇒ fall back to the global
+-- `pricing_config` default in 0041). The per-metric overage JSONB columns are
+-- GONE (pre-launch reshape, no back-compat — this changeset is unshipped, so it
+-- is edited in place and dev/test DBs re-migrate from a clean drop).
+-- `runtime_limits_json` stays JSONB (`AppRuntimeLimits`).
 --
 -- `plans` is a GLOBAL operator catalog — NOT tenant-scoped — so it has NO
 -- RLS (control is BYPASSRLS). Grants SELECT,INSERT,UPDATE to
@@ -26,8 +30,9 @@ CREATE TABLE zeroship.plans (
     id                        TEXT        PRIMARY KEY,          -- pln_<base62>
     name                      TEXT        NOT NULL,
     base_fee_cents            BIGINT      NOT NULL DEFAULT 0,
-    price_model_json          JSONB       NOT NULL,             -- {metric: PricingRule}
-    included_quota_json       JSONB       NOT NULL DEFAULT '{}',-- {metric: u64}
+    -- Compute-unit pricing (Refactor B): scalar price lever, NOT per-metric.
+    included_units            BIGINT      NOT NULL DEFAULT 0,   -- CU free before overage
+    fx_pico_cents_per_unit    BIGINT,                           -- NULL ⇒ pricing_config default
     runtime_limits_json       JSONB       NOT NULL,             -- AppRuntimeLimits
     spend_limit_default_cents BIGINT      NOT NULL DEFAULT 0,
     archived                  BOOLEAN     NOT NULL DEFAULT false,

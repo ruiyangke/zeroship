@@ -26,6 +26,7 @@ use zeroship_core::types::SpendState;
 use crate::metering::current_period_start_unix;
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::charge_cents;
+use crate::pricing_store::PricingStore;
 use crate::registry::{Registry, RegistryError};
 
 /// Thresholds (in integer percent of the limit) governing the state machine,
@@ -255,6 +256,15 @@ impl SpendEngine {
             .map(|p| (p.id.clone(), p))
             .collect();
 
+        // Compute-unit pricing (Refactor B): load the GLOBAL cost model + the
+        // default FX ONCE per sweep (both are tiny global tables), then price
+        // every app's usage as integer CU × the plan's effective FX. The dollar
+        // cap comparison below is UNCHANGED — `total_units × fx` is folded into
+        // `total_cents` exactly as the old per-metric overage was.
+        let pricing = PricingStore::new(self.registry.clone());
+        let weights = pricing.weights().await?;
+        let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
+
         // One batched usage read for the whole fleet's current period, grouped
         // by app in Rust. Mirrors `Metering::period_totals` per app.
         let usage_rows = conn
@@ -290,7 +300,8 @@ impl SpendEngine {
 
             // Price the current period's usage (from the batched fleet read).
             let usage = usage_by_app.get(&app_id).cloned().unwrap_or_default();
-            let breakdown = charge_cents(&plan.price, &usage);
+            let price = plan.price.with_effective_fx(default_fx);
+            let breakdown = charge_cents(&price, &usage, &weights);
             let spend_cents = breakdown.total_cents;
 
             // Effective limit: override else plan default.

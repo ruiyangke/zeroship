@@ -44,7 +44,8 @@ use uuid::Uuid;
 
 use crate::metering::Metering;
 use crate::plan_catalog::PlanCatalog;
-use crate::pricing::charge_cents;
+use crate::pricing::{charge_cents, MetricWeights};
+use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
 use crate::stripe_client::{Period, StripeApi, StripeClient};
 use crate::AppState;
@@ -224,11 +225,23 @@ async fn sweep<S: StripeApi>(
 
     let metering = Metering::new(state.registry.clone());
     let catalog = PlanCatalog::new(state.registry.clone());
+
+    // Compute-unit pricing (Refactor B): load the GLOBAL cost model + the
+    // default FX ONCE per tick (tiny global tables), then bill each app's
+    // closed-period usage as integer CU × the plan's effective FX. The invoice
+    // shape is UNCHANGED — one item per app = `charge_cents(...).total_cents`.
+    let pricing = PricingStore::new(state.registry.clone());
+    let weights = pricing.weights().await?;
+    let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
+
     let mut billed = 0usize;
 
     for (creator_id, app_ids) in &apps_by_creator {
-        match bill_creator(state, stripe, &metering, &catalog, creator_id, app_ids, period_start)
-            .await
+        match bill_creator(
+            state, stripe, &metering, &catalog, &weights, default_fx, creator_id, app_ids,
+            period_start,
+        )
+        .await
         {
             Ok(true) => billed += 1,
             Ok(false) => { /* nothing to bill / already billed / no customer */ }
@@ -256,6 +269,8 @@ async fn bill_creator<S: StripeApi>(
     stripe: &S,
     metering: &Metering,
     catalog: &PlanCatalog,
+    weights: &MetricWeights,
+    default_fx: Option<u64>,
     creator_id: &Uuid,
     app_ids: &[Uuid],
     period_start: i64,
@@ -312,7 +327,8 @@ async fn bill_creator<S: StripeApi>(
             continue;
         };
         let usage = metering.period_totals(app_id, period_start).await?;
-        let breakdown = charge_cents(&plan.price, &usage);
+        let price = plan.price.with_effective_fx(default_fx);
+        let breakdown = charge_cents(&price, &usage, weights);
         if breakdown.total_cents == 0 {
             continue;
         }
@@ -516,7 +532,7 @@ mod tests {
 
     use std::cell::RefCell;
 
-    use crate::pricing::{charge_cents, PlanPrice, PricingRule};
+    use crate::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice};
     use crate::stripe_client::{Period, StripeApi};
     use crate::stripe_store::StripeError;
 
@@ -578,13 +594,18 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 6, 13, 0, 0, 0).unwrap().timestamp(),
         );
 
-        let mut price = PlanPrice::default();
-        price
-            .overage
-            .insert("requests".to_string(), PricingRule::Flat { rate_cents: 1, per_units: 1 });
+        // CU pricing: weight 1 CU/request, FX = 1 cent/CU ⇒ 750 requests = 750c.
+        let price = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(crate::pricing::FX_SCALE as u64),
+            spend_limit_default_cents: 0,
+        };
+        let mut weights = MetricWeights::new();
+        weights.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
         let mut usage = std::collections::HashMap::new();
         usage.insert("requests".to_string(), 750i64);
-        let breakdown = charge_cents(&price, &usage);
+        let breakdown = charge_cents(&price, &usage, &weights);
         assert_eq!(breakdown.total_cents, 750);
 
         let fake = RecordingStripe::default();

@@ -8,8 +8,10 @@
 //! reject any id that is not a real, unarchived plan.
 //!
 //! The catalog is a GLOBAL operator config (not tenant-scoped) — `plans` has no
-//! RLS; control is `BYPASSRLS`. Reads back the JSONB price/quota/limits columns
-//! into the pure [`crate::pricing`] + [`AppRuntimeLimits`] types.
+//! RLS; control is `BYPASSRLS`. Under billing-v2 compute-unit pricing the price
+//! model is SCALAR (`included_units` + a nullable per-plan FX) — read back into
+//! the pure [`crate::pricing::PlanPrice`]; only `runtime_limits_json` stays
+//! JSONB ([`AppRuntimeLimits`]).
 
 use compio_postgres::Row;
 use zeroship_core::types::AppRuntimeLimits;
@@ -49,7 +51,7 @@ impl PlanCatalog {
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, base_fee_cents, price_model_json, included_quota_json, \
+                "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                         runtime_limits_json, spend_limit_default_cents, archived \
                  FROM zeroship.plans WHERE id = $1",
                 &[&id],
@@ -70,7 +72,7 @@ impl PlanCatalog {
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, base_fee_cents, price_model_json, included_quota_json, \
+                "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                         runtime_limits_json, spend_limit_default_cents, archived \
                  FROM zeroship.plans ORDER BY id",
                 &[],
@@ -108,10 +110,6 @@ impl PlanCatalog {
     ///
     /// `plan.archived` is ignored for the flag — pass the intent via `archived`.
     pub async fn upsert(&self, plan: &Plan, archived: Option<bool>) -> Result<Plan, RegistryError> {
-        let price_model_json = serde_json::to_value(&plan.price.overage)
-            .map_err(|e| RegistryError::InvalidInput(format!("price_model_json: {e}")))?;
-        let included_quota_json = serde_json::to_value(&plan.price.included)
-            .map_err(|e| RegistryError::InvalidInput(format!("included_quota_json: {e}")))?;
         let runtime_limits_json = serde_json::to_value(&plan.runtime)
             .map_err(|e| RegistryError::InvalidInput(format!("runtime_limits_json: {e}")))?;
         let base_fee = i64::try_from(plan.price.base_fee_cents).unwrap_or_else(|_| {
@@ -121,6 +119,25 @@ impl PlanCatalog {
                 "plan_catalog: base_fee_cents exceeds i64::MAX — clamping"
             );
             i64::MAX
+        });
+        let included_units = i64::try_from(plan.price.included_units).unwrap_or_else(|_| {
+            tracing::warn!(
+                included_units = plan.price.included_units,
+                plan_id = %plan.id,
+                "plan_catalog: included_units exceeds i64::MAX — clamping"
+            );
+            i64::MAX
+        });
+        // fx is per-plan and NULLABLE (NULL ⇒ global pricing_config default).
+        let fx_pico: Option<i64> = plan.price.fx_pico_cents_per_unit.map(|fx| {
+            i64::try_from(fx).unwrap_or_else(|_| {
+                tracing::warn!(
+                    fx_pico_cents_per_unit = fx,
+                    plan_id = %plan.id,
+                    "plan_catalog: fx_pico_cents_per_unit exceeds i64::MAX — clamping"
+                );
+                i64::MAX
+            })
         });
         let spend_default = i64::try_from(plan.price.spend_limit_default_cents).unwrap_or_else(|_| {
             tracing::warn!(
@@ -139,26 +156,26 @@ impl PlanCatalog {
                 // (COALESCE($8, plans.archived)) so a PUT without `archived`
                 // never un-archives.
                 "INSERT INTO zeroship.plans \
-                   (id, name, base_fee_cents, price_model_json, included_quota_json, \
+                   (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                     runtime_limits_json, spend_limit_default_cents, archived, updated_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, false), NOW()) \
                  ON CONFLICT (id) DO UPDATE SET \
                     name = EXCLUDED.name, \
                     base_fee_cents = EXCLUDED.base_fee_cents, \
-                    price_model_json = EXCLUDED.price_model_json, \
-                    included_quota_json = EXCLUDED.included_quota_json, \
+                    included_units = EXCLUDED.included_units, \
+                    fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit, \
                     runtime_limits_json = EXCLUDED.runtime_limits_json, \
                     spend_limit_default_cents = EXCLUDED.spend_limit_default_cents, \
                     archived = COALESCE($8, zeroship.plans.archived), \
                     updated_at = NOW() \
-                 RETURNING id, name, base_fee_cents, price_model_json, included_quota_json, \
+                 RETURNING id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                            runtime_limits_json, spend_limit_default_cents, archived",
                 &[
                     &plan.id,
                     &plan.name,
                     &base_fee,
-                    &price_model_json,
-                    &included_quota_json,
+                    &included_units,
+                    &fx_pico,
                     &runtime_limits_json,
                     &spend_default,
                     &archived,
@@ -185,20 +202,17 @@ impl PlanCatalog {
     }
 }
 
-/// Decode a `plans` row into a [`Plan`]. The JSONB columns come back as
-/// `serde_json::Value` (the `with-serde_json-1` driver feature) and deserialize
-/// into the pure types.
+/// Decode a `plans` row into a [`Plan`]. The price model is scalar (CU pricing);
+/// `runtime_limits_json` is the only JSONB column. `fx_pico_cents_per_unit` is
+/// nullable (NULL ⇒ the plan inherits the global `pricing_config` default — the
+/// engine/reconciler resolve `None` before pricing).
 fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
     let base_fee: i64 = row.get("base_fee_cents");
+    let included_units: i64 = row.get("included_units");
+    let fx_pico: Option<i64> = row.get("fx_pico_cents_per_unit");
     let spend_default: i64 = row.get("spend_limit_default_cents");
-    let price_model_json: serde_json::Value = row.get("price_model_json");
-    let included_quota_json: serde_json::Value = row.get("included_quota_json");
     let runtime_limits_json: serde_json::Value = row.get("runtime_limits_json");
 
-    let overage = serde_json::from_value(price_model_json)
-        .map_err(|e| RegistryError::Database(format!("plan price_model_json parse: {e}")))?;
-    let included = serde_json::from_value(included_quota_json)
-        .map_err(|e| RegistryError::Database(format!("plan included_quota_json parse: {e}")))?;
     let runtime: AppRuntimeLimits = serde_json::from_value(runtime_limits_json)
         .map_err(|e| RegistryError::Database(format!("plan runtime_limits_json parse: {e}")))?;
 
@@ -207,8 +221,8 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
         name: row.get("name"),
         price: PlanPrice {
             base_fee_cents: base_fee.max(0) as u64,
-            included,
-            overage,
+            included_units: included_units.max(0) as u64,
+            fx_pico_cents_per_unit: fx_pico.map(|fx| fx.max(0) as u64),
             spend_limit_default_cents: spend_default.max(0) as u64,
         },
         runtime,

@@ -110,18 +110,30 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
 }
 
 /// Seed a plan charging 1 cent/request with `limit` default, then an app on it.
+/// CU pricing: global weight `requests` = 1 CU/op × fx 10^12 pico-cents/CU
+/// (= 1 cent/CU) ⇒ 1 request = 1 cent.
 async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("upsert requests weight");
     let plan_id = format!("pln_spend_{}", Uuid::new_v4().simple());
+    let fx_one_cent: i64 = 1_000_000_000_000;
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.plans \
-               (id, name, base_fee_cents, price_model_json, included_quota_json, \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                 runtime_limits_json, spend_limit_default_cents) \
-             VALUES ($1, 'spend-test', 0, \
-                     '{\"requests\":{\"Flat\":{\"rate_cents\":1,\"per_units\":1}}}', '{}', \
+             VALUES ($1, 'spend-test', 0, 0, $3, \
                      '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', $2)",
-            &[&plan_id, &limit],
+            &[&plan_id, &limit, &fx_one_cent],
         )
         .await
         .expect("seed priced plan");

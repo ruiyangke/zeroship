@@ -1,225 +1,193 @@
-//! Pure tier math for the configurable pricing catalog (billing PR4).
+//! Compute-unit (CU) pricing — the cost-model / price decoupling (billing-v2
+//! Refactor B).
 //!
-//! Salvaged from the since-deleted `crates/platform` (`billing/pricing.rs`), converting
-//! **millicents → cents** (D3): the catalog and reconciler standardize on
-//! cents (Stripe's unit). All arithmetic is integer with a `u128` intermediate
-//! and **half-up rounding at the line-item boundary**, so a fractional cent
-//! never silently truncates downward.
+//! The cost model (how much compute a metric op "costs" in CU) is a **global**
+//! fleet-wide table ([`MetricWeights`], persisted in `zeroship.metric_weights`);
+//! the price lever (how many cents one CU sells for — the **FX**) is per-plan
+//! (`PlanPrice::fx`, defaulting from the global `zeroship.pricing_config`). This
+//! separates "engineering cost" from "business price" and — critically — lets us
+//! accumulate integer `compute_units` across every metric and convert to cents
+//! **exactly once**, killing the per-metric-line rounding-error class the old
+//! per-metric overage model carried.
 //!
-//! This module is DB-free and unit-pure: the plan catalog ([`crate::plan_catalog`])
-//! deserializes the JSONB plan columns into these types, and the reconciler
-//! (PR6) consumes [`ChargeBreakdown::lines`] to build Stripe invoice items.
-//!
-//! Charge model (FINALIZED DESIGN, locked 2026-06-13):
+//! Charge model (billing-v2, locked 2026-06-13):
 //!
 //! ```text
-//! charge = base_fee + Σ max(0, usage[m] − included[m]) × overage_rate[m]
+//! total_units    = Σ_m  floor( max(0, usage[m]) × units_per_op[m] / per_units[m] )   (integer CU)
+//! billable_units = max(0, total_units − included_units)
+//! total_cents    = base_fee_cents + round_half_up_ONCE( billable_units × fx )
 //! ```
 //!
-//! Usage past the included quota is pay-as-you-go overage; usage within the
-//! quota is free (only the base fee applies).
+//! - The unit is **`compute_units` / CU** — an integer, deliberately NOT named
+//!   "token" (that collides with PAT/JWT/`token_id`/`token_handlers.rs`).
+//! - A metric absent from the weight table contributes **0 units** (free) —
+//!   preserving the live "unknown metric is free, not an error" semantics.
+//! - FX is stored as an integer **pico-cents per CU** (`fx_pico_cents_per_unit`,
+//!   10⁻¹² cent) so a sub-cent unit price is representable without floats; the
+//!   single `× fx ÷ 10¹²` conversion rounds half-up once at the boundary.
+//!
+//! ## Overflow envelope (documented per the blueprint)
+//!
+//! Per-metric CU accumulation: `usage[m] (i64, ≤ ~9.2e18) × units_per_op (u64)`
+//! is done in `u128` (max ~3.4e38) then divided by `per_units` (≥ 1) — a single
+//! metric cannot overflow `u128`, and the summed `total_units` is clamped into
+//! `u64` (saturating) before pricing. The cents conversion `billable_units (u64,
+//! ≤ ~1.8e19) × fx_pico (u64, ≤ ~1.8e19)` is a `u128` product (≤ ~3.4e38, within
+//! `u128::MAX ≈ 3.4e38`) divided by `10¹²`, rounded half-up, then saturated into
+//! `u64` cents. Realistic magnitudes (billable ≤ ~1e12 CU, fx ≤ ~1e9 pico-cents)
+//! sit ~17 orders of magnitude below the `u128` ceiling; the saturating clamps
+//! make even adversarial inputs total-correct (no wrap), logged when they fire.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// A single overage pricing rule for one metric. Charges apply only to the
-/// **billable** units (usage past the metric's included quota — the caller
-/// computes `max(0, usage − included)` before invoking [`rule_cost`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PricingRule {
-    /// Flat rate: `rate_cents` per `per_units` units consumed.
-    Flat {
-        rate_cents: u64,
-        per_units: u64,
-    },
-    /// Tiered (graduated) pricing.
-    Tiered {
-        tiers: Vec<PricingTier>,
-    },
-}
+/// The fixed integer scale for the FX (cents-per-CU) lever: FX is stored as
+/// **pico-cents per CU** (10⁻¹² cent). `cents = round_half_up(billable_units ×
+/// fx_pico_cents_per_unit / FX_SCALE)`, computed once.
+pub const FX_SCALE: u128 = 1_000_000_000_000; // 10^12
 
-/// One tier in graduated pricing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PricingTier {
-    /// Usage up to this amount uses this rate. `None` = unlimited (final tier).
-    pub up_to: Option<u64>,
-    /// Rate in cents per `per_units`.
-    pub rate_cents: u64,
-    /// Number of units the rate applies to.
+/// One metric's global cost weight: `units_per_op` CU accrue per `per_units`
+/// operations of this metric, so a sub-unit weight is exact (e.g. 1 CU per 1000
+/// `egress_bytes` ⇒ `units_per_op = 1, per_units = 1000`). `per_units` must be
+/// `> 0`; a `per_units == 0` weight is treated as free (contributes 0 CU),
+/// matching the "unweighted metric is free" rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricWeight {
+    pub units_per_op: u64,
     pub per_units: u64,
 }
 
-/// The fully-resolved price model for one plan tier.
+/// The GLOBAL cost model: `metric → MetricWeight`. Loaded once per spend/reconcile
+/// sweep from `zeroship.metric_weights`. A metric absent here contributes 0 CU.
+pub type MetricWeights = HashMap<String, MetricWeight>;
+
+/// The fully-resolved price model for one plan tier under CU pricing.
 ///
-/// `base_fee_cents` is charged unconditionally each period. For each metric in
-/// `overage`, usage past `included[metric]` (default 0) is charged at that
-/// metric's rule. `spend_limit_default_cents` is the cap a new app inherits
-/// from the plan (the creator may override it per-app in PR5).
+/// `base_fee_cents` is charged unconditionally each period. `included_units` CU
+/// are free; CU beyond that are billed at `fx` (pico-cents per CU). `fx == None`
+/// ⇒ fall back to the global `pricing_config` default FX (resolved by the
+/// catalog before pricing). `spend_limit_default_cents` is the cap a new app
+/// inherits from the plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PlanPrice {
     pub base_fee_cents: u64,
-    /// Included quota per metric (units). A metric absent from this map has
-    /// an included quota of 0 ⇒ all usage is billable overage.
+    /// CU included before overage.
+    pub included_units: u64,
+    /// FX as pico-cents per CU; `None` ⇒ use the global default
+    /// (`pricing_config.fx_pico_cents_per_unit`). Always resolved to a concrete
+    /// value before [`charge_cents`] is called (the catalog substitutes the
+    /// default), but kept optional in the type so a plan can simply inherit.
     #[serde(default)]
-    pub included: HashMap<String, u64>,
-    /// Overage rule per metric. A metric absent from this map is FREE (no
-    /// overage charge, regardless of usage) — matching the platform port's
-    /// "resources without pricing rules are free, not an error".
-    #[serde(default)]
-    pub overage: HashMap<String, PricingRule>,
+    pub fx_pico_cents_per_unit: Option<u64>,
     pub spend_limit_default_cents: u64,
 }
 
 impl PlanPrice {
     /// Semantic validation of a catalog price model, run at the write boundary
-    /// (the `PUT /api/plans/:id` handler) so a malformed price is rejected with
-    /// a 400 rather than producing a silently-wrong charge at billing time.
+    /// (the `PUT /api/plans/:id` handler) so a malformed price is a 400, not a
+    /// silently-wrong charge at billing time.
     ///
-    /// Rejects:
-    ///   - A `Tiered` rule whose `up_to` boundaries are not strictly increasing
-    ///     (a non-monotonic or duplicate boundary makes `tier_capacity` math
-    ///     ambiguous / produces dead tiers).
-    ///   - A non-final tier with `up_to = None` (only the LAST tier may be the
-    ///     unbounded "rest" tier; an earlier `None` swallows all remaining usage
-    ///     and orphans the tiers after it).
-    ///
-    /// A `per_units == 0` rule is intentionally allowed: it means "free" by
-    /// design (matches the platform port's "resources without pricing rules are
-    /// free"), and the charge math treats it as a zero contribution.
+    /// Under CU pricing the price model is scalar, so the only structural
+    /// constraint is the FX: if set, it must be `> 0` (a `Some(0)` FX would price
+    /// all usage to base-only, which is almost certainly an operator mistake —
+    /// to make a tier free, leave `included_units` high or `fx = 0` is rejected
+    /// so the intent is explicit via the global default / weights, not a silent
+    /// zero). `None` (inherit the global default) is always valid.
     ///
     /// # Errors
-    /// Returns a human-readable message naming the offending metric.
+    /// Returns a human-readable message when the FX is explicitly zero.
     pub fn validate(&self) -> Result<(), String> {
-        for (metric, rule) in &self.overage {
-            if let PricingRule::Tiered { tiers } = rule {
-                let mut prev: Option<u64> = None;
-                for (i, tier) in tiers.iter().enumerate() {
-                    match tier.up_to {
-                        Some(up_to) => {
-                            if let Some(p) = prev {
-                                if up_to <= p {
-                                    return Err(format!(
-                                        "metric '{metric}': tier up_to values must be strictly \
-                                         increasing (got {up_to} after {p})"
-                                    ));
-                                }
-                            }
-                            prev = Some(up_to);
-                        }
-                        None => {
-                            // Only the final tier may be unbounded.
-                            if i != tiers.len() - 1 {
-                                return Err(format!(
-                                    "metric '{metric}': only the final tier may have up_to = null \
-                                     (unbounded); an earlier unbounded tier orphans later tiers"
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(0) = self.fx_pico_cents_per_unit {
+            return Err(
+                "fx_pico_cents_per_unit must be > 0 when set (omit it to inherit the global \
+                 default; a zero FX prices all usage to base-only)"
+                    .to_string(),
+            );
         }
         Ok(())
     }
+
+    /// Resolve the effective FX (pico-cents per CU): the plan's own `fx` if set,
+    /// else the global default. Call before [`charge_cents`] so an inheriting
+    /// plan (`fx == None`) prices at the global rate, not base-only.
+    #[must_use]
+    pub fn with_effective_fx(&self, default_fx_pico_cents_per_unit: Option<u64>) -> Self {
+        let mut p = self.clone();
+        if p.fx_pico_cents_per_unit.is_none() {
+            p.fx_pico_cents_per_unit = default_fx_pico_cents_per_unit;
+        }
+        p
+    }
 }
 
-/// One line item in a charge breakdown — the reconciler maps each to a Stripe
-/// invoice item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LineItem {
-    pub metric: String,
-    /// Units past the included quota that were billed (`max(0, usage −
-    /// included)`).
-    pub billable_units: u64,
-    /// Cents charged for this line (half-up rounded).
-    pub cents: u64,
-}
-
-/// The full per-period charge: the base fee, the per-metric overage lines, and
-/// the total. `total_cents == base_cents + Σ lines.cents` by construction.
+/// The full per-period charge under CU pricing. `total_cents` is what both call
+/// sites read; `total_units`/`billable_units` are exposed for transparency
+/// (audit, dashboards, invoice description).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChargeBreakdown {
     pub base_cents: u64,
-    pub lines: Vec<LineItem>,
+    /// Σ over metrics of `floor(usage × units_per_op / per_units)` (audit).
+    pub total_units: u64,
+    /// `max(0, total_units − included_units)`.
+    pub billable_units: u64,
     pub total_cents: u64,
 }
 
-/// Compute the cents charged for `billable_units` of a metric under `rule`.
+/// Accumulate total compute units for a usage map under the global weight table.
 ///
-/// `u128` intermediate; **half-up rounding** at the boundary (`(a*r + d/2) / d`).
-/// A `per_units == 0` rule is treated as free (avoids divide-by-zero), matching
-/// the platform port.
+/// `total_units = Σ_m floor( max(0, usage[m]) × units_per_op[m] / per_units[m] )`,
+/// integer throughout (`u128` intermediate, floored per metric, saturating-summed
+/// into `u64`). A metric with no weight — or a `per_units == 0` weight —
+/// contributes 0.
 #[must_use]
-pub fn rule_cost(rule: &PricingRule, billable_units: u64) -> u64 {
-    match rule {
-        PricingRule::Flat { rate_cents, per_units } => {
-            div_round_half_up(
-                u128::from(billable_units) * u128::from(*rate_cents),
-                u128::from(*per_units),
-            )
+pub fn total_units(weights: &MetricWeights, usage: &HashMap<String, i64>) -> u64 {
+    let mut acc: u64 = 0;
+    for (metric, &raw) in usage {
+        let Some(w) = weights.get(metric) else {
+            continue; // unweighted ⇒ free
+        };
+        if w.per_units == 0 {
+            continue; // degenerate weight ⇒ free (no divide-by-zero)
         }
-        PricingRule::Tiered { tiers } => {
-            // Accumulate each tier's EXACT (unrounded) rational contribution
-            // `consumed·rate / per_units` and round the SUMMED total half-up
-            // exactly once. Rounding per tier (the old behaviour) summed a set
-            // of independently-rounded cents, biasing the charge upward by up to
-            // ~N cents for N tiers — an over-bill. Because `per_units` may differ
-            // per tier we keep a single fraction `numer / denom` over a common
-            // denominator (the LCM of the per-tier denominators) so tiers with
-            // distinct `per_units` still compose into one round-once total.
-            let mut remaining = billable_units;
-            let mut prev_boundary: u64 = 0;
-            // Running fraction: total contribution = numer / denom (denom > 0).
-            let mut numer: u128 = 0;
-            let mut denom: u128 = 1;
-            for tier in tiers {
-                if remaining == 0 {
-                    break;
-                }
-                let tier_capacity = match tier.up_to {
-                    Some(up_to) => up_to.saturating_sub(prev_boundary),
-                    None => remaining, // final tier covers the rest
-                };
-                let consumed = remaining.min(tier_capacity);
-                remaining -= consumed;
-                if let Some(up_to) = tier.up_to {
-                    prev_boundary = up_to;
-                }
-                // A `per_units == 0` tier is free (avoids divide-by-zero),
-                // contributing nothing to the running fraction.
-                if tier.per_units == 0 {
-                    continue;
-                }
-                let tier_numer = u128::from(consumed) * u128::from(tier.rate_cents);
-                let tier_denom = u128::from(tier.per_units);
-                // numer/denom + tier_numer/tier_denom over a common denominator.
-                // Reduce by gcd to keep the intermediates bounded.
-                let g = gcd(denom, tier_denom);
-                let denom_lcm = denom / g * tier_denom;
-                numer = numer * (denom_lcm / denom) + tier_numer * (denom_lcm / tier_denom);
-                denom = denom_lcm;
-            }
-            // Round the single accumulated fraction half-up exactly once.
-            div_round_half_up(numer, denom)
-        }
+        let used = u128::from(raw.max(0) as u64);
+        // floor(used × units_per_op / per_units), exact integer.
+        let metric_units = used * u128::from(w.units_per_op) / u128::from(w.per_units);
+        let metric_units = u64::try_from(metric_units).unwrap_or(u64::MAX);
+        acc = acc.saturating_add(metric_units);
     }
+    acc
 }
 
-/// Greatest common divisor (binary-free Euclid) over `u128`. Used to keep the
-/// tiered running fraction's denominator at the LCM (not the raw product) so
-/// the `u128` numerator/denominator don't overflow for many-tier rules.
-fn gcd(mut a: u128, mut b: u128) -> u128 {
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
+/// Compute the full period charge for a plan price against a usage map and the
+/// global weight table.
+///
+/// Accumulates integer CU across every metric ([`total_units`]), subtracts the
+/// plan's `included_units`, and converts the billable CU to cents **exactly
+/// once** via the FX lever (`× fx_pico ÷ FX_SCALE`, half-up). `fx == None` is
+/// treated as 0 here — the catalog is responsible for substituting the global
+/// default before calling (an unresolved FX prices to base-only, never panics).
+#[must_use]
+pub fn charge_cents(
+    price: &PlanPrice,
+    usage: &HashMap<String, i64>,
+    weights: &MetricWeights,
+) -> ChargeBreakdown {
+    let total = total_units(weights, usage);
+    let billable = total.saturating_sub(price.included_units);
+    let fx_pico = price.fx_pico_cents_per_unit.unwrap_or(0);
+    let overage_cents = div_round_half_up(u128::from(billable) * u128::from(fx_pico), FX_SCALE);
+    let total_cents = price.base_fee_cents.saturating_add(overage_cents);
+    ChargeBreakdown {
+        base_cents: price.base_fee_cents,
+        total_units: total,
+        billable_units: billable,
+        total_cents,
     }
-    a
 }
 
 /// `round(numer / denom)` half-up, in `u128`, saturating into `u64`. A zero
-/// denominator yields 0 (free rule).
+/// denominator yields 0.
 fn div_round_half_up(numer: u128, denom: u128) -> u64 {
     if denom == 0 {
         return 0;
@@ -227,359 +195,226 @@ fn div_round_half_up(numer: u128, denom: u128) -> u64 {
     let rounded = (numer + denom / 2) / denom;
     u64::try_from(rounded).unwrap_or_else(|_| {
         // A charge that overflows u64 cents is absurd (≈$1.8e17); clamp but log
-        // it so a runaway price model / usage total is visible, not silent.
+        // it so a runaway weight/FX/usage total is visible, not silent.
         tracing::warn!(
             rounded_cents = %rounded,
-            "pricing: charge saturated u64::MAX cents — clamping (check price model / usage)"
+            "pricing: charge saturated u64::MAX cents — clamping (check weights / fx / usage)"
         );
         u64::MAX
     })
-}
-
-/// Compute the full period charge for a plan price against a usage map.
-///
-/// `usage` is `metric → total` (the `i64` totals the metering aggregator
-/// returns; negative or zero totals contribute no billable units). The result
-/// breaks down into the base fee plus one [`LineItem`] per metric that has BOTH
-/// an overage rule AND billable usage past its included quota. Lines are sorted
-/// by metric name so the output (and the reconciler's invoice items) is
-/// deterministic.
-#[must_use]
-pub fn charge_cents(price: &PlanPrice, usage: &HashMap<String, i64>) -> ChargeBreakdown {
-    let mut lines: Vec<LineItem> = Vec::new();
-    for (metric, rule) in &price.overage {
-        let used = usage.get(metric).copied().unwrap_or(0).max(0) as u64;
-        let included = price.included.get(metric).copied().unwrap_or(0);
-        let billable_units = used.saturating_sub(included);
-        if billable_units == 0 {
-            continue; // within quota ⇒ no overage line
-        }
-        let cents = rule_cost(rule, billable_units);
-        if cents == 0 {
-            continue; // a free/zero-rate rule produces no line
-        }
-        lines.push(LineItem { metric: metric.clone(), billable_units, cents });
-    }
-    lines.sort_by(|a, b| a.metric.cmp(&b.metric));
-    // Saturating-add the line cents (consistent with the base-fee add below) so
-    // the documented `total == base + Σ lines` invariant holds even on overflow.
-    // A plain `.sum()` would debug-panic / release-wrap, breaking the invariant.
-    let lines_total: u64 = lines.iter().fold(0u64, |acc, l| acc.saturating_add(l.cents));
-    let total_cents = price.base_fee_cents.saturating_add(lines_total);
-    ChargeBreakdown {
-        base_cents: price.base_fee_cents,
-        lines,
-        total_cents,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn flat(rate_cents: u64, per_units: u64) -> PricingRule {
-        PricingRule::Flat { rate_cents, per_units }
+    fn w(units_per_op: u64, per_units: u64) -> MetricWeight {
+        MetricWeight { units_per_op, per_units }
     }
 
-    // -- ported flat/tiered/multi-dimensional tests (millicents → cents) ----
+    /// A representative global weight table: 1 CU/request, 1 CU/1000 cpu_us,
+    /// 1 CU/1000 egress_bytes.
+    fn weights() -> MetricWeights {
+        let mut t = MetricWeights::new();
+        t.insert("requests".to_string(), w(1, 1));
+        t.insert("cpu_us".to_string(), w(1, 1_000));
+        t.insert("egress_bytes".to_string(), w(1, 1_000));
+        t
+    }
 
     #[test]
-    fn flat_pricing_overage() {
-        // Ported `flat_pricing`: $0.30 / million requests, expressed in CENTS
-        // (30 cents / 1M). 3.5M billable units → 3.5M * 30 / 1M = 105 cents.
-        let mut price = PlanPrice::default();
-        price.overage.insert("requests".to_string(), flat(30, 1_000_000));
+    fn total_units_sums_weighted_metrics() {
         let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 3_500_000);
-        let b = charge_cents(&price, &usage);
-        assert_eq!(b.lines.len(), 1);
-        assert_eq!(b.lines[0].cents, 105);
-        assert_eq!(b.total_cents, 105);
+        usage.insert("requests".to_string(), 100); // 100 CU
+        usage.insert("cpu_us".to_string(), 5_500); // floor(5500/1000) = 5 CU
+        usage.insert("egress_bytes".to_string(), 2_999); // floor(2999/1000) = 2 CU
+        assert_eq!(total_units(&weights(), &usage), 107);
     }
 
     #[test]
-    fn multi_dimensional_overage() {
-        // Ported `multi_dimensional` in cents. requests: 30c/1M; cpu_us:
-        // 1250c/1B; egress_bytes: 9c/1B. No included quota ⇒ all usage billable.
-        let mut price = PlanPrice::default();
-        price.overage.insert("requests".to_string(), flat(30, 1_000_000));
-        price.overage.insert("cpu_us".to_string(), flat(1250, 1_000_000_000));
-        price.overage.insert("egress_bytes".to_string(), flat(9, 1_000_000_000));
+    fn unknown_metric_zero_weight_is_free() {
+        // REGRESSION: a metric absent from the weight table contributes 0 CU
+        // (free), matching the live "unknown metric is free, not an error".
         let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 3_500_000); // 105
-        usage.insert("cpu_us".to_string(), 17_500_000_000); // 21875
-        usage.insert("egress_bytes".to_string(), 7_000_000_000); // 63
-        let b = charge_cents(&price, &usage);
-        assert_eq!(b.total_cents, 105 + 21875 + 63);
-        // breakdown sums to total
-        let sum: u64 = b.lines.iter().map(|l| l.cents).sum();
-        assert_eq!(sum + b.base_cents, b.total_cents);
+        usage.insert("requests".to_string(), 10);
+        usage.insert("not_a_metric".to_string(), 999_999_999);
+        assert_eq!(total_units(&weights(), &usage), 10);
     }
 
     #[test]
-    fn tiered_pricing_overage() {
-        // Ported `tiered_pricing` in cents: first 1M free, next 9M at 30c/1M,
-        // remainder at 20c/1M. 15M billable units.
-        let mut price = PlanPrice::default();
-        price.overage.insert(
-            "requests".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: Some(1_000_000), rate_cents: 0, per_units: 1_000_000 },
-                    PricingTier { up_to: Some(10_000_000), rate_cents: 30, per_units: 1_000_000 },
-                    PricingTier { up_to: None, rate_cents: 20, per_units: 1_000_000 },
-                ],
-            },
-        );
+    fn included_units_quota_then_overage() {
+        // included_units fully covers usage ⇒ base only; over the quota ⇒ the
+        // overage is billed at FX.
+        // FX = 1 cent per CU = 10^12 pico-cents/CU.
+        let one_cent_per_cu = FX_SCALE as u64;
+        let price = PlanPrice {
+            base_fee_cents: 500,
+            included_units: 100,
+            fx_pico_cents_per_unit: Some(one_cent_per_cu),
+            spend_limit_default_cents: 5_000,
+        };
+        // Usage = 100 CU exactly (= included) ⇒ base only.
         let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 15_000_000);
-        let b = charge_cents(&price, &usage);
-        // Tier1: 1M free=0; Tier2: 9M*30/1M=270; Tier3: 5M*20/1M=100 → 370.
-        assert_eq!(b.lines[0].cents, 370);
-        assert_eq!(b.total_cents, 370);
+        usage.insert("requests".to_string(), 100);
+        let b = charge_cents(&price, &usage, &weights());
+        assert_eq!(b.total_units, 100);
+        assert_eq!(b.billable_units, 0, "at/under quota ⇒ nothing billable");
+        assert_eq!(b.total_cents, 500, "base fee only");
+
+        // Usage = 150 CU ⇒ 50 billable × 1 cent = 50 cents over the base.
+        let mut usage2 = HashMap::new();
+        usage2.insert("requests".to_string(), 150);
+        let b2 = charge_cents(&price, &usage2, &weights());
+        assert_eq!(b2.total_units, 150);
+        assert_eq!(b2.billable_units, 50);
+        assert_eq!(b2.total_cents, 500 + 50);
     }
 
     #[test]
-    fn unknown_metric_has_no_overage_rule_is_free() {
-        // Ported `unknown_resource_is_free`: a metric with no overage rule is
-        // free regardless of usage.
-        let price = PlanPrice::default();
+    fn included_units_cover_usage_yields_base_only() {
+        let price = PlanPrice {
+            base_fee_cents: 900,
+            included_units: 1_000_000,
+            fx_pico_cents_per_unit: Some(FX_SCALE as u64),
+            spend_limit_default_cents: 0,
+        };
         let mut usage = HashMap::new();
-        usage.insert("unknown".to_string(), 999_999);
-        let b = charge_cents(&price, &usage);
-        assert!(b.lines.is_empty());
-        assert_eq!(b.total_cents, 0);
-    }
-
-    #[test]
-    fn zero_usage_yields_only_base_fee() {
-        // Ported `zero_usage_zero_cost`, now with a base fee: empty usage ⇒
-        // base only.
-        let mut price = PlanPrice::default();
-        price.base_fee_cents = 500;
-        price.overage.insert("requests".to_string(), flat(30, 1_000_000));
-        let b = charge_cents(&price, &HashMap::new());
-        assert!(b.lines.is_empty());
-        assert_eq!(b.base_cents, 500);
-        assert_eq!(b.total_cents, 500);
-    }
-
-    #[test]
-    fn rule_cost_rounds_half_up() {
-        // 1 unit at 1 cent per 2 units = 0.5 cents → rounds UP to 1 (half-up).
-        // The platform port truncated DOWN to 0; the cents conversion uses
-        // half-up at the line boundary (D3).
-        assert_eq!(rule_cost(&flat(1, 2), 1), 1);
-        // 1 unit at 1 cent per 3 units = 0.333 → rounds to 0.
-        assert_eq!(rule_cost(&flat(1, 3), 1), 0);
-        // 2 units at 1 cent per 3 units = 0.667 → rounds to 1.
-        assert_eq!(rule_cost(&flat(1, 3), 2), 1);
-    }
-
-    // -- NEW regression tests (blueprint PR4 (d)) ----------------------------
-
-    #[test]
-    fn overage_only_charges_above_included() {
-        // REGRESSION (catches a port bug that prices from ZERO instead of from
-        // the included quota). Plan includes 1M requests free; usage is 1.5M.
-        // Only the 0.5M OVER the quota is billable: 500_000 * 30 / 1M = 15c.
-        // A from-zero bug would bill 1.5M * 30 / 1M = 45c.
-        let mut price = PlanPrice::default();
-        price.included.insert("requests".to_string(), 1_000_000);
-        price.overage.insert("requests".to_string(), flat(30, 1_000_000));
-        let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 1_500_000);
-        let b = charge_cents(&price, &usage);
-        assert_eq!(b.lines.len(), 1, "exactly one overage line");
-        assert_eq!(b.lines[0].billable_units, 500_000, "only the over-quota units");
-        assert_eq!(b.lines[0].cents, 15, "15c, NOT 45c (must not price from zero)");
-        assert_eq!(b.total_cents, 15);
-    }
-
-    #[test]
-    fn included_quota_fully_covers_usage_yields_base_only() {
-        // Usage at OR below the included quota produces no overage line — only
-        // the base fee is charged.
-        let mut price = PlanPrice::default();
-        price.base_fee_cents = 900;
-        price.included.insert("requests".to_string(), 1_000_000);
-        price.included.insert("cpu_us".to_string(), 5_000_000_000);
-        price.overage.insert("requests".to_string(), flat(30, 1_000_000));
-        price.overage.insert("cpu_us".to_string(), flat(1250, 1_000_000_000));
-        let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 1_000_000); // exactly the quota
-        usage.insert("cpu_us".to_string(), 4_000_000_000); // under the quota
-        let b = charge_cents(&price, &usage);
-        assert!(b.lines.is_empty(), "no overage when usage ≤ included");
-        assert_eq!(b.base_cents, 900);
+        usage.insert("requests".to_string(), 999_999); // under the included CU
+        let b = charge_cents(&price, &usage, &weights());
+        assert_eq!(b.billable_units, 0);
         assert_eq!(b.total_cents, 900);
     }
 
     #[test]
-    fn breakdown_total_equals_base_plus_lines() {
-        // Invariant: total_cents == base_cents + Σ lines.cents.
-        let mut price = PlanPrice::default();
-        price.base_fee_cents = 1200;
-        price.included.insert("requests".to_string(), 100);
-        price.overage.insert("requests".to_string(), flat(5, 1));
-        price.overage.insert("egress_bytes".to_string(), flat(9, 1_000_000_000));
-        let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 300); // 200 billable * 5 = 1000
-        usage.insert("egress_bytes".to_string(), 2_000_000_000); // 18
-        let b = charge_cents(&price, &usage);
-        let sum: u64 = b.lines.iter().map(|l| l.cents).sum();
-        assert_eq!(b.total_cents, b.base_cents + sum);
-        assert_eq!(b.total_cents, 1200 + 1000 + 18);
-        // Lines are deterministically sorted by metric name.
-        assert_eq!(b.lines[0].metric, "egress_bytes");
-        assert_eq!(b.lines[1].metric, "requests");
-    }
-
-    #[test]
-    fn tiered_rounds_once_over_summed_total_not_per_tier() {
-        // REGRESSION for the per-tier round-half-up over-bill (#1). Three tiers
-        // whose EXACT contributions each carry a fractional cent that rounds UP
-        // individually, but whose SUM has a smaller fractional part. Rounding
-        // per tier over-bills; rounding the summed total once is correct.
+    fn charge_rounds_units_to_cents_exactly_once() {
+        // REGRESSION (the whole point of Refactor B). Under the OLD per-metric
+        // overage model each metric's cents were rounded independently and
+        // summed, biasing the charge upward. Here we accumulate CU across many
+        // metrics into ONE total and round to cents ONCE.
         //
-        // Each tier: 1 unit at 5 cents per 8 units = 5/8 = 0.625c.
-        //   per-tier round-half-up: 1 + 1 + 1 = 3c   (the OLD buggy total)
-        //   exact sum: 15/8 = 1.875c → round-once half-up = 2c (the CORRECT total)
-        let mut price = PlanPrice::default();
-        price.overage.insert(
-            "m".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: Some(1), rate_cents: 5, per_units: 8 },
-                    PricingTier { up_to: Some(2), rate_cents: 5, per_units: 8 },
-                    PricingTier { up_to: None, rate_cents: 5, per_units: 8 },
-                ],
-            },
-        );
+        // FX = 0.5 cent per CU = FX_SCALE/2 pico-cents/CU. Three metrics each
+        // contributing an ODD number of CU:
+        //   requests 1 CU, cpu_us 1 CU (1000 us), egress_bytes 1 CU (1000 bytes)
+        //   total_units = 3 CU.
+        //   Per-metric rounding (the OLD bug): each 1 CU × 0.5c = 0.5c → round-up
+        //     to 1c each ⇒ 3c total.
+        //   Round-ONCE (correct): 3 CU × 0.5c = 1.5c → round half-up once = 2c.
+        let half_cent_per_cu = (FX_SCALE / 2) as u64;
+        let price = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(half_cent_per_cu),
+            spend_limit_default_cents: 0,
+        };
         let mut usage = HashMap::new();
-        usage.insert("m".to_string(), 3);
-        let b = charge_cents(&price, &usage);
-        assert_eq!(b.lines.len(), 1);
+        usage.insert("requests".to_string(), 1); // 1 CU
+        usage.insert("cpu_us".to_string(), 1_000); // 1 CU
+        usage.insert("egress_bytes".to_string(), 1_000); // 1 CU
+        let b = charge_cents(&price, &usage, &weights());
+        assert_eq!(b.total_units, 3, "CU accumulate across metrics");
         assert_eq!(
-            b.lines[0].cents, 2,
-            "round ONCE over the summed 15/8=1.875c → 2c, NOT 3c (per-tier rounding over-bills)"
+            b.total_cents, 2,
+            "round ONCE over 3 CU (1.5c → 2c), NOT per-metric (0.5c×3 → 3c)"
         );
-        assert_eq!(b.total_cents, 2);
     }
 
     #[test]
-    fn tiered_round_once_handles_varying_per_units() {
-        // Tiers with DIFFERENT per_units must still compose into a single
-        // round-once total via the common-denominator accumulation.
-        //   Tier1: 1 unit @ 1c / 3  = 1/3
-        //   Tier2: 1 unit @ 1c / 7  = 1/7
-        //   exact sum = 1/3 + 1/7 = 10/21 ≈ 0.476c → round-once = 0c
-        //   per-tier rounding would give round(1/3)=0 + round(1/7)=0 = 0 here,
-        //   so also assert a case where they diverge:
-        //   Tier1: 2 @ 1c/3 = 2/3 (≈0.667→1 per-tier), Tier2: 2 @ 1c/3 = 2/3
-        //   exact sum = 4/3 ≈ 1.333c → round-once = 1c; per-tier = 1+1 = 2c.
-        let mut price = PlanPrice::default();
-        price.overage.insert(
-            "m".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: Some(2), rate_cents: 1, per_units: 3 },
-                    PricingTier { up_to: None, rate_cents: 1, per_units: 3 },
-                ],
-            },
-        );
+    fn fx_change_reprices_without_touching_weights() {
+        // REGRESSION proving cost-model / price decoupling: the SAME raw usage +
+        // SAME global weight table, but a different per-plan FX, reprices. The
+        // weights (engineering cost) are untouched; only the business price (FX)
+        // moves.
         let mut usage = HashMap::new();
-        usage.insert("m".to_string(), 4);
-        let b = charge_cents(&price, &usage);
-        assert_eq!(b.lines[0].cents, 1, "4/3=1.333c → round once = 1c, not 2c");
+        usage.insert("requests".to_string(), 1_000); // 1000 CU under weights()
+        let ws = weights();
+
+        let cheap = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(FX_SCALE as u64), // 1 cent/CU
+            spend_limit_default_cents: 0,
+        };
+        let pricey = PlanPrice {
+            fx_pico_cents_per_unit: Some((FX_SCALE as u64) * 2), // 2 cents/CU
+            ..cheap.clone()
+        };
+
+        let bc = charge_cents(&cheap, &usage, &ws);
+        let bp = charge_cents(&pricey, &usage, &ws);
+        assert_eq!(bc.total_units, 1_000, "CU is weight-derived, unchanged");
+        assert_eq!(bp.total_units, 1_000, "same CU under the same weights");
+        assert_eq!(bc.total_cents, 1_000, "1000 CU × 1c");
+        assert_eq!(bp.total_cents, 2_000, "1000 CU × 2c — FX lever moved, weights did not");
     }
 
     #[test]
-    fn tiered_pricing_overage_round_once_with_zero_first_tier() {
-        // The original ported tiered test still passes under round-once (the
-        // 270 and 100 cents are exact, so rounding once == rounding per tier).
-        assert_eq!(rule_cost(&PricingRule::Tiered {
-            tiers: vec![
-                PricingTier { up_to: Some(1_000_000), rate_cents: 0, per_units: 1_000_000 },
-                PricingTier { up_to: Some(10_000_000), rate_cents: 30, per_units: 1_000_000 },
-                PricingTier { up_to: None, rate_cents: 20, per_units: 1_000_000 },
-            ],
-        }, 15_000_000), 370);
+    fn sub_unit_weight_and_sub_cent_fx_compose() {
+        // The "$0.30 per 1M requests" tier expressed in CU terms when 1 req = 1
+        // CU. fx = 0.00003 cent/CU = 3e-5 cent = 3e-5 × 10^12 = 30_000_000
+        // pico-cents/CU (the seeded global default). 1M requests ⇒ 1M CU ×
+        // 0.00003c = 30c, rounded once.
+        let mut t = MetricWeights::new();
+        t.insert("requests".to_string(), w(1, 1));
+        let price = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(30_000_000),
+            spend_limit_default_cents: 0,
+        };
+        let mut usage = HashMap::new();
+        usage.insert("requests".to_string(), 1_000_000);
+        let b = charge_cents(&price, &usage, &t);
+        assert_eq!(b.total_units, 1_000_000);
+        assert_eq!(b.total_cents, 30, "1M CU × 0.00003c = 30c, rounded once");
     }
 
     #[test]
-    fn validate_rejects_non_monotonic_tier_boundaries() {
-        let mut price = PlanPrice::default();
-        price.overage.insert(
-            "requests".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: Some(10), rate_cents: 1, per_units: 1 },
-                    PricingTier { up_to: Some(10), rate_cents: 2, per_units: 1 }, // duplicate
-                    PricingTier { up_to: None, rate_cents: 3, per_units: 1 },
-                ],
-            },
-        );
-        let err = price.validate().expect_err("duplicate up_to must be rejected");
-        assert!(err.contains("strictly increasing"), "got: {err}");
-
-        // Decreasing boundary is also rejected.
-        let mut price2 = PlanPrice::default();
-        price2.overage.insert(
-            "requests".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: Some(100), rate_cents: 1, per_units: 1 },
-                    PricingTier { up_to: Some(50), rate_cents: 2, per_units: 1 },
-                ],
-            },
-        );
-        assert!(price2.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_unbounded_non_final_tier() {
-        let mut price = PlanPrice::default();
-        price.overage.insert(
-            "requests".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: None, rate_cents: 1, per_units: 1 }, // unbounded, not last
-                    PricingTier { up_to: Some(10), rate_cents: 2, per_units: 1 },
-                ],
-            },
-        );
-        let err = price.validate().expect_err("non-final unbounded tier must be rejected");
-        assert!(err.contains("final tier"), "got: {err}");
-    }
-
-    #[test]
-    fn validate_accepts_well_formed_tiers_and_flat() {
-        let mut price = PlanPrice::default();
-        price.overage.insert("flat".to_string(), flat(30, 1_000_000));
-        price.overage.insert(
-            "tiered".to_string(),
-            PricingRule::Tiered {
-                tiers: vec![
-                    PricingTier { up_to: Some(1_000_000), rate_cents: 0, per_units: 1_000_000 },
-                    PricingTier { up_to: Some(10_000_000), rate_cents: 30, per_units: 1_000_000 },
-                    PricingTier { up_to: None, rate_cents: 20, per_units: 1_000_000 },
-                ],
-            },
-        );
-        assert!(price.validate().is_ok());
+    fn unresolved_fx_prices_base_only() {
+        // fx == None (catalog failed to substitute) must price to base-only, never
+        // panic. Defensive: the catalog always resolves the default in practice.
+        let price = PlanPrice {
+            base_fee_cents: 700,
+            included_units: 0,
+            fx_pico_cents_per_unit: None,
+            spend_limit_default_cents: 0,
+        };
+        let mut usage = HashMap::new();
+        usage.insert("requests".to_string(), 5_000);
+        let b = charge_cents(&price, &usage, &weights());
+        assert_eq!(b.billable_units, 5_000);
+        assert_eq!(b.total_cents, 700, "no FX ⇒ base only, no panic");
     }
 
     #[test]
     fn negative_total_contributes_no_units() {
-        // A negative aggregate total (shouldn't happen, but be defensive) maps
-        // to 0 billable units, not a wrapping huge value.
-        let mut price = PlanPrice::default();
-        price.overage.insert("requests".to_string(), flat(30, 1_000_000));
+        // A negative aggregate total (shouldn't happen, but defensive) maps to 0
+        // CU, not a wrapping huge value.
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), -5);
-        let b = charge_cents(&price, &usage);
-        assert!(b.lines.is_empty());
-        assert_eq!(b.total_cents, 0);
+        assert_eq!(total_units(&weights(), &usage), 0);
+    }
+
+    #[test]
+    fn validate_rejects_explicit_zero_fx_accepts_none_and_positive() {
+        let mut p = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(0),
+            spend_limit_default_cents: 0,
+        };
+        assert!(p.validate().is_err(), "explicit zero FX is rejected");
+        p.fx_pico_cents_per_unit = None;
+        assert!(p.validate().is_ok(), "None (inherit default) is valid");
+        p.fx_pico_cents_per_unit = Some(30_000);
+        assert!(p.validate().is_ok(), "positive FX is valid");
+    }
+
+    #[test]
+    fn zero_per_units_weight_is_free() {
+        let mut t = MetricWeights::new();
+        t.insert("x".to_string(), w(1, 0)); // degenerate ⇒ free
+        let mut usage = HashMap::new();
+        usage.insert("x".to_string(), 999);
+        assert_eq!(total_units(&t, &usage), 0);
     }
 }

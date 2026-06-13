@@ -23,6 +23,7 @@ pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod plan_catalog;
 pub mod pricing;
+pub mod pricing_store;
 pub mod rate_limit;
 pub mod registry;
 pub mod spend;

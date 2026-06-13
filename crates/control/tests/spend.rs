@@ -33,22 +33,37 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 }
 
 /// Seed a dedicated plan that charges 1 cent per `requests` unit (no included
-/// quota, no base fee) with the given `spend_limit_default_cents`, then an app
-/// on it. Returns `(plan_id, app_id)`.
+/// CU, no base fee) with the given `spend_limit_default_cents`, then an app on
+/// it. Returns `(plan_id, app_id)`. Under compute-unit pricing the per-request
+/// cost is `weight(requests) × fx`: with the seeded global weight of 1 CU /
+/// request and `fx = 10^12` pico-cents/CU (= 1 cent/CU), 1 request = 1 cent —
+/// identical to the old per-metric `Flat{1,1}` rate.
 async fn make_app_on_priced_plan(
     client: &compio_postgres::Client,
     spend_limit_default_cents: i64,
 ) -> (String, Uuid) {
+    // Ensure the `requests` weight is exactly 1 CU / op for this assertion,
+    // independent of any future global seed re-tuning.
+    client
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("upsert requests weight");
     let plan_id = format!("pln_spend_{}", Uuid::new_v4().simple());
+    // fx = 10^12 pico-cents/CU = 1 cent/CU.
+    let fx_one_cent: i64 = 1_000_000_000_000;
     client
         .execute(
             "INSERT INTO zeroship.plans \
-               (id, name, base_fee_cents, price_model_json, included_quota_json, \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                 runtime_limits_json, spend_limit_default_cents) \
-             VALUES ($1, 'spend-test', 0, \
-                     '{\"requests\":{\"Flat\":{\"rate_cents\":1,\"per_units\":1}}}', '{}', \
+             VALUES ($1, 'spend-test', 0, 0, $3, \
                      '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', $2)",
-            &[&plan_id, &spend_limit_default_cents],
+            &[&plan_id, &spend_limit_default_cents, &fx_one_cent],
         )
         .await
         .expect("seed priced plan");

@@ -294,54 +294,53 @@ pub fn console_plan_id() -> String {
 
 /// Build the three built-in tiers. The `runtime_limits_json` reproduces the
 /// matrix the deleted `registry.rs::runtime_limits_for_plan` hardcoded:
-/// free = 50ms/5s/64MB, pro = 30s/30s/256MB, unlimited = None/None/None. The
-/// price model is the v1 overage rates in CENTS (D3): free has no overage rule
-/// (its spend cap becomes enforceable once PR5 wires the spend engine), pro
-/// charges per-metric overage, unlimited is uncapped/free. Returns
-/// `[free, pro, unlimited]`.
+/// free = 50ms/5s/64MB, pro = 30s/30s/256MB, unlimited = None/None/None.
+///
+/// Under billing-v2 compute-unit pricing (Refactor B) the price model is scalar:
+/// each tier carries `base_fee_cents`, `included_units` (CU free before
+/// overage), and an FX (`fx == None` ⇒ inherit the global `pricing_config`
+/// default — the relative cost of requests-vs-cpu-vs-bytes now lives in the
+/// GLOBAL `metric_weights`, NOT the plan). Values (with the seeded default FX of
+/// 30000 pico-cents/CU = 0.00003 ¢/CU, and 1 CU ≈ 1 request under the seeded
+/// weights):
+///   - free:      base 0, included 100_000 CU (~100k requests free), inherit FX,
+///                spend_limit 0 (quota-capped, no card).
+///   - pro:       base $5 (500c), included 1_000_000 CU, inherit FX,
+///                spend_limit $50 (5000c) — pay-go overage into the cap.
+///   - unlimited: base 0, included 0, inherit FX, spend_limit 0 (uncapped;
+///                console is system-owned + reconciler-skipped anyway).
+/// Returns `[free, pro, unlimited]`.
 fn builtin_plans() -> Vec<Plan> {
-    use crate::pricing::{PlanPrice, PricingRule};
-    use std::collections::HashMap;
+    use crate::pricing::PlanPrice;
     use zeroship_core::types::{AppRuntimeLimits, FREE_TIER_RUNTIME_LIMITS};
 
-    let flat = |rate_cents: u64, per_units: u64| PricingRule::Flat { rate_cents, per_units };
-
-    // Free: spend_limit == base (0). The intended guarantee is quota-capped, no
-    // card — but that cap is only ENFORCED once PR5 wires the spend engine to
-    // the 0 limit; until then this tier carries no overage rule so any usage
-    // past the (zero) included quota is simply un-billed, not actively blocked.
-    // Runtime limits come from the shared `FREE_TIER_RUNTIME_LIMITS` const so
-    // the seed and the registry's missing-plan fallback can never drift.
+    // Free: spend_limit == base (0) ⇒ quota-capped, no card (the spend engine
+    // treats limit==0 as the free-tier cap). A small `included_units` of free CU
+    // bounds abuse without a billing relationship. Runtime limits come from the
+    // shared `FREE_TIER_RUNTIME_LIMITS` const so the seed and the registry's
+    // missing-plan fallback can never drift.
     let free = Plan {
         id: free_plan_id(),
         name: "free".to_string(),
         price: PlanPrice {
             base_fee_cents: 0,
-            included: HashMap::new(),
-            overage: HashMap::new(),
+            included_units: 100_000,
+            fx_pico_cents_per_unit: None, // inherit the global default
             spend_limit_default_cents: 0,
         },
         runtime: FREE_TIER_RUNTIME_LIMITS,
         archived: false,
     };
 
-    // Pro: a small base fee + included quota, pay-go overage past it (cents,
-    // CF-comparable rates rescaled millicents→cents). Default spend cap $50.
-    let mut pro_included = HashMap::new();
-    pro_included.insert("requests".to_string(), 1_000_000u64);
-    pro_included.insert("cpu_us".to_string(), 10_000_000_000u64);
-    pro_included.insert("egress_bytes".to_string(), 1_000_000_000u64);
-    let mut pro_overage = HashMap::new();
-    pro_overage.insert("requests".to_string(), flat(30, 1_000_000)); // $0.30/M
-    pro_overage.insert("cpu_us".to_string(), flat(1250, 1_000_000_000)); // $12.50/M ms
-    pro_overage.insert("egress_bytes".to_string(), flat(9, 1_000_000_000)); // $0.09/GB
+    // Pro: a small base fee + a generous included CU allotment, pay-go overage
+    // past it at the global FX. Default spend cap $50.
     let pro = Plan {
         id: pro_plan_id(),
         name: "pro".to_string(),
         price: PlanPrice {
             base_fee_cents: 500,
-            included: pro_included,
-            overage: pro_overage,
+            included_units: 1_000_000,
+            fx_pico_cents_per_unit: None, // inherit the global default
             spend_limit_default_cents: 5_000,
         },
         runtime: AppRuntimeLimits {
@@ -353,16 +352,15 @@ fn builtin_plans() -> Vec<Plan> {
     };
 
     // Unlimited / enterprise: no runtime caps (what the console needs), no
-    // overage rules. spend_limit_default 0 ⇒ the spend engine treats it as
-    // uncapped (PR5 maps limit==0 paid tiers as no enforcement at this layer;
-    // the console is system-owned and skipped by the reconciler anyway).
+    // included CU, no spend cap. spend_limit_default 0 ⇒ the spend engine treats
+    // it as uncapped; the console is system-owned and skipped by the reconciler.
     let unlimited = Plan {
         id: unlimited_plan_id(),
         name: "unlimited".to_string(),
         price: PlanPrice {
             base_fee_cents: 0,
-            included: HashMap::new(),
-            overage: HashMap::new(),
+            included_units: 0,
+            fx_pico_cents_per_unit: None, // inherit the global default
             spend_limit_default_cents: 0,
         },
         runtime: AppRuntimeLimits {

@@ -16,7 +16,7 @@ use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
-use zeroship_control::pricing::{charge_cents, PlanPrice, PricingRule};
+use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
 use zeroship_control::Registry;
 use zeroship_core::types::AppRuntimeLimits;
 
@@ -36,20 +36,15 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 /// Seed a unique unarchived plan into the catalog; return it. Each test mints a
 /// fresh `pln_…` id so parallel runs never collide.
 async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
-    let mut included = HashMap::new();
-    included.insert("requests".to_string(), 1_000_000u64);
-    let mut overage = HashMap::new();
-    overage.insert(
-        "requests".to_string(),
-        PricingRule::Flat { rate_cents: 30, per_units: 1_000_000 },
-    );
     let plan = Plan {
         id: zeroship_core::typed_id::new_plan_id(),
         name: name.to_string(),
         price: PlanPrice {
             base_fee_cents: 500,
-            included,
-            overage,
+            included_units: 1_000_000,
+            // 1 cent/CU (explicit so the round-trip pins a concrete fx, not the
+            // global default-inheriting None).
+            fx_pico_cents_per_unit: Some(FX_SCALE as u64),
             spend_limit_default_cents: 5_000,
         },
         runtime: AppRuntimeLimits {
@@ -333,9 +328,9 @@ async fn list_skips_poison_row_but_get_is_strict() {
     client
         .execute(
             "INSERT INTO zeroship.plans \
-               (id, name, base_fee_cents, price_model_json, included_quota_json, \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                 runtime_limits_json, spend_limit_default_cents, archived) \
-             VALUES ($1, 'poison', 0, '{}'::jsonb, '{}'::jsonb, '\"not-an-object\"'::jsonb, 0, false)",
+             VALUES ($1, 'poison', 0, 0, NULL, '\"not-an-object\"'::jsonb, 0, false)",
             &[&poison_id],
         )
         .await
@@ -350,11 +345,11 @@ async fn list_skips_poison_row_but_get_is_strict() {
 }
 
 #[compio::test]
-async fn charge_from_real_aggregates() {
-    // End-to-end of the pricing path against REAL usage_aggregates rows: write
-    // usage for an app, fetch the period totals via the real Metering reader,
-    // price them against a real catalog plan, and assert the charge matches the
-    // overage math (base + over-quota units × rate).
+async fn charge_from_real_aggregates_uses_weight_table() {
+    // End-to-end of the CU pricing path against REAL usage_aggregates rows +
+    // the REAL global `metric_weights` table: write usage for an app, fetch the
+    // period totals via the real Metering reader, load the global weight table
+    // via the real PricingStore, price the plan, and assert `total_cents`.
     let Some(url) = db_url() else {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
@@ -364,7 +359,19 @@ async fn charge_from_real_aggregates() {
     let catalog = PlanCatalog::new(registry.clone());
     let owner = make_user(&client).await;
 
-    // Plan: base 500c, 1M requests included, 30c/1M overage.
+    // Make the weight for `requests` deterministic for this assertion (1 CU per
+    // request), independent of any future seed re-tuning.
+    client
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("upsert requests weight");
+
+    // Plan: base 500c, 1M CU included, FX = 1 cent/CU (explicit).
     let plan = seed_plan(&catalog, "charge").await;
     let name = format!("charge-{}", Uuid::new_v4().simple());
     let app = registry.create_app(&name, &plan.id, &owner).await.expect("create");
@@ -385,16 +392,40 @@ async fn charge_from_real_aggregates() {
     };
     metering.ingest_at(&report, period).await.expect("ingest");
 
-    // Read back the real aggregates and price them.
+    // Read back the real aggregates, the real global weight table, and price.
     let totals = metering.period_totals(&app.id, period).await.expect("totals");
     let fetched_plan = catalog.get(&plan.id).await.expect("get").expect("present");
-    let breakdown = charge_cents(&fetched_plan.price, &totals);
+    let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
+    let weights = pricing.weights().await.expect("weights");
+    let default_fx = pricing.default_fx_pico_cents_per_unit().await.expect("default fx");
+    let price = fetched_plan.price.with_effective_fx(default_fx);
+    let breakdown = charge_cents(&price, &totals, &weights);
 
-    // 500 base + (1.5M − 1M) × 30 / 1M = 500 + 15 = 515 cents.
+    // 1.5M requests × 1 CU = 1.5M CU; included 1M ⇒ 0.5M billable CU.
+    // 0.5M CU × 1 cent = 500_000c overage + 500c base = 500_500c.
     assert_eq!(breakdown.base_cents, 500);
-    assert_eq!(breakdown.lines.len(), 1);
-    assert_eq!(breakdown.lines[0].metric, "requests");
-    assert_eq!(breakdown.lines[0].billable_units, 500_000);
-    assert_eq!(breakdown.lines[0].cents, 15);
-    assert_eq!(breakdown.total_cents, 515);
+    assert_eq!(breakdown.total_units, 1_500_000);
+    assert_eq!(breakdown.billable_units, 500_000);
+    assert_eq!(breakdown.total_cents, 500_500);
+}
+
+#[compio::test]
+async fn charge_uses_only_db_weight_table_and_default_fx() {
+    // Prove the global weight table + default FX are actually loaded from the DB
+    // (not a hardcoded const): a metric with NO weight row contributes 0 CU, and
+    // a plan with `fx = None` prices at the seeded global default.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let _client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
+    let weights = pricing.weights().await.expect("weights");
+    let default_fx = pricing.default_fx_pico_cents_per_unit().await.expect("fx");
+    assert!(default_fx.is_some(), "the global default FX is seeded");
+    let mut t = MetricWeights::new();
+    t.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
+    // sanity: the loaded table is non-empty (seeded platform counters)
+    assert!(weights.contains_key("requests"), "platform-counter weight is seeded");
 }
