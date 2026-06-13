@@ -386,6 +386,25 @@ impl StripeStore {
             .and_then(|r| r.get::<_, Option<String>>("stripe_customer_id")))
     }
 
+    /// Reverse-resolve a creator from their platform Customer id
+    /// (`cus_…`). Used by `invoice.payment_failed` ingest when the event
+    /// carries no `metadata.creator_id` but does carry the `customer` (PR6
+    /// Stream-1 infra invoices). Returns `None` if no creator owns that customer.
+    pub async fn get_creator_by_customer(
+        &self,
+        stripe_customer_id: &str,
+    ) -> Result<Option<Uuid>, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT creator_id FROM zeroship.creator_billing WHERE stripe_customer_id = $1",
+                &[&stripe_customer_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(rows.first().map(|r| r.get::<_, Uuid>("creator_id")))
+    }
+
     /// Upsert the creator's platform Customer id. Idempotent: re-setting the
     /// same id is a no-op write. The row is created if absent.
     pub async fn set_customer(

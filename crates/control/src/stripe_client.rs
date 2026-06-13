@@ -74,9 +74,12 @@ pub trait StripeApi {
 
     /// Create an invoice sweeping `customer`'s pending invoice items, then
     /// finalize it (so it is issued, not left in draft). Returns the `in_…` id.
+    /// `creator_id` is stamped into `metadata.creator_id` so the
+    /// `invoice.payment_failed` webhook can resolve the creator directly.
     async fn create_and_finalize_invoice(
         &self,
         customer: &str,
+        creator_id: &str,
         idempotency_key: &str,
     ) -> Result<String, StripeError>;
 }
@@ -214,7 +217,13 @@ impl StripeApi for StripeClient {
         period: Period,
         idempotency_key: &str,
     ) -> Result<String, StripeError> {
-        let amount = i64::try_from(amount_cents).unwrap_or(i64::MAX);
+        // Money MUST NOT silently clamp on overflow — a clamp would mis-bill.
+        // Surface it as a hard validation error so the caller skips this line.
+        let amount = i64::try_from(amount_cents).map_err(|_| {
+            StripeError::Validation(format!(
+                "invoice item amount_cents {amount_cents} exceeds i64::MAX — refusing to clamp"
+            ))
+        })?;
         let form = vec![
             ("customer".to_string(), customer.to_string()),
             ("amount".to_string(), amount.to_string()),
@@ -232,15 +241,18 @@ impl StripeApi for StripeClient {
     async fn create_and_finalize_invoice(
         &self,
         customer: &str,
+        creator_id: &str,
         idempotency_key: &str,
     ) -> Result<String, StripeError> {
         // 1. Create a draft invoice sweeping the customer's pending items.
         //    auto_advance=false so WE control finalization (no surprise charge
         //    timing); the deterministic key makes the create replay-safe.
+        //    metadata[creator_id] lets invoice.payment_failed resolve the creator.
         let create_form = vec![
             ("customer".to_string(), customer.to_string()),
             ("auto_advance".to_string(), "false".to_string()),
             ("collection_method".to_string(), "charge_automatically".to_string()),
+            ("metadata[creator_id]".to_string(), creator_id.to_string()),
         ];
         let invoice = self
             .post_form("/v1/invoices", &create_form, Some(idempotency_key))

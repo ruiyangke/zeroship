@@ -13,16 +13,22 @@
 //! no owner row (e.g. the system console, 0036 `apps.system=true`) have no
 //! billable creator and are SKIPPED.
 //!
-//! Idempotency — two airtight layers under at-least-once delivery:
-//!   1. `billing_runs(creator_id, period_start)` PK + `INSERT … ON CONFLICT DO
-//!      NOTHING`, claimed BEFORE any Stripe call. 0 rows affected ⇒ already
-//!      billed this period ⇒ skip entirely (no Stripe call at all).
-//!   2. A DETERMINISTIC Stripe `Idempotency-Key` per item/invoice derived from
-//!      `(creator_id, app_id, period_start)`. Even if the process crashes after
-//!      the `billing_runs` INSERT commits but before Stripe responds, the next
-//!      tick re-drives any row whose `stripe_invoice_id IS NULL` replaying the
-//!      SAME keys, so Stripe returns the original objects rather than creating
-//!      duplicates.
+//! Idempotency — three airtight layers under at-least-once delivery:
+//!   1. `billing_runs(creator_id, period_start)` PK, claimed BEFORE any Stripe
+//!      call. A COMPLETED row (`stripe_invoice_id` NOT NULL) ⇒ already billed
+//!      this period ⇒ skip entirely (no pricing, no Stripe call). A NULL-invoice
+//!      row is a crash-window remnant we re-drive.
+//!   2. The `billing_run_items(creator_id, period_start, app_id)` LEDGER is the
+//!      DURABLE per-app double-bill guard. We write one row the instant each
+//!      `create_invoice_item` returns; on (re-)drive we SKIP any app already in
+//!      the ledger. This guarantees each app's item posts AT MOST ONCE even when
+//!      Stripe's 24h Idempotency-Key window has expired (a >24h re-drive). The
+//!      ledger — not Stripe's key — is what makes the no-double-bill guarantee
+//!      hold across the crash/timeout window.
+//!   3. A DETERMINISTIC Stripe `Idempotency-Key` per item/invoice derived from
+//!      `(creator_id, app_id, period_start)` — belt-and-suspenders for the
+//!      <24h replay case (Stripe returns the original object rather than
+//!      creating a duplicate).
 //!
 //! Zero tokio: a `compio::time` interval; `compio-postgres`; `cyper` Stripe.
 //! Multi-instance safety: a `pg_try_advisory_lock` around the sweep (the same
@@ -33,7 +39,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use uuid::Uuid;
 
 use crate::metering::Metering;
@@ -195,12 +201,16 @@ async fn sweep<S: StripeApi>(
     // no owner row are absent here and thus skipped. One owner per app by
     // construction (0031), but we group defensively in case of fan-out.
     let conn = state.registry.conn().await?;
+    // DISTINCT ON (app_id): an app must map to AT MOST ONE owner row so a
+    // (data-integrity) fan-out of multiple role='owner' rows can never bill the
+    // same app twice (MINOR-9). One owner per app by construction (0031); the
+    // DISTINCT ON makes that defensive rather than load-bearing.
     let owner_rows = conn
         .query(
-            "SELECT m.user_id AS creator_id, m.app_id \
+            "SELECT DISTINCT ON (m.app_id) m.user_id AS creator_id, m.app_id \
              FROM zeroship.app_members m \
              WHERE m.role = 'owner' \
-             ORDER BY m.user_id, m.app_id",
+             ORDER BY m.app_id, m.user_id",
             &[],
         )
         .await?;
@@ -250,16 +260,42 @@ async fn bill_creator<S: StripeApi>(
     app_ids: &[Uuid],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
-    // Compute per-app charge lines from real aggregates × the plan catalog.
-    // `lines` is (app_id, description, amount_cents) for each non-zero app
-    // charge. We also need the creator's Customer; resolve it first so a
-    // creator with no saved payment identity is skipped cleanly.
+    // Integer-exact period PK (MAJOR-4): bind TIMESTAMPTZ directly rather than
+    // round-tripping the unix-seconds key through f64, so a claim and any
+    // re-drive resolve to the BYTE-IDENTICAL period_start.
+    let period_ts: DateTime<Utc> = Utc
+        .timestamp_opt(period_start, 0)
+        .single()
+        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {period_start}")))?;
+
+    let conn = state.registry.conn().await?;
+
+    // MAJOR-6: short-circuit BEFORE any pricing. If a COMPLETED run row already
+    // exists (stripe_invoice_id NOT NULL) this period is fully billed — do no
+    // pricing work at all. A NULL-invoice row is a crash-window remnant we still
+    // need to re-drive, so we fall through to pricing in that case only.
+    let existing = conn
+        .query(
+            "SELECT stripe_invoice_id FROM zeroship.billing_runs \
+             WHERE creator_id = $1 AND period_start = $2",
+            &[creator_id, &period_ts],
+        )
+        .await?;
+    let run_exists = !existing.is_empty();
+    let invoice_done = existing
+        .first()
+        .and_then(|r| r.get::<_, Option<String>>("stripe_invoice_id"))
+        .is_some();
+    if invoice_done {
+        return Ok(false);
+    }
+
+    // Resolve the creator's Customer; a creator with no saved payment identity is
+    // skipped. MAJOR-5: if such a creator HAS usage we will surface a warn below
+    // (silent under-bill is revenue lost invisibly).
     let customer = match state.stripe_store.get_customer(*creator_id).await {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            tracing::debug!(creator_id = %creator_id, "billing_reconcile: no platform Customer — skipping");
-            return Ok(false);
-        }
+        Ok(Some(c)) => Some(c),
+        Ok(None) => None,
         Err(e) => return Err(RegistryError::Database(format!("get_customer: {e}"))),
     };
 
@@ -290,61 +326,94 @@ async fn bill_creator<S: StripeApi>(
         return Ok(false);
     }
 
-    // Layer 1: claim the run BEFORE any Stripe call. 0 rows ⇒ already billed
-    // this period ⇒ skip (unless a prior crash left stripe_invoice_id NULL, in
-    // which case we re-drive — see below).
-    let amount_i64 = i64::try_from(total_cents).unwrap_or(i64::MAX);
-    let conn = state.registry.conn().await?;
-    let claimed = conn
-        .query(
+    // MAJOR-5: usage exists but no saved Customer ⇒ we CANNOT bill. Surface it
+    // loudly (a missing-customer marker) instead of dropping revenue at debug!.
+    let Some(customer) = customer else {
+        tracing::warn!(
+            creator_id = %creator_id,
+            total_cents,
+            billing_event = "missing_customer_with_usage",
+            "billing_reconcile: creator has billable usage but no saved Stripe Customer — NOT billed"
+        );
+        return Ok(false);
+    };
+
+    // MAJOR-3: money MUST NOT silently clamp. An overflow here is a hard error
+    // that skips this creator (the per-creator loop catches it + warns), never a
+    // clamp to i64::MAX.
+    let amount_i64 = i64::try_from(total_cents).map_err(|_| {
+        RegistryError::Database(format!(
+            "billing_reconcile: total_cents {total_cents} exceeds i64::MAX — refusing to clamp"
+        ))
+    })?;
+
+    // Layer 1: claim the run BEFORE any Stripe call (only if not already
+    // present). 0 rows ⇒ already claimed by a prior tick that may have crashed
+    // mid-Stripe — we re-drive using the per-app ledger to avoid double-posting.
+    if !run_exists {
+        conn.execute(
             "INSERT INTO zeroship.billing_runs (creator_id, period_start, amount_cents) \
-             VALUES ($1, to_timestamp($2::double precision), $3) \
-             ON CONFLICT (creator_id, period_start) DO NOTHING \
-             RETURNING creator_id",
-            &[creator_id, &(period_start as f64), &amount_i64],
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (creator_id, period_start) DO NOTHING",
+            &[creator_id, &period_ts, &amount_i64],
         )
         .await?;
-    let fresh_claim = !claimed.is_empty();
-
-    if !fresh_claim {
-        // Row already exists. Re-drive ONLY if a prior crash left the invoice
-        // incomplete (stripe_invoice_id IS NULL) — the commit-then-crash window.
-        // A completed run is a true no-op.
-        let existing = conn
-            .query(
-                "SELECT stripe_invoice_id FROM zeroship.billing_runs \
-                 WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-                &[creator_id, &(period_start as f64)],
-            )
-            .await?;
-        let invoice_done = existing
-            .first()
-            .and_then(|r| r.get::<_, Option<String>>("stripe_invoice_id"))
-            .is_some();
-        if invoice_done {
-            return Ok(false);
-        }
+    } else {
         tracing::warn!(
             creator_id = %creator_id,
             "billing_reconcile: re-driving a run with NULL stripe_invoice_id (crash-window recovery)"
         );
     }
 
-    // Layer 2: deterministic Stripe idempotency keys make the calls replay-safe.
+    // CRIT-1: the per-app ledger is the DURABLE double-bill guard. Stripe's
+    // Idempotency-Key only dedupes for 24h, so a re-drive after key expiry would
+    // otherwise re-post an already-posted app. We load the apps already posted
+    // for this (creator, period) and SKIP them; we write a ledger row the instant
+    // each create_invoice_item returns. Layer-2 (deterministic Stripe keys) is
+    // still belt-and-suspenders for the <24h case.
+    let posted_rows = conn
+        .query(
+            "SELECT app_id FROM zeroship.billing_run_items \
+             WHERE creator_id = $1 AND period_start = $2",
+            &[creator_id, &period_ts],
+        )
+        .await?;
+    let already_posted: std::collections::HashSet<Uuid> =
+        posted_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+
     let period = Period {
         start: period_start,
         end: period_end_unix(period_start),
     };
     for (app_id, desc, amount) in &lines {
+        if already_posted.contains(app_id) {
+            // Item already posted to Stripe in a prior (crashed) drive — skip.
+            continue;
+        }
         let item_key = invoice_item_idempotency_key(creator_id, app_id, period_start);
-        stripe
+        let item_id = stripe
             .create_invoice_item(&customer, *amount, BILLING_CURRENCY, desc, period, &item_key)
             .await
             .map_err(|e| RegistryError::Database(format!("create_invoice_item: {e}")))?;
+        // Ledger the post IMMEDIATELY — before the next item or any later failure
+        // — so a crash here cannot cause this app to be re-posted next drive.
+        let item_amount = i64::try_from(*amount).map_err(|_| {
+            RegistryError::Database(format!(
+                "billing_reconcile: item amount {amount} exceeds i64::MAX — refusing to clamp"
+            ))
+        })?;
+        conn.execute(
+            "INSERT INTO zeroship.billing_run_items \
+               (creator_id, period_start, app_id, stripe_item_id, amount_cents) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (creator_id, period_start, app_id) DO NOTHING",
+            &[creator_id, &period_ts, app_id, &item_id, &item_amount],
+        )
+        .await?;
     }
     let invoice_key = invoice_idempotency_key(creator_id, period_start);
     let invoice_id = stripe
-        .create_and_finalize_invoice(&customer, &invoice_key)
+        .create_and_finalize_invoice(&customer, &creator_id.to_string(), &invoice_key)
         .await
         .map_err(|e| RegistryError::Database(format!("create_and_finalize_invoice: {e}")))?;
 
@@ -352,8 +421,8 @@ async fn bill_creator<S: StripeApi>(
     conn.execute(
         "UPDATE zeroship.billing_runs \
          SET stripe_invoice_id = $3, amount_cents = $4 \
-         WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-        &[creator_id, &(period_start as f64), &invoice_id, &amount_i64],
+         WHERE creator_id = $1 AND period_start = $2",
+        &[creator_id, &period_ts, &invoice_id, &amount_i64],
     )
     .await?;
 
@@ -488,6 +557,7 @@ mod tests {
         async fn create_and_finalize_invoice(
             &self,
             customer: &str,
+            _creator_id: &str,
             idempotency_key: &str,
         ) -> Result<String, StripeError> {
             self.invoices
@@ -530,7 +600,7 @@ mod tests {
         .await
         .unwrap();
         let invoice_key = invoice_idempotency_key(&creator, period);
-        fake.create_and_finalize_invoice("cus_fake", &invoice_key).await.unwrap();
+        fake.create_and_finalize_invoice("cus_fake", &creator.to_string(), &invoice_key).await.unwrap();
 
         let items = fake.items.borrow();
         assert_eq!(items.len(), 1);

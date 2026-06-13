@@ -30,6 +30,12 @@ pub enum Action {
     SpendStateChange,
     /// A creator changed an app's spend-limit override via the M4 endpoint.
     SetSpendLimit,
+    /// A creator finished the Checkout setup flow and now has a saved default
+    /// PaymentMethod (`setup_intent.succeeded` webhook, billing PR6 Stream-1).
+    SetupIntentSucceeded,
+    /// A finalized infra-billing invoice could not be charged
+    /// (`invoice.payment_failed` webhook, billing PR6 Stream-1).
+    InvoicePaymentFailed,
 }
 
 impl Action {
@@ -45,6 +51,8 @@ impl Action {
             Self::RecordPayout => "record_payout",
             Self::SpendStateChange => "spend_state_change",
             Self::SetSpendLimit => "set_spend_limit",
+            Self::SetupIntentSucceeded => "setup_intent_succeeded",
+            Self::InvoicePaymentFailed => "invoice_payment_failed",
         }
     }
 }

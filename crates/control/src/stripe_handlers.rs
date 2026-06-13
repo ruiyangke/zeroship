@@ -126,10 +126,24 @@ pub async fn billing_setup(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
+    // Parse + bind the path id BEFORE authz so we can enforce ownership.
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
+
+    // CRIT-10: billing/setup is SELF-SERVICE — a creator sets up their OWN card.
+    // Allow when the authenticated principal IS the creator (`:id` bound to the
+    // principal), OR when a platform billing operator acts (Cedar BillingWrite).
+    // This both opens self-service and closes the cross-creator hole (a creator
+    // calling billing/setup for a DIFFERENT creator's id is denied).
+    // CRIT-10: billing/setup is SELF-SERVICE — a creator sets up their OWN card.
+    // Allow when the authenticated principal IS the creator (`:id` bound to the
+    // principal), OR when a platform billing operator acts (Cedar BillingWrite).
+    // This both opens self-service and closes the cross-creator hole (a creator
+    // calling billing/setup for a DIFFERENT creator's id is denied).
+    if authz.principal_id != creator_id {
+        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+            return resp;
+        }
+    }
 
     if state.stripe_secret_key.is_empty() {
         tracing::error!("stripe: billing_setup called with no STRIPE_SECRET_KEY configured");
@@ -424,6 +438,11 @@ struct StripeObject {
     application_fee_amount: Option<i64>,
     #[serde(default)]
     currency: Option<String>,
+    /// The Stripe Customer (`cus_…`) the invoice belongs to. Stream-1's
+    /// infra-billing invoices carry this; we reverse-resolve it to a creator via
+    /// `creator_billing.stripe_customer_id` when no metadata.creator_id is set.
+    #[serde(default)]
+    customer: Option<String>,
     /// Invoice's own metadata (generally empty — Stripe doesn't copy
     /// session metadata here).
     #[serde(default)]
@@ -662,7 +681,7 @@ async fn handle_setup_intent_succeeded(
                     creator_id: Some(creator_id),
                     actor_user_id: None,
                     actor_token_id: None,
-                    action: Action::RecordPayout,
+                    action: Action::SetupIntentSucceeded,
                     resource: Some(&event.id),
                     source_ip: ip.as_deref(),
                 },
@@ -688,7 +707,27 @@ async fn handle_invoice_payment_failed(
     event: &StripeEvent,
     obj: &StripeObject,
 ) -> web::HttpResponse {
-    let creator_id = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok());
+    // Resolve the creator: prefer metadata.creator_id (stamped on PR6 invoices),
+    // then fall back to reverse-resolving the Customer (`cus_…`) on the invoice
+    // via creator_billing — exactly the case PR6's own infra invoices hit, where
+    // Stripe surfaces `customer` but not creator metadata on the invoice object.
+    let mut creator_id = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok());
+    if creator_id.is_none() {
+        if let Some(customer) = obj.customer.as_deref() {
+            match state.stripe_store.get_creator_by_customer(customer).await {
+                Ok(c) => creator_id = c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "stripe: invoice.payment_failed customer reverse-resolve failed");
+                }
+            }
+        }
+    }
+    if creator_id.is_none() {
+        tracing::warn!(
+            event_id = %sanitize_event_id(&event.id),
+            "stripe: invoice.payment_failed could not resolve creator_id (no metadata, no matching customer)"
+        );
+    }
     let ip = source_ip(req, state);
     audit::log_with_detail(
         &state.registry,
@@ -697,7 +736,7 @@ async fn handle_invoice_payment_failed(
             creator_id,
             actor_user_id: None,
             actor_token_id: None,
-            action: Action::RecordPayout,
+            action: Action::InvoicePaymentFailed,
             resource: Some(&event.id),
             source_ip: ip.as_deref(),
         },

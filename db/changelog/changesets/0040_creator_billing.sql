@@ -38,11 +38,30 @@ CREATE TABLE zeroship.creator_billing (
 CREATE TABLE zeroship.billing_runs (
     creator_id        UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
     period_start      TIMESTAMPTZ NOT NULL,  -- the billed month (UTC, first-of-month 00:00)
-    amount_cents      BIGINT NOT NULL,
+    amount_cents      BIGINT NOT NULL CHECK (amount_cents >= 0),  -- money is non-negative (MINOR-19)
     stripe_invoice_id TEXT,                  -- NULL until the Stripe finalize call succeeds
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (creator_id, period_start)   -- the idempotency key (no double-bill per period)
 );
+-- Per-app invoice-item ledger (CRIT-1). The `billing_runs` PK claims that a
+-- period was *claimed*, but NOT which apps' invoice items already posted to
+-- Stripe. On a re-drive after a crash/timeout — and after Stripe's 24h
+-- Idempotency-Key window has expired — replaying the same key no longer dedupes,
+-- so without this ledger an already-posted app's item would post a SECOND time
+-- (double-bill). We record one row here the instant `create_invoice_item`
+-- returns; on (re-)drive we skip any app already present, so each app's item is
+-- posted AT MOST ONCE regardless of Stripe key expiry. The ledger — not Stripe's
+-- 24h key — is the durable double-bill guard.
+CREATE TABLE zeroship.billing_run_items (
+    creator_id     UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
+    period_start   TIMESTAMPTZ NOT NULL,  -- matches billing_runs.period_start
+    app_id         UUID NOT NULL,
+    stripe_item_id TEXT NOT NULL,         -- the ii_… Stripe returned
+    amount_cents   BIGINT NOT NULL CHECK (amount_cents >= 0),  -- money is non-negative (MINOR-19)
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (creator_id, period_start, app_id)  -- one posted item per app per period
+);
+--rollback DROP TABLE zeroship.billing_run_items;
 --rollback DROP TABLE zeroship.billing_runs;
 --rollback DROP TABLE zeroship.creator_billing;
 
@@ -53,7 +72,19 @@ CREATE TABLE zeroship.billing_runs (
 -- only.
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
-    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.creator_billing TO zeroship_control';
-    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.billing_runs    TO zeroship_control';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.creator_billing  TO zeroship_control';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.billing_runs      TO zeroship_control';
+    -- The per-app ledger is append-only (INSERT) + SELECT on (re-)drive.
+    EXECUTE 'GRANT SELECT, INSERT ON zeroship.billing_run_items         TO zeroship_control';
   END IF;
 END $g$;
+
+--changeset zeroship:billing-owner-index splitStatements:true
+-- The reconciler's creator→app owner sweep scans `app_members WHERE
+-- role='owner'`. A partial index on the owner rows keyed by user_id makes that
+-- per-tick scan an index range read instead of a seq scan as membership grows
+-- (MINOR-8 / MINOR-20).
+CREATE INDEX IF NOT EXISTS app_members_owner_by_user_idx
+    ON zeroship.app_members (user_id)
+    WHERE role = 'owner';
+--rollback DROP INDEX IF EXISTS zeroship.app_members_owner_by_user_idx;

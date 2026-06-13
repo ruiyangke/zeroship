@@ -13,9 +13,14 @@
 //! Real Postgres via `CONTROL_TEST_DB`; silent skip otherwise. The DB must have
 //! changeset 0040 applied.
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+use ntex::http::StatusCode;
+use ntex::web::{self, test};
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
@@ -55,11 +60,25 @@ struct RecordedRequest {
     idempotency_key: Option<String>,
     authorization: Option<String>,
     body: String,
+    /// True if the mock served this request from its Idempotency-Key replay
+    /// cache (i.e. Stripe would NOT have created a new object).
+    replayed: bool,
 }
 
 #[derive(Default)]
 struct MockState {
     requests: Vec<RecordedRequest>,
+    /// Idempotency-Key → the exact JSON response previously returned for that
+    /// key. Real Stripe replays the ORIGINAL response on a repeated key (within
+    /// its 24h window); a faithful mock must do the same so the idempotency
+    /// tests actually exercise layer-2 (the deterministic Stripe key). See
+    /// `dedupe_by_key`.
+    idempotency_replies: HashMap<String, String>,
+    /// When false, the mock does NOT replay by Idempotency-Key — it treats every
+    /// request as fresh. This simulates Stripe's key window having EXPIRED
+    /// (>24h), proving the per-app LEDGER (not Stripe's key) is what guarantees
+    /// at-most-once posting (CRIT-1).
+    dedupe_by_key: bool,
 }
 
 #[derive(Clone)]
@@ -79,6 +98,23 @@ impl MockStripe {
             .filter(|r| r.method == method && r.path.starts_with(path_prefix))
             .count()
     }
+
+    /// Count distinct POSTs to `path_prefix` that ACTUALLY created a new object
+    /// (i.e. were not replayed from a prior identical Idempotency-Key). This is
+    /// the count that matters for "double-bill": even if a request was sent
+    /// twice, a deduped reply means Stripe created the object once.
+    fn count_created(&self, method: &str, path_prefix: &str) -> usize {
+        let st = self.state.lock().unwrap();
+        st.requests
+            .iter()
+            .filter(|r| r.method == method && r.path.starts_with(path_prefix) && !r.replayed)
+            .count()
+    }
+
+    /// Turn OFF Idempotency-Key replay to simulate Stripe's >24h key expiry.
+    fn disable_dedupe(&self) {
+        self.state.lock().unwrap().dedupe_by_key = false;
+    }
 }
 
 /// Stand up a localhost HTTP/1.1 server that answers Stripe's create endpoints
@@ -89,7 +125,10 @@ async fn start_mock_stripe() -> MockStripe {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
     let addr = listener.local_addr().expect("local_addr");
     let base_url = format!("http://{addr}");
-    let state = Arc::new(Mutex::new(MockState::default()));
+    let state = Arc::new(Mutex::new(MockState {
+        dedupe_by_key: true, // faithful default: replay by Idempotency-Key like real Stripe
+        ..MockState::default()
+    }));
     let accept_state = Arc::clone(&state);
 
     compio::runtime::spawn(async move {
@@ -173,6 +212,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
             idempotency_key,
             authorization,
             body,
+            replayed: false,
         },
         body_start + content_length,
     ))
@@ -182,7 +222,23 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
 /// the request. The `id` returned is derived from the path so each endpoint
 /// yields a plausible object id.
 fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u8> {
-    state.lock().unwrap().requests.push(req.clone());
+    // Faithful Stripe idempotency: if dedupe is on and we've seen this
+    // Idempotency-Key before, replay the EXACT original response (Stripe does
+    // not create a second object). Mark the recorded request `replayed` so the
+    // test can distinguish "sent twice but deduped" from "created twice".
+    {
+        let mut st = state.lock().unwrap();
+        if st.dedupe_by_key {
+            if let Some(key) = req.idempotency_key.clone() {
+                if let Some(prev) = st.idempotency_replies.get(&key).cloned() {
+                    let mut rec = req.clone();
+                    rec.replayed = true;
+                    st.requests.push(rec);
+                    return http_200_json(&prev);
+                }
+            }
+        }
+    }
 
     let json: String = if req.path.starts_with("/v1/customers") {
         format!(r#"{{"id":"cus_mock_{}","object":"customer"}}"#, short())
@@ -201,7 +257,20 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         r#"{"id":"obj_mock","object":"unknown"}"#.to_string()
     };
 
-    let body = json.into_bytes();
+    {
+        let mut st = state.lock().unwrap();
+        st.requests.push(req.clone());
+        if let Some(key) = req.idempotency_key.clone() {
+            st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
+        }
+    }
+
+    http_200_json(&json)
+}
+
+/// Build a `200 OK` HTTP/1.1 response with a JSON body.
+fn http_200_json(json: &str) -> Vec<u8> {
+    let body = json.to_string().into_bytes();
     let mut resp = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
         body.len()
@@ -520,7 +589,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         .expect("create invoice item");
     assert!(item.starts_with("ii_mock_"), "parsed the ii_ id from the mock JSON");
     let invoice = client
-        .create_and_finalize_invoice("cus_x", "billrun:k2")
+        .create_and_finalize_invoice("cus_x", &Uuid::new_v4().to_string(), "billrun:k2")
         .await
         .expect("create + finalize");
     assert!(invoice.starts_with("in_mock_final_"), "parsed the finalized invoice id");
@@ -714,4 +783,233 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
         fx.state.stripe_secret_key.expose_secret().to_string(),
     ))
     .with_base_url(fx.state.stripe_base_url.clone())
+}
+
+/// A StripeApi decorator that forwards to the REAL `StripeClient` (so requests
+/// still hit the mock + get ledgered) but FAILS after the first invoice-item
+/// create — simulating a crash/timeout partway through posting a creator's
+/// items. The first item posts (and is ledgered by `bill_creator`); the second
+/// returns an error, aborting the drive before the invoice is finalized.
+struct FailAfterFirstItem {
+    inner: StripeClient,
+    items_seen: std::cell::Cell<usize>,
+}
+
+impl StripeApi for FailAfterFirstItem {
+    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_customer(email, creator_id).await
+    }
+    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_checkout_setup_session(c, ok, cancel).await
+    }
+    async fn create_invoice_item(
+        &self,
+        customer: &str,
+        amount_cents: u64,
+        currency: &str,
+        description: &str,
+        period: Period,
+        idempotency_key: &str,
+    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        let n = self.items_seen.get();
+        self.items_seen.set(n + 1);
+        if n >= 1 {
+            // Second (and later) item: simulate the crash/timeout window.
+            return Err(zeroship_control::stripe_store::StripeError::Db(
+                "simulated crash after first item".to_string(),
+            ));
+        }
+        self.inner
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key)
+            .await
+    }
+    async fn create_and_finalize_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_and_finalize_invoice(customer, creator_id, idempotency_key).await
+    }
+}
+
+/// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
+/// Idempotency-Key window has expired (dedupe OFF). The per-app LEDGER — not
+/// Stripe's 24h key — must guarantee app A's invoice item is created EXACTLY
+/// ONCE; the re-drive posts ONLY app B.
+///
+/// RED→GREEN: without the `billing_run_items` ledger (or if the re-drive does
+/// not skip ledgered apps), the second drive re-posts app A and the mock — with
+/// dedupe OFF — creates a SECOND item for A (double-bill). The ledger makes it
+/// GREEN: count_created == 2 total (A once + B once), never 3.
+#[compio::test]
+async fn partial_post_then_crash_does_not_double_bill_app_a() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "partial").await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "partial").await;
+    let plan = make_plan(&fx.state).await;
+    let app_a = make_owned_app(&fx.state, &plan, creator).await;
+    let app_b = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state.stripe_store.set_customer(creator, "cus_test_partial").await.unwrap();
+    ingest_at(&fx.state, app_a, 100, period, 1).await; // 100c
+    ingest_at(&fx.state, app_b, 200, period, 2).await; // 200c
+
+    // First drive: crashes after the first invoice item posts.
+    let failing = FailAfterFirstItem {
+        inner: dummy_passthrough(&fx),
+        items_seen: std::cell::Cell::new(0),
+    };
+    let res = billing_reconcile::tick_with(&fx.state, &failing, now).await;
+    // The sweep swallows per-creator errors → Ok(0) (nobody fully billed), but
+    // exactly ONE item must have posted + been ledgered.
+    assert_eq!(res.expect("tick swallows the per-creator error"), 0, "no creator fully billed on the crashed drive");
+
+    let created_after_crash = fx.mock.count_created("POST", "/v1/invoiceitems");
+    assert_eq!(created_after_crash, 1, "exactly one item posted before the crash");
+    let ledger_after_crash = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT app_id FROM zeroship.billing_run_items WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read ledger");
+    assert_eq!(ledger_after_crash.len(), 1, "exactly one app ledgered after the crash");
+
+    // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
+    fx.mock.disable_dedupe();
+
+    // Re-drive with a healthy client — the ledger must skip the already-posted
+    // app and post ONLY the remaining one.
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("re-drive tick");
+    assert_eq!(billed, 1, "the creator is now fully billed on the re-drive");
+
+    // THE guarantee: total CREATED items == 2 (A once + B once), NOT 3 — even
+    // though Stripe's key window expired. The ledger, not Stripe, enforced this.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        2,
+        "no double-bill: app A's item was created exactly once across both drives (ledger guard)",
+    );
+
+    // Both apps are now ledgered, and the run is completed.
+    let ledger_final = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT app_id FROM zeroship.billing_run_items WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read ledger");
+    assert_eq!(ledger_final.len(), 2, "both apps ledgered after the re-drive");
+    let run = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read run");
+    assert!(run[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
+}
+
+// ===========================================================================
+// CRIT-10: billing/setup self-service authz (own-id ok; cross-creator 403).
+// ===========================================================================
+
+/// Wire just the `billing/setup` route onto a test App (same path the prod
+/// router registers).
+fn billing_setup_route(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource("/api/creators/{id}/billing/setup")
+            .route(web::post().to(zeroship_control::stripe_handlers::billing_setup)),
+    );
+}
+
+/// CRIT-10: a creator may set up their OWN card (principal == :id), but a
+/// creator calling billing/setup for ANOTHER creator's id is denied (the `:id`
+/// is bound to the principal). A non-billing-operator principal acting on a
+/// foreign id falls through to the Cedar BillingWrite gate and is FORBIDDEN.
+///
+/// RED→GREEN: before the fix, billing/setup gated ONLY on Cedar
+/// BillingWrite/Resource::Any with `:id` unbound — so (a) self-service was
+/// impossible for a normal creator (403 on their OWN id) and (b) nothing tied
+/// `:id` to the principal. The fix makes own-id OK and keeps foreign-id 403.
+#[compio::test]
+async fn billing_setup_is_self_service_and_blocks_cross_creator() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "authz").await;
+
+    // A normal (non-operator) creator principal. Its PAT user_id IS the creator.
+    let creator_a = common::authz_fixture::non_admin_pat(&fx.state).await;
+    // A second creator (a different user id) — the cross-creator target.
+    let creator_b = common::authz_fixture::non_admin_pat(&fx.state).await;
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).configure(billing_setup_route),
+    )
+    .await;
+
+    // (1) Self-service: creator A acts on creator A's OWN id → OK (200).
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/creators/{}/billing/setup", creator_a.user_id))
+        .header("authorization", creator_a.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "creator may set up their OWN card");
+
+    // (2) Cross-creator: creator A acts on creator B's id → FORBIDDEN (403),
+    //     and no Stripe customer is created for B.
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/creators/{}/billing/setup", creator_b.user_id))
+        .header("authorization", creator_a.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a creator must NOT set up billing for a DIFFERENT creator",
+    );
+    let stored_b = fx.state.stripe_store.get_customer(creator_b.user_id).await.unwrap();
+    assert!(stored_b.is_none(), "no customer created for the cross-creator victim");
+
+    creator_a.cleanup(&fx.state).await;
+    creator_b.cleanup(&fx.state).await;
+}
+
+/// CRIT-10 (operator path): a platform billing operator may set up ANY
+/// creator's billing (foreign id) — the admin PAT carries BillingWrite.
+#[compio::test]
+async fn billing_setup_allows_platform_operator_for_any_creator() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "authz-op").await;
+
+    let operator = common::authz_fixture::admin_pat(&fx.state).await;
+    let creator = make_user(&fx.state, "op-target").await;
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).configure(billing_setup_route),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/billing/setup"))
+        .header("authorization", operator.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "a billing operator may set up any creator");
+
+    operator.cleanup(&fx.state).await;
 }
