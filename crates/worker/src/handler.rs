@@ -198,10 +198,12 @@ pub async fn dispatch(
     };
 
     metrics::inc(&metrics::DISPATCH_TOTAL);
-    // Metering auto-counter: one dispatched request for this app. Fed into
-    // the process-wide meter the flush task drains (the `requests` platform
-    // counter). Cheap atomic bump; no-op when the meter is unconfigured.
-    cache::record_request(&app_id);
+
+    // Metering auto-counters: start the wall clock now so it spans the whole
+    // dispatch (V8 entry + any pending-promise await). The full five-counter
+    // record happens once at the end of dispatch, when egress is known — see
+    // `cache::record_request` below.
+    let wall_start = std::time::Instant::now();
 
     // Parse the HTTP envelope from the request body.
     let envelope: HttpEnvelope = match serde_json::from_slice(&body) {
@@ -236,7 +238,19 @@ pub async fn dispatch(
     let cancel = CancelFlag::new();
     let ctx = RequestCtx::new(cancel.clone());
 
-    // Enter isolate, dispatch through the unified fetch handler.
+    // ingress_bytes = the end-user request body bytes the worker received
+    // (the inner envelope body, not the JSON envelope wrapper overhead).
+    let ingress_bytes = envelope.body.len() as u64;
+
+    // Enter isolate, dispatch through the unified fetch handler. Sample the
+    // V8 thread's CPU clock (CLOCK_THREAD_CPUTIME_ID — the same clock the
+    // CPU limiter arms) around the synchronous isolate entry: the delta is
+    // the real CPU time this request burned in V8. (For a `Pending` handler
+    // the async continuation runs on the shared V8 actor thread via the
+    // pump and is not attributable to this request without a per-request
+    // accumulator the kernel does not expose; the synchronous burn captured
+    // here is the faithful, non-fabricated lower bound — see report.)
+    let cpu_start = zeroship_runtime::init::thread_cpu_time();
     let outcome = {
         runtime.enter_isolate();
         let o = runtime.call_fetch_handler_with_user(
@@ -251,19 +265,38 @@ pub async fn dispatch(
         runtime.exit_isolate();
         o
     };
+    let cpu_us = zeroship_runtime::init::thread_cpu_time()
+        .saturating_sub(cpu_start)
+        .as_micros() as u64;
+
+    // Record all five platform auto-counters once `egress_bytes` is known.
+    // For a buffered response that is the body length, recorded inline here;
+    // for a streaming response the body bytes aren't known until the stream
+    // drains, so the recording is deferred into the drain task.
+    let record = |egress_bytes: u64| {
+        let wall_us = wall_start.elapsed().as_micros() as u64;
+        cache::record_request(&app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+    };
 
     match outcome {
         FetchOutcome::Response { status, headers, body, logs: request_logs } => {
             crate::logs::append(&logs, app_id, request_logs);
+            record(body.len() as u64);
             make_http_response(status, headers, body)
         }
         FetchOutcome::Stream { status, headers, body_reader, logs: request_logs } => {
             crate::logs::append(&logs, app_id, request_logs);
-            stream_response(status, &headers, body_reader)
+            stream_response(
+                status,
+                &headers,
+                body_reader,
+                metering_on_complete(app_id, cpu_us, ingress_bytes, wall_start),
+            )
         }
         FetchOutcome::WebSocketUpgrade { .. } => {
             // WS upgrades over the HTTP dispatch endpoint aren't supported —
             // the gateway uses a separate WS proxy path for websocket traffic.
+            record(0);
             make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch")
         }
         FetchOutcome::Pending { rx, cancel: cf } => {
@@ -275,6 +308,7 @@ pub async fn dispatch(
                     logs: request_logs,
                 })) => {
                     crate::logs::append(&logs, app_id, request_logs);
+                    record(body.len() as u64);
                     make_http_response(status, headers, body)
                 }
                 Some(Ok(SettledFetch::Stream {
@@ -284,17 +318,50 @@ pub async fn dispatch(
                     logs: request_logs,
                 })) => {
                     crate::logs::append(&logs, app_id, request_logs);
-                    stream_response(status, &headers, body_reader)
+                    stream_response(
+                        status,
+                        &headers,
+                        body_reader,
+                        metering_on_complete(app_id, cpu_us, ingress_bytes, wall_start),
+                    )
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade { logs: request_logs, .. })) => {
                     crate::logs::append(&logs, app_id, request_logs);
+                    record(0);
                     make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch")
                 }
-                Some(Err(e)) => make_error(&e),
-                None => make_error_msg(504, "request timed out"),
+                Some(Err(e)) => {
+                    record(0);
+                    make_error(&e)
+                }
+                None => {
+                    record(0);
+                    make_error_msg(504, "request timed out")
+                }
             }
         }
     }
+}
+
+/// Build the per-request metering callback the streaming drain task invokes
+/// once the response body has fully flushed, with the total egress bytes it
+/// observed. Records all five platform auto-counters (the wall clock is
+/// finalized here so it spans the whole stream lifetime, not just the
+/// synchronous handler entry).
+///
+/// `Box<dyn FnOnce>` so it can be moved into the spawned drain task; the
+/// `METER` thread-local it ultimately writes lives on the worker's V8 actor
+/// thread, the same thread `compio::runtime::spawn` schedules onto.
+fn metering_on_complete(
+    app_id: Uuid,
+    cpu_us: u64,
+    ingress_bytes: u64,
+    wall_start: std::time::Instant,
+) -> Box<dyn FnOnce(u64)> {
+    Box::new(move |egress_bytes: u64| {
+        let wall_us = wall_start.elapsed().as_micros() as u64;
+        cache::record_request(&app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+    })
 }
 
 /// Build an HTTP response forwarding the JS handler's status, headers, and body.
@@ -322,6 +389,7 @@ fn stream_response(
     status: u16,
     headers: &[(String, String)],
     reader: StreamReader,
+    on_complete: Box<dyn FnOnce(u64)>,
 ) -> HttpResponse {
     let status_code = ntex::http::StatusCode::from_u16(status)
         .unwrap_or(ntex::http::StatusCode::OK);
@@ -334,12 +402,20 @@ fn stream_response(
 
     // Spawn a drain task — waker-based, not busy-polling.
     // StreamWriter.push() wakes this task when new chunks arrive.
+    //
+    // `egress` accumulates every byte forwarded to the client; whichever
+    // way the loop terminates (client disconnect, stream complete) we call
+    // `on_complete(egress)` to land the metering auto-counters with the
+    // true response body size this stream produced.
     compio::runtime::spawn(async move {
+        let mut egress: u64 = 0;
         loop {
             // Drain all available chunks
             while let Some(chunk) = reader.pop() {
                 if !chunk.is_empty() {
+                    egress += chunk.len() as u64;
                     if tx.send(Ok::<Bytes, std::io::Error>(Bytes::from(chunk))).is_err() {
+                        on_complete(egress);
                         return; // client disconnected
                     }
                 }
@@ -349,9 +425,11 @@ fn stream_response(
             if reader.is_done() {
                 while let Some(chunk) = reader.pop() {
                     if !chunk.is_empty() {
+                        egress += chunk.len() as u64;
                         let _ = tx.send(Ok(Bytes::from(chunk)));
                     }
                 }
+                on_complete(egress);
                 return; // tx drops → stream ends → HTTP response completes
             }
 
@@ -552,6 +630,139 @@ mod tests {
             let body = test::read_body(resp).await;
             let lines: Vec<String> = serde_json::from_slice(&body).expect("logs json");
             assert_eq!(lines, vec!["b2-real-log /from-worker-test"]);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    /// PR2-completion faithful regression: a real `/dispatch` request must
+    /// feed ALL FIVE platform auto-counters into the per-app `Meter`, not
+    /// just `requests`. This drives the REAL worker dispatch pipeline
+    /// (ntex `/dispatch/{app_id}` → `record_request` → `call_fetch_handler`)
+    /// — no shim — and then drains the very `Meter` the handler wrote to,
+    /// asserting `cpu_us`, `wall_us`, `egress_bytes`, and `ingress_bytes`
+    /// all landed alongside `requests`.
+    ///
+    /// Pre-fix this FAILS: `cache::record_request` only bumped `requests`,
+    /// so cpu/wall/egress/ingress drain as zero.
+    #[test]
+    fn dispatch_feeds_all_five_platform_counters() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            init_runtime();
+
+            let app_id = Uuid::new_v4();
+            // The handler echoes its request body so egress is deterministic,
+            // and burns a little CPU in a loop so cpu_us is reliably > 0.
+            let source = br#"
+                export default {
+                  fetch(req, env, ctx) {
+                    let acc = 0;
+                    for (let i = 0; i < 200000; i++) { acc += i % 7; }
+                    return new Response("echo:" + acc.toString().slice(0, 0) + req.url);
+                  }
+                }
+            "#;
+
+            // Hold our own Arc<Meter> clone so we can drain what the handler
+            // (which writes via the METER thread-local) recorded.
+            let meter = std::sync::Arc::new(zeroship_plugin_meter::Meter::new());
+            crate::cache::init_cache(
+                10,
+                crate::cache::KernelConfig {
+                    db_url: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: meter.clone(),
+                },
+            );
+            assert!(crate::cache::load_app(
+                app_id,
+                source,
+                AppRuntimeLimits::default()
+            ));
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            crate::sync::put_env_from_json(
+                &envs,
+                app_id,
+                r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                0,
+            )
+            .expect("insert env");
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("blob-meter");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let config = Arc::new(crate::WorkerConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_url: None,
+                kv_url: None,
+                storage_backend: None,
+                max_isolates: 10,
+                poll_interval_secs: 60,
+                worker_key: String::new(),
+                shutdown_timeout_secs: 0,
+                blob_store,
+            });
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+            )
+            .await;
+
+            // A non-empty request body → ingress_bytes must equal its length.
+            let req_body = "the-end-user-request-body-payload";
+            let url = "http://example.test/counters-probe";
+            let envelope = serde_json::json!({
+                "method": "POST",
+                "url": url,
+                "headers": [],
+                "body": req_body,
+            });
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{app_id}"))
+                .set_payload(serde_json::to_vec(&envelope).unwrap())
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            let resp_body_len = body.len() as u64;
+            assert!(resp_body_len > 0, "handler returned a non-empty body");
+
+            // Drain the SAME meter the handler fed — the faithful assertion.
+            let snap = meter.drain();
+            let usage = snap
+                .get(&app_id)
+                .expect("meter recorded usage for the dispatched app");
+
+            assert_eq!(usage.requests, 1, "requests counter unchanged");
+            assert_eq!(
+                usage.ingress_bytes,
+                req_body.len() as u64,
+                "ingress_bytes must equal the request body length"
+            );
+            assert_eq!(
+                usage.egress_bytes, resp_body_len,
+                "egress_bytes must equal the response body length"
+            );
+            assert!(
+                usage.wall_us > 0,
+                "wall_us must be a positive elapsed-time measurement"
+            );
+            assert!(
+                usage.cpu_us > 0,
+                "cpu_us must be a positive CPU-time measurement"
+            );
 
             let _ = std::fs::remove_dir_all(blob_root);
         });

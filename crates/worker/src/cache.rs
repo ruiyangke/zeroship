@@ -142,21 +142,36 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     plugins
 }
 
-/// Auto-counter hook: record one dispatched request against the
-/// process-wide meter for `app_id`. Called by the dispatch handler once a
-/// request reaches the runtime. No-op when the meter is unset (degraded
-/// config).
+/// Auto-counter hook: record one completed dispatched request's platform
+/// counters against the process-wide meter for `app_id`. Called by the
+/// dispatch handler once a request has been served. No-op when the meter is
+/// unset (degraded config).
 ///
-/// Today only the `requests` platform counter is fed here — it is the one
-/// number readily available at dispatch time. The remaining platform
-/// auto-counters (cpu_us / wall_us / egress_bytes / ingress_bytes) are TODO:
-/// they require threading per-request CPU/wall accounting and byte tallies
-/// out of `call_fetch_handler` / `FetchOutcome`, which don't surface them
-/// yet. When they do, extend this to `meter.record_request(...)`.
-pub fn record_request(app_id: &Uuid) {
+/// Feeds all five platform auto-counters in one shot via
+/// [`Meter::record_request`] — `requests` (always +1) plus the four the
+/// dispatch handler measures per request:
+/// - `cpu_us` — V8 thread CPU microseconds (CLOCK_THREAD_CPUTIME_ID delta
+///   around the synchronous isolate entry; the same clock the CPU limiter
+///   uses),
+/// - `wall_us` — wall-clock microseconds spanning the dispatch,
+/// - `egress_bytes` — response body bytes the worker produced,
+/// - `ingress_bytes` — request body bytes the worker received.
+pub fn record_request(
+    app_id: &Uuid,
+    cpu_us: u64,
+    wall_us: u64,
+    egress_bytes: u64,
+    ingress_bytes: u64,
+) {
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(&app_id.to_string(), "requests", 1);
+            meter.record_request(
+                &app_id.to_string(),
+                cpu_us,
+                wall_us,
+                egress_bytes,
+                ingress_bytes,
+            );
         }
     });
 }
