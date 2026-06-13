@@ -796,3 +796,450 @@ PR4 is the keystone. Changeset order: `0038`(PR4) → `0039`(PR5) → `0040`(PR6
 `compio-postgres`); typed_id `pln_…`; no back-compat alias (free-text `plan_id`,
 `runtime_limits_for_plan`, platform `SpendAction` DELETED not aliased); money
 server-side only; RLS fail-closed on app-keyed tables; least-priv grants.
+
+---
+
+## Billing v2 — metering-as-infra + compute-unit pricing
+
+> **Status:** BLUEPRINT (design only). Reshapes the *shipped* PR1–PR6 pipeline
+> (plugin-meter producer + `control/pricing.rs` per-metric overage) into two
+> locked refactors. **Decisions A & B below are LOCKED — design to them.**
+> Worktree `appbase-billing` @ `feat/billing-metering`. Latest changeset `0040`.
+>
+> **Refactor A — metering is INFRASTRUCTURE.** Delete the creator-facing
+> `env.meter` API; emit raw metric events from the db/kv/storage native
+> primitives at their op boundary (platform-measured, unforgeable). The worker
+> keeps emitting the 5 platform counters.
+>
+> **Refactor B — compute-unit pricing.** Replace per-metric cents-rates with a
+> global metric→weight cost model + per-plan `{included_units, fx, base_fee}`;
+> accumulate integer `compute_units` (CU), convert to cents **once** at the end.
+>
+> **What does NOT change (read + confirmed against the live call sites):** the
+> control aggregator (`metering.rs` — `IngestLedger`/`Metering`, idempotent
+> `(worker_id,sequence)` dedup, `usage_aggregates` UPSERT, `period_totals`),
+> the spend state machine (`spend.rs::derive_state` bands/deadband/raised-limit
+> recovery), the gateway edge enforcement (`enforce.rs` degrade/block), and the
+> Stripe rail (`stripe_client.rs`, `billing_reconcile.rs` two-layer idempotency,
+> webhook). This is a **producer + pricing** reshape only. `usage_aggregates`
+> stays **raw-metric-keyed** (`0037`: `PRIMARY KEY (app_id, period_start, metric)`)
+> — verified; no schema change there, units are derived at pricing time.
+
+### A0 — Why these shapes (cross-cutting)
+
+- The CU is named **`compute_units` / CU**, never "token" — `token` collides
+  with PAT/JWT/`token_id`/`token_handlers.rs` throughout the tree.
+- The cost model (metric→weight) is **global** (one fleet-wide table), the price
+  lever (`fx = cents_per_unit`) is **per-plan**. Separating "how much compute a
+  byte costs" (engineering) from "how many cents a unit sells for" (business)
+  is the whole point of Refactor B and kills the per-tier rounding error class.
+- Spend cap stays **dollar/cents-denominated** (creator mental model): enforced
+  as `total_units × fx` vs the cents cap — i.e. the existing
+  `spend.rs::evaluate_all` keeps comparing `spend_cents` to `limit_cents`; only
+  the way `spend_cents` is COMPUTED changes (CU×fx instead of Σ overage lines).
+
+---
+
+### A — Metering as infrastructure (producer reshape)
+
+#### A1 — The `Meter`'s new home + injection mechanism (THE #1 UNKNOWN, resolved)
+
+**Home: a new `crates/metering` crate.** Today the `Meter` + `flush` + the
+`v8_class` increment surface all live in `crates/plugin-meter`. Refactor A
+deletes the `env.meter` creator API but KEEPS the `Meter` and `flush` — and
+those must now be a dependency of `plugin-db`/`plugin-kv`/`plugin-storage`
+(producers) AND the worker (owner + flusher). A *plugin* crate cannot be the
+shared home: `plugin-db` depending on `plugin-meter` (a sibling plugin) is a
+layering inversion, and `plugin-meter` as a namespace plugin ceases to exist
+once `env.meter` is deleted. So:
+
+- **NEW `crates/metering`** — owns `Meter` (the atomic per-`(app_id,metric)`
+  table, `increment`/`record_request`/`drain`/`merge`, `FIXED_METRICS`,
+  `is_fixed_metric`), `SequenceSource`, `build_report`, and the compio
+  `flush` task (`spawn_flush_task`, `FlushConfig`, `DEFAULT_FLUSH_INTERVAL`).
+  These move **verbatim** from `plugin-meter/src/{meter,flush}.rs` (a `git mv`
+  in spirit; the code is runtime-agnostic and already zero-tokio/`cyper`).
+  Depends only on `zeroship-core` (for `AppUsage`/`UsageReport`) + `compio` +
+  `cyper` + `uuid`. NO dependency on `zeroship-runtime` (it carries no V8).
+- **DELETE `crates/plugin-meter` entirely** — `lib.rs` (`MeterPlugin`,
+  `NativePlugin` impl, `namespace()=="meter"`), `v8_class.rs` (`MeterHandle`,
+  `mint_meter`, the `#[v8_class] increment`), and the now-moved `meter.rs`/
+  `flush.rs`. No `env.meter` namespace, no alias (pre-launch).
+- **Why a crate, not `crates/core`:** `core` is inter-service wire types +
+  typed_id + observability with a deliberately tiny dependency set; pulling
+  `cyper` + a compio flush loop into it bloats a foundational crate every
+  service links. A dedicated `crates/metering` keeps the flush/transport out
+  of `core` while still being depended on by the three plugin crates + worker.
+  (`AppUsage`/`UsageReport` stay in `core` — they are wire types the control
+  plane also deserializes.)
+
+**The injection vehicle: a `MeterHandle` value type (NOT the old v8_class).**
+Reuse the name `MeterHandle` for a plain Rust struct in `crates/metering`:
+
+```rust
+// crates/metering/src/lib.rs  (design)
+#[derive(Clone)]
+pub struct MeterHandle { meter: Arc<Meter>, app_id: String }
+impl MeterHandle {
+    pub fn record(&self, metric: &str, n: u64) { self.meter.increment(&self.app_id, metric, n); }
+}
+```
+
+It is the `Arc<Meter>` + the server-injected `app_id` bound together so a
+producer emits without re-deriving the app or being able to meter another app
+(the exact structural guarantee the deleted `env.meter` v8_class gave, now
+applied to platform primitives instead of user code).
+
+**How it threads in — the live registration path (traced, named):**
+
+1. The worker owns the one process-wide `Arc<Meter>`. It is constructed in
+   `crates/worker/src/main.rs` (~line 489–502, where `spawn_flush_task` is
+   called today) and stored in the `METER` thread-local on every ntex worker
+   thread via `cache::init_cache(max_size, KernelConfig{ meter, .. })`
+   (`crates/worker/src/cache.rs:46,64,83`). **Unchanged** — `KernelConfig.meter`
+   already carries it; `spawn_flush_task` now comes from `zeroship_metering`.
+2. `create_plugins()` (`cache.rs:112`) is the SINGLE construction site for all
+   plugins on an isolate. It already reads `METER.with(|m| m.borrow().clone())`
+   to mint the (deleted) `MeterPlugin`. Refactor A re-points that `Arc<Meter>`:
+   it is passed into the **constructors** of `DbPlugin`, `KvPlugin`,
+   `StoragePlugin` instead. The `MeterPlugin` push (`cache.rs:135-140`) is
+   deleted.
+3. Each plugin's `build_instance(scope, app_id)` (runtime plugin trait,
+   `crates/runtime/src/core/plugin.rs:76`) **already receives `app_id`** —
+   resolved by the runtime from `SharedState.env_vars["APP_ID"]`
+   (`plugin.rs:225-228`). At mint time the plugin combines its stored
+   `Arc<Meter>` with that `app_id` into a `MeterHandle` and stamps it onto the
+   v8_class instance (kv/db) or a thread-local (storage). **No new injection
+   point is needed in the runtime** — the existing `build_instance(app_id)`
+   surface is exactly the hook. This is the key finding: the plumbing already
+   exists; only the *destination* of the `Arc<Meter>` moves from `MeterPlugin`
+   to the three data plugins.
+
+**Per-plugin wiring (matching each plugin's existing shape):**
+
+- **plugin-kv** (`v8_class`-backed): `KvPlugin::with_backend(backend)` →
+  `KvPlugin::with_backend_and_meter(backend, Arc<Meter>)`. `build_instance`
+  (`lib.rs:78`) calls `mint_kv(scope, backend, meter, app_id)`; `mint_kv`
+  (`v8_class.rs:364`) stamps a `MeterHandle` field onto the `Kv` struct
+  (`v8_class.rs:46`, alongside `backend`/`app_id`). Each `dispatch_*` resolve
+  arm emits (see A2).
+- **plugin-db** (`v8_class` + 27 flat callbacks): `DbPlugin::new(url)` →
+  `DbPlugin::new(url, Arc<Meter>)`. `build_instance` (`lib.rs:272`) →
+  `mint_db(scope, app_id, meter)`. The emit lives at the shared exec boundary
+  (`exec.rs`, see A2), so the `MeterHandle` is most naturally placed in the
+  per-app `context` (`crates/plugin-db/src/context.rs`, the thread-local the
+  exec layer already uses for schema/tx-client lookups keyed by `app_id`) —
+  registered once per app in `DbPlugin::register`/first-touch, read by
+  `exec_query`/`exec_mutation`. This keeps the exec functions' signatures
+  untouched (they already take `app_id: &str`, enough to fetch the handle).
+- **plugin-storage** (flat callbacks reading a `thread_local! STORAGE_BACKEND`):
+  add a parallel `thread_local! STORAGE_METER: RefCell<Option<Arc<Meter>>>`,
+  populated in `StoragePlugin::register` (`lib.rs:121-124`, beside the backend
+  set) from a meter the plugin now stores. `StoragePlugin::with_backend(backend)`
+  → `with_backend_and_meter(backend, Arc<Meter>)`. The callbacks
+  (`callbacks.rs`) read it the same way they read the backend; `app_id` comes
+  from `get_app_id(&state)` (`callbacks.rs:57`), the meter from the new
+  thread-local, combined per-call.
+
+#### A2 — Emit points + metric taxonomy (after the op succeeds)
+
+Raw metric names (lowercase, snake; share the `usage_aggregates.metric TEXT`
+row shape — no DDL per metric; they are NOT in `FIXED_METRICS`, so they flow
+through `AppUsage.custom` (`core/types.rs:183`) transparently):
+
+| Plugin | Emit site (live fn) | Metric(s) | Counts | Bytes known? |
+| --- | --- | --- | --- | --- |
+| db | `exec.rs::exec_query` (read path, `:121`) success | `db_reads` +1; `db_rows_read` += `rows.len()` | one query op; rows returned | rows in hand; bytes optional (skip v1) |
+| db | `exec.rs::exec_mutation` / `exec_mutation_with_emit` (`:161`,`:288`) success | `db_writes` +1; `db_rows_written` += affected | one mutation; affected rows | affected-row Vec in hand |
+| db | `exec.rs::exec_count` (`:135`) success | `db_reads` +1 | one count op | n/a |
+| kv | `dispatch.rs` `spawn_kv_op!` `Ok(v)` arm for get/list (`:87`,`:220`) | `kv_reads` +1 | one read op | n/a v1 |
+| kv | `Ok(v)` arm for set/delete/incr/setIfAbsent/expire/persist | `kv_writes` +1 | one write op | n/a v1 |
+| storage | `callbacks.rs::put` `Ok(size)` arm (`:134`) | `storage_ops` +1; `storage_bytes` += `size` | one put; bytes written | `size` is the resolve value |
+| storage | `callbacks.rs::get` `Ok(Some((bytes,meta)))` arm (`:177`) | `storage_ops` +1; `storage_egress_bytes` += `meta.size` | one get; bytes read | `meta.size` in hand |
+| storage | `put_stream`/`get_stream` finalize | `storage_ops` +1; `storage_bytes` += final `size` | one streamed op | final `size` known at resolve |
+| storage | `delete`/`list` `Ok` arm | `storage_ops` +1 | one op | n/a |
+
+**Emit discipline (locked):** emit **only in the success (`Ok`) arm**, AFTER the
+backend op returns — never on validation error, never before the op. A failed
+op is not billable. The emit is a synchronous lock-free atomic bump
+(`MeterHandle::record` → `Meter::increment`), so it adds no await and cannot
+fail the op. The five platform counters (requests/cpu_us/wall_us/egress_bytes/
+ingress_bytes) keep flowing via the worker's unchanged
+`cache::record_request` (`cache.rs:159`, called from `handler.rs:278,363`).
+
+**Taxonomy decision:** ship the op-count + bytes metrics above in v1
+(`db_reads, db_writes, db_rows_read, db_rows_written, kv_reads, kv_writes,
+storage_ops, storage_bytes, storage_egress_bytes`). `db_bytes`/`kv_bytes` are
+deferred — neither exec nor the kv backend trait surfaces a wire-byte count at
+the resolve boundary today, and adding it means threading a size through the
+backend traits (out of scope; a metric with no weight is simply free).
+
+#### A3 — `env.meter` removal + worker ownership (what survives vs dies)
+
+- **Survives** (moves to `crates/metering`): `Meter`, `record_request`,
+  `drain`, `merge`, `increment`, `SequenceSource`, `build_report`, `flush`
+  (the whole compio flush task). The worker keeps owning the singleton
+  (`KernelConfig.meter` + `METER` thread-local) and spawning the one flush task.
+- **Dies** (deleted, no alias): the entire `env.meter` namespace —
+  `MeterPlugin` (`NativePlugin` impl, `namespace()=="meter"`, `build_instance`
+  minting the handle), the `MeterHandle` **v8_class** + `mint_meter` +
+  `increment` `#[v8_method]` (`plugin-meter/src/v8_class.rs`), and the
+  `MAX_INCREMENT`/`validate_metric`/`read_count` argument plumbing. The
+  namespace registration in `create_plugins` (`cache.rs:135-140`) is removed,
+  so `env` loses `meter` (one fewer `NativePlugin` in the vector; the
+  `create_plugins_*` worker tests assert the surviving namespaces).
+- **`Cargo.toml`:** add `crates/metering` to the workspace; `worker`,
+  `plugin-db`, `plugin-kv`, `plugin-storage` depend on it; drop
+  `plugin-meter` from the workspace + every dependent. `crates/cli` (the
+  `zeroship serve` mirror of `create_plugins`) loses its `MeterPlugin` push too.
+
+#### A4 — e2e probe re-point (drive primitives, not env.meter)
+
+- **`examples/metering-probe/src/index.ts`** — remove
+  `env.meter.increment("probe_hits")` (the API is gone). The handler instead
+  drives a measurable db + kv + storage op per request (e.g.
+  `await env.kv.incr("probe_hits")` then `await env.db.<coll>.insert({...})`
+  then a small `env.storage.put(...)`), so the platform-emitted `kv_writes`/
+  `db_writes`/`storage_ops` are the metrics the harness asserts on. The
+  response still echoes a per-request shape for the smoke check (drop
+  `meter_total_in_process`; the in-process value is no longer creator-visible).
+  The probe needs a `default.schema` (one tiny collection) so `env.db` is
+  installed — add it.
+- **`tests/e2e_metering_billing.sh`** — Stage 2/3 assertions move from
+  "custom metric `probe_hits` aggregated" to "`kv_writes`/`db_writes`/
+  `storage_ops` aggregated ≥ N". The metering-test plan seed (`:165`) gains a
+  `metric_weights` consistent with the new pricing (see B); the
+  `price_model_json` shape changes (see B5). The probe app's plan must enable
+  kv + storage backends in the worker (`--kv-url`, `--storage-url`) — the
+  compose harness already wires db; confirm kv/storage are configured for the
+  probe's worker or the namespaces are absent and the ops no-op.
+
+---
+
+### B — Compute-unit pricing (cost-model / price decoupling)
+
+#### B1 — The new charge model
+
+```text
+total_units = Σ_m  usage[m] × weight[m]            (integer; weight via per_units divisor)
+charge_cents = base_fee_cents + round_ONCE( max(0, total_units − included_units) × fx )
+                                                   (fx = cents_per_unit)
+```
+
+- `weight[m]` is an integer "units per op" with a `per_units` divisor so it
+  stays integer: a weight `{ units: 1, per_units: 1000 }` for `egress_bytes`
+  means 1 CU per 1000 bytes. Accumulate `Σ floor-free` as an exact rational
+  and only floor/round into integer CU at the boundary (reuse the existing
+  `u128` + `div_round_half_up` + gcd/LCM machinery already in `pricing.rs`,
+  now applied to UNITS not cents).
+- Integer CU accumulate across all metrics into ONE total; cents conversion
+  happens exactly **once** (`× fx`, one `round_half_up`). This is the rounding
+  fix: the shipped `pricing.rs` rounds per-metric-line (one `rule_cost` per
+  metric, summed) — billing-v2 rounds once over the summed CU.
+- A metric absent from the weight table contributes **0 units** (free) —
+  preserves the live "unknown metric is free, not an error" semantics
+  (`pricing.rs::charge_cents` `unwrap_or(0)`).
+
+#### B2 — `pricing.rs` reshape (types + signatures)
+
+NEW shapes (replace `PricingRule`/`PricingTier`/`PlanPrice`/`LineItem` — pre-launch, DELETE the old ones, no alias):
+
+```rust
+// crates/control/src/pricing.rs  (design)
+pub struct MetricWeight { pub units: u64, pub per_units: u64 }   // per_units>0; CU per per_units ops
+pub type WeightTable = HashMap<String, MetricWeight>;            // GLOBAL cost model
+
+pub struct PlanPrice {
+    pub base_fee_cents: u64,
+    pub included_units: u64,        // CU included before overage
+    pub fx_cents_per_unit_milli: u64, // fx as milli-cents-per-CU (integer; see B-note)
+    pub spend_limit_default_cents: u64,
+}
+pub struct ChargeBreakdown {
+    pub base_cents: u64,
+    pub total_units: u64,           // Σ usage×weight (audit)
+    pub billable_units: u64,        // max(0, total_units − included)
+    pub total_cents: u64,
+}
+pub fn total_units(weights: &WeightTable, usage: &HashMap<String,i64>) -> u64;
+pub fn charge_cents(price: &PlanPrice, usage: &HashMap<String,i64>, weights: &WeightTable)
+    -> ChargeBreakdown;
+```
+
+- **`fx` precision note:** `cents_per_unit` is often < 1 cent, so store `fx`
+  as an integer milli-cent (or pico-cent) per CU and divide once at the end —
+  same `div_round_half_up` boundary. Pick the scale so the cheapest realistic
+  unit price (e.g. $0.30 / 1M requests with weight 1/req ⇒ 0.00003 ¢/CU) is
+  representable. Recommend `fx_pico_cents_per_unit: u64` (10^-12 cent) — gives
+  ample headroom and one clean `round_once`. (The exact scale is a B-impl
+  detail; the blueprint locks "integer sub-cent fx, divide once".)
+- `charge_cents` keeps its **call signature shape compatible** with both live
+  callers by appending `weights`: `charge_cents(&plan.price, &usage, &weights)`.
+  Both call sites read only `breakdown.total_cents` (confirmed:
+  `spend.rs:293-294`, `billing_reconcile.rs:315-316`) — so they change by one
+  argument and nothing else. The per-metric `LineItem` vec is GONE; the
+  reconciler already bills **one invoice item per app = `total_cents`**
+  (`billing_reconcile.rs:303,320`), never per-metric, so no invoice-shape change.
+- Keep + adapt the unit tests; ADD regressions:
+  `units_accumulate_then_round_to_cents_once`,
+  `reweighting_history_changes_charge` (same raw usage + different weight table
+  ⇒ different CU ⇒ proves auditability), `included_units_cover_usage_yields_base_only`,
+  `unknown_metric_zero_weight_is_free`.
+
+#### B3 — The weight-table home: a DB table `metric_weights` (recommended)
+
+**Recommendation: a `metric_weights` DB table, NOT a config/seed const.** The
+weight table is the global cost model — it must be operator-editable at runtime
+(same governance as the plan catalog) and visible to BOTH the spend engine and
+the reconciler (two crates/cron tasks). A compiled const would require a
+redeploy to re-weight; a seed-only row could not be edited. A small table
+mirrors `plans` exactly (global, non-tenant, no RLS, control BYPASSRLS):
+
+```sql
+-- 0041_metric_weights.sql (NEW changeset; see B5 on why new, not edit 0038)
+CREATE TABLE zeroship.metric_weights (
+    metric     TEXT PRIMARY KEY,
+    units      BIGINT NOT NULL,          -- CU per per_units ops
+    per_units  BIGINT NOT NULL CHECK (per_units > 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- GRANT SELECT,INSERT,UPDATE TO zeroship_control (DO-block guard, 0037 pattern)
+```
+
+- Loaded once per `evaluate_all` / per reconcile tick (cheap; a handful of
+  rows) and passed as `&WeightTable` into `charge_cents`. A new
+  `pricing_store.rs` (or a method on the existing `PlanCatalog`) reads it.
+- A global FX default lives beside the weights (a singleton row in a tiny
+  `pricing_config(fx_default, ...)` table, or a sentinel `metric=''` — prefer
+  a 1-row `pricing_config` table for clarity); each plan's `fx` defaults from
+  it at seed and may override per-plan.
+- Operator endpoints: `GET/PUT /api/metric-weights` + `GET/PUT /api/pricing-config`
+  (master-key/BillingWrite), symmetric with the shipped `/api/plans`.
+
+#### B4 — `plan_catalog` + seed changes
+
+- **`plan_catalog.rs`** `Plan { price: PlanPrice }` now serializes the new
+  `PlanPrice` (`base_fee_cents`, `included_units`, `fx`, `spend_limit_default`).
+  The JSONB columns change meaning: `price_model_json` no longer holds the
+  per-metric `overage` map. Two options (B5 picks): either repurpose
+  `price_model_json` to hold `{ included_units, fx }` or collapse to scalar
+  columns. **Recommend scalar columns** `included_units BIGINT`,
+  `fx_pico_cents_per_unit BIGINT` (drop `price_model_json`/`included_quota_json`
+  JSONB) — the price model is now scalar, so JSONB earns nothing and a typed
+  column is auditable + CHECK-constrainable. `from_row` / `upsert`
+  (`plan_catalog.rs:111-160,194-208`) adapt.
+- **`bootstrap_console.rs::builtin_plans`** (`:302`) re-expressed in CU:
+  - `free`: `included_units` small/zero, `spend_limit_default 0` (quota-capped,
+    no card) — unchanged intent.
+  - `pro`: `base_fee 500`, a generous `included_units`, `fx` from the global
+    default, `spend_limit_default 5_000`. The old per-metric `pro_overage`
+    (`:334-337`) is deleted; the relative cost of requests-vs-cpu-vs-egress now
+    lives in the **global weight table**, not the plan.
+  - `unlimited`: `included_units 0`, `spend_limit_default 0` (uncapped),
+    no caps. The seeder seeds `metric_weights` + `pricing_config` too (ahead of
+    `bootstrap_console`, same ordering as `seed_plans`).
+
+#### B5 — Changeset decision: **NEW `0041` + reshape `0038` in place** (split)
+
+Pre-launch / unshipped, so back-compat is not a constraint — but the choice is
+about migration *hygiene* for dev/test DBs that already ran `0038`:
+
+- **`metric_weights` + `pricing_config`** → **NEW `0041_metric_weights.sql`**
+  (+ `0042` if splitting config). They are new tables; a new changeset is the
+  only correct shape.
+- **The `plans` column reshape** (drop the `price_model_json`/`included_quota_json`
+  JSONB; add `included_units`/`fx` scalar columns) → **edit `0038` IN PLACE.**
+  Rationale: `0038` is unshipped (no production tenants — see top-of-doc
+  pre-launch stance), Liquibase changesets are content-hashed so an in-place
+  edit forces a clean re-migrate on dev/test DBs (drop volume + re-run, the
+  established compose `migrate` flow), and leaving a vestigial JSONB column then
+  ALTER-ing it away in `0041` is exactly the "ALTER existing tables" dead-code
+  the pre-launch stance forbids. **So: reshape `0038`'s `CREATE TABLE plans`
+  columns in place; add `0041` for the genuinely-new weight tables.** (If the
+  operator prefers append-only changesets even pre-launch, the fallback is an
+  `0041` that `ALTER TABLE plans DROP/ADD` — documented but NOT recommended.)
+- `usage_aggregates` (`0037`) — **NO change.** Confirmed raw-metric-keyed;
+  units are derived at pricing time, preserving re-weightability.
+
+#### B6 — Charge call sites (both change by one argument)
+
+- **`spend.rs::evaluate_all`** (`:233`, charge at `:293`): load the
+  `&WeightTable` once before the per-app loop (alongside the batched fleet
+  usage read at `:241-259`), pass it to `charge_cents(&plan.price, &usage,
+  &weights)`. `spend_cents = breakdown.total_cents` (unchanged downstream:
+  `derive_state`, deadband, persist — all untouched). The dollar cap comparison
+  (`limit_cents`, `:297-303`) is unchanged — `total_units × fx` is already
+  folded into `total_cents`.
+- **`billing_reconcile.rs::reconcile`** (charge at `:315`): same one-arg change;
+  load `&WeightTable` once per tick before the creator loop. `breakdown.total_cents`
+  → one invoice item per app (`:320`), unchanged. The mock-Stripe integration
+  + idempotency tests (`:519+`) adapt their `PlanPrice` fixtures to the new
+  shape + pass a weight table.
+
+---
+
+### Sequencing (A vs B) + test plan
+
+**Order: B (pricing) first, then A (producer).** They are code-disjoint —
+**A** touches plugins/worker/runtime/metering + the example; **B** touches
+control pricing/catalog/schema. But they share the PG `zeroship_billing_test`
+(`:5440`) so their *integration* tests cannot run concurrently — sequence them.
+B first because:
+
+1. B is self-contained in `control` + one changeset; it can land + be green
+   without touching the runtime. A's e2e (A4) asserts the *whole* pipe
+   (primitive emit → aggregate → **price** → cap), so it wants B's CU pricing
+   already in place to assert meaningful charges.
+2. A is the larger blast radius (new crate, delete a crate, 3 plugin ctors,
+   worker, CLI) — landing it on top of an already-correct pricing layer means
+   the e2e re-point (A4) tests the final shape once, not twice.
+
+(If parallelism is wanted, B's unit tests + A's unit/plugin tests are
+DB-free and can run concurrently; only the two integration suites serialize on
+`:5440`.)
+
+**Per-refactor TDD (real path, no shims — `feedback_faithful_e2e_tests`):**
+
+- **B — pricing (unit, DB-free):** RED→GREEN `units_accumulate_then_round_to_cents_once`
+  (fails against the shipped per-metric-round `charge_cents`);
+  `reweighting_history_changes_charge`; `unknown_metric_zero_weight_is_free`;
+  `included_units_cover_usage_yields_base_only`.
+- **B — catalog/engine (integration, real PG `:5440`):**
+  `charge_from_real_aggregates_uses_weight_table` (seed `usage_aggregates` +
+  `metric_weights` + a plan, assert `total_cents`); `evaluate_all` still
+  transitions correctly under CU pricing (re-run the shipped spend-engine
+  integration test against the new charge — it must stay green: proves the
+  state machine is untouched); `reconcile_creates_one_invoice_item_per_app`
+  re-run with CU pricing + mock-Stripe (proves the rail is untouched).
+- **A — primitives (unit per plugin):** `kv_op_emits_kv_write_on_success`,
+  `db_query_emits_db_read`, `storage_put_emits_storage_bytes_eq_size`, and the
+  RED regression `failed_op_emits_nothing` (emit must be in the `Ok` arm only).
+  Use a real `Meter` + assert `drain()` — not a mock.
+- **A — worker (faithful):** `create_plugins` no longer registers `meter`;
+  `env.meter` is `undefined` in an isolate (the deletion is observable);
+  `create_plugins_threads_meter_into_db_kv_storage` (the three data plugins
+  receive the shared `Arc<Meter>`).
+- **A — e2e (`tests/e2e_metering_billing.sh`, real multi-node):** re-pointed
+  probe drives real kv/db/storage ops → worker flush → control aggregate →
+  assert `kv_writes`/`db_writes`/`storage_ops` in `usage_aggregates` →
+  price via CU → cross a spend cap → assert gateway 402/degrade → reconcile →
+  assert mock-Stripe invoice item. This is the single end-to-end proof that
+  both refactors compose.
+
+### The 3 riskiest design points
+
+1. **`MeterHandle` reaches plugin-db's exec layer cleanly.** kv/storage stamp
+   it onto a per-instance struct / thread-local trivially; db's emit lives at
+   the shared `exec.rs` boundary which is reached by BOTH the v8_class and 27
+   flat callbacks via `app_id`-keyed `context`. Putting the handle in
+   `context` (not a new exec parameter) is the low-churn choice but must be
+   verified to not collide with the tx-client/schema caches already there.
+2. **`fx` sub-cent precision + single round.** Choosing the integer fx scale
+   (pico-cents/CU) so the cheapest unit price is representable AND the
+   `u128` CU×fx product can't overflow before the one `div_round_half_up`.
+   Get this wrong and either cheap metrics round to free or huge usage saturates.
+3. **The `0038` in-place reshape + dev-DB re-migrate.** Editing a content-hashed
+   changeset forces every dev/test DB to drop-and-re-migrate; if any harness
+   assumes an incremental `update`, it breaks. Mitigated by pre-launch (no prod
+   data) but the compose `migrate` flow + every integration test's DB setup
+   must tolerate the changed `0038` hash (fresh DB, not incremental).
