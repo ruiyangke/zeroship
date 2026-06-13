@@ -59,7 +59,7 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
         },
         archived: false,
     };
-    catalog.upsert(&plan).await.expect("upsert plan")
+    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert plan")
 }
 
 /// Mint a user row so `create_app`'s owner-membership insert has a valid FK.
@@ -93,7 +93,7 @@ async fn upsert_and_get_round_trips_pure_types() {
     // upsert again (same id) updates in place — idempotent.
     let mut updated = plan.clone();
     updated.name = "round-trip-2".to_string();
-    catalog.upsert(&updated).await.expect("re-upsert");
+    catalog.upsert(&updated, Some(updated.archived)).await.expect("re-upsert");
     let again = catalog.get(&plan.id).await.expect("get2").expect("present2");
     assert_eq!(again.name, "round-trip-2");
 }
@@ -216,7 +216,7 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
         wall_timeout_ms: Some(23_456),
         heap_limit_mb: Some(177),
     };
-    catalog.upsert(&plan).await.expect("upsert bespoke limits");
+    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert bespoke limits");
 
     let name = format!("limits-{}", Uuid::new_v4().simple());
     let app = registry
@@ -230,6 +230,123 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     assert_eq!(info.runtime.cpu_limit_ms, Some(12_345), "from the catalog row, not a name table");
     assert_eq!(info.runtime.wall_timeout_ms, Some(23_456));
     assert_eq!(info.runtime.heap_limit_mb, Some(177));
+}
+
+#[compio::test]
+async fn upsert_with_none_archived_preserves_existing_archived() {
+    // REGRESSION (#11): an archived plan, re-upserted with `archived = None`
+    // (the PUT-without-archived case), MUST STAY archived. The old code set
+    // `archived = EXCLUDED.archived` from a `#[serde(default)] -> false`, so a
+    // name edit silently UN-archived the plan. Now `None` ⇒ COALESCE-preserve.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let _client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry);
+
+    let plan = seed_plan(&catalog, "to-stay-archived").await;
+    assert!(catalog.archive(&plan.id).await.expect("archive"));
+    assert!(
+        catalog.get(&plan.id).await.expect("get").expect("present").archived,
+        "precondition: archived"
+    );
+
+    // PUT a name change with NO archived field (archived = None) — must NOT
+    // resurrect the plan.
+    let mut renamed = plan.clone();
+    renamed.name = "renamed-while-archived".to_string();
+    let written = catalog.upsert(&renamed, None).await.expect("upsert none-archived");
+    assert!(written.archived, "name edit with archived=None must NOT un-archive");
+    assert_eq!(written.name, "renamed-while-archived", "the name DID change");
+
+    let fetched = catalog.get(&plan.id).await.expect("get").expect("present");
+    assert!(fetched.archived, "still archived after the read-back");
+
+    // Explicit Some(false) is the deliberate un-archive path.
+    let unarchived = catalog.upsert(&renamed, Some(false)).await.expect("explicit un-archive");
+    assert!(!unarchived.archived, "Some(false) explicitly un-archives");
+}
+
+#[compio::test]
+async fn set_plan_guards_archive_in_one_statement() {
+    // #8: set_plan is race-free in a single guarded UPDATE. Assigning a plan
+    // archived just before the call is rejected with a typed InvalidInput, and
+    // the app's plan is unchanged. (A direct test of the single-statement guard;
+    // the true concurrent race can't be deterministically forced in a unit test,
+    // but the guard is what closes the window.)
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry.clone());
+    let owner = make_user(&client).await;
+
+    let live = seed_plan(&catalog, "live-8").await;
+    let target = seed_plan(&catalog, "target-8").await;
+    let name = format!("toctou-{}", Uuid::new_v4().simple());
+    let app = registry.create_app(&name, &live.id, &owner).await.expect("create");
+
+    // Archive the target, then attempt to assign it: the guarded UPDATE matches
+    // 0 rows and the disambiguation returns InvalidInput("archived").
+    assert!(catalog.archive(&target.id).await.expect("archive"));
+    let err = registry
+        .set_plan(&app.id, &target.id)
+        .await
+        .expect_err("assigning an archived plan must be rejected");
+    match err {
+        zeroship_control::registry::RegistryError::InvalidInput(msg) => {
+            assert!(msg.contains("archived"), "got: {msg}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+    let still = registry.get_app(&app.id).await.expect("get").expect("present");
+    assert_eq!(still.plan_id, live.id, "rejected set_plan must not change the plan");
+
+    // set_plan to a non-existent app returns Ok(false), NOT an error.
+    let ghost = Uuid::now_v7();
+    assert!(
+        !registry.set_plan(&ghost, &live.id).await.expect("no such app -> Ok(false)"),
+        "no such app yields Ok(false)"
+    );
+}
+
+#[compio::test]
+async fn list_skips_poison_row_but_get_is_strict() {
+    // #5: a row with un-parseable JSONB is skipped by list() (warn) but a
+    // direct get() of that id hard-errors. Inject a poison row via raw SQL.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry);
+
+    let good = seed_plan(&catalog, "good-row").await;
+    // A poison plan: runtime_limits_json is a STRING, not an AppRuntimeLimits
+    // object, so row_to_plan's from_value fails.
+    let poison_id = zeroship_core::typed_id::new_plan_id();
+    client
+        .execute(
+            "INSERT INTO zeroship.plans \
+               (id, name, base_fee_cents, price_model_json, included_quota_json, \
+                runtime_limits_json, spend_limit_default_cents, archived) \
+             VALUES ($1, 'poison', 0, '{}'::jsonb, '{}'::jsonb, '\"not-an-object\"'::jsonb, 0, false)",
+            &[&poison_id],
+        )
+        .await
+        .expect("insert poison row");
+
+    let plans = catalog.list().await.expect("list tolerates poison row");
+    assert!(plans.iter().any(|p| p.id == good.id), "good row is listed");
+    assert!(!plans.iter().any(|p| p.id == poison_id), "poison row is skipped, not listed");
+
+    // get() of the poison id is strict — hard error.
+    assert!(catalog.get(&poison_id).await.is_err(), "get is strict on a poison row");
 }
 
 #[compio::test]

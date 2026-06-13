@@ -296,18 +296,22 @@ pub fn console_plan_id() -> String {
 /// matrix the deleted `registry.rs::runtime_limits_for_plan` hardcoded:
 /// free = 50ms/5s/64MB, pro = 30s/30s/256MB, unlimited = None/None/None. The
 /// price model is the v1 overage rates in CENTS (D3): free has no overage rule
-/// (quota-capped by its spend limit), pro charges per-metric overage, unlimited
-/// is uncapped/free. Returns `[free, pro, unlimited]`.
+/// (its spend cap becomes enforceable once PR5 wires the spend engine), pro
+/// charges per-metric overage, unlimited is uncapped/free. Returns
+/// `[free, pro, unlimited]`.
 fn builtin_plans() -> Vec<Plan> {
     use crate::pricing::{PlanPrice, PricingRule};
     use std::collections::HashMap;
-    use zeroship_core::types::AppRuntimeLimits;
+    use zeroship_core::types::{AppRuntimeLimits, FREE_TIER_RUNTIME_LIMITS};
 
     let flat = |rate_cents: u64, per_units: u64| PricingRule::Flat { rate_cents, per_units };
 
-    // Free: spend_limit ≈ base (0) ⇒ quota-capped by construction, no overage
-    // rule (any usage past the included quota is bounded by the spend cap, not
-    // billed). No card required.
+    // Free: spend_limit == base (0). The intended guarantee is quota-capped, no
+    // card — but that cap is only ENFORCED once PR5 wires the spend engine to
+    // the 0 limit; until then this tier carries no overage rule so any usage
+    // past the (zero) included quota is simply un-billed, not actively blocked.
+    // Runtime limits come from the shared `FREE_TIER_RUNTIME_LIMITS` const so
+    // the seed and the registry's missing-plan fallback can never drift.
     let free = Plan {
         id: free_plan_id(),
         name: "free".to_string(),
@@ -317,11 +321,7 @@ fn builtin_plans() -> Vec<Plan> {
             overage: HashMap::new(),
             spend_limit_default_cents: 0,
         },
-        runtime: AppRuntimeLimits {
-            cpu_limit_ms: Some(50),
-            wall_timeout_ms: Some(5_000),
-            heap_limit_mb: Some(64),
-        },
+        runtime: FREE_TIER_RUNTIME_LIMITS,
         archived: false,
     };
 
@@ -389,7 +389,8 @@ pub async fn seed_plans(registry: &Registry) -> Result<(), ConsoleBootstrapError
     let catalog = PlanCatalog::new(registry.clone());
     for plan in builtin_plans() {
         catalog
-            .upsert(&plan)
+            // Built-in tiers are always unarchived; assert it explicitly.
+            .upsert(&plan, Some(plan.archived))
             .await
             .map_err(|e| ConsoleBootstrapError::Db(format!("seed plan '{}': {e}", plan.id)))?;
     }
@@ -439,9 +440,12 @@ pub async fn bootstrap_console(
     //    api_key (it deploys via the seed + serves via the gateway route), but
     //    the columns are NOT NULL. We use a deterministic, clearly-marked
     //    sentinel so a re-run doesn't churn the row.
-    // 0. Seed the built-in plan tiers FIRST so the console-app upsert's
-    //    `plan_id` FK target exists (idempotent — ON CONFLICT DO UPDATE).
-    seed_plans(registry).await?;
+    //
+    //    The built-in plan tiers are ALREADY seeded unconditionally by `main.rs`
+    //    BEFORE this function runs (so `create_app`/`set_plan` work even without
+    //    `--bootstrap-console`), which guarantees the console-app upsert's
+    //    `plan_id` FK target exists. We do NOT re-seed here — that was a
+    //    redundant second call that double-logged the "tiers seeded" line.
     let console_plan = console_plan_id();
     upsert_console_app_row(control_pg, &app_id, &app_name, &console_plan).await?;
 

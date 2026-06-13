@@ -650,13 +650,17 @@ impl From<crate::plan_catalog::Plan> for PlanDto {
 
 /// Body for `PUT /api/plans/:id`. `id` comes from the path; the body carries
 /// the editable fields. A new id mints a row; an existing id updates it.
+///
+/// `archived` is OPTIONAL: omitting it preserves the existing row's archived
+/// flag (a name/price edit must not silently un-archive a plan). Send
+/// `"archived": false` explicitly to un-archive, `true` to archive.
 #[derive(Deserialize)]
 pub struct UpsertPlanBody {
     pub name: String,
     pub price: crate::pricing::PlanPrice,
     pub runtime: zeroship_core::types::AppRuntimeLimits,
     #[serde(default)]
-    pub archived: bool,
+    pub archived: Option<bool>,
 }
 
 pub async fn list_plans(
@@ -713,15 +717,25 @@ pub async fn upsert_plan(
             .json(&serde_json::json!({"error":"plan id must be a pln_<base62> typed id"}));
     }
     let body = body.into_inner();
+    // Semantic validation at the write boundary: a malformed price model
+    // (e.g. non-monotonic tier boundaries) is a 400, not a silently-wrong
+    // charge later (#13/#4).
+    if let Err(msg) = body.price.validate() {
+        return web::HttpResponse::BadRequest()
+            .json(&serde_json::json!({"error": format!("invalid price model: {msg}")}));
+    }
+    let archived = body.archived;
     let plan = crate::plan_catalog::Plan {
         id,
         name: body.name,
         price: body.price,
         runtime: body.runtime,
-        archived: body.archived,
+        // Placeholder — the upsert uses the `archived` arg, not this field;
+        // `None` ⇒ preserve existing (a PUT without `archived` can't un-archive).
+        archived: archived.unwrap_or(false),
     };
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-    match catalog.upsert(&plan).await {
+    match catalog.upsert(&plan, archived).await {
         Ok(written) => web::HttpResponse::Ok().json(&PlanDto::from(written)),
         Err(e) => error_response(e),
     }

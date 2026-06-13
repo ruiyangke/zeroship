@@ -71,6 +71,59 @@ pub struct PlanPrice {
     pub spend_limit_default_cents: u64,
 }
 
+impl PlanPrice {
+    /// Semantic validation of a catalog price model, run at the write boundary
+    /// (the `PUT /api/plans/:id` handler) so a malformed price is rejected with
+    /// a 400 rather than producing a silently-wrong charge at billing time.
+    ///
+    /// Rejects:
+    ///   - A `Tiered` rule whose `up_to` boundaries are not strictly increasing
+    ///     (a non-monotonic or duplicate boundary makes `tier_capacity` math
+    ///     ambiguous / produces dead tiers).
+    ///   - A non-final tier with `up_to = None` (only the LAST tier may be the
+    ///     unbounded "rest" tier; an earlier `None` swallows all remaining usage
+    ///     and orphans the tiers after it).
+    ///
+    /// A `per_units == 0` rule is intentionally allowed: it means "free" by
+    /// design (matches the platform port's "resources without pricing rules are
+    /// free"), and the charge math treats it as a zero contribution.
+    ///
+    /// # Errors
+    /// Returns a human-readable message naming the offending metric.
+    pub fn validate(&self) -> Result<(), String> {
+        for (metric, rule) in &self.overage {
+            if let PricingRule::Tiered { tiers } = rule {
+                let mut prev: Option<u64> = None;
+                for (i, tier) in tiers.iter().enumerate() {
+                    match tier.up_to {
+                        Some(up_to) => {
+                            if let Some(p) = prev {
+                                if up_to <= p {
+                                    return Err(format!(
+                                        "metric '{metric}': tier up_to values must be strictly \
+                                         increasing (got {up_to} after {p})"
+                                    ));
+                                }
+                            }
+                            prev = Some(up_to);
+                        }
+                        None => {
+                            // Only the final tier may be unbounded.
+                            if i != tiers.len() - 1 {
+                                return Err(format!(
+                                    "metric '{metric}': only the final tier may have up_to = null \
+                                     (unbounded); an earlier unbounded tier orphans later tiers"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One line item in a charge breakdown — the reconciler maps each to a Stripe
 /// invoice item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,9 +160,19 @@ pub fn rule_cost(rule: &PricingRule, billable_units: u64) -> u64 {
             )
         }
         PricingRule::Tiered { tiers } => {
+            // Accumulate each tier's EXACT (unrounded) rational contribution
+            // `consumed·rate / per_units` and round the SUMMED total half-up
+            // exactly once. Rounding per tier (the old behaviour) summed a set
+            // of independently-rounded cents, biasing the charge upward by up to
+            // ~N cents for N tiers — an over-bill. Because `per_units` may differ
+            // per tier we keep a single fraction `numer / denom` over a common
+            // denominator (the LCM of the per-tier denominators) so tiers with
+            // distinct `per_units` still compose into one round-once total.
             let mut remaining = billable_units;
-            let mut cost: u128 = 0;
             let mut prev_boundary: u64 = 0;
+            // Running fraction: total contribution = numer / denom (denom > 0).
+            let mut numer: u128 = 0;
+            let mut denom: u128 = 1;
             for tier in tiers {
                 if remaining == 0 {
                     break;
@@ -119,31 +182,40 @@ pub fn rule_cost(rule: &PricingRule, billable_units: u64) -> u64 {
                     None => remaining, // final tier covers the rest
                 };
                 let consumed = remaining.min(tier_capacity);
-                cost += tiered_line_cost(consumed, tier.rate_cents, tier.per_units);
                 remaining -= consumed;
                 if let Some(up_to) = tier.up_to {
                     prev_boundary = up_to;
                 }
+                // A `per_units == 0` tier is free (avoids divide-by-zero),
+                // contributing nothing to the running fraction.
+                if tier.per_units == 0 {
+                    continue;
+                }
+                let tier_numer = u128::from(consumed) * u128::from(tier.rate_cents);
+                let tier_denom = u128::from(tier.per_units);
+                // numer/denom + tier_numer/tier_denom over a common denominator.
+                // Reduce by gcd to keep the intermediates bounded.
+                let g = gcd(denom, tier_denom);
+                let denom_lcm = denom / g * tier_denom;
+                numer = numer * (denom_lcm / denom) + tier_numer * (denom_lcm / tier_denom);
+                denom = denom_lcm;
             }
-            // Round the accumulated (still-unrounded) tiered total half-up once
-            // at the boundary. `tiered_line_cost` returns the scaled numerator
-            // pre-division so graduated tiers compose without per-tier rounding
-            // drift.
-            u64::try_from(cost).unwrap_or(u64::MAX)
+            // Round the single accumulated fraction half-up exactly once.
+            div_round_half_up(numer, denom)
         }
     }
 }
 
-/// Numerator contribution of one tier (already divided per-tier with half-up
-/// rounding). Kept separate so a `per_units == 0` tier contributes 0.
-fn tiered_line_cost(consumed: u64, rate_cents: u64, per_units: u64) -> u128 {
-    if per_units == 0 {
-        return 0;
+/// Greatest common divisor (binary-free Euclid) over `u128`. Used to keep the
+/// tiered running fraction's denominator at the LCM (not the raw product) so
+/// the `u128` numerator/denominator don't overflow for many-tier rules.
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
     }
-    u128::from(div_round_half_up(
-        u128::from(consumed) * u128::from(rate_cents),
-        u128::from(per_units),
-    ))
+    a
 }
 
 /// `round(numer / denom)` half-up, in `u128`, saturating into `u64`. A zero
@@ -153,7 +225,15 @@ fn div_round_half_up(numer: u128, denom: u128) -> u64 {
         return 0;
     }
     let rounded = (numer + denom / 2) / denom;
-    u64::try_from(rounded).unwrap_or(u64::MAX)
+    u64::try_from(rounded).unwrap_or_else(|_| {
+        // A charge that overflows u64 cents is absurd (≈$1.8e17); clamp but log
+        // it so a runaway price model / usage total is visible, not silent.
+        tracing::warn!(
+            rounded_cents = %rounded,
+            "pricing: charge saturated u64::MAX cents — clamping (check price model / usage)"
+        );
+        u64::MAX
+    })
 }
 
 /// Compute the full period charge for a plan price against a usage map.
@@ -181,7 +261,10 @@ pub fn charge_cents(price: &PlanPrice, usage: &HashMap<String, i64>) -> ChargeBr
         lines.push(LineItem { metric: metric.clone(), billable_units, cents });
     }
     lines.sort_by(|a, b| a.metric.cmp(&b.metric));
-    let lines_total: u64 = lines.iter().map(|l| l.cents).sum();
+    // Saturating-add the line cents (consistent with the base-fee add below) so
+    // the documented `total == base + Σ lines` invariant holds even on overflow.
+    // A plain `.sum()` would debug-panic / release-wrap, breaking the invariant.
+    let lines_total: u64 = lines.iter().fold(0u64, |acc, l| acc.saturating_add(l.cents));
     let total_cents = price.base_fee_cents.saturating_add(lines_total);
     ChargeBreakdown {
         base_cents: price.base_fee_cents,
@@ -350,6 +433,141 @@ mod tests {
         // Lines are deterministically sorted by metric name.
         assert_eq!(b.lines[0].metric, "egress_bytes");
         assert_eq!(b.lines[1].metric, "requests");
+    }
+
+    #[test]
+    fn tiered_rounds_once_over_summed_total_not_per_tier() {
+        // REGRESSION for the per-tier round-half-up over-bill (#1). Three tiers
+        // whose EXACT contributions each carry a fractional cent that rounds UP
+        // individually, but whose SUM has a smaller fractional part. Rounding
+        // per tier over-bills; rounding the summed total once is correct.
+        //
+        // Each tier: 1 unit at 5 cents per 8 units = 5/8 = 0.625c.
+        //   per-tier round-half-up: 1 + 1 + 1 = 3c   (the OLD buggy total)
+        //   exact sum: 15/8 = 1.875c → round-once half-up = 2c (the CORRECT total)
+        let mut price = PlanPrice::default();
+        price.overage.insert(
+            "m".to_string(),
+            PricingRule::Tiered {
+                tiers: vec![
+                    PricingTier { up_to: Some(1), rate_cents: 5, per_units: 8 },
+                    PricingTier { up_to: Some(2), rate_cents: 5, per_units: 8 },
+                    PricingTier { up_to: None, rate_cents: 5, per_units: 8 },
+                ],
+            },
+        );
+        let mut usage = HashMap::new();
+        usage.insert("m".to_string(), 3);
+        let b = charge_cents(&price, &usage);
+        assert_eq!(b.lines.len(), 1);
+        assert_eq!(
+            b.lines[0].cents, 2,
+            "round ONCE over the summed 15/8=1.875c → 2c, NOT 3c (per-tier rounding over-bills)"
+        );
+        assert_eq!(b.total_cents, 2);
+    }
+
+    #[test]
+    fn tiered_round_once_handles_varying_per_units() {
+        // Tiers with DIFFERENT per_units must still compose into a single
+        // round-once total via the common-denominator accumulation.
+        //   Tier1: 1 unit @ 1c / 3  = 1/3
+        //   Tier2: 1 unit @ 1c / 7  = 1/7
+        //   exact sum = 1/3 + 1/7 = 10/21 ≈ 0.476c → round-once = 0c
+        //   per-tier rounding would give round(1/3)=0 + round(1/7)=0 = 0 here,
+        //   so also assert a case where they diverge:
+        //   Tier1: 2 @ 1c/3 = 2/3 (≈0.667→1 per-tier), Tier2: 2 @ 1c/3 = 2/3
+        //   exact sum = 4/3 ≈ 1.333c → round-once = 1c; per-tier = 1+1 = 2c.
+        let mut price = PlanPrice::default();
+        price.overage.insert(
+            "m".to_string(),
+            PricingRule::Tiered {
+                tiers: vec![
+                    PricingTier { up_to: Some(2), rate_cents: 1, per_units: 3 },
+                    PricingTier { up_to: None, rate_cents: 1, per_units: 3 },
+                ],
+            },
+        );
+        let mut usage = HashMap::new();
+        usage.insert("m".to_string(), 4);
+        let b = charge_cents(&price, &usage);
+        assert_eq!(b.lines[0].cents, 1, "4/3=1.333c → round once = 1c, not 2c");
+    }
+
+    #[test]
+    fn tiered_pricing_overage_round_once_with_zero_first_tier() {
+        // The original ported tiered test still passes under round-once (the
+        // 270 and 100 cents are exact, so rounding once == rounding per tier).
+        assert_eq!(rule_cost(&PricingRule::Tiered {
+            tiers: vec![
+                PricingTier { up_to: Some(1_000_000), rate_cents: 0, per_units: 1_000_000 },
+                PricingTier { up_to: Some(10_000_000), rate_cents: 30, per_units: 1_000_000 },
+                PricingTier { up_to: None, rate_cents: 20, per_units: 1_000_000 },
+            ],
+        }, 15_000_000), 370);
+    }
+
+    #[test]
+    fn validate_rejects_non_monotonic_tier_boundaries() {
+        let mut price = PlanPrice::default();
+        price.overage.insert(
+            "requests".to_string(),
+            PricingRule::Tiered {
+                tiers: vec![
+                    PricingTier { up_to: Some(10), rate_cents: 1, per_units: 1 },
+                    PricingTier { up_to: Some(10), rate_cents: 2, per_units: 1 }, // duplicate
+                    PricingTier { up_to: None, rate_cents: 3, per_units: 1 },
+                ],
+            },
+        );
+        let err = price.validate().expect_err("duplicate up_to must be rejected");
+        assert!(err.contains("strictly increasing"), "got: {err}");
+
+        // Decreasing boundary is also rejected.
+        let mut price2 = PlanPrice::default();
+        price2.overage.insert(
+            "requests".to_string(),
+            PricingRule::Tiered {
+                tiers: vec![
+                    PricingTier { up_to: Some(100), rate_cents: 1, per_units: 1 },
+                    PricingTier { up_to: Some(50), rate_cents: 2, per_units: 1 },
+                ],
+            },
+        );
+        assert!(price2.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unbounded_non_final_tier() {
+        let mut price = PlanPrice::default();
+        price.overage.insert(
+            "requests".to_string(),
+            PricingRule::Tiered {
+                tiers: vec![
+                    PricingTier { up_to: None, rate_cents: 1, per_units: 1 }, // unbounded, not last
+                    PricingTier { up_to: Some(10), rate_cents: 2, per_units: 1 },
+                ],
+            },
+        );
+        let err = price.validate().expect_err("non-final unbounded tier must be rejected");
+        assert!(err.contains("final tier"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_tiers_and_flat() {
+        let mut price = PlanPrice::default();
+        price.overage.insert("flat".to_string(), flat(30, 1_000_000));
+        price.overage.insert(
+            "tiered".to_string(),
+            PricingRule::Tiered {
+                tiers: vec![
+                    PricingTier { up_to: Some(1_000_000), rate_cents: 0, per_units: 1_000_000 },
+                    PricingTier { up_to: Some(10_000_000), rate_cents: 30, per_units: 1_000_000 },
+                    PricingTier { up_to: None, rate_cents: 20, per_units: 1_000_000 },
+                ],
+            },
+        );
+        assert!(price.validate().is_ok());
     }
 
     #[test]

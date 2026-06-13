@@ -27,6 +27,19 @@ pub struct AppRuntimeLimits {
     pub heap_limit_mb: Option<u32>,
 }
 
+/// Conservative free-tier runtime limits — the single shared source of truth.
+///
+/// Used by the control-plane catalog seed (`bootstrap_console::builtin_plans`
+/// free tier) and the registry's fallback for an app whose plan row is missing
+/// or whose `runtime_limits_json` fails to parse. Keeping ONE const stops the
+/// two copies from drifting (50ms CPU / 5s wall / 64MB heap). The worker
+/// therefore never gets `(None, None, None)` (unbounded) for an unpriced app.
+pub const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
+    cpu_limit_ms: Some(50),
+    wall_timeout_ms: Some(5_000),
+    heap_limit_mb: Some(64),
+};
+
 /// Worker-facing metadata for an app version/config snapshot.
 ///
 /// `PartialEq`/`Eq` are intentionally NOT derived: `manifest`'s recursive

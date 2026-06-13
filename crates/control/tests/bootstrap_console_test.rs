@@ -375,6 +375,15 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         hydra_admin_url: hydra.base.clone(),
     };
 
+    // Seed the built-in plan tiers FIRST — exactly as `main.rs` does
+    // UNCONDITIONALLY before calling `bootstrap_console` (the console-app upsert
+    // needs the `unlimited` plan as its `plan_id` FK target). `bootstrap_console`
+    // no longer self-seeds (that was a redundant double-seed; #15), so the
+    // caller owns the seed, and this test mirrors that contract.
+    zeroship_control::bootstrap_console::seed_plans(&registry)
+        .await
+        .expect("seed built-in plan tiers");
+
     // ---- First run: seeds everything. ----
     let first = bootstrap_console(&cfg, &registry, &env_store, &blob_store, &mut control_pg)
         .await

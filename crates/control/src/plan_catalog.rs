@@ -59,6 +59,13 @@ impl PlanCatalog {
     }
 
     /// List every plan (including archived ones) ordered by id.
+    ///
+    /// Resilient to a single poison row: a row whose JSONB columns fail to
+    /// deserialize is SKIPPED with a `tracing::warn!` rather than failing the
+    /// whole catalog list (consistent with the registry's tolerant free-tier
+    /// fallback in `get_versions`). `get(:id)` stays STRICT — a specific id that
+    /// can't be parsed is a hard error there, because the caller asked for that
+    /// exact plan.
     pub async fn list(&self) -> Result<Vec<Plan>, RegistryError> {
         let conn = self.registry.conn().await?;
         let rows = conn
@@ -69,30 +76,72 @@ impl PlanCatalog {
                 &[],
             )
             .await?;
-        rows.iter().map(row_to_plan).collect()
+        let mut plans = Vec::with_capacity(rows.len());
+        for row in &rows {
+            match row_to_plan(row) {
+                Ok(plan) => plans.push(plan),
+                Err(e) => {
+                    let id: String = row.get("id");
+                    tracing::warn!(
+                        plan_id = %id,
+                        error = %e,
+                        "plan_catalog: list: skipping unparseable plan row"
+                    );
+                }
+            }
+        }
+        Ok(plans)
     }
 
     /// Insert-or-update a plan (operator / master-key gated at the HTTP layer).
     /// The id is the primary key; an existing id is updated in place (so the
     /// built-in tiers are idempotently re-seeded on every boot). Returns the
     /// written [`Plan`].
-    pub async fn upsert(&self, plan: &Plan) -> Result<Plan, RegistryError> {
+    ///
+    /// `archived` controls the archived flag on the UPSERT:
+    ///   - `Some(b)` — set `archived = b` explicitly (the only way to UN-archive
+    ///     is `Some(false)`; un-archiving must be deliberate).
+    ///   - `None` — PRESERVE the existing row's `archived` on conflict
+    ///     (`COALESCE($8, plans.archived)`); a brand-new row defaults to
+    ///     `false`. This is what a PUT without an `archived` field maps to, so a
+    ///     name/price edit can't silently resurrect an archived plan.
+    ///
+    /// `plan.archived` is ignored for the flag — pass the intent via `archived`.
+    pub async fn upsert(&self, plan: &Plan, archived: Option<bool>) -> Result<Plan, RegistryError> {
         let price_model_json = serde_json::to_value(&plan.price.overage)
             .map_err(|e| RegistryError::InvalidInput(format!("price_model_json: {e}")))?;
         let included_quota_json = serde_json::to_value(&plan.price.included)
             .map_err(|e| RegistryError::InvalidInput(format!("included_quota_json: {e}")))?;
         let runtime_limits_json = serde_json::to_value(&plan.runtime)
             .map_err(|e| RegistryError::InvalidInput(format!("runtime_limits_json: {e}")))?;
-        let base_fee = i64::try_from(plan.price.base_fee_cents).unwrap_or(i64::MAX);
-        let spend_default = i64::try_from(plan.price.spend_limit_default_cents).unwrap_or(i64::MAX);
+        let base_fee = i64::try_from(plan.price.base_fee_cents).unwrap_or_else(|_| {
+            tracing::warn!(
+                base_fee_cents = plan.price.base_fee_cents,
+                plan_id = %plan.id,
+                "plan_catalog: base_fee_cents exceeds i64::MAX — clamping"
+            );
+            i64::MAX
+        });
+        let spend_default = i64::try_from(plan.price.spend_limit_default_cents).unwrap_or_else(|_| {
+            tracing::warn!(
+                spend_limit_default_cents = plan.price.spend_limit_default_cents,
+                plan_id = %plan.id,
+                "plan_catalog: spend_limit_default_cents exceeds i64::MAX — clamping"
+            );
+            i64::MAX
+        });
 
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
+                // INSERT defaults a new row's archived to COALESCE($8, false);
+                // ON CONFLICT preserves the existing value when $8 is NULL
+                // (COALESCE($8, plans.archived)) so a PUT without `archived`
+                // never un-archives.
                 "INSERT INTO zeroship.plans \
                    (id, name, base_fee_cents, price_model_json, included_quota_json, \
                     runtime_limits_json, spend_limit_default_cents, archived, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, false), NOW()) \
                  ON CONFLICT (id) DO UPDATE SET \
                     name = EXCLUDED.name, \
                     base_fee_cents = EXCLUDED.base_fee_cents, \
@@ -100,7 +149,7 @@ impl PlanCatalog {
                     included_quota_json = EXCLUDED.included_quota_json, \
                     runtime_limits_json = EXCLUDED.runtime_limits_json, \
                     spend_limit_default_cents = EXCLUDED.spend_limit_default_cents, \
-                    archived = EXCLUDED.archived, \
+                    archived = COALESCE($8, zeroship.plans.archived), \
                     updated_at = NOW() \
                  RETURNING id, name, base_fee_cents, price_model_json, included_quota_json, \
                            runtime_limits_json, spend_limit_default_cents, archived",
@@ -112,7 +161,7 @@ impl PlanCatalog {
                     &included_quota_json,
                     &runtime_limits_json,
                     &spend_default,
-                    &plan.archived,
+                    &archived,
                 ],
             )
             .await?;

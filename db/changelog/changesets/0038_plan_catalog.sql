@@ -34,8 +34,17 @@ CREATE TABLE zeroship.plans (
     created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- ON DELETE RESTRICT is stated EXPLICITLY (it is also the default) to document
+-- intent: a plan is never hard-deleted while an app references it — plans are
+-- archived (soft), so a stray DELETE must be blocked, not cascade.
 ALTER TABLE zeroship.apps
-    ADD CONSTRAINT apps_plan_fk FOREIGN KEY (plan_id) REFERENCES zeroship.plans(id);
+    ADD CONSTRAINT apps_plan_fk FOREIGN KEY (plan_id) REFERENCES zeroship.plans(id)
+        ON DELETE RESTRICT;
+-- Index the FK column: `Registry::get_versions` LEFT JOINs apps→plans on every
+-- 5s route-pull, and PG does not auto-index FK referencing columns. Without
+-- this the join scans apps.plan_id sequentially each poll.
+CREATE INDEX apps_plan_id_idx ON zeroship.apps(plan_id);
+--rollback DROP INDEX zeroship.apps_plan_id_idx;
 --rollback ALTER TABLE zeroship.apps DROP CONSTRAINT apps_plan_fk;
 --rollback DROP TABLE zeroship.plans;
 

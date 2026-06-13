@@ -8,6 +8,7 @@ use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
 use zeroship_core::types::{
     AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap,
+    FREE_TIER_RUNTIME_LIMITS,
 };
 
 // ---------------------------------------------------------------------------
@@ -378,21 +379,48 @@ impl Registry {
 
     /// Change the plan for an app.
     ///
-    /// Validates the target plan exists + is unarchived in the catalog BEFORE
-    /// the UPDATE (PR4 / CT-A1): an unknown or archived plan returns a clean
-    /// [`RegistryError::InvalidInput`] rather than a raw FK violation. Returns
-    /// `true` if the app row was updated, `false` if no such app.
+    /// Race-free in ONE statement (PR4 / CT-A1): the UPDATE only fires when the
+    /// target plan EXISTS and is NOT archived, guarded by an `EXISTS` subquery in
+    /// the same statement. A separate validate-then-UPDATE had a TOCTOU window —
+    /// a plan archived between the check and the UPDATE would still be assigned
+    /// (the FK only guards existence, and archive is an UPDATE not a delete).
+    ///
+    /// Translates the result: a matched+updated app row → `Ok(true)`. Zero rows
+    /// is ambiguous (no such app OR the plan is unknown/archived), so we
+    /// disambiguate with a follow-up read to return a clean typed error rather
+    /// than a raw FK violation or a silent no-op.
     pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
-        Self::validate_plan(&conn, plan_id).await?;
         let n = conn
             .execute(
-                "UPDATE zeroship.apps SET plan_id = $1, \
-                 updated_at = NOW() WHERE id = $2",
+                "UPDATE zeroship.apps SET plan_id = $1, updated_at = NOW() \
+                 WHERE id = $2 \
+                   AND EXISTS (SELECT 1 FROM zeroship.plans \
+                               WHERE id = $1 AND NOT archived)",
                 &[&plan_id, id],
             )
             .await?;
-        Ok(n > 0)
+        if n > 0 {
+            return Ok(true);
+        }
+        // Zero rows: the app doesn't exist, or the plan is unknown/archived.
+        // Disambiguate so the caller gets a typed error for a bad plan rather
+        // than a misleading `Ok(false)` (= "no such app").
+        let app_exists = conn
+            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
+            .await?;
+        if app_exists.is_empty() {
+            return Ok(false); // genuinely no such app
+        }
+        // The app exists ⇒ the plan guard is why nothing updated. Reuse the
+        // shared validator to produce the precise unknown-vs-archived message.
+        Self::validate_plan(&conn, plan_id).await?;
+        // validate_plan said the plan is fine yet the guarded UPDATE matched 0
+        // rows — only possible under a concurrent archive between the two
+        // statements. Report it as the same typed error class.
+        Err(RegistryError::InvalidInput(format!(
+            "plan '{plan_id}' is not assignable (archived concurrently)"
+        )))
     }
 
     // -- Versions / Routes --------------------------------------------------
@@ -540,16 +568,6 @@ impl Registry {
     // (no idempotency, no period, no custom metrics) are gone — pre-launch,
     // no deprecated aliases.
 }
-
-/// Conservative free-tier runtime limits, applied when an app's plan row is
-/// missing or its `runtime_limits_json` fails to parse. An unpriced/unknown
-/// app is treated as the cheapest, most-bounded tier — the worker never gets
-/// `(None, None, None)` (unbounded CPU/wall/heap) by default.
-pub(crate) const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
-    cpu_limit_ms: Some(50),
-    wall_timeout_ms: Some(5_000),
-    heap_limit_mb: Some(64),
-};
 
 /// Derive an app's [`AppRuntimeLimits`] from its plan-catalog
 /// `runtime_limits_json` (the LEFT-JOINed column in [`Registry::get_versions`]).
