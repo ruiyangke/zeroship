@@ -219,3 +219,574 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
 5. **Metrics set** — ship the 5 platform counters + open `env.meter` custom
    metrics in v1, or also the richer "25+ metrics" from the old drafts?
 6. **ISS-30 onboarding** — fold into this epic or run as a parallel Stripe slice?
+
+> **All six resolved** by the FINALIZED DESIGN section at the top of this doc
+> (2026-06-13). Retained for provenance only.
+
+---
+
+## Implementation plan: PR4–PR7 (build blueprint)
+
+> Implements the FINALIZED DESIGN (locked 2026-06-13). PR1–PR3 already landed:
+> `UsageReport{report_id,sequence,custom}` + `AppUsage.custom` (`crates/core/src/types.rs`),
+> the `plugin-meter` producer + compio flush, and the idempotent aggregator
+> (`crates/control/src/metering.rs` — `IngestLedger`, `Metering`, `period_start_unix`,
+> `current_period_totals`) over `usage_aggregates`/`usage_reports_seen` (changeset 0037).
+> Latest changeset = `0037`; new ones start at `0038`.
+>
+> **Status: HARDENED (critic→reviser, 3 rounds) — ready for PR4 implementation.**
+
+### Cross-cutting decisions made here (sub-decisions the locked design left to the build)
+
+- **D1 — Spend state is PULLed on `RouteEntry`, not pushed.** Live code has NO
+  `ControlEvent` delivery path: `ControlEvent` (core) is defined but unconsumed;
+  the gateway pulls `/internal/routes` every `poll_interval_secs`
+  (`gateway/src/sync.rs::sync_once`) and the worker pulls `/internal/versions`.
+  So the *faithful* mechanism is: control writes `spend_state` to a column, it
+  rides on the pulled `RouteEntry`, and the gateway's `RouteCache::update`
+  threads it onto `CompiledRoute`. We STILL add `ControlEvent::SpendState` to the
+  wire enum (the design names it and it is the future push channel), and control
+  constructs it on every transition for the audit log + a future SSE channel —
+  but enforcement does not depend on push delivery. Steady-state latency = one
+  poll interval (same as a plan change today), correct for a spend cap evaluated
+  on a ~minute aggregation tick.
+- **D2 — `plan_id` becomes a typed_id FK (`pln_<base62>`), free-text dropped.**
+  Pre-launch: no alias. `AppRecord.plan_id`, `RouteEntry.plan_id`,
+  `AppVersionInfo.plan_id` stay `String` but now hold a `pln_…` id that must
+  exist in the catalog. `runtime_limits_for_plan` (registry.rs:490) is deleted;
+  limits come from the catalog row.
+  - **typed_id prefix is NOT yet registered.** `crates/core/src/typed_id.rs`
+    declares prefixes as `pub const` string constants (`USER_PREFIX="usr"`,
+    `APP_PREFIX="app"`, `WAKE_PREFIX="wak"`, `APP_OAUTH_CLIENT_PREFIX="oac"`,
+    …) and the `all_prefixes`/`*_prefix_is_three_chars` tests enumerate them.
+    PR4 **adds** `pub const PLAN_PREFIX: &str = "pln";` (3 chars, matching the
+    R16-API2 convention) + a `new_plan_id()` helper (`generate(PLAN_PREFIX)`)
+    and extends the `all_prefixes` test. The catalog `upsert` mints ids via
+    `new_plan_id()`; built-in tiers seed fixed ids (`pln_free`, `pln_pro`,
+    `pln_unlimited` — these are sentinel ids, exempt from base62 decode, matched
+    verbatim — OR mint real ones and reference them from `bootstrap_builder`).
+    Decision: **mint real `pln_<base62>` ids at seed time** and have the seeder
+    return them so the console-app `set_plan` references the real id (no sentinel
+    special-case in the parser).
+- **D3 — money is integer cents, not millicents.** The ported `pricing.rs`
+  (`crates/platform/src/billing/pricing.rs`) uses **millicents** throughout
+  (`PricingRule::Flat{rate_millicents,per_units}`, `PricingTier.rate_millicents`,
+  `cost()` returns `total_millicents`); the catalog and reconciler standardize on
+  **cents** (Stripe's unit) with `u128` intermediate math, rounding half-up at the
+  line-item boundary. The port renames every `*_millicents` field to `*_cents` and
+  re-scales the seed rates (the platform seed table used e.g. `300 millicents /
+  1_000_000 requests`; convert to cents at seed time, NOT in the hot path).
+- **D4 — creator billing identity lives on a NEW `creator_billing` table** keyed
+  by `creator_id`, NOT on `apps`. `creator_accounts` already holds the Stream-2
+  Connect `acct_…` and is keyed `creator_id UUID PRIMARY KEY REFERENCES
+  zeroship.users(id)` (changeset `0004`); so a `creator_id` **is a user id**. The
+  Stream-1 platform Customer `cus_…` is distinct and gets its own
+  `creator_billing` table (also keyed by the same `creator_id`/user id).
+  - **Creator→app ownership join (H1 — the schema has NO `apps.creator_id`).**
+    Changeset `0031` states it explicitly: *"This schema has no `apps.creator_id`
+    column — the only data-level owner signal is `app_members` itself."*
+    Ownership flows through `zeroship.app_members(app_id, user_id, role)` with
+    `role='owner'`. Therefore the reconciler's "sum over the creator's apps" is:
+    ```sql
+    SELECT m.user_id AS creator_id, m.app_id
+    FROM zeroship.app_members m
+    WHERE m.role = 'owner'
+    ```
+    An app has **at most one** owner row (0031's backfill + `create_app` bind a
+    single owner; PK is `(app_id, user_id)` but the `owner` role is singular by
+    construction). The reconciler iterates owner rows, groups by `user_id`, and
+    bills that `creator_id`. Apps with **no** owner row (e.g. the system console,
+    `0036 apps.system=true`) are **skipped** (no billable creator). `creator_billing`
+    rows are created lazily on first `billing/setup` for that `creator_id`.
+
+---
+
+### PR4 — configurable tiered pricing catalog
+
+**Goal.** Replace free-text `plan_id` (CT-A1 self-escalation) with an
+operator-editable, server-side plan catalog. Per tier: `base_fee_cents`,
+`included_quota[metric]`, `overage_rate_cents[metric]` (per unit, with a
+`per_units` divisor), `spend_limit_default_cents`. Compute a period charge from
+`usage_aggregates`.
+
+#### (a) Files to create/modify
+- **NEW `crates/control/src/pricing.rs`** — ported, unit-pure, DB-free:
+  - `PricingRule::{Flat{rate_cents,per_units}, Tiered{tiers:Vec<PricingTier>}}`
+    and `PricingTier{up_to:Option<u64>, rate_cents, per_units}` — ported from
+    `crates/platform/src/billing/pricing.rs` (millicents→cents, D3).
+  - `struct PlanPrice { base_fee_cents: u64, included: HashMap<String,u64>,
+    overage: HashMap<String,PricingRule>, spend_limit_default_cents: u64 }`.
+  - `fn charge_cents(&PlanPrice, usage: &HashMap<String,i64>) -> ChargeBreakdown`
+    implementing `charge = base + Σ max(0, usage[m] − included[m]) × rate[m]`.
+    `ChargeBreakdown { base_cents, lines: Vec<LineItem{metric, billable_units,
+    cents}>, total_cents }` — the reconciler (PR6) consumes `lines`.
+  - Keep/port existing `pricing.rs` unit tests (unit converted); ADD
+    `overage_only_charges_above_included` and
+    `included_quota_fully_covers_usage_yields_base_only`.
+- **NEW `crates/control/src/plan_catalog.rs`** — the PG-backed catalog:
+  - `struct PlanCatalog { registry: Registry }`.
+  - `struct Plan { id: String /* pln_… */, name: String, price: PlanPrice,
+    runtime: AppRuntimeLimits, archived: bool }`.
+  - `get/list/upsert/archive` (upsert/archive operator/master-key gated). JSON
+    columns (`price_model_json`, `included_quota_json`, `runtime_limits_json`)
+    deserialize into the pure types.
+- **MODIFY `crates/control/src/registry.rs`**
+  - DELETE `runtime_limits_for_plan` (~490–513). `get_versions` (~363–399) JOINs
+    `plans` and builds `AppRuntimeLimits` from the plan row; missing plan ⇒
+    conservative free-tier fallback (worker never gets `None,None,None`).
+  - `create_app`/`set_plan` validate the id exists+unarchived (FK at DB; Rust path
+    returns clean `InvalidInput` not a raw FK violation). NOTE `set_plan`
+    (registry.rs:341) is today a bare `UPDATE zeroship.apps SET plan_id=$1` with NO
+    validation — PR4 adds the catalog existence/archived check before the UPDATE.
+    `set_plan` seeds the app's effective `spend_limit_cents` from
+    `spend_limit_default_cents` if no explicit override (writes the
+    `app_spend_state` row created in PR5; for PR4-alone the seed can be deferred to
+    PR5's first `evaluate_all`).
+  - DELETE the two doc-comment references to `runtime_limits_for_plan` in
+    `registry.rs` callers (`bootstrap_console.rs:9–10,83–85`) so no dangling symbol
+    reference remains after the fn is removed.
+- **MODIFY `crates/control/src/bootstrap_console.rs`** — change `CONSOLE_PLAN_ID`
+  (line 85) from `"enterprise"` to the seeded unlimited-tier `pln_…` id, and add a
+  `seed_plans()` call ahead of the console-app upsert (see "Seeding + console-app
+  FK ordering" below). Update the file's doc comment (lines 8–10, 83–85).
+- **MODIFY `crates/control/src/api.rs`** + route registration: `GET /api/plans`
+  (BillingRead), `GET /api/plans/:id`, `PUT/DELETE /api/plans/:id` (master-key /
+  BillingWrite on Resource::Any). DELETE has no DB DELETE — it archives
+  (`archived=true`) so existing `apps.plan_id` FKs + historical `billing_runs`
+  stay resolvable.
+
+#### (b) Schema changeset — `db/changelog/changesets/0038_plan_catalog.sql`
+```sql
+--liquibase formatted sql
+--changeset zeroship:plan-catalog splitStatements:true
+CREATE TABLE zeroship.plans (
+    id                        TEXT        PRIMARY KEY,          -- pln_<base62>
+    name                      TEXT        NOT NULL,
+    base_fee_cents            BIGINT      NOT NULL DEFAULT 0,
+    price_model_json          JSONB       NOT NULL,             -- {metric: PricingRule}
+    included_quota_json       JSONB       NOT NULL DEFAULT '{}',-- {metric: u64}
+    runtime_limits_json       JSONB       NOT NULL,             -- AppRuntimeLimits
+    spend_limit_default_cents BIGINT      NOT NULL DEFAULT 0,
+    archived                  BOOLEAN     NOT NULL DEFAULT false,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE zeroship.apps
+    ADD CONSTRAINT apps_plan_fk FOREIGN KEY (plan_id) REFERENCES zeroship.plans(id);
+--rollback ALTER TABLE zeroship.apps DROP CONSTRAINT apps_plan_fk;
+--rollback DROP TABLE zeroship.plans;
+
+--changeset zeroship:plan-catalog-grants splitStatements:false
+DO $g$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.plans TO zeroship_control';
+  END IF;
+END $g$;
+```
+`plans` is a global (non-tenant) catalog — NO RLS (operator config; control is
+BYPASSRLS). Grant `SELECT,INSERT,UPDATE` to `zeroship_control` (no DELETE —
+archive, never hard-delete, so historical `billing_runs` keep a resolvable plan).
+
+**Seeding + console-app FK ordering (verified against live bootstrap).** The
+console app row is upserted by **`crates/control/src/bootstrap_console.rs`** (the
+`INSERT INTO zeroship.apps … ON CONFLICT` at ~line 381), NOT `bootstrap_builder.rs`,
+and it uses the free-text `CONSOLE_PLAN_ID = "enterprise"` const
+(`bootstrap_console.rs:85`). Under the PR4 FK (`apps.plan_id → plans.id`) two
+things MUST happen, in this order, BEFORE that upsert runs:
+1. A `seed_plans()` step (new, called at the START of the control bootstrap, ahead
+   of `bootstrap_console`) upserts the built-in tiers and returns their minted
+   `pln_…` ids. Tiers: `free` (spend_limit ≈ base ⇒ quota-capped, no card),
+   `pro`, `unlimited`/enterprise (no CPU/wall cap — what the console needs). The
+   runtime_limits_json for each reproduces the matrix that
+   `runtime_limits_for_plan` (registry.rs:490, deleted in PR4) hardcoded today
+   (free=50ms/5s/64MB, pro=30s/30s/256MB, unlimited=None/None/None).
+2. **`CONSOLE_PLAN_ID` changes from the free-text `"enterprise"` to the seeded
+   `pln_…` id** of the unlimited tier (resolve it from `seed_plans()`'s return, or
+   make the seed mint a deterministic id and reference it). Otherwise the console
+   `INSERT` violates the new FK and bootstrap fails. This is a required edit in
+   `bootstrap_console.rs` + its doc comment (lines 8–10, 83–85 reference the now
+   deleted `runtime_limits_for_plan`).
+
+The `seed_plans()` upsert is idempotent (ON CONFLICT (id) DO UPDATE), so a
+re-bootstrap is a no-op.
+
+#### (d) TDD test plan
+- **Unit (DB-free):** ported pricing tests + two overage cases; breakdown sums to
+  total. **Regression:** `overage_only_charges_above_included` (catches a port bug
+  that prices from zero).
+- **Integration (`CONTROL_TEST_DB` :5440):** `create_app_with_unknown_plan_id_is_rejected`
+  (closes CT-A1), `set_plan_to_archived_plan_is_rejected`,
+  `get_versions_derives_limits_from_catalog_not_hardcode`, `charge_from_real_aggregates`.
+
+**Build/test gate (must be green to land PR4):** `cargo build -p zeroship-control
+-p zeroship-core` + `cargo test -p zeroship-control` (catalog/pricing units +
+integration; integration needs PG on :5440) + `cargo test -p zeroship-core`
+(typed_id `all_prefixes` now includes `pln`). `clippy -p zeroship-control` clean.
+
+---
+
+### PR5 — spend engine + edge enforcement
+
+**Goal.** Each tick: compute period spend vs `spend_limit_cents`; derive
+`SpendState` (Warn ~80% → Degrade soft cap → Block hard cap); persist; surface on
+the pulled `RouteEntry`; gateway throttles (Degrade) or 402s (Block) pre-dispatch.
+Hysteresis on recovery.
+
+#### (a) Files to create/modify
+- **MODIFY `crates/core/src/types.rs`** — ADD `enum SpendState { Allow, Warn,
+  Degrade, Block }` (snake_case, Default=Allow) — folds the ported `SpendAction`
+  (delete it, no alias); ADD `ControlEvent::SpendState { app_id, state }`; ADD
+  `#[serde(default)] RouteEntry.spend_state` (update the gateway/worker fixtures).
+- **NEW `crates/control/src/spend.rs`** — PURE
+  `derive_state(spend_cents: u64, limit_cents: u64, &SpendThresholds, prev: SpendState) -> SpendState`.
+  `SpendThresholds { warn_pct: 80, degrade_pct: 95, block_pct: 100, deadband_pct: 5 }`.
+  The state machine is defined on `pct = if limit==0 { u64::MAX } else { spend*100/limit }`
+  (integer math; `limit==0` ⇒ a free/cardless plan ⇒ any spend is `pct=∞` ⇒ Block):
+  - **Upward (entering a more-restrictive state) — at the threshold:**
+    `pct >= block_pct` ⇒ Block; else `pct >= degrade_pct` ⇒ Degrade; else
+    `pct >= warn_pct` ⇒ Warn; else Allow. Compute this as `raw_state`.
+  - **Downward (relaxing) — only past the deadband, to avoid flapping:** never
+    relax by more than one step per evaluation isn't required; what matters is the
+    boundary. A transition to a LESS-restrictive state than `prev` is only
+    permitted when `pct` has dropped below `(threshold_of(prev) - deadband_pct)`.
+    Concretely: `Degrade→Warn` requires `pct < degrade_pct - 5 = 90`;
+    `Warn→Allow` requires `pct < warn_pct - 5 = 75`; `Block→Degrade` requires
+    `pct < block_pct - 5 = 95`. If `raw_state` is less restrictive than `prev` but
+    the deadband condition is NOT met, **hold `prev`** (this is the anti-flap).
+  - **Raised-limit immediate recovery (NOT subject to deadband).** The deadband
+    guards against oscillation at a FIXED limit. When the *limit itself changes*
+    (creator raises it, or new plan), the percentage drops by construction and the
+    deadband would wrongly pin the app in Block/Degrade. So: `evaluate_all` passes
+    the `limit_cents` used at `prev`'s computation (persisted alongside `state` in
+    `app_spend_state`); if `limit_cents != prev_limit_cents` (a real limit change,
+    not just accrual), `derive_state` **ignores the deadband for that tick** and
+    returns `raw_state` directly. Result: raising the cap recovers immediately on
+    the next ~60s tick; accrual oscillation near a fixed cap does not flap.
+  - PG `SpendEngine { registry, catalog }`:
+    - `evaluate_all() -> Vec<(app_id, old: SpendState, new: SpendState)>` — for
+      each app: read `current_period_totals` (PR1–3 `Metering`), price via the
+      plan's `PlanPrice::charge_cents` (PR4) to get `spend_cents`, resolve the
+      effective `limit_cents` (`app_spend_state.spend_limit_cents` else the plan's
+      `spend_limit_default_cents`), call `derive_state`, and on a transition
+      UPDATE `app_spend_state` (state, spend_cents, the limit used) + INSERT a
+      `spend_state_history` row. Returns only the apps that transitioned.
+    - `set_limit(app_id, Option<u64>)` — upsert `app_spend_state.spend_limit_cents`
+      (`None` clears the override → plan default). Used by the PR-A4 endpoint.
+- **NEW `crates/control/src/cron/spend_reconcile.rs`** — compio interval (~60s):
+  `evaluate_all` → audit + construct `ControlEvent::SpendState` per transition.
+  Registered in `cron/mod.rs::spawn_all` via `compio::runtime::spawn(...).detach()`
+  (the established pattern — `spawn_all` currently spawns `audit_retention::run`
+  and `orphaned_app_reaper::run` this way; add a third spawn for
+  `spend_reconcile::run(Arc::clone(&state), DEFAULT_TICK_SECS)`).
+- **MODIFY `crates/control/src/api.rs`** + route registration — the creator-facing
+  override endpoint (M4): `PUT /api/apps/:id/spend-limit` body
+  `{ "cents": <u64|null> }` → authz `app_owner` on `Resource::App(id)` (the same
+  app-membership gate `set_plan`/env endpoints use) → `SpendEngine::set_limit(app,
+  Option<cents>)` (upserts `app_spend_state.spend_limit_cents`; `null` clears the
+  override back to the plan default). `GET /api/apps/:id/spend-limit` returns the
+  effective limit + current state. A creator CANNOT raise the limit beyond the
+  plan's `spend_limit_default_cents` unless their plan permits it (validated
+  against the catalog row); money stays server-bounded.
+- **MODIFY `registry.rs::get_routes`** — JOIN `app_spend_state` onto
+  `RouteEntry.spend_state`.
+- **MODIFY `gateway/src/sync.rs`** — `RouteCache::update` threads `spend_state` onto
+  `CompiledRoute`; on a per-app state flip it calls
+  `state.rate_limiters.set_degraded(app, on)` and
+  `state.concurrency.set_degraded(app, on)` (see the enforce.rs mechanism below).
+- **MODIFY `gateway/src/enforce.rs`** — three changes, designed to FIT the live
+  immutable-bucket registries (NOT the imagined mutable "divide the limit"):
+  - `check_spend(state: SpendState) -> Result<(), HttpResponse>` — pure match:
+    `Block` → `Err(402 SPEND_LIMIT)`, all others `Ok(())`.
+  - **Degrade on `ConcurrencyRegistry`.** Today `ConcurrencyRegistry` holds a
+    single global `limit: u32` and a per-app `gauges: HashMap<Uuid, AtomicU32>`
+    (no per-app limit). Add `degraded: RwLock<HashSet<Uuid>>` +
+    `set_degraded(app, on)`/`is_degraded(app)`. In `acquire_concurrency`, compute
+    the effective ceiling as `if is_degraded(app) { (self.limit / DEGRADE_FACTOR).max(1) } else { self.limit }`
+    and compare the gauge against THAT. No bucket rebuild — the existing CAS loop
+    just reads a smaller ceiling. `DEGRADE_FACTOR: u32 = 8`.
+  - **Degrade on `RateLimitRegistry`.** Today each app's `TokenBucket` is built
+    once with immutable `capacity`/`refill_rate` (`TokenBucket::new(rate,burst)`),
+    so we CANNOT mutate the bucket. Mechanism: add `degraded: RwLock<HashSet<Uuid>>`
+    + `set_degraded(app, on)`. `check_rate_limit` calls `bucket.try_acquire()` as
+    today when not degraded; when degraded it calls a new
+    `bucket.try_acquire_n(DEGRADE_FACTOR)` — i.e. a degraded request consumes
+    `DEGRADE_FACTOR` tokens instead of 1, which throttles effective throughput by
+    `1/DEGRADE_FACTOR` against the SAME bucket without rebuilding it (the
+    `1000`-scaled token math in `try_acquire` generalizes: consume
+    `DEGRADE_FACTOR * 1000` tokens, require `>= DEGRADE_FACTOR*1000` available).
+    `clear_degraded` removes the app from the set; the bucket then refills/serves
+    at its normal rate immediately (no flap, recovery is instant).
+  - **Per-rule limits (`PerRuleRateLimitRegistry`) are untouched** — they are
+    creator-defined business limits keyed `(app_id, rule_idx, bucket)` and fire
+    first in the request path; spend-degrade composes ON TOP (a Degraded app is
+    additionally throttled by the global degraded bucket), which is the intended
+    "tighten everything" semantics.
+- **MODIFY `gateway/src/router/dispatch.rs`** — in `handle_dispatch` (line 1308,
+  whose first body stmt is `enforce::check_rate_limit(&state.rate_limiters, app_id)`)
+  AND `handle_subscription_dispatch` (line 1188, whose `check_rate_limit` is at
+  line 1201), BEFORE `check_rate_limit`: `check_spend(route.spend_state)?`. Warn
+  adds `x-zs-spend-warn: 1` header (pass); Degrade passes (the throttle is applied
+  by the registries below, see H2 mechanism); Block 402s.
+  - **In-flight requests on a flip to Block.** Block 402s only NEW requests
+    (the gate runs at the top of `handle_dispatch`). Requests already past the
+    gate hold a `ConcurrencyGuard` (RAII, released on drop) and run to completion
+    — there is no mid-flight cancellation. This is intentional: a spend cap is a
+    soft money bound on a ~minute tick, not a kill switch; bounding *new* work is
+    sufficient and avoids tearing down live responses/streams.
+
+#### (b) Schema changeset — `0039_spend_state.sql`
+```sql
+--changeset zeroship:app-spend-state splitStatements:true
+CREATE TABLE zeroship.app_spend_state (
+    app_id            UUID PRIMARY KEY REFERENCES zeroship.apps(id) ON DELETE CASCADE,
+    spend_limit_cents BIGINT,                    -- creator OVERRIDE; NULL = use plan default
+    eval_limit_cents  BIGINT NOT NULL DEFAULT 0, -- EFFECTIVE limit used at last derive_state
+                                                 -- (override else plan default); the
+                                                 -- raised-limit-recovery comparison reads this
+    state             TEXT NOT NULL DEFAULT 'allow',
+    spend_cents       BIGINT NOT NULL DEFAULT 0,
+    period_start      TIMESTAMPTZ NOT NULL,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE zeroship.spend_state_history (
+    app_id     UUID NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
+    from_state TEXT NOT NULL, to_state TEXT NOT NULL,
+    spend_cents BIGINT NOT NULL, limit_cents BIGINT,
+    at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+--rollback DROP TABLE zeroship.spend_state_history;
+--rollback DROP TABLE zeroship.app_spend_state;
+
+--changeset zeroship:app-spend-state-rls splitStatements:true
+-- Verbatim 0037/0025 pattern: ENABLE + FORCE + a single tenant_isolation
+-- USING policy on the app_id key bound to the zeroship.tenant_app GUC. A
+-- request with the GUC unset reads `current_setting(...,true) => NULL`, so
+-- `app_id = NULL` is NULL ⇒ no rows (fail-closed). Control is BYPASSRLS so the
+-- engine still aggregates fleet-wide.
+ALTER TABLE zeroship.app_spend_state    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.app_spend_state    FORCE  ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON zeroship.app_spend_state
+    USING (app_id = current_setting('zeroship.tenant_app', true)::uuid);
+ALTER TABLE zeroship.spend_state_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.spend_state_history FORCE  ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON zeroship.spend_state_history
+    USING (app_id = current_setting('zeroship.tenant_app', true)::uuid);
+--rollback DROP POLICY IF EXISTS tenant_isolation ON zeroship.spend_state_history;
+--rollback DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_spend_state;
+
+--changeset zeroship:app-spend-state-grants splitStatements:false
+DO $g$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.app_spend_state    TO zeroship_control';
+    EXECUTE 'GRANT SELECT, INSERT         ON zeroship.spend_state_history TO zeroship_control';
+  END IF;
+END $g$;
+```
+RLS on both tables (app_id-keyed, the 0037 fail-closed pattern reproduced
+above); control is BYPASSRLS; least-priv grants to `zeroship_control`
+(`app_spend_state` is mutated by the engine ⇒ `SELECT,INSERT,UPDATE`; history is
+append-only ⇒ `SELECT,INSERT`).
+
+#### (d) TDD test plan
+- **Unit:** `derive_state` table-driven. **Regression:**
+  `degrade_recovers_only_after_deadband` (no flap), `block_recovers_immediately_when_limit_raised`.
+- **Integration (real PG):** `evaluate_all_persists_and_returns_transitions`.
+- **Faithful e2e (gateway path, not a shim):** feed `RouteEntry{spend_state:Block}`
+  via the REAL `RouteCache::update`, drive a request through the real
+  `handle_dispatch`, assert **402** before any worker proxy
+  (`over_limit_request_blocked_at_gateway` — fails today, passes after wire-in);
+  `degraded_route_tightens_concurrency` (drive `DEGRADE_FACTOR+1` concurrent
+  requests against a Degraded app whose normal limit would admit them all, assert
+  the surplus is rejected — fails if `set_degraded` is a no-op);
+  `degrade_clears_immediately_on_recovery` (flip Degrade→Allow via
+  `RouteCache::update`, assert full throughput restored on the next request — the
+  bucket is not rebuilt, so no warm-up).
+
+**Build/test gate (must be green to land PR5):** `cargo build -p zeroship-core
+-p zeroship-control -p zeroship-gateway` + `cargo test -p zeroship-gateway`
+(enforce unit tests incl. the new degrade-token-cost cases + the faithful
+dispatch e2e) + `cargo test -p zeroship-control` (spend engine + integration on
+:5440) + `cargo test -p zeroship-core` (RouteEntry/ControlEvent fixtures). Update
+the `crates/core/tests/types_test.rs` `ControlEvent`/`RouteEntry` round-trip
+fixtures for the new `SpendState` variant + `spend_state` field. `clippy` clean.
+
+---
+
+### PR6 — reconciler + Stripe billing rail
+
+**Goal.** End of calendar month (UTC): per creator, sum `usage_aggregates` across
+their apps → `charge_cents` per app via the PR4 catalog → Stripe **invoice items**
+on the platform's **Customer**. Idempotent per period. Card via Checkout
+setup-mode. NO Connect / application_fee (Stream-2).
+
+#### (a) Files to create/modify
+- **NEW `crates/control/src/stripe_client.rs`** — thin `cyper`-based Stripe REST
+  client. The `cyper::Client` + `compio::time::timeout` idiom is established in
+  control today: GET in `api.rs::fetch_worker_logs:694` and **POST with a body +
+  `content-type` header** in `bootstrap_builder.rs:263` and `oauth_handlers.rs:432`
+  (`client.post(url)?.header("content-type", …)?.body(bytes).send()`). Stripe wants
+  `application/x-www-form-urlencoded`, so set that content-type and form-encode the
+  body bytes (no reqwest). Define a `trait StripeApi` (so tests inject a recording
+  fake) implemented by the real `cyper` client. Headers: `Authorization: Bearer
+  <STRIPE_SECRET_KEY>`, `Idempotency-Key` on every mutating call. Methods:
+  `create_customer`, `create_checkout_setup_session` (mode=setup),
+  `create_invoice_item`, `create_and_finalize_invoice`. Map non-2xx to a new
+  `StripeError::Api{status,code}`. Base URL overridable (an `AppState.stripe_base_url`
+  field defaulting to `https://api.stripe.com`) for the test mock.
+- **NEW `crates/control/src/cron/billing_reconcile.rs`** — **NOT a port.**
+  `crates/platform/src/billing/reconciler.rs` is the *spend-limit* reconciler
+  (computes `SpendAction` from usage-vs-limit — that logic ports to PR5's
+  `spend.rs`, see PR7 checklist); there is **no Stripe invoice-item code in
+  `crates/platform`** (grep: invoice logic exists nowhere under
+  `crates/platform/src`). So `billing_reconcile.rs` is **new code** built against
+  the PR4 catalog + the new `stripe_client.rs`. It is a
+  compio interval (~hourly): compute the closed (previous) calendar month
+  (`period_start` via the same `period_start_unix` arithmetic as
+  `control/metering.rs`, one month back). **Creator→app resolution (H1):** read
+  ownership from `app_members WHERE role='owner'` (there is NO `apps.creator_id`),
+  group `app_id`s by `user_id` ⇒ that user_id is the `creator_id`; skip apps with
+  no owner row (e.g. the system console). Per creator: per-owned-app
+  `Metering::period_totals(app_id, period_start)` → `charge_cents` (PR4 catalog) →
+  invoice-item lines stamped with `metadata.creator_id` (so the existing webhook's
+  `extract_creator_id` resolves it back). **Idempotency** (two layers, airtight
+  under at-least-once):
+  1. `billing_runs(creator_id, period_start)` PK + `INSERT … ON CONFLICT DO NOTHING`
+     — claim the run BEFORE any Stripe call; `rows_affected()==0` ⇒ already billed
+     this period ⇒ skip entirely (no Stripe call at all).
+  2. Deterministic Stripe `Idempotency-Key = "billrun:{creator_id}:{period_start_unix}"`
+     on the invoice-create call (and per-item keys
+     `"billitem:{creator_id}:{app_id}:{period_start_unix}"`) — so EVEN IF the
+     process crashes after the `billing_runs` INSERT commits but before Stripe
+     responds, a retry replays the SAME key and Stripe returns the original object
+     rather than creating a duplicate. Record `stripe_invoice_id`+amount with an
+     `UPDATE billing_runs … WHERE creator_id=$ AND period_start=$` after the Stripe
+     call succeeds (the row already exists from step 1).
+  - **Crash-window note:** the only non-idempotent window is "INSERT committed,
+    Stripe key never sent" — covered by layer 2's deterministic key on the next
+    tick (the run row exists so step 1 says "billed", but a `stripe_invoice_id IS
+    NULL` row is re-driven: the reconciler re-attempts the Stripe call with the
+    same idempotency key for any `billing_runs` row whose `stripe_invoice_id` is
+    still NULL, making the whole path replay-safe).
+  Registered in `cron/mod.rs::spawn_all` via `compio::runtime::spawn(...).detach()`.
+- **MODIFY `stripe_store.rs`** — `creator_billing` upserts: `get_customer`/`set_customer`.
+- **MODIFY `stripe_handlers.rs`** — ADD `POST /api/creators/:id/billing/setup`
+  (Stream-1: ensure a `cus_…` exists for the creator via `stripe_client`, persist
+  it to `creator_billing`, return a Checkout setup-mode session URL). Extend the
+  EXISTING webhook handler (do NOT add a second one) to also handle
+  `setup_intent.succeeded` (sets `creator_billing.default_pm_set=true`) and
+  `invoice.payment_failed` (audit + future dunning). **Webhook signature: reuse
+  the existing `verify_stripe_signature` (`stripe_handlers.rs:236`, HMAC-SHA256
+  over the `Stripe-Signature` header) — do NOT reinvent it**; the new event types
+  ride the same already-verified ingest path (`extract_creator_id` at
+  `stripe_handlers.rs:365` resolves `metadata.creator_id`). The infra-billing
+  Connect `onboard`/`callback` placeholder (`stripe_handlers.rs:83`,
+  `/api/creators/:id/stripe/onboard`) is **Stream-2 and left untouched** by this
+  epic.
+- **MODIFY `lib.rs` (`AppState`) + `main.rs`** — ADD `stripe_secret_key:
+  SecretString` (+ optional `stripe_base_url` test override). Required in prod;
+  empty only under `insecure_dev`.
+
+#### (b) Schema changeset — `0040_creator_billing.sql`
+```sql
+--changeset zeroship:creator-billing splitStatements:true
+CREATE TABLE zeroship.creator_billing (
+    -- creator_id is a USER id (mirrors creator_accounts.creator_id, which is
+    -- `REFERENCES zeroship.users(id)` in 0004). FK to users(id) so a deleted
+    -- user's billing row cascades.
+    creator_id         UUID PRIMARY KEY REFERENCES zeroship.users(id) ON DELETE CASCADE,
+    stripe_customer_id TEXT,                 -- cus_… (platform account)
+    default_pm_set     BOOLEAN NOT NULL DEFAULT false,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE zeroship.billing_runs (
+    creator_id        UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
+    period_start      TIMESTAMPTZ NOT NULL,  -- the billed month (UTC, first-of-month 00:00)
+    amount_cents      BIGINT NOT NULL,
+    stripe_invoice_id TEXT,                  -- NULL until the Stripe call succeeds
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (creator_id, period_start)   -- the idempotency key (no double-bill)
+);
+--rollback DROP TABLE zeroship.billing_runs;
+--rollback DROP TABLE zeroship.creator_billing;
+
+--changeset zeroship:creator-billing-grants splitStatements:false
+DO $g$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.creator_billing TO zeroship_control';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.billing_runs    TO zeroship_control';
+  END IF;
+END $g$;
+```
+Grants `SELECT,INSERT,UPDATE` to `zeroship_control` (`billing_runs` needs UPDATE
+for the `stripe_invoice_id`/amount write-back after the Stripe call). Control-only
+bookkeeping, keyed by `creator_id` (a user id, not an app id) ⇒ **no per-tenant
+app RLS** — mirrors `usage_reports_seen`/`creator_accounts`.
+
+#### (d) TDD test plan
+- **Unit:** NEW line-item tests (no port — there is no invoice logic in
+  `crates/platform`): given a `PlanPrice` + a usage map, assert `charge_cents`
+  produces the expected invoice-item lines; assert the deterministic
+  `Idempotency-Key` strings (`billrun:`/`billitem:` formats) are stable for a fixed
+  `(creator,app,period)`. Stripe calls go through an injected `StripeApi` trait
+  (the `stripe_client` is the prod impl; a recording fake is the unit impl).
+- **Integration (real PG + LOCAL mock-Stripe HTTP server — the REAL `cyper` client
+  hits a localhost server speaking Stripe JSON, NOT a stubbed client):**
+  `reconcile_creates_invoice_items_per_app_from_real_aggregates`;
+  **`reconcile_is_idempotent_per_period`** (run twice ⇒ items created exactly once,
+  second run no-op — fails if dedup guard missing → double-bill);
+  `stripe_client_uses_cyper_and_sends_idempotency_key`; `setup_session_creates_customer_once`;
+  `reconcile_groups_apps_by_owner_via_app_members` (two apps owned by the same
+  user_id ⇒ one creator's invoice spans both apps — fails if the owner join is
+  wrong); `crashed_run_with_null_invoice_id_is_redriven` (pre-insert a
+  `billing_runs` row with `stripe_invoice_id IS NULL`, run reconcile, assert the
+  Stripe call fires with the SAME deterministic idempotency key and the row is
+  completed — covers the commit-then-crash window).
+
+**Build/test gate (must be green to land PR6):** `cargo build -p zeroship-control`
++ `cargo test -p zeroship-control` (reconciler units + the real-`cyper`→localhost
+mock-Stripe integration on :5440). The mock-Stripe server asserts it received a
+`Stripe-Signature`-free outbound (we only SEND; signature is inbound) and a
+non-empty `Idempotency-Key` on every mutating call. `clippy` clean.
+
+---
+
+### PR7 — delete `crates/platform`
+
+**Goal.** Remove the dead tokio monolith + its workspace `exclude`.
+
+- **Confirm-ported checklist (all true before deleting):** `billing/pricing.rs`
+  (the `*_millicents` pricing types + `compute_cost`)→PR4 `pricing.rs` (re-scaled
+  to cents, D3); `billing/spend_action.rs` (a re-export of `core/billing.rs::
+  SpendAction`) + `core/billing.rs::SpendAction`→`core::types::SpendState`
+  +`spend.rs::derive_state` (PR5); `billing/reconciler.rs` — note this is the
+  **spend-limit** reconciler (`SpendingLimit`/`SpendAction`/`reconcile`),
+  NOT a Stripe reconciler → its logic→PR5 `spend.rs`+`cron/spend_reconcile.rs`
+  (the PR6 `cron/billing_reconcile.rs`+`stripe_client.rs` are NEW, not ports — no
+  invoice code exists in `crates/platform`); `metering/{meter,flusher,
+  rollover}.rs`→plugin-meter+control/metering (PR1–3); enforcement→gateway/enforce
+  +PR5 spend gate; `core/{types,meter_store,event_log}`,`control/`,`server/`→discard
+  (confirm `grep -r "zeroship_platform\|crates/platform"` returns only the
+  `exclude` entry + this proposal).
+- **DELETE** `crates/platform/`; **MODIFY root `Cargo.toml`** (remove `exclude`);
+  **MODIFY `docs/reference/billing-metering.md`** → "shipped"; **MODIFY `AGENTS.md`**
+  revenue model (replace the stale "platform takes 15% / $100 → −$15" block with
+  "infra usage billing + configurable application fee (Stream 2)").
+- **Test:** `cargo build --workspace` + `cargo test -p zeroship-control
+  -p zeroship-gateway -p zeroship-core` green; `grep` gate (no `zeroship_platform`/
+  `crates/platform` references remain outside git history).
+
+---
+
+### Ordering / dependencies
+```
+PR4 (catalog + pricing) ──┬─→ PR5 (spend engine: needs charge_cents + plan limits)
+                          └─→ PR6 (reconciler: needs charge_cents + catalog)
+PR5 ⟂ PR6 (independent; either order after PR4)
+PR7 LAST (needs PR4+PR5+PR6 ported)
+```
+PR4 is the keystone. Changeset order: `0038`(PR4) → `0039`(PR5) → `0040`(PR6).
+**Per-PR invariant audit:** zero tokio (compio intervals; `cyper` Stripe;
+`compio-postgres`); typed_id `pln_…`; no back-compat alias (free-text `plan_id`,
+`runtime_limits_for_plan`, platform `SpendAction` DELETED not aliased); money
+server-side only; RLS fail-closed on app-keyed tables; least-priv grants.
