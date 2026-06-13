@@ -90,8 +90,13 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
     };
     let result = conn
         .execute(
+            // `$7::text::inet`: bind the param as TEXT (which `Option<&str>`
+            // serializes as) and let PG cast text→inet, instead of `$7::inet`
+            // which makes PG infer the param OID as `inet` and reject the `&str`
+            // bind at serialize time ("error serializing parameter"). The latter
+            // silently broke EVERY detail-audit insert (best-effort path).
             "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail)
-             VALUES($1, $2, $3, $4, $5, $6, $7::inet, $8)",
+             VALUES($1, $2, $3, $4, $5, $6, $7::text::inet, $8)",
             &[
                 &entry.app_id,
                 &entry.creator_id,

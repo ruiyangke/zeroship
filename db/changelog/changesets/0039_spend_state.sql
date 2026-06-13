@@ -39,6 +39,11 @@ CREATE TABLE zeroship.spend_state_history (
     spend_cents BIGINT NOT NULL, limit_cents BIGINT,
     at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Per-app history read (newest-first) must not seq-scan the unbounded
+-- append-only history table (#4). The (app_id, at DESC) index serves the
+-- "this app's recent transitions" query the dashboard / audit path runs.
+CREATE INDEX idx_spend_state_history_app_at ON zeroship.spend_state_history (app_id, at DESC);
+--rollback DROP INDEX IF EXISTS zeroship.idx_spend_state_history_app_at;
 --rollback DROP TABLE zeroship.spend_state_history;
 --rollback DROP TABLE zeroship.app_spend_state;
 

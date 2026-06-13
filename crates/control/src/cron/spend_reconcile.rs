@@ -27,6 +27,18 @@ use crate::AppState;
 /// money bound — a 60s tick bounds new over-limit work without thrashing PG.
 pub const DEFAULT_TICK_SECS: u64 = 60;
 
+/// Stable `pg_advisory_lock` key for the spend-reconcile sweep (#2).
+///
+/// Multiple control instances run this cron concurrently. Without a lock, two
+/// instances racing the same sweep would BOTH derive a transition and BOTH
+/// append a `spend_state_history` row (duplicate audit rows, possibly
+/// mis-recorded flaps). A session-scoped `pg_try_advisory_lock(<key>)` makes
+/// the sweep single-flight fleet-wide: the instance that wins runs it; the
+/// others skip this tick and retry next cadence. The key is an arbitrary but
+/// FIXED 64-bit constant unique to this sweep (derived from "zsspend1" — must
+/// never collide with another advisory-lock user).
+const SPEND_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_7370_6e64_0001;
+
 /// Cron entry point. Loops forever; each iteration runs one [`tick`] then
 /// sleeps `tick_secs`. A transient PG error is logged and swallowed so the
 /// cron task survives (mirrors `audit_retention` / `orphaned_app_reaper`).
@@ -54,8 +66,42 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 /// number of apps that transitioned.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
+    // #2 — multi-instance safety. Hold a session-scoped advisory lock on a
+    // dedicated connection for the whole sweep so only ONE control instance
+    // runs `evaluate_all` per tick. A loser skips this tick (returns 0) and
+    // retries next cadence; without this, racing instances both append
+    // duplicate `spend_state_history` rows. The lock connection is held until
+    // the explicit unlock below (and released anyway when the conn drops, since
+    // advisory locks are session-scoped).
+    let lock_conn = state.registry.conn().await?;
+    let got = lock_conn
+        .query(
+            "SELECT pg_try_advisory_lock($1) AS locked",
+            &[&SPEND_SWEEP_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+    let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
+    if !acquired {
+        tracing::debug!("spend_reconcile: advisory lock held by another instance — skipping tick");
+        return Ok(0);
+    }
+
     let engine = SpendEngine::new(state.registry.clone());
-    let transitions = engine.evaluate_all().await?;
+    let result = engine.evaluate_all().await;
+
+    // Release the advisory lock regardless of sweep outcome (best-effort; the
+    // session-scoped lock also frees when `lock_conn` drops).
+    if let Err(e) = lock_conn
+        .execute(
+            "SELECT pg_advisory_unlock($1)",
+            &[&SPEND_SWEEP_ADVISORY_LOCK_KEY],
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "spend_reconcile: advisory unlock failed (lock frees on conn drop)");
+    }
+
+    let transitions = result?;
     for t in &transitions {
         emit_transition(state, t).await;
     }
@@ -66,9 +112,14 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
 /// for one transition.
 #[allow(clippy::future_not_send)]
 async fn emit_transition(state: &AppState, t: &SpendTransition) {
+    // #8 — enrich the audit detail with the money context, matching the
+    // `{from,to,spend_cents,limit_cents}` shape documented on
+    // `audit::Action::SpendStateChange`.
     let detail = serde_json::json!({
         "from": spend_state_str(t.old),
         "to": spend_state_str(t.new),
+        "spend_cents": t.spend_cents,
+        "limit_cents": t.limit_cents,
     });
     audit::log_with_detail(
         &state.registry,

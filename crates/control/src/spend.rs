@@ -23,7 +23,7 @@
 use uuid::Uuid;
 use zeroship_core::types::SpendState;
 
-use crate::metering::{current_period_start_unix, Metering};
+use crate::metering::current_period_start_unix;
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::charge_cents;
 use crate::registry::{Registry, RegistryError};
@@ -168,16 +168,24 @@ pub fn derive_state(
 pub struct SpendEngine {
     registry: Registry,
     catalog: PlanCatalog,
-    metering: Metering,
     thresholds: SpendThresholds,
 }
 
 /// One state transition produced by [`SpendEngine::evaluate_all`].
+///
+/// Carries the priced `spend_cents` and effective `eval_limit_cents` at the
+/// derive so the reconcile cron's `SpendStateChange` audit row records the
+/// money context (#8) — matching the `{from,to,spend_cents,limit_cents}` shape
+/// documented on `audit::Action::SpendStateChange`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpendTransition {
     pub app_id: Uuid,
     pub old: SpendState,
     pub new: SpendState,
+    /// Priced period spend at the transition, in cents.
+    pub spend_cents: i64,
+    /// EFFECTIVE spend limit used at the derive, in cents.
+    pub limit_cents: i64,
 }
 
 impl SpendEngine {
@@ -185,7 +193,6 @@ impl SpendEngine {
     pub fn new(registry: Registry) -> Self {
         Self {
             catalog: PlanCatalog::new(registry.clone()),
-            metering: Metering::new(registry.clone()),
             registry,
             thresholds: SpendThresholds::default(),
         }
@@ -224,11 +231,49 @@ impl SpendEngine {
     /// the stored previous state, and on a transition persist it. Returns ONLY
     /// the apps that transitioned.
     pub async fn evaluate_all(&self) -> Result<Vec<SpendTransition>, RegistryError> {
-        let conn = self.registry.conn().await?;
+        let mut conn = self.registry.conn().await?;
         let app_rows = conn
             .query("SELECT id FROM zeroship.apps", &[])
             .await?;
         let period_start = current_period_start_unix();
+
+        // #5 — avoid the per-app N+1 connection storm. `catalog.get` and
+        // `metering.period_totals` each open a FRESH PG connection per call, so
+        // a naive per-app loop opened ~2N connections per sweep. Instead:
+        //   * hoist EVERY plan once into a map (plans are few — the built-in
+        //     tiers plus any operator-defined ones), and
+        //   * batch ALL apps' current-period usage in ONE query, grouped into a
+        //     per-app metric map in Rust.
+        // The whole sweep then reuses the single `conn` above (app list,
+        // per-app state read, and the transactional persists). Behavior is
+        // identical to the per-app reads — same plan rows, same usage totals.
+        let plans: std::collections::HashMap<String, crate::plan_catalog::Plan> = self
+            .catalog
+            .list()
+            .await?
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
+
+        // One batched usage read for the whole fleet's current period, grouped
+        // by app in Rust. Mirrors `Metering::period_totals` per app.
+        let usage_rows = conn
+            .query(
+                "SELECT app_id, metric, total FROM zeroship.usage_aggregates \
+                 WHERE period_start = to_timestamp($1::double precision)",
+                &[&(period_start as f64)],
+            )
+            .await?;
+        let mut usage_by_app: std::collections::HashMap<Uuid, std::collections::HashMap<String, i64>> =
+            std::collections::HashMap::new();
+        for row in &usage_rows {
+            let aid: Uuid = row.get("app_id");
+            usage_by_app
+                .entry(aid)
+                .or_default()
+                .insert(row.get::<_, String>("metric"), row.get::<_, i64>("total"));
+        }
+
         let mut transitions = Vec::new();
 
         for row in &app_rows {
@@ -238,13 +283,13 @@ impl SpendEngine {
 
             // Plan → price model + default spend limit. A missing plan row
             // (should not happen — plan_id is an FK) is skipped, not crashed.
-            let Some(plan) = self.catalog.get(&plan_id).await? else {
+            let Some(plan) = plans.get(&plan_id) else {
                 tracing::warn!(app_id = %app_id, plan_id = %plan_id, "spend: app plan not in catalog — skipping");
                 continue;
             };
 
-            // Price the current period's usage.
-            let usage = self.metering.period_totals(&app_id, period_start).await?;
+            // Price the current period's usage (from the batched fleet read).
+            let usage = usage_by_app.get(&app_id).cloned().unwrap_or_default();
             let breakdown = charge_cents(&plan.price, &usage);
             let spend_cents = breakdown.total_cents;
 
@@ -260,7 +305,7 @@ impl SpendEngine {
             if new != prev {
                 let spend_i64 = i64::try_from(spend_cents).unwrap_or(i64::MAX);
                 Self::persist_transition(
-                    &conn,
+                    &mut conn,
                     &app_id,
                     prev,
                     new,
@@ -269,11 +314,25 @@ impl SpendEngine {
                     period_start,
                 )
                 .await?;
-                transitions.push(SpendTransition { app_id, old: prev, new });
+                transitions.push(SpendTransition {
+                    app_id,
+                    old: prev,
+                    new,
+                    spend_cents: spend_i64,
+                    limit_cents: limit_i64,
+                });
             } else {
                 // No transition, but keep the stored spend/eval-limit fresh so
                 // the next tick's `limit_changed` comparison is accurate and
                 // the dashboard sees current spend. Upsert without history.
+                //
+                // #10 (write-amplification): we deliberately DO write every
+                // tick. Skipping the write when nothing changed would require
+                // reading the stored `spend_cents` back to compare — but for any
+                // ACTIVE app `spend_cents` almost always changes tick-to-tick
+                // (usage accrues), so the conditional would rarely skip and the
+                // dashboard would go stale on the apps that DON'T change. The
+                // single-row UPSERT is cheap; the freshness is the point.
                 Self::touch_state(
                     &conn,
                     &app_id,
@@ -290,8 +349,14 @@ impl SpendEngine {
 
     /// UPSERT the spend row to the new state AND append a history row. Called
     /// only on an actual transition.
+    ///
+    /// Both writes run in ONE transaction (#1): a crash or error between the
+    /// `app_spend_state` UPSERT and the `spend_state_history` INSERT must never
+    /// leave a state change with no audit row (or an audit row with no state
+    /// change). The transaction either commits both or — via the RAII
+    /// `Transaction` Drop / explicit early return — rolls both back atomically.
     async fn persist_transition(
-        conn: &compio_postgres::Client,
+        conn: &mut compio_postgres::Client,
         app_id: &Uuid,
         from: SpendState,
         to: SpendState,
@@ -299,7 +364,8 @@ impl SpendEngine {
         eval_limit_cents: i64,
         period_start_unix: i64,
     ) -> Result<(), RegistryError> {
-        conn.execute(
+        let tx = conn.transaction().await?;
+        tx.execute(
             "INSERT INTO zeroship.app_spend_state \
                (app_id, state, spend_cents, eval_limit_cents, period_start, updated_at) \
              VALUES ($1, $2, $3, $4, to_timestamp($5::double precision), NOW()) \
@@ -316,7 +382,7 @@ impl SpendEngine {
             ],
         )
         .await?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO zeroship.spend_state_history \
                (app_id, from_state, to_state, spend_cents, limit_cents) \
              VALUES ($1, $2, $3, $4, $5)",
@@ -329,6 +395,7 @@ impl SpendEngine {
             ],
         )
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 

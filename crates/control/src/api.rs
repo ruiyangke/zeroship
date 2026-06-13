@@ -626,8 +626,15 @@ pub async fn set_plan(
 // null, clears back to the plan default) the per-app spend-limit override.
 // `GET` returns the effective limit + current state. Authz is BillingWrite /
 // BillingRead on `Resource::App(id)` — the same app-membership gate `set_plan`
-// uses. A creator CANNOT raise the override beyond the plan's
-// `spend_limit_default_cents` (money stays server-bounded).
+// uses.
+//
+// REDUCTION-ONLY by design (#9): the override is bounded above by the plan's
+// `spend_limit_default_cents`, so a creator can only LOWER their effective cap,
+// never raise it above what the plan already grants. This is intentional and
+// safe — there is NO privilege-escalation path: raising your effective headroom
+// means UPGRADING the plan (an operator/billing-gated action), not editing this
+// override. We therefore do NOT model a separate `spend_limit_max_cents`
+// column; the plan default IS the ceiling. A request above it is rejected 403.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -682,13 +689,18 @@ pub async fn set_spend_limit(
                 crate::audit::AuditEntry {
                     app_id: Some(uid),
                     creator_id: None,
-                    actor_user_id: None,
-                    actor_token_id: None,
+                    // #7 — populate the actor from the AuthzGuard so a
+                    // billing-write audit row records WHO changed the cap.
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
                     action: crate::audit::Action::SetSpendLimit,
                     resource: Some("spend_limit"),
                     source_ip: None,
                 },
-                &serde_json::json!({ "cents": body.cents }),
+                // Log the resolved `plan_default` bound alongside the requested
+                // cents so the audit row shows the reduction-only ceiling the
+                // override was checked against (#7).
+                &serde_json::json!({ "cents": body.cents, "plan_default_cents": plan_default }),
             )
             .await;
             web::HttpResponse::Ok().json(&serde_json::json!({"updated": true}))

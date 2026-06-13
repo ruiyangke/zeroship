@@ -70,8 +70,15 @@ impl TokenBucket {
     /// `DEGRADE_FACTOR`, so each request costs `DEGRADE_FACTOR` tokens — a
     /// `1/DEGRADE_FACTOR` throughput cut against the SAME bucket with no
     /// rebuild. `n == 0` is treated as `1` (never free).
+    ///
+    /// The cost is CLAMPED to the bucket capacity (`min(n*1000, capacity)`).
+    /// Without the clamp, a Degraded request costing `DEGRADE_FACTOR` tokens
+    /// against a bucket whose capacity is `< DEGRADE_FACTOR` (a tiny-burst
+    /// rule) could NEVER be satisfied — Degrade would silently become a hard
+    /// Block regardless of refill. Clamping guarantees Degrade is always a
+    /// throttle, never a hard Block, for any `(rate, burst)` config (#6).
     fn try_acquire_n(&self, n: u32) -> bool {
-        let cost = u64::from(n.max(1)) * 1000;
+        let cost = (u64::from(n.max(1)) * 1000).min(self.capacity);
         loop {
             let state = self.state.load(Ordering::Acquire);
             let (tokens, last) = unpack(state);
@@ -513,6 +520,37 @@ mod tests {
         for _ in 0..1000 {
             assert!(reg.check(&app, 0, lim.per, "1.1.1.1", &lim).is_ok());
         }
+    }
+
+    /// #6: a Degraded app on a TINY-burst global bucket (capacity <
+    /// DEGRADE_FACTOR) must still be admitted at least once — Degrade is a
+    /// throttle, never a hard Block. Pre-fix, a degraded request cost
+    /// `DEGRADE_FACTOR` tokens against a 1-token bucket and could never be
+    /// satisfied (silent hard Block). The cost-clamp (`min(cost, capacity)`)
+    /// guarantees admission regardless of the burst config.
+    #[test]
+    fn degraded_tiny_burst_still_admits_some_requests() {
+        // rate=1, burst=1 → capacity 1 logical token, far below DEGRADE_FACTOR.
+        let reg = RateLimitRegistry::new(1, 1);
+        let app = Uuid::nil();
+        reg.set_degraded(&app, true);
+        assert!(
+            reg.is_degraded(&app),
+            "precondition: app is flagged degraded",
+        );
+        // The first degraded request must still be admitted (cost clamped to
+        // the 1-token capacity), proving Degrade did not become a hard Block.
+        assert!(
+            check_rate_limit(&reg, &app).is_ok(),
+            "a degraded app on a tiny-burst bucket must still admit a request \
+             (Degrade is a throttle, not a hard Block)",
+        );
+        // It IS still throttled: the bucket is now drained, so the immediate
+        // next request 429s (this is the throttle, not a permanent block).
+        assert!(
+            check_rate_limit(&reg, &app).is_err(),
+            "the drained bucket throttles the next immediate request",
+        );
     }
 
     #[test]

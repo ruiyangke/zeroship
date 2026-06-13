@@ -487,6 +487,12 @@ Hysteresis on recovery.
   effective limit + current state. A creator CANNOT raise the limit beyond the
   plan's `spend_limit_default_cents` unless their plan permits it (validated
   against the catalog row); money stays server-bounded.
+  - **The override is REDUCTION-ONLY by design.** It is bounded above by the
+    plan default, so a creator can only LOWER their effective cap — never raise
+    it above what the plan grants. Raising headroom = upgrading the plan (an
+    operator/billing-gated action), not editing this override. There is no
+    privilege-escalation path and deliberately no separate `spend_limit_max`
+    column: the plan default IS the ceiling.
 - **MODIFY `registry.rs::get_routes`** — JOIN `app_spend_state` onto
   `RouteEntry.spend_state`.
 - **MODIFY `gateway/src/sync.rs`** — `RouteCache::update` threads `spend_state` onto

@@ -144,6 +144,70 @@ async fn evaluate_all_persists_and_returns_transitions() {
     assert_eq!(hist2, 1, "no extra history row on a stable tick");
 }
 
+/// #1 (atomic transition): the `app_spend_state` UPSERT and the
+/// `spend_state_history` INSERT must commit together. After a transition, BOTH
+/// rows exist AND are mutually consistent — the state row's `spend_cents` /
+/// `eval_limit_cents` match the latest history row's `spend_cents` /
+/// `limit_cents` (they are written from the same values inside ONE
+/// transaction). A crash-induced half-write (state with no history, or vice
+/// versa) would fail this consistency check.
+#[compio::test]
+async fn transition_writes_state_and_history_atomically_and_consistent() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry.clone());
+    let engine = SpendEngine::new(registry);
+
+    // Limit 100 cents, 1 cent/request, 100 requests ⇒ 100% ⇒ Block.
+    let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
+    let worker = format!("w-{}", Uuid::new_v4());
+    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+
+    let transitions = engine.evaluate_all().await.expect("evaluate_all");
+    let ours: Vec<_> = transitions.iter().filter(|t| t.app_id == app).collect();
+    assert_eq!(ours.len(), 1, "our app transitioned once");
+
+    // The state row exists.
+    let state_rows = client
+        .query(
+            "SELECT state, spend_cents, eval_limit_cents \
+             FROM zeroship.app_spend_state WHERE app_id = $1",
+            &[&app],
+        )
+        .await
+        .unwrap();
+    assert_eq!(state_rows.len(), 1, "exactly one app_spend_state row");
+    let state: String = state_rows[0].get("state");
+    let state_spend: i64 = state_rows[0].get("spend_cents");
+    let state_limit: i64 = state_rows[0].get("eval_limit_cents");
+    assert_eq!(state, "block");
+
+    // A matching history row exists, written in the SAME transaction.
+    let hist_rows = client
+        .query(
+            "SELECT from_state, to_state, spend_cents, limit_cents \
+             FROM zeroship.spend_state_history WHERE app_id = $1 ORDER BY at DESC",
+            &[&app],
+        )
+        .await
+        .unwrap();
+    assert_eq!(hist_rows.len(), 1, "exactly one history row on the transition");
+    let h_to: String = hist_rows[0].get("to_state");
+    let h_spend: i64 = hist_rows[0].get("spend_cents");
+    let h_limit: Option<i64> = hist_rows[0].get("limit_cents");
+    assert_eq!(h_to, "block", "history records the Block transition");
+
+    // Consistency: both rows carry the SAME priced spend + effective limit,
+    // proving they were written together (atomic), not separately/partially.
+    assert_eq!(state_spend, 100, "state row records the priced spend");
+    assert_eq!(h_spend, state_spend, "history spend matches state spend");
+    assert_eq!(h_limit, Some(state_limit), "history limit matches state eval limit");
+}
+
 #[compio::test]
 async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
