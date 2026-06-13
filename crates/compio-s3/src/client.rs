@@ -868,13 +868,38 @@ impl S3Client {
         Ok(PartETag { part_number, e_tag })
     }
 
-    /// Complete a multipart upload. Parses the XML response for in-200 errors.
+    /// Complete a multipart upload on a **fresh** per-operation client. Parses
+    /// the XML response for in-200 errors.
+    ///
+    /// Prefer [`complete_multipart_on`](S3Client::complete_multipart_on) with
+    /// the upload session's already-warm pooled client: opening a *cold*
+    /// connection for `CompleteMultipartUpload` right after a long-running
+    /// upload is slow to establish on some endpoints (`cyper`/`MinIO` over
+    /// `io_uring`), and the warm-session variant avoids that connect latency.
     pub async fn complete_multipart(
         &self,
         key: &str,
         upload_id: &UploadId,
         parts: &[PartETag],
     ) -> S3Result<()> {
+        let session = self.open_upload_session();
+        self.complete_multipart_on(&session, key, upload_id, parts)
+            .await
+    }
+
+    /// Complete a multipart upload, reusing the caller's warm pooled
+    /// [`UploadSession`] (the same client the part PUTs used) instead of opening
+    /// a fresh, cold connection. After a long upload a brand-new connection is
+    /// slow to establish on this `cyper`/`MinIO`/`io_uring` stack; reusing the warm
+    /// kept-alive pool removes that post-upload connect latency.
+    pub async fn complete_multipart_on(
+        &self,
+        session: &UploadSession,
+        key: &str,
+        upload_id: &UploadId,
+        parts: &[PartETag],
+    ) -> S3Result<()> {
+        let client = &session.0;
         let stored = self.config.object_key(key);
         let (base_url, host, canonical_uri) = self.object_url(&stored);
         let query = vec![("uploadId".to_string(), upload_id.0.clone())];
@@ -890,7 +915,6 @@ impl S3Client {
             self.signed_headers("POST", &host, &canonical_uri, &query, &payload, &extra);
         let cq = signer::canonical_query(&query);
         let url = format!("{base_url}?{cq}");
-        let client = new_client();
         let mut req = client.request(Method::POST, &url)?;
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;
@@ -909,9 +933,30 @@ impl S3Client {
         check_complete_multipart_response(&xml)
     }
 
-    /// Abort a multipart upload. MUST be called on any mid-upload error to free
-    /// orphaned (billed) parts. A 404 is treated as success.
+    /// Abort a multipart upload on a **fresh** per-operation client. MUST be
+    /// called on any mid-upload error to free orphaned (billed) parts. A 404 is
+    /// treated as success.
+    ///
+    /// The error-path abort on a still-open upload session should prefer
+    /// [`abort_multipart_on`](S3Client::abort_multipart_on) with the warm
+    /// session client (same rationale as `complete_multipart_on`); this
+    /// fresh-client variant is for the orphan-drainer (which has no session).
     pub async fn abort_multipart(&self, key: &str, upload_id: &UploadId) -> S3Result<()> {
+        let session = self.open_upload_session();
+        self.abort_multipart_on(&session, key, upload_id).await
+    }
+
+    /// Abort a multipart upload, reusing the caller's warm pooled
+    /// [`UploadSession`] instead of opening a cold connection. Used by the
+    /// upload path's error-cleanup so the abort that frees billed parts does not
+    /// itself pay the post-upload cold-connect latency.
+    pub async fn abort_multipart_on(
+        &self,
+        session: &UploadSession,
+        key: &str,
+        upload_id: &UploadId,
+    ) -> S3Result<()> {
+        let client = &session.0;
         let stored = self.config.object_key(key);
         let (base_url, host, canonical_uri) = self.object_url(&stored);
         let query = vec![("uploadId".to_string(), upload_id.0.clone())];
@@ -925,7 +970,6 @@ impl S3Client {
         );
         let cq = signer::canonical_query(&query);
         let url = format!("{base_url}?{cq}");
-        let client = new_client();
         let mut req = client.request(Method::DELETE, &url)?;
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str()).map_err(map_build_err)?;

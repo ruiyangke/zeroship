@@ -48,6 +48,14 @@ use super::{
 /// the part count low for large objects while bounding per-upload memory.
 pub const PART_SIZE: usize = 8 * 1024 * 1024;
 
+/// One in-flight `UploadPart` future, boxed to a concrete (nameable) type so the
+/// `FuturesUnordered` can be threaded through helper methods. Boxing a future is
+/// NOT spawning — the future still only advances when the owning loop polls it,
+/// so dropping the set on the error path is a safe cancellation of an ordinary
+/// (un-spawned) future. `'a` ties it to the borrowed session client.
+type InflightPart<'a> =
+    futures::future::LocalBoxFuture<'a, Result<PartETag, String>>;
+
 #[derive(Debug, Clone)]
 pub struct S3 {
     client: S3Client,
@@ -87,20 +95,30 @@ impl S3 {
     /// and the guard is disarmed on a clean complete; no abort happens here —
     /// the caller owns the explicit error-path abort.
     ///
-    /// ## Bounded-concurrency part uploads
+    /// ## Bounded-concurrency overlap pipeline (HIGH-2)
     ///
-    /// The source is still read STRICTLY SEQUENTIALLY into one `PART_SIZE`
-    /// buffer at a time, but each full part's `UploadPart` PUT is dispatched as
-    /// a concurrent future rather than awaited inline. At most
-    /// [`crate::limits::upload_concurrency`] PUTs run at once: when that many
-    /// are in flight we await the next one to finish before reading/dispatching
-    /// the next part. Memory stays bounded — at most `N × PART_SIZE` of part
-    /// buffers live (plus the reader's chunk). Uploads finish out of order, so
-    /// `(part_number, ETag)` results are sorted by part number before
-    /// `complete_multipart` (S3 requires ascending part order). Any in-flight
-    /// PUT error (or reader error, or a cap breach) propagates immediately; the
-    /// remaining in-flight futures are dropped (cancelled) and the caller's
-    /// error path aborts the multipart.
+    /// ONE task drives the producer (`body.next_chunk()`) AND the in-flight
+    /// `UploadPart` PUTs CONCURRENTLY via `futures::select!`. When a part PUT
+    /// completes *while the next chunk is still arriving*, the two overlap — a
+    /// slow producer no longer starves the in-flight uploads (the prior
+    /// gate-only-drain loop parked on the producer between dispatches, leaving
+    /// in-flight PUTs unpolled while their deadlines ticked). At most
+    /// [`crate::limits::upload_concurrency`] PUTs run at once: at capacity the
+    /// loop drains one before reading more, so live part memory is bounded by
+    /// `~(N+1) × PART_SIZE` (the in-flight set plus a transiently-buffered
+    /// part). Uploads finish out of order, so `(part_number, ETag)` results are
+    /// sorted by part number before `complete_multipart` (S3 requires ascending
+    /// part order). Any in-flight PUT error (or reader error, or a cap breach)
+    /// propagates immediately; the remaining in-flight futures are dropped
+    /// (cancelled) and the caller's error path aborts the multipart.
+    ///
+    /// The in-flight futures are PLAIN (un-spawned) `FuturesUnordered` members:
+    /// dropping the set on the error path is a safe cancellation of ordinary
+    /// futures. NO `spawn` — spawning + drop-cancelling a compio task with an
+    /// in-flight io_uring op corrupts the runtime; the whole point of the
+    /// select pipeline is overlap WITHOUT spawn. The per-part scaled send
+    /// timeout (`send_for_body`) is kept as defense-in-depth against a
+    /// genuinely *stalled* (not merely slow) part.
     #[allow(clippy::future_not_send)] // Backend is (?Send); body source is !Send by design
     #[allow(clippy::too_many_lines)] // single-pass stream → concurrent parts → complete
     async fn put_stream_inner(
@@ -111,7 +129,7 @@ impl S3 {
         guard: &compio_s3::MultipartGuard,
     ) -> Result<u64, String> {
         use futures::stream::FuturesUnordered;
-        use futures::StreamExt;
+        use futures::{FutureExt, StreamExt};
 
         let max_total = crate::limits::max_stream_object_bytes();
         let concurrency = crate::limits::upload_concurrency();
@@ -127,11 +145,14 @@ impl S3 {
         let mut upload_id: Option<UploadId> = None;
 
         // ONE pooled HTTP client shared across this multipart session's part
-        // uploads. Concurrent parts reuse its kept-alive connections instead of
-        // each opening a fresh one — that is what makes N-way concurrency safe
-        // (a fresh-client-per-part fan-out floods the host with TIME_WAIT
-        // sockets and trips transient connect failures). The client never
-        // outlives this call, so the per-thread client invariant holds.
+        // uploads AND its finalization (Complete/Abort). Concurrent parts reuse
+        // its kept-alive connections instead of each opening a fresh one — that
+        // is what makes N-way concurrency safe (a fresh-client-per-part fan-out
+        // floods the host with TIME_WAIT sockets and trips transient connect
+        // failures). Reusing it for the trailing `CompleteMultipartUpload` also
+        // avoids the cold-connect latency a brand-new connection pays right
+        // after a long upload. The client never outlives this call, so the
+        // per-thread client invariant holds.
         let session_client = self.client.open_upload_session();
 
         // In-flight part-upload futures, at most `concurrency` live at once.
@@ -140,95 +161,80 @@ impl S3 {
         // be polled concurrently on the single compio thread.
         let mut inflight = FuturesUnordered::new();
 
-        // Accumulate incoming chunks into a part buffer; dispatch whole
-        // PART_SIZE parts as they fill. Bounded memory: at most
-        // `concurrency × PART_SIZE` part bytes in flight + one chunk.
-        //
-        // ## Slow-producer handling (HIGH-2)
-        //
-        // A `FuturesUnordered` only advances its members when this loop polls it
-        // (at the backpressure drain). While the loop is parked on a slow
-        // producer between dispatches, the in-flight `UploadPart` futures are
-        // not polled — yet their send deadlines tick. We make that deadline
-        // ROBUST instead of racing the producer against the drain: each
-        // `UploadPart` gets a send timeout SCALED to its body size
-        // (`S3Timeouts::send_for_body` — ~158s for an 8 MiB part at the assumed
-        // 64 KB/s floor, vs the old fixed 30s), so a legitimately
-        // slow-but-progressing source no longer trips it.
-        //
-        // Two finer-grained overlap strategies were prototyped and rejected on
-        // this compio/cyper/MinIO stack: (a) spawning each part as a compio task
-        // corrupts the io_uring when the error path drop-CANCELS a task with an
-        // in-flight op; (b) `select`-ing the producer against the drain left the
-        // subsequent `CompleteMultipartUpload` connection unable to establish
-        // within the control-op timeout after an interleaved slow upload. The
-        // scaled per-part deadline is the robust, side-effect-free fix; true
-        // producer/upload overlap is deferred (see the review notes).
-        //
-        // Plain (un-spawned) `FuturesUnordered` futures are used so that dropping
-        // the set on the error path is a safe cancellation of ordinary futures.
-        // Memory stays bounded: a new part is never dispatched while
-        // `inflight.len() >= concurrency`.
+        // The part buffer: incoming chunks accumulate here and whole PART_SIZE
+        // parts are dispatched as capacity allows. It transiently holds ≤ ~2
+        // parts (a full part can sit buffered for one iteration while `inflight`
+        // is at capacity), so total live memory is ≈ (N+1) × PART_SIZE.
         let mut part_buf: Vec<u8> = Vec::with_capacity(PART_SIZE);
-        while let Some(chunk) = body.next_chunk().await {
-            let chunk = chunk?;
-            if chunk.is_empty() {
-                continue;
-            }
-            total += chunk.len() as u64;
-            if total > max_total {
-                return Err(format!(
-                    "storage: object exceeds max stream size {max_total} bytes \
-                     (set {} to raise)",
-                    crate::limits::MAX_STREAM_OBJECT_BYTES_ENV
-                ));
-            }
-            part_buf.extend_from_slice(&chunk);
+        let mut producer_done = false;
 
-            while part_buf.len() >= PART_SIZE {
-                if upload_id.is_none() {
-                    let id = self
-                        .client
-                        .create_multipart(s3_key, content_type)
-                        .await
-                        .map_err(|e| map_s3(s3_key, e))?;
-                    // Arm the drop-safety guard the INSTANT the id exists, then
-                    // keep a working copy.
-                    guard.set(id.clone());
-                    upload_id = Some(id);
+        // Single overlap loop: read the producer and drive the in-flight PUTs
+        // concurrently. Each iteration makes exactly one move forward.
+        loop {
+            if inflight.len() >= concurrency {
+                // At capacity: drain one completed PUT before reading more, so
+                // memory stays bounded. A part error propagates → caller aborts.
+                match inflight.next().await {
+                    Some(res) => parts.push(res?),
+                    None => break, // unreachable (non-empty above), but safe
                 }
-                // Refuse to exceed S3's 10,000-part hard limit: such an upload
-                // can never `complete`, so fail fast (the caller aborts).
-                if part_number >= crate::limits::MAX_MULTIPART_PARTS {
-                    return Err(format!(
-                        "storage: multipart upload would exceed the S3 {}-part limit",
-                        crate::limits::MAX_MULTIPART_PARTS
-                    ));
-                }
-                // Backpressure: keep at most `concurrency` PUTs in flight.
-                // Awaiting one BEFORE dispatching the next bounds live memory
-                // AND drives the in-flight set forward.
-                while inflight.len() >= concurrency {
-                    match inflight.next().await {
-                        Some(res) => parts.push(res?),
-                        None => break,
+            } else if producer_done {
+                // Producer exhausted and we have spare capacity: stop reading
+                // and fall through to the final-part flush + drain below.
+                break;
+            } else if inflight.is_empty() {
+                // Nothing to overlap. Do NOT `select!` on an empty
+                // `FuturesUnordered` (its `next()` is immediately `Ready(None)`
+                // and would busy-loop) — just read the next chunk.
+                match body.next_chunk().await {
+                    Some(chunk) => {
+                        self.handle_chunk(
+                            chunk?,
+                            s3_key,
+                            content_type,
+                            &session_client,
+                            guard,
+                            &mut total,
+                            max_total,
+                            &mut part_buf,
+                            &mut part_number,
+                            &mut upload_id,
+                            &mut inflight,
+                            concurrency,
+                        )
+                        .await?;
                     }
+                    None => producer_done = true,
                 }
-                let id = upload_id.as_ref().expect("multipart created");
-                // Copy exactly PART_SIZE into a tight buffer rather than
-                // `split_off`-ing the (possibly 16 MiB-grown) `part_buf`: the
-                // part `Bytes` is held through the PUT + every retry, so an
-                // over-capacity allocation would pin ~2× the intended memory.
-                let part = Bytes::copy_from_slice(&part_buf[..PART_SIZE]);
-                part_buf.drain(..PART_SIZE);
-                part_number += 1;
-                inflight.push(self.upload_part_owned(
-                    &session_client,
-                    s3_key,
-                    id,
-                    part_number,
-                    part,
-                ));
+            } else {
+                // Overlap: a PUT completing WHILE the next chunk arrives is the
+                // whole point — neither starves the other.
+                futures::select! {
+                    chunk = body.next_chunk().fuse() => match chunk {
+                        Some(c) => {
+                            self.handle_chunk(
+                                c?,
+                                s3_key,
+                                content_type,
+                                &session_client,
+                                guard,
+                                &mut total,
+                                max_total,
+                                &mut part_buf,
+                                &mut part_number,
+                                &mut upload_id,
+                                &mut inflight,
+                                concurrency,
+                            )
+                            .await?;
+                        }
+                        None => producer_done = true,
+                    },
+                    done = inflight.next() => match done {
+                        Some(res) => parts.push(res?),
+                        None => {} // set drained to empty; next iter re-reads
+                    },
+                }
             }
         }
 
@@ -246,13 +252,10 @@ impl S3 {
                 }
                 part_number += 1;
                 let part = Bytes::from(std::mem::take(&mut part_buf));
-                inflight.push(self.upload_part_owned(
-                    &session_client,
-                    s3_key,
-                    id,
-                    part_number,
-                    part,
-                ));
+                inflight.push(
+                    self.upload_part_owned(&session_client, s3_key, id, part_number, part)
+                        .boxed_local(),
+                );
             }
             // Drain all remaining in-flight part uploads. An error here drops
             // the rest (cancelling those plain futures); the caller aborts the
@@ -264,8 +267,9 @@ impl S3 {
             // ascending part-number order at complete time.
             parts.sort_by_key(|p| p.part_number);
 
+            // Finalize on the warm session client (no cold post-upload connect).
             self.client
-                .complete_multipart(s3_key, id, &parts)
+                .complete_multipart_on(&session_client, s3_key, id, &parts)
                 .await
                 .map_err(|e| map_s3(s3_key, e))?;
             // Completed — disarm the guard so neither the explicit error path
@@ -285,6 +289,86 @@ impl S3 {
         }
 
         Ok(total)
+    }
+
+    /// Fold one incoming chunk into the running state: enforce the size cap,
+    /// update the running total, buffer the bytes, and dispatch any FULL
+    /// `PART_SIZE` parts whose slots are free.
+    ///
+    /// Parts are dispatched ONLY while `inflight.len() < concurrency`. If
+    /// `part_buf` still holds ≥ `PART_SIZE` when the in-flight set is at
+    /// capacity, the bytes are LEFT buffered — the caller's next
+    /// capacity-drain frees a slot and the following iteration flushes them.
+    /// `part_buf` therefore transiently holds ≤ ~2 parts; total live memory
+    /// stays ≈ (N+1) × PART_SIZE. Lazily creates the multipart (and arms the
+    /// drop-safety guard) on the first full part.
+    #[allow(clippy::too_many_arguments)] // shared loop state threaded explicitly
+    #[allow(clippy::future_not_send)] // !Send by design (per-thread cyper client)
+    async fn handle_chunk<'a>(
+        &'a self,
+        chunk: Bytes,
+        s3_key: &'a str,
+        content_type: &str,
+        session_client: &'a compio_s3::UploadSession,
+        guard: &compio_s3::MultipartGuard,
+        total: &mut u64,
+        max_total: u64,
+        part_buf: &mut Vec<u8>,
+        part_number: &mut u32,
+        upload_id: &mut Option<UploadId>,
+        inflight: &mut futures::stream::FuturesUnordered<InflightPart<'a>>,
+        concurrency: usize,
+    ) -> Result<(), String> {
+        use futures::FutureExt;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        *total += chunk.len() as u64;
+        if *total > max_total {
+            return Err(format!(
+                "storage: object exceeds max stream size {max_total} bytes \
+                 (set {} to raise)",
+                crate::limits::MAX_STREAM_OBJECT_BYTES_ENV
+            ));
+        }
+        part_buf.extend_from_slice(&chunk);
+
+        // Dispatch whole parts while we have data AND a free in-flight slot.
+        // Leaving a full part buffered when at capacity is intentional — the
+        // overlap loop's capacity-drain frees a slot next iteration.
+        while part_buf.len() >= PART_SIZE && inflight.len() < concurrency {
+            if upload_id.is_none() {
+                let id = self
+                    .client
+                    .create_multipart(s3_key, content_type)
+                    .await
+                    .map_err(|e| map_s3(s3_key, e))?;
+                // Arm the drop-safety guard the INSTANT the id exists.
+                guard.set(id.clone());
+                *upload_id = Some(id);
+            }
+            // Refuse to exceed S3's 10,000-part hard limit: such an upload
+            // can never `complete`, so fail fast (the caller aborts).
+            if *part_number >= crate::limits::MAX_MULTIPART_PARTS {
+                return Err(format!(
+                    "storage: multipart upload would exceed the S3 {}-part limit",
+                    crate::limits::MAX_MULTIPART_PARTS
+                ));
+            }
+            let id = upload_id.as_ref().expect("multipart created");
+            // Copy exactly PART_SIZE into a tight buffer rather than
+            // `split_off`-ing the (possibly grown) `part_buf`: the part `Bytes`
+            // is held through the PUT + every retry, so an over-capacity
+            // allocation would pin ~2× the intended memory.
+            let part = Bytes::copy_from_slice(&part_buf[..PART_SIZE]);
+            part_buf.drain(..PART_SIZE);
+            *part_number += 1;
+            inflight.push(
+                self.upload_part_owned(session_client, s3_key, id, *part_number, part)
+                    .boxed_local(),
+            );
+        }
+        Ok(())
     }
 
     /// One concurrent `UploadPart`: an owned, self-contained future (cloned

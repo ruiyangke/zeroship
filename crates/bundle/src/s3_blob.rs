@@ -124,10 +124,14 @@ impl S3BlobStore {
         let mut upload_id: Option<UploadId> = None;
 
         // ONE pooled HTTP client shared across this multipart session's part
-        // uploads. Concurrent parts reuse its kept-alive connections instead of
-        // each opening a fresh one — a fresh-client-per-part fan-out floods the
-        // host with TIME_WAIT sockets and trips transient connect failures. The
-        // client never outlives this call, so the per-thread invariant holds.
+        // uploads AND its finalization. Concurrent parts reuse its kept-alive
+        // connections instead of each opening a fresh one — a fresh-client-
+        // per-part fan-out floods the host with TIME_WAIT sockets and trips
+        // transient connect failures. The trailing `CompleteMultipartUpload`
+        // also runs on this warm session (`complete_multipart_on`) so it does
+        // not pay the cold-connect latency a brand-new connection costs right
+        // after a long upload. The client never outlives this call, so the
+        // per-thread invariant holds.
         let session_client = self.client.open_upload_session();
 
         // In-flight part-upload futures, at most `concurrency` live at once.
@@ -135,12 +139,16 @@ impl S3BlobStore {
         // path is then a safe cancellation of ordinary futures (spawning +
         // drop-cancelling a compio task with an in-flight io_uring op corrupts
         // the runtime). The source here is a SYNCHRONOUS `std::io::Read` (a
-        // deploy artifact on local disk / in memory), so there is no slow-async
-        // producer to starve the in-flight PUTs between drains — the
-        // `plugin-storage` `S3::put_stream` path (a slow V8 ReadableStream)
-        // additionally `select`s the producer against the drain; here the read
-        // is fast and the backpressure drains suffice. The set caps at
-        // `concurrency`, so memory stays bounded by `concurrency × PART_SIZE`.
+        // deploy artifact on local disk / in memory): a `read()` returns
+        // immediately, so — unlike a slow async producer — it cannot park this
+        // loop and starve the in-flight PUTs between drains. The
+        // `plugin-storage` `S3::put_stream` path (a slow V8 `ReadableStream`)
+        // therefore `select!`s its async producer against the in-flight drain
+        // for true overlap (HIGH-2); here the read is fast and the
+        // gate/backpressure drain suffices, so a `select!` over a synchronous
+        // read (which cannot yield to the executor) would add nothing. The set
+        // caps at `concurrency`, so memory stays bounded by
+        // `concurrency × PART_SIZE`.
         let mut inflight = FuturesUnordered::new();
 
         // Read the source in bounded chunks; accumulate into the current part
@@ -253,8 +261,9 @@ impl S3BlobStore {
                 });
             }
 
+            // Finalize on the warm session client (no cold post-upload connect).
             self.client
-                .complete_multipart(key, id, &parts)
+                .complete_multipart_on(&session_client, key, id, &parts)
                 .await
                 .map_err(|e| map_s3(hash, e))?;
             // Completed — the object exists; disarm the guard so neither the

@@ -97,24 +97,34 @@ no pricing model — add a server-side plan catalog (see the remediation plan).
 
 ## T1 — Launch-blocking infrastructure
 
-### ISS-72 · env.storage multipart: in-flight parts don't overlap a slow producer (mitigated, not fully fixed)
-**Status:** open — known limitation · **Effort:** M · **Tier:** T3 · Surfaced by the fable S3 review (HIGH-2)
+### ISS-72 · env.storage multipart: in-flight parts overlap a slow producer (FIXED — select pipeline)
+**Status:** FIXED (`design/s3-object-storage`) · **Effort:** M · **Tier:** T3 · Surfaced by the fable S3 review (HIGH-2)
 
-The parallel multipart loop (`put_stream`/`put_blob_stream`) only polls its `FuturesUnordered`
-of in-flight `UploadPart`s inside the `while inflight.len() >= concurrency` gate — so while the
-loop is suspended at `body.next_chunk().await` (an app/end-user-paced V8 ReadableStream), the
-mid-flight PUTs make no progress, yet their send-deadlines keep ticking. **Mitigated** (`7f441914`)
-by scaling the per-part timeout to part size (`S3Timeouts::send_for_body` ≈ 158 s for an 8 MiB
-part → ~52 KB/s floor) + a generous control-op timeout, so the common case is safe and the prior
-"slow producer → spurious 30 s timeout → 8 futile retries → fail" no longer bites above ~52 KB/s.
-**Not fully fixed:** the structural starvation remains (a producer slower than the floor still
-fails; objects < N×PART_SIZE get no producer/PUT overlap at all). True overlap (select producer
-vs `inflight`, or spawn parts as compio tasks) was **prototyped and reverted** — on this
-compio/cyper/io_uring stack, spawn-per-part corrupts the ring when the abort path drop-cancels a
-task with an in-flight op, and `select` left the post-upload Complete/get connection unable to
-establish in time. **Follow-up:** an io_uring-cancellation-safe overlap (or a connection-lifecycle
-fix in compio-s3/cyper — the deeper "fresh-connection send slowness after a long multipart upload"
-the review flagged). No regression test today (the slow-producer test exercised that env pathology).
+The parallel multipart loop in `S3::put_stream` (`crates/plugin-storage/src/backend/s3.rs`) was
+restructured from a gate-only-drain loop into a **select-based bounded-concurrency overlap
+pipeline**: one task drives the producer (`body.next_chunk()`) and the in-flight `UploadPart`
+`FuturesUnordered` CONCURRENTLY via `futures::select!`, so a PUT completing *while the next chunk
+is still arriving* overlaps the two — the mid-flight PUTs are continuously polled even while the
+loop awaits a slow V8 `ReadableStream`. At capacity the loop drains one part before reading more
+(memory bounded ≈ `(N+1)×PART_SIZE`); parts are still sorted ascending before complete; an
+in-flight error still drops the set and the caller's error path aborts. **No spawn** — the
+futures are plain (un-spawned) `FuturesUnordered` members (`InflightPart` = `LocalBoxFuture`), so
+the abort-path drop is a safe ordinary-future cancellation, not an io_uring-corrupting task cancel
+(the spawn-per-part prototype that corrupted the ring is avoided by construction). The prior
+attempt's "select broke the post-upload Complete connection" was a misdiagnosis of a *cold-connect*
+slowness: `CompleteMultipartUpload`/`AbortMultipartUpload` now REUSE the upload session's already-warm
+pooled `cyper::Client` (`complete_multipart_on` / `abort_multipart_on` in `crates/compio-s3`), so
+finalization no longer opens a cold connection after a long upload. The per-part scaled timeout
+(`S3Timeouts::send_for_body`) is kept as defense-in-depth against a genuinely *stalled* part.
+**Regression test:** `run_s3_slow_producer_overlap` in `crates/plugin-storage/tests/backend_parity.rs`
+(MinIO-gated) drives `put_stream` with a real inter-chunk-delayed producer spanning several parts
+and asserts a byte-exact round-trip + finalized object. NB: this test proves the new loop COMPLETES
+correctly under a slow producer; it cannot be made to *fail* on the old loop against **local** MinIO,
+because local parts complete in milliseconds whenever polled, so a fast part is never starved across
+a producer stall — the starvation (and the cold-Complete latency) are real-S3-network phenomena.
+The bundle path (`put_blob_stream`) keeps the gate-drain loop: its source is a synchronous
+`std::io::Read` that returns immediately and cannot park the loop, so there is no async producer to
+overlap; it adopts only the warm-session `complete_multipart_on`.
 
 ### ISS-32 · No production object storage (S3/R2)
 **Status:** FIXED (PR1–PR4, branch `design/s3-object-storage`) · **Effort:** M–L · **Tier:** T1

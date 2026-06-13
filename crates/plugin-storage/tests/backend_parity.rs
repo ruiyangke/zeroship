@@ -453,6 +453,11 @@ fn s3_parity_and_large_stream() {
                 // round-trips byte-exact (parts sorted by number before
                 // complete, despite finishing out of order).
                 run_s3_parallel_many_parts().await;
+                // HIGH-2: a SLOW producer (real inter-chunk delays spanning
+                // several parts) must still complete byte-exact — the select-
+                // overlap loop drives the in-flight PUTs while the producer
+                // stalls, where the old gate-only-drain loop would starve them.
+                run_s3_slow_producer_overlap().await;
                 // C1: an error mid-multipart-upload must explicitly abort the
                 // upload (no orphaned parts, no process abort).
                 run_s3_mid_upload_abort(&backend).await;
@@ -506,6 +511,103 @@ impl ChunkSource for ErrAfterChunks {
         self.remaining -= n;
         Some(Ok(Bytes::from(vec![0xEEu8; n])))
     }
+}
+
+/// A `ChunkSource` that emulates a SLOW async producer: it yields `chunk`-sized
+/// buffers with a real `compio::time::sleep` delay BETWEEN chunks (a slow V8
+/// `ReadableStream` / constrained uplink), until `total` bytes are produced.
+///
+/// The bytes are position-dependent so a misordered/duplicated/dropped part
+/// fails the byte-compare, not merely a length check.
+#[cfg(feature = "s3")]
+struct SlowChunks {
+    produced: usize,
+    total: usize,
+    chunk: usize,
+    delay: Duration,
+    first: bool,
+}
+
+#[cfg(feature = "s3")]
+#[async_trait::async_trait(?Send)]
+impl ChunkSource for SlowChunks {
+    async fn next_chunk(&mut self) -> Option<ChunkResult> {
+        if self.produced >= self.total {
+            return None;
+        }
+        // Delay BEFORE every chunk after the first — this is the inter-chunk
+        // stall that, on the old gate-only-drain loop, parked the upload loop
+        // and left the in-flight `UploadPart`s unpolled while their deadlines
+        // ticked. The select-overlap loop instead advances them concurrently.
+        if self.first {
+            self.first = false;
+        } else {
+            compio::time::sleep(self.delay).await;
+        }
+        let len = self.chunk.min(self.total - self.produced);
+        let mut buf = vec![0u8; len];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((self.produced + i) % 251) as u8;
+        }
+        self.produced += len;
+        Some(Ok(Bytes::from(buf)))
+    }
+}
+
+/// HIGH-2 regression (plugin-storage `S3::put_stream`): a SLOW producer — real
+/// inter-chunk delays, total spanning several parts — must still COMPLETE the
+/// multipart upload byte-exact. On the old gate-only-drain loop the in-flight
+/// `UploadPart`s sat unpolled while the loop was parked on the slow producer
+/// between dispatches; the new select-overlap loop drives the producer and the
+/// in-flight PUTs concurrently so a slow-but-progressing source finishes.
+#[cfg(feature = "s3")]
+async fn run_s3_slow_producer_overlap() {
+    use zeroship_plugin_storage::limits::UPLOAD_CONCURRENCY_ENV;
+    const PART_SIZE: usize = 8 * 1024 * 1024;
+
+    // Concurrency 4 so multiple PUTs are in flight while the producer stalls.
+    std::env::set_var(UPLOAD_CONCURRENCY_ENV, "4");
+    let backend = make_s3();
+
+    let key = "slow-producer.bin";
+    // ~3.1 parts total, fed as ~1 MiB chunks with a ~1.2s inter-chunk delay —
+    // ~30s of cumulative producer stall spread across the upload. The select-
+    // overlap loop keeps the in-flight PUTs advancing through every stall, so
+    // the upload completes byte-exact instead of hanging / timing out a part.
+    let total = PART_SIZE * 3 + 100_000;
+    let chunk = 1024 * 1024;
+    let src = SlowChunks {
+        produced: 0,
+        total,
+        chunk,
+        delay: Duration::from_millis(1200),
+        first: true,
+    };
+
+    // Rebuild the expected bytes with the SAME position-dependent formula.
+    let mut expect = vec![0u8; total];
+    for (i, b) in expect.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+
+    let written = backend
+        .put_stream(APP, BUCKET, key, Box::new(src), None)
+        .await
+        .unwrap_or_else(|e| panic!("HIGH-2 slow-producer put_stream: {e}"));
+    std::env::remove_var(UPLOAD_CONCURRENCY_ENV);
+    assert_eq!(written, total as u64, "HIGH-2: written size");
+
+    let (meta, stream) = backend
+        .get_stream(APP, BUCKET, key)
+        .await
+        .unwrap()
+        .expect("HIGH-2: get_stream None");
+    assert_eq!(meta.size, total as u64, "HIGH-2: get meta size");
+    let got = drain(stream).await;
+    assert_eq!(got.len(), expect.len(), "HIGH-2: length mismatch");
+    assert!(got == expect, "HIGH-2: byte-compare mismatch (ordering/overlap?)");
+
+    backend.delete(APP, BUCKET, key).await.unwrap();
 }
 
 /// C1 regression (plugin-storage `S3::put_stream`): a mid-upload error must
