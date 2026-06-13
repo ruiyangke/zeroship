@@ -147,8 +147,15 @@ pub async fn get_routes(
     }
 }
 
-/// POST /internal/usage — accept usage report from workers.
-/// Uses common::types::UsageReport { worker_id, counters: { app_id → AppUsage } }
+/// POST /internal/usage — accept a usage report from a worker.
+///
+/// `UsageReport { worker_id, report_id, sequence, counters: { app_id →
+/// AppUsage } }`. Ingest is IDEMPOTENT: the report is deduped on
+/// `(worker_id, sequence)` and aggregated per `(app_id, calendar-month,
+/// metric)` into `zeroship.usage_aggregates`. A duplicate (an at-least-once
+/// producer retry) is a no-op — it never double-counts. The response always
+/// carries the worker's `high_water` sequence so a producer can resync after
+/// a restart, plus a `duplicate` flag.
 pub async fn report_usage(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -159,22 +166,22 @@ pub async fn report_usage(
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
-    for (app_id, usage) in &body.counters {
-        let deltas = [
-            ("requests", usage.requests as i64),
-            ("cpu_us", usage.cpu_us as i64),
-            ("wall_us", usage.wall_us as i64),
-            ("egress_bytes", usage.egress_bytes as i64),
-            ("ingress_bytes", usage.ingress_bytes as i64),
-        ];
-        for (resource, delta) in &deltas {
-            if *delta > 0 {
-                if let Err(e) = state.registry.record_usage(app_id, resource, *delta).await {
-                    return web::HttpResponse::InternalServerError()
-                        .json(&serde_json::json!({"error": e.to_string()}));
-                }
-            }
+    let metering = crate::metering::Metering::new(state.registry.clone());
+    match metering.ingest(&body).await {
+        Ok(outcome) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "recorded": true,
+            "duplicate": outcome.duplicate,
+            "high_water": outcome.high_water_sequence,
+        })),
+        Err(e) => {
+            tracing::error!(
+                worker_id = %body.worker_id,
+                sequence = body.sequence,
+                error = %e,
+                "control-internal: usage ingest failed"
+            );
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}))
         }
     }
-    web::HttpResponse::Ok().json(&serde_json::json!({"recorded": true}))
 }

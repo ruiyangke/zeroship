@@ -634,7 +634,11 @@ pub async fn get_usage(
     {
         return resp;
     }
-    match state.registry.get_usage(&uid).await {
+    // Usage now comes from the period-aggregated `usage_aggregates` table
+    // (the metering pipeline), scoped to the current calendar-month period.
+    // Returns the same `metric → total` map shape the dashboard consumes.
+    let metering = crate::metering::Metering::new(state.registry.clone());
+    match metering.current_period_totals(&uid).await {
         Ok(usage) => web::HttpResponse::Ok().json(&usage),
         Err(e) => error_response(e),
     }

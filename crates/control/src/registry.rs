@@ -478,42 +478,13 @@ impl Registry {
     }
 
     // -- Usage / Metering ---------------------------------------------------
-
-    /// Increment a usage counter for an app (upsert).
-    pub async fn record_usage(
-        &self,
-        app_id: &Uuid,
-        resource: &str,
-        delta: i64,
-    ) -> Result<(), RegistryError> {
-        let conn = self.conn().await?;
-        conn.execute(
-            "INSERT INTO zeroship.app_usage AS u (app_id, resource, value) VALUES ($1, $2, $3) \
-             ON CONFLICT (app_id, resource) DO UPDATE SET value = u.value + EXCLUDED.value",
-            &[app_id, &resource, &delta],
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Get all usage counters for an app.
-    pub async fn get_usage(
-        &self,
-        app_id: &Uuid,
-    ) -> Result<HashMap<String, i64>, RegistryError> {
-        let conn = self.conn().await?;
-        let rows = conn
-            .query(
-                "SELECT resource, value FROM zeroship.app_usage WHERE app_id = $1",
-                &[app_id],
-            )
-            .await?;
-        let mut map = HashMap::new();
-        for row in &rows {
-            map.insert(row.get::<_, String>("resource"), row.get::<_, i64>("value"));
-        }
-        Ok(map)
-    }
+    //
+    // Usage ingest + reads moved to `crate::metering::Metering` (the
+    // idempotent, period-aggregated pipeline backed by
+    // `zeroship.usage_aggregates` + `zeroship.usage_reports_seen`). The old
+    // raw-additive `record_usage`/`get_usage` over `zeroship.app_usage`
+    // (no idempotency, no period, no custom metrics) are gone — pre-launch,
+    // no deprecated aliases.
 }
 
 fn runtime_limits_for_plan(plan_id: &str) -> AppRuntimeLimits {
