@@ -208,6 +208,18 @@ fn cmd_serve(args: &[String]) {
     };
     plugins.push(Arc::new(kv_plugin));
 
+    // Meter plugin: always on, for namespace parity with the production
+    // worker kernel — `env.meter.increment(metric, n?)` resolves in dev
+    // (`zeroship serve`) exactly as it does on a deployed app. In dev there
+    // is no control plane to flush to, so NO flush task is spawned: the
+    // meter accumulates locally and is never drained (intentional — dev
+    // doesn't bill). The production worker (`crates/worker`) is the vector
+    // that pairs this plugin with a `spawn_flush_task` → control POST.
+    plugins.push(Arc::new(zeroship_plugin_meter::MeterPlugin::with_meter(
+        Arc::new(zeroship_plugin_meter::Meter::new()),
+    )));
+    eprintln!("[zeroship] meter plugin registered (dev: no flush — local accumulation only)");
+
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
     // in the spawned child env, and user apps expect access to OPENAI_API_KEY

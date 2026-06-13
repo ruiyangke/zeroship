@@ -484,6 +484,32 @@ fn main() -> std::io::Result<()> {
     // env entries for deleted apps don't leak forever.
     sync::start_version_poller(config.clone(), shared_versions.clone(), shared_envs.clone());
 
+    // ── Metering producer ────────────────────────────────────────────────
+    // ONE process-wide meter, shared with every ntex worker thread's
+    // `create_plugins` (via KernelConfig) AND the single flush task spawned
+    // here. `env.meter.increment` from any app on any thread accumulates
+    // into this instance; the flush task drains it every ~10s and POSTs a
+    // `UsageReport` (idempotent, dedup'd on worker_id+sequence) to control.
+    let meter = Arc::new(zeroship_plugin_meter::Meter::new());
+    // Stable-ish worker identity for the dedup key. Prefer $HOSTNAME (stable
+    // across restarts in k8s/compose); else bind addr; else a random id. A
+    // restart with a fresh id simply forgoes cross-restart dedup — never a
+    // false dedup, so it's safe.
+    let worker_id = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{bind_addr}-{}", uuid::Uuid::new_v4()));
+    zeroship_plugin_meter::spawn_flush_task(
+        Arc::clone(&meter),
+        zeroship_plugin_meter::FlushConfig {
+            control_url: config.control_url.clone(),
+            control_key: config.control_key.clone(),
+            worker_id: worker_id.clone(),
+            interval: zeroship_plugin_meter::DEFAULT_FLUSH_INTERVAL,
+        },
+    );
+    tracing::info!(worker_id = %worker_id, "metering flush task started");
+
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests
     // before they're force-dropped. Wire our flag through.
@@ -501,6 +527,8 @@ fn main() -> std::io::Result<()> {
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
+                // The ONE process-wide meter the flush task drains.
+                meter: Arc::clone(&meter),
             },
         );
         // Per-thread reconcile loop — reads from the shared version map,

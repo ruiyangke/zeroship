@@ -14,6 +14,7 @@ zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
 zeroship-plugin-kv = { workspace = true }
+zeroship-plugin-meter = { workspace = true }
 zeroship-plugin-storage = { workspace = true, features = ["s3"] }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }

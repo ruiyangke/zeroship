@@ -198,6 +198,10 @@ pub async fn dispatch(
     };
 
     metrics::inc(&metrics::DISPATCH_TOTAL);
+    // Metering auto-counter: one dispatched request for this app. Fed into
+    // the process-wide meter the flush task drains (the `requests` platform
+    // counter). Cheap atomic bump; no-op when the meter is unconfigured.
+    cache::record_request(&app_id);
 
     // Parse the HTTP envelope from the request body.
     let envelope: HttpEnvelope = match serde_json::from_slice(&body) {
@@ -478,6 +482,7 @@ mod tests {
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
+                    meter: std::sync::Arc::new(zeroship_plugin_meter::Meter::new()),
                 },
             );
             assert!(crate::cache::load_app(
@@ -646,6 +651,7 @@ mod tests {
                     db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
                     kv_url: Some(kv_url),
                     storage_backend: Some(StorageBackendConfig::Local(storage_root.clone())),
+                    meter: std::sync::Arc::new(zeroship_plugin_meter::Meter::new()),
                 },
             );
             assert!(crate::cache::load_app(

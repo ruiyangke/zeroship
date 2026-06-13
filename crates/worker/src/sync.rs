@@ -652,6 +652,7 @@ mod tests {
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
+                    meter: std::sync::Arc::new(zeroship_plugin_meter::Meter::new()),
                 },
             );
 

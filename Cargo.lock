@@ -6494,6 +6494,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
+ "zeroship-plugin-meter",
  "zeroship-plugin-storage",
  "zeroship-runtime",
 ]
@@ -6730,6 +6731,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-plugin-meter"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "cyper",
+ "serde_json",
+ "tracing",
+ "uuid",
+ "v8",
+ "zeroship-core",
+ "zeroship-runtime",
+ "zeroship-runtime-macros",
+]
+
+[[package]]
 name = "zeroship-plugin-storage"
 version = "0.1.0"
 dependencies = [
@@ -6875,6 +6891,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
+ "zeroship-plugin-meter",
  "zeroship-plugin-storage",
  "zeroship-runtime",
 ]
