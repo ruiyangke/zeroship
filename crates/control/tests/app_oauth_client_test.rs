@@ -53,6 +53,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     };
 
     let registry = Registry::new(&url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
     let raw = pg(&url).await;
     let mut conn = pg(&url).await; // owned, mutable — for the transactional upsert
     let hydra = HydraAdmin::new(hydra_url.clone());
@@ -73,7 +74,7 @@ async fn provision_asserts_hydra_db_and_routes() {
     // 1. Create a uniquely-named app so reruns don't collide.
     let app_name = format!("zs-1d-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = app.id;
@@ -305,6 +306,7 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
     let blob_root = std::env::temp_dir().join(format!("oac-blob-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&blob_root).expect("mkdir blob root");
     let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store =
         EnvStore::new(registry.clone(), "test-master-key-deadbeefcafebabe", false).expect("env");
     let stripe_store = StripeStore::new(registry.clone());
@@ -380,7 +382,7 @@ async fn appstate_provision_then_delete_end_to_end() {
     let app_name = format!("zs-1d-state-{}", Uuid::new_v4().simple());
     let app = state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = app.id;

@@ -35,12 +35,27 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 /// Insert a bare `apps` row directly so the FK on `usage_aggregates(app_id)`
 /// is satisfied without the full create_app owner/user dance. Returns the id.
 async fn make_app(client: &compio_postgres::Client) -> Uuid {
+    // PR4: apps.plan_id is an FK into zeroship.plans. Ensure the built-in free
+    // plan exists, then reference its real catalog id.
+    let free = zeroship_control::bootstrap_console::free_plan_id();
+    client
+        .execute(
+            "INSERT INTO zeroship.plans \
+               (id, name, base_fee_cents, price_model_json, included_quota_json, \
+                runtime_limits_json, spend_limit_default_cents) \
+             VALUES ($1, 'free', 0, '{}', '{}', \
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', 0) \
+             ON CONFLICT (id) DO NOTHING",
+            &[&free],
+        )
+        .await
+        .expect("seed free plan");
     let name = format!("metering-test-{}", Uuid::new_v4());
     let rows = client
         .query(
             "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
-             VALUES ($1, 'free', $2, '') RETURNING id",
-            &[&name, &Uuid::new_v4().to_string()],
+             VALUES ($1, $2, $3, '') RETURNING id",
+            &[&name, &free, &Uuid::new_v4().to_string()],
         )
         .await
         .expect("insert app");

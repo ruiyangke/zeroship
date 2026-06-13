@@ -33,6 +33,9 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
         return;
     };
     let registry = Registry::new(&url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
     // Unique app so parallel runs don't collide; the count assertion is
     // app-scoped, and the global sweep only touches >retention rows.
     let conn = raw_conn(&url).await;
@@ -50,7 +53,7 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     .expect("seed owner user");
     let name = format!("ret-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let app = registry
-        .create_app(&name, "free", &owner_id)
+        .create_app(&name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create_app")
         .id;

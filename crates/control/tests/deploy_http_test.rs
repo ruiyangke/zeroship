@@ -250,6 +250,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     );
 
     let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
         .expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
@@ -323,7 +324,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -539,7 +540,7 @@ async fn deploy_manifest_not_first_returns_400() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -616,7 +617,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -708,7 +709,7 @@ async fn deploy_noncolliding_scope_returns_200() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;

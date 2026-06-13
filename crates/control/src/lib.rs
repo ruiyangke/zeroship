@@ -21,6 +21,8 @@ pub mod internal;
 pub mod metering;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
+pub mod plan_catalog;
+pub mod pricing;
 pub mod rate_limit;
 pub mod registry;
 pub mod stripe_handlers;

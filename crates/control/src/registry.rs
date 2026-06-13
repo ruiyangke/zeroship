@@ -120,6 +120,38 @@ impl Registry {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 
+    /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
+    /// Returns a clean [`RegistryError::InvalidInput`] (not a raw FK violation)
+    /// for an unknown or archived plan — the server-side gate that closes the
+    /// CT-A1 free-text self-escalation. Runs on a borrowed connection so it
+    /// composes inside an existing transaction.
+    async fn validate_plan<C: compio_postgres::GenericClient + Sync>(
+        conn: &C,
+        plan_id: &str,
+    ) -> Result<(), RegistryError> {
+        let rows = conn
+            .query(
+                "SELECT archived FROM zeroship.plans WHERE id = $1",
+                &[&plan_id],
+            )
+            .await?;
+        match rows.first() {
+            None => Err(RegistryError::InvalidInput(format!(
+                "unknown plan '{plan_id}' (not in the plan catalog)"
+            ))),
+            Some(row) => {
+                let archived: bool = row.get("archived");
+                if archived {
+                    Err(RegistryError::InvalidInput(format!(
+                        "plan '{plan_id}' is archived and cannot be assigned"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     // -- App CRUD -----------------------------------------------------------
 
     /// Create a new application owned by `owner_id`. Returns the created
@@ -156,6 +188,13 @@ impl Registry {
         let key_hash = hash_api_key(&api_key);
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
+
+        // Server-side plan gate (PR4 / CT-A1): the plan must exist and be
+        // unarchived in the catalog. Checked inside the txn before the INSERT
+        // so an invalid plan returns a clean InvalidInput AND never leaves a
+        // half-written app/owner pair (the FK would also reject it, but this
+        // gives a typed error and an archived-plan check the FK can't).
+        Self::validate_plan(&tx, plan_id).await?;
 
         let rows = tx
             .query(
@@ -338,8 +377,14 @@ impl Registry {
     }
 
     /// Change the plan for an app.
+    ///
+    /// Validates the target plan exists + is unarchived in the catalog BEFORE
+    /// the UPDATE (PR4 / CT-A1): an unknown or archived plan returns a clean
+    /// [`RegistryError::InvalidInput`] rather than a raw FK violation. Returns
+    /// `true` if the app row was updated, `false` if no such app.
     pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
+        Self::validate_plan(&conn, plan_id).await?;
         let n = conn
             .execute(
                 "UPDATE zeroship.apps SET plan_id = $1, \
@@ -362,9 +407,17 @@ impl Registry {
     /// app on its reconcile pass.
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
+        // LEFT JOIN the plan catalog so each app's runtime limits come from its
+        // plan row (PR4 — no more hardcoded `runtime_limits_for_plan` table). A
+        // missing plan (NULL `runtime_limits_json`) falls back to the
+        // conservative free-tier limits below, so the worker never receives
+        // `(None, None, None)` for an unpriced app.
         let rows = conn
             .query(
-                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM zeroship.apps",
+                "SELECT a.id, a.deploy_hash, a.plan_id, a.env_version, a.manifest_json, \
+                        p.runtime_limits_json \
+                 FROM zeroship.apps a \
+                 LEFT JOIN zeroship.plans p ON p.id = a.plan_id",
                 &[],
             )
             .await?;
@@ -375,6 +428,7 @@ impl Registry {
             let plan_id: String = row.get("plan_id");
             let env_version: i64 = row.get("env_version");
             let manifest_json: Option<String> = row.get("manifest_json");
+            let runtime_limits_json: Option<serde_json::Value> = row.get("runtime_limits_json");
             let manifest = manifest_json.as_deref().and_then(|j| {
                 match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
                     Ok(m) => Some(m),
@@ -390,7 +444,7 @@ impl Registry {
             });
             map.insert(id, AppVersionInfo {
                 deploy_hash: hash,
-                runtime: runtime_limits_for_plan(&plan_id),
+                runtime: runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id),
                 plan_id,
                 env_version,
                 manifest,
@@ -487,28 +541,38 @@ impl Registry {
     // no deprecated aliases.
 }
 
-fn runtime_limits_for_plan(plan_id: &str) -> AppRuntimeLimits {
-    match plan_id {
-        "free" => AppRuntimeLimits {
-            cpu_limit_ms: Some(50),
-            wall_timeout_ms: Some(5_000),
-            heap_limit_mb: Some(64),
+/// Conservative free-tier runtime limits, applied when an app's plan row is
+/// missing or its `runtime_limits_json` fails to parse. An unpriced/unknown
+/// app is treated as the cheapest, most-bounded tier — the worker never gets
+/// `(None, None, None)` (unbounded CPU/wall/heap) by default.
+pub(crate) const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
+    cpu_limit_ms: Some(50),
+    wall_timeout_ms: Some(5_000),
+    heap_limit_mb: Some(64),
+};
+
+/// Derive an app's [`AppRuntimeLimits`] from its plan-catalog
+/// `runtime_limits_json` (the LEFT-JOINed column in [`Registry::get_versions`]).
+/// A NULL column (no plan row) or a parse failure falls back to the
+/// conservative free-tier limits — limits come from the catalog, not a
+/// hardcoded plan-name table (PR4 deleted `runtime_limits_for_plan`).
+fn runtime_limits_from_catalog(
+    json: Option<&serde_json::Value>,
+    app_id: &Uuid,
+) -> AppRuntimeLimits {
+    match json {
+        Some(j) => match serde_json::from_value::<AppRuntimeLimits>(j.clone()) {
+            Ok(limits) => limits,
+            Err(e) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %e,
+                    "registry: plan runtime_limits_json parse failure — using free-tier fallback"
+                );
+                FREE_TIER_RUNTIME_LIMITS
+            }
         },
-        "pro" => AppRuntimeLimits {
-            cpu_limit_ms: Some(30_000),
-            wall_timeout_ms: Some(30_000),
-            heap_limit_mb: Some(256),
-        },
-        "unlimited" | "enterprise" => AppRuntimeLimits {
-            cpu_limit_ms: None,
-            wall_timeout_ms: None,
-            heap_limit_mb: None, // platform default (128 MB)
-        },
-        _ => AppRuntimeLimits {
-            cpu_limit_ms: Some(50),
-            wall_timeout_ms: Some(5_000),
-            heap_limit_mb: Some(64),
-        },
+        None => FREE_TIER_RUNTIME_LIMITS,
     }
 }
 

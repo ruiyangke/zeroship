@@ -18,7 +18,9 @@ zeroship-auth = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.
-compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
+# `with-serde_json-1` so the plan catalog binds its JSONB price/quota/limits
+# columns as `serde_json::Value` (PR4).
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 compio = { workspace = true }
 memmap2 = { workspace = true }
 ntex = { workspace = true }

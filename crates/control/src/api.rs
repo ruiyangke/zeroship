@@ -29,8 +29,11 @@ pub struct CreateAppBody {
     pub plan_id: String,
 }
 
+/// Default plan for a `create_app` with no explicit `plan_id`: the built-in
+/// free tier's catalog id (`pln_…`). PR4 dropped the free-text `"free"` —
+/// the plan must be a real catalog id so the FK + server-side gate accept it.
 fn default_plan() -> String {
-    "free".to_string()
+    crate::bootstrap_console::free_plan_id()
 }
 
 #[derive(Deserialize)]
@@ -611,6 +614,132 @@ pub async fn set_plan(
         Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
         Ok(false) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan catalog (billing PR4) — operator-editable, server-side pricing catalog.
+//
+// Reads (`GET /api/plans`, `GET /api/plans/:id`) require BillingRead on
+// `Resource::Any` (a fleet-wide read — the catalog is global operator config,
+// not tenant data). Writes (`PUT`/`DELETE`) require BillingWrite on
+// `Resource::Any` (operator / master-key authority). DELETE archives (soft
+// delete) so existing `apps.plan_id` FKs + historical billing runs stay
+// resolvable — there is no hard DELETE.
+// ---------------------------------------------------------------------------
+
+/// JSON shape for a plan in the catalog API. `price`/`runtime` serialize the
+/// pure types verbatim (the same JSON the DB JSONB columns hold).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PlanDto {
+    pub id: String,
+    pub name: String,
+    pub price: crate::pricing::PlanPrice,
+    pub runtime: zeroship_core::types::AppRuntimeLimits,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl From<crate::plan_catalog::Plan> for PlanDto {
+    fn from(p: crate::plan_catalog::Plan) -> Self {
+        Self { id: p.id, name: p.name, price: p.price, runtime: p.runtime, archived: p.archived }
+    }
+}
+
+/// Body for `PUT /api/plans/:id`. `id` comes from the path; the body carries
+/// the editable fields. A new id mints a row; an existing id updates it.
+#[derive(Deserialize)]
+pub struct UpsertPlanBody {
+    pub name: String,
+    pub price: crate::pricing::PlanPrice,
+    pub runtime: zeroship_core::types::AppRuntimeLimits,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+pub async fn list_plans(
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::BillingRead, Resource::Any, &state).await {
+        return resp;
+    }
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    match catalog.list().await {
+        Ok(plans) => {
+            let dtos: Vec<PlanDto> = plans.into_iter().map(PlanDto::from).collect();
+            web::HttpResponse::Ok().json(&dtos)
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+pub async fn get_plan(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::BillingRead, Resource::Any, &state).await {
+        return resp;
+    }
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    match catalog.get(&id).await {
+        Ok(Some(plan)) => web::HttpResponse::Ok().json(&PlanDto::from(plan)),
+        Ok(None) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"plan not found"}))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+pub async fn upsert_plan(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+    body: Json<UpsertPlanBody>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    // The plan id MUST be a well-formed `pln_<base62>` typed id so the catalog
+    // namespace can't be polluted with free-text ids (the CT-A1 class).
+    let id = id.into_inner();
+    if zeroship_core::typed_id::parse_with_prefix(&id, zeroship_core::typed_id::PLAN_PREFIX)
+        .is_err()
+    {
+        return web::HttpResponse::BadRequest()
+            .json(&serde_json::json!({"error":"plan id must be a pln_<base62> typed id"}));
+    }
+    let body = body.into_inner();
+    let plan = crate::plan_catalog::Plan {
+        id,
+        name: body.name,
+        price: body.price,
+        runtime: body.runtime,
+        archived: body.archived,
+    };
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    match catalog.upsert(&plan).await {
+        Ok(written) => web::HttpResponse::Ok().json(&PlanDto::from(written)),
+        Err(e) => error_response(e),
+    }
+}
+
+pub async fn archive_plan(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    match catalog.archive(&id).await {
+        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"archived": true})),
+        Ok(false) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"plan not found"}))
         }
         Err(e) => error_response(e),
     }

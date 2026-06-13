@@ -62,6 +62,7 @@ impl Fixture {
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
         let env_store =
             EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
@@ -1284,7 +1285,7 @@ async fn app_delete_returns_200_atomic() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, "free", &owner_id)
+        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
         .await
         .expect("create app");
     let app_id = record.id;

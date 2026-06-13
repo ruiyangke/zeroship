@@ -857,6 +857,18 @@ fn main() -> std::io::Result<()> {
     // ordered after the `migrate` service. `ops/Caddyfile` routes
     // `console.zeroship.localhost` → the gateway (the console is a gateway-fronted
     // app); the separate Vite builder service is retired.
+    // Seed the built-in plan tiers (free/pro/unlimited) UNCONDITIONALLY at boot
+    // — independent of `--bootstrap-console`. PR4 made `apps.plan_id` an FK into
+    // `zeroship.plans`, so `create_app`/`set_plan` (and the console seed) all
+    // require the built-in plans to exist. Idempotent (ON CONFLICT DO UPDATE on
+    // the deterministic `pln_…` ids), so a re-boot is a no-op.
+    bootstrap_console::seed_plans(&registry)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: plan-catalog seed failed");
+            std::io::Error::other(err.to_string())
+        })?;
+
     if bootstrap_console {
         let console_scheme = if insecure_dev { "http" } else { "https" };
         let cfg = bootstrap_console::ConsoleBootstrapConfig {
@@ -990,6 +1002,17 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/api/apps/{id}/plan")
                     .route(web::put().to(api::set_plan)),
+            )
+            // --- Plan catalog (PR4): operator-editable pricing catalog ---
+            .service(
+                web::resource("/api/plans")
+                    .route(web::get().to(api::list_plans)),
+            )
+            .service(
+                web::resource("/api/plans/{id}")
+                    .route(web::get().to(api::get_plan))
+                    .route(web::put().to(api::upsert_plan))
+                    .route(web::delete().to(api::archive_plan)),
             )
             .service(
                 web::resource("/api/apps/{id}/usage")

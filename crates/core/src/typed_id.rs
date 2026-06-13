@@ -208,6 +208,15 @@ pub const WAKE_PREFIX: &str = "wak";
 /// through this constant so they can never drift.
 pub const APP_OAUTH_CLIENT_PREFIX: &str = "oac";
 
+/// Pricing-plan typed-id prefix (billing PR4). Three chars to match the
+/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// (R16-API2). The `zeroship.plans.id` column stores the full typed-id
+/// string (`pln_<base62>`); `apps.plan_id` is an FK into it (no more
+/// free-text self-escalation — CT-A1). The catalog mints ids via
+/// [`new_plan_id`] and the built-in tiers are seeded with real `pln_…` ids
+/// at control bootstrap.
+pub const PLAN_PREFIX: &str = "pln";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -245,6 +254,13 @@ pub fn new_session_id() -> String {
 /// back to the client on `POST /admin/sandboxes/{id}/wake`.
 pub fn new_wake_id() -> String {
     generate(WAKE_PREFIX)
+}
+
+/// Generate a new pricing-plan ID: `pln_{base62(uuidv7)}`. Minted by the
+/// plan-catalog `upsert` and by the bootstrap seeder for the built-in
+/// tiers (billing PR4).
+pub fn new_plan_id() -> String {
+    generate(PLAN_PREFIX)
 }
 
 #[cfg(test)]
@@ -329,10 +345,17 @@ mod tests {
         let a = new_app_id();
         let s = new_session_id();
         let w = new_wake_id();
+        let p = new_plan_id();
         assert!(u.starts_with("usr_"));
         assert!(a.starts_with("app_"));
         assert!(s.starts_with("ses_"));
         assert!(w.starts_with("wak_"));
+        assert!(p.starts_with("pln_"));
+        // pln_ + 22 base62 chars = 26, and it round-trips through parse().
+        assert_eq!(p.len(), 26);
+        assert_eq!(PLAN_PREFIX.len(), 3, "plan prefix must be 3 chars (R16-API2)");
+        let (prefix, _) = parse(&p).expect("new_plan_id must roundtrip");
+        assert_eq!(prefix, "pln");
     }
 
     /// C-7-LT-PR2 / R16-API2: every typed-id prefix in this crate is

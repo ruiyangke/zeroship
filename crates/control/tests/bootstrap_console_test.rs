@@ -32,7 +32,7 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::app_oauth_client::client_id_for_app;
 use zeroship_control::bootstrap_console::{
     bootstrap_console, console_app_id, console_app_name, ConsoleBootstrapConfig,
-    ConsoleBootstrapStatus, CONSOLE_PLAN_ID,
+    console_plan_id, ConsoleBootstrapStatus,
 };
 use zeroship_control::{EnvStore, Registry};
 
@@ -393,7 +393,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         .expect("query apps");
     assert_eq!(apps.len(), 1, "console.apps row exists");
     assert_eq!(apps[0].get::<_, String>("name"), console_app_name(&host));
-    assert_eq!(apps[0].get::<_, String>("plan_id"), CONSOLE_PLAN_ID);
+    assert_eq!(apps[0].get::<_, String>("plan_id"), console_plan_id());
     assert!(
         apps[0].get::<_, Option<String>>("deploy_hash").is_some(),
         "deploy_hash committed from .zship ingest"
@@ -451,7 +451,7 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     // (3) RouteEntry surfaces the OAuth fields (gateway route-sync invariant).
     let routes = registry.get_routes().await.expect("get_routes");
     let entry = routes.get(&app_id).expect("route entry for console app");
-    assert_eq!(entry.plan_id, CONSOLE_PLAN_ID);
+    assert_eq!(entry.plan_id, console_plan_id());
     assert_eq!(entry.oauth_client_id.as_deref(), Some(client_id.as_str()));
     assert_eq!(
         entry.sector_identifier.as_deref(),
