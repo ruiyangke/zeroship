@@ -493,14 +493,19 @@ fn main() -> std::io::Result<()> {
     // all into this instance. The flush task drains it every ~10s and POSTs a
     // `UsageReport` (idempotent, dedup'd on worker_id+sequence) to control.
     let meter = Arc::new(zeroship_metering::Meter::new());
-    // Stable-ish worker identity for the dedup key. Prefer $HOSTNAME (stable
-    // across restarts in k8s/compose); else bind addr; else a random id. A
-    // restart with a fresh id simply forgoes cross-restart dedup — never a
-    // false dedup, so it's safe.
-    let worker_id = std::env::var("HOSTNAME")
+    // Restart-unique metering identity for the (worker_id, sequence) dedup
+    // key. The per-process SequenceSource resets to 1 every boot, so the
+    // identity MUST change on every restart or post-restart sequences collide
+    // with pre-restart rows in usage_reports_seen and get dropped as phantom
+    // "duplicates" (silent under-billing). `boot_worker_id` folds a fresh
+    // per-process boot nonce onto the stable base ($HOSTNAME in k8s/compose,
+    // else the bind addr) to guarantee that. This identity is metering-only;
+    // CHWBL routing keys on bind addresses, not this string.
+    let worker_base = std::env::var("HOSTNAME")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{bind_addr}-{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|| bind_addr.to_string());
+    let worker_id = zeroship_metering::boot_worker_id(&worker_base);
     zeroship_metering::spawn_flush_task(
         Arc::clone(&meter),
         zeroship_metering::FlushConfig {

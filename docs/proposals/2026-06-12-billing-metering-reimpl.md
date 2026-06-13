@@ -1255,3 +1255,33 @@ DB-free and can run concurrently; only the two integration suites serialize on
    assumes an incremental `update`, it breaks. Mitigated by pre-launch (no prod
    data) but the compose `migrate` flow + every integration test's DB setup
    must tolerate the changed `0038` hash (fresh DB, not incremental).
+
+### Metering hardening backlog (post-merge, not blockers)
+
+Known gaps deliberately deferred — documented, not fixed in this epic. None
+block merge; each is a clean future plug-in, not a rewrite.
+
+- **(a) Crash-loss window.** Undrained in-memory deltas are lost if a worker
+  dies between ~10s flushes (bounded by the flush interval + customer-favorable
+  — we under-bill, never over-bill). Close with a worker-side durable checkpoint
+  once a durability SLA actually exists.
+- **(b) Hot-row UPSERT contention.** All workers UPSERT the same
+  `(app_id, period_start, metric)` row in `usage_aggregates`. Move to
+  per-worker-sharded append-only rows + `SUM`-on-read + period partitioning if
+  contention shows up at fleet scale.
+- **(c) Ledger retention/pruning.** `usage_reports_seen` and
+  `spend_state_history` grow unbounded — and `usage_reports_seen` now also grows
+  one identity per worker boot-epoch (after the FIX-1 boot-nonce identity). Needs
+  a periodic prune past the dedup-relevant window.
+- **(d) `get_stream` egress timing.** Storage egress is billed at stream-open
+  (`storage_egress_bytes` currently counts "objects opened for read," not bytes
+  actually delivered). Confirm that's intended, or bill incrementally in
+  `read_chunk` against bytes streamed.
+- **(e) db/kv byte metrics deferred.** db/kv byte-level metrics are weightless
+  (0-weight in `metric_weights`). Confirm they can't accidentally bill (a
+  non-zero weight slipping in would start charging for them silently).
+- **(f) Adapter boundary at the flush drain.** Keep the flush drain a clean
+  adapter boundary so external interop (CloudEvents→OpenMeter, OTLP→telemetry,
+  Stripe `meter_events`) plugs in later without a rewrite.
+- **(g) `MeterHandle` `String`→`Arc<str>` micro-opt.** Drop the per-op `app_id`
+  heap clone by holding the id as `Arc<str>`.

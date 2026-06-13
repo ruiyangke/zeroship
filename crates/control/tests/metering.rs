@@ -141,6 +141,80 @@ async fn duplicate_report_does_not_double_count_in_pg() {
 }
 
 #[compio::test]
+async fn worker_restart_does_not_drop_post_restart_usage() {
+    // Restart-safety regression (the silent under-billing bug): the dedup key
+    // is (worker_id, sequence) and the per-process SequenceSource resets to 1
+    // every boot. If worker_id were STABLE across restarts (as $HOSTNAME is),
+    // a post-restart report re-emitting sequence 1 would collide with the
+    // pre-restart row in usage_reports_seen → ON CONFLICT DO NOTHING drops it
+    // → post-restart usage silently lost.
+    //
+    // The fix folds a per-process boot nonce into the metering identity
+    // (`boot_worker_id`), so the two incarnations carry DIFFERENT worker_ids
+    // even though both restart their sequence at 1. This test models the two
+    // boots with two distinct identities sharing the same stable base.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry);
+    let app = make_app(&client).await;
+    let period = period_start_unix(1_900_000_000);
+
+    // A stable logical base (think $HOSTNAME) shared by both boots. Each boot
+    // mints a restart-unique identity by folding a fresh per-process nonce
+    // onto the base — exactly what `zeroship_metering::boot_worker_id` does
+    // (kept as a literal here so the control test needs no dep on the worker-
+    // side metering crate). The control-side property under test is that two
+    // distinct identities sharing a base do NOT collide in the dedup ledger.
+    let base = format!("pod-{}", Uuid::new_v4());
+    let boot_a = format!("{base}-{}", Uuid::new_v4());
+    let boot_b = format!("{base}-{}", Uuid::new_v4());
+    assert_ne!(boot_a, boot_b, "restart must mint a fresh metering identity");
+
+    // Boot A: emit sequence 1 with 10 requests.
+    let a1 = metering
+        .ingest_at(&report(&boot_a, 1, app, AppUsage { requests: 10, ..Default::default() }), period)
+        .await
+        .expect("boot A seq 1");
+    assert!(!a1.duplicate, "boot A seq 1 is fresh");
+
+    // --- worker restart: sequence resets to 1, fresh identity (boot_b) ---
+    // Boot B re-emits sequence 1 with NEW deltas. Pre-fix this collided with
+    // boot A's (stable_id, 1) and was dropped. Post-fix it must apply.
+    let b1 = metering
+        .ingest_at(&report(&boot_b, 1, app, AppUsage { requests: 7, ..Default::default() }), period)
+        .await
+        .expect("boot B seq 1");
+    assert!(
+        !b1.duplicate,
+        "post-restart report must NOT be dropped as a phantom duplicate"
+    );
+
+    // Both boots' deltas must be billed: 10 (boot A) + 7 (boot B) = 17.
+    assert_eq!(
+        metering.total(&app, period, "requests").await.unwrap(),
+        17,
+        "post-restart usage must be applied, not silently lost"
+    );
+
+    // Exactly-once still holds WITHIN a process: a genuine in-process retry of
+    // boot B's sequence 1 (same identity + sequence) is still a duplicate.
+    let b1_retry = metering
+        .ingest_at(&report(&boot_b, 1, app, AppUsage { requests: 7, ..Default::default() }), period)
+        .await
+        .expect("boot B seq 1 retry");
+    assert!(b1_retry.duplicate, "in-process retransmit is still deduped");
+    assert_eq!(
+        metering.total(&app, period, "requests").await.unwrap(),
+        17,
+        "in-process duplicate must not double-count"
+    );
+}
+
+#[compio::test]
 async fn month_rollover_lands_in_separate_period_rows() {
     let Some(url) = db_url() else {
         eprintln!("skip: CONTROL_TEST_DB not set");

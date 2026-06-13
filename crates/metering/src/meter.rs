@@ -11,10 +11,15 @@
 //! by re-merging it (see [`Meter::merge`]), so nothing is lost.
 //!
 //! One `Meter` is shared (via `Arc`) across every worker thread in a
-//! process. `env.meter.increment` bumps it; the platform auto-counters
-//! (requests today; cpu/wall/egress/ingress are wired as the worker grows
-//! those numbers) feed the same instance. A single flush task per process
-//! drains it and emits one `UsageReport` with the next monotonic sequence.
+//! process. There is NO creator-facing `env.meter` API — the billing
+//! signal is platform-measured so app code can neither forge nor suppress
+//! it. The only increment sources are: the worker's per-request platform
+//! counters via [`Meter::record_request`] (requests today; cpu/wall/egress/
+//! ingress are wired as the worker grows those numbers), and the three
+//! trusted data primitives (`plugin-db`, `plugin-kv`, `plugin-storage`)
+//! emitting raw resource metrics at their op boundary via a `MeterHandle`.
+//! A single flush task per process drains it and emits one `UsageReport`
+//! with the next monotonic sequence.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,19 +27,6 @@ use std::sync::{Mutex, RwLock};
 
 use uuid::Uuid;
 use zeroship_core::types::{AppUsage, UsageReport};
-
-/// The five fixed platform counters, addressed by name from
-/// `env.meter.increment` callers too (so an SDK that increments
-/// `"requests"` lands in the fixed field, not `custom`). Anything not in
-/// this set is a `custom` metric.
-pub const FIXED_METRICS: [&str; 5] =
-    ["requests", "cpu_us", "wall_us", "egress_bytes", "ingress_bytes"];
-
-/// Is `metric` one of the five reserved platform counter names?
-#[must_use]
-pub fn is_fixed_metric(metric: &str) -> bool {
-    FIXED_METRICS.contains(&metric)
-}
 
 /// Per-app atomic counters. The five fixed counters are dedicated atomics
 /// (O(1), no map lookup on the hot path); `custom` is a locked map keyed by
@@ -46,8 +38,10 @@ struct AppCounters {
     wall_us: AtomicU64,
     egress_bytes: AtomicU64,
     ingress_bytes: AtomicU64,
-    /// SDK-defined metrics. `Mutex` (not per-key atomics) because the key
-    /// set is open and small; contention is negligible at flush cadence.
+    /// Platform-emitted resource metrics from the trusted data primitives
+    /// (`db_reads`, `db_writes`, `kv_reads`, `kv_writes`, `storage_ops`, …).
+    /// `Mutex` (not per-key atomics) because the key set is open and small;
+    /// contention is negligible at flush cadence.
     custom: Mutex<HashMap<String, u64>>,
 }
 
@@ -308,7 +302,7 @@ mod tests {
     fn fixed_metric_name_routes_to_fixed_field() {
         let m = Meter::new();
         let a = app();
-        // An SDK calling increment("cpu_us", ...) must land in the fixed
+        // A producer calling increment("cpu_us", ...) must land in the fixed
         // field, not custom (these names are reserved).
         m.increment(&a, "cpu_us", 100);
         let snap = m.drain();

@@ -166,9 +166,11 @@ pub struct UsageReport {
 /// Per-application usage counters for a billing interval.
 ///
 /// The five fixed fields are the platform counters every app is billed on.
-/// `custom` carries SDK-defined metrics (`env.meter.increment("name", n)`)
-/// so new metrics flow without a wire change per metric. Empty `custom`
-/// is omitted from the JSON.
+/// `custom` carries platform-emitted resource metrics from the trusted data
+/// primitives (`db_reads`, `kv_writes`, `storage_ops`, …) — NOT SDK or app
+/// self-reported counters (there is no `env.meter` API; the billing signal
+/// is platform-measured). New metrics flow without a wire change per metric.
+/// Empty `custom` is omitted from the JSON.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppUsage {
     pub requests: u64,
@@ -176,9 +178,9 @@ pub struct AppUsage {
     pub wall_us: u64,
     pub egress_bytes: u64,
     pub ingress_bytes: u64,
-    /// SDK-defined counters, keyed by metric name. Reserved names (the five
-    /// fixed fields above) must not appear here; the producer keeps them
-    /// separate.
+    /// Platform-emitted resource metrics from the trusted db/kv/storage
+    /// primitives, keyed by metric name. Reserved names (the five fixed
+    /// fields above) must not appear here; the producer keeps them separate.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom: HashMap<String, u64>,
 }

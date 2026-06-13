@@ -29,8 +29,8 @@ use std::sync::Arc;
 pub mod flush;
 pub mod meter;
 
-pub use flush::{spawn_flush_task, FlushConfig, DEFAULT_FLUSH_INTERVAL};
-pub use meter::{build_report, is_fixed_metric, Meter, SequenceSource, FIXED_METRICS};
+pub use flush::{boot_worker_id, spawn_flush_task, FlushConfig, DEFAULT_FLUSH_INTERVAL};
+pub use meter::{build_report, Meter, SequenceSource};
 
 /// The injection vehicle for the trusted producers (the db/kv/storage
 /// native primitives). Binds the process-wide `Arc<Meter>` to the

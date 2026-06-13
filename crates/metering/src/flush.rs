@@ -28,12 +28,42 @@ pub struct FlushConfig {
     pub control_url: String,
     /// Shared control-key bearer secret. Empty ⇒ no auth header (dev).
     pub control_key: String,
-    /// Stable identity string for this worker process. The dedup key
-    /// component on the control side. MUST be stable across the process's
-    /// lifetime and ideally across restarts of the same logical worker.
+    /// Restart-unique metering identity for this worker PROCESS — the dedup
+    /// key component on the control side. MUST be stable across the
+    /// process's lifetime and MUST change on every restart, because the
+    /// per-process [`SequenceSource`] resets to 1 each boot. Build it with
+    /// [`boot_worker_id`] so the per-boot nonce makes it restart-unique:
+    /// a re-emitted sequence after a restart then lands under a FRESH
+    /// `(worker_id, sequence)` key instead of colliding with a pre-restart
+    /// row and being silently dropped as a "duplicate" (under-billing).
     pub worker_id: String,
     /// Flush cadence.
     pub interval: Duration,
+}
+
+/// Build the restart-unique metering identity for this worker process.
+///
+/// `base` is the worker's logical/stable name (`$HOSTNAME` in k8s/compose,
+/// else a bind-addr fallback). We append a fresh per-process boot nonce
+/// (`{base}-{nonce}`) so the identity is unique to THIS process incarnation.
+///
+/// Why this is required for correctness, not cosmetics: the dedup key is
+/// `(worker_id, sequence)` and [`SequenceSource`] restarts at 1 every boot.
+/// If `worker_id` were stable across restarts (as `$HOSTNAME` is), the
+/// post-restart sequences 1,2,3… would collide with rows already in
+/// `usage_reports_seen` and the ingest's `ON CONFLICT DO NOTHING` would drop
+/// each fresh post-restart report as a phantom "duplicate" — silently losing
+/// usage until the sequence climbed past the pre-restart high-water mark.
+/// Folding a boot nonce in keeps dedup EXACTLY-once for genuine in-process
+/// retransmits (same process ⇒ same nonce ⇒ same `worker_id`) while never
+/// dropping a fresh report from a new process incarnation.
+///
+/// The `worker_id` column is free-text `TEXT`, so this needs no schema
+/// change. This identity is metering-only — CHWBL routing keys on worker
+/// bind addresses, not on this string.
+#[must_use]
+pub fn boot_worker_id(base: &str) -> String {
+    format!("{base}-{}", uuid::Uuid::new_v4())
 }
 
 /// Spawn the flush task on the compio runtime. Detaches; runs until the
@@ -167,6 +197,20 @@ mod tests {
             worker_id: "w-test".to_string(),
             interval: Duration::from_millis(10),
         }
+    }
+
+    #[test]
+    fn boot_worker_id_is_restart_unique_for_the_same_base() {
+        // Two process boots with the SAME stable base ($HOSTNAME) must
+        // produce DIFFERENT metering identities — otherwise the per-boot
+        // sequence reset collides with pre-restart rows in
+        // usage_reports_seen and post-restart usage is silently dropped.
+        let base = "worker-pod-7";
+        let boot_a = boot_worker_id(base);
+        let boot_b = boot_worker_id(base);
+        assert_ne!(boot_a, boot_b, "each boot must get a fresh metering identity");
+        assert!(boot_a.starts_with(&format!("{base}-")), "base is preserved as a prefix");
+        assert!(boot_b.starts_with(&format!("{base}-")));
     }
 
     #[test]
