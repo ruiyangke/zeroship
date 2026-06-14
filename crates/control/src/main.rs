@@ -1266,6 +1266,14 @@ fn main() -> std::io::Result<()> {
                     .route(web::put().to(api::upsert_plan))
                     .route(web::delete().to(api::archive_plan)),
             )
+            // Global default FX (gap #28) — operator-only (BillingRead/Write on
+            // Resource::Any); the missing runtime lever for the GLOBAL FX a plan
+            // inherits when `plans.fx` is NULL.
+            .service(
+                web::resource("/api/pricing-config")
+                    .route(web::get().to(api::get_pricing_config))
+                    .route(web::put().to(api::set_pricing_config)),
+            )
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),

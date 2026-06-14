@@ -1032,6 +1032,118 @@ pub async fn archive_plan(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Global pricing config (gap #28) — the operator-editable GLOBAL default FX.
+//
+// The global default FX (`pricing_config.id='global'.fx_pico_cents_per_unit`) is
+// the price a CU sells for when a plan does NOT override it (`plans.fx == NULL`).
+// Per-plan FX is already operator-editable via `PUT /api/plans/:id`; this is the
+// missing runtime lever for the GLOBAL default — previously seed/DB-only, so an
+// operator had to ship a migration to reprice globally.
+//
+// Both routes are OPERATOR-ONLY: `BillingRead`/`BillingWrite` on `Resource::Any`
+// — the SAME fleet-wide gate the plan-catalog + fee-policy writes use. A creator
+// (app-scoped `Resource::App{id}` grant) is NOT reachable here and gets a 403.
+//
+// The write enforces the near-zero FX floor (`>= MIN_FX_PICO_CENTS_PER_UNIT`)
+// with a clean 400 BEFORE touching the DB (fail closed — never rely solely on
+// the DB CHECK), and AUDITS the actor + old→new value (it reprices everyone).
+//
+// Reproducibility: changing the global default FX affects FUTURE pricing only.
+// Finalized invoices snapshot their effective FX onto each line at finalize time,
+// so a re-priced default never rewrites a settled invoice (no invoices are
+// finalized in this config-write flow — no code needed here, only the guarantee).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SetPricingConfigBody {
+    /// New global default FX in pico-cents per CU. Must be
+    /// `>= MIN_FX_PICO_CENTS_PER_UNIT`.
+    pub fx_pico_cents_per_unit: u64,
+}
+
+pub async fn get_pricing_config(
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::BillingRead, Resource::Any, &state).await {
+        return resp;
+    }
+    let store = crate::pricing_store::PricingStore::new(state.registry.clone());
+    match store.default_fx_pico_cents_per_unit().await {
+        // `None` here means the singleton is MISSING or stored below the floor —
+        // a platform misconfiguration the reader logs loudly. Surface it as a
+        // pricing-misconfigured 500 (the same fail-closed posture the sweeps take)
+        // rather than fabricating a default the operator never set.
+        Ok(Some(fx)) => web::HttpResponse::Ok()
+            .json(&serde_json::json!({ "fx_pico_cents_per_unit": fx })),
+        Ok(None) => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "pricing misconfigured",
+            "global default FX missing or below floor",
+        ),
+        Err(e) => error_response(e),
+    }
+}
+
+pub async fn set_pricing_config(
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+    body: Json<SetPricingConfigBody>,
+) -> web::HttpResponse {
+    // OPERATOR-ONLY — the SAME `Resource::Any` gate the plan/fee-policy writes
+    // use. A creator's app-scoped `BillingWrite` is denied (403).
+    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    // Enforce the near-zero FX floor at the boundary (fail closed) — a clean 400
+    // rather than relying on the DB CHECK to surface as an opaque 500.
+    if body.fx_pico_cents_per_unit < crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "fx below floor",
+            "detail": format!(
+                "fx_pico_cents_per_unit must be >= {} (a near-zero global FX prices all overage \
+                 to ~$0; raise a plan's included_units to make a tier free instead)",
+                crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT
+            ),
+            "floor_pico_cents_per_unit": crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT,
+        }));
+    }
+
+    let store = crate::pricing_store::PricingStore::new(state.registry.clone());
+    match store.set_default_fx(body.fx_pico_cents_per_unit).await {
+        Ok(old_fx) => {
+            // Audit WHO repriced the global default + the old→new transition. The
+            // global FX is the highest-leverage money lever (it reprices every
+            // inheriting plan), so an unexpected change must be attributable.
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: None,
+                    creator_id: None,
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
+                    action: crate::audit::Action::SetGlobalFx,
+                    resource: Some("pricing_config"),
+                    source_ip: None,
+                },
+                &serde_json::json!({
+                    "old_fx_pico_cents_per_unit": old_fx,
+                    "new_fx_pico_cents_per_unit": body.fx_pico_cents_per_unit,
+                }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "fx_pico_cents_per_unit": body.fx_pico_cents_per_unit,
+            }))
+        }
+        // `error_response` maps the store's below-floor/overflow rejection
+        // (`RegistryError::InvalidInput`) to a 400 — defense in depth, the handler
+        // already rejected below-floor above; any other error maps as usual.
+        Err(e) => error_response(e),
+    }
+}
+
 pub async fn get_usage(
     id: Path<String>,
     authz: AuthzGuard,

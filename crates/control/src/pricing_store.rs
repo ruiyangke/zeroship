@@ -105,4 +105,64 @@ impl PricingStore {
         }
         Ok(Some(fx as u64))
     }
+
+    /// Set the GLOBAL default FX (pico-cents per CU) — the singleton
+    /// `pricing_config.id='global'` row. Operator-only at the HTTP layer
+    /// (`PUT /api/pricing-config`, gated `BillingWrite`/`Resource::Any`).
+    ///
+    /// Returns the PREVIOUS value (so the handler can audit the old→new
+    /// transition — this is the highest-leverage price lever, it reprices every
+    /// inheriting plan). `None` is returned for the previous value when the
+    /// singleton row was absent before this write (an unseeded DB).
+    ///
+    /// The FX floor (`>= MIN_FX_PICO_CENTS_PER_UNIT`) is enforced HERE as defense
+    /// in depth — the HTTP handler rejects a below-floor value with a 400 BEFORE
+    /// calling this, and the DB CHECK in changeset 0041 makes a below-floor value
+    /// unrepresentable at the source. A caller passing a below-floor value is a
+    /// programming error; we reject it cleanly with [`RegistryError::InvalidInput`]
+    /// (fail closed) rather than letting the DB CHECK surface as an opaque
+    /// `Database` error.
+    ///
+    /// Reproducibility note: changing the global default FX affects FUTURE pricing
+    /// only. Finalized invoices snapshot their own effective FX onto each line at
+    /// finalize time, so a re-priced global default never rewrites a settled
+    /// invoice (no invoices are finalized in this config-write flow).
+    pub async fn set_default_fx(&self, fx_pico_cents_per_unit: u64) -> Result<Option<u64>, RegistryError> {
+        if fx_pico_cents_per_unit < MIN_FX_PICO_CENTS_PER_UNIT {
+            return Err(RegistryError::InvalidInput(format!(
+                "fx_pico_cents_per_unit must be >= {MIN_FX_PICO_CENTS_PER_UNIT} (got \
+                 {fx_pico_cents_per_unit}); a near-zero global FX prices all overage to ~$0"
+            )));
+        }
+        // The column is BIGINT (i64); reject (don't clamp) a value above i64::MAX
+        // so the stored value always round-trips exactly.
+        let fx_i64 = i64::try_from(fx_pico_cents_per_unit).map_err(|_| {
+            RegistryError::InvalidInput(format!(
+                "fx_pico_cents_per_unit {fx_pico_cents_per_unit} exceeds i64::MAX — refusing to clamp"
+            ))
+        })?;
+
+        let conn = self.registry.conn().await?;
+        // UPSERT the singleton: an unseeded DB mints the 'global' row; a seeded DB
+        // updates it. The RETURNING-via-old-value pattern needs the prior value,
+        // so read-then-write would race; instead we read the old value in the same
+        // statement using a CTE that captures the pre-update row.
+        let rows = conn
+            .query(
+                "WITH prev AS ( \
+                    SELECT fx_pico_cents_per_unit AS old_fx \
+                    FROM zeroship.pricing_config WHERE id = 'global' \
+                 ) \
+                 INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit, updated_at) \
+                 VALUES ('global', $1, NOW()) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                    fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit, \
+                    updated_at = NOW() \
+                 RETURNING (SELECT old_fx FROM prev) AS old_fx",
+                &[&fx_i64],
+            )
+            .await?;
+        let old: Option<i64> = rows.first().and_then(|r| r.get("old_fx"));
+        Ok(old.map(|v| v.max(0) as u64))
+    }
 }
