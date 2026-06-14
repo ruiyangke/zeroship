@@ -330,6 +330,8 @@ fn builtin_plans() -> Vec<Plan> {
         },
         runtime: FREE_TIER_RUNTIME_LIMITS,
         archived: false,
+        // MAJOR-4: the free tier is a PUBLIC tier a creator may self-assign.
+        assignable_by_creator: true,
     };
 
     // Pro: a small base fee + a generous included CU allotment, pay-go overage
@@ -349,6 +351,8 @@ fn builtin_plans() -> Vec<Plan> {
             heap_limit_mb: Some(256),
         },
         archived: false,
+        // MAJOR-4: the pro tier is a PUBLIC pay-go tier a creator may self-assign.
+        assignable_by_creator: true,
     };
 
     // Unlimited / enterprise: no runtime caps (what the console needs), no
@@ -369,6 +373,9 @@ fn builtin_plans() -> Vec<Plan> {
             heap_limit_mb: None,
         },
         archived: false,
+        // MAJOR-4: the unlimited/enterprise tier is OPERATOR-only — a creator
+        // must NOT be able to self-assign it (it would underpay / escape caps).
+        assignable_by_creator: false,
     };
 
     vec![free, pro, unlimited]

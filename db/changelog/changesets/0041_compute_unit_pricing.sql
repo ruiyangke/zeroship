@@ -36,9 +36,20 @@ CREATE TABLE zeroship.metric_weights (
 
 -- Single-row global pricing config. `id` is a fixed sentinel (always 'global')
 -- with a CHECK so the table can only ever hold the one row.
+--
+-- MAJOR-3: the global default FX has a near-zero FLOOR (mirroring
+-- `crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT` = 1000 pico-cents/CU = 10^-9
+-- cent/CU). Without it a fat-fingered 0 / near-zero / negative global FX would
+-- coerce to Some(0) in the loader and silently price ALL overage to $0
+-- platform-wide with no UnresolvedFx abort. The CHECK makes a below-floor global
+-- FX unrepresentable at the source; `pricing_store::default_fx_pico_cents_per_unit`
+-- ALSO rejects a below-floor value (fail closed) as defense in depth.
 CREATE TABLE zeroship.pricing_config (
     id                       TEXT        PRIMARY KEY DEFAULT 'global' CHECK (id = 'global'),
-    fx_pico_cents_per_unit   BIGINT      NOT NULL,            -- default cents-per-CU @ 10^-12 scale
+    -- >= MIN_FX_PICO_CENTS_PER_UNIT (1000); a near-zero/zero/negative global FX
+    -- is an operator fat-finger, not a real "nearly free" tier (raise a plan's
+    -- included_units for that, never push the FX toward zero).
+    fx_pico_cents_per_unit   BIGINT      NOT NULL CHECK (fx_pico_cents_per_unit >= 1000), -- default cents-per-CU @ 10^-12 scale
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 --rollback DROP TABLE zeroship.pricing_config;
@@ -54,9 +65,12 @@ CREATE TABLE zeroship.pricing_config (
 --   wall_us        1 CU / 10000 wall-microseconds (wall is cheaper than CPU)
 --   ingress_bytes  1 CU / 10000 bytes
 --   egress_bytes   1 CU / 1000 bytes              (egress costs more than ingress)
---   db_reads/db_writes/db_rows_*   op/row weights (Refactor A)
+--   db_reads/db_writes/db_rows_written   op/row weights (Refactor A)
 --   kv_reads/kv_writes             op weights
 --   storage_ops/storage_bytes/storage_egress_bytes  op + byte weights
+-- NOTE: there is NO `db_rows_read` weight — no primitive emits that metric, so a
+-- seed row for it would be dead config (an unemitted weighted metric never
+-- accrues). It is intentionally absent.
 INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) VALUES
     ('requests',            1, 1),
     ('cpu_us',              1, 1000),
@@ -65,7 +79,6 @@ INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) VALUES
     ('egress_bytes',        1, 1000),
     ('db_reads',            1, 1),
     ('db_writes',           2, 1),
-    ('db_rows_read',        1, 100),
     ('db_rows_written',     1, 50),
     ('kv_reads',            1, 1),
     ('kv_writes',           2, 1),

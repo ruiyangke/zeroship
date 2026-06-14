@@ -14,7 +14,7 @@
 //! JSONB ([`AppRuntimeLimits`]).
 
 use compio_postgres::Row;
-use zeroship_core::types::AppRuntimeLimits;
+use zeroship_core::types::{AppRuntimeLimits, FREE_TIER_RUNTIME_LIMITS};
 
 use crate::pricing::PlanPrice;
 use crate::registry::{Registry, RegistryError};
@@ -30,6 +30,12 @@ pub struct Plan {
     pub price: PlanPrice,
     pub runtime: AppRuntimeLimits,
     pub archived: bool,
+    /// MAJOR-4: whether an app_owner (creator) principal may self-assign this
+    /// plan via `PUT /api/apps/:id/plan`. The public tiers (`free`, `pro`) are
+    /// `true`; operator tiers (console/enterprise/unlimited) are `false`. An
+    /// operator (`BillingWrite` on `Resource::Any`) may assign ANY plan
+    /// regardless of this flag.
+    pub assignable_by_creator: bool,
 }
 
 /// PG-backed plan catalog. Shares the control plane's per-query connection
@@ -47,12 +53,18 @@ impl PlanCatalog {
 
     /// Fetch one plan by id. `None` if no such row (archived plans ARE
     /// returned — the caller decides whether to reject an archived plan).
+    ///
+    /// MAJOR-2: a corrupt `runtime_limits_json` no longer hard-errors here —
+    /// `row_to_plan` falls back to free-tier runtime limits so the plan still
+    /// PRICES (billing reconcile must still bill an app whose plan row's JSONB
+    /// is poison). See [`row_to_plan`].
     pub async fn get(&self, id: &str) -> Result<Option<Plan>, RegistryError> {
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, spend_limit_default_cents, archived \
+                        runtime_limits_json, spend_limit_default_cents, archived, \
+                        assignable_by_creator \
                  FROM zeroship.plans WHERE id = $1",
                 &[&id],
             )
@@ -62,18 +74,21 @@ impl PlanCatalog {
 
     /// List every plan (including archived ones) ordered by id.
     ///
-    /// Resilient to a single poison row: a row whose JSONB columns fail to
-    /// deserialize is SKIPPED with a `tracing::warn!` rather than failing the
-    /// whole catalog list (consistent with the registry's tolerant free-tier
-    /// fallback in `get_versions`). `get(:id)` stays STRICT — a specific id that
-    /// can't be parsed is a hard error there, because the caller asked for that
-    /// exact plan.
+    /// MAJOR-2: poison tolerance is now in `row_to_plan` itself — a corrupt
+    /// `runtime_limits_json` falls back to free-tier runtime limits and the plan
+    /// is still RETURNED (not skipped), so spend enforcement still prices (and
+    /// can Block) the app. `get(:id)` is poison-tolerant the SAME way, so the
+    /// two pricing paths agree: neither silently drops an app on a poison row.
+    /// A truly undecodable row (e.g. a non-nullable scalar column returns an
+    /// error) is logged + skipped here, but such a row cannot exist under the
+    /// NOT-NULL/CHECK schema.
     pub async fn list(&self) -> Result<Vec<Plan>, RegistryError> {
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, spend_limit_default_cents, archived \
+                        runtime_limits_json, spend_limit_default_cents, archived, \
+                        assignable_by_creator \
                  FROM zeroship.plans ORDER BY id",
                 &[],
             )
@@ -110,43 +125,49 @@ impl PlanCatalog {
     ///
     /// `plan.archived` is ignored for the flag — pass the intent via `archived`.
     pub async fn upsert(&self, plan: &Plan, archived: Option<bool>) -> Result<Plan, RegistryError> {
+        // MINOR (write-path i64 clamps): validate the price model at the write
+        // boundary as DEFENSE IN DEPTH. The HTTP handler already validates, but
+        // a direct `upsert` (bootstrap seed, future internal callers) must not
+        // silently clamp an out-of-range `base_fee`/`included_units`/`fx`/
+        // `spend_default` to i64::MAX below — `validate()` rejects an
+        // included_units above the i64 ceiling (and a below-floor FX) so an
+        // out-of-range plan write is a HARD ERROR, not a silent clamp.
+        plan.price.validate().map_err(RegistryError::InvalidInput)?;
+
         let runtime_limits_json = serde_json::to_value(&plan.runtime)
             .map_err(|e| RegistryError::InvalidInput(format!("runtime_limits_json: {e}")))?;
-        let base_fee = i64::try_from(plan.price.base_fee_cents).unwrap_or_else(|_| {
-            tracing::warn!(
-                base_fee_cents = plan.price.base_fee_cents,
-                plan_id = %plan.id,
-                "plan_catalog: base_fee_cents exceeds i64::MAX — clamping"
-            );
-            i64::MAX
-        });
-        let included_units = i64::try_from(plan.price.included_units).unwrap_or_else(|_| {
-            tracing::warn!(
-                included_units = plan.price.included_units,
-                plan_id = %plan.id,
-                "plan_catalog: included_units exceeds i64::MAX — clamping"
-            );
-            i64::MAX
-        });
+        // `base_fee` and `spend_limit_default` have no explicit ceiling in
+        // `validate()` but cannot exceed i64::MAX after that check on realistic
+        // inputs; the try_from below is retained as a final guard and now warns
+        // on the (validate-unreachable) overflow rather than silently producing
+        // a wrong value. `included_units`/`fx` are already bounded by validate().
+        let base_fee = i64::try_from(plan.price.base_fee_cents).map_err(|_| {
+            RegistryError::InvalidInput(format!(
+                "base_fee_cents {} exceeds i64::MAX — refusing to clamp",
+                plan.price.base_fee_cents
+            ))
+        })?;
+        let included_units = i64::try_from(plan.price.included_units).map_err(|_| {
+            RegistryError::InvalidInput(format!(
+                "included_units {} exceeds i64::MAX — refusing to clamp",
+                plan.price.included_units
+            ))
+        })?;
         // fx is per-plan and NULLABLE (NULL ⇒ global pricing_config default).
-        let fx_pico: Option<i64> = plan.price.fx_pico_cents_per_unit.map(|fx| {
-            i64::try_from(fx).unwrap_or_else(|_| {
-                tracing::warn!(
-                    fx_pico_cents_per_unit = fx,
-                    plan_id = %plan.id,
-                    "plan_catalog: fx_pico_cents_per_unit exceeds i64::MAX — clamping"
-                );
-                i64::MAX
-            })
-        });
-        let spend_default = i64::try_from(plan.price.spend_limit_default_cents).unwrap_or_else(|_| {
-            tracing::warn!(
-                spend_limit_default_cents = plan.price.spend_limit_default_cents,
-                plan_id = %plan.id,
-                "plan_catalog: spend_limit_default_cents exceeds i64::MAX — clamping"
-            );
-            i64::MAX
-        });
+        let fx_pico: Option<i64> = match plan.price.fx_pico_cents_per_unit {
+            Some(fx) => Some(i64::try_from(fx).map_err(|_| {
+                RegistryError::InvalidInput(format!(
+                    "fx_pico_cents_per_unit {fx} exceeds i64::MAX — refusing to clamp"
+                ))
+            })?),
+            None => None,
+        };
+        let spend_default = i64::try_from(plan.price.spend_limit_default_cents).map_err(|_| {
+            RegistryError::InvalidInput(format!(
+                "spend_limit_default_cents {} exceeds i64::MAX — refusing to clamp",
+                plan.price.spend_limit_default_cents
+            ))
+        })?;
 
         let conn = self.registry.conn().await?;
         let rows = conn
@@ -157,8 +178,9 @@ impl PlanCatalog {
                 // never un-archives.
                 "INSERT INTO zeroship.plans \
                    (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                    runtime_limits_json, spend_limit_default_cents, archived, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, false), NOW()) \
+                    runtime_limits_json, spend_limit_default_cents, archived, \
+                    assignable_by_creator, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, false), $9, NOW()) \
                  ON CONFLICT (id) DO UPDATE SET \
                     name = EXCLUDED.name, \
                     base_fee_cents = EXCLUDED.base_fee_cents, \
@@ -167,9 +189,11 @@ impl PlanCatalog {
                     runtime_limits_json = EXCLUDED.runtime_limits_json, \
                     spend_limit_default_cents = EXCLUDED.spend_limit_default_cents, \
                     archived = COALESCE($8, zeroship.plans.archived), \
+                    assignable_by_creator = EXCLUDED.assignable_by_creator, \
                     updated_at = NOW() \
                  RETURNING id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                           runtime_limits_json, spend_limit_default_cents, archived",
+                           runtime_limits_json, spend_limit_default_cents, archived, \
+                           assignable_by_creator",
                 &[
                     &plan.id,
                     &plan.name,
@@ -179,6 +203,7 @@ impl PlanCatalog {
                     &runtime_limits_json,
                     &spend_default,
                     &archived,
+                    &plan.assignable_by_creator,
                 ],
             )
             .await?;
@@ -206,18 +231,38 @@ impl PlanCatalog {
 /// `runtime_limits_json` is the only JSONB column. `fx_pico_cents_per_unit` is
 /// nullable (NULL ⇒ the plan inherits the global `pricing_config` default — the
 /// engine/reconciler resolve `None` before pricing).
+///
+/// MAJOR-2 (poison tolerance FOR PRICING): a corrupt `runtime_limits_json` does
+/// NOT fail the decode. Pricing only needs the scalar price columns
+/// (`base_fee_cents`, `included_units`, `fx`, `spend_limit_default_cents`) —
+/// NOT the runtime limits. A row whose JSONB can't parse falls back to the
+/// conservative [`FREE_TIER_RUNTIME_LIMITS`] (with a `warn!`) so BOTH `list()`
+/// (spend enforcement) and `get()` (billing reconcile) still PRICE the app —
+/// previously `list` SKIPPED the poison row (app ran uncapped) while `get`
+/// HARD-ERRORED (creator's whole bill failed), so a poison plan made an app
+/// both uncapped AND unbilled. The runtime-limits consumer in
+/// `registry.rs::get_versions` has its OWN conservative fallback and does not go
+/// through this decoder, so a real runtime-limits read is unaffected.
 fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
     let base_fee: i64 = row.get("base_fee_cents");
     let included_units: i64 = row.get("included_units");
     let fx_pico: Option<i64> = row.get("fx_pico_cents_per_unit");
     let spend_default: i64 = row.get("spend_limit_default_cents");
     let runtime_limits_json: serde_json::Value = row.get("runtime_limits_json");
+    let id: String = row.get("id");
 
-    let runtime: AppRuntimeLimits = serde_json::from_value(runtime_limits_json)
-        .map_err(|e| RegistryError::Database(format!("plan runtime_limits_json parse: {e}")))?;
+    let runtime: AppRuntimeLimits = serde_json::from_value(runtime_limits_json).unwrap_or_else(|e| {
+        tracing::warn!(
+            plan_id = %id,
+            error = %e,
+            "plan_catalog: runtime_limits_json parse failure — using free-tier fallback so the \
+             plan still PRICES (MAJOR-2 poison tolerance); enforcement + billing both see the app"
+        );
+        FREE_TIER_RUNTIME_LIMITS
+    });
 
     Ok(Plan {
-        id: row.get("id"),
+        id,
         name: row.get("name"),
         price: PlanPrice {
             base_fee_cents: base_fee.max(0) as u64,
@@ -227,5 +272,6 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
         },
         runtime,
         archived: row.get("archived"),
+        assignable_by_creator: row.get("assignable_by_creator"),
     })
 }

@@ -23,7 +23,7 @@
 use uuid::Uuid;
 use zeroship_core::types::SpendState;
 
-use crate::metering::current_period_start_unix;
+use crate::metering::{current_period_start_unix, period_ts};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::charge_cents;
 use crate::pricing_store::PricingStore;
@@ -270,8 +270,8 @@ impl SpendEngine {
         let usage_rows = conn
             .query(
                 "SELECT app_id, metric, total FROM zeroship.usage_aggregates \
-                 WHERE period_start = to_timestamp($1::double precision)",
-                &[&(period_start as f64)],
+                 WHERE period_start = $1",
+                &[&period_ts(period_start)],
             )
             .await?;
         let mut usage_by_app: std::collections::HashMap<Uuid, std::collections::HashMap<String, i64>> =
@@ -337,13 +337,39 @@ impl SpendEngine {
             let limit_cents = override_limit.map_or(plan.price.spend_limit_default_cents, |o| {
                 u64::try_from(o).unwrap_or(0)
             });
-            let limit_i64 = i64::try_from(limit_cents).unwrap_or(i64::MAX);
+
+            // MAJOR-1: money MUST NOT silently clamp, and the spend sweep must
+            // MIRROR billing_reconcile's overflow posture (which SKIPS the
+            // app/creator on a cents→i64 overflow rather than clamping). The old
+            // `i64::try_from(...).unwrap_or(i64::MAX)` silently clamped the
+            // stored spend/limit — an overflowing app would be Blocked-via-clamp
+            // by enforcement but skipped (unbilled) by reconcile, so the two
+            // disagreed. Now an overflow on EITHER conversion skips THIS app with
+            // a warn! (the loop continues for everyone else), matching reconcile.
+            let Ok(spend_i64) = i64::try_from(spend_cents) else {
+                tracing::warn!(
+                    app_id = %app_id,
+                    plan_id = %plan_id,
+                    spend_cents,
+                    "spend: priced spend exceeds i64::MAX — skipping app (refusing to clamp), \
+                     consistent with billing_reconcile skipping it"
+                );
+                continue;
+            };
+            let Ok(limit_i64) = i64::try_from(limit_cents) else {
+                tracing::warn!(
+                    app_id = %app_id,
+                    plan_id = %plan_id,
+                    limit_cents,
+                    "spend: effective limit exceeds i64::MAX — skipping app (refusing to clamp)"
+                );
+                continue;
+            };
 
             let limit_changed = limit_i64 != prev_eval_limit;
             let new = derive_state(spend_cents, limit_cents, &self.thresholds, prev, limit_changed);
 
             if new != prev {
-                let spend_i64 = i64::try_from(spend_cents).unwrap_or(i64::MAX);
                 Self::persist_transition(
                     &mut conn,
                     &app_id,
@@ -373,15 +399,8 @@ impl SpendEngine {
                 // (usage accrues), so the conditional would rarely skip and the
                 // dashboard would go stale on the apps that DON'T change. The
                 // single-row UPSERT is cheap; the freshness is the point.
-                Self::touch_state(
-                    &conn,
-                    &app_id,
-                    new,
-                    i64::try_from(spend_cents).unwrap_or(i64::MAX),
-                    limit_i64,
-                    period_start,
-                )
-                .await?;
+                Self::touch_state(&conn, &app_id, new, spend_i64, limit_i64, period_start)
+                    .await?;
             }
         }
         Ok(transitions)
@@ -408,7 +427,7 @@ impl SpendEngine {
         tx.execute(
             "INSERT INTO zeroship.app_spend_state \
                (app_id, state, spend_cents, eval_limit_cents, period_start, updated_at) \
-             VALUES ($1, $2, $3, $4, to_timestamp($5::double precision), NOW()) \
+             VALUES ($1, $2, $3, $4, $5, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                state = EXCLUDED.state, spend_cents = EXCLUDED.spend_cents, \
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
@@ -418,7 +437,7 @@ impl SpendEngine {
                 &spend_state_str(to),
                 &spend_cents,
                 &eval_limit_cents,
-                &(period_start_unix as f64),
+                &period_ts(period_start_unix),
             ],
         )
         .await?;
@@ -453,7 +472,7 @@ impl SpendEngine {
         conn.execute(
             "INSERT INTO zeroship.app_spend_state \
                (app_id, state, spend_cents, eval_limit_cents, period_start, updated_at) \
-             VALUES ($1, $2, $3, $4, to_timestamp($5::double precision), NOW()) \
+             VALUES ($1, $2, $3, $4, $5, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                spend_cents = EXCLUDED.spend_cents, \
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
@@ -463,7 +482,7 @@ impl SpendEngine {
                 &spend_state_str(state),
                 &spend_cents,
                 &eval_limit_cents,
-                &(period_start_unix as f64),
+                &period_ts(period_start_unix),
             ],
         )
         .await?;
@@ -481,13 +500,23 @@ impl SpendEngine {
         cents: Option<u64>,
     ) -> Result<(), RegistryError> {
         let conn = self.registry.conn().await?;
-        let limit: Option<i64> = cents.map(|c| i64::try_from(c).unwrap_or(i64::MAX));
+        // MAJOR-1: a money column MUST NOT silently clamp. An override above
+        // i64::MAX is rejected (it cannot round-trip the BIGINT column), not
+        // clamped to i64::MAX (which would silently inflate the cap).
+        let limit: Option<i64> = match cents {
+            Some(c) => Some(i64::try_from(c).map_err(|_| {
+                RegistryError::InvalidInput(format!(
+                    "spend limit {c} exceeds i64::MAX — refusing to clamp"
+                ))
+            })?),
+            None => None,
+        };
         conn.execute(
             "INSERT INTO zeroship.app_spend_state (app_id, spend_limit_cents, period_start, updated_at) \
-             VALUES ($1, $2, to_timestamp($3::double precision), NOW()) \
+             VALUES ($1, $2, $3, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                spend_limit_cents = EXCLUDED.spend_limit_cents, updated_at = NOW()",
-            &[app_id, &limit, &(current_period_start_unix() as f64)],
+            &[app_id, &limit, &period_ts(current_period_start_unix())],
         )
         .await?;
         Ok(())

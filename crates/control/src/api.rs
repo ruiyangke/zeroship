@@ -609,12 +609,47 @@ pub async fn set_plan(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
-    if let Err(resp) = authz
-        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+
+    // MAJOR-4: two authority levels for assigning a plan.
+    //   * OPERATOR — BillingWrite on Resource::Any (master-key / operator) — may
+    //     assign ANY plan (including operator-only tiers).
+    //   * app_owner / CREATOR — BillingWrite on Resource::App{id} — may assign
+    //     ONLY a plan flagged `assignable_by_creator = true`. Without this gate a
+    //     creator could PUT a cheaper operator plan (e.g. unlimited/console) and
+    //     underpay — the asymmetry the reduction-only spend-limit override
+    //     already closes for caps.
+    // We probe the operator grant first; if it is denied we fall back to the
+    // app-scoped grant AND enforce the creator-assignability guardrail.
+    let is_operator = authz
+        .require(Action::BillingWrite, Resource::Any, &state)
         .await
-    {
-        return resp;
+        .is_ok();
+    if !is_operator {
+        if let Err(resp) = authz
+            .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+            .await
+        {
+            return resp;
+        }
+        // app_owner principal: the target plan MUST be creator-assignable.
+        let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+        match catalog.get(&body.plan_id).await {
+            Ok(Some(plan)) if plan.assignable_by_creator => { /* allowed */ }
+            Ok(Some(_)) => {
+                return web::HttpResponse::Forbidden().json(&serde_json::json!({
+                    "error": "plan not assignable by creator",
+                    "detail": "this plan can only be assigned by an operator; choose a \
+                               creator-assignable plan or contact support to upgrade",
+                }));
+            }
+            Ok(None) => {
+                return web::HttpResponse::BadRequest()
+                    .json(&serde_json::json!({"error": "unknown plan"}));
+            }
+            Err(e) => return error_response(e),
+        }
     }
+
     match state.registry.set_plan(&uid, &body.plan_id).await {
         Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
         Ok(false) => {
@@ -815,11 +850,22 @@ pub struct PlanDto {
     pub runtime: zeroship_core::types::AppRuntimeLimits,
     #[serde(default)]
     pub archived: bool,
+    /// MAJOR-4: whether a creator (app_owner) may self-assign this plan. Surfaced
+    /// in the read so operators can see/audit which tiers are creator-assignable.
+    #[serde(default)]
+    pub assignable_by_creator: bool,
 }
 
 impl From<crate::plan_catalog::Plan> for PlanDto {
     fn from(p: crate::plan_catalog::Plan) -> Self {
-        Self { id: p.id, name: p.name, price: p.price, runtime: p.runtime, archived: p.archived }
+        Self {
+            id: p.id,
+            name: p.name,
+            price: p.price,
+            runtime: p.runtime,
+            archived: p.archived,
+            assignable_by_creator: p.assignable_by_creator,
+        }
     }
 }
 
@@ -836,6 +882,11 @@ pub struct UpsertPlanBody {
     pub runtime: zeroship_core::types::AppRuntimeLimits,
     #[serde(default)]
     pub archived: Option<bool>,
+    /// MAJOR-4: operator-controlled flag — may a creator self-assign this plan?
+    /// Defaults to `false` (fail-closed: an operator-minted plan is NOT
+    /// creator-assignable unless explicitly opted in).
+    #[serde(default)]
+    pub assignable_by_creator: bool,
 }
 
 pub async fn list_plans(
@@ -908,6 +959,7 @@ pub async fn upsert_plan(
         // Placeholder — the upsert uses the `archived` arg, not this field;
         // `None` ⇒ preserve existing (a PUT without `archived` can't un-archive).
         archived: archived.unwrap_or(false),
+        assignable_by_creator: body.assignable_by_creator,
     };
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     match catalog.upsert(&plan, archived).await {

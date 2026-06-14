@@ -55,9 +55,30 @@ pub fn current_period_start_unix() -> i64 {
     period_start_unix(Utc::now().timestamp())
 }
 
+/// Convert a unix-seconds period start to a `TIMESTAMPTZ`-bindable
+/// `DateTime<Utc>`. Used so the `period_start` column is bound as an INTEGER
+/// timestamp (matching `billing_reconcile`'s deliberate move off the f64
+/// `to_timestamp($::double precision)` idiom) rather than round-tripping the
+/// key through f64. At calendar-month magnitudes the two are numerically
+/// identical; binding the integer timestamp keeps every period-keyed write/read
+/// on ONE representation.
+pub(crate) fn period_ts(period_start_unix_secs: i64) -> chrono::DateTime<Utc> {
+    Utc.timestamp_opt(period_start_unix_secs, 0)
+        .single()
+        .unwrap_or_else(Utc::now)
+}
+
 /// Iterate an `AppUsage` as `(metric, delta)` pairs — the five fixed
 /// counters (only when non-zero) followed by each custom metric. Used by
 /// both the pure ledger and the PG UPSERT so they aggregate identically.
+///
+/// MINOR (u64→i64 ingest wrap): the counters are `u64` but `usage_aggregates`
+/// stores `BIGINT` (i64). A naive `v as i64` of a value above `i64::MAX` wraps
+/// NEGATIVE and would LOWER the aggregate — a buggy/compromised worker could
+/// poison a tenant's total via `/internal/usage`. We `i64::try_from` and
+/// SKIP-with-`warn!` an out-of-range delta rather than wrap it (a single
+/// >i64::MAX counter in one flush is itself absurd — ~9.2e18 — so dropping it is
+/// strictly safer than wrapping it negative).
 fn usage_deltas(usage: &AppUsage) -> Vec<(String, i64)> {
     let mut out: Vec<(String, i64)> = Vec::new();
     let fixed = [
@@ -69,15 +90,31 @@ fn usage_deltas(usage: &AppUsage) -> Vec<(String, i64)> {
     ];
     for (name, v) in fixed {
         if v > 0 {
-            out.push((name.to_string(), v as i64));
+            push_delta(&mut out, name.to_string(), v);
         }
     }
     for (name, &v) in &usage.custom {
         if v > 0 {
-            out.push((name.clone(), v as i64));
+            push_delta(&mut out, name.clone(), v);
         }
     }
     out
+}
+
+/// Push a `(metric, delta)` pair, converting the `u64` counter to the `i64`
+/// aggregate column. A value above `i64::MAX` is skipped with a `warn!` rather
+/// than wrapped negative (see [`usage_deltas`]).
+fn push_delta(out: &mut Vec<(String, i64)>, metric: String, v: u64) {
+    match i64::try_from(v) {
+        Ok(delta) => out.push((metric, delta)),
+        Err(_) => {
+            tracing::warn!(
+                metric = %metric,
+                value = v,
+                "metering: usage delta exceeds i64::MAX — skipping (refusing to wrap negative)"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,18 +234,20 @@ impl Metering {
         let is_new = !inserted.is_empty();
 
         if is_new {
-            // 2. Apply deltas — UPSERT add-to-total per metric. period_start
-            // bound as unix seconds via to_timestamp (same idiom as
-            // stripe_store::record_payout — avoids TIMESTAMPTZ binding).
+            // 2. Apply deltas — UPSERT add-to-total per metric. period_start is
+            // bound as an INTEGER TIMESTAMPTZ (converging on
+            // billing_reconcile's deliberate move off the f64
+            // `to_timestamp($::double precision)` idiom).
+            let period_ts = period_ts(period_start_unix_secs);
             for (app_id, usage) in &report.counters {
                 for (metric, delta) in usage_deltas(usage) {
                     tx.execute(
                         "INSERT INTO zeroship.usage_aggregates AS u \
                            (app_id, period_start, metric, total, updated_at) \
-                         VALUES ($1, to_timestamp($2::double precision), $3, $4, NOW()) \
+                         VALUES ($1, $2, $3, $4, NOW()) \
                          ON CONFLICT (app_id, period_start, metric) \
                          DO UPDATE SET total = u.total + EXCLUDED.total, updated_at = NOW()",
-                        &[app_id, &(period_start_unix_secs as f64), &metric, &delta],
+                        &[app_id, &period_ts, &metric, &delta],
                     )
                     .await?;
                 }
@@ -251,8 +290,8 @@ impl Metering {
         let rows = conn
             .query(
                 "SELECT metric, total FROM zeroship.usage_aggregates \
-                 WHERE app_id = $1 AND period_start = to_timestamp($2::double precision)",
-                &[app_id, &(period_start_unix_secs as f64)],
+                 WHERE app_id = $1 AND period_start = $2",
+                &[app_id, &period_ts(period_start_unix_secs)],
             )
             .await?;
         let mut out = HashMap::new();
@@ -283,9 +322,9 @@ impl Metering {
         let rows = conn
             .query(
                 "SELECT total FROM zeroship.usage_aggregates \
-                 WHERE app_id = $1 AND period_start = to_timestamp($2::double precision) \
+                 WHERE app_id = $1 AND period_start = $2 \
                    AND metric = $3",
-                &[app_id, &(period_start_unix_secs as f64), &metric],
+                &[app_id, &period_ts(period_start_unix_secs), &metric],
             )
             .await?;
         Ok(rows.first().map_or(0, |r| r.get("total")))
@@ -374,6 +413,33 @@ mod tests {
         led.ingest_at(&report("w1", 1, app, AppUsage { requests: 3, ..Default::default() }), p);
         led.ingest_at(&report("w2", 1, app, AppUsage { requests: 4, ..Default::default() }), p);
         assert_eq!(led.total(app, p, "requests"), 7, "different workers both count");
+    }
+
+    #[test]
+    fn ingest_skips_overflow_delta_instead_of_wrapping_negative() {
+        // MINOR (u64→i64 ingest wrap) REGRESSION: a counter above i64::MAX must
+        // NOT wrap negative and lower the aggregate. Pre-fix `v as i64` of
+        // u64::MAX yields -1, so the total would go NEGATIVE; post-fix the
+        // out-of-range delta is dropped (skip-with-warn) and the total holds.
+        let mut led = IngestLedger::new();
+        let app = Uuid::new_v4();
+        let p = 1_000;
+        // requests fits, cpu_us overflows i64.
+        led.ingest_at(
+            &report(
+                "w1",
+                1,
+                app,
+                AppUsage { requests: 5, cpu_us: u64::MAX, ..Default::default() },
+            ),
+            p,
+        );
+        assert_eq!(led.total(app, p, "requests"), 5, "in-range counter still applies");
+        assert_eq!(
+            led.total(app, p, "cpu_us"),
+            0,
+            "an overflowing counter is dropped, NOT wrapped negative",
+        );
     }
 
     #[test]

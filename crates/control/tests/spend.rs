@@ -224,6 +224,81 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
 }
 
 #[compio::test]
+async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
+    // MAJOR-1 REGRESSION: an app whose priced `spend_cents` overflows i64 must be
+    // SKIPPED with a warn! by the spend sweep — NOT clamped to i64::MAX and
+    // Blocked. This mirrors billing_reconcile's overflow posture (it skips such
+    // an app too). Pre-fix the sweep did `i64::try_from(spend_cents).unwrap_or(
+    // i64::MAX)` — a silent clamp that wrote a Block state row, so enforcement
+    // Blocked an app that reconcile would skip (unbilled): the two disagreed.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry.clone());
+    let engine = SpendEngine::new(registry);
+
+    // Force the `requests` weight to exactly 1 CU/op for a deterministic CU total.
+    client
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('requests', 1, 1) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+            &[],
+        )
+        .await
+        .expect("upsert requests weight");
+
+    // Plan: fx = 2 cents/CU (= 2 × FX_SCALE pico-cents/CU), no included CU, no
+    // base. With usage = i64::MAX requests ⇒ total_units = i64::MAX (fits u64, so
+    // NO ComputeUnitOverflow), overage = 2 × i64::MAX cents ≈ u64::MAX — which
+    // EXCEEDS i64::MAX, so the cents→i64 conversion in the sweep overflows and
+    // the app must be skipped.
+    let fx_two_cents: i64 = 2_000_000_000_000; // 2 × 10^12
+    let plan_id = format!("pln_ovf_{}", Uuid::new_v4().simple());
+    client
+        .execute(
+            "INSERT INTO zeroship.plans \
+               (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+                runtime_limits_json, spend_limit_default_cents) \
+             VALUES ($1, 'ovf-test', 0, 0, $2, \
+                     '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', 100)",
+            &[&plan_id, &fx_two_cents],
+        )
+        .await
+        .expect("seed overflow plan");
+    let name = format!("ovf-test-{}", Uuid::new_v4());
+    let app: Uuid = client
+        .query(
+            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+             VALUES ($1, $2, $3, '') RETURNING id",
+            &[&name, &plan_id, &Uuid::new_v4().to_string()],
+        )
+        .await
+        .expect("insert app")[0]
+        .get("id");
+
+    // Usage = i64::MAX requests in the current period.
+    let worker = format!("w-{}", Uuid::new_v4());
+    metering
+        .ingest(&report(&worker, 1, app, i64::MAX as u64))
+        .await
+        .expect("ingest overflow usage");
+
+    // The sweep must NOT transition (skip) our app, and write NO state row for it.
+    let transitions = engine.evaluate_all().await.expect("evaluate_all");
+    assert!(
+        !transitions.iter().any(|t| t.app_id == app),
+        "an overflowing-spend app is SKIPPED (no transition), not clamped-and-Blocked",
+    );
+    let (state, hist) = read_state(&client, &app).await;
+    assert_eq!(state, None, "no app_spend_state row written for the skipped app");
+    assert_eq!(hist, 0, "no spend_state_history row for the skipped app");
+}
+
+#[compio::test]
 async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
     // recovers to Allow on the next tick once `set_limit` raises the cap far

@@ -7,7 +7,7 @@
 //! rows) and pass it as `&MetricWeights` into [`crate::pricing::charge_cents`].
 //! The default FX resolves a plan's `fx == None`.
 
-use crate::pricing::{MetricWeight, MetricWeights};
+use crate::pricing::{MetricWeight, MetricWeights, MIN_FX_PICO_CENTS_PER_UNIT};
 use crate::registry::{Registry, RegistryError};
 
 /// PG-backed reader for the global cost model + FX default.
@@ -65,12 +65,18 @@ impl PricingStore {
 
     /// The global default FX (pico-cents per CU) — `pricing_config.id='global'`.
     ///
-    /// `None` if the singleton row is absent. This is a PLATFORM
-    /// MISCONFIGURATION, not a benign default (MAJOR-2): a plan that inherits
-    /// (`fx == None`) cannot then be priced, and the sweeps fail closed (abort)
-    /// rather than billing base-only $0. We `tracing::error!` here so the missing
-    /// seed is loud — the previous "logged when missing" claim was false (there
-    /// was no log), letting a missing row silently leak revenue.
+    /// `None` if the singleton row is absent OR its value is BELOW the near-zero
+    /// floor. Both are PLATFORM MISCONFIGURATIONS, not benign defaults
+    /// (MAJOR-2 / MAJOR-3): a plan that inherits (`fx == None`) cannot then be
+    /// priced, and the sweeps fail closed (abort) rather than billing base-only
+    /// $0. We `tracing::error!` so the bad/missing seed is loud.
+    ///
+    /// MAJOR-3: a below-floor global FX (`< MIN_FX_PICO_CENTS_PER_UNIT`) is
+    /// treated as UNRESOLVED — returning `None` so the sweep fails closed —
+    /// rather than coercing a near-zero/zero value to `Some(0)` and silently
+    /// pricing ALL overage to $0 platform-wide. The DB CHECK in 0041 makes a
+    /// below-floor value unrepresentable at the source; this is defense in depth
+    /// (and covers a row written before the CHECK / by a privileged path).
     pub async fn default_fx_pico_cents_per_unit(&self) -> Result<Option<u64>, RegistryError> {
         let conn = self.registry.conn().await?;
         let rows = conn
@@ -87,6 +93,16 @@ impl PricingStore {
             return Ok(None);
         };
         let fx: i64 = row.get("fx_pico_cents_per_unit");
-        Ok(Some(fx.max(0) as u64))
+        if fx < 0 || (fx as u64) < MIN_FX_PICO_CENTS_PER_UNIT {
+            tracing::error!(
+                fx,
+                floor = MIN_FX_PICO_CENTS_PER_UNIT,
+                "pricing_config: global default FX is BELOW the near-zero floor — refusing to \
+                 price all overage to ~$0. Treating as UNRESOLVED so the sweep fails closed; \
+                 fix pricing_config.fx_pico_cents_per_unit."
+            );
+            return Ok(None);
+        }
+        Ok(Some(fx as u64))
     }
 }

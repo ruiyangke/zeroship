@@ -53,6 +53,7 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
             heap_limit_mb: Some(256),
         },
         archived: false,
+        assignable_by_creator: false,
     };
     catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert plan")
 }
@@ -310,9 +311,16 @@ async fn set_plan_guards_archive_in_one_statement() {
 }
 
 #[compio::test]
-async fn list_skips_poison_row_but_get_is_strict() {
-    // #5: a row with un-parseable JSONB is skipped by list() (warn) but a
-    // direct get() of that id hard-errors. Inject a poison row via raw SQL.
+async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
+    // MAJOR-2 REGRESSION: a plan row with un-parseable `runtime_limits_json` must
+    // STILL be priced by BOTH paths — `list()` (spend enforcement) AND `get()`
+    // (billing reconcile). Pricing needs only the scalar price columns, not the
+    // runtime limits, so a poison row falls back to free-tier runtime limits and
+    // is RETURNED with its real price intact.
+    //
+    // Pre-fix: `list()` SKIPPED the poison row (app ran UNCAPPED) and `get()`
+    // HARD-ERRORED (creator's whole bill failed) — so a poison plan made an app
+    // both uncapped AND unbilled. The two paths now AGREE: both return it.
     let Some(url) = db_url() else {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
@@ -323,25 +331,44 @@ async fn list_skips_poison_row_but_get_is_strict() {
 
     let good = seed_plan(&catalog, "good-row").await;
     // A poison plan: runtime_limits_json is a STRING, not an AppRuntimeLimits
-    // object, so row_to_plan's from_value fails.
+    // object, so row_to_plan's from_value fails — but its PRICE columns are real
+    // (base 700c, FX = 1 cent/CU) and must survive.
     let poison_id = zeroship_core::typed_id::new_plan_id();
+    let fx = FX_SCALE as i64; // 1 cent/CU
     client
         .execute(
             "INSERT INTO zeroship.plans \
                (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                runtime_limits_json, spend_limit_default_cents, archived) \
-             VALUES ($1, 'poison', 0, 0, NULL, '\"not-an-object\"'::jsonb, 0, false)",
-            &[&poison_id],
+                runtime_limits_json, spend_limit_default_cents, archived, \
+                assignable_by_creator) \
+             VALUES ($1, 'poison', 700, 0, $2, '\"not-an-object\"'::jsonb, 0, false, false)",
+            &[&poison_id, &fx],
         )
         .await
         .expect("insert poison row");
 
+    // list() RETURNS the poison row (priced), not skipped.
     let plans = catalog.list().await.expect("list tolerates poison row");
     assert!(plans.iter().any(|p| p.id == good.id), "good row is listed");
-    assert!(!plans.iter().any(|p| p.id == poison_id), "poison row is skipped, not listed");
+    let listed = plans
+        .iter()
+        .find(|p| p.id == poison_id)
+        .expect("poison row is STILL listed (priceable), not skipped");
+    assert_eq!(listed.price.base_fee_cents, 700, "poison row keeps its real price (list)");
 
-    // get() of the poison id is strict — hard error.
-    assert!(catalog.get(&poison_id).await.is_err(), "get is strict on a poison row");
+    // get() of the poison id is ALSO tolerant now — returns the priced plan
+    // (free-tier runtime fallback), no hard error.
+    let got = catalog
+        .get(&poison_id)
+        .await
+        .expect("get tolerates poison row (prices it)")
+        .expect("poison plan is present");
+    assert_eq!(got.price.base_fee_cents, 700, "poison row keeps its real price (get)");
+    assert_eq!(
+        got.runtime,
+        zeroship_core::types::FREE_TIER_RUNTIME_LIMITS,
+        "poison runtime_limits_json falls back to the conservative free-tier limits",
+    );
 }
 
 #[compio::test]
@@ -428,6 +455,117 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
     t.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
     // sanity: the loaded table is non-empty (seeded platform counters)
     assert!(weights.contains_key("requests"), "platform-counter weight is seeded");
+}
+
+#[compio::test]
+async fn upsert_hard_errors_on_out_of_range_price_not_silent_clamp() {
+    // MINOR (write-path i64 clamps) REGRESSION: a plan write with an
+    // out-of-range price (here included_units = u64::MAX, above the i64 BIGINT
+    // ceiling) must be a HARD ERROR at `upsert` — not a silent clamp to i64::MAX.
+    // `upsert` calls `plan.price.validate()` as defense in depth so even a direct
+    // (non-HTTP) caller cannot land a clamped plan.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let _client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry);
+
+    let mut plan = seed_plan(&catalog, "range-ok").await;
+    // Now mutate to an out-of-range included_units and re-upsert: must error.
+    plan.price.included_units = u64::MAX;
+    let res = catalog.upsert(&plan, Some(false)).await;
+    assert!(
+        res.is_err(),
+        "an out-of-range included_units must be a hard error at upsert, not a silent i64 clamp",
+    );
+}
+
+#[compio::test]
+async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
+    // MAJOR-3 REGRESSION. Two arms:
+    //   (a) the DB CHECK on `pricing_config.fx_pico_cents_per_unit >= 1000`
+    //       (the MIN_FX floor) rejects a fat-fingered near-zero global FX at the
+    //       source.
+    //   (b) defense in depth: even if a below-floor value somehow lands (here we
+    //       drop the CHECK to inject one), the loader treats it as UNRESOLVED
+    //       (returns None) so the sweep fails CLOSED — it does NOT coerce a
+    //       near-zero/zero global FX to Some(0) and silently price ALL overage to
+    //       ~$0 platform-wide.
+    // Single-threaded (the harness runs --test-threads=1), and we RESTORE the
+    // seeded global row + CHECK before returning so other tests see a sane FX.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
+
+    // Snapshot the seeded global FX so we can restore it.
+    let seeded: i64 = client
+        .query_one(
+            "SELECT fx_pico_cents_per_unit FROM zeroship.pricing_config WHERE id = 'global'",
+            &[],
+        )
+        .await
+        .expect("read seeded fx")
+        .get("fx_pico_cents_per_unit");
+
+    // (a) The CHECK rejects a below-floor UPDATE.
+    let blocked = client
+        .execute(
+            "UPDATE zeroship.pricing_config SET fx_pico_cents_per_unit = 0 WHERE id = 'global'",
+            &[],
+        )
+        .await;
+    assert!(blocked.is_err(), "below-floor global FX (0) must be rejected by the CHECK (MAJOR-3)");
+
+    // (b) Bypass the CHECK to inject a below-floor value, then prove the loader
+    // fails closed (None), then restore the CHECK + seeded value.
+    client
+        .execute(
+            "ALTER TABLE zeroship.pricing_config DROP CONSTRAINT \
+             pricing_config_fx_pico_cents_per_unit_check",
+            &[],
+        )
+        .await
+        .expect("drop check");
+    client
+        .execute(
+            "UPDATE zeroship.pricing_config SET fx_pico_cents_per_unit = 0 WHERE id = 'global'",
+            &[],
+        )
+        .await
+        .expect("inject below-floor fx");
+
+    let fx = pricing
+        .default_fx_pico_cents_per_unit()
+        .await
+        .expect("loader runs");
+    // RESTORE before asserting so a panic can't leave the global row poisoned.
+    client
+        .execute(
+            "UPDATE zeroship.pricing_config SET fx_pico_cents_per_unit = $1 WHERE id = 'global'",
+            &[&seeded],
+        )
+        .await
+        .expect("restore seeded fx");
+    client
+        .execute(
+            "ALTER TABLE zeroship.pricing_config ADD CONSTRAINT \
+             pricing_config_fx_pico_cents_per_unit_check CHECK (fx_pico_cents_per_unit >= 1000)",
+            &[],
+        )
+        .await
+        .expect("restore check");
+
+    assert_eq!(
+        fx, None,
+        "a below-floor global FX must resolve to None (unresolved → sweep fails closed), \
+         NOT Some(0) which would silently bill all overage at $0",
+    );
 }
 
 #[compio::test]
