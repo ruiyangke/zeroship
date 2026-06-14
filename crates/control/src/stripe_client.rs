@@ -215,6 +215,26 @@ pub trait StripeApi {
     /// (server-side truth), closing the "callback trusts the POSTed acct_…" hole.
     async fn retrieve_account(&self, account_id: &str) -> Result<ConnectAccount, StripeError>;
 
+    /// Create a **Refund** (`re_…`) returning the cash that was collected on a paid
+    /// invoice back to the original card (billing-ops gap #26, PR-3). `provider_invoice_id`
+    /// is the Stripe invoice (`in_…`) we recorded as the `invoice_payments.provider_ref`
+    /// of the `charge` row — this method resolves that invoice's PaymentIntent and issues
+    /// `POST /v1/refunds {payment_intent, amount}` (verified at
+    /// docs.stripe.com/api/refunds/create: a `Refund` "Funds will be refunded to the
+    /// credit or debit card that was originally charged" — a credit note alone does NOT
+    /// move cash on a paid invoice, so a Refund is the authoritative money-movement object
+    /// for `destination='cash'`). `amount_cents` is the positive amount to refund (cents,
+    /// the smallest currency unit); a partial refund passes less than the charge.
+    /// `idempotency_key` is a deterministic key derived from `refund.id` so a crash-retry
+    /// returns the SAME `re_…` rather than double-refunding. Returns the `re_…` id.
+    async fn create_refund(
+        &self,
+        provider_invoice_id: &str,
+        amount_cents: u64,
+        currency: &str,
+        idempotency_key: &str,
+    ) -> Result<String, StripeError>;
+
     /// Create a Connect **PaymentIntent** on the connected account, with the
     /// platform's `application_fee_amount` stamped SERVER-SIDE (`POST
     /// /v1/payment_intents`, `transfer_data[destination]=acct_…`,
@@ -675,6 +695,56 @@ impl StripeApi for StripeClient {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         Ok(ConnectPaymentIntent { id, client_secret })
+    }
+
+    async fn create_refund(
+        &self,
+        provider_invoice_id: &str,
+        amount_cents: u64,
+        currency: &str,
+        idempotency_key: &str,
+    ) -> Result<String, StripeError> {
+        // Money MUST NOT silently clamp on overflow — surface as a hard error.
+        let amount = i64::try_from(amount_cents).map_err(|_| {
+            StripeError::Validation(format!(
+                "refund amount_cents {amount_cents} exceeds i64::MAX — refusing to clamp"
+            ))
+        })?;
+        if amount <= 0 {
+            return Err(StripeError::Validation(format!(
+                "refund amount must be > 0 (got {amount})"
+            )));
+        }
+        // We persist the Stripe invoice id (`in_…`) as the charge row's provider_ref.
+        // `POST /v1/refunds` refunds a `charge` or a `payment_intent`, not an invoice —
+        // so resolve the invoice's PaymentIntent first (GET /v1/invoices/{in_…}), then
+        // refund THAT. The invoice's `payment_intent` is the money object the customer
+        // paid; refunding it returns the cash to the original card.
+        let enc = encode_query_component(provider_invoice_id);
+        let invoice = self.get_json(&format!("/v1/invoices/{enc}")).await?;
+        let payment_intent = invoice
+            .get("payment_intent")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                StripeError::Validation(format!(
+                    "stripe: invoice {provider_invoice_id} has no payment_intent — cannot refund cash"
+                ))
+            })?;
+        let form = vec![
+            ("payment_intent".to_string(), payment_intent),
+            ("amount".to_string(), amount.to_string()),
+            ("currency".to_string(), currency.to_string()),
+            // requested_by_customer is the closest Stripe reason for an operator
+            // goodwill / over-charge correction. It is audit-only at Stripe.
+            ("reason".to_string(), "requested_by_customer".to_string()),
+        ];
+        // The deterministic Idempotency-Key (derived from refund.id) makes a
+        // crash-retry replay the SAME `re_…` rather than double-refund.
+        let json = self
+            .post_form("/v1/refunds", &form, Some(idempotency_key))
+            .await?;
+        extract_id(&json, "refund")
     }
 }
 

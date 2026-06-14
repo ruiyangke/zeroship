@@ -242,6 +242,16 @@ pub const INVOICE_PAYMENT_PREFIX: &str = "ipy";
 /// SQL `DEFAULT` — there is no in-DB base62 generator).
 pub const CREDIT_PREFIX: &str = "crd";
 
+/// Refund typed-id prefix (billing-ops gap #26, PR-3). Three chars to match the
+/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// (R16-API2), and disjoint from `inv`/`ipy`/`crd` so a refund id can never be
+/// confused with the invoice it FKs into or the credit grant a `refund_to_credit`
+/// refund appends. The `zeroship.refunds.id` column stores the full typed-id
+/// string (`ref_<base62>`), minted in Rust by the operator `POST
+/// /invoices/{id}/refunds` endpoint + the void+reissue true-up bridge (no SQL
+/// `DEFAULT` — there is no in-DB base62 generator).
+pub const REFUND_PREFIX: &str = "ref";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -308,6 +318,13 @@ pub fn new_invoice_payment_id() -> String {
 /// PR-2).
 pub fn new_credit_id() -> String {
     generate(CREDIT_PREFIX)
+}
+
+/// Generate a new refund ID: `ref_{base62(uuidv7)}`. Minted by the operator
+/// `POST /api/invoices/{id}/refunds` endpoint and by the void+reissue true-up
+/// bridge (billing-ops gap #26, PR-3).
+pub fn new_refund_id() -> String {
+    generate(REFUND_PREFIX)
 }
 
 #[cfg(test)]
@@ -442,6 +459,21 @@ mod tests {
         let (prefix, _) = parse(&p).expect("new_invoice_payment_id must roundtrip");
         assert_eq!(prefix, "ipy");
         assert_ne!(prefix, INVOICE_PREFIX, "payment id must be disjoint from invoice id");
+    }
+
+    #[test]
+    fn refund_prefix_is_three_chars_and_disjoint() {
+        assert_eq!(REFUND_PREFIX.len(), 3, "refund prefix must be 3 chars (R16-API2)");
+        let r = new_refund_id();
+        assert!(r.starts_with("ref_"));
+        assert_eq!(r.len(), 26, "ref_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&r).expect("new_refund_id must roundtrip");
+        assert_eq!(prefix, "ref");
+        // Disjoint from every sibling money-record prefix so a refund id can never
+        // be confused with the invoice it FKs into, a payment row, or a credit grant.
+        assert_ne!(prefix, INVOICE_PREFIX);
+        assert_ne!(prefix, INVOICE_PAYMENT_PREFIX);
+        assert_ne!(prefix, CREDIT_PREFIX);
     }
 
     #[test]

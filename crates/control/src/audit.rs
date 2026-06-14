@@ -69,6 +69,18 @@ pub enum Action {
     /// bill), operator-only, so every grant is audited with the actor + the
     /// creator / amount / kind in the detail JSON.
     CreditGranted,
+    /// An operator refunded a finalized invoice via `POST
+    /// /api/invoices/{id}/refunds` (billing-ops gap #26, PR-3). A refund moves
+    /// real money (a Stripe `Refund` for `destination='cash'`) or grants
+    /// platform credit (`destination='credit'`), operator-only, so every refund is
+    /// audited with the actor + the invoice / amount / destination in the detail JSON.
+    InvoiceRefunded,
+    /// An operator voided a finalized invoice via `POST /api/invoices/{id}/void`
+    /// (billing-ops gap #26, PR-3). A void is the only legal finalized→void
+    /// correction transition; it restores consumed credit (`void_reversal`) and
+    /// reissues a corrected invoice, so it is audited with the actor + the
+    /// voided/reissued ids + any true-up refund in the detail JSON.
+    InvoiceVoided,
 }
 
 impl Action {
@@ -93,6 +105,8 @@ impl Action {
             Self::SetFeePolicy => "set_fee_policy",
             Self::SetGlobalFx => "set_global_fx",
             Self::CreditGranted => "credit_granted",
+            Self::InvoiceRefunded => "invoice_refunded",
+            Self::InvoiceVoided => "invoice_voided",
         }
     }
 }

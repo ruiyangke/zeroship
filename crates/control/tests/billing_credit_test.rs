@@ -184,6 +184,15 @@ impl StripeApi for RecordingStripe {
             client_secret: None,
         })
     }
+    async fn create_refund(
+        &self,
+        _provider_invoice_id: &str,
+        _amount_cents: u64,
+        _currency: &str,
+        _idempotency_key: &str,
+    ) -> Result<String, StripeError> {
+        Ok(Self::unique("re"))
+    }
 }
 
 // ===========================================================================

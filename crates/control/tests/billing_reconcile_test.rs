@@ -1238,6 +1238,9 @@ impl StripeApi for FailAfterFirstItem {
     async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
         self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
     }
+    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
+    }
 }
 
 /// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
@@ -1379,6 +1382,9 @@ impl StripeApi for PostThenCrash {
     }
     async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
         self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
+    }
+    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
     }
 }
 
@@ -1566,6 +1572,9 @@ impl StripeApi for CrashOnFinalize {
     }
     async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
         self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
+    }
+    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
     }
 }
 
@@ -2000,6 +2009,9 @@ impl StripeApi for FinalizeAlreadyFinalized {
     async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
         self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
     }
+    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
+    }
 }
 
 // ===========================================================================
@@ -2122,6 +2134,9 @@ impl StripeApi for FinalizeReturnsFixedId {
     }
     async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
         self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
+    }
+    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
     }
 }
 

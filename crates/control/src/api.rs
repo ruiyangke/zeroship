@@ -74,6 +74,36 @@ fn default_credit_currency() -> String {
     crate::credit::CREDIT_CURRENCY.to_string()
 }
 
+/// Body for the operator refund endpoint `POST /api/invoices/{id}/refunds`
+/// (billing-ops gap #26, PR-3). The operator supplies the amount + destination; the
+/// tax split is OPTIONAL — when omitted, the endpoint derives it proportionally from
+/// the invoice's frozen `tax_cents`/`total_cents`. The idempotency key arrives in the
+/// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
+#[derive(Deserialize)]
+pub struct RefundBody {
+    /// Positive amount to refund, in cents.
+    pub amount_cents: i64,
+    /// Where the refund goes: `cash` (a Stripe `Refund` re_… to the card) or
+    /// `credit` (a platform-native `refund_to_credit` grant). Defaults to `credit`
+    /// (DECISION 3 — keep money on-platform unless cash is explicitly requested).
+    #[serde(default = "default_refund_destination")]
+    pub destination: String,
+    /// Optional explicit pre-tax portion. When omitted (with `tax_cents`), the
+    /// endpoint derives a proportional split from the invoice's tax ratio.
+    #[serde(default)]
+    pub subtotal_cents: Option<i64>,
+    /// Optional explicit tax portion. See `subtotal_cents`.
+    #[serde(default)]
+    pub tax_cents: Option<i64>,
+    /// Optional operator audit reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+fn default_refund_destination() -> String {
+    "credit".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Error → HttpResponse
 // ---------------------------------------------------------------------------
@@ -1320,6 +1350,225 @@ pub async fn grant_credit(
                            a credit grant key is bound to its exact (creator, amount, \
                            currency, kind, expiry, note) — no second grant was created",
             })),
+    }
+}
+
+/// Operator refund endpoint `POST /api/invoices/{id}/refunds` (billing-ops gap #26,
+/// PR-3). OPERATOR-ONLY: `Action::BillingWrite` on `Resource::Any`. A creator/app
+/// token (which can at most hold `BillingWrite` on `Resource::App{id}`) is 403 — a
+/// refund moves real money / grants credit and is never self-serve in v1 (DECISION 5).
+/// Requires an `Idempotency-Key` header; a reused key with the SAME body returns the
+/// first refund (safe retry), a reused key with a DIFFERENT body is 409. The `{id}` is
+/// the internal `inv_…` invoice id.
+pub async fn refund_invoice(
+    req: web::HttpRequest,
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+    body: Json<RefundBody>,
+) -> web::HttpResponse {
+    // OPERATOR-ONLY on Resource::Any. No App-scoped fallback.
+    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    let invoice_id = id.into_inner();
+    let body = body.into_inner();
+
+    let idem_key = req
+        .headers()
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_default();
+    if idem_key.is_empty() {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "missing Idempotency-Key header",
+            "detail": "POST /api/invoices/{id}/refunds requires an Idempotency-Key header so a \
+                       retried refund is a no-op (no double refund)",
+        }));
+    }
+
+    let Some(destination) = crate::refund::RefundDestination::parse(&body.destination) else {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "invalid destination",
+            "detail": "refund destination must be 'cash' or 'credit'",
+        }));
+    };
+
+    let conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+
+    // Resolve the tax split. If the operator supplied both subtotal+tax, use them
+    // verbatim (the helper validates the split). Otherwise derive a PROPORTIONAL tax
+    // split from the invoice's frozen tax ratio (MISSING-6 — a refund of a taxed
+    // invoice returns proportional tax): tax = round_half_up(amount × inv.tax / inv.total).
+    let (subtotal_cents, tax_cents) = match (body.subtotal_cents, body.tax_cents) {
+        (Some(s), Some(t)) => (s, t),
+        _ => {
+            let inv = match conn
+                .query(
+                    "SELECT tax_cents, total_cents FROM zeroship.invoices WHERE id = $1",
+                    &[&invoice_id],
+                )
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return error_response(RegistryError::Database(e.to_string())),
+            };
+            let Some(row) = inv.first() else {
+                return web::HttpResponse::NotFound().json(&serde_json::json!({
+                    "error": "no such invoice",
+                    "detail": format!("no invoice {invoice_id}"),
+                }));
+            };
+            let inv_tax: i64 = row.get("tax_cents");
+            let inv_total: i64 = row.get("total_cents");
+            // round_half_up(amount × inv_tax / inv_total); 0 when the invoice is untaxed.
+            let tax = if inv_total > 0 && inv_tax > 0 {
+                let num = i128::from(body.amount_cents) * i128::from(inv_tax);
+                let half = i128::from(inv_total) / 2;
+                i64::try_from((num + half) / i128::from(inv_total)).unwrap_or(0)
+            } else {
+                0
+            };
+            (body.amount_cents - tax, tax)
+        }
+    };
+
+    // Build the Stripe-backed refund provider (the cash leg). The credit leg never
+    // touches it.
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+    let provider = crate::refund::StripeRefundProvider { stripe: &stripe };
+
+    let outcome = crate::refund::issue_refund(
+        &conn,
+        &provider,
+        &invoice_id,
+        body.amount_cents,
+        subtotal_cents,
+        tax_cents,
+        destination,
+        body.reason.as_deref(),
+        &idem_key,
+    )
+    .await;
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => return error_response(e),
+    };
+
+    use crate::refund::RefundOutcome;
+    match outcome {
+        RefundOutcome::Issued { refund_id, provider_ref } => {
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: None,
+                    creator_id: None,
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
+                    action: crate::audit::Action::InvoiceRefunded,
+                    resource: Some(&refund_id),
+                    source_ip: None,
+                },
+                &serde_json::json!({
+                    "refund_id": refund_id,
+                    "invoice_id": invoice_id,
+                    "amount_cents": body.amount_cents,
+                    "subtotal_cents": subtotal_cents,
+                    "tax_cents": tax_cents,
+                    "destination": destination.as_str(),
+                    "provider_ref": provider_ref,
+                }),
+            )
+            .await;
+            web::HttpResponse::Created().json(&serde_json::json!({
+                "refund_id": refund_id,
+                "destination": destination.as_str(),
+                "provider_ref": provider_ref,
+                "created": true,
+            }))
+        }
+        RefundOutcome::Duplicate(refund_id) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "refund_id": refund_id,
+            "created": false,
+        })),
+        RefundOutcome::Conflict => web::HttpResponse::Conflict().json(&serde_json::json!({
+            "error": "idempotency-key-reuse-conflict",
+            "detail": "the Idempotency-Key was reused with a different request body; a refund \
+                       key is bound to its exact (invoice, amount, split, destination) — no \
+                       second refund was created",
+        })),
+        RefundOutcome::OverRefund(detail) => {
+            web::HttpResponse::UnprocessableEntity().json(&serde_json::json!({
+                "error": "over-refund",
+                "detail": detail,
+            }))
+        }
+        RefundOutcome::InvalidInvoice(detail) => {
+            web::HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "invalid invoice",
+                "detail": detail,
+            }))
+        }
+    }
+}
+
+/// Operator void+reissue endpoint `POST /api/invoices/{id}/void` (billing-ops gap #26,
+/// PR-3). OPERATOR-ONLY: `Action::BillingWrite` on `Resource::Any`. Voids a finalized
+/// invoice (the only legal `finalized→void` transition), restores any credit it
+/// consumed (`void_reversal`), reissues a corrected invoice for the same period, and
+/// auto-refunds any over-collection (the true-up bridge) — all under the per-creator
+/// advisory lock. The `{id}` is the internal `inv_…` invoice id.
+pub async fn void_invoice(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    let invoice_id = id.into_inner();
+
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+
+    match crate::void_reissue::void_and_reissue(&state, &stripe, &invoice_id).await {
+        Ok(outcome) => {
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: None,
+                    creator_id: None,
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
+                    action: crate::audit::Action::InvoiceVoided,
+                    resource: Some(&outcome.voided_invoice_id),
+                    source_ip: None,
+                },
+                &serde_json::json!({
+                    "voided_invoice_id": outcome.voided_invoice_id,
+                    "reissued_invoice_id": outcome.reissued_invoice_id,
+                    "true_up_refund_id": outcome.true_up_refund_id,
+                    "true_up_cents": outcome.true_up_cents,
+                }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "voided_invoice_id": outcome.voided_invoice_id,
+                "reissued_invoice_id": outcome.reissued_invoice_id,
+                "true_up_refund_id": outcome.true_up_refund_id,
+                "true_up_cents": outcome.true_up_cents,
+            }))
+        }
+        Err(e) => error_response(e),
     }
 }
 

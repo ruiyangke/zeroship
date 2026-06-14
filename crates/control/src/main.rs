@@ -1280,6 +1280,17 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/billing/credit")
                     .route(web::post().to(api::grant_credit)),
             )
+            // Operator refund + void/reissue (billing-ops gap #26, PR-3) —
+            // OPERATOR-ONLY (BillingWrite on Resource::Any). Refund requires an
+            // Idempotency-Key header. {id} is the internal inv_… invoice id.
+            .service(
+                web::resource("/api/invoices/{id}/refunds")
+                    .route(web::post().to(api::refund_invoice)),
+            )
+            .service(
+                web::resource("/api/invoices/{id}/void")
+                    .route(web::post().to(api::void_invoice)),
+            )
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),
