@@ -21,6 +21,12 @@ pub enum RegistryError {
     AlreadyExists(String),
     Database(String),
     InvalidInput(String),
+    /// The operation is refused because it would violate a business invariant
+    /// that is not a simple uniqueness clash — e.g. hard-deleting an app that has
+    /// financial history (an `invoice_lines` row pins it via `ON DELETE RESTRICT`,
+    /// and a billed app must be ANONYMIZED, not deleted). A TYPED conflict so the
+    /// caller can map it to a clear status instead of leaking a raw DB error.
+    Conflict(String),
     /// The global default FX is missing, so the platform cannot price any
     /// inheriting plan (billing-v2 MAJOR-2). A billing sweep that hits this
     /// must ABORT (bill no one) rather than emit base-only $0 invoices — it is
@@ -36,6 +42,7 @@ impl std::fmt::Display for RegistryError {
             Self::AlreadyExists(s) => write!(f, "already exists: {s}"),
             Self::Database(s) => write!(f, "database: {s}"),
             Self::InvalidInput(s) => write!(f, "invalid input: {s}"),
+            Self::Conflict(s) => write!(f, "conflict: {s}"),
             Self::FxUnresolved => write!(
                 f,
                 "global default FX missing — platform cannot price; aborting billing sweep \
@@ -324,6 +331,28 @@ impl Registry {
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
         let client_id = crate::app_oauth_client::client_id_for_app(id);
         let mut conn = self.conn().await?;
+
+        // Schema MAJOR-1(i): a billed app is NOT hard-deletable. `invoice_lines.app_id
+        // → apps ON DELETE RESTRICT` (0042) would otherwise abort the DELETE with an
+        // opaque DB error for any ever-invoiced app. Pre-check + return a TYPED
+        // Conflict so the caller gets a clear 409 — consistent with the
+        // anonymize-don't-delete financial-history posture (the account reaper retains
+        // and anonymizes such apps' owners rather than erasing the billing trail).
+        let billed = conn
+            .query(
+                "SELECT EXISTS (SELECT 1 FROM zeroship.invoice_lines WHERE app_id = $1) AS billed",
+                &[id],
+            )
+            .await?
+            .first()
+            .is_some_and(|r| r.get::<_, bool>("billed"));
+        if billed {
+            return Err(RegistryError::Conflict(format!(
+                "app {id} has billing history (invoiced line items) and cannot be hard-deleted; \
+                 it must be anonymized instead"
+            )));
+        }
+
         let tx = conn.transaction().await?;
         let n = tx
             .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])

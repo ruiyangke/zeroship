@@ -53,6 +53,9 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
         RegistryError::AlreadyExists(msg) => {
             web::HttpResponse::Conflict().json(&serde_json::json!({ "error": msg }))
         }
+        RegistryError::Conflict(msg) => {
+            web::HttpResponse::Conflict().json(&serde_json::json!({ "error": msg }))
+        }
         RegistryError::InvalidInput(msg) => {
             web::HttpResponse::BadRequest().json(&serde_json::json!({ "error": msg }))
         }

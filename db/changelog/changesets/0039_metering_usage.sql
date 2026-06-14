@@ -7,7 +7,18 @@
 CREATE TABLE zeroship.usage_aggregates (
     app_id     UUID                    NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
     period     zeroship.billing_period NOT NULL,
-    metric     TEXT                    NOT NULL REFERENCES zeroship.billing_metrics(metric) ON DELETE RESTRICT,
+    -- Schema MAJOR-1(ii): NO ACTION DEFERRABLE INITIALLY DEFERRED, not immediate
+    -- RESTRICT. A custom metric is `billing_metrics.owner_app → apps ON DELETE
+    -- CASCADE` (0037); deleting an app CASCADE-deletes both this app's
+    -- usage_aggregates rows (via app_id) AND its custom billing_metrics rows. With
+    -- an IMMEDIATE RESTRICT here, the metric-delete would abort the moment the
+    -- still-present aggregate row references it (order-dependent). Deferring the
+    -- check to end-of-statement lets the app_id CASCADE remove the aggregate rows
+    -- FIRST, so by commit the metric FK is satisfied (no dangling aggregate metric)
+    -- AND a concurrent app-delete succeeds. The "no aggregate without a cataloged
+    -- metric" guarantee is preserved — it is just checked at statement end.
+    metric     TEXT                    NOT NULL REFERENCES zeroship.billing_metrics(metric)
+                                       ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     total      BIGINT                  NOT NULL DEFAULT 0 CHECK (total >= 0),
     updated_at TIMESTAMPTZ             NOT NULL DEFAULT NOW(),
     PRIMARY KEY (app_id, period, metric)
