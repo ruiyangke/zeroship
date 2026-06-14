@@ -39,6 +39,20 @@ struct Fixture {
 
 impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
+        // Default fixture: insecure_dev (empty webhook secret ⇒ signature
+        // verification skipped) — matches the existing audit-coverage test.
+        Self::new_with_secret(db_url, label, "", true).await
+    }
+
+    /// Build a fixture with an explicit webhook signing secret + `insecure_dev`
+    /// flag. A non-empty secret with `insecure_dev=false` exercises the REAL
+    /// signature-verify path (used by the forged-event test).
+    async fn new_with_secret(
+        db_url: &str,
+        label: &str,
+        webhook_secret: &str,
+        insecure_dev: bool,
+    ) -> Self {
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
@@ -63,14 +77,14 @@ impl Fixture {
             blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new("test-master-key".to_string()),
-            stripe_webhook_secret: SecretString::new(String::new()),
+            stripe_webhook_secret: SecretString::new(webhook_secret.to_string()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "https://api.stripe.com".to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
-            insecure_dev: true,
+            insecure_dev,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
@@ -124,7 +138,10 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     };
     let fx = Fixture::new(&db_url, "record-audit").await;
     let app = init_control!(fx);
-    let creator_id = Uuid::new_v4();
+    // `creator_accounts.creator_id` FKs to `users(id)` — seed a real user so
+    // `link_account` satisfies the constraint on a freshly-migrated DB.
+    let seed = side_conn(&db_url).await;
+    let creator_id = make_user(&seed).await;
     fx.state
         .stripe_store
         .link_account(creator_id, "acct_webhookAudit1")
@@ -183,4 +200,205 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     assert_eq!(detail["amount_cents"], 1234);
     assert_eq!(detail["stripe_event_id"], event_id);
     assert_eq!(detail["stripe_object_id"], stripe_object_id);
+}
+
+// ─── G6 replay-dedup ledger tests ──────────────────────────────────────────
+
+/// Open a side connection for seeding users + reading the dedup ledger / audit.
+async fn side_conn(db_url: &str) -> compio_postgres::Client {
+    let (conn, driver) = compio_postgres::connect(db_url, compio_postgres::NoTls)
+        .await
+        .expect("side connect");
+    compio::runtime::spawn(async move {
+        let _ = driver.run().await;
+    })
+    .detach();
+    conn
+}
+
+/// Insert a fresh `zeroship.users` row (FK target of `creator_billing`) and
+/// return its id. Unique email per call.
+async fn make_user(conn: &compio_postgres::Client) -> Uuid {
+    let rows = conn
+        .query(
+            "INSERT INTO zeroship.users (email, name) \
+             VALUES ($1, 'g6-dedup-test') RETURNING id",
+            &[&format!("g6-{}@test.invalid", Uuid::new_v4().simple())],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
+}
+
+/// Count rows in the dedup ledger for a given event-id (0 ⇒ not yet claimed).
+async fn ledger_count(conn: &compio_postgres::Client, event_id: &str) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.stripe_events_seen WHERE event_id = $1",
+        &[&event_id],
+    )
+    .await
+    .expect("count ledger")[0]
+        .get::<_, i64>("n")
+}
+
+/// Count `setup_intent_succeeded` audit rows for a creator+event — the proof
+/// the handler ran (one row per actual processing).
+async fn setup_audit_count(conn: &compio_postgres::Client, creator_id: Uuid, event_id: &str) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM app_audit \
+         WHERE creator_id = $1 AND action = 'setup_intent_succeeded' AND resource = $2",
+        &[&creator_id, &event_id],
+    )
+    .await
+    .expect("count audit")[0]
+        .get::<_, i64>("n")
+}
+
+fn setup_intent_body(event_id: &str, creator_id: Uuid) -> String {
+    json!({
+        "id": event_id,
+        "type": "setup_intent.succeeded",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": format!("seti_{}", Uuid::new_v4().simple()),
+            "metadata": { "creator_id": creator_id.to_string() }
+        }}
+    })
+    .to_string()
+}
+
+/// POST a webhook body to `$app`, optionally with a `stripe-signature` header.
+/// A macro (not a fn) so it works on the opaque `Pipeline<…>` `init_service`
+/// returns without naming its type.
+macro_rules! post_webhook {
+    ($app:expr, $body:expr, $sig:expr) => {{
+        let mut req = test::TestRequest::post()
+            .uri("/internal/webhooks/stripe")
+            .header("content-type", "application/json");
+        let sig: Option<&str> = $sig;
+        if let Some(s) = sig {
+            req = req.header("stripe-signature", s);
+        }
+        let req = req.set_payload($body.to_string()).to_request();
+        test::call_service(&$app, req).await
+    }};
+}
+
+/// A re-delivered IDENTICAL event is deduped by the ledger — the handler is NOT
+/// re-run (no second audit row) and the redelivery is 200-acked. WITHOUT the
+/// `stripe_events_seen` ledger this fails: `setup_intent.succeeded` has no
+/// payouts-table dedup of its own, so the handler runs twice (two audit rows).
+#[compio::test]
+async fn redelivered_event_is_deduped_handler_not_rerun() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "dedup-replay").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let event_id = format!("evt_dedup_{}", Uuid::new_v4().simple());
+    let body = setup_intent_body(&event_id, creator_id);
+
+    // First delivery — processed, ledger claimed, one audit row.
+    let r1 = post_webhook!(app, &body, None);
+    assert_eq!(r1.status(), StatusCode::OK);
+    let b1: Value = serde_json::from_slice(&test::read_body(r1).await).unwrap();
+    assert_eq!(b1["status"], "default_pm_set");
+    assert_eq!(ledger_count(&conn, &event_id).await, 1, "event claimed after success");
+    assert_eq!(setup_audit_count(&conn, creator_id, &event_id).await, 1);
+
+    // Re-delivery of the EXACT same event — deduped, handler NOT re-run.
+    let r2 = post_webhook!(app, &body, None);
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b2["status"], "duplicate", "redelivery acked as duplicate");
+    assert_eq!(ledger_count(&conn, &event_id).await, 1, "no second ledger row");
+    assert_eq!(
+        setup_audit_count(&conn, creator_id, &event_id).await,
+        1,
+        "handler did NOT re-run on redelivery — exactly-once effective"
+    );
+}
+
+/// A FORGED / unsigned event is rejected by signature verification BEFORE the
+/// dedup ledger is touched: it is neither claimed (no ledger row) nor processed
+/// (no audit row). Proves sig-verify-FIRST ordering.
+#[compio::test]
+async fn forged_event_rejected_before_ledger_claim() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    // Real secret + verification ON.
+    let fx = Fixture::new_with_secret(&db_url, "dedup-forged", "whsec_test_g6", false).await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let event_id = format!("evt_forged_{}", Uuid::new_v4().simple());
+    let body = setup_intent_body(&event_id, creator_id);
+
+    // Bogus signature header — verification must reject.
+    let r = post_webhook!(app, &body, Some("t=1777017600,v1=deadbeef"));
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST, "forged event rejected");
+    assert_eq!(
+        ledger_count(&conn, &event_id).await,
+        0,
+        "forged event NEVER claimed in the dedup ledger"
+    );
+    assert_eq!(
+        setup_audit_count(&conn, creator_id, &event_id).await,
+        0,
+        "forged event NEVER processed"
+    );
+}
+
+/// A handler that FAILS (non-2xx) does NOT claim the event — so Stripe's retry
+/// re-processes it (no lost event). Here the first delivery names a creator_id
+/// with no `users` row ⇒ `set_default_pm`'s FK insert errors ⇒ 500, unclaimed.
+/// The retry (after the user exists) succeeds and is then recorded once.
+#[compio::test]
+async fn handler_failure_is_retried_not_lost() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "dedup-retry").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+
+    // A creator_id that is NOT a real user → set_default_pm FK insert fails.
+    let creator_id = Uuid::new_v4();
+    let event_id = format!("evt_retry_{}", Uuid::new_v4().simple());
+    let body = setup_intent_body(&event_id, creator_id);
+
+    // First delivery: handler errors (FK violation) → non-2xx, NOT claimed.
+    let r1 = post_webhook!(app, &body, None);
+    assert_eq!(
+        r1.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "handler failed (FK) → retryable 5xx"
+    );
+    assert_eq!(
+        ledger_count(&conn, &event_id).await,
+        0,
+        "failed handler did NOT claim the event — Stripe will retry"
+    );
+
+    // Now the user exists (creator finished signup before the retry lands).
+    conn.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, 'g6-retry')",
+        &[&creator_id, &format!("g6-retry-{}@test.invalid", creator_id.simple())],
+    )
+    .await
+    .expect("insert user with fixed id");
+
+    // Retry (same event_id) — now succeeds and IS recorded exactly once.
+    let r2 = post_webhook!(app, &body, None);
+    assert_eq!(r2.status(), StatusCode::OK, "retry processed (not lost)");
+    let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b2["status"], "default_pm_set");
+    assert_eq!(ledger_count(&conn, &event_id).await, 1, "retry recorded once");
+    assert_eq!(setup_audit_count(&conn, creator_id, &event_id).await, 1);
 }

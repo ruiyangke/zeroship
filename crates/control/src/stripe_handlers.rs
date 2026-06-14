@@ -567,6 +567,61 @@ pub async fn webhook(
         }
     };
 
+    // ── Replay-dedup (billing G6) ──────────────────────────────────────────
+    // Order is load-bearing: signature verification ran FIRST (above), so a
+    // forged/unsigned event never reaches the ledger or the handlers. Only a
+    // VERIFIED event is checked here. Stripe re-delivers at-least-once; a
+    // previously-PROCESSED event-id is 200-acked WITHOUT re-dispatching so the
+    // setup_intent / payment_failed / invoice.paid handlers don't re-run their
+    // side effects (and don't emit a duplicate audit row).
+    //
+    // CLAIM-AFTER-SUCCESS: the ledger is written only AFTER the handler returns
+    // 2xx (see the tail of this fn). A handler that errored is NOT recorded, so
+    // Stripe's retry re-processes it — exactly-once EFFECTIVE (no double-process
+    // AND no lost event on handler failure).
+    match state.stripe_store.event_processed(&event.id).await {
+        Ok(true) => {
+            // Already processed on a prior delivery — idempotent ack.
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "duplicate"}));
+        }
+        Ok(false) => { /* first delivery — dispatch below */ }
+        Err(e) => {
+            // Ledger unreachable: fail CLOSED with a retryable 5xx rather than
+            // risk processing without a dedup guard. Stripe retries.
+            tracing::error!(error = %e, "stripe: replay-dedup ledger check failed");
+            return err_json(500, "internal error");
+        }
+    }
+
+    let resp = dispatch_event(&req, &state, &event, raw).await;
+
+    // Record PROCESSED only on handler success (2xx). On a non-2xx the event is
+    // left unclaimed so Stripe's retry re-processes it (no lost event).
+    if resp.status().is_success() {
+        if let Err(e) = state
+            .stripe_store
+            .mark_event_processed(&event.id, &event.event_type)
+            .await
+        {
+            // The handler already applied its (idempotent) effect; failing to
+            // record the dedup row only means a redelivery re-runs an
+            // idempotent handler. Log and still ack — do NOT 5xx, which would
+            // force a guaranteed redelivery of an already-applied event.
+            tracing::error!(error = %e, "stripe: failed to record processed event in dedup ledger");
+        }
+    }
+    resp
+}
+
+/// Dispatch a SIGNATURE-VERIFIED, NOT-YET-PROCESSED webhook event to its
+/// handler. Returns the HTTP response; the caller (`webhook`) records the
+/// event-id as processed iff this returns 2xx (claim-after-success).
+async fn dispatch_event(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    raw: &[u8],
+) -> web::HttpResponse {
     let obj = &event.data.object;
 
     // Stream-1 (infra-billing) lifecycle events. These ride the SAME verified
@@ -574,10 +629,10 @@ pub async fn webhook(
     // (metadata.creator_id, stamped by `create_customer`).
     match event.event_type.as_str() {
         "setup_intent.succeeded" => {
-            return handle_setup_intent_succeeded(&req, &state, &event, obj).await;
+            return handle_setup_intent_succeeded(req, state, event, obj).await;
         }
         "invoice.payment_failed" => {
-            return handle_invoice_payment_failed(&req, &state, &event, obj).await;
+            return handle_invoice_payment_failed(req, state, event, obj).await;
         }
         // `invoice.paid` carries TWO concerns:
         //   * Stream-1 (infra recovery, G2): a previously-failed infra invoice
@@ -598,10 +653,10 @@ pub async fn webhook(
             // marker is the load-bearing signal and is present on every
             // reconciler-created invoice.)
             if is_infra_invoice(obj) {
-                if let Some(cid) = resolve_infra_creator(&state, obj).await {
+                if let Some(cid) = resolve_infra_creator(state, obj).await {
                     let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
                     match store.record_payment_recovered(cid, event.created).await {
-                        Ok(Some(t)) => audit_account_transition(&req, &state, &t, &event.id).await,
+                        Ok(Some(t)) => audit_account_transition(req, state, &t, &event.id).await,
                         Ok(None) => { /* nothing to recover (already active / no row) */ }
                         Err(e) => {
                             tracing::error!(error = %e, "stripe: invoice.paid status recovery failed");
@@ -659,7 +714,7 @@ pub async fn webhook(
         .await
     {
         Ok(rec) => {
-            let ip = source_ip(&req, &state);
+            let ip = source_ip(req, state);
             let detail = serde_json::json!({
                 "creator_id": creator_id.to_string(),
                 "amount_cents": rec.gross_amount,

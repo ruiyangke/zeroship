@@ -440,6 +440,50 @@ impl StripeStore {
         .map_err(|e| StripeError::Db(e.to_string()))?;
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Webhook replay-dedup ledger (billing G6) — process each verified
+    // event AT MOST ONCE. See `zeroship.stripe_events_seen` (changeset 0046).
+    // ------------------------------------------------------------------
+
+    /// `true` iff this webhook event-id was already processed (a prior delivery
+    /// succeeded and was recorded). The webhook dispatcher checks this at the
+    /// TOP — after signature verification, before handler dispatch — so a
+    /// re-delivered event is 200-acked without re-running its handler.
+    pub async fn event_processed(&self, event_id: &str) -> Result<bool, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT 1 FROM zeroship.stripe_events_seen WHERE event_id = $1",
+                &[&event_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Record a webhook event-id as PROCESSED (claim-after-success). Called only
+    /// AFTER the event's handler returned a 2xx, so a handler that errored is
+    /// never recorded and Stripe's retry re-processes it — exactly-once
+    /// EFFECTIVE (no double-process, no lost-on-failure).
+    ///
+    /// `INSERT … ON CONFLICT DO NOTHING` is idempotent: a concurrent redelivery
+    /// that already recorded the id is a no-op here.
+    pub async fn mark_event_processed(
+        &self,
+        event_id: &str,
+        event_type: &str,
+    ) -> Result<(), StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        conn.execute(
+            "INSERT INTO zeroship.stripe_events_seen (event_id, event_type) \
+             VALUES ($1, $2) ON CONFLICT (event_id) DO NOTHING",
+            &[&event_id, &event_type],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Body of `link_account` once we've decided this is a real link
