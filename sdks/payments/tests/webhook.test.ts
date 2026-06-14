@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { verifyWebhook } from "../src/webhook";
 import { signWebhookForTest } from "../src/testing";
-import { buildCheckoutSession } from "../src/checkout";
 
 const SECRET = "whsec_test_EXAMPLE";
 const NOW = 1_700_000_000;
@@ -136,95 +135,5 @@ describe("verifyWebhook", () => {
       CROSS_BODY, header, CROSS_SECRET, { now: () => CROSS_TIMESTAMP },
     );
     expect(result).toEqual({ valid: true, timestamp: CROSS_TIMESTAMP });
-  });
-});
-
-describe("buildCheckoutSession", () => {
-  const base = {
-    priceId: "price_123",
-    creatorAccountId: "acct_abc",
-    successUrl: "https://app.example/ok",
-    cancelUrl: "https://app.example/cancel",
-  };
-
-  it("builds a POST request with the default 15% fee", () => {
-    const req = buildCheckoutSession("sk_test_x", base);
-    expect(req.method).toBe("POST");
-    expect(req.url).toBe("https://api.stripe.com/v1/checkout/sessions");
-    expect(req.headers.authorization).toBe("Bearer sk_test_x");
-    expect(req.headers["stripe-account"]).toBe("acct_abc");
-    expect(req.headers["content-type"]).toBe("application/x-www-form-urlencoded");
-    expect(req.body).toContain("mode=subscription");
-    expect(req.body).toContain("line_items%5B0%5D%5Bprice%5D=price_123");
-    expect(req.body).toContain("subscription_data%5Bapplication_fee_percent%5D=15");
-    expect(req.body).toContain("success_url=https%3A%2F%2Fapp.example%2Fok");
-  });
-
-  it("respects a custom applicationFeePercent", () => {
-    const req = buildCheckoutSession("sk", { ...base, applicationFeePercent: 10 });
-    expect(req.body).toContain("application_fee_percent%5D=10");
-  });
-
-  it("sets metadata on BOTH session and subscription_data", () => {
-    const req = buildCheckoutSession("sk", {
-      ...base,
-      metadata: { creator_id: "c1", tier: "pro" },
-    });
-    // Session-level metadata (visible on payment_intent).
-    expect(req.body).toContain("metadata%5Bcreator_id%5D=c1");
-    expect(req.body).toContain("metadata%5Btier%5D=pro");
-    // Subscription-level metadata (visible on invoice.paid).
-    expect(req.body).toContain("subscription_data%5Bmetadata%5D%5Bcreator_id%5D=c1");
-    expect(req.body).toContain("subscription_data%5Bmetadata%5D%5Btier%5D=pro");
-  });
-
-  it("rejects metadata keys outside Stripe's allowed charset", () => {
-    expect(() => buildCheckoutSession("sk", { ...base, metadata: { "bad-key": "v" } }))
-      .toThrow(/metadata key/);
-    expect(() => buildCheckoutSession("sk", { ...base, metadata: { "": "v" } }))
-      .toThrow(/metadata key/);
-    expect(() => buildCheckoutSession("sk", { ...base, metadata: { [`k${"a".repeat(41)}`]: "v" } }))
-      .toThrow(/metadata key/);
-  });
-
-  it("serializes customerEmail when set", () => {
-    const req = buildCheckoutSession("sk", { ...base, customerEmail: "a@b.co" });
-    expect(req.body).toContain("customer_email=a%40b.co");
-  });
-
-  it("pins stripe-version header when set", () => {
-    const req = buildCheckoutSession("sk", { ...base, stripeVersion: "2024-06-20" });
-    expect(req.headers["stripe-version"]).toBe("2024-06-20");
-  });
-
-  it("omits stripe-version header when unset", () => {
-    const req = buildCheckoutSession("sk", base);
-    expect(req.headers["stripe-version"]).toBeUndefined();
-  });
-
-  it("rejects invalid applicationFeePercent", () => {
-    expect(() => buildCheckoutSession("sk", { ...base, applicationFeePercent: 150 }))
-      .toThrow(/\[0, 100\]/);
-    expect(() => buildCheckoutSession("sk", { ...base, applicationFeePercent: -1 }))
-      .toThrow(/\[0, 100\]/);
-    expect(() => buildCheckoutSession("sk", { ...base, applicationFeePercent: NaN }))
-      .toThrow(/\[0, 100\]/);
-  });
-
-  it("rejects non-http(s) redirect URLs", () => {
-    expect(() => buildCheckoutSession("sk", { ...base, successUrl: "javascript:alert(1)" }))
-      .toThrow(/valid http/);
-    expect(() => buildCheckoutSession("sk", { ...base, cancelUrl: "./relative" }))
-      .toThrow(/valid http/);
-    expect(() => buildCheckoutSession("sk", { ...base, successUrl: "file:///etc/passwd" }))
-      .toThrow(/valid http/);
-  });
-
-  it("rejects missing required fields", () => {
-    expect(() => buildCheckoutSession("", base)).toThrow(/apiKey/);
-    expect(() => buildCheckoutSession("sk", { ...base, priceId: "" })).toThrow(/priceId/);
-    expect(() => buildCheckoutSession("sk", { ...base, creatorAccountId: "" })).toThrow(/creatorAccountId/);
-    expect(() => buildCheckoutSession("sk", { ...base, successUrl: "" })).toThrow(/successUrl/);
-    expect(() => buildCheckoutSession("sk", { ...base, cancelUrl: "" })).toThrow(/cancelUrl/);
   });
 });

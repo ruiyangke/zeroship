@@ -1058,6 +1058,10 @@ importers:
         version: link:../..
 
   sdks/payments:
+    dependencies:
+      '@zeroship/control':
+        specifier: workspace:*
+        version: link:../control
     devDependencies:
       tsup:
         specifier: ^8.5.1

@@ -1,5 +1,14 @@
 export { verifyWebhook } from "./webhook";
 export type { VerifyOpts, VerifyResult } from "./webhook";
 
-export { buildCheckoutSession } from "./checkout";
-export type { CreateCheckoutOpts, CheckoutSessionRequest } from "./checkout";
+export {
+  createPaymentsClient,
+  PaymentsClient,
+  PaymentsError,
+} from "./connect";
+export type {
+  PaymentsClientOptions,
+  CheckoutInput,
+  CheckoutResult,
+  OnboardingResult,
+} from "./connect";
