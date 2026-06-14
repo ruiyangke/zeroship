@@ -57,9 +57,18 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     // creator's owned apps' CLOSED-period usage and pushes Stripe invoice items
     // + a finalized invoice on the creator's platform Customer. Idempotent per
     // (creator, period) via `billing_runs`. Infra-cost billing only (Stream-1).
-    let billing_state = Arc::clone(&state);
-    compio::runtime::spawn(async move {
-        billing_reconcile::run(billing_state, billing_reconcile::DEFAULT_TICK_SECS).await;
-    })
-    .detach();
+    //
+    // Provider-aware (blueprint §M5): the reconcile sweep IS the Native
+    // provider's `invoice` rail, so it spawns for `native` (the only functional
+    // backend in the M-Native phase). For an export backend whose `invoice` is a
+    // no-op it would be skipped — but those backends fail to boot today
+    // (`build_provider`), so under M-Native the kind is always `native` here and
+    // the spawn is identical to before.
+    if state.metering_provider.kind() == crate::metering::provider::MeteringProviderKind::Native {
+        let billing_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            billing_reconcile::run(billing_state, billing_reconcile::DEFAULT_TICK_SECS).await;
+        })
+        .detach();
+    }
 }

@@ -98,6 +98,17 @@ struct ControlCli {
     )]
     stripe_base_url: String,
 
+    /// Metering/billing provider backend (M6). `native` (default) runs the
+    /// control-side aggregation → CU×FX → Stripe reconciler. `stripe` (Stripe
+    /// Billing Meters) and `openmeter` are NOT yet implemented and refuse to
+    /// boot with a clear error.
+    #[arg(
+        long = "metering-provider",
+        env = "METERING_PROVIDER",
+        default_value = "native"
+    )]
+    metering_provider: String,
+
     /// Comma-separated previous master keys accepted during key rotation.
     #[arg(
         long = "legacy-master-keys",
@@ -950,6 +961,38 @@ fn main() -> std::io::Result<()> {
         })?;
     }
 
+    // Metering provider (M6): parse the kind, then build it. An unknown value
+    // or a not-yet-implemented backend (stripe/openmeter) refuses to boot with a
+    // clear message rather than silently mis-billing.
+    let metering_provider_kind =
+        match zeroship_control::metering::provider::MeteringProviderKind::parse(
+            &cli.metering_provider,
+        ) {
+            Ok(k) => k,
+            Err(bad) => {
+                tracing::error!(
+                    value = %bad,
+                    "control: unknown --metering-provider (expected native|stripe|openmeter)"
+                );
+                std::process::exit(1);
+            }
+        };
+    let metering_provider = match zeroship_control::metering::provider::build_provider(
+        &zeroship_control::metering::provider::MeteringProviderConfig {
+            kind: metering_provider_kind,
+        },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "control: refusing to start — metering provider not available");
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(
+        metering_provider = metering_provider_kind.as_str(),
+        "control: metering provider selected"
+    );
+
     let state = Arc::new(AppState {
         registry,
         env_store,
@@ -982,6 +1025,7 @@ fn main() -> std::io::Result<()> {
         pat_issuer,
         hydra_introspector,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        metering_provider,
         pairwise_salt,
     });
 

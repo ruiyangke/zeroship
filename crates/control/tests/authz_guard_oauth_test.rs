@@ -246,6 +246,10 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
         hydra_introspector: Arc::new(HydraIntrospector::new(&hydra.base)),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        metering_provider: zeroship_control::metering::provider::build_provider(
+            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+        )
+        .expect("native provider builds"),
         pairwise_salt: [0u8; 32],
     });
 

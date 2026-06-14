@@ -35,6 +35,8 @@ use zeroship_core::types::{AppUsage, UsageReport};
 
 use crate::registry::{Registry, RegistryError};
 
+pub mod provider;
+
 /// Compute the calendar-month period start (00:00:00 UTC on the 1st) for a
 /// given unix-seconds instant, as unix seconds. This is the aggregation
 /// bucket key: every report received within a UTC month accumulates into the

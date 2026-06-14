@@ -101,6 +101,10 @@ impl Fixture {
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).
+            metering_provider: zeroship_control::metering::provider::build_provider(
+                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+            )
+            .expect("native provider builds"),
             pairwise_salt: zeroship_core::auth::derive_pairwise_salt(b"control-test-stash"),
         });
 

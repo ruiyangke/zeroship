@@ -193,6 +193,13 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
+    /// The configured metering/billing provider, built once at boot
+    /// (`--metering-provider`, default `native`). The billing-reconcile cron
+    /// drives it; `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the
+    /// local ledger, provider-independent). M-Native: only `Native` is
+    /// functional — it is the existing Stripe pipeline behind the
+    /// [`metering::provider::MeteringProvider`] trait.
+    pub metering_provider: Arc<dyn metering::provider::MeteringProvider>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
     /// stash signing key the gateway uses via
     /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a

@@ -342,6 +342,10 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
             "http://127.0.0.1:9",
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        metering_provider: zeroship_control::metering::provider::build_provider(
+            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+        )
+        .expect("native provider builds"),
         pairwise_salt: [0u8; 32],
     })
 }

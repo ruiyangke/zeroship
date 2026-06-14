@@ -287,7 +287,7 @@ async fn sweep<S: StripeApi>(
 /// or no saved customer).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::future_not_send)]
-async fn bill_creator<S: StripeApi>(
+pub(crate) async fn bill_creator<S: StripeApi>(
     state: &AppState,
     stripe: &S,
     metering: &Metering,
@@ -585,9 +585,32 @@ async fn bill_creator<S: StripeApi>(
     Ok(true)
 }
 
+/// Resolve the apps owned by ONE creator (the per-creator slice of the same
+/// `app_members WHERE role='owner'` ownership query `sweep` runs fleet-wide).
+/// Used by [`crate::metering::provider::native::NativeProvider::invoice`] so the
+/// per-creator provider verb bills exactly the creator's owned apps. Behaviour
+/// matches `sweep`'s grouping (DISTINCT ON keeps an app at most once).
+#[allow(clippy::future_not_send)]
+pub(crate) async fn owned_app_ids(
+    state: &AppState,
+    creator_id: &Uuid,
+) -> Result<Vec<Uuid>, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let rows = conn
+        .query(
+            "SELECT DISTINCT ON (m.app_id) m.app_id \
+             FROM zeroship.app_members m \
+             WHERE m.role = 'owner' AND m.user_id = $1 \
+             ORDER BY m.app_id, m.user_id",
+            &[creator_id],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect())
+}
+
 /// Resolve an app's `plan_id`. Returns `None` if the app row is gone.
 #[allow(clippy::future_not_send)]
-async fn lookup_plan_id(state: &AppState, app_id: &Uuid) -> Result<Option<String>, RegistryError> {
+pub(crate) async fn lookup_plan_id(state: &AppState, app_id: &Uuid) -> Result<Option<String>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
         .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[app_id])
