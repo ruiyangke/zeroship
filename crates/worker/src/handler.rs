@@ -438,7 +438,11 @@ fn stream_response(
         }
 
         loop {
-            // Drain all available chunks
+            // Drain all available chunks. The byte-threshold flush is checked
+            // INSIDE the loop so a burst of many queued chunks can't overshoot
+            // the ~STREAM_FLUSH_BYTES crash-loss bound by an unbounded amount —
+            // we flush as soon as the accrued delta crosses the threshold,
+            // mid-burst, rather than only once after draining everything.
             while let Some(chunk) = reader.pop() {
                 if !chunk.is_empty() {
                     bytes_since_flush += chunk.len() as u64;
@@ -446,12 +450,10 @@ fn stream_response(
                         flush_delta!(); // client disconnected — land the trailing delta
                         return;
                     }
+                    if bytes_since_flush >= STREAM_FLUSH_BYTES {
+                        flush_delta!();
+                    }
                 }
-            }
-
-            // Incremental byte-threshold flush mid-stream.
-            if bytes_since_flush >= STREAM_FLUSH_BYTES {
-                flush_delta!();
             }
 
             // Check if stream is complete

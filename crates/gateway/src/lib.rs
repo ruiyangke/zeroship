@@ -207,8 +207,9 @@ pub struct GateState {
     /// meters a worker-proxy body, never increments `egress_bytes`. A single
     /// `spawn_flush_task` (wired in `main.rs`) drains this and POSTs to the
     /// same control `/internal/usage` ingest under a restart-unique
-    /// `gate-<base>-<nonce>` producer id. Recording is a lock-free atomic
-    /// bump on the response path; the flush is a detached background task,
-    /// so the proxy hot path is not slowed.
+    /// `gate-<base>-<nonce>` producer id. Recording is a cheap counter bump
+    /// on the response path (an `RwLock` read + a per-app `Mutex` for the
+    /// custom metric — uncontended, not literally lock-free); the flush is a
+    /// detached background task, so the proxy hot path is not slowed.
     pub meter: Arc<zeroship_metering::Meter>,
 }

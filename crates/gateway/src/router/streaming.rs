@@ -8,8 +8,12 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ntex::util::Bytes;
+use uuid::Uuid;
+
+use zeroship_metering::Meter;
 
 // ---------------------------------------------------------------------------
 // Streaming static-asset serving
@@ -32,6 +36,46 @@ pub(super) const STREAM_THRESHOLD_BYTES: u64 = 1024 * 1024;
 // of RSS while a fast disk feeds it.
 pub(super) const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
+// Incremental flush threshold for streamed-static egress metering. The
+// drain accrues delivered bytes locally and only bumps the meter once a
+// chunk of accrued bytes reaches this size (plus a final bump on
+// completion / disconnect), bounding in-memory un-recorded egress without
+// touching the meter on every 64 KiB chunk. Mirrors the worker's
+// `STREAM_FLUSH_BYTES`.
+const STREAM_EGRESS_FLUSH_BYTES: u64 = 1024 * 1024;
+
+/// Per-stream metering context threaded into the streamed-static drain so the
+/// gateway bills `gateway_egress_bytes` for the bytes ACTUALLY delivered to
+/// the client (incremental accrual + a final delta on completion/disconnect),
+/// not the intended asset length recorded up front. Without this, a client
+/// aborting a large-asset download is billed the whole file (finding #2 /
+/// over-bill on disconnect).
+///
+/// `app_id` is the route's server-resolved id (never a client value). The
+/// recorded metric is disjoint from the worker-owned `egress_bytes` by
+/// construction — the gateway only meters bodies the worker never sees.
+pub(super) struct StreamEgressMeter {
+    meter: Arc<Meter>,
+    app_id: Uuid,
+}
+
+impl StreamEgressMeter {
+    pub(super) fn new(meter: Arc<Meter>, app_id: Uuid) -> Self {
+        Self { meter, app_id }
+    }
+
+    /// Record `n` delivered bytes as `gateway_egress_bytes` for this stream's
+    /// app. A no-op for `n == 0`. Cheap: the same `Meter::increment` the
+    /// buffered path uses (an `RwLock` read + a per-app `Mutex` for the custom
+    /// metric — uncontended, no await, no blocking I/O).
+    fn record(&self, n: u64) {
+        if n > 0 {
+            self.meter
+                .increment(&self.app_id.to_string(), "gateway_egress_bytes", n);
+        }
+    }
+}
+
 /// Spawn a compio task that reads `path` in `chunk_bytes`-sized chunks
 /// starting at offset 0 and pushes each chunk into the returned mpsc
 /// receiver. The receiver yields `Result<Bytes, Rc<dyn Error>>` so it
@@ -52,8 +96,9 @@ pub(super) fn chunk_stream_from_path(
     path: PathBuf,
     size: u64,
     chunk_bytes: usize,
+    egress: Option<StreamEgressMeter>,
 ) -> ntex::channel::mpsc::Receiver<Result<Bytes, Rc<dyn std::error::Error>>> {
-    chunk_stream_from_path_range(path, 0, size, chunk_bytes)
+    chunk_stream_from_path_range(path, 0, size, chunk_bytes, egress)
 }
 
 /// Range-aware variant of [`chunk_stream_from_path`]. Reads `length`
@@ -65,6 +110,7 @@ pub(super) fn chunk_stream_from_path_range(
     start: u64,
     length: u64,
     chunk_bytes: usize,
+    egress: Option<StreamEgressMeter>,
 ) -> ntex::channel::mpsc::Receiver<Result<Bytes, Rc<dyn std::error::Error>>> {
     let (tx, rx) = ntex::channel::mpsc::channel();
     compio::runtime::spawn(async move {
@@ -75,7 +121,7 @@ pub(super) fn chunk_stream_from_path_range(
                 return;
             }
         };
-        chunk_stream_from_file_range(&file, start, length, chunk_bytes, &tx).await;
+        chunk_stream_from_file_range(&file, start, length, chunk_bytes, &tx, egress.as_ref()).await;
     })
     .detach();
     rx
@@ -100,7 +146,7 @@ pub(super) async fn chunk_stream_from_file<R>(
 ) where
     R: compio::io::AsyncReadAt,
 {
-    chunk_stream_from_file_range(source, 0, size, chunk_bytes, tx).await
+    chunk_stream_from_file_range(source, 0, size, chunk_bytes, tx, None).await
 }
 
 /// Range-aware variant of [`chunk_stream_from_file`]. Starts reading
@@ -112,17 +158,33 @@ pub(super) async fn chunk_stream_from_file_range<R>(
     length: u64,
     chunk_bytes: usize,
     tx: &ntex::channel::mpsc::Sender<Result<Bytes, Rc<dyn std::error::Error>>>,
+    egress: Option<&StreamEgressMeter>,
 ) where
     R: compio::io::AsyncReadAt,
 {
     use compio::buf::BufResult;
+    let record = |n: u64| {
+        if let Some(m) = egress {
+            m.record(n);
+        }
+    };
     let mut sent: u64 = 0;
+    // Delivered bytes accrued since the last meter bump. A chunk counts as
+    // delivered only AFTER `tx.send` succeeds (the body writer accepted it),
+    // so a client disconnect bills the bytes actually written, not the
+    // intended asset length (finding #2). Flushed at `STREAM_EGRESS_FLUSH_BYTES`
+    // mid-stream and once more at every exit below.
+    let mut since_flush: u64 = 0;
     while sent < length {
         let want = std::cmp::min(chunk_bytes as u64, length - sent) as usize;
         let buf = vec![0u8; want];
         let BufResult(res, returned) = source.read_at(buf, start + sent).await;
         match res {
-            Ok(0) => return,
+            // Short read / EOF: land the trailing delivered delta before exit.
+            Ok(0) => {
+                record(since_flush);
+                return;
+            }
             Ok(n) => {
                 // Trim the buffer to what was actually read — short
                 // reads are legal and we don't want to ship trailing
@@ -135,16 +197,26 @@ pub(super) async fn chunk_stream_from_file_range<R>(
                 // win at this
                 // layer is that we never hold the full file in RAM.
                 if tx.send(Ok(Bytes::from(chunk))).is_err() {
+                    // Client disconnected: bill only what was delivered so far.
+                    record(since_flush);
                     return;
                 }
                 sent += n as u64;
+                since_flush += n as u64;
+                if since_flush >= STREAM_EGRESS_FLUSH_BYTES {
+                    record(since_flush);
+                    since_flush = 0;
+                }
             }
             Err(e) => {
                 let _ = tx.send(Err::<Bytes, Rc<dyn std::error::Error>>(Rc::new(e)));
+                record(since_flush);
                 return;
             }
         }
     }
+    // Full delivery: land the final delta.
+    record(since_flush);
 }
 
 #[cfg(test)]
@@ -218,7 +290,7 @@ mod tests {
         let payload: Vec<u8> = (0..5 * 1024 + 7).map(|i| (i % 251) as u8).collect();
         std::fs::write(&path, &payload).expect("write");
 
-        let rx = chunk_stream_from_path(path.clone(), payload.len() as u64, 1024);
+        let rx = chunk_stream_from_path(path.clone(), payload.len() as u64, 1024, None);
         let chunks = drain_chunks(rx).await;
 
         let total: usize = chunks.iter().map(|c| c.len()).sum();
@@ -242,7 +314,7 @@ mod tests {
         // emits exactly `length` bytes — no overshoot.
         let payload: Vec<u8> = (0..200).map(|i| i as u8).collect();
         let (tx, rx) = ntex::channel::mpsc::channel::<Result<Bytes, Rc<dyn std::error::Error>>>();
-        chunk_stream_from_file_range(&payload, 50, 30, 16, &tx).await;
+        chunk_stream_from_file_range(&payload, 50, 30, 16, &tx, None).await;
         drop(tx);
 
         let chunks = drain_chunks(rx).await;

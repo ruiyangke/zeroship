@@ -890,6 +890,7 @@ async fn execute_resource_tree(
                 &req,
                 dispatch_path,
                 try_chain,
+                app_id,
                 wall_start,
             )
             .await
@@ -898,18 +899,28 @@ async fn execute_resource_tree(
 
     // 8b. Gateway egress metering (#27). For gateway-owned arms only, record
     //     the served body length as `gateway_egress_bytes` against the
-    //     route's server-resolved `app_id` (never a client value). The body
-    //     size is known here for both buffered (`Bytes`) and streamed
-    //     (`SizedStream`) static responses — ntex reports `BodySize::Sized(n)`
-    //     for both, and a static asset is finite/bounded, so a one-shot
-    //     record at response-build time is exact (no incremental flush needed,
-    //     unlike the worker's open-ended SSE streams). A lock-free atomic
-    //     bump: it adds no await and does not slow the proxy hot path (the
-    //     worker arms skip this entirely). This is disjoint from the worker's
-    //     `egress_bytes` by construction; the gateway NEVER touches
-    //     `egress_bytes`.
+    //     route's server-resolved `app_id` (never a client value).
+    //
+    //     Two recording points, by body shape:
+    //       * Buffered static (`Bytes`), redirect, and the static arm's own
+    //         error bodies (404/503) — `BodySize::Sized(n)` is the FULLY
+    //         delivered length, so a one-shot record here is exact.
+    //       * Streamed static (`SizedStream`) — the served length is only
+    //         INTENDED up front; a client disconnect delivers fewer bytes.
+    //         The streamed drain in `static_serve`/`streaming` therefore meters
+    //         DELIVERED bytes itself (incremental accrual + a final delta on
+    //         completion/disconnect) and stamps `EGRESS_METERED_HEADER`;
+    //         `record_gateway_egress` sees the marker and skips the up-front
+    //         size so a stream is never double-counted (finding #2).
+    //
+    //     The bump is cheap — `Meter::increment` takes an `RwLock` read plus a
+    //     per-app `Mutex` for the custom metric (uncontended, no await, no
+    //     blocking I/O); the flush to control runs in a detached task, so the
+    //     proxy hot path is not slowed (the worker arms skip this entirely).
+    //     This is disjoint from the worker's `egress_bytes` by construction;
+    //     the gateway NEVER touches `egress_bytes`.
     if gateway_owned_egress {
-        record_gateway_egress(&state, app_id, &response);
+        record_gateway_egress(&state, app_id, &mut response);
     }
 
     // 9. Idempotency capture — store the worker's response under the
@@ -940,15 +951,31 @@ async fn execute_resource_tree(
 /// two metrics are disjoint by construction and can never count the same
 /// byte. `app_id` is the route's server-resolved id (never a client value).
 ///
-/// Reads the size from the built response's body hint, which is
-/// `BodySize::Sized(n)` for both the buffered `Bytes` path and the
-/// `SizedStream` static path (a static asset's length is known up front).
-/// A non-`Sized` body (chunked/unknown) records nothing rather than guess —
-/// gateway-owned bodies are always sized today, so this is defensive.
-/// The increment is a lock-free atomic bump; the flush to control runs in a
-/// detached background task, so this adds no latency to the response path.
-fn record_gateway_egress(state: &GateState, app_id: &Uuid, response: &HttpResponse) {
+/// Records the FULLY-delivered body size for buffered bodies (`Bytes` static,
+/// redirect, the static arm's 404/503 error bodies) — `BodySize::Sized(n)` is
+/// the exact delivered length there. The streamed-static (`SizedStream`) path
+/// instead meters DELIVERED bytes inside its own drain (a disconnect bills
+/// only what was written, not the intended size — finding #2) and stamps
+/// `EGRESS_METERED_HEADER`; we detect that marker, strip it, and skip the
+/// up-front size so a stream is never double-counted.
+///
+/// The increment is a cheap counter bump (an `RwLock` read + a per-app
+/// `Mutex` for the custom metric — uncontended, not literally lock-free); the
+/// flush to control runs in a detached background task, so this adds no
+/// latency to the response path.
+fn record_gateway_egress(state: &GateState, app_id: &Uuid, response: &mut HttpResponse) {
     use ntex::http::body::{BodySize, MessageBody};
+    // A streamed-static response self-meters delivered bytes in its drain.
+    // Strip the internal marker and skip the size record (no double-count).
+    if response
+        .headers()
+        .contains_key(super::static_serve::EGRESS_METERED_HEADER)
+    {
+        response
+            .headers_mut()
+            .remove(super::static_serve::EGRESS_METERED_HEADER);
+        return;
+    }
     if let BodySize::Sized(n) = response.body().size() {
         if n > 0 {
             state
@@ -3675,6 +3702,108 @@ mod tests {
                 "the gateway must NOT meter a worker-proxied response body as \
                  gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
             );
+        }
+    }
+
+    /// A worker RPC route that caps input at `max` bytes, so a body over the
+    /// cap trips the gateway's 413 early-return arm in `execute_resource_tree`
+    /// (a gateway-edge error envelope) BEFORE any worker proxy. Used to pin
+    /// finding #1: gateway error/4xx envelopes are platform overhead and are
+    /// deliberately NOT metered as `gateway_egress_bytes`.
+    fn max_input_route(max: u32) -> zeroship_core::types::RouteEntry {
+        use zeroship_bundle::{ProcedureKind, ResourceEntry};
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "rpc:ping".to_string(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                max_input_bytes: Some(max),
+                ..Default::default()
+            },
+        );
+        let manifest = zeroship_bundle::Manifest {
+            version: 1,
+            resources,
+            ..zeroship_bundle::Manifest::default()
+        };
+        zeroship_core::types::RouteEntry {
+            name: "spend-app.zeroship.localhost".to_string(),
+            plan_id: "free".to_string(),
+            api_key_hash: "h".to_string(),
+            deploy_hash: None,
+            manifest,
+            oauth_client_id: None,
+            sector_identifier: None,
+            spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
+        }
+    }
+
+    /// FINDING #1 (pinning): a gateway-EMITTED error envelope (here a 413 from
+    /// the `max_input_bytes` early-return arm — a body the worker never sees)
+    /// is PLATFORM OVERHEAD and must NOT emit `gateway_egress_bytes`. The
+    /// gateway only bills successful static + redirect bodies; error/4xx/5xx/204
+    /// envelopes (tiny, frequently attacker-driven) are deliberately unbilled.
+    ///
+    /// Drives the REAL `handle_request` → `execute_resource_tree` 413 arm with
+    /// a body over the declared cap, then drains the SAME `Arc<Meter>` and
+    /// asserts the gateway recorded NO usage at all for the route's app. Locks
+    /// the code↔design agreement so a future change that meters error arms
+    /// fails here.
+    #[compio::test]
+    async fn gateway_error_envelope_is_not_metered() {
+        let state = build_idempotency_state();
+        let meter = Arc::clone(&state.meter);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, max_input_route(8));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        // A body over the 8-byte cap → 413 PayloadTooLarge from the gateway
+        // edge, before any worker proxy.
+        let oversized = Bytes::from_static(b"this body is well over eight bytes");
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .header("origin", "https://spend-app.zeroship.localhost")
+            .method(ntex::http::Method::POST)
+            .to_http_request();
+        let mut resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            oversized,
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "an over-cap body must 413 at the gateway edge",
+        );
+        // The 413 body is non-empty (a JSON error envelope) — proving the
+        // assertion below is about the DELIBERATE no-meter decision, not an
+        // empty body.
+        let body = collect_body(resp.take_body()).await;
+        assert!(!body.is_empty(), "the 413 envelope is a non-empty JSON body");
+
+        let snap = meter.drain();
+        // The gateway must record NOTHING for an error envelope: no
+        // gateway_egress_bytes, and (the gateway never owns it) no egress_bytes.
+        if let Some(usage) = snap.get(&app_id) {
+            assert_eq!(
+                usage.custom.get("gateway_egress_bytes").copied(),
+                None,
+                "a gateway error/4xx envelope is platform overhead and must NOT \
+                 be metered as gateway_egress_bytes",
+            );
+            assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
         }
     }
 

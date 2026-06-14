@@ -178,13 +178,25 @@ coordination.**
 
 The gateway emits egress in two situations:
 
-1. **Gateway-originated egress** (static assets, redirects, error pages, the
-   asset proxy) — bytes the *worker never sees*. There is no worker
-   `egress_bytes` for these. → metric **`gateway_egress_bytes`**.
+1. **Gateway-originated egress** (static assets, redirects) — bytes the
+   *worker never sees*. There is no worker `egress_bytes` for these. → metric
+   **`gateway_egress_bytes`**.
 2. **Worker-proxied egress** (the worker's response body the gateway forwards
    to the client) — the worker **already** counts these as `egress_bytes` in
    `record_request`/`metering_on_complete`. If the gateway *also* counted the
    proxied body, the same bytes bill twice.
+
+> **Scope (deliberate): `gateway_egress_bytes` covers static + redirect
+> response bodies only.** Gateway-emitted error / 4xx / 5xx / 204 envelopes
+> (404 no-route / in-tree, 400 non-canonical path, 402 ACCOUNT_SUSPENDED /
+> SPEND_LIMIT, 403 CSRF, 405, 413, 426, insufficient-scope, CORS-preflight 204,
+> etc.) are **platform overhead and are deliberately NOT billed.** They are
+> tiny and frequently attacker-driven (probes, rate-limit hits, spoof attempts)
+> rather than legitimate end-user delivery, so metering them would charge a
+> creator for traffic they neither served nor wanted. The static arm's OWN
+> 404/503 bodies (a matched static resource whose blob is missing/unavailable)
+> *are* billed — they are a consequence of serving that app's asset map, not a
+> gateway-edge reject — and are counted by their known size at step 8b.
 
 **The ownership rule (no double-count):**
 
@@ -197,14 +209,23 @@ Concretely, in `execute_resource_tree`'s action match
 (`router/dispatch.rs:806`):
 
 - `ResolvedAction::Static { .. }` (→ `serve_resource_tree_static`) → meter the
-  served body length as `gateway_egress_bytes`.
+  served body length as `gateway_egress_bytes`. Buffered bodies (and the static
+  arm's own 404/503 error bodies) are recorded by their fully-delivered
+  `BodySize::Sized` at step 8b; the streamed-static (`SizedStream`) path meters
+  DELIVERED bytes inside its drain so a client disconnect bills only what was
+  written, not the intended asset length (see §2.5).
 - `ResolvedAction::Redirect { .. }` → meter the (small) redirect response body
   as `gateway_egress_bytes` (a redirect is cheap but non-zero; including it
-  keeps the rule simple — "gateway-emitted bytes are gateway-owned").
+  keeps the rule simple — "gateway-emitted *successful* bytes are
+  gateway-owned").
 - `ResolvedAction::WorkerRpc | WorkerSsr | Rewrite` (→ `handle_dispatch`) → the
   gateway does **NOT** meter the body. The worker already counted it as
   `egress_bytes`. (The gateway adds only a few framing/header bytes, which we
   deliberately do not bill — they are platform overhead, not app egress.)
+- **Gateway-edge error/4xx/5xx/204 envelopes** (the early-return arms above the
+  action match — auth, CSRF, max-input, method/upgrade gates, account/spend
+  gates, non-canonical path, no-route 404, CORS preflight) → **NOT metered.**
+  Platform overhead, per the scope note above.
 
 This makes the partition **structural**: `egress_bytes` and
 `gateway_egress_bytes` are disjoint by construction (worker-body vs
@@ -227,16 +248,22 @@ Static/streaming static responses can themselves be large and streamed
 (`serve_static_streaming` in `static_serve.rs`). So the gateway recording point
 must mirror the worker's buffered-vs-streamed split:
 
-- **Buffered static / redirect / error** → the body length is known when the
+- **Buffered static / redirect** → the body length is known when the
   `HttpResponse` is built; record `gateway_egress_bytes` inline at that point
-  (a synchronous `meter.increment(app_id, "gateway_egress_bytes", n)`).
+  (a synchronous `meter.increment(app_id, "gateway_egress_bytes", n)`). The
+  static arm's own 404/503 bodies (matched-resource-but-missing-blob) ride this
+  same buffered path — they are app-asset-serving overhead, not a gateway-edge
+  reject, so they are billed by their known size. (Gateway-edge error/4xx/5xx/
+  204 envelopes are NOT billed — §2.4 scope note.)
 - **Streamed static** (`serve_static_streaming`, range/large assets) → the
-  gateway already spawns a drain; record the accumulated byte count when the
-  stream finalizes / the client disconnects, exactly as the worker's
-  `stream_response` does (`handler.rs:410`). For very long static streams the
-  same **incremental flush** §3.3 applies (flush a delta every N bytes), but
-  static assets are finite and bounded, so the finalize-only recording is the
-  v1; incremental is the streaming-SSE concern in §3.
+  gateway already spawns a drain; the drain meters the bytes ACTUALLY DELIVERED
+  to the client (incremental accrual flushed every ~1 MiB, plus a final delta
+  on completion / client disconnect), NOT the intended asset size recorded up
+  front. A client aborting a large-asset download is therefore billed ~what was
+  delivered, not the whole file — the over-bill-on-disconnect fix. This mirrors
+  the worker's `stream_response` drain (`handler.rs:410`). The streamed response
+  carries an internal marker so the step-8b size record skips it (no
+  double-count with the drain's delivered-bytes accounting).
 
 The `app_id` is the **route's** app_id — `execute_resource_tree` already holds
 `app_id: &Uuid` resolved server-side from `lookup_by_name` (§route resolution),
@@ -582,9 +609,11 @@ through the unchanged pricing path.
    `egress_bytes` (recommended — egress is egress) or cheaper (asset egress is
    often CDN-fronted and cheap)? Affects only the `0047` weight, re-tunable
    anytime via G5a.
-2. **Redirect egress.** Meter the (tiny) redirect/error-page body as
-   `gateway_egress_bytes` (recommended — keeps "gateway-emitted ⇒ gateway-owned"
-   simple) or exclude redirects as de-minimis?
+2. **Redirect egress.** Meter the (tiny) redirect body as
+   `gateway_egress_bytes` (recommended — keeps "gateway-emitted *successful*
+   bytes ⇒ gateway-owned" simple) or exclude redirects as de-minimis?
+   (RESOLVED for error envelopes: gateway-edge error/4xx/5xx/204 bodies are
+   platform overhead and NOT billed — §2.4 scope note.)
 3. **`stream_wall_us` vs folding into `wall_us`.** Keep long-lived duration in
    its own metric (recommended — pricing + observability flexibility) or unify?
 4. **Recording cadence defaults** (`FLUSH_INTERVAL` / `FLUSH_BYTES`) — confirm
