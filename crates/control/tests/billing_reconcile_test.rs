@@ -79,6 +79,14 @@ struct MockState {
     /// (>24h), proving the per-app LEDGER (not Stripe's key) is what guarantees
     /// at-most-once posting (CRIT-1).
     dedupe_by_key: bool,
+    /// Pending invoice items, in creation order: (id, customer, zs_item_key).
+    /// A faithful Stripe lists these on `GET /v1/invoiceitems?...&pending=true`
+    /// so the reconciler's `find_invoice_item_by_key` (C1) can adopt an
+    /// already-posted item on a >24h re-drive instead of double-posting. An item
+    /// swept onto a finalized invoice would drop off `pending=true`, but our
+    /// finalize never sweeps a SECOND copy, so leaving them is faithful enough
+    /// for the >24h adopt path under test.
+    invoice_items: Vec<(String, String, Option<String>)>,
 }
 
 #[derive(Clone)]
@@ -108,6 +116,18 @@ impl MockStripe {
         st.requests
             .iter()
             .filter(|r| r.method == method && r.path.starts_with(path_prefix) && !r.replayed)
+            .count()
+    }
+
+    /// Count POSTs to the EXACT path that actually created a new object (not
+    /// replayed). Distinct from `count_created`, which matches by prefix — needed
+    /// to separate `POST /v1/invoices` (draft create) from
+    /// `POST /v1/invoices/{id}/finalize` (which shares the `/v1/invoices` prefix).
+    fn count_created_exact(&self, method: &str, path: &str) -> usize {
+        let st = self.state.lock().unwrap();
+        st.requests
+            .iter()
+            .filter(|r| r.method == method && r.path == path && !r.replayed)
             .count()
     }
 
@@ -240,6 +260,30 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         }
     }
 
+    // GET /v1/invoiceitems?...&pending=true — list the pending items for a
+    // customer (C1's `find_invoice_item_by_key`). Faithful Stripe list shape:
+    // `{ "object":"list", "data":[ {id, metadata:{zs_item_key}}, … ] }`.
+    if req.method == "GET" && req.path.starts_with("/v1/invoiceitems") {
+        let customer = query_param(&req.path, "customer");
+        let st = state.lock().unwrap();
+        let data: Vec<String> = st
+            .invoice_items
+            .iter()
+            .filter(|(_, cust, _)| customer.as_deref() == Some(cust.as_str()))
+            .map(|(id, _, key)| match key {
+                Some(k) => format!(
+                    r#"{{"id":"{id}","object":"invoiceitem","metadata":{{"zs_item_key":"{k}"}}}}"#
+                ),
+                None => format!(r#"{{"id":"{id}","object":"invoiceitem","metadata":{{}}}}"#),
+            })
+            .collect();
+        drop(st);
+        let body = format!(r#"{{"object":"list","data":[{}]}}"#, data.join(","));
+        state.lock().unwrap().requests.push(req.clone());
+        return http_200_json(&body);
+    }
+
+    let new_item_id = format!("ii_mock_{}", short());
     let json: String = if req.path.starts_with("/v1/customers") {
         format!(r#"{{"id":"cus_mock_{}","object":"customer"}}"#, short())
     } else if req.path.starts_with("/v1/checkout/sessions") {
@@ -248,7 +292,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
             short()
         )
     } else if req.path.starts_with("/v1/invoiceitems") {
-        format!(r#"{{"id":"ii_mock_{}","object":"invoiceitem"}}"#, short())
+        format!(r#"{{"id":"{new_item_id}","object":"invoiceitem"}}"#)
     } else if req.path.contains("/finalize") {
         format!(r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#, short())
     } else if req.path.starts_with("/v1/invoices") {
@@ -259,6 +303,12 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
 
     {
         let mut st = state.lock().unwrap();
+        // Record a created invoice item so the GET-list (adopt) path can find it.
+        if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
+            let customer = form_param(&req.body, "customer").unwrap_or_default();
+            let key = form_param(&req.body, "metadata[zs_item_key]");
+            st.invoice_items.push((new_item_id.clone(), customer, key));
+        }
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
             st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
@@ -266,6 +316,65 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     }
 
     http_200_json(&json)
+}
+
+/// Extract a query-string parameter from a request path (e.g. `customer`).
+fn query_param(path: &str, name: &str) -> Option<String> {
+    let q = path.split_once('?').map(|(_, q)| q)?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+/// Extract a form field from an `application/x-www-form-urlencoded` body. Keys
+/// are matched after percent-decoding so `metadata[zs_item_key]` matches the
+/// wire's `metadata%5Bzs_item_key%5D`.
+fn form_param(body: &str, name: &str) -> Option<String> {
+    for pair in body.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if percent_decode(k) == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+/// Minimal `application/x-www-form-urlencoded` / query decode: `+` → space,
+/// `%XX` → byte. Sufficient for the mock's keys/values under test.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Build a `200 OK` HTTP/1.1 response with a JSON body.
@@ -595,28 +704,32 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         .with_base_url(fx.mock.base_url.clone());
     let period = Period { start: 1_700_000_000, end: 1_702_000_000 };
     let item = client
-        .create_invoice_item("cus_x", 1234, "usd", "infra", period, "billitem:k1")
+        .create_invoice_item("cus_x", 1234, "usd", "infra", period, "billitem:k1", "billitem:k1")
         .await
         .expect("create invoice item");
     assert!(item.starts_with("ii_mock_"), "parsed the ii_ id from the mock JSON");
-    let invoice = client
-        .create_and_finalize_invoice("cus_x", &Uuid::new_v4().to_string(), "billrun:k2")
+    let draft = client
+        .create_invoice("cus_x", &Uuid::new_v4().to_string(), "billrun:k2")
         .await
-        .expect("create + finalize");
+        .expect("create draft");
+    assert!(draft.starts_with("in_mock_"), "parsed the draft invoice id");
+    let invoice = client.finalize_invoice(&draft).await.expect("finalize");
     assert!(invoice.starts_with("in_mock_final_"), "parsed the finalized invoice id");
 
     let reqs = fx.mock.requests();
-    let item_req = reqs.iter().find(|r| r.path.starts_with("/v1/invoiceitems")).expect("item req");
+    let item_req = reqs.iter().find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems")).expect("item req");
     assert_eq!(item_req.idempotency_key.as_deref(), Some("billitem:k1"), "item idempotency key sent");
     assert_eq!(item_req.authorization.as_deref(), Some("Bearer sk_test_mock"), "bearer auth sent");
     // Form body carries the bracketed period params (proves form encoding).
     assert!(item_req.body.contains("period%5Bstart%5D=1700000000"), "period[start] form-encoded; body={}", item_req.body);
     assert!(item_req.body.contains("amount=1234"), "amount in form body");
+    // The deterministic lookup key is stamped into metadata for the >24h adopt path (C1).
+    assert!(item_req.body.contains("metadata%5Bzs_item_key%5D=billitem%3Ak1"), "zs_item_key metadata sent; body={}", item_req.body);
 
     let invoice_create = reqs.iter().find(|r| r.path == "/v1/invoices").expect("invoice create");
     assert_eq!(invoice_create.idempotency_key.as_deref(), Some("billrun:k2"), "invoice idempotency key sent");
     let finalize = reqs.iter().find(|r| r.path.contains("/finalize")).expect("finalize");
-    assert_eq!(finalize.idempotency_key.as_deref(), Some("billrun:k2:finalize"), "finalize idempotency key sent");
+    assert_eq!(finalize.idempotency_key.as_deref(), Some(format!("finalize:{draft}").as_str()), "finalize idempotency key keyed on draft id");
 }
 
 /// `billing/setup` ensures a Customer exists, and a SECOND setup reuses the same
@@ -929,6 +1042,7 @@ impl StripeApi for FailAfterFirstItem {
         description: &str,
         period: Period,
         idempotency_key: &str,
+        lookup_key: &str,
     ) -> Result<String, zeroship_control::stripe_store::StripeError> {
         let n = self.items_seen.get();
         self.items_seen.set(n + 1);
@@ -939,11 +1053,17 @@ impl StripeApi for FailAfterFirstItem {
             ));
         }
         self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key)
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
             .await
     }
-    async fn create_and_finalize_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_and_finalize_invoice(customer, creator_id, idempotency_key).await
+    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
+        self.inner.find_invoice_item_by_key(customer, lookup_key).await
+    }
+    async fn create_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_invoice(customer, creator_id, idempotency_key).await
+    }
+    async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.finalize_invoice(invoice_id).await
     }
 }
 
@@ -986,16 +1106,23 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 
     let created_after_crash = fx.mock.count_created("POST", "/v1/invoiceitems");
     assert_eq!(created_after_crash, 1, "exactly one item posted before the crash");
+    // Claim-then-call (C1): the intent row is written BEFORE each Stripe POST, so
+    // after the crash app A is CONFIRMED (non-NULL stripe_item_id) and app B is
+    // INTENT-only (NULL — its POST failed). Exactly ONE confirmed post.
     let ledger_after_crash = fx
         .state
         .control_pg
         .query(
-            "SELECT app_id FROM zeroship.billing_run_items WHERE creator_id = $1",
+            "SELECT app_id, stripe_item_id FROM zeroship.billing_run_items WHERE creator_id = $1",
             &[&creator],
         )
         .await
         .expect("read ledger");
-    assert_eq!(ledger_after_crash.len(), 1, "exactly one app ledgered after the crash");
+    let confirmed_after_crash = ledger_after_crash
+        .iter()
+        .filter(|r| r.get::<_, Option<String>>("stripe_item_id").is_some())
+        .count();
+    assert_eq!(confirmed_after_crash, 1, "exactly one app CONFIRMED-posted after the crash (claim-then-call)");
 
     // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
     fx.mock.disable_dedupe();
@@ -1036,6 +1163,328 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
         .await
         .expect("read run");
     assert!(run[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
+}
+
+/// C1 decorator: `create_invoice_item` POSTS to the real Stripe (mock) — so the
+/// item EXISTS on Stripe — but then returns an Err, simulating the process
+/// crashing AFTER the Stripe POST returns yet BEFORE the ledger row is confirmed
+/// (its `stripe_item_id` UPDATE commits). This is the EXACT crash window the old
+/// "ledger-after-call" ordering could not survive: Stripe has the item, the
+/// ledger does not.
+struct PostThenCrash {
+    inner: StripeClient,
+}
+
+impl StripeApi for PostThenCrash {
+    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_customer(email, creator_id).await
+    }
+    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_checkout_setup_session(c, ok, cancel).await
+    }
+    async fn create_invoice_item(
+        &self,
+        customer: &str,
+        amount_cents: u64,
+        currency: &str,
+        description: &str,
+        period: Period,
+        idempotency_key: &str,
+        lookup_key: &str,
+    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        // Post for real (the item lands on Stripe)…
+        let _id = self
+            .inner
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .await?;
+        // …then "crash" before bill_creator can confirm it in the ledger.
+        Err(zeroship_control::stripe_store::StripeError::Db(
+            "simulated crash after the Stripe POST returned, before ledger confirm".to_string(),
+        ))
+    }
+    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
+        self.inner.find_invoice_item_by_key(customer, lookup_key).await
+    }
+    async fn create_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_invoice(customer, creator_id, idempotency_key).await
+    }
+    async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.finalize_invoice(invoice_id).await
+    }
+}
+
+/// C1 (the tighter crash window): the item POSTS to Stripe, then the process
+/// crashes BEFORE the ledger records the post. A re-drive AFTER Stripe's 24h
+/// Idempotency-Key window has expired (dedupe OFF) must NOT post a second item —
+/// the claim-then-call intent row + the deterministic metadata LOOKUP adopt the
+/// already-posted item. The app's invoice item is created EXACTLY ONCE.
+///
+/// RED→GREEN: under the OLD ordering (ledger written AFTER the Stripe call, no
+/// intent row, no zs_item_key metadata), the crashed drive leaves NO ledger row,
+/// so the >24h re-drive (key expired) re-POSTs the SAME app → count_created == 2
+/// (double-bill). The claim-then-call fix makes it count_created == 1.
+#[compio::test]
+async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "c1crash").await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "c1crash").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state.stripe_store.set_customer(creator, "cus_test_c1crash").await.unwrap();
+    ingest_at(&fx.state, app, 500, period, 1).await; // 500c
+
+    // First drive: the item posts to Stripe, then we crash before the ledger
+    // confirms it.
+    let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
+    let res = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    assert_eq!(res.expect("sweep swallows the per-creator error"), 0, "no creator fully billed on the crashed drive");
+
+    // The item DID post to Stripe exactly once on the crashed drive.
+    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before the crash");
+    // The intent row exists (claim-then-call) but is NOT yet confirmed.
+    let intent = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT stripe_item_id FROM zeroship.billing_run_items WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read ledger");
+    assert_eq!(intent.len(), 1, "claim-then-call wrote one intent row before the POST");
+    assert!(
+        intent[0].get::<_, Option<String>>("stripe_item_id").is_none(),
+        "the intent row's stripe_item_id is NULL (post unconfirmed at crash time)",
+    );
+
+    // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
+    fx.mock.disable_dedupe();
+
+    // Re-drive with a healthy client. The NULL intent row + the metadata lookup
+    // must ADOPT the already-posted item rather than POST a duplicate.
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("re-drive tick");
+    assert_eq!(billed, 1, "the creator is fully billed on the re-drive");
+
+    // THE guarantee: the app's invoice item was CREATED exactly once across both
+    // drives — even though Stripe's key window expired. The ledger + metadata
+    // lookup, not Stripe's key, enforced this.
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "no double-bill: the item was created exactly once (claim-then-call + metadata adopt)",
+    );
+
+    // The ledger row is now confirmed and the run completed with the right amount.
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT stripe_invoice_id, amount_cents FROM zeroship.billing_runs WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read run");
+    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
+    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 500, "billed the real amount, not $0");
+    let confirmed = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT stripe_item_id FROM zeroship.billing_run_items WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read ledger");
+    assert_eq!(confirmed.len(), 1, "still exactly one ledger row (no duplicate)");
+    assert!(confirmed[0].get::<_, Option<String>>("stripe_item_id").is_some(), "the post is now confirmed in the ledger");
+}
+
+/// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
+/// dedupe ON, the re-driven POST replays Stripe's original object (no new item),
+/// so the deterministic Idempotency-Key path also yields exactly one created item.
+#[compio::test]
+async fn post_then_crash_redrive_within_24h_is_idempotent() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "c1within").await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "c1within").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state.stripe_store.set_customer(creator, "cus_test_c1within").await.unwrap();
+    ingest_at(&fx.state, app, 320, period, 1).await; // 320c
+
+    let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
+    let _ = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before crash");
+
+    // Re-drive WITHIN 24h: dedupe stays ON. Stripe replays the original item.
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("re-drive within 24h");
+    assert_eq!(billed, 1, "creator billed on the re-drive");
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "no double-bill within 24h: the deterministic key replayed the original item",
+    );
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT amount_cents, stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read run");
+    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 320, "billed the real amount");
+    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
+}
+
+/// C2 decorator: `create_invoice` creates the draft for real (it lands on Stripe
+/// carrying the swept line items) but `finalize_invoice` returns an Err — the
+/// process crashes AFTER the draft is created/persisted but BEFORE finalize.
+struct CrashOnFinalize {
+    inner: StripeClient,
+}
+
+impl StripeApi for CrashOnFinalize {
+    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_customer(email, creator_id).await
+    }
+    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_checkout_setup_session(c, ok, cancel).await
+    }
+    async fn create_invoice_item(
+        &self,
+        customer: &str,
+        amount_cents: u64,
+        currency: &str,
+        description: &str,
+        period: Period,
+        idempotency_key: &str,
+        lookup_key: &str,
+    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .await
+    }
+    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
+        self.inner.find_invoice_item_by_key(customer, lookup_key).await
+    }
+    async fn create_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        // Create the draft for real (it sweeps the pending items)…
+        self.inner.create_invoice(customer, creator_id, idempotency_key).await
+    }
+    async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        // …then crash before finalize.
+        Err(zeroship_control::stripe_store::StripeError::Db(
+            "simulated crash after draft create, before finalize".to_string(),
+        ))
+    }
+}
+
+/// C2 (under-bill): create draft (sweeping the real items) → crash before
+/// finalize. A re-drive AFTER Stripe's 24h create-key window has expired (dedupe
+/// OFF) must FINALIZE the ORIGINAL draft (which carries the items) — NOT create a
+/// fresh empty draft and finalize a $0 invoice.
+///
+/// RED→GREEN: under the OLD non-atomic create+finalize (no persisted draft id),
+/// the >24h re-drive's `create` key is expired ⇒ a NEW draft is created ⇒ it
+/// sweeps NO pending items (they're on the orphaned first draft) ⇒ finalizes a $0
+/// invoice (under-bill). Persisting the draft id before finalize + re-finalizing
+/// THAT draft on re-drive makes the finalized invoice carry the real amount.
+#[compio::test]
+async fn crash_before_finalize_finalizes_original_draft_after_24h() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "c2crash").await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "c2crash").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state.stripe_store.set_customer(creator, "cus_test_c2crash").await.unwrap();
+    ingest_at(&fx.state, app, 700, period, 1).await; // 700c
+
+    // First drive: items post, draft is created + persisted, then finalize crashes.
+    let crashing = CrashOnFinalize { inner: dummy_passthrough(&fx) };
+    let res = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    assert_eq!(res.expect("sweep swallows the per-creator error"), 0, "not fully billed (finalize crashed)");
+
+    // The item posted, the draft was created exactly once and PERSISTED.
+    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once");
+    assert_eq!(fx.mock.count_created_exact("POST", "/v1/invoices"), 1, "exactly one draft created (no finalize yet)");
+    let after_crash = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT draft_invoice_id, stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read run");
+    let persisted_draft: Option<String> = after_crash[0].get("draft_invoice_id");
+    assert!(persisted_draft.is_some(), "the draft invoice id was persisted BEFORE finalize (C2)");
+    assert!(after_crash[0].get::<_, Option<String>>("stripe_invoice_id").is_none(), "not finalized yet");
+
+    // Simulate >24h: Stripe's create Idempotency-Key window has expired.
+    fx.mock.disable_dedupe();
+
+    // Re-drive with a healthy client: it must FINALIZE the EXISTING draft, NOT
+    // create a new empty one.
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("re-drive tick");
+    assert_eq!(billed, 1, "the creator is fully billed on the re-drive");
+
+    // THE guarantee: still exactly ONE draft created across both drives (no new
+    // empty draft), and the finalize targeted the ORIGINAL draft id.
+    assert_eq!(
+        fx.mock.count_created_exact("POST", "/v1/invoices"),
+        1,
+        "no new draft on re-drive: the ORIGINAL draft (with the real items) was finalized",
+    );
+    let finalize_req = fx
+        .mock
+        .requests()
+        .into_iter()
+        .find(|r| r.path.contains("/finalize"))
+        .expect("finalize fired on re-drive");
+    let draft_id = persisted_draft.unwrap();
+    assert!(
+        finalize_req.path.contains(&draft_id),
+        "finalize targeted the persisted ORIGINAL draft id ({draft_id}); path={}",
+        finalize_req.path,
+    );
+
+    // The run is completed with the REAL amount (not $0).
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT amount_cents, stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("read run");
+    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 700, "finalized the real amount, NOT a $0 empty invoice");
+    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed with the finalized invoice id");
 }
 
 // ===========================================================================

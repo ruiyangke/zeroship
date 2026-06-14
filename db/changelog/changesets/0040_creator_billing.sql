@@ -39,6 +39,14 @@ CREATE TABLE zeroship.billing_runs (
     creator_id        UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
     period_start      TIMESTAMPTZ NOT NULL,  -- the billed month (UTC, first-of-month 00:00)
     amount_cents      BIGINT NOT NULL CHECK (amount_cents >= 0),  -- money is non-negative (MINOR-19)
+    -- The Stripe DRAFT invoice id (`in_…`), persisted the instant the draft is
+    -- created — BEFORE finalize (C2). The reconciler creates the draft (which
+    -- sweeps the customer's pending invoice items), persists this id, THEN
+    -- finalizes. If finalize crashes, the re-drive finalizes THIS existing draft
+    -- (which carries the real line items) by id rather than creating a fresh
+    -- empty draft. Without this, a >24h re-drive (Stripe create-key expired)
+    -- would create a NEW empty draft, finalize a $0 invoice, and under-bill.
+    draft_invoice_id  TEXT,
     stripe_invoice_id TEXT,                  -- NULL until the Stripe finalize call succeeds
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (creator_id, period_start)   -- the idempotency key (no double-bill per period)
@@ -48,15 +56,23 @@ CREATE TABLE zeroship.billing_runs (
 -- Stripe. On a re-drive after a crash/timeout — and after Stripe's 24h
 -- Idempotency-Key window has expired — replaying the same key no longer dedupes,
 -- so without this ledger an already-posted app's item would post a SECOND time
--- (double-bill). We record one row here the instant `create_invoice_item`
--- returns; on (re-)drive we skip any app already present, so each app's item is
--- posted AT MOST ONCE regardless of Stripe key expiry. The ledger — not Stripe's
--- 24h key — is the durable double-bill guard.
+-- (double-bill).
+--
+-- CLAIM-THEN-CALL (C1): the row is INSERTed with `stripe_item_id = NULL` BEFORE
+-- `create_invoice_item` is called, then UPDATEd with the returned `ii_…` after.
+-- This makes the durable record PRECEDE the irreversible Stripe POST:
+--   * `stripe_item_id IS NOT NULL` ⇒ DEFINITELY posted ⇒ skip on re-drive.
+--   * `stripe_item_id IS NULL`     ⇒ intent recorded, outcome unknown (crash
+--     mid-call). On re-drive we do NOT blindly re-POST: within Stripe's 24h key
+--     window the deterministic key replays the same item; past 24h we LOOK UP
+--     the item by its deterministic metadata key and adopt it if already posted,
+--     else post fresh — then fill in `stripe_item_id`. The ledger — not Stripe's
+--     24h key — is the durable double-bill guard.
 CREATE TABLE zeroship.billing_run_items (
     creator_id     UUID NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,
     period_start   TIMESTAMPTZ NOT NULL,  -- matches billing_runs.period_start
     app_id         UUID NOT NULL,
-    stripe_item_id TEXT NOT NULL,         -- the ii_… Stripe returned
+    stripe_item_id TEXT,                  -- the ii_… Stripe returned; NULL = intent recorded, post not yet confirmed
     amount_cents   BIGINT NOT NULL CHECK (amount_cents >= 0),  -- money is non-negative (MINOR-19)
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (creator_id, period_start, app_id)  -- one posted item per app per period
@@ -74,8 +90,10 @@ DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.creator_billing  TO zeroship_control';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.billing_runs      TO zeroship_control';
-    -- The per-app ledger is append-only (INSERT) + SELECT on (re-)drive.
-    EXECUTE 'GRANT SELECT, INSERT ON zeroship.billing_run_items         TO zeroship_control';
+    -- The per-app ledger is claim-then-call (C1): INSERT the intent row with a
+    -- NULL stripe_item_id, then UPDATE it with the ii_… after create_invoice_item
+    -- returns. SELECT on (re-)drive to read the skip/adopt set.
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.billing_run_items TO zeroship_control';
   END IF;
 END $g$;
 

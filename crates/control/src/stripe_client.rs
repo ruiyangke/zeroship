@@ -60,7 +60,11 @@ pub trait StripeApi {
     ) -> Result<String, StripeError>;
 
     /// Create a pending invoice item on `customer` for one billing line.
-    /// `idempotency_key` makes the create replay-safe. Returns the `ii_…` id.
+    /// `idempotency_key` makes the create replay-safe. `lookup_key` is stamped
+    /// into `metadata.zs_item_key` so a >24h re-drive (after the
+    /// Idempotency-Key window has expired) can FIND an already-posted item via
+    /// [`StripeApi::find_invoice_item_by_key`] instead of blindly re-posting it
+    /// (C1). Returns the `ii_…` id.
     #[allow(clippy::too_many_arguments)]
     async fn create_invoice_item(
         &self,
@@ -70,18 +74,41 @@ pub trait StripeApi {
         description: &str,
         period: Period,
         idempotency_key: &str,
+        lookup_key: &str,
     ) -> Result<String, StripeError>;
 
-    /// Create an invoice sweeping `customer`'s pending invoice items, then
-    /// finalize it (so it is issued, not left in draft). Returns the `in_…` id.
-    /// `creator_id` is stamped into `metadata.creator_id` so the
-    /// `invoice.payment_failed` webhook can resolve the creator directly.
-    async fn create_and_finalize_invoice(
+    /// Find a previously-posted, still-pending invoice item on `customer` whose
+    /// `metadata.zs_item_key` equals `lookup_key`. Returns the `ii_…` id if one
+    /// exists, else `None`.
+    ///
+    /// C1: when the per-app ledger has an intent row with a NULL `stripe_item_id`
+    /// (the prior drive crashed between the Stripe POST and the ledger commit)
+    /// AND Stripe's 24h Idempotency-Key window has expired, the deterministic key
+    /// no longer dedupes — so we must look the item up by its deterministic
+    /// metadata key and adopt it if present, rather than POST a duplicate.
+    async fn find_invoice_item_by_key(
+        &self,
+        customer: &str,
+        lookup_key: &str,
+    ) -> Result<Option<String>, StripeError>;
+
+    /// Create a DRAFT invoice sweeping `customer`'s pending invoice items.
+    /// Returns the draft `in_…` id. `creator_id` is stamped into
+    /// `metadata.creator_id` so the `invoice.payment_failed` webhook can resolve
+    /// the creator directly. The caller PERSISTS this id (C2) BEFORE calling
+    /// [`StripeApi::finalize_invoice`], so a crash before finalize re-drives by
+    /// finalizing THIS draft (which carries the real items) rather than creating
+    /// a fresh empty draft.
+    async fn create_invoice(
         &self,
         customer: &str,
         creator_id: &str,
         idempotency_key: &str,
     ) -> Result<String, StripeError>;
+
+    /// Finalize an existing DRAFT invoice by id (draft → open/issued). Idempotent:
+    /// finalizing an already-finalized invoice returns the same `in_…`.
+    async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, StripeError>;
 }
 
 /// Production `cyper`-based Stripe client. Holds the secret key (never logged —
@@ -163,6 +190,45 @@ impl StripeClient {
             Err(StripeError::Api { status, code })
         }
     }
+
+    /// GET `path` (already including any query string) with the Bearer auth
+    /// header. Parses the JSON response, mapping a non-2xx to [`StripeError::Api`].
+    /// Used by [`StripeApi::find_invoice_item_by_key`] to list invoice items.
+    async fn get_json(&self, path: &str) -> Result<serde_json::Value, StripeError> {
+        let url = format!("{}{}", self.base_url, path);
+        let client = cyper::Client::new();
+        let builder = client
+            .get(&url)
+            .map_err(|e| StripeError::Db(format!("stripe: build request: {e}")))?
+            .header(
+                "authorization",
+                &format!("Bearer {}", self.secret_key.expose_secret()),
+            )
+            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?;
+        let response = compio::time::timeout(STRIPE_HTTP_TIMEOUT, builder.send())
+            .await
+            .map_err(|_| StripeError::Db("stripe: request timeout".to_string()))?
+            .map_err(|e| StripeError::Db(format!("stripe: transport: {e}")))?;
+
+        let status = response.status().as_u16();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| StripeError::Db(format!("stripe: read body: {e}")))?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            StripeError::Db(format!("stripe: response not JSON (status {status}): {e}"))
+        })?;
+        if (200..300).contains(&status) {
+            Ok(json)
+        } else {
+            let code = json
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+                .map(str::to_string);
+            Err(StripeError::Api { status, code })
+        }
+    }
 }
 
 /// Pull the `id` field out of a Stripe object response, or surface a clear
@@ -208,6 +274,7 @@ impl StripeApi for StripeClient {
             .ok_or_else(|| StripeError::Db("stripe: checkout session response missing url".into()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_invoice_item(
         &self,
         customer: &str,
@@ -216,6 +283,7 @@ impl StripeApi for StripeClient {
         description: &str,
         period: Period,
         idempotency_key: &str,
+        lookup_key: &str,
     ) -> Result<String, StripeError> {
         // Money MUST NOT silently clamp on overflow — a clamp would mis-bill.
         // Surface it as a hard validation error so the caller skips this line.
@@ -231,6 +299,10 @@ impl StripeApi for StripeClient {
             ("description".to_string(), description.to_string()),
             ("period[start]".to_string(), period.start.to_string()),
             ("period[end]".to_string(), period.end.to_string()),
+            // Deterministic lookup key (C1): lets a >24h re-drive FIND this item
+            // by metadata (the Idempotency-Key dedupe window having expired)
+            // instead of POSTing a duplicate.
+            ("metadata[zs_item_key]".to_string(), lookup_key.to_string()),
         ];
         let json = self
             .post_form("/v1/invoiceitems", &form, Some(idempotency_key))
@@ -238,16 +310,46 @@ impl StripeApi for StripeClient {
         extract_id(&json, "invoice item")
     }
 
-    async fn create_and_finalize_invoice(
+    async fn find_invoice_item_by_key(
+        &self,
+        customer: &str,
+        lookup_key: &str,
+    ) -> Result<Option<String>, StripeError> {
+        // List the customer's PENDING (not-yet-invoiced) items and match on the
+        // deterministic metadata key. `pending=true` keeps the page small and
+        // bounded to items not yet swept onto an invoice. Stripe caps `limit` at
+        // 100; a single creator's monthly per-app item count is far below that.
+        let enc_customer = encode_query_component(customer);
+        let path = format!("/v1/invoiceitems?customer={enc_customer}&pending=true&limit=100");
+        let json = self.get_json(&path).await?;
+        let Some(items) = json.get("data").and_then(|d| d.as_array()) else {
+            return Ok(None);
+        };
+        for item in items {
+            let matches = item
+                .get("metadata")
+                .and_then(|m| m.get("zs_item_key"))
+                .and_then(|k| k.as_str())
+                .is_some_and(|k| k == lookup_key);
+            if matches {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    return Ok(Some(id.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn create_invoice(
         &self,
         customer: &str,
         creator_id: &str,
         idempotency_key: &str,
     ) -> Result<String, StripeError> {
-        // 1. Create a draft invoice sweeping the customer's pending items.
-        //    auto_advance=false so WE control finalization (no surprise charge
-        //    timing); the deterministic key makes the create replay-safe.
-        //    metadata[creator_id] lets invoice.payment_failed resolve the creator.
+        // Create a draft invoice sweeping the customer's pending items.
+        // auto_advance=false so WE control finalization (no surprise charge
+        // timing); the deterministic key makes the create replay-safe within 24h.
+        // metadata[creator_id] lets invoice.payment_failed resolve the creator.
         let create_form = vec![
             ("customer".to_string(), customer.to_string()),
             ("auto_advance".to_string(), "false".to_string()),
@@ -257,11 +359,14 @@ impl StripeApi for StripeClient {
         let invoice = self
             .post_form("/v1/invoices", &create_form, Some(idempotency_key))
             .await?;
-        let invoice_id = extract_id(&invoice, "invoice")?;
+        extract_id(&invoice, "invoice")
+    }
 
-        // 2. Finalize it (draft → open/issued). Reuse a derived idempotency key
-        //    so the finalize is also replay-safe.
-        let finalize_key = format!("{idempotency_key}:finalize");
+    async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, StripeError> {
+        // Finalize (draft → open/issued). A derived idempotency key keyed on the
+        // invoice id makes the finalize replay-safe; finalizing an already-final
+        // invoice is itself idempotent on Stripe's side.
+        let finalize_key = format!("finalize:{invoice_id}");
         let finalized = self
             .post_form(
                 &format!("/v1/invoices/{invoice_id}/finalize"),
@@ -271,6 +376,26 @@ impl StripeApi for StripeClient {
             .await?;
         extract_id(&finalized, "finalized invoice")
     }
+}
+
+/// Percent-encode a value for use as a URL QUERY-STRING component (used to build
+/// the `find_invoice_item_by_key` GET path). Same unreserved set as the form
+/// encoder, but a space becomes `%20` (not `+`) per RFC 3986 query rules.
+fn encode_query_component(s: &str) -> String {
+    let mut out = String::new();
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(hex_upper(b >> 4));
+                out.push(hex_upper(b & 0x0f));
+            }
+        }
+    }
+    out
 }
 
 /// `application/x-www-form-urlencoded` encode `(key, value)` pairs with Stripe's
