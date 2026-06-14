@@ -66,3 +66,23 @@ ALTER TABLE zeroship.billing_line_provider_refs
 --rollback ALTER TABLE zeroship.invoice_lines DROP COLUMN plan_id;
 --rollback ALTER TABLE zeroship.invoice_lines DROP COLUMN segment_no;
 --rollback ALTER TABLE zeroship.billing_line_provider_refs ADD CONSTRAINT billing_line_provider_refs_line_fk FOREIGN KEY (invoice_id, app_id) REFERENCES zeroship.invoice_lines(invoice_id, app_id) ON DELETE CASCADE;
+
+--changeset zeroship:invoice-lines-segment-delete-grants splitStatements:false
+-- round 4, MAJOR-1: the reconcile now DELETEs orphaned DRAFT segment lines + their
+-- provider-refs when a re-drive builds FEWER segments than a prior crashed drive
+-- posted (else the draft invoice sweeps the stale higher-segment Stripe items and
+-- the finalized subtotal disagrees with the Stripe total — an over-charge). Draft
+-- lines are mutable until finalize (the immutability trigger only fires on a
+-- finalized parent), but the 0042 grants gave `zeroship_control` only
+-- SELECT/INSERT/UPDATE on invoice_lines and SELECT/INSERT on
+-- billing_line_provider_refs — no DELETE. Add DELETE so the orphan reconciliation
+-- can run as the least-privilege control role (not just as a superuser in tests).
+-- The finalized-parent immutability trigger still rejects any DELETE once the
+-- invoice is finalized, so this widens privilege only for the still-draft window.
+DO $g$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
+    EXECUTE 'GRANT DELETE ON zeroship.invoice_lines              TO zeroship_control';
+    EXECUTE 'GRANT DELETE ON zeroship.billing_line_provider_refs TO zeroship_control';
+  END IF;
+END $g$;
+--rollback DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE DELETE ON zeroship.invoice_lines FROM zeroship_control'; EXECUTE 'REVOKE DELETE ON zeroship.billing_line_provider_refs FROM zeroship_control'; END IF; END $rb$;

@@ -104,6 +104,16 @@ pub trait StripeApi {
         lookup_key: &str,
     ) -> Result<String, StripeError>;
 
+    /// Delete a PENDING (not-yet-finalized-onto-an-invoice) invoice item by id
+    /// (`DELETE /v1/invoiceitems/{id}`). Used by the reconcile's draft-orphan
+    /// reconciliation (round 4, MAJOR-1): when a re-drive builds FEWER segments than
+    /// a prior crashed drive posted, the stale higher-segment items must be removed
+    /// BEFORE the draft sweeps them, or the finalized subtotal disagrees with the
+    /// Stripe total (an over-charge). Deleting an item that is already gone (a prior
+    /// partial cleanup) returns Stripe's `resource_missing`; the caller treats that
+    /// as success (the desired end-state — no such item — already holds).
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), StripeError>;
+
     /// Find a previously-posted, still-pending invoice item on `customer` whose
     /// `metadata.zs_item_key` equals `lookup_key`. Returns the `ii_…` id if one
     /// exists, else `None`.
@@ -372,6 +382,45 @@ impl StripeClient {
             Err(StripeError::Api { status, code })
         }
     }
+
+    /// DELETE `path` with the Bearer auth header. Parses the JSON response,
+    /// mapping a non-2xx to [`StripeError::Api`]. Used by
+    /// [`StripeApi::delete_invoice_item`].
+    async fn delete_json(&self, path: &str) -> Result<serde_json::Value, StripeError> {
+        let url = format!("{}{}", self.base_url, path);
+        let client = cyper::Client::new();
+        let builder = client
+            .delete(&url)
+            .map_err(|e| StripeError::Db(format!("stripe: build request: {e}")))?
+            .header(
+                "authorization",
+                &format!("Bearer {}", self.secret_key.expose_secret()),
+            )
+            .map_err(|e| StripeError::Db(format!("stripe: set auth header: {e}")))?;
+        let response = compio::time::timeout(STRIPE_HTTP_TIMEOUT, builder.send())
+            .await
+            .map_err(|_| StripeError::Db("stripe: request timeout".to_string()))?
+            .map_err(|e| StripeError::Db(format!("stripe: transport: {e}")))?;
+
+        let status = response.status().as_u16();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| StripeError::Db(format!("stripe: read body: {e}")))?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            StripeError::Db(format!("stripe: response not JSON (status {status}): {e}"))
+        })?;
+        if (200..300).contains(&status) {
+            Ok(json)
+        } else {
+            let code = json
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+                .map(str::to_string);
+            Err(StripeError::Api { status, code })
+        }
+    }
 }
 
 /// Pull the `id` field out of a Stripe object response, or surface a clear
@@ -481,6 +530,17 @@ impl StripeApi for StripeClient {
             }
         }
         Ok(None)
+    }
+
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), StripeError> {
+        let enc = encode_query_component(item_id);
+        match self.delete_json(&format!("/v1/invoiceitems/{enc}")).await {
+            Ok(_) => Ok(()),
+            // Already gone (a prior partial cleanup or a never-posted item) — the
+            // desired end-state (no such item) holds, so converge rather than error.
+            Err(StripeError::Api { code: Some(code), .. }) if code == "resource_missing" => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     async fn create_invoice(

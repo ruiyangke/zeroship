@@ -66,6 +66,8 @@ struct MockState {
     idempotency_replies: HashMap<String, String>,
     dedupe_by_key: bool,
     invoice_items: Vec<(String, String, Option<String>)>,
+    /// Stripe item ids that received a `DELETE /v1/invoiceitems/{id}` (MAJOR-1).
+    deleted_items: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,22 @@ impl MockStripe {
             .filter(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
             .filter_map(|r| r.idempotency_key.clone())
             .collect()
+    }
+    /// Register a PENDING invoice item on `customer` with `zs_item_key` metadata so
+    /// `find_invoice_item_by_key` finds it and `delete_invoice_item` can remove it
+    /// (MAJOR-1 orphan seeding). Returns the synthetic `ii_…` id.
+    fn preload_invoice_item(&self, customer: &str, item_key: &str) -> String {
+        let id = format!("ii_orphan_{}", short());
+        self.state.lock().unwrap().invoice_items.push((
+            id.clone(),
+            customer.to_string(),
+            Some(item_key.to_string()),
+        ));
+        id
+    }
+    /// True if `item_id` received a DELETE (MAJOR-1).
+    fn was_item_deleted(&self, item_id: &str) -> bool {
+        self.state.lock().unwrap().deleted_items.contains(item_id)
     }
 }
 
@@ -186,6 +204,25 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
                 }
             }
         }
+    }
+    if req.method == "DELETE" && req.path.starts_with("/v1/invoiceitems/") {
+        // /v1/invoiceitems/{id} — record the delete, drop it from the pending list
+        // (so a later find_invoice_item_by_key no longer returns it), echo Stripe's
+        // deleted-object response.
+        let id = req
+            .path
+            .trim_start_matches("/v1/invoiceitems/")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        {
+            let mut st = state.lock().unwrap();
+            st.deleted_items.insert(id.clone());
+            st.invoice_items.retain(|(iid, _, _)| iid != &id);
+            st.requests.push(req.clone());
+        }
+        return http_200_json(&format!(r#"{{"id":"{id}","object":"invoiceitem","deleted":true}}"#));
     }
     if req.method == "GET" && req.path.starts_with("/v1/invoiceitems") {
         let customer = query_param(&req.path, "customer");
@@ -515,7 +552,6 @@ async fn record_plan_change_like_set_plan(
     to_plan: &str,
     now_unix: i64,
 ) -> PlanChangeOutcome {
-    let catalog = zeroship_control::plan_catalog::PlanCatalog::new(state.registry.clone());
     let from_plan_id: Option<String> = state
         .control_pg
         .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app])
@@ -523,17 +559,6 @@ async fn record_plan_change_like_set_plan(
         .expect("read app plan")
         .first()
         .map(|r| r.get::<_, String>("plan_id"));
-    let from_base_fee: Option<i64> = match &from_plan_id {
-        Some(fp) => catalog
-            .get(fp)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|p| i64::try_from(p.price.base_fee_cents).ok()),
-        None => None,
-    };
-    let to = catalog.get(to_plan).await.expect("catalog").expect("to plan");
-    let to_base_fee = i64::try_from(to.price.base_fee_cents).unwrap();
 
     proration::record_plan_change_tx(
         &state.registry,
@@ -541,8 +566,6 @@ async fn record_plan_change_like_set_plan(
         &creator,
         from_plan_id.as_deref(),
         to_plan,
-        from_base_fee,
-        to_base_fee,
         now_unix,
     )
     .await
@@ -603,11 +626,11 @@ async fn confirmed_item_refs(state: &AppState, creator: Uuid, app: Uuid) -> i64 
 async fn read_event(
     state: &AppState,
     app: Uuid,
-) -> Option<(chrono::NaiveDate, serde_json::Value, Option<i64>, i64)> {
+) -> Option<(chrono::NaiveDate, serde_json::Value, Option<String>, String)> {
     state
         .control_pg
         .query(
-            "SELECT period, usage_at_change, from_base_fee_cents, to_base_fee_cents \
+            "SELECT period, usage_at_change, from_plan_id, to_plan_id \
              FROM zeroship.plan_change_events WHERE app_id = $1 ORDER BY effective_at DESC LIMIT 1",
             &[&app],
         )
@@ -618,8 +641,8 @@ async fn read_event(
             (
                 r.get::<_, chrono::NaiveDate>("period"),
                 r.get::<_, serde_json::Value>("usage_at_change"),
-                r.get::<_, Option<i64>>("from_base_fee_cents"),
-                r.get::<_, i64>("to_base_fee_cents"),
+                r.get::<_, Option<String>>("from_plan_id"),
+                r.get::<_, String>("to_plan_id"),
             )
         })
 }
@@ -921,7 +944,7 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     let outcome = record_plan_change_like_set_plan(&fx.state, app, creator, &pro, now).await;
     assert!(matches!(outcome, PlanChangeOutcome::Recorded { .. }));
 
-    let (ev_period, usage_at_change, from_fee, to_fee) =
+    let (ev_period, usage_at_change, from_plan, to_plan) =
         read_event(&fx.state, app).await.expect("event recorded");
     let usage: HashMap<String, i64> = serde_json::from_value(usage_at_change).unwrap();
     assert_eq!(
@@ -929,9 +952,11 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
         Some(&1234),
         "usage_at_change captured the SERVER-SIDE cumulative total (not client-supplied)"
     );
-    // Server-derived frozen base fees from the catalog.
-    assert_eq!(from_fee, Some(0), "from_base_fee = Free base (0), server-derived");
-    assert_eq!(to_fee, 3_000, "to_base_fee = Pro base (3000), server-derived");
+    // round 4 CRITICAL-1: the row freezes NO base fee — segment pricing reads the
+    // live catalog at reconcile time. The audit trail is the plan ids; the base fees
+    // are recoverable from the catalog by those ids.
+    assert_eq!(from_plan.as_deref(), Some(free.as_str()), "from_plan_id = Free (audit trail)");
+    assert_eq!(to_plan, pro, "to_plan_id = Pro (audit trail)");
     assert_eq!(ev_period, period_d(current_period), "attributed to the current open period");
 
     // Now FINALIZE the current period's invoice, then change again: the new event
@@ -1133,4 +1158,273 @@ async fn end_missing_metric_does_not_credit_the_bill() {
             assert!(v >= 0, "no negative usage_snapshot delta on any segment line");
         }
     }
+}
+
+/// (h) CRITICAL-1: segment pricing reads the LIVE catalog at RECONCILE time — it
+/// does NOT replay off any frozen base fee on `plan_change_events` (those columns
+/// were removed). Record a plan change at one plan price, then EDIT the catalog
+/// (raise the base fee) BEFORE the reconcile, and assert the frozen invoice line
+/// reflects the catalog value AT RECONCILE — documenting the intended (operator-
+/// gated, open-period-floats-until-finalize) behaviour.
+#[compio::test]
+async fn segment_pricing_reflects_catalog_at_reconcile_time() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "catalogtime").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    seed_weight(&fx.state).await;
+    let one_cent: i64 = 1_000_000_000_000;
+    // Pro starts with base 3000; we will RAISE it to 9000 in the catalog before the
+    // reconcile. Segment 1 (Pro) must price under the RECONCILE-time base (9000),
+    // not the change-time value (3000) — proving pricing is NOT frozen at change.
+    let free = seed_plan(&fx.state, "free", 0, 1_000, one_cent).await;
+    let pro = seed_plan(&fx.state, "pro", 3_000, 10_000, one_cent).await;
+    let creator = make_user(&fx.state, "catalogtime").await;
+    let app = make_owned_app(&fx.state, &free, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_ct_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+
+    ingest_at(&fx.state, app, 4_000, period, 1).await;
+    use chrono::{Datelike, TimeZone};
+    let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
+    let day11 = chrono::Utc
+        .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
+        .unwrap()
+        .timestamp();
+    record_plan_change_like_set_plan(&fx.state, app, creator, &pro, day11).await;
+    ingest_at(&fx.state, app, 26_000, period, 2).await;
+
+    // OPERATOR mid-month edit: raise Pro's base fee in the catalog AFTER the change
+    // was recorded but BEFORE the reconcile. There is no per-change freeze, so the
+    // open period re-prices off this new catalog value.
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.plans SET base_fee_cents = 9000 WHERE id = $1",
+            &[&pro],
+        )
+        .await
+        .expect("raise Pro base fee");
+
+    let days_in_period = proration::days_in_period(period);
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1);
+
+    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let pro_line = lines.iter().find(|l| l.1 == pro).expect("a Pro segment line");
+    if days_in_period == 30 {
+        // Pro base day-weighted 20/30 of the RECONCILE-time fee (9000), not 3000:
+        // round_half_up(9000×20/30) = 6000.
+        assert_eq!(
+            pro_line.4, 6_000,
+            "Pro segment base reflects the RECONCILE-time catalog fee (9000×20/30), \
+             NOT the change-time value (would have been 3000×20/30 = 2000)"
+        );
+    } else {
+        // For any month length, the prorated base must EXCEED the change-time-derived
+        // value, proving it tracked the catalog edit rather than a frozen snapshot.
+        let change_time_derived = (3_000i64 * i64::from(days_in_period - 10)) / i64::from(days_in_period);
+        assert!(
+            pro_line.4 > change_time_derived,
+            "Pro segment base ({}) reflects the raised reconcile-time catalog fee, not the \
+             change-time value (~{})",
+            pro_line.4, change_time_derived
+        );
+    }
+}
+
+/// (i) MAJOR-1: a re-drive that builds FEWER segments than a prior crashed drive
+/// posted must NOT leave orphaned Stripe items / DB lines — else the draft sweeps
+/// the stale items and the finalized subtotal disagrees with the Stripe total (an
+/// over-charge). We SEED a draft with an EXTRA (orphan) segment line + its
+/// provider-ref + a matching Stripe item, then drive a reconcile that builds only
+/// the real (fewer) segments. Assert: the orphan Stripe item is deleted, exactly
+/// the current segment set persists, and the DB subtotal == the Stripe item total.
+#[compio::test]
+async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "orphan").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    seed_weight(&fx.state).await;
+    let one_cent: i64 = 1_000_000_000_000;
+    // No-change app: the real build is EXACTLY one segment (segment_no 0).
+    let plan = seed_plan(&fx.state, "flat", 0, 0, one_cent).await;
+    let creator = make_user(&fx.state, "orphan").await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let customer = format!("cus_orphan_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &customer).await.unwrap();
+    ingest_at(&fx.state, app, 1_000, period, 1).await; // 1000c, one segment
+
+    // SEED a crash-window draft: a draft invoice claim, a REAL segment_no=0 line,
+    // AND an ORPHAN segment_no=1 line + its provider-ref, plus a matching pending
+    // Stripe item registered in the mock so it is deletable by id.
+    let inv_id = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv_id, &creator, &period_d(period)],
+        )
+        .await
+        .expect("seed draft invoice");
+    // The real segment 0 line (matches what the fresh build will produce).
+    for (seg, amount) in [(0i16, 1_000i64), (1i16, 7_777i64)] {
+        fx.state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.invoice_lines \
+                   (invoice_id, app_id, segment_no, plan_id, included_units, \
+                    fx_pico_cents_per_unit, base_fee_cents, amount_cents, \
+                    usage_snapshot, weights_snapshot) \
+                 VALUES ($1, $2, $3, $4, 0, $5, 0, $6, '{}'::jsonb, '{}'::jsonb)",
+                &[&inv_id, &app, &seg, &plan, &one_cent, &amount],
+            )
+            .await
+            .expect("seed line");
+    }
+    // The orphan segment 1 was "posted": register a Stripe item with its
+    // deterministic metadata key so the orphan-reconciler can DELETE it, and a
+    // provider-ref so the reconciler knows its external id directly.
+    let orphan_key =
+        billing_reconcile::invoice_item_idempotency_key(&creator, &app, period, 1);
+    let orphan_item_id = fx.mock.preload_invoice_item(&customer, &orphan_key);
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_line_provider_refs \
+               (invoice_id, app_id, segment_no, provider, ref_kind, external_id) \
+             VALUES ($1, $2, 1, 'stripe', 'invoice_item', $3)",
+            &[&inv_id, &app, &orphan_item_id],
+        )
+        .await
+        .expect("seed orphan provider-ref");
+
+    // Drive the reconcile: it re-drives the existing draft, builds ONLY segment 0,
+    // and must delete the orphan segment 1 (DB line + ref + Stripe item).
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1, "the re-driven draft finalizes");
+
+    // The orphan Stripe item was DELETEd.
+    assert!(
+        fx.mock.was_item_deleted(&orphan_item_id),
+        "the orphaned segment-1 Stripe item must be deleted on the shrinking re-drive"
+    );
+
+    // Exactly the current segment set (segment 0 only) persists.
+    let lines = read_segment_lines(&fx.state, creator, app).await;
+    assert_eq!(lines.len(), 1, "exactly one segment line persists (orphan removed)");
+    assert_eq!(lines[0].0, 0, "the surviving line is segment 0");
+
+    // DB subtotal == Stripe item total (no orphaned item left to diverge).
+    let inv_total: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT total_cents FROM zeroship.invoices WHERE id = $1",
+            &[&inv_id],
+        )
+        .await
+        .unwrap()[0]
+        .get("total_cents");
+    assert_eq!(inv_total, 1_000, "finalized subtotal is the single real segment");
+    // The orphan's provider-ref is gone too.
+    assert_eq!(
+        confirmed_item_refs(&fx.state, creator, app).await,
+        1,
+        "only the surviving segment's provider-ref remains"
+    );
+}
+
+/// (j) MINOR-4: a corrupt `usage_at_change` (valid JSONB but NOT a {metric: int}
+/// object) must ABORT/SKIP that app's billing rather than silently becoming `{}`
+/// (which would zero the segment START and massively over-count). Assert: the
+/// creator is NOT billed, no Stripe item is posted, and no finalized invoice.
+#[compio::test]
+async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "corrupt").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    seed_weight(&fx.state).await;
+    let one_cent: i64 = 1_000_000_000_000;
+    let free = seed_plan(&fx.state, "free", 0, 0, one_cent).await;
+    let pro = seed_plan(&fx.state, "pro", 0, 0, one_cent).await;
+    let creator = make_user(&fx.state, "corrupt").await;
+    let app = make_owned_app(&fx.state, &pro, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_corrupt_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+    // Big cumulative usage so a silent {}-start would over-bill from 0.
+    ingest_at(&fx.state, app, 50_000, period, 1).await;
+
+    // Directly INSERT a plan_change_events row with a CORRUPT usage_at_change: a
+    // JSON ARRAY is valid JSONB but does NOT deserialize into {metric: int}. (We
+    // bypass the real write path because it only ever writes a well-formed object;
+    // this simulates a poisoned/oversized snapshot at rest.)
+    use chrono::{Datelike, TimeZone};
+    let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
+    let mid = chrono::Utc
+        .with_ymd_and_hms(pstart.year(), pstart.month(), 15, 0, 0, 0)
+        .unwrap();
+    let ev_id = zeroship_core::typed_id::new_plan_change_event_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.plan_change_events \
+               (id, app_id, period, from_plan_id, to_plan_id, effective_at, usage_at_change) \
+             VALUES ($1, $2, $3::date, $4, $5, $6, '[1,2,3]'::jsonb)",
+            &[&ev_id, &app, &period_d(period), &free, &pro, &mid],
+        )
+        .await
+        .expect("seed corrupt event");
+
+    // The reconcile must NOT bill this creator (the parse error aborts/skips the
+    // app) — it does NOT silently price off an empty snapshot.
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick returns (per-creator error is logged + skipped)");
+    assert_eq!(billed, 0, "the creator with a corrupt snapshot is NOT billed (no over-bill)");
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        0,
+        "no Stripe item posted for an app whose snapshot is corrupt"
+    );
+    let finalized: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
+             WHERE creator_id = $1 AND status = 'finalized'",
+            &[&creator],
+        )
+        .await
+        .unwrap()[0]
+        .get("n");
+    assert_eq!(finalized, 0, "no finalized invoice for the skipped creator");
 }

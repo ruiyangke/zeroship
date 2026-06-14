@@ -427,8 +427,19 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         let mut period_changes: Vec<crate::proration::PlanChange> = Vec::with_capacity(change_rows.len());
         for r in &change_rows {
             let usage_json: serde_json::Value = r.get("usage_at_change");
+            // MINOR-4: a malformed `usage_at_change` MUST NOT silently become `{}` —
+            // that would zero the segment START snapshot and over-count the whole
+            // segment (every metric billed from 0 instead of its true cumulative
+            // start). Propagate the parse error so the per-creator loop in `sweep`
+            // logs it and SKIPS this creator's billing this tick, rather than
+            // emitting an over-bill off a silently-empty snapshot.
             let usage_at_change: std::collections::HashMap<String, i64> =
-                serde_json::from_value(usage_json).unwrap_or_default();
+                serde_json::from_value(usage_json).map_err(|e| {
+                    RegistryError::Database(format!(
+                        "billing_reconcile: corrupt usage_at_change for app {app_id} — \
+                         refusing to price off an empty snapshot (would over-bill): {e}"
+                    ))
+                })?;
             period_changes.push(crate::proration::PlanChange {
                 to_plan_id: r.get::<_, String>("to_plan_id"),
                 effective_at: r.get::<_, chrono::DateTime<Utc>>("effective_at"),
@@ -436,7 +447,11 @@ pub(crate) async fn bill_creator<S: StripeApi>(
             });
         }
         // The plan running at period START (segment 0's plan): the first change's
-        // from-plan if recorded, else the current plan (no change in this period).
+        // `from_plan_id`. That column is NULL for an initial plan assignment (no
+        // prior plan existed) — in which case there is no distinct pre-change plan,
+        // so segment 0 falls back to the current plan. It is also the current plan
+        // when there were NO changes this period (`change_rows` empty ⇒ `.first()` is
+        // None). Both fallbacks resolve via `unwrap_or_else`.
         let prior_plan_id: String = change_rows
             .first()
             .and_then(|r| r.get::<_, Option<String>>("from_plan_id"))
@@ -620,6 +635,77 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         .iter()
         .map(|r| (r.get::<_, Uuid>("app_id"), r.get::<_, i16>("segment_no")))
         .collect();
+
+    // MAJOR-1: reconcile the EXISTING draft's (app, segment) set against the FRESHLY
+    // built one BEFORE posting. A prior crashed drive may have posted/recorded MORE
+    // segments than this re-drive builds (a zero-day-merge / period-end-totals
+    // interaction can shrink the segment count). Those stale higher-segment lines +
+    // their already-posted Stripe items would otherwise be swept by the draft
+    // invoice, so the finalized subtotal (this drive's lines) would DISAGREE with the
+    // Stripe total — an over-charge. Draft lines are MUTABLE until finalize (the
+    // immutability trigger fires only on a finalized parent), so we delete the orphans
+    // here: drop the Stripe item (adopting an un-ref'd-but-possibly-posted item via
+    // its deterministic metadata key first), then the provider-ref, then the line.
+    let fresh_keys: std::collections::HashSet<(Uuid, i16)> =
+        lines.iter().map(|l| (l.app_id, l.segment_no)).collect();
+    let orphans: Vec<(Uuid, i16)> = line_exists
+        .union(&posted)
+        .copied()
+        .filter(|k| !fresh_keys.contains(k))
+        .collect();
+    for (orphan_app, orphan_seg) in &orphans {
+        // 1. Remove the Stripe item. If the orphan has a confirmed provider-ref we
+        //    know its external id; otherwise (line-only intent) it may STILL have been
+        //    posted (crash between POST and ref-insert), so look it up by its
+        //    deterministic metadata key and delete it if present.
+        let item_id: Option<String> = if posted.contains(&(*orphan_app, *orphan_seg)) {
+            conn.query(
+                "SELECT external_id FROM zeroship.billing_line_provider_refs \
+                 WHERE invoice_id = $1 AND app_id = $2 AND segment_no = $3 \
+                   AND provider = 'stripe' AND ref_kind = 'invoice_item'",
+                &[&invoice_id, orphan_app, orphan_seg],
+            )
+            .await?
+            .first()
+            .map(|r| r.get::<_, String>("external_id"))
+        } else {
+            // line-only intent (no confirmed ref): it may STILL have been posted
+            // (crash between POST and ref-insert), so look it up by its key.
+            let orphan_key =
+                invoice_item_idempotency_key(creator_id, orphan_app, period_start, *orphan_seg);
+            stripe
+                .find_invoice_item_by_key(&customer, &orphan_key)
+                .await
+                .map_err(|e| RegistryError::Database(format!("find_invoice_item_by_key: {e}")))?
+        };
+        if let Some(id) = item_id {
+            stripe
+                .delete_invoice_item(&id)
+                .await
+                .map_err(|e| RegistryError::Database(format!("delete_invoice_item: {e}")))?;
+            tracing::warn!(
+                creator_id = %creator_id,
+                app_id = %orphan_app,
+                segment_no = orphan_seg,
+                "billing_reconcile: deleted an orphaned Stripe invoice item (re-drive built fewer segments)"
+            );
+        }
+        // 2. Drop the provider-ref (composite-FK child) THEN the line. ON DELETE
+        //    CASCADE on the FK means deleting the line would also drop the ref, but
+        //    we delete the ref explicitly first so the order is unambiguous.
+        conn.execute(
+            "DELETE FROM zeroship.billing_line_provider_refs \
+             WHERE invoice_id = $1 AND app_id = $2 AND segment_no = $3",
+            &[&invoice_id, orphan_app, orphan_seg],
+        )
+        .await?;
+        conn.execute(
+            "DELETE FROM zeroship.invoice_lines \
+             WHERE invoice_id = $1 AND app_id = $2 AND segment_no = $3",
+            &[&invoice_id, orphan_app, orphan_seg],
+        )
+        .await?;
+    }
 
     let period_window = Period {
         start: period_start,
@@ -926,20 +1012,9 @@ pub(crate) async fn owned_app_ids(
     Ok(rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect())
 }
 
-/// Resolve an app's `plan_id`. Returns `None` if the app row is gone.
-// PR-4 made the per-app reconcile path read the plan via `lookup_plan_id_on` on
-// a borrowed connection (it already holds one), so this owned-connection variant
-// has no in-tree caller; kept as the documented sibling of `lookup_plan_id_on`.
-#[allow(dead_code)]
-#[allow(clippy::future_not_send)]
-pub(crate) async fn lookup_plan_id(state: &AppState, app_id: &Uuid) -> Result<Option<String>, RegistryError> {
-    let conn = state.registry.conn().await?;
-    lookup_plan_id_on(&conn, app_id).await
-}
-
-/// As [`lookup_plan_id`] but on a BORROWED connection, so a caller already
-/// holding one (the metering-export sweep) avoids a fresh per-query connection
-/// handshake.
+/// Resolve an app's `plan_id` on a BORROWED connection (the caller already holds
+/// one — the per-app reconcile path and the metering-export sweep), so it avoids a
+/// fresh per-query connection handshake. Returns `None` if the app row is gone.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn lookup_plan_id_on<C: compio_postgres::GenericClient + Sync>(
     conn: &C,
@@ -1072,6 +1147,9 @@ mod tests {
                 idempotency_key.to_string(),
             ));
             Ok(format!("ii_{}", self.items.borrow().len()))
+        }
+        async fn delete_invoice_item(&self, _item_id: &str) -> Result<(), StripeError> {
+            Ok(())
         }
         async fn find_invoice_item_by_key(
             &self,

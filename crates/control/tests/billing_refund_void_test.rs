@@ -109,6 +109,9 @@ impl StripeApi for RecordingStripe {
     ) -> Result<String, StripeError> {
         Ok(Self::unique("ii"))
     }
+    async fn delete_invoice_item(&self, _item_id: &str) -> Result<(), StripeError> {
+        Ok(())
+    }
     async fn find_invoice_item_by_key(
         &self,
         _c: &str,

@@ -1211,6 +1211,9 @@ impl StripeApi for FailAfterFirstItem {
             .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
             .await
     }
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.delete_invoice_item(item_id).await
+    }
     async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
         self.inner.find_invoice_item_by_key(customer, lookup_key).await
     }
@@ -1355,6 +1358,9 @@ impl StripeApi for PostThenCrash {
         Err(zeroship_control::stripe_store::StripeError::Db(
             "simulated crash after the Stripe POST returned, before ledger confirm".to_string(),
         ))
+    }
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.delete_invoice_item(item_id).await
     }
     async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
         self.inner.find_invoice_item_by_key(customer, lookup_key).await
@@ -1541,6 +1547,9 @@ impl StripeApi for CrashOnFinalize {
         self.inner
             .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
             .await
+    }
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.delete_invoice_item(item_id).await
     }
     async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
         self.inner.find_invoice_item_by_key(customer, lookup_key).await
@@ -1977,6 +1986,9 @@ impl StripeApi for FinalizeAlreadyFinalized {
             .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
             .await
     }
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.delete_invoice_item(item_id).await
+    }
     async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
         self.inner.find_invoice_item_by_key(customer, lookup_key).await
     }
@@ -2107,6 +2119,9 @@ impl StripeApi for FinalizeReturnsFixedId {
         self.inner
             .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
             .await
+    }
+    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.delete_invoice_item(item_id).await
     }
     async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
         self.inner.find_invoice_item_by_key(customer, lookup_key).await

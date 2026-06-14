@@ -3,10 +3,13 @@
 //!
 //! 1. **The write side** ([`record_plan_change`]) — invoked by `api.rs::set_plan`.
 //!    On every plan change it appends an append-only `plan_change_events` row that
-//!    snapshots BOTH the plan base fees (server-derived from the catalog, NEVER
-//!    client-supplied — CRITICAL-4) AND the app's cumulative `usage_aggregates`
-//!    totals (`usage_at_change` JSONB) read in the SAME txn as the `apps.plan_id`
-//!    flip. Per-period change cap ([`MAX_PLAN_CHANGES_PER_PERIOD`]); past the cap
+//!    snapshots the app's cumulative `usage_aggregates` totals (`usage_at_change`
+//!    JSONB) read in the SAME txn as the `apps.plan_id` flip — the segment-boundary
+//!    marker, server-derived, never client-supplied. (It does NOT freeze the plan
+//!    base fee: segment pricing reads the live catalog at reconcile time exactly
+//!    like the base-usage path, and reproducibility comes from the `invoice_lines`
+//!    snapshot at finalize — round 4 CRITICAL-1.) Per-period change cap
+//!    ([`MAX_PLAN_CHANGES_PER_PERIOD`]); past the cap
 //!    the plan still flips (the creator IS on the new plan) but NO snapshot is
 //!    recorded, so the tail prices under the actually-running plan (MAJOR-4). The
 //!    whole write takes the per-creator advisory lock so it cannot interleave with
@@ -84,22 +87,21 @@ pub fn next_period_date(period: chrono::NaiveDate) -> chrono::NaiveDate {
 /// together). Takes the per-creator advisory lock FIRST so it serializes against
 /// a month-end reconcile for the same creator.
 ///
-/// `from_base_fee_cents` / `to_base_fee_cents` are passed by the caller already
-/// resolved from the plan CATALOG (server-side) — this function never reads them
-/// from any client input. `now_unix` is the effective instant.
+/// `now_unix` is the effective instant. NOTE (round 4, CRITICAL-1): the row does
+/// NOT freeze either plan's base fee — segment pricing reads the live catalog at
+/// reconcile time (like the base-usage path) and is frozen into `invoice_lines`
+/// at finalize. The plan-change audit trail is `from_plan_id`/`to_plan_id` +
+/// `effective_at`; the base fees are recoverable from the catalog by those ids.
 ///
 /// # Errors
 /// Propagates DB errors. Returns [`PlanChangeOutcome::AppNotFound`] (not an error)
 /// when the app row is absent.
-#[allow(clippy::too_many_arguments)]
 pub async fn record_plan_change<C: GenericClient + Sync>(
     tx: &C,
     app_id: &Uuid,
     creator_id: &Uuid,
     from_plan_id: Option<&str>,
     to_plan_id: &str,
-    from_base_fee_cents: Option<i64>,
-    to_base_fee_cents: i64,
     now_unix: i64,
 ) -> Result<PlanChangeOutcome, RegistryError> {
     // SERIALIZE against the month-end reconcile for THIS creator. The reconcile
@@ -183,9 +185,8 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
     let effective_at = Utc.timestamp_opt(now_unix, 0).single().unwrap_or_else(Utc::now);
     tx.execute(
         "INSERT INTO zeroship.plan_change_events \
-           (id, app_id, period, from_plan_id, to_plan_id, effective_at, \
-            from_base_fee_cents, to_base_fee_cents, usage_at_change) \
-         VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)",
+           (id, app_id, period, from_plan_id, to_plan_id, effective_at, usage_at_change) \
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7)",
         &[
             &event_id,
             app_id,
@@ -193,8 +194,6 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
             &from_plan_id,
             &to_plan_id,
             &effective_at,
-            &from_base_fee_cents,
-            &to_base_fee_cents,
             &usage_json,
         ],
     )
@@ -208,19 +207,15 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
 /// single shared path BOTH `api.rs::set_plan` and the proration tests drive, so
 /// the tests exercise the REAL server-side write — advisory lock, server-side
 /// usage snapshot, plan flip, cap, period-finalized attribution — with no shim.
-/// Base fees are supplied by the caller already resolved from the plan catalog.
 ///
 /// # Errors
 /// Propagates DB / transaction errors.
-#[allow(clippy::too_many_arguments)]
 pub async fn record_plan_change_tx(
     registry: &Registry,
     app_id: &Uuid,
     creator_id: &Uuid,
     from_plan_id: Option<&str>,
     to_plan_id: &str,
-    from_base_fee_cents: Option<i64>,
-    to_base_fee_cents: i64,
     now_unix: i64,
 ) -> Result<PlanChangeOutcome, RegistryError> {
     let mut conn = registry.conn().await?;
@@ -234,8 +229,6 @@ pub async fn record_plan_change_tx(
         creator_id,
         from_plan_id,
         to_plan_id,
-        from_base_fee_cents,
-        to_base_fee_cents,
         now_unix,
     )
     .await?;
@@ -299,9 +292,17 @@ pub fn days_in_period(period_start_unix: i64) -> u32 {
 fn change_day_of_month(effective_at: chrono::DateTime<Utc>, period_start_unix: i64) -> u32 {
     let period_start =
         Utc.timestamp_opt(period_start_unix, 0).single().unwrap_or_else(Utc::now);
-    // Same month as the period? If the change predates the period (an event
-    // attributed forward from a finalized period would not, but be defensive) it
-    // owns from day 1; if it postdates it, it owns from the last day.
+    // Defensive clamps for instants outside the attributed period. In normal
+    // operation a change is attributed to the period CONTAINING its `effective_at`
+    // (MISSING-4 only pushes a finalized-period change FORWARD to the next period,
+    // never backward), so `effective_at` lies within [period_start, period_end) and
+    // neither clamp fires. Still:
+    //   * an `effective_at` BEFORE period_start (clock skew / a forward-attributed
+    //     change landing on the 1st) owns from day 1;
+    //   * an `effective_at` on/after period_end (a change forward-attributed into a
+    //     FUTURE period whose calendar day-of-month exceeds this period's length,
+    //     e.g. day 31 attributed into a 30-day period) clamps to the last day so the
+    //     half-open partition stays inside [1, dim+1] and Σdays == dim holds.
     let dim = days_in_period(period_start_unix);
     if effective_at < period_start {
         return 1;
@@ -336,6 +337,10 @@ fn finalize_boundaries(
     for k in 0..n {
         let start = boundaries[k].start_day;
         let end = if k + 1 < n { boundaries[k + 1].start_day } else { dim + 1 };
+        // Boundaries are built in effective_at (⇒ start_day non-decreasing) order, so
+        // a span is always >= 0 days. Assert it so a future ordering regression fails
+        // LOUD in tests/debug rather than silently u32-underflow-wrapping to ~4e9 days.
+        debug_assert!(end >= start, "segment span end_day {end} < start_day {start} (boundary ordering broke)");
         spans.push((start, end));
     }
 
@@ -373,6 +378,12 @@ fn finalize_boundaries(
         } else {
             dim + 1
         };
+        // Kept boundaries preserve start_day order, so end_day >= start_day. Assert
+        // it so an ordering regression fails loud instead of u32-underflow-wrapping.
+        debug_assert!(
+            end_day >= start_day,
+            "kept segment span end_day {end_day} < start_day {start_day} (boundary ordering broke)"
+        );
         let segment_days = end_day - start_day;
 
         // END cumulative snapshot = the next KEPT boundary's start snapshot, or the
@@ -404,6 +415,12 @@ fn finalize_boundaries(
         let included_full = price.included_units;
         let fx = price.fx_pico_cents_per_unit;
 
+        // POLICY (a): per-segment `included_units` is the plan's full quota
+        // day-weighted by this segment's share, with NO remainder reconciliation
+        // (unlike base_fee_cents below, which anchors Σ to the exact day-weighted
+        // full fee). This is intentional — the included-units allowance is a quota
+        // grant, not money; a sub-cent rounding drift across segments is acceptable
+        // and does not need a remainder rule.
         let included_units = day_weight(included_full, u64::from(segment_days), u64::from(dim));
         // Base fee day-weighted; remainder reconciled on the LAST kept segment.
         let base_fee_cents = day_weight(base_full, u64::from(segment_days), u64::from(dim));
@@ -795,5 +812,107 @@ mod tests {
         assert_eq!(next_period_date(dec), chrono::NaiveDate::from_ymd_opt(2027, 1, 1).unwrap());
         let jun = chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         assert_eq!(next_period_date(jun), chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap());
+    }
+
+    /// MAJOR-3: a GENUINE N≥2 telescoping case — TWO plan changes in one period
+    /// ⇒ THREE distinct segments / plans / FX. Asserts:
+    ///   * per-metric deltas telescope EXACTLY to the period total across all 3
+    ///     segments;
+    ///   * a metric ABSENT from snapshot 1 but APPEARING in snapshot 2 is attributed
+    ///     to the right segment (start 0 in its first-seen segment, no negative);
+    ///   * a metric present early but with NO further growth (vanishing) contributes
+    ///     0 to later segments;
+    ///   * the 3 segment amounts sum to the expected subtotal under each plan's FX.
+    #[test]
+    fn three_segments_two_changes_telescope_exactly() {
+        // 30-day June; changes on day 11 and day 21 ⇒ segments [1,11), [11,21), [21,31)
+        // = 10 / 10 / 10 days. Three plans, no base fee, no quota, all 1 cent/CU so the
+        // amount is just the summed delta (keeps the arithmetic auditable).
+        let flat = PlanPrice {
+            base_fee_cents: 0,
+            included_units: 0,
+            fx_pico_cents_per_unit: Some(one_cent_per_cu()),
+            spend_limit_default_cents: 0,
+        };
+        let mut prices = HashMap::new();
+        for id in ["pln_a", "pln_b", "pln_c"] {
+            prices.insert(id.to_string(), flat.clone());
+        }
+
+        // Cumulative snapshots:
+        //   change 1 (day 11): {alpha: 100}                — `beta` not yet seen.
+        //   change 2 (day 21): {alpha: 300, beta: 50}      — `beta` APPEARS here.
+        //   period end:        {alpha: 300, beta: 120}     — `alpha` STOPS growing.
+        let mut snap1 = HashMap::new();
+        snap1.insert("alpha".to_string(), 100i64);
+        let mut snap2 = HashMap::new();
+        snap2.insert("alpha".to_string(), 300i64);
+        snap2.insert("beta".to_string(), 50i64);
+        let mut end = HashMap::new();
+        end.insert("alpha".to_string(), 300i64);
+        end.insert("beta".to_string(), 120i64);
+
+        let day = |d: u32| Utc.with_ymd_and_hms(2026, 6, d, 0, 0, 0).unwrap();
+        let changes = vec![
+            PlanChange { to_plan_id: "pln_b".to_string(), effective_at: day(11), usage_at_change: snap1 },
+            PlanChange { to_plan_id: "pln_c".to_string(), effective_at: day(21), usage_at_change: snap2 },
+        ];
+        let segs = build_segments_with_prior(
+            june_2026_start(),
+            "pln_a",
+            &changes,
+            &end,
+            "pln_c",
+            &prices,
+        );
+        assert_eq!(segs.len(), 3, "two changes ⇒ three distinct segments");
+        assert_eq!((segs[0].plan_id.as_str(), segs[1].plan_id.as_str(), segs[2].plan_id.as_str()),
+                   ("pln_a", "pln_b", "pln_c"), "three DISTINCT plans, in order");
+
+        // Per-segment alpha deltas: 100−0, 300−100, 300−300=0 (vanishing late).
+        assert_eq!(segs[0].usage_delta.get("alpha"), Some(&100), "seg0 alpha = 100−0");
+        assert_eq!(segs[1].usage_delta.get("alpha"), Some(&200), "seg1 alpha = 300−100");
+        assert_eq!(segs[2].usage_delta.get("alpha"), None, "seg2 alpha = 300−300 = 0 (vanished, no line)");
+
+        // `beta` is ABSENT from snapshot 1 ⇒ start 0 in its first-seen segment (seg1),
+        // and never appears in seg0.
+        assert_eq!(segs[0].usage_delta.get("beta"), None, "seg0 never saw beta");
+        assert_eq!(segs[1].usage_delta.get("beta"), Some(&50), "seg1 beta = 50−0 (first seen)");
+        assert_eq!(segs[2].usage_delta.get("beta"), Some(&70), "seg2 beta = 120−50");
+
+        // Telescoping: per-metric deltas sum EXACTLY to the period total.
+        let alpha_total: i64 = segs.iter().map(|s| *s.usage_delta.get("alpha").unwrap_or(&0)).sum();
+        let beta_total: i64 = segs.iter().map(|s| *s.usage_delta.get("beta").unwrap_or(&0)).sum();
+        assert_eq!(alpha_total, 300, "Σ alpha deltas telescope to the period total");
+        assert_eq!(beta_total, 120, "Σ beta deltas telescope to the period total");
+
+        // Day partition telescopes to days_in_period.
+        let total_days: u32 = segs.iter().map(|s| s.end_day - s.start_day).sum();
+        assert_eq!(total_days, 30, "Σ segment_days == days_in_period across all 3 segments");
+
+        // The 3 segment amounts sum to the expected subtotal. 1 cent/CU, no base/quota:
+        // seg0 = 100c, seg1 = 250c (200 alpha + 50 beta), seg2 = 70c (beta only) = 420c.
+        let w = {
+            let mut w = weights_requests();
+            w.insert("alpha".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
+            w.insert("beta".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
+            w
+        };
+        let amount = |s: &BilledSegment| {
+            let p = PlanPrice {
+                base_fee_cents: s.base_fee_cents,
+                included_units: s.included_units,
+                fx_pico_cents_per_unit: s.fx_pico_cents_per_unit,
+                spend_limit_default_cents: 0,
+            };
+            charge_cents(&p, &s.usage_delta, &w).unwrap().total_cents
+        };
+        let a0 = amount(&segs[0]);
+        let a1 = amount(&segs[1]);
+        let a2 = amount(&segs[2]);
+        assert_eq!(a0, 100, "seg0: 100 alpha CU × 1c");
+        assert_eq!(a1, 250, "seg1: (200 alpha + 50 beta) CU × 1c");
+        assert_eq!(a2, 70, "seg2: 70 beta CU × 1c (alpha vanished ⇒ 0)");
+        assert_eq!(a0 + a1 + a2, 420, "3 segment amounts sum to the expected subtotal");
     }
 }
