@@ -23,7 +23,7 @@
 use uuid::Uuid;
 use zeroship_core::types::SpendState;
 
-use crate::metering::{current_period_start_unix, period_ts};
+use crate::metering::{current_period_start_unix, period_date};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::charge_cents;
 use crate::pricing_store::PricingStore;
@@ -200,16 +200,19 @@ impl SpendEngine {
     }
 
     /// Resolve `(plan_id, prev_state, override_limit, eval_limit)` for one app.
-    /// `prev_state`/`eval_limit` come from `app_spend_state` (default
-    /// Allow / 0 when there is no row yet).
+    /// The override now lives in `app_spend_limit` (config), the derived state +
+    /// eval-limit in `app_spend_state` — so this is a DOUBLE LEFT JOIN
+    /// (`apps ⋈ app_spend_limit ⋈ app_spend_state`). Defaults Allow / NULL / 0
+    /// when there is no row yet in the respective table.
     async fn app_state_row(
         conn: &compio_postgres::Client,
         app_id: &Uuid,
     ) -> Result<(String, SpendState, Option<i64>, i64), RegistryError> {
         let rows = conn
             .query(
-                "SELECT a.plan_id, s.state, s.spend_limit_cents, s.eval_limit_cents \
+                "SELECT a.plan_id, s.state, l.spend_limit_cents, s.eval_limit_cents \
                  FROM zeroship.apps a \
+                 LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
                  LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
                  WHERE a.id = $1",
                 &[app_id],
@@ -270,18 +273,33 @@ impl SpendEngine {
         let usage_rows = conn
             .query(
                 "SELECT app_id, metric, total FROM zeroship.usage_aggregates \
-                 WHERE period_start = $1",
-                &[&period_ts(period_start)],
+                 WHERE period = $1::date",
+                &[&period_date(period_start)],
             )
             .await?;
         let mut usage_by_app: std::collections::HashMap<Uuid, std::collections::HashMap<String, i64>> =
             std::collections::HashMap::new();
+        // ACTIVE UNWEIGHTED-METRIC ALERT (Key flow B): a metric that has accrued
+        // usage this period but has NO `metric_weights` row prices to $0 CU —
+        // silent free billing. Warn ONCE per such metric per sweep (deduped) so
+        // an operator notices a cataloged-but-unweighted metric. Checked against
+        // the already-loaded `weights` map (no extra query).
+        let mut warned_unweighted: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for row in &usage_rows {
             let aid: Uuid = row.get("app_id");
+            let metric: String = row.get("metric");
+            if !weights.contains_key(&metric) && warned_unweighted.insert(metric.clone()) {
+                tracing::warn!(
+                    metric = %metric,
+                    billing_event = "active_unweighted_metric",
+                    "spend: metric has active usage this period but no metric_weights row — it prices to $0 CU (silent free billing)"
+                );
+            }
             usage_by_app
                 .entry(aid)
                 .or_default()
-                .insert(row.get::<_, String>("metric"), row.get::<_, i64>("total"));
+                .insert(metric, row.get::<_, i64>("total"));
         }
 
         let mut transitions = Vec::new();
@@ -423,30 +441,34 @@ impl SpendEngine {
         eval_limit_cents: i64,
         period_start_unix: i64,
     ) -> Result<(), RegistryError> {
+        let period = period_date(period_start_unix);
         let tx = conn.transaction().await?;
         tx.execute(
             "INSERT INTO zeroship.app_spend_state \
-               (app_id, state, spend_cents, eval_limit_cents, period_start, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, NOW()) \
+               (app_id, state, spend_cents, eval_limit_cents, period, updated_at) \
+             VALUES ($1, $2, $3, $4, $5::date, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                state = EXCLUDED.state, spend_cents = EXCLUDED.spend_cents, \
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
-               period_start = EXCLUDED.period_start, updated_at = NOW()",
+               period = EXCLUDED.period, updated_at = NOW()",
             &[
                 app_id,
                 &spend_state_str(to),
                 &spend_cents,
                 &eval_limit_cents,
-                &period_ts(period_start_unix),
+                &period,
             ],
         )
         .await?;
+        // `spend_state_history.period` is NOT NULL — bind it (this is why the
+        // 0041 DDL and this code had to land together).
         tx.execute(
             "INSERT INTO zeroship.spend_state_history \
-               (app_id, from_state, to_state, spend_cents, limit_cents) \
-             VALUES ($1, $2, $3, $4, $5)",
+               (app_id, period, from_state, to_state, spend_cents, limit_cents) \
+             VALUES ($1, $2::date, $3, $4, $5, $6)",
             &[
                 app_id,
+                &period,
                 &spend_state_str(from),
                 &spend_state_str(to),
                 &spend_cents,
@@ -459,8 +481,9 @@ impl SpendEngine {
     }
 
     /// UPSERT spend/eval-limit freshness WITHOUT a state change (no history).
-    /// Preserves the creator override column (`spend_limit_cents`) — it is set
-    /// only via `set_limit`.
+    /// The creator override now lives in the SEPARATE `app_spend_limit` table
+    /// (set only via `set_limit`), so this derived-state write no longer has an
+    /// override column to clobber — ending the prior three-writer clobber dance.
     async fn touch_state(
         conn: &compio_postgres::Client,
         app_id: &Uuid,
@@ -471,18 +494,18 @@ impl SpendEngine {
     ) -> Result<(), RegistryError> {
         conn.execute(
             "INSERT INTO zeroship.app_spend_state \
-               (app_id, state, spend_cents, eval_limit_cents, period_start, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, NOW()) \
+               (app_id, state, spend_cents, eval_limit_cents, period, updated_at) \
+             VALUES ($1, $2, $3, $4, $5::date, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                spend_cents = EXCLUDED.spend_cents, \
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
-               period_start = EXCLUDED.period_start, updated_at = NOW()",
+               period = EXCLUDED.period, updated_at = NOW()",
             &[
                 app_id,
                 &spend_state_str(state),
                 &spend_cents,
                 &eval_limit_cents,
-                &period_ts(period_start_unix),
+                &period_date(period_start_unix),
             ],
         )
         .await?;
@@ -490,10 +513,11 @@ impl SpendEngine {
     }
 
     /// Set (or clear, with `None`) the per-app spend-limit override. Used by
-    /// the M4 creator endpoint. Upserts `app_spend_state.spend_limit_cents`
-    /// without touching the derived state — the next `evaluate_all` tick
-    /// re-derives against the new effective limit (immediate recovery on a
-    /// raise, via the `limit_changed` deadband bypass).
+    /// the M4 creator endpoint. Upserts the dedicated CONFIG table
+    /// `app_spend_limit` ONLY — it no longer touches the derived `app_spend_state`
+    /// row (that was the three-writer clobber). The next `evaluate_all` tick
+    /// re-derives against the new effective limit (immediate recovery on a raise,
+    /// via the `limit_changed` deadband bypass).
     pub async fn set_limit(
         &self,
         app_id: &Uuid,
@@ -512,11 +536,11 @@ impl SpendEngine {
             None => None,
         };
         conn.execute(
-            "INSERT INTO zeroship.app_spend_state (app_id, spend_limit_cents, period_start, updated_at) \
-             VALUES ($1, $2, $3, NOW()) \
+            "INSERT INTO zeroship.app_spend_limit (app_id, spend_limit_cents, updated_at) \
+             VALUES ($1, $2, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                spend_limit_cents = EXCLUDED.spend_limit_cents, updated_at = NOW()",
-            &[app_id, &limit, &period_ts(current_period_start_unix())],
+            &[app_id, &limit],
         )
         .await?;
         Ok(())

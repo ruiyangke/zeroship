@@ -150,9 +150,9 @@ impl MeteringProvider for NativeProvider {
         .await?;
 
         // `bill_creator` returns true when a fresh invoice was finalized this
-        // call. The finalized invoice id lives on `billing_runs`; surface it so
-        // a caller can audit the close. A no-op (already billed / nothing to
-        // bill / no customer) yields `InvoiceRef(None)`.
+        // call. The finalized provider invoice id lives on `billing_provider_refs`;
+        // surface it so a caller can audit the close. A no-op (already billed /
+        // nothing to bill / no customer) yields `InvoiceRef(None)`.
         if billed {
             let invoice_id = lookup_invoice_id(state, &creator.creator_id, period.start)
                 .await
@@ -177,30 +177,28 @@ impl MeteringProvider for NativeProvider {
     }
 }
 
-/// Read back the finalized Stripe invoice id `bill_creator` persisted on the
-/// `billing_runs` row for `(creator, period)`. `None` if no finalized invoice
-/// (the run is still in-flight or absent).
+/// Read back the finalized Stripe provider invoice id `bill_creator` persisted
+/// for `(creator, period)`: join the FINALIZED `invoices` row to its
+/// `billing_provider_refs(provider='stripe', ref_kind='invoice')` external id.
+/// `None` if no finalized invoice (the run is still in-flight or absent). The
+/// `period` is the first-of-month `billing_period` DATE (bound `$2::date`).
 async fn lookup_invoice_id(
     state: &AppState,
     creator_id: &Uuid,
     period_start: i64,
 ) -> Result<Option<String>, crate::registry::RegistryError> {
-    use chrono::TimeZone;
-    let period_ts = chrono::Utc
-        .timestamp_opt(period_start, 0)
-        .single()
-        .ok_or_else(|| {
-            crate::registry::RegistryError::Database(format!("invalid period_start {period_start}"))
-        })?;
+    let period = crate::metering::period_date(period_start);
     let conn = state.registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT stripe_invoice_id FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = $2",
-            &[creator_id, &period_ts],
+            "SELECT r.external_id \
+             FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.creator_id = $1 AND i.period = $2::date \
+               AND i.status = 'finalized' \
+               AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
+            &[creator_id, &period],
         )
         .await?;
-    Ok(rows
-        .first()
-        .and_then(|r| r.get::<_, Option<String>>("stripe_invoice_id")))
+    Ok(rows.first().map(|r| r.get::<_, String>("external_id")))
 }

@@ -221,9 +221,15 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
 }
 
 /// Whether the user has financial history that GDPR Art. 17(3)(b) lets us
-/// retain. Today that means: do they own a `creator_accounts` row (a
-/// Stripe-Connect account)? Payouts FK `creator_accounts`, so the account row
-/// is the canonical anchor — if it exists, the financial ledger does too.
+/// retain. This means EITHER:
+///   * they own a `creator_accounts` row (a Stripe-Connect *payout* account —
+///     payouts FK it, so it anchors the creator-revenue ledger), OR
+///   * they have an `invoices` row (an infra-cost invoice — the durable
+///     marketplace billing artifact, keyed by `creator_id`).
+/// Either is a retain-on-erase anchor: an invoiced creator's `users` row is
+/// anonymized-in-place (not hard-deleted) so the invoice's `creator_id` FK
+/// target stays alive. A never-billed creator (neither) is hard-deleted and
+/// CASCADE reaps the empty billing shell.
 ///
 /// **Policy knob (operator-editable).** Widen/narrow this predicate to change
 /// what blocks a hard delete.
@@ -233,7 +239,11 @@ async fn user_has_financial_history(
 ) -> Result<bool> {
     let rows = conn
         .query(
-            "SELECT 1 FROM zeroship.creator_accounts WHERE creator_id = $1 LIMIT 1",
+            "SELECT 1 WHERE EXISTS ( \
+                SELECT 1 FROM zeroship.creator_accounts WHERE creator_id = $1 \
+             ) OR EXISTS ( \
+                SELECT 1 FROM zeroship.invoices WHERE creator_id = $1 \
+             )",
             &[&user_id],
         )
         .await

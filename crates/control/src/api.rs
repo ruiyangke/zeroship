@@ -773,8 +773,9 @@ pub async fn get_spend_limit(
     };
     let rows = match conn
         .query(
-            "SELECT a.plan_id, s.spend_limit_cents, s.state \
+            "SELECT a.plan_id, l.spend_limit_cents, s.state \
              FROM zeroship.apps a \
+             LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
              LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
              WHERE a.id = $1",
             &[&uid],

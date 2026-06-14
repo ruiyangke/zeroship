@@ -50,11 +50,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::cron::billing_reconcile::{lookup_plan_id_on, period_end_unix};
-use crate::metering::{current_period_start_unix, Metering};
+use crate::metering::{current_period_start_unix, period_date, Metering};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::total_units;
 use crate::pricing_store::PricingStore;
@@ -191,17 +191,14 @@ async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, R
     // only O(apps-with-activity), not O(every-app-ever-owned). Without this, a
     // long-lived deployment's sweep cost grows with the TOTAL app count even
     // though almost none have new usage in any given tick.
-    let period_ts: DateTime<Utc> = Utc
-        .timestamp_opt(period_start, 0)
-        .single()
-        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {period_start}")))?;
+    let period_d = period_date(period_start);
     let active_app_rows = conn
         .query(
-            "SELECT app_id FROM zeroship.usage_aggregates WHERE period_start = $1 \
+            "SELECT app_id FROM zeroship.usage_aggregates WHERE period = $1::date \
              UNION \
              SELECT app_id FROM zeroship.metering_exports \
-               WHERE period_start = $1 AND exported_units > 0",
-            &[&period_ts],
+               WHERE period = $1::date AND exported_units > 0",
+            &[&period_d],
         )
         .await?;
     let active_apps: std::collections::HashSet<Uuid> =
@@ -308,10 +305,7 @@ async fn export_app(
     // read + writes) collapses that to one handshake per app.
     let conn = state.registry.conn().await?;
 
-    let period_ts: DateTime<Utc> = Utc
-        .timestamp_opt(period.start, 0)
-        .single()
-        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {}", period.start)))?;
+    let period_d = period_date(period.start);
 
     // 1. CURRENT cumulative GROSS CU — the SAME derivation the spend cap uses.
     let usage = Metering::period_totals_on(&conn, app_id, period.start).await?;
@@ -327,8 +321,8 @@ async fn export_app(
     let high_water: u64 = conn
         .query(
             "SELECT exported_units FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period_start = $2",
-            &[app_id, &period_ts],
+             WHERE app_id = $1 AND period = $2::date",
+            &[app_id, &period_d],
         )
         .await?
         .first()
@@ -391,7 +385,7 @@ async fn export_app(
     {
         Ok(t) => t,
         Err(e) => {
-            record_export_failure(&conn, app_id, &period_ts, &format!("reported_total: {e}")).await;
+            record_export_failure(&conn, app_id, &period_d, &format!("reported_total: {e}")).await;
             return Err(RegistryError::Database(format!(
                 "metering_export: reported_total for app {app_id}: {e}"
             )));
@@ -403,7 +397,7 @@ async fn export_app(
         // Stripe's aggregate already reflects `current` (a crash-then-re-drive
         // where the push landed but the high-water never advanced). No re-push;
         // just advance the local high-water to match + clear any failure state.
-        advance_high_water(&conn, app_id, &period_ts, current_units).await?;
+        advance_high_water(&conn, app_id, &period_d, current_units).await?;
         return Ok(false);
     }
 
@@ -420,7 +414,7 @@ async fn export_app(
         // consecutive_failures, stamp last_error/last_attempt_at) so it is
         // queryable + alertable, then propagate (the sweep logs + continues; the
         // high-water is NOT advanced ⇒ the next sweep retries the SAME window).
-        record_export_failure(&conn, app_id, &period_ts, &format!("report_usage: {e}")).await;
+        record_export_failure(&conn, app_id, &period_d, &format!("report_usage: {e}")).await;
         return Err(RegistryError::Database(format!(
             "metering_export: report_usage for app {app_id}: {e}"
         )));
@@ -434,7 +428,7 @@ async fn export_app(
     //    the failure state. A crash BEFORE this write leaves the OLD high-water ⇒
     //    the next sweep reconciles against Stripe's aggregate (which now reflects
     //    this push) ⇒ delta 0 ⇒ no double-count.
-    advance_high_water(&conn, app_id, &period_ts, current_units).await?;
+    advance_high_water(&conn, app_id, &period_d, current_units).await?;
 
     Ok(true)
 }
@@ -445,7 +439,7 @@ async fn export_app(
 async fn advance_high_water(
     conn: &compio_postgres::Client,
     app_id: &Uuid,
-    period_ts: &DateTime<Utc>,
+    period: &chrono::NaiveDate,
     current_units: u64,
 ) -> Result<(), RegistryError> {
     let current_i64 = i64::try_from(current_units).map_err(|_| {
@@ -455,13 +449,13 @@ async fn advance_high_water(
     })?;
     conn.execute(
         "INSERT INTO zeroship.metering_exports \
-             (app_id, period_start, exported_units, updated_at, \
+             (app_id, period, exported_units, updated_at, \
               consecutive_failures, last_error, last_attempt_at) \
-         VALUES ($1, $2, $3, NOW(), 0, NULL, NOW()) \
-         ON CONFLICT (app_id, period_start) \
+         VALUES ($1, $2::date, $3, NOW(), 0, NULL, NOW()) \
+         ON CONFLICT (app_id, period) \
          DO UPDATE SET exported_units = EXCLUDED.exported_units, updated_at = NOW(), \
                        consecutive_failures = 0, last_error = NULL, last_attempt_at = NOW()",
-        &[app_id, period_ts, &current_i64],
+        &[app_id, period, &current_i64],
     )
     .await?;
     Ok(())
@@ -477,7 +471,7 @@ async fn advance_high_water(
 async fn record_export_failure(
     conn: &compio_postgres::Client,
     app_id: &Uuid,
-    period_ts: &DateTime<Utc>,
+    period: &chrono::NaiveDate,
     error: &str,
 ) {
     // Cap the stored error so a pathological message can't bloat the row.
@@ -485,13 +479,13 @@ async fn record_export_failure(
     if let Err(e) = conn
         .execute(
             "INSERT INTO zeroship.metering_exports \
-                 (app_id, period_start, exported_units, updated_at, \
+                 (app_id, period, exported_units, updated_at, \
                   consecutive_failures, last_error, last_attempt_at) \
-             VALUES ($1, $2, 0, NOW(), 1, $3, NOW()) \
-             ON CONFLICT (app_id, period_start) \
+             VALUES ($1, $2::date, 0, NOW(), 1, $3, NOW()) \
+             ON CONFLICT (app_id, period) \
              DO UPDATE SET consecutive_failures = zeroship.metering_exports.consecutive_failures + 1, \
                            last_error = EXCLUDED.last_error, last_attempt_at = NOW()",
-            &[app_id, period_ts, &truncated],
+            &[app_id, period, &truncated],
         )
         .await
     {

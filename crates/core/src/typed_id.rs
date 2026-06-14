@@ -217,6 +217,12 @@ pub const APP_OAUTH_CLIENT_PREFIX: &str = "oac";
 /// at control bootstrap.
 pub const PLAN_PREFIX: &str = "pln";
 
+/// Invoice typed-id prefix (billing schema redesign). Three chars to match the
+/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// (R16-API2). The `zeroship.invoices.id` column stores the full typed-id
+/// string (`inv_<base62>`); the provider-ref + line side tables FK into it.
+pub const INVOICE_PREFIX: &str = "inv";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -261,6 +267,12 @@ pub fn new_wake_id() -> String {
 /// tiers (billing PR4).
 pub fn new_plan_id() -> String {
     generate(PLAN_PREFIX)
+}
+
+/// Generate a new invoice ID: `inv_{base62(uuidv7)}`. Minted by the
+/// billing reconciler when it claims a `(creator, period)` invoice row.
+pub fn new_invoice_id() -> String {
+    generate(INVOICE_PREFIX)
 }
 
 #[cfg(test)]
@@ -370,6 +382,16 @@ mod tests {
         assert_eq!(w.len(), 26, "wak_ + 22 base62 = 26 chars");
         let (prefix, _) = parse(&w).expect("new_wake_id must roundtrip");
         assert_eq!(prefix, "wak");
+    }
+
+    #[test]
+    fn invoice_prefix_is_three_chars_and_roundtrips() {
+        assert_eq!(INVOICE_PREFIX.len(), 3, "invoice prefix must be 3 chars (R16-API2)");
+        let i = new_invoice_id();
+        assert!(i.starts_with("inv_"));
+        assert_eq!(i.len(), 26, "inv_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&i).expect("new_invoice_id must roundtrip");
+        assert_eq!(prefix, "inv");
     }
 
     #[test]

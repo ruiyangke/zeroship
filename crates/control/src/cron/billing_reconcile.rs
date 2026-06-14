@@ -13,29 +13,35 @@
 //! no owner row (e.g. the system console, 0036 `apps.system=true`) have no
 //! billable creator and are SKIPPED.
 //!
-//! Idempotency — three airtight layers under at-least-once delivery:
-//!   1. `billing_runs(creator_id, period_start)` PK, claimed BEFORE any Stripe
-//!      call. A COMPLETED row (`stripe_invoice_id` NOT NULL) ⇒ already billed
-//!      this period ⇒ skip entirely (no pricing, no Stripe call). A NULL-invoice
-//!      row is a crash-window remnant we re-drive.
-//!   2. The `billing_run_items(creator_id, period_start, app_id)` LEDGER is the
-//!      DURABLE per-app double-bill guard, written CLAIM-THEN-CALL (C1): an
-//!      intent row (`stripe_item_id = NULL`) is `INSERT`ed BEFORE `create_invoice_item`,
-//!      then `UPDATE`d with the `ii_…` after. So the durable record PRECEDES the
-//!      irreversible Stripe POST. On (re-)drive: a NOT-NULL `stripe_item_id` is
-//!      skipped outright; a NULL row (intent recorded, outcome unknown — the
-//!      crash-mid-call case) is reconciled by LOOKING UP the item via its
+//! Idempotency — three airtight layers under at-least-once delivery (mapped onto
+//! the provider-agnostic invoice model: `invoices` + `invoice_lines` +
+//! `billing_provider_refs` / `billing_line_provider_refs`):
+//!   1. `invoices(creator_id, period)` UNIQUE, claimed BEFORE any Stripe call via
+//!      `INSERT … 'draft' ON CONFLICT DO NOTHING`. A `status='finalized'` row ⇒
+//!      already billed this period ⇒ skip entirely (no pricing, no Stripe call).
+//!      A `status='draft'` row is a crash-window remnant we re-drive.
+//!   2. The `invoice_lines(invoice_id, app_id)` LEDGER is the DURABLE per-app
+//!      double-bill guard, written CLAIM-THEN-CALL (C1): the line (carrying the
+//!      frozen charge SNAPSHOT) is `INSERT`ed BEFORE `create_invoice_item`, and a
+//!      `billing_line_provider_refs(provider='stripe', ref_kind='invoice_item')`
+//!      row (a REAL composite FK → the line) is written AFTER. So the durable
+//!      record PRECEDES the irreversible Stripe POST. On (re-)drive: a line whose
+//!      provider-ref EXISTS is skipped outright (== old `stripe_item_id NOT
+//!      NULL`); a line with NO provider-ref (intent recorded, outcome unknown —
+//!      the crash-mid-call case) is reconciled by LOOKING UP the item via its
 //!      deterministic `metadata.zs_item_key` (`find_invoice_item_by_key`) and
 //!      adopting it if present, else posting fresh. This guarantees each app's
 //!      item posts AT MOST ONCE even when Stripe's 24h Idempotency-Key window has
-//!      expired (a >24h re-drive). The ledger + metadata lookup — not Stripe's
+//!      expired (a >24h re-drive). The line + ref + metadata lookup — not Stripe's
 //!      key — is what makes the no-double-bill guarantee hold.
-//!   3. The invoice is created (draft) and FINALIZED in two steps (C2): the draft
-//!      id is persisted to `billing_runs.draft_invoice_id` the instant the draft
-//!      exists, BEFORE finalize. A crash before finalize re-drives by finalizing
-//!      THAT draft (which carries the real items) rather than creating a fresh
-//!      empty draft — which a >24h create-key-expired re-drive would otherwise
-//!      finalize at $0 (under-bill).
+//!   3. The invoice is created (draft) and FINALIZED in distinct steps (C2): the
+//!      draft id is persisted to a `billing_provider_refs(ref_kind='draft_invoice')`
+//!      row the instant the draft exists, BEFORE finalize. A crash before finalize
+//!      re-drives by finalizing THAT draft (which carries the real items) rather
+//!      than creating a fresh empty draft — which a >24h create-key-expired
+//!      re-drive would otherwise finalize at $0 (under-bill). FINALIZE writes
+//!      subtotal/credit/tax/total/status/finalized_at in ONE UPDATE so the
+//!      `invoice_total_balances` CHECK never sees a half-written row.
 //!   4. A DETERMINISTIC Stripe `Idempotency-Key` per item/invoice derived from
 //!      `(creator_id, app_id, period_start)` — belt-and-suspenders for the
 //!      <24h replay case (Stripe returns the original object rather than
@@ -50,12 +56,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{Datelike, TimeZone, Utc};
 use uuid::Uuid;
 
-use crate::metering::Metering;
+use crate::metering::{period_date, Metering};
 use crate::plan_catalog::PlanCatalog;
-use crate::pricing::{charge_cents, MetricWeights};
+use crate::pricing::{charge_cents, MetricWeight, MetricWeights};
 use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
 use crate::stripe_client::{Period, StripeApi, StripeClient};
@@ -236,14 +242,11 @@ async fn sweep<S: StripeApi>(
     // left with no active app would have billed `total_cents == 0` (a no-op), so
     // skipping them is observably identical (no invoice either way). This keeps
     // the sweep cost O(apps-with-usage) instead of O(every-app-ever-owned).
-    let period_ts: DateTime<Utc> = Utc
-        .timestamp_opt(period_start, 0)
-        .single()
-        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {period_start}")))?;
+    let period = period_date(period_start);
     let active_app_rows = conn
         .query(
-            "SELECT DISTINCT app_id FROM zeroship.usage_aggregates WHERE period_start = $1",
-            &[&period_ts],
+            "SELECT DISTINCT app_id FROM zeroship.usage_aggregates WHERE period = $1::date",
+            &[&period],
         )
         .await?;
     let active_apps: std::collections::HashSet<Uuid> =
@@ -323,32 +326,30 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     app_ids: &[Uuid],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
-    // Integer-exact period PK (MAJOR-4): bind TIMESTAMPTZ directly rather than
-    // round-tripping the unix-seconds key through f64, so a claim and any
-    // re-drive resolve to the BYTE-IDENTICAL period_start.
-    let period_ts: DateTime<Utc> = Utc
-        .timestamp_opt(period_start, 0)
-        .single()
-        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {period_start}")))?;
+    // `period` is the first-of-month `billing_period` DATE (the claim key). Bound
+    // via `$N::date` on every write (the domain param OID rejects a bare
+    // NaiveDate); reads need no cast.
+    let period = period_date(period_start);
 
     let conn = state.registry.conn().await?;
 
-    // MAJOR-6: short-circuit BEFORE any pricing. If a COMPLETED run row already
-    // exists (stripe_invoice_id NOT NULL) this period is fully billed — do no
-    // pricing work at all. A NULL-invoice row is a crash-window remnant we still
-    // need to re-drive, so we fall through to pricing in that case only.
+    // MAJOR-6: short-circuit BEFORE any pricing. A `status='finalized'` invoice
+    // for (creator, period) means this period is fully billed — do no pricing
+    // work at all (== old `stripe_invoice_id NOT NULL`). A `draft` row is a
+    // crash-window remnant we re-drive, so we fall through to pricing then.
     let existing = conn
         .query(
-            "SELECT stripe_invoice_id FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = $2",
-            &[creator_id, &period_ts],
+            "SELECT id, status FROM zeroship.invoices \
+             WHERE creator_id = $1 AND period = $2::date",
+            &[creator_id, &period],
         )
         .await?;
-    let run_exists = !existing.is_empty();
+    let existing_invoice_id: Option<String> = existing.first().map(|r| r.get::<_, String>("id"));
     let invoice_done = existing
         .first()
-        .and_then(|r| r.get::<_, Option<String>>("stripe_invoice_id"))
-        .is_some();
+        .map(|r| r.get::<_, String>("status"))
+        .as_deref()
+        == Some("finalized");
     if invoice_done {
         return Ok(false);
     }
@@ -362,8 +363,10 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         Err(e) => return Err(RegistryError::Database(format!("get_customer: {e}"))),
     };
 
-    // Price each owned app's closed-period usage.
-    let mut lines: Vec<(Uuid, String, u64)> = Vec::new();
+    // Price each owned app's closed-period usage, capturing the SNAPSHOT inputs
+    // (usage, applied weights, included_units, resolved FX, base fee, authoritative
+    // amount) so a finalized line replays bit-for-bit via charge_cents.
+    let mut lines: Vec<BilledLine> = Vec::new();
     let mut total_cents: u64 = 0;
     for app_id in app_ids {
         // Resolve the app's plan (FK into the catalog). A missing/poison plan is
@@ -402,8 +405,27 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         if breakdown.total_cents == 0 {
             continue;
         }
+        // The FX actually charged (resolved on `price`; always Some here because
+        // charge_cents succeeded). Frozen onto the line.
+        let charged_fx = price.fx_pico_cents_per_unit.unwrap_or(0);
+        // Only the weights ACTUALLY APPLIED to this app's usage metrics are
+        // frozen (a metric with no weight contributes 0 CU — recording the whole
+        // global table would bloat every snapshot and obscure what was applied).
+        let applied_weights: std::collections::BTreeMap<String, MetricWeight> = usage
+            .keys()
+            .filter_map(|m| weights.get(m).map(|w| (m.clone(), *w)))
+            .collect();
         let desc = format!("Infra usage — app {app_id} — {}", month_label(period_start));
-        lines.push((*app_id, desc, breakdown.total_cents));
+        lines.push(BilledLine {
+            app_id: *app_id,
+            desc,
+            amount: breakdown.total_cents,
+            usage,
+            applied_weights,
+            included_units: price.included_units,
+            fx_pico_cents_per_unit: charged_fx,
+            base_fee_cents: price.base_fee_cents,
+        });
         total_cents = total_cents.saturating_add(breakdown.total_cents);
     }
 
@@ -433,77 +455,117 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         ))
     })?;
 
-    // Layer 1: claim the run BEFORE any Stripe call (only if not already
-    // present). 0 rows ⇒ already claimed by a prior tick that may have crashed
-    // mid-Stripe — we re-drive using the per-app ledger to avoid double-posting.
-    if !run_exists {
-        conn.execute(
-            "INSERT INTO zeroship.billing_runs (creator_id, period_start, amount_cents) \
-             VALUES ($1, $2, $3) \
-             ON CONFLICT (creator_id, period_start) DO NOTHING",
-            &[creator_id, &period_ts, &amount_i64],
-        )
-        .await?;
-    } else {
-        tracing::warn!(
-            creator_id = %creator_id,
-            "billing_reconcile: re-driving a run with NULL stripe_invoice_id (crash-window recovery)"
-        );
-    }
+    // Layer 1: claim the invoice (draft) BEFORE any Stripe call. ON CONFLICT
+    // (creator_id, period) DO NOTHING is the no-double-bill claim. We then read
+    // back the id either way (a re-drive reuses the existing draft).
+    let invoice_id = match existing_invoice_id {
+        Some(id) => {
+            tracing::warn!(
+                creator_id = %creator_id,
+                "billing_reconcile: re-driving an existing draft invoice (crash-window recovery)"
+            );
+            id
+        }
+        None => {
+            let new_id = zeroship_core::typed_id::new_invoice_id();
+            conn.execute(
+                "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+                 VALUES ($1, $2, $3::date, 'draft') \
+                 ON CONFLICT (creator_id, period) DO NOTHING",
+                &[&new_id, creator_id, &period],
+            )
+            .await?;
+            // ON CONFLICT may have no-op'd if a concurrent drive claimed it first
+            // (the advisory lock makes this rare, but be exact): re-read the id.
+            conn.query(
+                "SELECT id FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date",
+                &[creator_id, &period],
+            )
+            .await?
+            .first()
+            .map(|r| r.get::<_, String>("id"))
+            .ok_or_else(|| {
+                RegistryError::Database("billing_reconcile: invoice claim vanished".to_string())
+            })?
+        }
+    };
 
-    // CRIT-1 (claim-then-call): the per-app ledger is the DURABLE double-bill
-    // guard, and the DURABLE INTENT must PRECEDE the irreversible Stripe POST.
-    // We load the current ledger state for this (creator, period):
-    //   * `stripe_item_id IS NOT NULL` ⇒ the item DEFINITELY posted ⇒ skip.
-    //   * `stripe_item_id IS NULL`     ⇒ intent was recorded but the outcome is
-    //     unknown (a prior drive crashed between the POST and the ledger commit).
-    //     We do NOT blindly re-POST: within 24h the deterministic Idempotency-Key
-    //     replays the same item; past 24h (key expired) we LOOK UP the item by
-    //     its deterministic metadata key and adopt it if present, else post fresh.
+    // CRIT-1 (claim-then-call): the per-app `invoice_lines` row is the DURABLE
+    // double-bill guard, and the DURABLE INTENT (the line + its frozen snapshot)
+    // must PRECEDE the irreversible Stripe POST. Presence of a
+    // `billing_line_provider_refs` row (a real composite FK → the line) == old
+    // `stripe_item_id NOT NULL`. Load the current per-app posted set.
     let posted_rows = conn
         .query(
-            "SELECT app_id, stripe_item_id FROM zeroship.billing_run_items \
-             WHERE creator_id = $1 AND period_start = $2",
-            &[creator_id, &period_ts],
+            "SELECT app_id FROM zeroship.billing_line_provider_refs \
+             WHERE invoice_id = $1 AND provider = 'stripe' AND ref_kind = 'invoice_item'",
+            &[&invoice_id],
         )
         .await?;
-    // app_id → Some(stripe_item_id) if confirmed-posted, None if intent-only.
-    let mut ledger_state: std::collections::HashMap<Uuid, Option<String>> =
-        std::collections::HashMap::new();
-    for r in &posted_rows {
-        ledger_state.insert(r.get::<_, Uuid>("app_id"), r.get::<_, Option<String>>("stripe_item_id"));
-    }
+    let posted: std::collections::HashSet<Uuid> =
+        posted_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+    // Which lines already have an intent (snapshot) row written?
+    let line_rows = conn
+        .query(
+            "SELECT app_id FROM zeroship.invoice_lines WHERE invoice_id = $1",
+            &[&invoice_id],
+        )
+        .await?;
+    let line_exists: std::collections::HashSet<Uuid> =
+        line_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
 
-    let period = Period {
+    let period_window = Period {
         start: period_start,
         end: period_end_unix(period_start),
     };
-    for (app_id, desc, amount) in &lines {
-        match ledger_state.get(app_id) {
-            // Confirmed posted in a prior drive — skip outright (no re-POST).
-            Some(Some(_)) => continue,
-            // Intent recorded but post unconfirmed (crash mid-call) — adopt or
-            // post fresh below.
-            Some(None) => {}
-            // No ledger row yet — write the durable INTENT row BEFORE the Stripe
-            // call (claim-then-call). A crash after this INSERT but before the
-            // POST leaves a NULL-`stripe_item_id` row we reconcile on re-drive.
-            None => {
-                let item_amount = i64::try_from(*amount).map_err(|_| {
-                    RegistryError::Database(format!(
-                        "billing_reconcile: item amount {amount} exceeds i64::MAX — refusing to clamp"
-                    ))
-                })?;
-                conn.execute(
-                    "INSERT INTO zeroship.billing_run_items \
-                       (creator_id, period_start, app_id, stripe_item_id, amount_cents) \
-                     VALUES ($1, $2, $3, NULL, $4) \
-                     ON CONFLICT (creator_id, period_start, app_id) DO NOTHING",
-                    &[creator_id, &period_ts, app_id, &item_amount],
-                )
-                .await?;
-            }
+    for line in &lines {
+        let app_id = &line.app_id;
+        // Confirmed posted in a prior drive — skip outright (no re-POST).
+        if posted.contains(app_id) {
+            continue;
         }
+        let intent_only = line_exists.contains(app_id);
+
+        // SNAPSHOT-ONTO-LINE before the POST: write (or refresh, while still
+        // draft) the line carrying the frozen charge inputs + authoritative
+        // amount. The line trigger keeps these mutable until the parent finalizes.
+        let item_amount = i64::try_from(line.amount).map_err(|_| {
+            RegistryError::Database(format!(
+                "billing_reconcile: item amount {} exceeds i64::MAX — refusing to clamp",
+                line.amount
+            ))
+        })?;
+        let included_i64 = i64::try_from(line.included_units).unwrap_or(i64::MAX);
+        let fx_i64 = i64::try_from(line.fx_pico_cents_per_unit).unwrap_or(i64::MAX);
+        let base_i64 = i64::try_from(line.base_fee_cents).unwrap_or(i64::MAX);
+        let usage_json = serde_json::to_value(&line.usage)
+            .map_err(|e| RegistryError::Database(format!("usage_snapshot serialize: {e}")))?;
+        let weights_json = serde_json::to_value(&line.applied_weights)
+            .map_err(|e| RegistryError::Database(format!("weights_snapshot serialize: {e}")))?;
+        conn.execute(
+            "INSERT INTO zeroship.invoice_lines \
+               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
+                amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (invoice_id, app_id) DO UPDATE SET \
+               included_units = EXCLUDED.included_units, \
+               fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit, \
+               base_fee_cents = EXCLUDED.base_fee_cents, \
+               amount_cents = EXCLUDED.amount_cents, \
+               usage_snapshot = EXCLUDED.usage_snapshot, \
+               weights_snapshot = EXCLUDED.weights_snapshot",
+            &[
+                &invoice_id,
+                app_id,
+                &included_i64,
+                &fx_i64,
+                &base_i64,
+                &item_amount,
+                &usage_json,
+                &weights_json,
+            ],
+        )
+        .await?;
 
         let item_key = invoice_item_idempotency_key(creator_id, app_id, period_start);
 
@@ -511,7 +573,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         // by its deterministic metadata key (closes the >24h window where the
         // Idempotency-Key no longer dedupes). If found, we did NOT re-POST.
         let mut item_id: Option<String> = None;
-        if matches!(ledger_state.get(app_id), Some(None)) {
+        if intent_only {
             item_id = stripe
                 .find_invoice_item_by_key(&customer, &item_key)
                 .await
@@ -526,45 +588,48 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         }
 
         // Not adopted ⇒ POST it. Within 24h the deterministic Idempotency-Key
-        // makes this replay-safe; past 24h the intent row + the metadata lookup
+        // makes this replay-safe; past 24h the line intent + the metadata lookup
         // above already ruled out an existing item, so a fresh POST is correct.
         let item_id = match item_id {
             Some(id) => id,
             None => stripe
                 .create_invoice_item(
-                    &customer, *amount, BILLING_CURRENCY, desc, period, &item_key, &item_key,
+                    &customer, line.amount, BILLING_CURRENCY, &line.desc, period_window, &item_key,
+                    &item_key,
                 )
                 .await
                 .map_err(|e| RegistryError::Database(format!("create_invoice_item: {e}")))?,
         };
 
-        // Confirm the post in the ledger (fills the NULL intent row's
-        // stripe_item_id). A crash AFTER the POST but BEFORE this UPDATE leaves
-        // the intent row NULL — the next drive adopts via the metadata lookup, so
-        // the item is still posted AT MOST ONCE.
+        // Confirm the post: write the line provider-ref (the real composite FK ⇒
+        // a malformed key is rejected at write). A crash AFTER the POST but BEFORE
+        // this INSERT leaves the line with no ref — the next drive adopts via the
+        // metadata lookup, so the item is still posted AT MOST ONCE.
         conn.execute(
-            "UPDATE zeroship.billing_run_items SET stripe_item_id = $4 \
-             WHERE creator_id = $1 AND period_start = $2 AND app_id = $3",
-            &[creator_id, &period_ts, app_id, &item_id],
+            "INSERT INTO zeroship.billing_line_provider_refs \
+               (invoice_id, app_id, provider, ref_kind, external_id) \
+             VALUES ($1, $2, 'stripe', 'invoice_item', $3) \
+             ON CONFLICT (invoice_id, app_id, provider, ref_kind) DO NOTHING",
+            &[&invoice_id, app_id, &item_id],
         )
         .await?;
     }
 
     // C2 (persist-draft-before-finalize): create the draft invoice (which sweeps
-    // the customer's pending items), persist its id IMMEDIATELY, THEN finalize.
-    // On a re-drive, if a draft id is already persisted, finalize THAT existing
-    // draft (which carries the real line items) rather than creating a new empty
-    // draft — which a >24h create-key-expired re-drive would otherwise finalize
-    // at $0 (under-bill).
+    // the customer's pending items), persist its id IMMEDIATELY (as a
+    // `draft_invoice` provider-ref), THEN finalize. On a re-drive, if a draft id
+    // is already persisted, finalize THAT existing draft (which carries the real
+    // line items) rather than creating a new empty draft — which a >24h
+    // create-key-expired re-drive would otherwise finalize at $0 (under-bill).
     let existing_draft: Option<String> = conn
         .query(
-            "SELECT draft_invoice_id FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = $2",
-            &[creator_id, &period_ts],
+            "SELECT external_id FROM zeroship.billing_provider_refs \
+             WHERE invoice_id = $1 AND provider = 'stripe' AND ref_kind = 'draft_invoice'",
+            &[&invoice_id],
         )
         .await?
         .first()
-        .and_then(|r| r.get::<_, Option<String>>("draft_invoice_id"));
+        .map(|r| r.get::<_, String>("external_id"));
 
     let draft_id = match existing_draft {
         Some(id) => {
@@ -581,33 +646,63 @@ pub(crate) async fn bill_creator<S: StripeApi>(
                 .await
                 .map_err(|e| RegistryError::Database(format!("create_invoice: {e}")))?;
             // Persist the draft id BEFORE finalize. A crash here (post-create,
-            // pre-finalize) is recovered by the re-drive finding this id above.
+            // pre-finalize) is recovered by the re-drive finding this ref above.
             conn.execute(
-                "UPDATE zeroship.billing_runs SET draft_invoice_id = $3 \
-                 WHERE creator_id = $1 AND period_start = $2",
-                &[creator_id, &period_ts, &id],
+                "INSERT INTO zeroship.billing_provider_refs \
+                   (invoice_id, provider, ref_kind, external_id) \
+                 VALUES ($1, 'stripe', 'draft_invoice', $2) \
+                 ON CONFLICT (invoice_id, provider, ref_kind) DO NOTHING",
+                &[&invoice_id, &id],
             )
             .await?;
             id
         }
     };
 
-    let invoice_id = stripe
+    let provider_invoice_id = stripe
         .finalize_invoice(&draft_id)
         .await
         .map_err(|e| RegistryError::Database(format!("finalize_invoice: {e}")))?;
 
-    // Record the finalized Stripe invoice id + amount on the (already-claimed)
-    // run row.
+    // FINALIZE-IN-ONE-UPDATE: write subtotal/credit/tax/total/status/finalized_at
+    // in ONE statement so the `invoice_total_balances` CHECK
+    // (total = subtotal − credit + tax) never sees a half-written row. Credit/tax
+    // are 0 at launch ⇒ total == subtotal == amount_i64. The immutability trigger
+    // then freezes the invoice + its lines.
     conn.execute(
-        "UPDATE zeroship.billing_runs \
-         SET stripe_invoice_id = $3, amount_cents = $4 \
-         WHERE creator_id = $1 AND period_start = $2",
-        &[creator_id, &period_ts, &invoice_id, &amount_i64],
+        "UPDATE zeroship.invoices \
+         SET subtotal_cents = $2, credit_cents = 0, tax_cents = 0, total_cents = $2, \
+             status = 'finalized', finalized_at = NOW(), updated_at = NOW() \
+         WHERE id = $1",
+        &[&invoice_id, &amount_i64],
+    )
+    .await?;
+
+    // Record the finalized provider invoice id (the seam — core invoices carry no
+    // provider ids).
+    conn.execute(
+        "INSERT INTO zeroship.billing_provider_refs \
+           (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'invoice', $2) \
+         ON CONFLICT (invoice_id, provider, ref_kind) DO NOTHING",
+        &[&invoice_id, &provider_invoice_id],
     )
     .await?;
 
     Ok(true)
+}
+
+/// One priced per-app line during a reconcile, carrying the frozen charge inputs
+/// (the snapshot) so a finalized invoice replays bit-for-bit.
+struct BilledLine {
+    app_id: Uuid,
+    desc: String,
+    amount: u64,
+    usage: std::collections::HashMap<String, i64>,
+    applied_weights: std::collections::BTreeMap<String, MetricWeight>,
+    included_units: u64,
+    fx_pico_cents_per_unit: u64,
+    base_fee_cents: u64,
 }
 
 /// Resolve the apps owned by ONE creator (the per-creator slice of the same

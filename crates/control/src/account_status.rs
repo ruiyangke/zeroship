@@ -137,6 +137,19 @@ impl AccountStatusStore {
             .conn()
             .await
             .map_err(|e| StripeError::Db(format!("{e}")))?;
+        // PARENT-FIRST (schema redesign): `creator_billing_status.creator_id` now
+        // FKs `creator_billing(creator_id)`, not `users` directly. A payment
+        // failure can be the FIRST billing signal for a creator (no prior
+        // `creator_billing` identity row — e.g. they never ran `billing/setup`),
+        // so ensure the FK parent exists before the status UPSERT or the INSERT
+        // FK-violates. Idempotent (ON CONFLICT DO NOTHING).
+        conn.execute(
+            "INSERT INTO zeroship.creator_billing (creator_id) \
+             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
         // UPSERT with a guarded transition. A `prior` CTE snapshots the
         // pre-write state (the INSERT…ON CONFLICT can't see its own old row in
         // RETURNING), so we can tell a genuine active→past_due edge from a no-op.

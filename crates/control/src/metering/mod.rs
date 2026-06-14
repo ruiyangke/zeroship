@@ -29,13 +29,22 @@
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{Datelike, NaiveDate, TimeZone, Utc};
 use uuid::Uuid;
 use zeroship_core::types::{AppUsage, UsageReport};
 
 use crate::registry::{Registry, RegistryError};
 
 pub mod provider;
+
+/// Per-`owner_app` cap on auto-registered `custom` metrics in `billing_metrics`.
+/// Bounds attacker-influenced cardinality: an app emitting `usage.custom` keys
+/// can register at most this many distinct custom metrics. A NEW custom metric
+/// beyond the cap is dropped-with-warn (`custom_metric_cap_refused`) — its delta
+/// is NOT applied (so it can never FK-abort the report) and the rest of the
+/// report commits normally (at-least-once liveness). Already-registered custom
+/// metrics keep flowing (they only bump `last_seen_at`).
+pub const MAX_CUSTOM_METRICS_PER_APP: i64 = 100;
 
 /// Compute the calendar-month period start (00:00:00 UTC on the 1st) for a
 /// given unix-seconds instant, as unix seconds. This is the aggregation
@@ -57,17 +66,24 @@ pub fn current_period_start_unix() -> i64 {
     period_start_unix(Utc::now().timestamp())
 }
 
-/// Convert a unix-seconds period start to a `TIMESTAMPTZ`-bindable
-/// `DateTime<Utc>`. Used so the `period_start` column is bound as an INTEGER
-/// timestamp (matching `billing_reconcile`'s deliberate move off the f64
-/// `to_timestamp($::double precision)` idiom) rather than round-tripping the
-/// key through f64. At calendar-month magnitudes the two are numerically
-/// identical; binding the integer timestamp keeps every period-keyed write/read
-/// on ONE representation.
-pub(crate) fn period_ts(period_start_unix_secs: i64) -> chrono::DateTime<Utc> {
-    Utc.timestamp_opt(period_start_unix_secs, 0)
+/// Convert a unix-seconds period start to the `billing_period` DATE value: the
+/// first-of-month `NaiveDate` the `period` column (a `zeroship.billing_period`
+/// DATE domain) holds. This is THE period representation written to every
+/// period-keyed billing table — killing the old `f64`/`TIMESTAMPTZ` round-trip.
+///
+/// BIND SITE NOTE: the `period` column is a DATE *domain*, so the compio-postgres
+/// driver infers the parameter type as the domain OID, which `NaiveDate`'s
+/// `ToSql::accepts` rejects. Every WRITE therefore binds via an explicit
+/// `$N::date` cast (the date→domain assignment cast then applies). READs need no
+/// cast — Postgres reports a domain column's type as its base DATE in the row
+/// description, so `NaiveDate`'s `FromSql` accepts it directly.
+pub(crate) fn period_date(period_start_unix_secs: i64) -> NaiveDate {
+    let dt = Utc
+        .timestamp_opt(period_start_unix_secs, 0)
         .single()
-        .unwrap_or_else(Utc::now)
+        .unwrap_or_else(Utc::now);
+    NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
+        .unwrap_or_else(|| Utc::now().date_naive().with_day(1).unwrap_or(dt.date_naive()))
 }
 
 /// Iterate an `AppUsage` as `(metric, delta)` pairs — the five fixed
@@ -236,20 +252,43 @@ impl Metering {
         let is_new = !inserted.is_empty();
 
         if is_new {
-            // 2. Apply deltas — UPSERT add-to-total per metric. period_start is
-            // bound as an INTEGER TIMESTAMPTZ (converging on
-            // billing_reconcile's deliberate move off the f64
-            // `to_timestamp($::double precision)` idiom).
-            let period_ts = period_ts(period_start_unix_secs);
+            // 2. Apply deltas — UPSERT add-to-total per metric. `period` is the
+            // first-of-month DATE (the `billing_period` domain); bound via an
+            // explicit `$N::date` cast (the driver infers a domain param OID
+            // that NaiveDate's ToSql rejects — see `period_date`).
+            let period = period_date(period_start_unix_secs);
             for (app_id, usage) in &report.counters {
-                for (metric, delta) in usage_deltas(usage) {
+                // FK-ABORT GUARD (Key flow A): every `usage_aggregates.metric`
+                // FKs `billing_metrics(metric) ON DELETE RESTRICT`, so a metric
+                // must be cataloged BEFORE its aggregate UPSERT or the whole
+                // report tx FK-aborts (and at-least-once retries can never make
+                // progress). Platform/primitive metrics are seeded; custom SDK
+                // metrics auto-register here — capped per `owner_app`. A NEW
+                // custom metric beyond the cap is REFUSED (not inserted): we then
+                // DROP its delta (`custom_metric_cap_refused`) so it never reaches
+                // the FK-guarded UPSERT, and the rest of the report still applies.
+                let deltas = usage_deltas(usage);
+                let resolved =
+                    Self::register_custom_metrics(&tx, app_id, &deltas).await?;
+                for (metric, delta) in deltas {
+                    if !resolved.contains(&metric) {
+                        // Refused at the cap (or otherwise unresolved): dropped
+                        // with a warn, NOT applied — preserves ingest liveness.
+                        tracing::warn!(
+                            app_id = %app_id,
+                            metric = %metric,
+                            billing_event = "custom_metric_cap_refused",
+                            "metering: custom metric refused at per-app cap — dropping its delta (report still applies)"
+                        );
+                        continue;
+                    }
                     tx.execute(
                         "INSERT INTO zeroship.usage_aggregates AS u \
-                           (app_id, period_start, metric, total, updated_at) \
-                         VALUES ($1, $2, $3, $4, NOW()) \
-                         ON CONFLICT (app_id, period_start, metric) \
+                           (app_id, period, metric, total, updated_at) \
+                         VALUES ($1, $2::date, $3, $4, NOW()) \
+                         ON CONFLICT (app_id, period, metric) \
                          DO UPDATE SET total = u.total + EXCLUDED.total, updated_at = NOW()",
-                        &[app_id, &period_ts, &metric, &delta],
+                        &[app_id, &period, &metric, &delta],
                     )
                     .await?;
                 }
@@ -264,6 +303,77 @@ impl Metering {
             duplicate: !is_new,
             high_water_sequence: hw,
         })
+    }
+
+    /// Register (or bump the GC clock of) the `custom` metrics in `deltas` for
+    /// `owner_app`, and return the SET of `deltas` metrics that resolve in
+    /// `billing_metrics` AFTER this step — i.e. the metrics whose aggregate
+    /// UPSERT will not FK-abort.
+    ///
+    /// Platform/primitive metrics (the fixed counters) are always seeded, so
+    /// they resolve unconditionally. A custom metric is resolved iff it is
+    /// already cataloged OR it registers now; a NEW custom metric that would push
+    /// `owner_app` past [`MAX_CUSTOM_METRICS_PER_APP`] is REFUSED (capped) and is
+    /// therefore NOT in the returned set — the caller drops its delta with a warn
+    /// rather than FK-aborting the whole report.
+    ///
+    /// Each registration is `INSERT … ON CONFLICT (metric) DO UPDATE SET
+    /// last_seen_at = NOW()`, so an already-known custom metric just bumps its GC
+    /// clock. The per-app cap is enforced by an `INSERT … SELECT … WHERE
+    /// (count of this app's custom rows) < cap` guard, made race-safe inside the
+    /// report tx.
+    async fn register_custom_metrics<C: compio_postgres::GenericClient + Sync>(
+        conn: &C,
+        owner_app: &Uuid,
+        deltas: &[(String, i64)],
+    ) -> Result<std::collections::HashSet<String>, RegistryError> {
+        let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (metric, _) in deltas {
+            // Already cataloged (platform/primitive seed OR a prior custom
+            // registration)? Then it resolves; bump last_seen_at if it is a
+            // custom row owned by this app (cheap, idempotent) and move on.
+            let existing = conn
+                .query(
+                    "SELECT kind::text AS kind FROM zeroship.billing_metrics WHERE metric = $1",
+                    &[metric],
+                )
+                .await?;
+            if let Some(row) = existing.first() {
+                let kind: String = row.get("kind");
+                if kind == "custom" {
+                    // Bump the GC clock; ON CONFLICT keeps it idempotent.
+                    conn.execute(
+                        "UPDATE zeroship.billing_metrics SET last_seen_at = NOW() WHERE metric = $1",
+                        &[metric],
+                    )
+                    .await?;
+                }
+                resolved.insert(metric.clone());
+                continue;
+            }
+            // Not cataloged ⇒ a NEW custom metric. Register it ONLY if this app is
+            // under its cap. The guarded INSERT counts the app's existing custom
+            // rows in the same statement, so two concurrent first-sights of the
+            // same app can't both slip past the cap (serialized by the report tx).
+            let inserted = conn
+                .query(
+                    "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app, last_seen_at) \
+                     SELECT $1, 'custom', 'unit', $2, NOW() \
+                     WHERE (SELECT COUNT(*) FROM zeroship.billing_metrics \
+                              WHERE owner_app = $2 AND kind = 'custom') < $3 \
+                     ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW() \
+                     RETURNING metric",
+                    &[metric, owner_app, &MAX_CUSTOM_METRICS_PER_APP],
+                )
+                .await?;
+            if inserted.is_empty() {
+                // Cap reached — refused. Leave it OUT of `resolved` so the caller
+                // drops the delta (no FK abort).
+                continue;
+            }
+            resolved.insert(metric.clone());
+        }
+        Ok(resolved)
     }
 
     /// The maximum applied sequence for a worker (0 if none). A producer
@@ -304,8 +414,8 @@ impl Metering {
         let rows = conn
             .query(
                 "SELECT metric, total FROM zeroship.usage_aggregates \
-                 WHERE app_id = $1 AND period_start = $2",
-                &[app_id, &period_ts(period_start_unix_secs)],
+                 WHERE app_id = $1 AND period = $2::date",
+                &[app_id, &period_date(period_start_unix_secs)],
             )
             .await?;
         let mut out = HashMap::new();
@@ -336,9 +446,9 @@ impl Metering {
         let rows = conn
             .query(
                 "SELECT total FROM zeroship.usage_aggregates \
-                 WHERE app_id = $1 AND period_start = $2 \
+                 WHERE app_id = $1 AND period = $2::date \
                    AND metric = $3",
-                &[app_id, &period_ts(period_start_unix_secs), &metric],
+                &[app_id, &period_date(period_start_unix_secs), &metric],
             )
             .await?;
         Ok(rows.first().map_or(0, |r| r.get("total")))

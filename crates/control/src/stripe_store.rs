@@ -411,26 +411,32 @@ impl StripeStore {
     // `billing/setup`. (billing PR6, changeset 0040.)
     // ------------------------------------------------------------------
 
-    /// The creator's platform Stripe Customer id (`cus_…`), or `None` if no row
-    /// exists yet or the row has no customer id.
+    /// The creator's platform Stripe Customer id (`cus_…`), or `None` if no ref
+    /// exists yet. The id now lives in the provider-ref side table
+    /// `billing_customer_refs` (the Native invoice rail AND Stripe Billing Meters
+    /// share the single `provider='stripe'` ref).
     pub async fn get_customer(&self, creator_id: Uuid) -> Result<Option<String>, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT stripe_customer_id FROM zeroship.creator_billing WHERE creator_id = $1",
+                "SELECT external_id FROM zeroship.billing_customer_refs \
+                 WHERE creator_id = $1 AND provider = 'stripe'",
                 &[&creator_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(rows
-            .first()
-            .and_then(|r| r.get::<_, Option<String>>("stripe_customer_id")))
+        Ok(rows.first().map(|r| r.get::<_, String>("external_id")))
     }
 
     /// Reverse-resolve a creator from their platform Customer id
     /// (`cus_…`). Used by `invoice.payment_failed` ingest when the event
     /// carries no `metadata.creator_id` but does carry the `customer` (PR6
     /// Stream-1 infra invoices). Returns `None` if no creator owns that customer.
+    ///
+    /// The caller has NO provider in hand — a provider customer id (`cus_…`) is
+    /// globally unique, so the lookup is `WHERE external_id = $1`. The standalone
+    /// `UNIQUE(external_id)` constraint on `billing_customer_refs` makes this
+    /// providerless probe constraint-guaranteed-singular.
     pub async fn get_creator_by_customer(
         &self,
         stripe_customer_id: &str,
@@ -438,7 +444,7 @@ impl StripeStore {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT creator_id FROM zeroship.creator_billing WHERE stripe_customer_id = $1",
+                "SELECT creator_id FROM zeroship.billing_customer_refs WHERE external_id = $1",
                 &[&stripe_customer_id],
             )
             .await
@@ -446,23 +452,40 @@ impl StripeStore {
         Ok(rows.first().map(|r| r.get::<_, Uuid>("creator_id")))
     }
 
-    /// Upsert the creator's platform Customer id. Idempotent: re-setting the
-    /// same id is a no-op write. The row is created if absent.
+    /// Upsert the creator's platform Customer id. A 2-statement transaction: the
+    /// `creator_billing` identity row (the FK parent) is created first, THEN the
+    /// `billing_customer_refs(creator_id,'stripe',cus_…)` mapping. Idempotent:
+    /// re-setting the same id is a no-op write (ON CONFLICT). The customer id no
+    /// longer lives on `creator_billing` — it is fully relocated to the side table.
     pub async fn set_customer(
         &self,
         creator_id: Uuid,
         stripe_customer_id: &str,
     ) -> Result<(), StripeError> {
-        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
-        conn.execute(
-            "INSERT INTO zeroship.creator_billing (creator_id, stripe_customer_id) \
-             VALUES ($1, $2) \
-             ON CONFLICT (creator_id) DO UPDATE \
-                SET stripe_customer_id = EXCLUDED.stripe_customer_id, updated_at = NOW()",
+        let mut conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        // 1. Ensure the identity (FK parent) exists.
+        tx.execute(
+            "INSERT INTO zeroship.creator_billing (creator_id) \
+             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        // 2. Map the customer ref. ON CONFLICT (creator_id, provider) keeps it
+        //    idempotent on re-set.
+        tx.execute(
+            "INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id) \
+             VALUES ($1, 'stripe', $2) \
+             ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id",
             &[&creator_id, &stripe_customer_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
+        tx.commit().await.map_err(|e| StripeError::Db(e.to_string()))?;
         Ok(())
     }
 
