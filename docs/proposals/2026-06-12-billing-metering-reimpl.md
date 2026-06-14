@@ -1408,3 +1408,390 @@ so the implementation blueprint is written against the *corrected* code:
    reconciler; how `Native` retains enforcement; per-deployment wiring) — dual-reviewed;
 2. implement `Native` (refactor current behind the trait) + `Stripe` (Billing
    Meters) + `OpenMeter`, TDD with a faithful mock per provider.
+
+---
+
+## Pluggable metering — implementation blueprint
+
+> **Status:** BLUEPRINT (design only — no implementation code). Implements the
+> "Pluggable metering providers — design direction (confirmed 2026-06-13)"
+> section above, resolved against the CURRENT, just-hardened code
+> (`d7ea29b2` C1/C2 + `d3a7d1ea` MAJOR/MINOR). Worktree `appbase-billing` @
+> `feat/billing-metering`. Latest changeset `0042` (`0038`–`0042` already
+> landed for plans/spend/billing/metric-weights/pricing-config). New changesets
+> here start at `0043`.
+>
+> **The single load-bearing finding** (everything below follows from it): the
+> reconciler ALREADY parameterises its Stripe surface behind the `StripeApi`
+> trait and is ALREADY driven by a `tick_with<S: StripeApi>(state, &stripe,
+> now)` seam (`billing_reconcile.rs:167`). The pluggable layer does NOT rewrite
+> the reconciler — it lifts the *whole* `tick_with` body (group-by-owner →
+> price → invoice) to become the **Native** provider's `invoice()`, and adds two
+> sibling providers that differ only in *where CU goes*. The hardened C1/C2 +
+> MAJOR crash-window logic moves verbatim inside `NativeProvider::invoice` (it is
+> not re-derived).
+
+### M0 — The two layers, and why CU is the only thing that crosses
+
+`usage_aggregates` stays **raw-metric-keyed** (`0037`: `PK (app_id, period_start,
+metric)`) — **no schema change, no provider touches it**. The neutral quantity
+that crosses to a provider is **compute units (CU)**, and CU is *derived* from
+the raw totals via the global weight table:
+
+```text
+raw usage_aggregates (per metric)  ──pricing::total_units(weights, usage)──►  CU
+                                   ──pricing::charge_cents(price,usage,wt)──►  cents
+```
+
+Both `total_units` and `charge_cents` already exist and are pure
+(`pricing.rs:253`, `:321`). So a provider that wants "CU" calls `total_units`;
+a provider that wants "cents" calls `charge_cents`. **No CU column is added** —
+re-weightability (the whole point of Refactor B) is preserved.
+
+Two contracts split the layers (both new, both in control):
+
+- **`UsageLedger`** — the READ contract over the local ledger (metering = fact):
+  ```rust
+  // crates/control/src/metering/ledger.rs (or a method-trait on Metering)
+  trait UsageLedger {
+      async fn period_totals(&self, app: Uuid, period_start: i64)
+          -> Result<HashMap<String,i64>, RegistryError>;
+  }
+  ```
+  This is `Metering::period_totals` (`metering.rs:284`) promoted to a trait so
+  enforcement + every provider read the SAME local fact. **No behaviour change**
+  — `Metering` impls it; the existing inherent method stays (or becomes the impl
+  body). This is the seam an external meter could one day back; today only the
+  PG impl exists.
+- **`MeteringProvider`** — the WRITE/EXPORT + INVOICE contract (billing = policy):
+  the four verbs below. The provider decides where CU *also* goes; it never owns
+  the local ledger.
+
+### M1 — The `MeteringProvider` trait and its value types
+
+Home: **NEW `crates/control/src/metering/provider/mod.rs`** (a submodule tree
+under the existing `metering` module — `mod.rs`, `native.rs`, `stripe_meters.rs`,
+`openmeter.rs`, `types.rs`). Lives in `control` (not `core`): it is control-plane
+policy that pulls `cyper` + the catalog + `stripe_client`, none of which belong in
+the foundational `core` crate (same reasoning that kept `crates/metering` out of
+`core`).
+
+```rust
+// crates/control/src/metering/provider/types.rs (design)
+pub struct CustomerRef(pub String);          // Native/Stripe: "cus_…"; OpenMeter: the subject id
+pub struct InvoiceRef(pub Option<String>);   // "in_…" for Native; None when the provider self-invoices
+pub struct BillingPeriod { pub start: i64, pub end: i64 } // unix secs; == stripe_client::Period
+pub struct CreatorBilling {                  // what ensure_customer needs/returns
+    pub creator_id: Uuid,
+    pub email: String,
+    pub customer: Option<CustomerRef>,        // already-saved cus_… if any
+}
+
+// crates/control/src/metering/provider/mod.rs (design)
+#[allow(async_fn_in_trait)]
+pub trait MeteringProvider {
+    /// Ensure the provider knows this creator (Native/Stripe: a cus_…;
+    /// OpenMeter: a no-op, the subject is the app/creator id). Idempotent.
+    async fn ensure_customer(&self, creator: &CreatorBilling)
+        -> Result<CustomerRef, ProviderError>;
+
+    /// Forward this period's CU for one app. `compute_units` is the integer CU
+    /// from `pricing::total_units`. `idempotency_key` is the deterministic
+    /// per-(app,period) key. Native: NO-OP (usage is already local). Stripe:
+    /// POST /v1/billing/meter_events. OpenMeter: POST a CloudEvent.
+    async fn report_usage(
+        &self, customer: &CustomerRef, app_id: Uuid, period: BillingPeriod,
+        compute_units: u64, idempotency_key: &str,
+    ) -> Result<(), ProviderError>;
+
+    /// Close + bill the period for one creator. Native: the WHOLE current
+    /// reconciler body (price → invoice items → create+finalize, with C1/C2).
+    /// Stripe: NO-OP (Stripe self-invoices from meter_events). OpenMeter: NO-OP
+    /// (OpenMeter aggregates only — invoicing stays on the Native rail or
+    /// another billing backend).
+    async fn invoice(&self, creator: &CreatorBilling, period: BillingPeriod)
+        -> Result<InvoiceRef, ProviderError>;
+
+    /// Inbound webhook (signature-verify + mutate). Native/Stripe: the existing
+    /// Stripe webhook path. OpenMeter: a no-op (no inbound billing events).
+    async fn handle_webhook(&self, payload: &[u8], sig: &str)
+        -> Result<(), ProviderError>;
+}
+```
+
+**Relationship to `StripeApi` (explicit).** `StripeApi` is UNCHANGED — it stays
+the low-level Stripe REST surface (`create_customer`, `create_invoice_item`,
+`find_invoice_item_by_key`, `create_invoice`, `finalize_invoice`,
+`create_checkout_setup_session`). `MeteringProvider` sits ABOVE it:
+`NativeProvider` and `StripeMetersProvider` both *hold* a `StripeApi` and call
+into it; `OpenMeterProvider` does not. `StripeApi` is "how to talk to Stripe";
+`MeteringProvider` is "what the billing backend is". The new Stripe-Meters verb
+(`meter_events`) is added as a NEW method on `StripeApi` (M3), not a new trait —
+keeping one Stripe REST surface.
+
+`ProviderError` wraps `StripeError` + a transport variant + a `Config` variant;
+it maps into `RegistryError` at the cron boundary exactly as `StripeError` does
+today.
+
+### M2 — Native provider (default): wrap the current pipeline, zero behaviour change
+
+`NativeProvider { stripe: StripeClient, store: StripeStore, registry: Registry }`
+in `provider/native.rs`. It is the current code behind the trait:
+
+- `ensure_customer` = today's `billing_setup` customer path
+  (`stripe_handlers.rs:122` → `StripeApi::create_customer` + `StripeStore`
+  upsert). Returns the `cus_…`.
+- `report_usage` = **NO-OP** (`Ok(())`). Native enforcement + invoicing both read
+  the local ledger; nothing to forward. (This is *the* concrete statement of
+  "metering is never outsourced".)
+- `invoice` = **the entire `bill_creator` body** (`billing_reconcile.rs:290`)
+  moved verbatim — claim-then-call ledger (C1), create/finalize split (C2),
+  deterministic idempotency keys, the `find_invoice_item_by_key` adoption path,
+  the per-app pricing via `charge_cents`. **The hardened logic is not touched; it
+  is relocated.** `sweep` (group-by-owner) stays in the cron and calls
+  `provider.invoice(creator, period)` once per creator.
+- `handle_webhook` = the existing `webhook` handler
+  (`stripe_handlers.rs:497` — `verify_stripe_signature` + `setup_intent.succeeded`
+  + `invoice.payment_failed`), unchanged.
+
+**Refactor mechanics (low-risk):** `billing_reconcile.rs` keeps
+`run`/`tick`/`tick_with`/`sweep`; `bill_creator` is moved into
+`NativeProvider::invoice` and `sweep` calls `provider.invoice(...)` instead of
+`bill_creator(...)`. Under `--metering-provider native` the call graph is
+byte-identical to today; the integration tests (`reconcile_is_idempotent_per_period`,
+`crashed_run_with_null_invoice_id_is_redriven`, the owner-grouping + mock-Stripe
+suite) run UNCHANGED and are the regression gate proving no behaviour drift.
+
+### M3 — Stripe (Billing Meters) provider
+
+`StripeMetersProvider { stripe: StripeClient, store, registry }` in
+`provider/stripe_meters.rs`. Stripe owns aggregation + invoicing; we only push CU.
+
+- **NEW `StripeApi::create_meter_event`** (added to the existing trait + impl):
+  ```rust
+  async fn create_meter_event(
+      &self, event_name: &str, stripe_customer_id: &str,
+      value: u64, identifier: &str, timestamp: i64,
+  ) -> Result<(), StripeError>;
+  ```
+  POSTs `POST /v1/billing/meter_events` (form-encoded, same `post_form` idiom):
+  `event_name=<the Meter's event_name>`,
+  `payload[stripe_customer_id]=cus_…`, `payload[value]=<CU>`,
+  `identifier=<idempotency_key>` (Stripe dedupes on `identifier` within its
+  window), `timestamp=<period end or now>`. This is a DISTINCT surface from
+  `/v1/invoiceitems` — meter events feed a Stripe Meter, not an invoice item.
+- **Mapping (CU/FX/customer → Stripe Meters concepts):**
+  - **Customer** → the same platform `cus_…` (`ensure_customer` reuses the Native
+    customer path).
+  - **CU** → the meter-event `value`. One event per `(app, period)` carrying the
+    period's total CU (or incrementally per export sweep — M4).
+  - **FX** → a Stripe **metered Price** (unit_amount = FX per CU) on a Stripe
+    **Meter** + a **Subscription** that ties the customer to that price. The
+    Price/Meter/Subscription are OPERATOR-PROVISIONED once in the Stripe
+    dashboard (or a one-shot setup) and their ids are config
+    (`--stripe-meter-event-name`, `--stripe-meter-price-id`). We do NOT sync FX
+    per-plan into Stripe in v1 — a single fleet meter+price is the v1 shape
+    (per-plan Stripe prices is a documented follow-up). The plan's `fx` is
+    therefore IGNORED on this rail (Stripe's price is the price); the local
+    spend cap still uses our `fx` for enforcement (see M5).
+- `report_usage` → `create_meter_event(event_name, cus, compute_units, idem_key, ts)`.
+- `invoice` → **NO-OP** (`Ok(InvoiceRef(None))`). Stripe self-invoices from the
+  subscription + pushed meter events on its own billing cycle.
+- `handle_webhook` → reuse the existing verified webhook ingest; Stripe-Meters
+  adds no new mutation in v1 (invoice.payment_failed still audited).
+
+### M4 — OpenMeter provider
+
+`OpenMeterProvider { client: OpenMeterClient, base_url, token }` in
+`provider/openmeter.rs`. OpenMeter aggregates; it does NOT invoice.
+
+- **NEW `OpenMeterClient`** — a `cyper`-based zero-tokio adapter, SAME shape as
+  `StripeClient` (Bearer token, `compio::time::timeout`, base-url overridable for
+  the mock). Behind a `trait OpenMeterApi { async fn ingest_event(&self, ev:
+  &CloudEvent) -> Result<(), ProviderError>; }` for test injection.
+- **CloudEvents shape** (OpenMeter's ingest is CloudEvents/JSON to
+  `POST /api/v1/events`, `content-type: application/cloudevents+json`):
+  ```json
+  {
+    "specversion": "1.0",
+    "id": "<idempotency_key>",          // OpenMeter dedupes on id
+    "source": "zeroship-control",
+    "type": "compute_units",            // the OpenMeter meter's eventType
+    "time": "<RFC3339 period end>",
+    "subject": "<app_id or creator_id>",// the OpenMeter meter's subject
+    "data": { "value": <CU>, "app_id": "...", "period_start": <unix> }
+  }
+  ```
+- `ensure_customer` → no-op (OpenMeter has no customer object; the subject IS the
+  identity). Returns `CustomerRef(app_id|creator_id)`.
+- `report_usage` → `ingest_event(CloudEvent{ id: idem_key, subject, value: CU })`.
+- `invoice` → **NO-OP** — invoicing stays on the Native/Stripe rail. v1 ships
+  OpenMeter as an *export-only* sink (aggregate-elsewhere); if an operator runs
+  OpenMeter they pair it with Native invoicing OR consume OpenMeter's aggregates
+  out-of-band. (A future "OpenMeter→Stripe invoice" bridge is a follow-up, not v1.)
+- `handle_webhook` → no-op.
+
+### M5 — THE CRUX: where `report_usage` fires, and how enforcement stays Native
+
+**Decision: a dedicated periodic EXPORT sweep, NOT the ingest tick and NOT the
+flush boundary.** Rationale, resolved against the live code:
+
+- The **flush boundary** is in the WORKER (`crates/metering/flush.rs`) — wrong
+  layer: it has no provider config, no customer mapping, no catalog, and the
+  worker must stay billing-agnostic. Rejected.
+- The **ingest/aggregation tick** is `internal.rs::report_usage` → `Metering::ingest`
+  — it runs per worker POST (~10s × N workers), is per-RAW-report (no
+  period-total CU yet), and is on the hot ingest path. Forwarding here would push
+  partial deltas at high frequency and couple ingest latency to an external API.
+  Rejected.
+- **A new `cron/metering_export.rs` sweep (~hourly, matching billing)** is the
+  right boundary. It mirrors `spend_reconcile`/`billing_reconcile`: advisory-lock
+  → for each `(creator, owned app)` → `total_units(weights, period_totals)` → CU
+  → `provider.report_usage(cus, app, period, cu, idem_key)`. **For
+  `--metering-provider native` this sweep is not even spawned** (report_usage is a
+  no-op; spawning it would be pure waste). It is spawned ONLY for stripe/openmeter.
+
+**Enforcement is PROVABLY unchanged across all providers.** `spend.rs::evaluate_all`
+reads `usage_aggregates` (the batched fleet query at `:270`), prices via
+`charge_cents`, derives `SpendState`, persists, and the gateway pulls it — and
+**none of that calls a provider**. The provider abstraction is wired ONLY into
+the two export/invoice cron tasks (`metering_export`, `billing_reconcile`), never
+into `spend.rs` or `enforce.rs`. So Warn→Degrade→Block uses the local ledger
+identically whether the provider is native, stripe, or openmeter. This is the
+metering↔billing separation made concrete: **enforcement = local fact; provider =
+export/invoice only.**
+
+**Native vs Stripe-Meters cron wiring (the one subtlety):**
+
+| Provider | `metering_export` cron | `billing_reconcile` cron | `spend_reconcile` cron |
+| --- | --- | --- | --- |
+| native | NOT spawned (no-op) | **spawned** → `NativeProvider::invoice` | spawned (unchanged) |
+| stripe | **spawned** → meter_events | spawned but `invoice` = no-op (so it does nothing) | spawned (unchanged) |
+| openmeter | **spawned** → CloudEvents | spawned, `invoice` = no-op | spawned (unchanged) |
+
+`spawn_all` constructs the configured provider once (`Arc<dyn MeteringProvider>`),
+threads it into the cron tasks, and skips spawning a cron whose provider verb is a
+no-op (cheap match on the provider kind). `spend_reconcile` is provider-agnostic
+and always spawned.
+
+### M6 — Per-deployment wiring
+
+- **CLI/env (`main.rs`):** add `--metering-provider <native|stripe|openmeter>`
+  (env `METERING_PROVIDER`, default `native`). Provider creds:
+  `--stripe-meter-event-name` + `--stripe-meter-price-id` (env
+  `STRIPE_METER_EVENT_NAME`/`STRIPE_METER_PRICE_ID`) for stripe;
+  `--openmeter-url` + `--openmeter-token` (env `OPENMETER_URL`/`OPENMETER_TOKEN`,
+  `SecretString`) for openmeter. Parse into a `MeteringProviderConfig` enum.
+- **`AppState`:** add `pub metering_provider: Arc<dyn MeteringProvider>` (built
+  once at boot). The existing `stripe_secret_key`/`stripe_base_url` feed the
+  Native + Stripe-Meters providers; new fields back the OpenMeter one.
+- **Construction:** a `fn build_provider(cfg, state-deps) -> Arc<dyn
+  MeteringProvider>` in `provider/mod.rs`. `spawn_all` reads
+  `state.metering_provider` + the provider KIND to decide which crons to spawn
+  (M5 table).
+- **Prod-required validation (`main.rs` startup guard, beside the existing
+  `stripe_secret_key` guard at `:633`):**
+  - `native` / `stripe`: `stripe_secret_key` required (already enforced).
+  - `stripe`: ALSO require `stripe-meter-event-name` + `stripe-meter-price-id`
+    non-empty (else fail to boot — a Stripe-Meters deployment with no meter is a
+    silent revenue black hole).
+  - `openmeter`: require `openmeter-url` + `openmeter-token` non-empty.
+  - All guards bypassable ONLY under `insecure_dev`, matching the existing
+    pattern.
+
+### M7 — Zero-tokio adapters
+
+Both new clients mirror `StripeClient` exactly: `cyper::Client` + `compio::time::
+timeout`, hand-rolled body encoding (form for Stripe meter_events,
+`application/cloudevents+json` JSON for OpenMeter), Bearer auth, behind an
+injectable trait (`StripeApi::create_meter_event` reuses the existing trait;
+`OpenMeterApi` is the new sibling). NO SDK (every Stripe/OpenMeter Rust SDK pulls
+tokio + reqwest — banned). Base URLs overridable for the localhost mocks.
+
+### M8 — Test strategy (faithful, no shims — `feedback_faithful_e2e_tests`)
+
+- **Per-provider localhost mock** (mirror the existing mock-Stripe HTTP server the
+  reconciler integration tests already use): a mock that records inbound calls and
+  speaks the provider's JSON. Stripe-Meters mock asserts `POST /v1/billing/
+  meter_events` with the right `payload[value]`=CU + a stable `identifier`.
+  OpenMeter mock asserts `POST /api/v1/events` with a CloudEvent whose `id`=idem
+  key + `data.value`=CU. The REAL `cyper` client hits the mock (not a stubbed
+  trait) for the integration leg.
+- **RED→GREEN per provider:**
+  - **Native unchanged (regression gate):** the EXISTING reconciler integration
+    suite (`reconcile_is_idempotent_per_period`,
+    `crashed_run_with_null_invoice_id_is_redriven`,
+    `reconcile_groups_apps_by_owner_via_app_members`, the mock-Stripe invoice-item
+    assertions) re-run against `NativeProvider::invoice` and must pass byte-for-byte
+    — proving the lift introduced zero drift.
+  - **Stripe:** `stripe_report_usage_pushes_cu_as_meter_event` (CU forwarded with
+    correct value); `meter_event_identifier_is_idempotent` (re-run ⇒ same
+    `identifier`, mock sees one logical event); `stripe_invoice_is_noop` (the
+    billing cron does nothing under stripe).
+  - **OpenMeter:** `openmeter_report_usage_emits_cloudevent_with_cu`;
+    `cloudevent_id_is_idempotent`; `openmeter_invoice_is_noop`.
+  - **Enforcement-invariant (the crux, per provider):**
+    `spend_enforcement_reads_local_ledger_under_<provider>` — set provider to
+    stripe/openmeter, seed `usage_aggregates`, run `evaluate_all`, assert the SAME
+    `SpendState` transition as native (proves the provider never touched
+    enforcement). This is the single test that nails "providers are export/invoice
+    backends only".
+- **e2e:** extend `tests/e2e_metering_billing.sh` with a `METERING_PROVIDER`
+  matrix leg (native asserts a mock-Stripe invoice item as today; stripe asserts a
+  mock meter_event; openmeter asserts a mock CloudEvent) — the same probe traffic,
+  three export backends, one local ledger.
+
+### M9 — Build sequence + new/modified/refactored files + risks
+
+**Build order** (each step green before the next):
+
+1. **Seams (no behaviour change):** add `UsageLedger` trait (impl by `Metering`);
+   add `MeteringProvider` + `types.rs` + `ProviderError`. NEW files only;
+   nothing wired yet.
+2. **Native lift:** move `bill_creator` → `NativeProvider::invoice`; `sweep` calls
+   `provider.invoice`. Re-run the full reconciler suite (regression gate). This is
+   the riskiest step — gated entirely by the existing hardened tests.
+3. **Config + wiring:** `MeteringProviderConfig`, CLI/env, `AppState.metering_provider`,
+   `build_provider`, `spawn_all` provider-aware cron spawning, prod guards.
+4. **Stripe-Meters:** `StripeApi::create_meter_event` + impl + mock; `StripeMetersProvider`;
+   `cron/metering_export.rs`. TDD.
+5. **OpenMeter:** `OpenMeterApi` + `OpenMeterClient` + mock; `OpenMeterProvider`. TDD.
+6. **e2e matrix** + docs (`billing-metering.md` gains a "metering providers" section).
+
+**New files:** `metering/provider/{mod,types,native,stripe_meters,openmeter}.rs`,
+`metering/ledger.rs` (or trait in `metering.rs`), `openmeter_client.rs`,
+`cron/metering_export.rs`, per-provider mock test modules.
+**Modified:** `stripe_client.rs` (+`create_meter_event`), `lib.rs` (`AppState`),
+`main.rs` (CLI/env/guards), `cron/mod.rs` (`spawn_all`), `cron/billing_reconcile.rs`
+(`bill_creator`→`NativeProvider::invoice`).
+**Refactored (no behaviour change):** `billing_reconcile.rs` body relocation;
+`Metering::period_totals` behind `UsageLedger`.
+**No changeset needed** in v1 (`usage_aggregates` unchanged; provider config is
+CLI/env, not DB) — a `0043` only appears if an operator later wants per-deployment
+provider config persisted, which v1 does NOT.
+
+**The 3 riskiest points:**
+
+1. **The Native lift must be zero-drift.** Moving the C1/C2 + MAJOR crash-window
+   logic out of `bill_creator` into `NativeProvider::invoice` is a pure relocation
+   — but a subtle change to the claim-then-call ordering or the
+   `find_invoice_item_by_key` adoption path would silently reintroduce a
+   double/under-bill. Mitigation: relocate verbatim, change ONLY the function
+   boundary, and gate on the UNCHANGED hardened integration suite (the same tests
+   that caught C1/C2). Do not "tidy" the body during the move.
+2. **CU derivation parity between export and invoice.** Stripe-Meters' `report_usage`
+   pushes `total_units(weights, totals)` while the LOCAL spend cap prices
+   `charge_cents(...)` — both must read the SAME `weights` + the SAME period
+   totals or a creator is enforced on one number and billed (by Stripe) on
+   another. Mitigation: both load the weight table the same way per tick; the
+   enforcement-invariant test asserts the local figure is provider-independent;
+   document that on the Stripe rail the *invoice* number is Stripe's (FX = Stripe
+   price), so operators must keep the Stripe price ≈ the plan FX or the two
+   diverge by design.
+3. **Provider-aware cron spawning correctness.** A misconfigured `spawn_all` that
+   spawns `billing_reconcile` under `stripe` (where `invoice` is a no-op, fine) but
+   FORGETS to spawn `metering_export` (where CU is pushed) yields a Stripe
+   deployment that enforces locally but bills Stripe $0 — a silent revenue black
+   hole. Mitigation: the M6 prod guard refuses to boot a stripe/openmeter
+   deployment without its creds, and an integration test asserts the spawned-cron
+   set per provider kind matches the M5 table.
