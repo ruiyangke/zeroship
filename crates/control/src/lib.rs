@@ -11,6 +11,7 @@ pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;
 pub mod authz_guard;
+pub mod billing_read;
 pub mod bootstrap_builder;
 pub mod bootstrap_console;
 pub mod credit;
@@ -232,6 +233,13 @@ pub struct AppState {
     /// arms read — killing the live access token, not just the relay alias
     /// (Batch A fix 4). MUST stay byte-identical to the gateway's salt.
     pub pairwise_salt: [u8; 32],
+    /// In-process TTL cache for the creator-facing OPEN-period projected charge
+    /// (billing-ops gap #26, PR-7, read API G / MAJOR-5). Memoises
+    /// `(app_id, period) → projected_cents` for
+    /// [`billing_read::PROJECTED_CHARGE_TTL_SECS`] so polling cannot hammer a
+    /// full pricing pass. The value is non-authoritative (only a finalized
+    /// invoice bills).
+    pub projected_charge_cache: Arc<billing_read::ProjectedChargeCache>,
 }
 
 impl AppState {

@@ -1291,6 +1291,9 @@ fn main() -> std::io::Result<()> {
         tax_provider,
         notifier,
         pairwise_salt,
+        projected_charge_cache: Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
     });
 
     // Spawn the in-process control crons:
@@ -1359,6 +1362,32 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/spend-limit")
                     .route(web::get().to(api::get_spend_limit))
                     .route(web::put().to(api::set_spend_limit)),
+            )
+            // --- Creator billing READ APIs (PR-7, BillingRead) -------------
+            // Creator-scoped to OWNED apps; operator (Resource::Any) reads any.
+            .service(
+                web::resource("/api/apps/{id}/invoices")
+                    .route(web::get().to(api::list_app_invoices)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/projected-charge")
+                    .route(web::get().to(api::get_projected_charge)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/billing-status")
+                    .route(web::get().to(api::get_billing_status)),
+            )
+            .service(
+                web::resource("/api/invoices/{id}")
+                    .route(web::get().to(api::get_invoice)),
+            )
+            .service(
+                web::resource("/api/billing/credit-balance")
+                    .route(web::get().to(api::get_credit_balance)),
+            )
+            .service(
+                web::resource("/api/billing/payment-method")
+                    .route(web::get().to(api::get_payment_method)),
             )
             // --- Plan catalog (PR4): operator-editable pricing catalog ---
             .service(

@@ -944,6 +944,274 @@ pub async fn get_spend_limit(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Creator billing READ APIs (billing-ops gap #26, PR-7 — `BillingRead`).
+//
+// Six creator-scoped read endpoints. The APP-scoped reads (invoice history,
+// projected-charge, billing-status) gate `require(BillingRead, Resource::App{id})`
+// — the SAME membership gate `get_spend_limit` uses, so a creator sees only
+// OWNED apps and an operator (`Resource::Any`) sees any. The CREATOR-keyed reads
+// (credit-balance, payment-method) gate `can_act_anywhere(BillingRead)` (the
+// caller must be a billing-capable creator) and force the target creator to
+// `self` UNLESS the caller is an operator, who may target any via `?creator_id`.
+//
+// SECURITY: no raw Stripe ids, no other creator's data, no app-token escalation.
+// Every response is a clean DTO from `crate::billing_read` (no internal columns).
+// ---------------------------------------------------------------------------
+
+/// Pagination query for `GET /api/apps/{id}/invoices`. Defaults: 50 newest,
+/// offset 0. `limit` is clamped to `[1, 200]` to bound a single read.
+#[derive(Deserialize)]
+pub struct InvoiceListQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+/// Optional `?creator_id=` for the creator-keyed reads. Honoured ONLY for an
+/// operator (`Resource::Any`); a non-operator caller is always forced to self.
+#[derive(Deserialize)]
+pub struct CreatorScopeQuery {
+    #[serde(default)]
+    pub creator_id: Option<Uuid>,
+}
+
+/// Resolve the OWNING creator (`app_members.role='owner'`) for an app, or `None`
+/// when the app has no owner row (a system app) / does not exist.
+async fn owner_of_app(state: &AppState, app_id: &Uuid) -> Result<Option<Uuid>, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let rows = conn
+        .query(
+            "SELECT user_id FROM zeroship.app_members WHERE app_id = $1 AND role = 'owner' LIMIT 1",
+            &[app_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    Ok(rows.first().map(|r| r.get::<_, Uuid>("user_id")))
+}
+
+/// `GET /api/apps/{id}/invoices` — invoice history for ONE owned app's creator,
+/// newest-first, paginated. Authz: `BillingRead` on `Resource::App{id}`.
+pub async fn list_app_invoices(
+    id: Path<String>,
+    query: web::types::Query<InvoiceListQuery>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+    let creator_id = match owner_of_app(&state, &uid).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": [] })),
+        Err(e) => return error_response(e),
+    };
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+    match crate::billing_read::list_invoices_for_creator(&state.registry, &creator_id, limit, offset)
+        .await
+    {
+        Ok(invoices) => web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": invoices })),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `GET /api/invoices/{id}` — frozen-snapshot line detail. Authz is via the
+/// invoice's `creator_id` → the owning creator's apps (operator via
+/// `Resource::Any`). The `{id}` is the internal `inv_…` id.
+pub async fn get_invoice(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let invoice_id = id.into_inner();
+    let detail = match crate::billing_read::get_invoice_detail(&state.registry, &invoice_id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            // Gate billing capability before 404 so the endpoint never leaks
+            // invoice existence to a non-billing token.
+            match authz.can_act_anywhere(Action::BillingRead, &state).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return web::HttpResponse::Forbidden()
+                        .json(&serde_json::json!({"error": "forbidden"}))
+                }
+                Err(resp) => return resp,
+            }
+            return web::HttpResponse::NotFound()
+                .json(&serde_json::json!({"error": "invoice not found"}));
+        }
+        Err(e) => return error_response(e),
+    };
+
+    let is_op = match authz.is_operator(Action::BillingRead, &state).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if !is_op {
+        let owned = match state.registry.list_apps_for_owner(&detail.creator_id).await {
+            Ok(apps) => apps,
+            Err(e) => return error_response(e),
+        };
+        let mut authorized = false;
+        for app in &owned {
+            if authz
+                .require(Action::BillingRead, Resource::App { id: app.id.to_string() }, &state)
+                .await
+                .is_ok()
+            {
+                authorized = true;
+                break;
+            }
+        }
+        if !authorized {
+            return web::HttpResponse::Forbidden()
+                .json(&serde_json::json!({"error": "forbidden"}));
+        }
+    }
+    web::HttpResponse::Ok().json(&detail)
+}
+
+/// `GET /api/apps/{id}/projected-charge` — current-period projected charge over
+/// LIVE aggregates, labelled NON-AUTHORITATIVE (MAJOR-5). Cached 60s so polling
+/// cannot hammer a full pricing pass. Authz: `BillingRead` on `Resource::App{id}`.
+pub async fn get_projected_charge(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+    let now = chrono::Utc::now().timestamp();
+    match crate::billing_read::projected_charge(
+        &state.registry,
+        &state.projected_charge_cache,
+        &uid,
+        now,
+    )
+    .await
+    {
+        Ok(Some(p)) => web::HttpResponse::Ok().json(&p),
+        Ok(None) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"})),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `GET /api/billing/credit-balance` — the caller's USD credit balance + recent
+/// ledger. Creator-keyed: gated `can_act_anywhere(BillingRead)`; the target is
+/// `self` unless the caller is an operator passing `?creator_id=`.
+pub async fn get_credit_balance(
+    query: web::types::Query<CreatorScopeQuery>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let target = match resolve_creator_target(&authz, &state, query.creator_id).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    match crate::billing_read::credit_balance(&state.registry, &target, 50).await {
+        Ok(balance) => web::HttpResponse::Ok().json(&balance),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `GET /api/billing/payment-method` — the caller's PM status (presence only,
+/// never the raw provider id). Creator-keyed, scoped exactly like credit-balance.
+pub async fn get_payment_method(
+    query: web::types::Query<CreatorScopeQuery>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let target = match resolve_creator_target(&authz, &state, query.creator_id).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    match crate::billing_read::payment_method_status(&state.registry, &target).await {
+        Ok(status) => web::HttpResponse::Ok().json(&status),
+        Err(e) => error_response(e),
+    }
+}
+
+/// `GET /api/apps/{id}/billing-status` — plan + spend cap + spend/account state.
+/// Authz: `BillingRead` on `Resource::App{id}`.
+pub async fn get_billing_status(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+    match crate::billing_read::billing_status(&state.registry, &uid).await {
+        Ok(Some(status)) => web::HttpResponse::Ok().json(&status),
+        Ok(None) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"})),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Resolve the target creator for a creator-keyed billing read.
+///
+/// - **Operator** (`BillingRead` on `Resource::Any`): may target any creator via
+///   the optional `creator_id`; absent it, targets self.
+/// - **Creator** (billing-capable on at least one owned app): forced to `self`.
+///   A `creator_id` naming ANOTHER creator is 403; a caller with NO billing
+///   capability anywhere is 403.
+async fn resolve_creator_target(
+    authz: &AuthzGuard,
+    state: &AppState,
+    requested: Option<Uuid>,
+) -> Result<Uuid, web::HttpResponse> {
+    let is_op = authz.is_operator(Action::BillingRead, state).await?;
+    if is_op {
+        return Ok(requested.unwrap_or(authz.principal_id));
+    }
+    if !authz.can_act_anywhere(Action::BillingRead, state).await? {
+        return Err(web::HttpResponse::Forbidden()
+            .json(&serde_json::json!({"error": "forbidden"})));
+    }
+    if let Some(req) = requested {
+        if req != authz.principal_id {
+            return Err(web::HttpResponse::Forbidden().json(&serde_json::json!({
+                "error": "forbidden",
+                "detail": "only an operator may read another creator's billing",
+            })));
+        }
+    }
+    Ok(authz.principal_id)
+}
+
 /// Resolve an app's plan-default spend limit. `Ok(None)` when the app row is
 /// missing. Used to bound a creator override.
 async fn resolve_plan_default_cents(

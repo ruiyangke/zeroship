@@ -99,6 +99,9 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
         .expect("native tax provider builds"),
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
+        projected_charge_cache: std::sync::Arc::new(
+            zeroship_control::billing_read::ProjectedChargeCache::default(),
+        ),
     });
     (state, blob_root, deploy_tmp_dir)
 }

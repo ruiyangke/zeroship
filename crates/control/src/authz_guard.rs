@@ -89,6 +89,69 @@ impl AuthzGuard {
                 .json(&json!({"error": "authz_error", "detail": err.to_string()}))),
         }
     }
+
+    /// Whether this caller holds `action` on `Resource::Any` — the OPERATOR
+    /// (fleet-wide) probe, TOKEN-AWARE (it runs through `require`, so a narrowed
+    /// PAT that lost the grant returns `false`). Used by the creator-keyed
+    /// billing reads to decide whether the caller may target ANOTHER creator via
+    /// `?creator_id`. A plain 403 is "not operator"; any other status is an
+    /// infrastructure failure propagated as `Err(HttpResponse)` (fail closed).
+    pub async fn is_operator(
+        &self,
+        action: Action,
+        state: &AppState,
+    ) -> Result<bool, HttpResponse> {
+        match self.require(action, Resource::Any, state).await {
+            Ok(()) => Ok(true),
+            Err(resp) => {
+                if resp.status() == ntex::http::StatusCode::FORBIDDEN {
+                    Ok(false)
+                } else {
+                    Err(resp)
+                }
+            }
+        }
+    }
+
+    /// Whether this caller can perform `action` ANYWHERE they control: operator
+    /// (`Resource::Any`) OR owner/member of at least one app carrying the grant.
+    /// The self-scope gate for the creator-keyed billing reads (the caller
+    /// reading their OWN creator data must be a billing-capable creator, not
+    /// merely any authenticated token). Mirrors `token_handlers`' `Resource::Any`
+    /// handling via [`authz::is_authorized_anywhere`].
+    pub async fn can_act_anywhere(
+        &self,
+        action: Action,
+        state: &AppState,
+    ) -> Result<bool, HttpResponse> {
+        let now = match now_unix() {
+            Ok(now) => now,
+            Err(err) => {
+                tracing::error!(error = %err, "control: authz clock failed");
+                return Err(HttpResponse::InternalServerError()
+                    .json(&json!({"error": "authz_error"})));
+            }
+        };
+        let ctx = AuthzContext {
+            principal_id: self.principal_id,
+            token_id: self.token_id,
+            token_policy: self.token_policy.clone(),
+            action,
+            resource: Resource::Any,
+            now,
+            request_ip: self.request_ip,
+            mfa_verified: self.mfa_verified,
+            mfa_age_seconds: self.mfa_age_seconds,
+            request_id: Some(self.request_id.as_str()),
+        };
+        authz::is_authorized_anywhere(&state.control_pg, &state.static_policies, &ctx)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "control: is_authorized_anywhere failed");
+                HttpResponse::InternalServerError()
+                    .json(&json!({"error": "authz_error", "detail": err.to_string()}))
+            })
+    }
 }
 
 async fn guard_from_bearer(
