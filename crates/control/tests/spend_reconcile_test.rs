@@ -25,6 +25,14 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// `spend_reconcile::tick` single-flights the fleet-wide sweep via
+/// `pg_try_advisory_lock`. The `..._skips_when_advisory_lock_held` test
+/// deliberately HOLDS that lock for its duration, so a concurrent
+/// `..._writes_enriched_spend_audit` tick would also skip (n == 0) and fail its
+/// `n >= 1` assertion. Serialize the two with a process-wide lock (mirrors the
+/// production single-flight; poison-recovered).
+static SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -177,6 +185,7 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
         return;
     };
     let fx = build_state(&url, "audit").await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let metering = Metering::new(fx.state.registry.clone());
 
     // 100-cent cap, 1 cent/request, 100 requests ⇒ 100% ⇒ Allow→Block.
@@ -219,6 +228,7 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
         return;
     };
     let fx = build_state(&url, "lock").await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let metering = Metering::new(fx.state.registry.clone());
 
     let app = make_over_limit_app(&fx.state, 100).await;

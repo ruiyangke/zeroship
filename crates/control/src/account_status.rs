@@ -313,9 +313,11 @@ impl AccountStatusStore {
             .conn()
             .await
             .map_err(|e| StripeError::Db(format!("{e}")))?;
+        // `from_state`/`to_state` are the `account_state` domain — bind `::text`
+        // (the domain param OID rejects a bare &str, same as billing_period/DATE).
         conn.execute(
             "INSERT INTO zeroship.creator_billing_status_history \
-                (creator_id, from_state, to_state, reason) VALUES ($1, $2, $3, $4)",
+                (creator_id, from_state, to_state, reason) VALUES ($1, $2::text, $3::text, $4)",
             &[
                 &creator_id,
                 &account_state_str(from),
