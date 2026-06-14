@@ -233,6 +233,15 @@ pub const INVOICE_PREFIX: &str = "inv";
 /// generator).
 pub const INVOICE_PAYMENT_PREFIX: &str = "ipy";
 
+/// Credit-ledger typed-id prefix (billing-ops gap #26, PR-2). Three chars to
+/// match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// (R16-API2), and disjoint from `inv`/`ipy` so a credit-entry id can never be
+/// confused with the invoice it relates to. The `zeroship.credit_ledger.id`
+/// column stores the full typed-id string (`crd_<base62>`), minted in Rust by the
+/// operator grant endpoint and the reconciler's per-grant `consumed` writes (no
+/// SQL `DEFAULT` — there is no in-DB base62 generator).
+pub const CREDIT_PREFIX: &str = "crd";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -291,6 +300,14 @@ pub fn new_invoice_id() -> String {
 /// PR-1).
 pub fn new_invoice_payment_id() -> String {
     generate(INVOICE_PAYMENT_PREFIX)
+}
+
+/// Generate a new credit-ledger entry ID: `crd_{base62(uuidv7)}`. Minted by the
+/// operator `POST /billing/credit` grant endpoint and by the billing reconciler
+/// when it appends a per-grant `consumed` entry at finalize (billing-ops gap #26,
+/// PR-2).
+pub fn new_credit_id() -> String {
+    generate(CREDIT_PREFIX)
 }
 
 #[cfg(test)]

@@ -1274,6 +1274,12 @@ fn main() -> std::io::Result<()> {
                     .route(web::get().to(api::get_pricing_config))
                     .route(web::put().to(api::set_pricing_config)),
             )
+            // Operator credit grant (billing-ops gap #26, PR-2) — OPERATOR-ONLY
+            // (BillingWrite on Resource::Any). Idempotency-Key header required.
+            .service(
+                web::resource("/api/billing/credit")
+                    .route(web::post().to(api::grant_credit)),
+            )
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),

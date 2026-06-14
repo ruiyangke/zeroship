@@ -41,6 +41,39 @@ pub struct SetPlanBody {
     pub plan_id: String,
 }
 
+/// Body for the operator credit-grant endpoint `POST /api/billing/credit`
+/// (billing-ops gap #26, PR-2). The operator supplies the creator, a positive
+/// amount, and an optional kind/expiry/note. Currency is USD-pinned (v1) — the
+/// `credit::grant` boundary rejects any other. The idempotency key arrives in the
+/// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
+#[derive(Deserialize)]
+pub struct GrantCreditBody {
+    /// The creator (a `users.id` UUID — the `creator_billing` key).
+    pub creator_id: Uuid,
+    /// Positive grant amount in cents.
+    pub amount_cents: i64,
+    /// Grant kind — one of `grant`/`promo`/`goodwill`. Defaults to `grant`.
+    #[serde(default = "default_credit_kind")]
+    pub kind: String,
+    /// Currency (USD-pinned in v1). Defaults to `usd`.
+    #[serde(default = "default_credit_currency")]
+    pub currency: String,
+    /// Optional expiry — a grant past this instant is not consumable. None ⇒ never.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional operator audit note ('promo X', 'goodwill ticket #…').
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn default_credit_kind() -> String {
+    "grant".to_string()
+}
+
+fn default_credit_currency() -> String {
+    crate::credit::CREDIT_CURRENCY.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Error → HttpResponse
 // ---------------------------------------------------------------------------
@@ -1144,6 +1177,123 @@ pub async fn set_pricing_config(
         // `error_response` maps the store's below-floor/overflow rejection
         // (`RegistryError::InvalidInput`) to a 400 — defense in depth, the handler
         // already rejected below-floor above; any other error maps as usual.
+        Err(e) => error_response(e),
+    }
+}
+
+/// Operator credit-grant endpoint `POST /api/billing/credit` (billing-ops gap #26,
+/// PR-2). OPERATOR-ONLY: `Action::BillingWrite` on `Resource::Any` (master-key /
+/// operator). A creator/app token — which can at most hold `BillingWrite` on
+/// `Resource::App{id}` — is 403 here (credit is a fleet-wide money lever, never
+/// self-grantable). Requires an `Idempotency-Key` header; a reused key with the
+/// SAME body returns the first grant (safe retry), a reused key with a DIFFERENT
+/// body is 409 (no silent second grant). Currency is USD-pinned (v1).
+pub async fn grant_credit(
+    req: web::HttpRequest,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+    body: Json<GrantCreditBody>,
+) -> web::HttpResponse {
+    // OPERATOR-ONLY on Resource::Any. No App-scoped fallback: a creator may never
+    // grant themselves credit.
+    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+
+    // The idempotency key is a required header (the body carries the grant facts).
+    let idem_key = req
+        .headers()
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_default();
+    if idem_key.is_empty() {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "missing Idempotency-Key header",
+            "detail": "POST /api/billing/credit requires an Idempotency-Key header so a \
+                       retried grant is a no-op (no double grant)",
+        }));
+    }
+
+    let body = body.into_inner();
+    // The creator must have a `creator_billing` row (the FK target). Ensure it
+    // exists — the same lazy create the Stripe-store / account-status paths use —
+    // so an operator can grant credit before the creator's first invoice. A missing
+    // `users` row surfaces as a clean FK error → 400, not a 500.
+    let conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+    if let Err(e) = conn
+        .execute(
+            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
+             ON CONFLICT (creator_id) DO NOTHING",
+            &[&body.creator_id],
+        )
+        .await
+    {
+        // A non-existent user FK-violates here — return a clean 400.
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "unknown creator",
+            "detail": format!("no billable creator for creator_id {}: {e}", body.creator_id),
+        }));
+    }
+
+    let outcome = crate::credit::grant(
+        &conn,
+        &body.creator_id,
+        body.amount_cents,
+        &body.currency,
+        &body.kind,
+        body.expires_at,
+        body.note.as_deref(),
+        &idem_key,
+    )
+    .await;
+
+    match outcome {
+        Ok(crate::credit::GrantOutcome::Created(id)) => {
+            crate::audit::log_with_detail(
+                &state.registry,
+                crate::audit::AuditEntry {
+                    app_id: None,
+                    creator_id: Some(body.creator_id),
+                    actor_user_id: Some(authz.principal_id),
+                    actor_token_id: authz.token_id,
+                    action: crate::audit::Action::CreditGranted,
+                    resource: Some(&id),
+                    source_ip: None,
+                },
+                &serde_json::json!({
+                    "credit_id": id,
+                    "creator_id": body.creator_id,
+                    "amount_cents": body.amount_cents,
+                    "kind": body.kind,
+                    "currency": body.currency,
+                    "expires_at": body.expires_at,
+                }),
+            )
+            .await;
+            web::HttpResponse::Created().json(&serde_json::json!({
+                "credit_id": id,
+                "created": true,
+            }))
+        }
+        // Same key + same body — return the first grant (safe retry, no second grant).
+        Ok(crate::credit::GrantOutcome::Duplicate(id)) => {
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "credit_id": id,
+                "created": false,
+            }))
+        }
+        // Same key + DIFFERENT body — reject (mirrors Stripe's idempotency-conflict).
+        Ok(crate::credit::GrantOutcome::Conflict) => web::HttpResponse::Conflict()
+            .json(&serde_json::json!({
+                "error": "idempotency-key-reuse-conflict",
+                "detail": "the Idempotency-Key was reused with a different request body; \
+                           a credit grant key is bound to its exact (creator, amount, \
+                           currency, kind, expiry) — no second grant was created",
+            })),
         Err(e) => error_response(e),
     }
 }

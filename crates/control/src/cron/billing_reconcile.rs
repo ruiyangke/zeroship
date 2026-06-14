@@ -715,15 +715,29 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // FINALIZE-IN-ONE-UPDATE is preserved: the UPDATE writes
     // subtotal/credit/tax/total/status/finalized_at in ONE statement so the
     // `invoice_total_balances` CHECK (total = subtotal − credit + tax) never sees a
-    // half-written row. Credit/tax are 0 at launch ⇒ total == subtotal ==
-    // amount_i64. The immutability trigger then freezes the invoice + its lines.
+    // half-written row. The immutability trigger then freezes the invoice + its lines.
+    //
+    // CREDIT-APPLY AT FINALIZE (billing-ops PR-2, design flow A): just before the
+    // finalize UPDATE, INSIDE this same txn, consume the creator's available credit
+    // OLDEST-FIRST against the SUBTOTAL (credit applied BEFORE tax, matching the
+    // balance CHECK's `total = subtotal − credit + tax` ordering). One `consumed`
+    // entry per drawn grant is appended, keyed to THIS invoice id so a reconcile
+    // re-run (crash-window re-drive of the same draft claim) recomputes the same
+    // applied credit and NEVER double-consumes (see `consume_at_finalize`). Tax is 0
+    // at launch (the seam is PR-5), so `total = subtotal − credit`.
     let tx = conn.transaction().await?;
+    let credit = crate::credit::consume_at_finalize(
+        &tx, creator_id, &invoice_id, amount_i64, BILLING_CURRENCY,
+    )
+    .await?;
+    let credit_i64 = credit.applied_cents;
+    let total_i64 = amount_i64 - credit_i64; // tax = 0 at launch (PR-5 seam)
     tx.execute(
         "UPDATE zeroship.invoices \
-         SET subtotal_cents = $2, credit_cents = 0, tax_cents = 0, total_cents = $2, \
+         SET subtotal_cents = $2, credit_cents = $3, tax_cents = 0, total_cents = $4, \
              status = 'finalized', finalized_at = NOW(), updated_at = NOW() \
          WHERE id = $1",
-        &[&invoice_id, &amount_i64],
+        &[&invoice_id, &amount_i64, &credit_i64, &total_i64],
     )
     .await?;
     // Record the finalized provider invoice id (the seam — core invoices carry no

@@ -64,6 +64,11 @@ pub enum Action {
     /// every plan that inherits (`fx == None`) — so the write is audited with the
     /// actor + the old→new value in the detail JSON.
     SetGlobalFx,
+    /// An operator granted a creator credit via `POST /api/billing/credit`
+    /// (billing-ops gap #26, PR-2). Credit is a money lever (it reduces a future
+    /// bill), operator-only, so every grant is audited with the actor + the
+    /// creator / amount / kind in the detail JSON.
+    CreditGranted,
 }
 
 impl Action {
@@ -87,6 +92,7 @@ impl Action {
             Self::PlanArchived => "plan_archived",
             Self::SetFeePolicy => "set_fee_policy",
             Self::SetGlobalFx => "set_global_fx",
+            Self::CreditGranted => "credit_granted",
         }
     }
 }
