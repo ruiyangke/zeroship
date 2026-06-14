@@ -844,6 +844,36 @@ struct StripeObject {
     /// level of the invoice object.
     #[serde(default)]
     subscription_details: Option<SubscriptionDetails>,
+    // ── Dispute (charge.dispute.*) fields (PR-8) ────────────────────────────
+    /// The disputed amount (network-held), in cents. On a dispute object this is the
+    /// clawback amount; on an invoice object it is unset.
+    #[serde(default)]
+    amount: Option<i64>,
+    /// The Stripe dispute `status` (`needs_response`/`under_review`/`won`/`lost`/…).
+    #[serde(default)]
+    status: Option<String>,
+    /// The dispute `reason` (`fraudulent`/`duplicate`/…).
+    #[serde(default)]
+    reason: Option<String>,
+    /// The disputed charge (`ch_…`). One of the candidates we resolve back to an invoice.
+    #[serde(default)]
+    charge: Option<String>,
+    /// The disputed PaymentIntent (`pi_…`). Another resolution candidate.
+    #[serde(default)]
+    payment_intent: Option<String>,
+    /// An optional invoice hint (`in_…`) some Stripe API versions surface on the dispute.
+    #[serde(default)]
+    invoice: Option<String>,
+    /// `evidence_details.due_by` — the evidence-submission deadline.
+    #[serde(default)]
+    evidence_details: Option<DisputeEvidenceDetails>,
+}
+
+#[derive(Deserialize, Debug)]
+struct DisputeEvidenceDetails {
+    /// Unix seconds by which evidence must be submitted (nullable).
+    #[serde(default)]
+    due_by: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1021,6 +1051,20 @@ async fn dispatch_event(
         }
         "invoice.payment_failed" => {
             return handle_invoice_payment_failed(req, state, event, obj).await;
+        }
+        // DISPUTES / CHARGEBACKS (billing-ops PR-8, design flow I). A cardholder disputed
+        // a charge; Stripe held the funds. Record the dispute + the cash clawback (a
+        // negative dispute_debit invoice_payments row), claim-after-success on
+        // stripe_events_seen like every branch. `.created` opens the dispute (+ fires the
+        // `disputed` notification via the cron off the new billing_disputes row);
+        // `.closed` resolves it (won → a compensating dispute_reversal restores the
+        // budget; lost → the debit stands). `.updated` mid-lifecycle is recorded too (a
+        // terminal status on an update is treated like a close).
+        "charge.dispute.created" => {
+            return handle_dispute_created(req, state, event, obj).await;
+        }
+        "charge.dispute.closed" | "charge.dispute.updated" => {
+            return handle_dispute_closed_or_updated(req, state, event, obj).await;
         }
         // `invoice.paid` carries TWO concerns:
         //   * Stream-1 (infra recovery, G2): a previously-failed infra invoice
@@ -1351,6 +1395,185 @@ async fn record_infra_payment(
         "stripe: appended invoice_payments charge row"
     );
     Ok(())
+}
+
+/// `charge.dispute.created` (billing-ops PR-8, design flow I). A cardholder disputed a
+/// charge; Stripe held the funds. We:
+///   1. resolve the disputed Stripe payment object back to our internal invoice (mirroring
+///      `invoice.paid`'s resolution),
+///   2. in ONE txn, UPSERT a `billing_disputes` row (`status='open'`) AND append a
+///      NEGATIVE `dispute_debit` `invoice_payments` row (= cash clawed back). The negative
+///      row lowers `Σ(invoice_payments)`, so PR-3's over-refund cap auto-tightens — no
+///      cross-table trigger.
+/// The dispute is NEVER auto-refunded (the funds already moved) and NEVER mutates the
+/// invoice. The `disputed` notification fires once via the notify cron off the new row.
+///
+/// FAIL-CLOSED: a transient DB failure propagates → non-2xx → the event is left UNCLAIMED
+/// → Stripe retries. The record is idempotent on the `du_…` (the dispute-row UNIQUE + the
+/// dispute payment-row dedup index), so a retry never double-debits.
+async fn handle_dispute_created(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(provider_dispute_id) = obj.id.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.dispute.created missing dispute id — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_dispute_id"}));
+    };
+    let amount = obj.amount.unwrap_or(0);
+    if amount <= 0 {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.dispute.created non-positive amount — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "ignored_zero_amount"}));
+    }
+    let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
+
+    let conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: dispute.created conn failed — failing closed");
+            return err_json(500, "internal error");
+        }
+    };
+    // Resolve the disputed object → our invoice via the recorded charge/invoice refs.
+    let candidates: Vec<&str> = [obj.charge.as_deref(), obj.payment_intent.as_deref(), obj.invoice.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let internal_id = match crate::disputes::resolve_invoice_for_dispute(&conn, &candidates).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // Not a charge we invoiced (a Connect end-user dispute, or a pre-finalize
+            // race). Nothing to anchor — ack so Stripe stops retrying.
+            tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.dispute.created has no internal invoice — no dispute recorded");
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_internal_invoice"}));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: dispute.created invoice resolution failed — failing closed");
+            return err_json(500, "internal error");
+        }
+    };
+
+    let evidence_due_at = obj
+        .evidence_details
+        .as_ref()
+        .and_then(|d| d.due_by)
+        .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0));
+    let mut conn = conn;
+    let rec = match crate::disputes::record_dispute_created(
+        &mut conn,
+        &internal_id,
+        amount,
+        &currency,
+        obj.reason.as_deref(),
+        evidence_due_at,
+        provider_dispute_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: dispute.created record failed — failing closed for retry");
+            return err_json(500, "internal error");
+        }
+    };
+
+    let ip = source_ip(req, state);
+    audit::log_with_detail(
+        &state.registry,
+        AuditEntry {
+            app_id: None,
+            creator_id: None,
+            actor_user_id: None,
+            actor_token_id: None,
+            action: Action::RecordDispute,
+            resource: Some(&event.id),
+            source_ip: ip.as_deref(),
+        },
+        &serde_json::json!({
+            "stripe_event_type": "charge.dispute.created",
+            "dispute_id": rec.dispute_id,
+            "invoice_id": rec.invoice_id,
+            "provider_dispute_id": provider_dispute_id,
+            "amount_cents": amount,
+            "newly_created": rec.newly_created,
+        }),
+    )
+    .await;
+    web::HttpResponse::Ok().json(&serde_json::json!({
+        "status": "dispute_recorded",
+        "dispute_id": rec.dispute_id,
+    }))
+}
+
+/// `charge.dispute.closed` / `charge.dispute.updated` (PR-8). Progress an existing dispute
+/// to its terminal status: `won` appends a compensating positive `dispute_reversal` row
+/// (restoring the over-refund budget); `lost` leaves the `dispute_debit` standing. A
+/// non-terminal `.updated` (still needs_response/under_review) is a no-op ack — the dispute
+/// stays `open` and the debit stands. Idempotent on the `du_…`; a `.closed` arriving before
+/// its `.created` (no dispute row yet) is acked.
+async fn handle_dispute_closed_or_updated(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(provider_dispute_id) = obj.id.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.dispute.closed/updated missing dispute id — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_dispute_id"}));
+    };
+    let stripe_status = obj.status.as_deref().unwrap_or("");
+    let status = crate::disputes::DisputeStatus::from_stripe(stripe_status);
+    if !status.is_terminal() {
+        // A mid-lifecycle update (still open). Nothing to resolve; ack.
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "dispute_still_open"}));
+    }
+
+    let mut conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: dispute.closed conn failed — failing closed");
+            return err_json(500, "internal error");
+        }
+    };
+    let rec = match crate::disputes::record_dispute_closed(&mut conn, provider_dispute_id, status).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // No dispute row for this du_… (close-before-create or an unrecorded charge).
+            tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.dispute.closed with no recorded dispute — acked");
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_dispute_row"}));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: dispute.closed record failed — failing closed for retry");
+            return err_json(500, "internal error");
+        }
+    };
+
+    let ip = source_ip(req, state);
+    audit::log_with_detail(
+        &state.registry,
+        AuditEntry {
+            app_id: None,
+            creator_id: None,
+            actor_user_id: None,
+            actor_token_id: None,
+            action: Action::RecordDispute,
+            resource: Some(&event.id),
+            source_ip: ip.as_deref(),
+        },
+        &serde_json::json!({
+            "stripe_event_type": event.event_type,
+            "dispute_id": rec.dispute_id,
+            "invoice_id": rec.invoice_id,
+            "provider_dispute_id": provider_dispute_id,
+            "status": rec.status.as_str(),
+        }),
+    )
+    .await;
+    web::HttpResponse::Ok().json(&serde_json::json!({
+        "status": "dispute_resolved",
+        "dispute_status": rec.status.as_str(),
+    }))
 }
 
 /// Audit one account-state transition (G2). The detail carries the edge + reason

@@ -141,3 +141,109 @@ pub async fn append_charge<C: GenericClient + Sync>(
             )
         })
 }
+
+/// Append a signed dispute `invoice_payments` row (billing-ops gap #26, PR-8).
+///
+/// A `dispute_debit` (`amount_cents < 0`) records cash CLAWED BACK by a
+/// `charge.dispute.created` — it LOWERS `Σ(invoice_payments)`, automatically tightening
+/// PR-3's over-refund cap (which reads that sum) so a creator can't refund cash that was
+/// charged back. A `dispute_reversal` (`amount_cents > 0`) records cash RESTORED by a
+/// `charge.dispute.closed won`. Neither touches the finalized invoice — the immutability
+/// trigger is never challenged.
+///
+/// IDEMPOTENCY (PR-8 do-not-regress): the append is `INSERT … ON CONFLICT DO NOTHING`
+/// against the `(invoice_id, provider_ref, kind) WHERE kind IN
+/// ('dispute_debit','dispute_reversal')` partial unique index (0053), so a REDELIVERED
+/// dispute event under the same `du_…` `provider_ref` appends EXACTLY ONE row per
+/// (dispute, kind) — never a double-debit / double-restore. `kind` is in the key so one
+/// dispute's debit (created) and its later reversal (won) both fit. `provider_ref` (the
+/// `du_…`) MUST be `Some` so the dedup index covers the row.
+///
+/// Returns the `ipy_…` id (fresh on insert, or the already-present row's id on a
+/// conflicting redelivery). Generic over the client so the webhook can call it inside
+/// the same transaction that records the `billing_disputes` row.
+pub async fn append_dispute_row<C: GenericClient + Sync>(
+    conn: &C,
+    invoice_id: &str,
+    amount_cents: i64,
+    currency: &str,
+    kind: DisputePaymentKind,
+    provider_ref: &str,
+) -> Result<String, RegistryError> {
+    // Sign discipline: a debit MUST be negative (cash left), a reversal MUST be positive
+    // (cash back). A zero row is meaningless (the table CHECK forbids it anyway).
+    match kind {
+        DisputePaymentKind::Debit if amount_cents >= 0 => {
+            return Err(RegistryError::InvalidInput(format!(
+                "dispute_debit amount must be < 0 (got {amount_cents}) — it claws cash back"
+            )));
+        }
+        DisputePaymentKind::Reversal if amount_cents <= 0 => {
+            return Err(RegistryError::InvalidInput(format!(
+                "dispute_reversal amount must be > 0 (got {amount_cents}) — it restores cash"
+            )));
+        }
+        _ => {}
+    }
+    if provider_ref.is_empty() {
+        return Err(RegistryError::InvalidInput(
+            "dispute payment row requires a non-empty provider_ref (the du_… dispute id)".to_string(),
+        ));
+    }
+    let id = zeroship_core::typed_id::new_invoice_payment_id();
+    let kind_str = kind.as_str();
+    let inserted = conn
+        .query(
+            "INSERT INTO zeroship.invoice_payments \
+               (id, invoice_id, amount_cents, currency, kind, provider_ref) \
+             VALUES ($1, $2, $3, $4, $5::text::zeroship.invoice_payment_kind, $6) \
+             ON CONFLICT (invoice_id, provider_ref, kind) \
+               WHERE kind IN ('dispute_debit','dispute_reversal') \
+             DO NOTHING \
+             RETURNING id",
+            &[&id, &invoice_id, &amount_cents, &currency, &kind_str, &provider_ref],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    if let Some(row) = inserted.first() {
+        return Ok(row.get::<_, String>("id"));
+    }
+    // Conflict: a row for this (invoice_id, provider_ref, kind) already exists — return
+    // its id (idempotent no-op append on a same-du_… redelivery).
+    let existing = conn
+        .query(
+            "SELECT id FROM zeroship.invoice_payments \
+             WHERE invoice_id = $1 AND provider_ref = $2 AND kind = $3::text::zeroship.invoice_payment_kind",
+            &[&invoice_id, &provider_ref, &kind_str],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    existing
+        .first()
+        .map(|r| r.get::<_, String>("id"))
+        .ok_or_else(|| {
+            RegistryError::Database(
+                "append_dispute_row ON CONFLICT but no existing dispute row found".to_string(),
+            )
+        })
+}
+
+/// Which signed dispute payment row to append. Maps to the `invoice_payment_kind`
+/// domain values `dispute_debit` / `dispute_reversal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisputePaymentKind {
+    /// `charge.dispute.created` clawback — a NEGATIVE row lowering cash_collected.
+    Debit,
+    /// `charge.dispute.closed won` restoration — a POSITIVE row raising cash_collected.
+    Reversal,
+}
+
+impl DisputePaymentKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Debit => "dispute_debit",
+            Self::Reversal => "dispute_reversal",
+        }
+    }
+}

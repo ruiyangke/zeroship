@@ -81,6 +81,12 @@ pub enum Action {
     /// reissues a corrected invoice, so it is audited with the actor + the
     /// voided/reissued ids + any true-up refund in the detail JSON.
     InvoiceVoided,
+    /// A chargeback/dispute lifecycle event was recorded from a `charge.dispute.*`
+    /// webhook (billing-ops gap #26, PR-8). A dispute claws back cash the cardholder
+    /// paid — a forced reversal recorded as a `billing_disputes` row + a signed
+    /// `invoice_payments` row — so every dispute create/resolve is audited with the
+    /// dispute / invoice / amount / status in the detail JSON.
+    RecordDispute,
 }
 
 impl Action {
@@ -107,6 +113,7 @@ impl Action {
             Self::CreditGranted => "credit_granted",
             Self::InvoiceRefunded => "invoice_refunded",
             Self::InvoiceVoided => "invoice_voided",
+            Self::RecordDispute => "record_dispute",
         }
     }
 }

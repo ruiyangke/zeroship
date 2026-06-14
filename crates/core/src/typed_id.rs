@@ -287,6 +287,19 @@ pub const SPEND_HISTORY_PREFIX: &str = "she";
 /// pairwise-disjoint from every other notification source — see [`SPEND_HISTORY_PREFIX`].
 pub const CREATOR_BILLING_HISTORY_PREFIX: &str = "cbh";
 
+/// Billing-dispute typed-id prefix (billing-ops gap #26, PR-8: disputes/chargebacks).
+/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// `zeroship.billing_disputes.id` column stores the full typed-id string (`dsp_<base62>`),
+/// minted in Rust by the `charge.dispute.created` webhook branch.
+///
+/// The id IS the `billing_notifications.transition_id` for the `disputed` kind. Its
+/// prefix MUST be pairwise-disjoint from every other notification source
+/// (`she`/`cbh`/`inv`/`ref`) so a `transition_id` from one source can never collide with
+/// another's in the send-ledger dedup key — asserted by
+/// [`tests::notification_source_prefixes_are_pairwise_disjoint`]. Distinct from the
+/// Stripe-side dispute id (`du_…`/`dp_…`), which is a provider ref, not a typed_id.
+pub const DISPUTE_PREFIX: &str = "dsp";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -385,6 +398,22 @@ pub fn new_spend_history_id() -> String {
 /// gap #26, PR-6).
 pub fn new_creator_billing_history_id() -> String {
     generate(CREATOR_BILLING_HISTORY_PREFIX)
+}
+
+/// Generate a new billing-dispute ID: `dsp_{base62(uuidv7)}`. Minted in Rust by the
+/// `charge.dispute.created` webhook branch in `stripe_handlers` when it records a
+/// chargeback (billing-ops gap #26, PR-8). The `zeroship.billing_disputes.id` column
+/// stores the full typed-id string; the value becomes the
+/// `billing_notifications.transition_id` for the `disputed` notification kind (no SQL
+/// `DEFAULT` — there is no in-DB base62 generator, and a bare `gen_random_uuid()` would
+/// not carry the `dsp_` prefix the notify dedup key + disjointness assertion rely on).
+///
+/// Distinct from the Stripe-side dispute id (`du_…`/`dp_…`, stored separately in
+/// `billing_disputes.provider_dispute_id`): the `dsp_…` is OUR typed id, the `du_…` is
+/// Stripe's. Its prefix is pairwise-disjoint from every other notification source
+/// (`she`/`cbh`/`inv`/`ref`) — see [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+pub fn new_dispute_id() -> String {
+    generate(DISPUTE_PREFIX)
 }
 
 #[cfg(test)]
@@ -583,16 +612,15 @@ mod tests {
     /// share a prefix (which would let one source's id silently dedup against another's).
     #[test]
     fn notification_source_prefixes_are_pairwise_disjoint() {
-        // `dsp` (disputes) has no `*_PREFIX` const in this crate yet (the dispute id is
-        // minted by stripe_handlers in a later PR); assert against the literal so the
-        // disjointness invariant is complete and a future `DISPUTE_PREFIX = "dsp"`
-        // re-uses the same string.
+        // PR-8 wired the real `DISPUTE_PREFIX` const; it MUST still equal the `"dsp"`
+        // literal the PR-6 test reserved, so the dedup key stays disjoint and stable.
+        assert_eq!(DISPUTE_PREFIX, "dsp", "DISPUTE_PREFIX must remain 'dsp' (notify dedup key)");
         let sources = [
             ("spend_state_history", SPEND_HISTORY_PREFIX),
             ("creator_billing_status_history", CREATOR_BILLING_HISTORY_PREFIX),
             ("invoices", INVOICE_PREFIX),
             ("refunds", REFUND_PREFIX),
-            ("disputes", "dsp"),
+            ("disputes", DISPUTE_PREFIX),
         ];
         for (i, (name_a, pa)) in sources.iter().enumerate() {
             assert_eq!(pa.len(), 3, "{name_a} prefix must be 3 chars (R16-API2)");
@@ -605,6 +633,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dispute_prefix_is_three_chars_and_disjoint() {
+        assert_eq!(DISPUTE_PREFIX.len(), 3, "dispute prefix must be 3 chars (R16-API2)");
+        let d = new_dispute_id();
+        assert!(d.starts_with("dsp_"), "got {d}");
+        assert_eq!(d.len(), 26, "dsp_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&d).expect("new_dispute_id must roundtrip");
+        assert_eq!(prefix, "dsp");
+        // Disjoint from every sibling money/notification-source prefix.
+        assert_ne!(prefix, INVOICE_PREFIX);
+        assert_ne!(prefix, INVOICE_PAYMENT_PREFIX);
+        assert_ne!(prefix, CREDIT_PREFIX);
+        assert_ne!(prefix, REFUND_PREFIX);
+        assert_ne!(prefix, SPEND_HISTORY_PREFIX);
+        assert_ne!(prefix, CREATOR_BILLING_HISTORY_PREFIX);
     }
 
     #[test]

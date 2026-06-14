@@ -36,9 +36,9 @@ use zeroship_mailer::{Address, Email, Mailer, MailerError};
 /// ([`render_template`]) and is the `kind` column of the `billing_notifications`
 /// send-ledger (`billing_notification_kind` domain).
 ///
-/// PR-6 wires the cron for the dunning- and invoice/refund-driven kinds; the
-/// `spend_*`/`disputed` kinds are reserved in the domain (their source tables exist)
-/// for a follow-up — see the cron's scan set.
+/// PR-6 wires the cron for the dunning- and invoice/refund-driven kinds; PR-8 adds
+/// `disputed` (off `billing_disputes`). The `spend_*` kinds are still reserved in the
+/// domain (their source tables exist) for a follow-up — see the cron's scan set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BillingNotificationKind {
     /// First failed charge — `creator_billing_status_history` (`*→past_due`, the
@@ -55,6 +55,9 @@ pub enum BillingNotificationKind {
     InvoiceFinalized,
     /// A newly-issued refund (`refunds`).
     Refunded,
+    /// A newly-opened dispute / chargeback (`billing_disputes`; PR-8). transition_id =
+    /// the `dsp_…` dispute id.
+    Disputed,
 }
 
 impl BillingNotificationKind {
@@ -68,6 +71,7 @@ impl BillingNotificationKind {
             Self::Recovered => "recovered",
             Self::InvoiceFinalized => "invoice_finalized",
             Self::Refunded => "refunded",
+            Self::Disputed => "disputed",
         }
     }
 
@@ -81,6 +85,7 @@ impl BillingNotificationKind {
             "recovered" => Self::Recovered,
             "invoice_finalized" => Self::InvoiceFinalized,
             "refunded" => Self::Refunded,
+            "disputed" => Self::Disputed,
             _ => return None,
         })
     }
@@ -185,6 +190,15 @@ pub fn render_template(n: &Notification) -> (String, String) {
                 ),
             )
         }
+        BillingNotificationKind::Disputed => (
+            "A charge was disputed — what happens next".to_owned(),
+            format!(
+                "Hi {name},\n\nA payment of {amount} on one of your zeroship invoices was \
+                 disputed by the cardholder. The funds are held by the card network while \
+                 the dispute is reviewed. No action is needed from you right now — we'll \
+                 update you when it resolves.\n\n— zeroship billing\n"
+            ),
+        ),
     }
 }
 
@@ -392,6 +406,7 @@ mod tests {
             BillingNotificationKind::Recovered,
             BillingNotificationKind::InvoiceFinalized,
             BillingNotificationKind::Refunded,
+            BillingNotificationKind::Disputed,
         ] {
             assert_eq!(BillingNotificationKind::from_str(k.as_str()), Some(k));
         }
@@ -407,6 +422,7 @@ mod tests {
             BillingNotificationKind::Recovered,
             BillingNotificationKind::InvoiceFinalized,
             BillingNotificationKind::Refunded,
+            BillingNotificationKind::Disputed,
         ] {
             let n = Notification {
                 to_email: "c@example.test".to_owned(),

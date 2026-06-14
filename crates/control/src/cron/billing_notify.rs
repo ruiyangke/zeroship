@@ -287,6 +287,41 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
         });
     }
 
+    // (d) Newly-opened disputes (PR-8). transition_id = the `dsp_…` dispute id; creator
+    // via the invoice FK. We notify ONLY the open-dispute event (the cardholder disputed a
+    // charge) — won/lost resolutions are not separate creator emails (they're operator
+    // bookkeeping). The disputed amount is formatted into the body (frozen, never
+    // re-priced).
+    let rows = conn
+        .query(
+            "SELECT d.id, i.creator_id, d.amount_cents, d.currency \
+               FROM zeroship.billing_disputes d \
+               JOIN zeroship.invoices i ON i.id = d.invoice_id \
+               LEFT JOIN zeroship.billing_notifications n \
+                 ON n.creator_id = i.creator_id \
+                AND n.transition_id = d.id \
+                AND n.kind = 'disputed'::zeroship.billing_notification_kind \
+              WHERE d.created_at > NOW() - $1::text::interval \
+                AND ( n.status IS NULL \
+                   OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
+            &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    for r in &rows {
+        let amount: i64 = r.get("amount_cents");
+        out.push(Candidate {
+            creator_id: r.get("creator_id"),
+            kind: BillingNotificationKind::Disputed,
+            transition_id: r.get("id"),
+            detail: NotificationDetail {
+                period_label: None,
+                amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
+                refund_destination_label: None,
+            },
+        });
+    }
+
     Ok(out)
 }
 
