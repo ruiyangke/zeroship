@@ -6,9 +6,9 @@
 //! on the compio runtime or queries hang.
 
 use compio_postgres::{connect, NoTls};
-use zeroship_auth::mailer::stdout::StdoutMailer;
-use zeroship_auth::mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
-use zeroship_auth::store::{suppressions};
+use zeroship_mailer::stdout::StdoutMailer;
+use zeroship_mailer::suppressions;
+use zeroship_mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
@@ -99,7 +99,7 @@ async fn stdout_mailer_refuses_suppressed() {
     assert!(
         matches!(
             result,
-            Err(zeroship_auth::mailer::MailerError::Suppressed(_))
+            Err(zeroship_mailer::MailerError::Suppressed(_))
         ),
         "expected Suppressed error, got: {result:?}"
     );

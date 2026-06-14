@@ -9,8 +9,8 @@ use zeroship_core::oidc_verify::JwksCache;
 use crate::config::AuthConfig;
 use crate::headers::{RequestContextMiddleware, SecurityHeaders};
 use crate::hydra_client::HydraAdmin;
-use crate::mailer::{Mailer, RelayForwardMailer};
 use crate::ui;
+use zeroship_mailer::{Mailer, RelayForwardMailer};
 
 /// Bundled stylesheet served at `/static/style.css`. Compiled into the
 /// binary at build time so the runtime has no filesystem dependency.

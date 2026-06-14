@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use compio_postgres::Client;
 
-use crate::mailer::{check_suppression, Email, Mailer, MailerError, MessageId};
+use crate::{check_suppression, Email, Mailer, MailerError, MessageId};
 
 #[derive(Debug, Default)]
 pub struct StdoutMailer;

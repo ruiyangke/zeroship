@@ -20,7 +20,7 @@
 //! `sns::canonical_string` produces for the same envelope; if you tweak
 //! the field order or add a field, regenerate the fixture.
 
-use zeroship_auth::mailer::sns::{
+use zeroship_mailer::sns::{
     canonical_string, is_valid_sns_cert_url, spki_from_pem, verify_with_cert, SnsEnvelope,
 };
 

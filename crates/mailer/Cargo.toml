@@ -1,0 +1,47 @@
+[package]
+name = "zeroship-mailer"
+version = "0.1.0"
+edition = "2021"
+description = "zeroship shared mailer — provider-neutral Mailer trait + drivers (stdout/SMTP/Resend), suppression-list gate, relay forward/bounce, webhook payloads. Consumed by auth (transactional + relay) and control (billing notifier)."
+
+[dependencies]
+compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+cyper = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+aws-lc-rs = { workspace = true }
+# `SmtpTls` derives `clap::ValueEnum` so the auth binary can parse it straight
+# off `--smtp-tls`; the derive lives on the type, so clap is a lib dependency.
+clap = { workspace = true, features = ["derive", "env"] }
+# Mailer trait uses `async fn` in trait — `#[async_trait]` keeps the trait
+# object-safe (so callers can store `Arc<dyn Mailer>`).
+async-trait = { workspace = true }
+# SES-SNS webhook signature verification. `x509-parser` is a pure-nom X.509
+# reader — used to lift the SubjectPublicKeyInfo out of the SigningCertURL PEM.
+# The RSA-SHA1/256 verify itself goes through `aws-lc-rs`.
+x509-parser = "0.18"
+# SMTP mailer driver — BLOCKING `SmtpTransport` wrapped in
+# `compio::runtime::spawn_blocking` (no tokio in the event loop). Features
+# chosen explicitly to AVOID `tokio1*` (which would pull tokio in) and
+# `native-tls` (we standardize on rustls).
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder", "pool", "hostname"] }
+# Compile-time-checked HTML/text email templates. Template-directory override
+# lives in `askama.toml` next to this file (askama 0.12 reads its config from
+# that file, not from `[package.metadata.askama]` — that mechanism only landed
+# in 0.13+).
+askama = "0.12"
+
+[dev-dependencies]
+# `tests/mailer_test.rs` is a live-PG suppression test driven by `#[compio::test]`.
+# The polling fallback keeps it runnable in sandboxes that block io_uring;
+# production builds use the normal workspace compio dependency above.
+compio = { workspace = true, features = ["polling"] }
+
+[lints]
+workspace = true

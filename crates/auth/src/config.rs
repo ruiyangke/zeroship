@@ -7,8 +7,8 @@ use zeroship_core::config::{
     parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY, DEV_TOTP_ENC_KEY,
 };
 
-use crate::mailer::SmtpTls;
 use zeroship_core::observability::ObservabilityFlags;
+use zeroship_mailer::SmtpTls;
 
 const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
 const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";

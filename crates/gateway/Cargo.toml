@@ -66,6 +66,10 @@ async-trait = { workspace = true }
 # exists before the CRUD round-trip. NOT a runtime dep — the gateway
 # bin never imports `zeroship-auth`.
 zeroship-auth = { workspace = true }
+# The oidc_rp_e2e fixture builds an `AuthConfig` whose `smtp_tls` /
+# `relay_smtp_tls` fields are `zeroship_mailer::SmtpTls` (the mailer was
+# extracted out of `zeroship-auth` into its own crate). NOT a runtime dep.
+zeroship-mailer = { workspace = true }
 # Phase 8 U1 — signing-key loader round-trip tests write a PKCS#8
 # PEM/DER fixture to a tmpdir and call `signing::load_from_path`.
 tempfile = { workspace = true }

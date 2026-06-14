@@ -18,6 +18,7 @@ pub mod resend;
 pub mod smtp;
 pub mod sns;
 pub mod stdout;
+pub mod suppressions;
 pub mod templates;
 pub mod types;
 
@@ -26,7 +27,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use compio_postgres::Client;
 
-use crate::store::suppressions;
 pub use resend::{ResendConfig, ResendMailer};
 pub use smtp::{SmtpConfig, SmtpMailer, SmtpTls};
 pub use stdout::StdoutMailer;

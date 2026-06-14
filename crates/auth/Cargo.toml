@@ -11,6 +11,10 @@ path = "src/main.rs"
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-authz = { workspace = true }
+# Shared mailer crate (extracted from this crate's old `src/mailer/`): the
+# provider-neutral `Mailer` trait + drivers (stdout/SMTP/Resend), the
+# suppression-list gate, and the relay forward/bounce + webhook payload types.
+zeroship-mailer = { workspace = true }
 compio = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 ntex = { workspace = true }
@@ -27,21 +31,6 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 mimalloc = { workspace = true }
-# Mailer trait uses `async fn` in trait — `#[async_trait]` keeps the trait
-# object-safe (so we can store `Arc<dyn Mailer>` in `AppCtx`).
-async-trait = { workspace = true }
-# SES-SNS webhook signature verification (P6-U3). `x509-parser` is a
-# pure-nom X.509 reader — used to lift the SubjectPublicKeyInfo out
-# of the SigningCertURL PEM. The RSA-SHA1 verify itself goes through
-# `aws-lc-rs` (workspace pin, also our FIPS provider for rustls).
-x509-parser = "0.18"
-aws-lc-rs = { workspace = true }
-# SMTP mailer driver — BLOCKING `SmtpTransport` wrapped in
-# `compio::runtime::spawn_blocking` (no tokio in the event loop).
-# Crate-local pin, not workspace; the auth server is the only consumer.
-# Features chosen explicitly to AVOID `tokio1*` (which would pull
-# tokio in) and `native-tls` (we standardize on rustls).
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder", "pool", "hostname"] }
 
 # Password hashing (Argon2id, PHC strings).
 # Not workspace-pinned — auth is the only consumer today.
@@ -81,6 +70,11 @@ askama = "0.12"
 # keeps them runnable in sandboxes that block io_uring; production builds use
 # the normal workspace compio dependency above the dev-dependency boundary.
 compio = { workspace = true, features = ["polling"] }
+# `tests/signup_forgot_ratelimit_test.rs` defines an in-test mock `Mailer`
+# impl; the trait uses `async fn`, so `#[async_trait]` keeps the impl
+# object-safe. Only the tests need it now that the trait lives in
+# `zeroship-mailer`.
+async-trait = { workspace = true }
 jsonwebtoken = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 # `tests/load_test.rs` uses `futures::future::join_all` to drive N parallel

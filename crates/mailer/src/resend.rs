@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use compio_postgres::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::mailer::{check_suppression, Address, Email, Mailer, MailerError, MessageId};
+use crate::{check_suppression, Address, Email, Mailer, MailerError, MessageId};
 
 const RESEND_ENDPOINT: &str = "https://api.resend.com/emails";
 
@@ -126,7 +126,7 @@ struct ResendResponse {
 impl Mailer for ResendMailer {
     async fn send(&self, db: &Client, msg: Email) -> Result<MessageId, MailerError> {
         // 1. Suppression-list check (mandatory contract — see
-        //    `crate::mailer::check_suppression`).
+        //    `crate::check_suppression`).
         check_suppression(db, &msg.to.email).await?;
 
         // 2. Build the JSON body.

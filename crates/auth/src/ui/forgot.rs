@@ -24,10 +24,10 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password_reset};
-use crate::mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
-use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
+use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
+use zeroship_mailer::{Address, Mailer};
 use crate::ui::ForgotPage;
 use sha2::{Digest, Sha256};
 

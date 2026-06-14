@@ -3,7 +3,7 @@
 //!
 //! These are PURE functions: they take the parsed inbound message + the
 //! resolved relay identity and return a provider-neutral [`Email`] for the
-//! dedicated relay-forward mailer ([`crate::mailer::RelayForwardMailer`]) to
+//! dedicated relay-forward mailer ([`crate::RelayForwardMailer`]) to
 //! send. All the header strip/rewrite logic and the loop-guard stamp live here
 //! so they can be asserted against the built message without a live SMTP path.
 //!
@@ -17,8 +17,8 @@
 //! `Delivered-To`, the `Received` chain, `Authentication-Results`, `ARC-*`,
 //! the broken upstream `DKIM-Signature`) are dropped by construction.
 
-use crate::mailer::inbound::{InboundMessage, RELAY_LOOP_HEADER};
-use crate::mailer::types::{Address, Email};
+use crate::inbound::{InboundMessage, RELAY_LOOP_HEADER};
+use crate::types::{Address, Email};
 
 /// Build the forwarded message to the user's real inbox (sub-spec §5.3).
 ///
@@ -157,7 +157,7 @@ fn bounce_mailbox(alias: &str, relay_domain: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mailer::inbound::{InboundHeader, Mailbox};
+    use crate::inbound::{InboundHeader, Mailbox};
 
     fn sample_inbound(real_inbox: &str) -> InboundMessage {
         InboundMessage {

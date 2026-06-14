@@ -19,21 +19,23 @@
 
 use compio_postgres::Client;
 
-use crate::error::{AuthError, Result};
+use crate::types::MailerError;
 
 /// Returns `true` if `email` is on the suppression list.
 ///
 /// # Errors
 ///
-/// `AuthError::Db` on PG failure.
-pub async fn is_suppressed(conn: &Client, email: &str) -> Result<bool> {
+/// [`MailerError::Transport`] on PG failure — a suppression-check failure is a
+/// transport-layer fault from the caller's point of view (the message could not
+/// be delivered).
+pub async fn is_suppressed(conn: &Client, email: &str) -> Result<bool, MailerError> {
     let rows = conn
         .query(
             "SELECT 1 FROM zeroship.email_suppressions WHERE email = $1::citext",
             &[&email],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("is_suppressed: {e}")))?;
+        .map_err(|e| MailerError::Transport(format!("is_suppressed: {e}")))?;
     Ok(!rows.is_empty())
 }
 
@@ -43,13 +45,13 @@ pub async fn is_suppressed(conn: &Client, email: &str) -> Result<bool> {
 ///
 /// # Errors
 ///
-/// `AuthError::Db` on PG failure.
+/// [`MailerError::Transport`] on PG failure.
 pub async fn add(
     conn: &Client,
     email: &str,
     reason: &str,
     provider_msg: Option<&str>,
-) -> Result<()> {
+) -> Result<(), MailerError> {
     conn.execute(
         "INSERT INTO zeroship.email_suppressions (email, reason, provider_msg) \
          VALUES ($1::citext, $2, $3) \
@@ -59,6 +61,6 @@ pub async fn add(
         &[&email, &reason, &provider_msg],
     )
     .await
-    .map_err(|e| AuthError::Db(format!("suppressions::add: {e}")))?;
+    .map_err(|e| MailerError::Transport(format!("suppressions::add: {e}")))?;
     Ok(())
 }

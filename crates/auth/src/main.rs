@@ -20,10 +20,10 @@ use zeroship_auth::config::AuthConfig;
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::mailer::{
+use zeroship_auth::server;
+use zeroship_mailer::{
     Mailer, RelayForwardMailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
 };
-use zeroship_auth::server;
 use zeroship_auth::startup_validation::validate_hydra_admin_url;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

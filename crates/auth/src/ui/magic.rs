@@ -53,8 +53,6 @@ use crate::hydra_client::HydraAdmin;
 use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::magic_link;
-use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
-use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
@@ -62,6 +60,8 @@ use crate::ui::{
     render_token_interstitial, ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage,
     MagicShowCodePage, PublicErrorMessage, TokenRedeemInterstitial,
 };
+use zeroship_mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
+use zeroship_mailer::{Address, Mailer};
 
 // ─── Cookie helpers ──────────────────────────────────────────────────
 

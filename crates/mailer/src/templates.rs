@@ -11,7 +11,7 @@
 
 use askama::Template;
 
-use crate::mailer::{Address, Email};
+use crate::{Address, Email};
 
 // ─── verify-email ────────────────────────────────────────────
 

@@ -2,10 +2,10 @@
 //! relay handler runs against it (sub-spec §4).
 //!
 //! This is a DIFFERENT Postmark product from the delivery-event webhook in
-//! [`crate::mailer::bounce`]: inbound mail receive POSTs a parsed MIME message
+//! [`crate::bounce`]: inbound mail receive POSTs a parsed MIME message
 //! as JSON (no MIME parser needed on our side), whereas the bounce/complaint
 //! webhook posts a `RecordType`-discriminated delivery event. The two share
-//! only HTTP Basic auth ([`crate::mailer::bounce::verify_basic_auth`]).
+//! only HTTP Basic auth ([`crate::bounce::verify_basic_auth`]).
 //!
 //! Reference: <https://postmarkapp.com/developer/webhooks/inbound-webhook>
 //!
@@ -32,7 +32,7 @@ pub const SPAM_SCORE_THRESHOLD: f64 = 5.0;
 pub const RELAY_MAX_HOPS: u32 = 3;
 
 /// Postmark Inbound's parsed message shape. PascalCase is Postmark's wire
-/// convention (matching [`crate::mailer::bounce`]).
+/// convention (matching [`crate::bounce`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct InboundMessage {

@@ -187,6 +187,7 @@ zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authz = { path = "crates/authz" }
+zeroship-mailer = { path = "crates/mailer" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

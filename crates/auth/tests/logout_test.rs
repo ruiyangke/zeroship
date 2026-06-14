@@ -25,8 +25,8 @@ use uuid::Uuid;
 
 use zeroship_auth::csrf;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
+use zeroship_mailer::{Mailer, StdoutMailer};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions, users};
 

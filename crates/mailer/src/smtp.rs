@@ -31,7 +31,7 @@ use lettre::{
     Message, Transport,
 };
 
-use crate::mailer::{check_suppression, Address, Email, Mailer, MailerError, MessageId};
+use crate::{check_suppression, Address, Email, Mailer, MailerError, MessageId};
 
 /// A raw `(name, value)` header lettre 0.11 has no one-call API for. lettre's
 /// typed `Header` trait takes a value implementing `Header`, so the relay's
@@ -103,7 +103,8 @@ pub enum SmtpTls {
     Plaintext,
 }
 
-/// Driver-specific config; parsed from `AUTH_SMTP_*` env vars in [`crate::config`].
+/// Driver-specific config; parsed from `AUTH_SMTP_*` env vars by the auth
+/// binary's config layer (`zeroship-auth`'s `config` module).
 #[derive(Debug, Clone)]
 pub struct SmtpConfig {
     pub host: String,
@@ -163,7 +164,7 @@ impl SmtpMailer {
 impl Mailer for SmtpMailer {
     async fn send(&self, db: &Client, msg: Email) -> Result<MessageId, MailerError> {
         // 1. Suppression-list check (every Mailer impl MUST do this — see
-        //    `crate::mailer::check_suppression` doc).
+        //    `crate::check_suppression` doc).
         check_suppression(db, &msg.to.email).await?;
 
         // 2. Translate our provider-neutral `Email` to a lettre `Message`.
@@ -445,8 +446,8 @@ mod tests {
     #[test]
     fn relay_forward_real_inbox_absent_from_all_rendered_headers() {
         let real = "real.user@personal.test";
-        let inbound = crate::mailer::inbound::InboundMessage {
-            from_full: crate::mailer::inbound::Mailbox {
+        let inbound = crate::inbound::InboundMessage {
+            from_full: crate::inbound::Mailbox {
                 email: "newsletter@shop.test".into(),
                 name: Some("Shop".into()),
             },
@@ -461,7 +462,7 @@ mod tests {
         };
         // Build the forward the REAL way (the path the handler runs), then
         // render it the REAL way (the path the SMTP driver runs).
-        let fwd = crate::mailer::forward::build_forward(
+        let fwd = crate::forward::build_forward(
             &inbound,
             "abc123@relay.zeroship.ai",
             real,

@@ -6506,7 +6506,6 @@ dependencies = [
  "argon2",
  "askama",
  "async-trait",
- "aws-lc-rs",
  "base64",
  "chrono",
  "clap",
@@ -6518,7 +6517,6 @@ dependencies = [
  "hex",
  "http",
  "jsonwebtoken",
- "lettre",
  "mimalloc",
  "ntex",
  "password-hash",
@@ -6532,9 +6530,9 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "x509-parser",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-mailer",
 ]
 
 [[package]]
@@ -6686,7 +6684,30 @@ dependencies = [
  "zeroship-auth",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-mailer",
  "zeroship-metering",
+]
+
+[[package]]
+name = "zeroship-mailer"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "async-trait",
+ "aws-lc-rs",
+ "base64",
+ "clap",
+ "compio",
+ "compio-postgres",
+ "cyper",
+ "http",
+ "lettre",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]

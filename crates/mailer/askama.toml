@@ -1,0 +1,8 @@
+# Askama 0.12 configuration. The email templates live next to the template
+# structs in `src/templates/` rather than askama's default `templates/`
+# directory at the crate root.
+#
+# Askama 0.13 will let us move this into `[package.metadata.askama]` in
+# `Cargo.toml`; until we upgrade, this file is the canonical config.
+[general]
+dirs = ["src/templates"]
