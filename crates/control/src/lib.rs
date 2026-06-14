@@ -21,6 +21,7 @@ pub mod internal;
 pub mod metering;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
+pub mod openmeter_client;
 pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
@@ -195,10 +196,10 @@ pub struct AppState {
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
     /// The configured metering/billing provider, built once at boot
     /// (`--metering-provider`, default `native`). The billing-reconcile cron
-    /// drives it; `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the
-    /// local ledger, provider-independent). M-Native: only `Native` is
-    /// functional — it is the existing Stripe pipeline behind the
-    /// [`metering::provider::MeteringProvider`] trait.
+    /// drives `Native` (invoice); the metering-export cron drives the export
+    /// backends `Stripe` (CU → meter_events) and `OpenMeter` (CU → CloudEvents).
+    /// `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the local ledger,
+    /// provider-independent). See [`metering::provider::MeteringProvider`].
     pub metering_provider: Arc<dyn metering::provider::MeteringProvider>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
     /// stash signing key the gateway uses via

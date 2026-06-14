@@ -146,4 +146,20 @@ mod tests {
             "native must NOT spawn metering_export (report_usage is a no-op) — got {tasks:?}"
         );
     }
+
+    /// OpenMeter, like Stripe, is an export backend: the `metering_export` cron —
+    /// where CU is PUSHED (as CloudEvents) — MUST be spawned (else $0 export), and
+    /// `billing_reconcile` (whose `invoice` is a no-op under openmeter) must NOT.
+    #[test]
+    fn openmeter_spawns_metering_export_not_billing_reconcile() {
+        let tasks = provider_aware_cron_tasks(MeteringProviderKind::OpenMeter);
+        assert!(
+            tasks.contains(&"metering_export"),
+            "openmeter MUST spawn metering_export (else $0 export) — got {tasks:?}"
+        );
+        assert!(
+            !tasks.contains(&"billing_reconcile"),
+            "openmeter must NOT spawn billing_reconcile (invoice is a no-op) — got {tasks:?}"
+        );
+    }
 }

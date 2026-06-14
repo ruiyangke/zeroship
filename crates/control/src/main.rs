@@ -100,8 +100,9 @@ struct ControlCli {
 
     /// Metering/billing provider backend (M6). `native` (default) runs the
     /// control-side aggregation → CU×FX → Stripe reconciler. `stripe` (Stripe
-    /// Billing Meters) and `openmeter` are NOT yet implemented and refuse to
-    /// boot with a clear error.
+    /// Billing Meters — CU → meter_events, Stripe self-invoices) and `openmeter`
+    /// (CU → CloudEvents, export-only — OpenMeter aggregates, invoicing stays
+    /// Native) are export backends; each refuses to boot without its creds.
     #[arg(
         long = "metering-provider",
         env = "METERING_PROVIDER",
@@ -133,6 +134,50 @@ struct ControlCli {
         default_value = ""
     )]
     stripe_meter_id: String,
+
+    /// OpenMeter base URL (M-OpenMeter). REQUIRED when `--metering-provider
+    /// openmeter` (else the deployment refuses to boot — an OpenMeter deployment
+    /// with no endpoint would push CU nowhere). `https://openmeter.cloud` or a
+    /// self-hosted deployment. The export cron POSTs CloudEvents to
+    /// `{url}/api/v1/events`.
+    #[arg(
+        long = "openmeter-url",
+        env = "OPENMETER_URL",
+        default_value = ""
+    )]
+    openmeter_url: String,
+
+    /// OpenMeter API token (Bearer) (M-OpenMeter). REQUIRED when
+    /// `--metering-provider openmeter`. Never logged.
+    #[arg(
+        long = "openmeter-token",
+        env = "OPENMETER_TOKEN",
+        default_value = "",
+        hide_env_values = true
+    )]
+    openmeter_token: String,
+
+    /// OpenMeter CloudEvent `type` = the operator-provisioned meter's `eventType`
+    /// (M-OpenMeter, e.g. `compute_units`). The export cron pushes CU as
+    /// CloudEvents of this `type`.
+    #[arg(
+        long = "openmeter-event-type",
+        env = "OPENMETER_EVENT_TYPE",
+        default_value = "compute_units"
+    )]
+    openmeter_event_type: String,
+
+    /// OpenMeter meter **slug** (M-OpenMeter). REQUIRED when
+    /// `--metering-provider openmeter`. The export cron reads the meter's
+    /// AGGREGATED value for `(subject, period)` via this slug to reconcile a
+    /// crash-then-re-drive push past OpenMeter's dedup window (C2) — without it a
+    /// >24h re-drive could double-count, so the deployment refuses to boot.
+    #[arg(
+        long = "openmeter-meter-slug",
+        env = "OPENMETER_METER_SLUG",
+        default_value = ""
+    )]
+    openmeter_meter_slug: String,
 
     /// Comma-separated previous master keys accepted during key rotation.
     #[arg(
@@ -704,6 +749,30 @@ fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
+        // M-OpenMeter prod guard (blueprint §M6 / §M9 risk 3): an `openmeter`
+        // deployment REQUIRES its base URL + API token (else CU pushes go nowhere
+        // — enforcing locally while exporting $0) AND a meter slug (needed to read
+        // the aggregate back for the >24h re-drive reconcile, C2). Refuse to boot.
+        // (`build_provider` also rejects these; this is the earlier, clearer
+        // message on the prod path.)
+        if cli.metering_provider.trim().eq_ignore_ascii_case("openmeter") {
+            if cli.openmeter_url.trim().is_empty() || cli.openmeter_token.trim().is_empty() {
+                tracing::error!(
+                    "control: --metering-provider openmeter requires --openmeter-url and \
+                     --openmeter-token. Refusing to boot an OpenMeter deployment with no endpoint \
+                     (it would export $0 while enforcing locally)."
+                );
+                std::process::exit(1);
+            }
+            if cli.openmeter_meter_slug.trim().is_empty() {
+                tracing::error!(
+                    "control: --metering-provider openmeter requires --openmeter-meter-slug (the \
+                     operator-provisioned meter's slug). It is needed to read the aggregate back \
+                     for the >24h re-drive reconcile (C2); refusing to boot without it."
+                );
+                std::process::exit(1);
+            }
+        }
         // The dedicated pairwise-salt secret MUST be a strong, stable,
         // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
         // anchor and MUST equal the gateway's value. Skip the strength check
@@ -1049,9 +1118,25 @@ fn main() -> std::io::Result<()> {
                 },
             )
         }
+        // OpenMeter: carry the operator-provisioned base URL + token + event type
+        // + meter slug. Empty url/token/slug leaves the config rejectable by
+        // `build_provider` (and the prod guard above catches it earlier).
+        zeroship_control::metering::provider::MeteringProviderKind::OpenMeter
+            if !cli.openmeter_url.trim().is_empty() =>
+        {
+            zeroship_control::metering::provider::MeteringProviderConfig::openmeter(
+                zeroship_control::metering::provider::OpenMeterConfig {
+                    base_url: cli.openmeter_url.trim().to_string(),
+                    token: zeroship_control::SecretString::new(cli.openmeter_token.clone()),
+                    event_type: cli.openmeter_event_type.trim().to_string(),
+                    meter_slug: cli.openmeter_meter_slug.trim().to_string(),
+                },
+            )
+        }
         kind => zeroship_control::metering::provider::MeteringProviderConfig {
             kind,
             stripe_meter: None,
+            openmeter: None,
         },
     };
     let metering_provider =
