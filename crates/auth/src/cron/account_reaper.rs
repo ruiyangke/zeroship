@@ -226,6 +226,7 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
 ///     payouts FK it, so it anchors the creator-revenue ledger), OR
 ///   * they have an `invoices` row (an infra-cost invoice — the durable
 ///     marketplace billing artifact, keyed by `creator_id`).
+///
 /// Either is a retain-on-erase anchor: an invoiced creator's `users` row is
 /// anonymized-in-place (not hard-deleted) so the invoice's `creator_id` FK
 /// target stays alive. A never-billed creator (neither) is hard-deleted and
