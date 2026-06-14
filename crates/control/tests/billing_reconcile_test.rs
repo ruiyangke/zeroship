@@ -1072,6 +1072,9 @@ impl StripeApi for FailAfterFirstItem {
     async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
         self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
     }
+    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
+        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
+    }
 }
 
 /// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
@@ -1220,6 +1223,9 @@ impl StripeApi for PostThenCrash {
     }
     async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
         self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
+    }
+    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
+        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
     }
 }
 
@@ -1406,6 +1412,9 @@ impl StripeApi for CrashOnFinalize {
     }
     async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
         self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
+    }
+    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
+        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
     }
 }
 

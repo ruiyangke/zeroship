@@ -62,7 +62,12 @@ pub trait MeteringProvider: Send + Sync {
 
     /// Forward this period's CU for one app. `compute_units` is the integer CU
     /// from `pricing::total_units`; `idempotency_key` is the deterministic
-    /// per-(app,period) key. Native: NO-OP (usage is already local).
+    /// per-(app,period) key. `now` is the sweep's wall-clock unix seconds — the
+    /// CONSUMPTION instant the event is stamped at (Stripe rejects a timestamp
+    /// more than 5min in the future or older than 35d, and aggregates the event
+    /// into whatever period its timestamp falls in, so "now during the current
+    /// period" is correct — NEVER `period.end`, which is a future timestamp).
+    /// Native: NO-OP (usage is already local).
     async fn report_usage(
         &self,
         state: &AppState,
@@ -71,7 +76,23 @@ pub trait MeteringProvider: Send + Sync {
         period: BillingPeriod,
         compute_units: u64,
         idempotency_key: &str,
+        now: i64,
     ) -> Result<(), ProviderError>;
+
+    /// Read the provider's EXTERNALLY-aggregated CU total for one
+    /// `(customer, period)` window — the SUM the external meter has actually
+    /// accepted. The export cron pushes `current_local − reported_total`, so a
+    /// crash-then-re-drive past the external dedup window NEVER double-counts
+    /// (the guarantee does not depend on the local high-water being fresh, nor on
+    /// any time-bounded idempotency window). Native: returns 0 (the export cron
+    /// is never spawned for Native; nothing is forwarded). Stripe: reads the
+    /// meter's `event_summaries` aggregate.
+    async fn reported_total(
+        &self,
+        state: &AppState,
+        customer: &CustomerRef,
+        period: BillingPeriod,
+    ) -> Result<u64, ProviderError>;
 
     /// Close + bill the period for one creator. Native: the WHOLE current
     /// reconciler body (price → invoice items → create+finalize, with C1/C2),
@@ -103,6 +124,13 @@ pub trait MeteringProvider: Send + Sync {
 pub struct StripeMeterConfig {
     /// The Stripe Meter's configured `event_name` (e.g. `compute_units`).
     pub event_name: String,
+    /// The Stripe **Meter id** (`mtr_…`) the operator provisioned. REQUIRED for
+    /// the C2 re-drive reconcile: the export cron reads the meter's *aggregated*
+    /// value for `(customer, period)` via `GET /v1/billing/meters/{id}/
+    /// event_summaries` and pushes `current − aggregate`, so a re-drive past
+    /// Stripe's ~24h `identifier` dedup window can NEVER double-count. The
+    /// `event_name` aggregates events; the `meter_id` reads the aggregate back.
+    pub meter_id: String,
     /// The platform Stripe secret key (same account the Native rail uses).
     pub secret_key: crate::SecretString,
     /// Stripe API base URL (overridable so tests point at a localhost mock).
@@ -116,6 +144,7 @@ impl Clone for StripeMeterConfig {
     fn clone(&self) -> Self {
         Self {
             event_name: self.event_name.clone(),
+            meter_id: self.meter_id.clone(),
             secret_key: crate::SecretString::new(self.secret_key.expose_secret().to_string()),
             base_url: self.base_url.clone(),
         }
@@ -127,6 +156,7 @@ impl std::fmt::Debug for StripeMeterConfig {
         // Never leak the secret key in Debug output.
         f.debug_struct("StripeMeterConfig")
             .field("event_name", &self.event_name)
+            .field("meter_id", &self.meter_id)
             .field("secret_key", &"<redacted>")
             .field("base_url", &self.base_url)
             .finish()
@@ -188,6 +218,15 @@ pub fn build_provider(
                         .to_string(),
                 )
             })?;
+            if meter.meter_id.trim().is_empty() {
+                return Err(ProviderError::Config(
+                    "metering-provider 'stripe' requires --stripe-meter-id (the \
+                     operator-provisioned Stripe Meter's `mtr_…` id) — it is needed to read the \
+                     meter's aggregated value back for the >24h re-drive reconcile (C2); \
+                     refusing to boot without it (a silent over-bill window)"
+                        .to_string(),
+                ));
+            }
             Ok(std::sync::Arc::new(stripe_meters::StripeProvider::new(meter)))
         }
         MeteringProviderKind::OpenMeter => Err(ProviderError::Config(
@@ -233,11 +272,31 @@ mod tests {
         // export-cron spawn on).
         let cfg = MeteringProviderConfig::stripe(StripeMeterConfig {
             event_name: "compute_units".to_string(),
+            meter_id: "mtr_test_x".to_string(),
             secret_key: crate::SecretString::new("sk_test_x".to_string()),
             base_url: "http://localhost:0".to_string(),
         });
         let provider = build_provider(&cfg).expect("stripe provider must build with creds");
         assert_eq!(provider.kind(), MeteringProviderKind::Stripe);
+    }
+
+    #[test]
+    fn build_stripe_provider_without_meter_id_is_rejected_at_boot() {
+        // The C2 re-drive reconcile reads the meter's aggregate via the meter id;
+        // a stripe deployment with no meter id MUST fail to boot (else it would
+        // silently fall back to trusting Stripe's 24h identifier window — the
+        // over-bill window the fix closes).
+        let cfg = MeteringProviderConfig::stripe(StripeMeterConfig {
+            event_name: "compute_units".to_string(),
+            meter_id: "  ".to_string(),
+            secret_key: crate::SecretString::new("sk_test_x".to_string()),
+            base_url: "http://localhost:0".to_string(),
+        });
+        let Err(err) = build_provider(&cfg) else {
+            panic!("stripe must be rejected without a meter id");
+        };
+        assert!(matches!(err, ProviderError::Config(_)), "got {err:?}");
+        assert!(err.to_string().contains("stripe-meter-id"), "msg: {err}");
     }
 
     #[test]

@@ -107,3 +107,36 @@ Stream 2).
   with persistence in
   [crates/control/src/stripe_store.rs](../../crates/control/src/stripe_store.rs),
   mirrored by [sdks/payments/src/webhook.ts](../../sdks/payments/src/webhook.ts).
+
+## Stripe Billing Meters export (M-Stripe)
+
+An alternative rail (`--metering-provider stripe`) where Stripe owns aggregation
++ invoicing and the platform only PUSHES compute units. The export cron
+([crates/control/src/cron/metering_export.rs](../../crates/control/src/cron/metering_export.rs))
+sweeps each owned app's current-period CU and forwards a delta as Stripe
+`meter_events` against an operator-provisioned Meter (`--stripe-meter-event-name`
++ `--stripe-meter-id`). Stripe's metered Price + Subscription self-invoice from
+those events; the platform never invoices on this rail.
+
+Exactly-once revenue under crash × >24h re-drive × multi-instance:
+
+- **Billable CU parity.** The export pushes BILLABLE CU
+  (`total_units − plan.included_units`) — the SAME quantity the spend cap /
+  `charge_cents` treat as billable — so Stripe billing == local enforcement. The
+  plan's `base_fee_cents` is a SEPARATE Stripe subscription line, not part of the
+  metered usage.
+- **Consumption-instant timestamp.** Each `meter_event` is stamped at the sweep's
+  wall-clock instant (Stripe accepts only `[now−35d, now+5min]`), never at the
+  period end (a future timestamp Stripe would reject — a $0-revenue black hole).
+- **Aggregate reconcile (no 24h-window trust).** Before pushing, the cron reads
+  the meter's *aggregated* value back
+  (`GET /v1/billing/meters/{id}/event_summaries`) and pushes
+  `current − max(local_high_water, stripe_aggregate)`. A crash-then-re-drive past
+  Stripe's ~24h `identifier` dedup window therefore re-pushes only the missing
+  remainder — the guarantee never depends on the dedup window.
+- **Durable failure surface.** A failing export bumps `consecutive_failures` +
+  records `last_error`/`last_attempt_at` on `metering_exports` (reset on success),
+  so a permanently mis-provisioned app is observable, not silently under-billing.
+- **Append-only — no clawback.** Stripe meters are additive: once CU is exported
+  it is never refunded. A DOWNWARD re-weight mid-period does NOT claw back already
+  exported CU; treat metric weights as append-only within a billing period.

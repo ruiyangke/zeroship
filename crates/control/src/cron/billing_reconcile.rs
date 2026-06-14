@@ -765,6 +765,15 @@ mod tests {
         ) -> Result<(), StripeError> {
             Ok(())
         }
+        async fn meter_event_summary(
+            &self,
+            _meter_id: &str,
+            _stripe_customer_id: &str,
+            _start_time: i64,
+            _end_time: i64,
+        ) -> Result<u64, StripeError> {
+            Ok(0)
+        }
     }
 
     #[compio::test]

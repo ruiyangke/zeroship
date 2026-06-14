@@ -105,15 +105,23 @@ impl MeteringProvider for StripeProvider {
         _state: &AppState,
         customer: &CustomerRef,
         _app_id: Uuid,
-        period: BillingPeriod,
+        _period: BillingPeriod,
         compute_units: u64,
         idempotency_key: &str,
+        now: i64,
     ) -> Result<(), ProviderError> {
         // Push the CU DELTA onto the Stripe Meter. The export cron has already
-        // computed `compute_units` as (current cumulative − last exported), so
-        // this is the consumed-since-last-export quantity Stripe will SUM.
-        // `idempotency_key` is the deterministic per-window dedup `identifier`.
-        // Stamp the event at the period end (the billed window's close).
+        // computed `compute_units` as the still-missing remainder (current −
+        // Stripe's aggregate / high-water), so this is the consumed-since-last-
+        // export quantity Stripe will SUM. `idempotency_key` is the deterministic
+        // per-window dedup `identifier`.
+        //
+        // C1: stamp the event at `now` — the CONSUMPTION/sweep instant — NOT
+        // `period.end` (the first of NEXT month). `period.end` is a FUTURE
+        // timestamp Stripe REJECTS (it accepts only [now−35d, now+5min]); a
+        // rejected push exports nothing → a $0-revenue black hole. Stripe
+        // aggregates the event into the period its timestamp falls in, so a `now`
+        // that lies within the current period is billed to the current period.
         let stripe = self.stripe();
         stripe
             .create_meter_event(
@@ -121,10 +129,34 @@ impl MeteringProvider for StripeProvider {
                 customer.as_str(),
                 compute_units,
                 idempotency_key,
-                period.end,
+                now,
             )
             .await?;
         Ok(())
+    }
+
+    async fn reported_total(
+        &self,
+        _state: &AppState,
+        customer: &CustomerRef,
+        period: BillingPeriod,
+    ) -> Result<u64, ProviderError> {
+        // C2: read the meter's AGGREGATED value for this (customer, period) — the
+        // SUM Stripe has actually accepted. The cron pushes `current − this`, so a
+        // re-drive past Stripe's ~24h `identifier` dedup window pushes only the
+        // still-missing remainder instead of double-counting. The guarantee rides
+        // on Stripe's own aggregate, never on the (by-construction-stale) local
+        // high-water or the 24h window.
+        let stripe = self.stripe();
+        let total = stripe
+            .meter_event_summary(
+                &self.meter.meter_id,
+                customer.as_str(),
+                period.start,
+                period.end,
+            )
+            .await?;
+        Ok(total)
     }
 
     async fn invoice(

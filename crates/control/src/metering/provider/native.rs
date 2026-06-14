@@ -103,9 +103,21 @@ impl MeteringProvider for NativeProvider {
         _period: BillingPeriod,
         _compute_units: u64,
         _idempotency_key: &str,
+        _now: i64,
     ) -> Result<(), ProviderError> {
         // NO-OP on the Native rail: usage is already local (usage_aggregates).
         Ok(())
+    }
+
+    async fn reported_total(
+        &self,
+        _state: &AppState,
+        _customer: &CustomerRef,
+        _period: BillingPeriod,
+    ) -> Result<u64, ProviderError> {
+        // Native never forwards CU to an external meter (the export cron is not
+        // spawned for it), so there is no external aggregate — 0.
+        Ok(0)
     }
 
     async fn invoice(

@@ -71,3 +71,26 @@ DO $g$ BEGIN
   END IF;
 END $g$;
 --rollback DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.metering_exports FROM zeroship_control'; END IF; END $rb$;
+
+-- ─── Durable per-app export failure surface (M-Stripe MAJOR M2) ─────────────
+-- A failing `report_usage` was previously LOG-ONLY: an app that always fails to
+-- export (a mis-provisioned customer, a meter id typo, a permanent Stripe 4xx)
+-- would silently UNDER-bill forever with nothing queryable to alert on. These
+-- columns make the failure DURABLE + observable:
+--   * consecutive_failures — bumped on each failed export attempt, RESET to 0 on
+--     a successful push. A sustained non-zero value is the alert signal ("app X
+--     has failed to export N times in a row").
+--   * last_error           — the most recent export error string (already
+--     redacted at the source; a SecretString is NEVER formatted into it).
+--   * last_attempt_at       — wall-clock of the most recent attempt (success OR
+--     failure), so an operator can see staleness.
+-- The row is UPSERTed on the FIRST attempt for a NEW (app, period) even before a
+-- successful push lands, so a from-the-start failure is still recorded (the
+-- export ledger no longer requires a prior successful push to exist).
+--changeset zeroship:metering-exports-failure-surface splitStatements:true
+ALTER TABLE zeroship.metering_exports
+    ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0
+        CHECK (consecutive_failures >= 0),
+    ADD COLUMN last_error            TEXT,
+    ADD COLUMN last_attempt_at       TIMESTAMPTZ;
+--rollback ALTER TABLE zeroship.metering_exports DROP COLUMN consecutive_failures, DROP COLUMN last_error, DROP COLUMN last_attempt_at;

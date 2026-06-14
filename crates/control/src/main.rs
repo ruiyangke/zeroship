@@ -121,6 +121,19 @@ struct ControlCli {
     )]
     stripe_meter_event_name: String,
 
+    /// Stripe **Billing Meter id** (`mtr_…`) (M-Stripe). REQUIRED when
+    /// `--metering-provider stripe`. The export cron reads the meter's
+    /// AGGREGATED value for `(customer, period)` via this id to reconcile a
+    /// crash-then-re-drive push past Stripe's ~24h `identifier` dedup window
+    /// (C2) — without it a >24h re-drive could double-bill, so the deployment
+    /// refuses to boot.
+    #[arg(
+        long = "stripe-meter-id",
+        env = "STRIPE_METER_ID",
+        default_value = ""
+    )]
+    stripe_meter_id: String,
+
     /// Comma-separated previous master keys accepted during key rotation.
     #[arg(
         long = "legacy-master-keys",
@@ -678,6 +691,19 @@ fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
+        // C2: the >24h re-drive reconcile reads the meter's aggregate by id; a
+        // `stripe` deployment with no meter id would have to trust Stripe's 24h
+        // identifier window (the over-bill window the fix closes). Refuse to boot.
+        if cli.metering_provider.trim().eq_ignore_ascii_case("stripe")
+            && cli.stripe_meter_id.trim().is_empty()
+        {
+            tracing::error!(
+                "control: --metering-provider stripe requires --stripe-meter-id (the \
+                 operator-provisioned Stripe Meter's `mtr_…` id). It is needed to read the meter's \
+                 aggregate back for the >24h re-drive reconcile (C2); refusing to boot without it."
+            );
+            std::process::exit(1);
+        }
         // The dedicated pairwise-salt secret MUST be a strong, stable,
         // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
         // anchor and MUST equal the gateway's value. Skip the strength check
@@ -1017,6 +1043,7 @@ fn main() -> std::io::Result<()> {
             zeroship_control::metering::provider::MeteringProviderConfig::stripe(
                 zeroship_control::metering::provider::StripeMeterConfig {
                     event_name: cli.stripe_meter_event_name.trim().to_string(),
+                    meter_id: cli.stripe_meter_id.trim().to_string(),
                     secret_key: zeroship_control::SecretString::new(stripe_secret_key.clone()),
                     base_url: cli.stripe_base_url.clone(),
                 },

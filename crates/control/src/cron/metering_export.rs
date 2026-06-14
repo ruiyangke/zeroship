@@ -35,6 +35,16 @@
 //! `spend.rs`/`enforce.rs`. Zero tokio: a `compio::time` interval;
 //! `compio-postgres`; the provider's `cyper` client. Multi-instance safety: a
 //! `pg_try_advisory_lock` (a NEW distinct key) around the sweep.
+//!
+//! ## Append-only metering — no clawback (m3)
+//!
+//! Stripe Billing Meters is ADDITIVE: once CU is exported it is NEVER clawed
+//! back. The export only ever pushes a NON-NEGATIVE delta (`current − already`,
+//! floored at 0); it never pushes a negative correction. So a DOWNWARD re-weight
+//! mid-period (lowering a metric's `units_per_op`, shrinking `current`) does NOT
+//! refund Stripe — the already-exported CU stays counted. Operators must treat
+//! metric weights as APPEND-ONLY within a billing period; re-price by opening a
+//! new period, not by reducing weights mid-period.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -43,8 +53,9 @@ use std::time::Duration;
 use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 
-use crate::cron::billing_reconcile::period_end_unix;
+use crate::cron::billing_reconcile::{lookup_plan_id, period_end_unix};
 use crate::metering::{current_period_start_unix, Metering};
+use crate::plan_catalog::PlanCatalog;
 use crate::pricing::total_units;
 use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
@@ -101,20 +112,24 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     }
 }
 
-/// Run one export sweep for the CURRENT calendar-month period. Exposed so an
-/// integration test can drive a single deterministic tick. Returns the number
-/// of apps that had a non-zero delta pushed this sweep.
+/// Run one export sweep for the CURRENT calendar-month period, stamping events
+/// at the real wall-clock instant. Exposed so an integration test can drive a
+/// single deterministic tick. Returns the number of apps that had a non-zero
+/// delta pushed this sweep.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
-    tick_at(state, current_period_start_unix()).await
+    tick_at(state, current_period_start_unix(), Utc::now().timestamp()).await
 }
 
-/// Sweep core, parameterized on the period so a test can drive an explicit
-/// `period_start`. Takes the advisory lock for the whole sweep (multi-instance
-/// safety) and exports each owned app's CURRENT cumulative CU as a DELTA over
-/// the per-`(app, period)` high-water.
+/// Sweep core, parameterized on the period AND the consumption instant `now` so
+/// a test can drive an explicit `period_start` and a deterministic event
+/// timestamp. `now` (unix seconds) is the instant each meter event is stamped at
+/// (C1: NEVER `period.end`, which is a future timestamp Stripe rejects). Takes
+/// the advisory lock for the whole sweep (multi-instance safety) and exports
+/// each owned app's CURRENT cumulative billable CU as a DELTA reconciled against
+/// the external meter's aggregate.
 #[allow(clippy::future_not_send)]
-pub async fn tick_at(state: &AppState, period_start: i64) -> Result<usize, RegistryError> {
+pub async fn tick_at(state: &AppState, period_start: i64, now: i64) -> Result<usize, RegistryError> {
     // Multi-instance safety: single-flight the sweep fleet-wide. A loser skips
     // this tick (the `metering_exports` high-water still prevents a double-push,
     // but the lock avoids duplicate external round-trips).
@@ -131,7 +146,7 @@ pub async fn tick_at(state: &AppState, period_start: i64) -> Result<usize, Regis
         return Ok(0);
     }
 
-    let result = sweep(state, period_start).await;
+    let result = sweep(state, period_start, now).await;
 
     if let Err(e) = lock_conn
         .execute(
@@ -150,7 +165,7 @@ pub async fn tick_at(state: &AppState, period_start: i64) -> Result<usize, Regis
 /// delta over the high-water, push it through the provider, and advance the
 /// high-water on success.
 #[allow(clippy::future_not_send)]
-async fn sweep(state: &AppState, period_start: i64) -> Result<usize, RegistryError> {
+async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, RegistryError> {
     // Creator→apps via ownership (same H1 join the billing sweep uses):
     // app_members WHERE role='owner'. DISTINCT ON (app_id) so a fan-out of owner
     // rows can never export the same app twice. Apps with no owner row are
@@ -178,6 +193,10 @@ async fn sweep(state: &AppState, period_start: i64) -> Result<usize, RegistryErr
     let pricing = PricingStore::new(state.registry.clone());
     let weights = pricing.weights().await?;
     let metering = Metering::new(state.registry.clone());
+    // The catalog resolves each app's plan so the export can subtract the plan's
+    // `included_units` — pushing BILLABLE CU (M1), matching what `charge_cents`
+    // (and thus the spend cap) treats as billable. Built ONCE per sweep.
+    let catalog = PlanCatalog::new(state.registry.clone());
 
     let period = BillingPeriod {
         start: period_start,
@@ -208,7 +227,8 @@ async fn sweep(state: &AppState, period_start: i64) -> Result<usize, RegistryErr
 
         for app_id in app_ids {
             match export_app(
-                state, &metering, &weights, &customer, &creator_billing, app_id, period,
+                state, &metering, &catalog, &weights, &customer, &creator_billing, app_id,
+                period, now,
             )
             .await
             {
@@ -235,27 +255,51 @@ async fn sweep(state: &AppState, period_start: i64) -> Result<usize, RegistryErr
 
 /// Export ONE app's current-period delta. Returns `Ok(true)` if a non-zero
 /// delta was pushed (and the high-water advanced), `Ok(false)` for a no-op
-/// (delta 0).
+/// (delta 0). On a push failure it records the failure durably (M2) and returns
+/// `Err` so the sweep logs + continues.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::future_not_send)]
 async fn export_app(
     state: &AppState,
     metering: &Metering,
+    catalog: &PlanCatalog,
     weights: &crate::pricing::MetricWeights,
     customer: &CustomerRef,
     creator_billing: &CreatorBilling,
     app_id: &Uuid,
     period: BillingPeriod,
+    now: i64,
 ) -> Result<bool, RegistryError> {
-    // 1. CURRENT cumulative CU — the SAME derivation the spend cap uses.
+    // 1. CURRENT cumulative GROSS CU — the SAME derivation the spend cap uses.
     let usage = metering.period_totals(app_id, period.start).await?;
-    let current_units = total_units(weights, &usage).map_err(|e| {
+    let gross_units = total_units(weights, &usage).map_err(|e| {
         // An overflow is a hard error (never a clamp) — skip this app's export
         // this tick; the high-water is untouched so a later (fixed) tick retries.
         RegistryError::Database(format!(
             "metering_export: compute-unit overflow for app {app_id}: {e}"
         ))
     })?;
+
+    // M1 — BILLABLE CU parity: subtract the plan's `included_units` so the CU
+    // pushed to Stripe == the CU `charge_cents` (and thus the spend cap) treats
+    // as billable. `billable = max(0, gross − included)`, identical to
+    // `ChargeBreakdown.billable_units`. The plan's `base_fee_cents` is a SEPARATE
+    // Stripe subscription line — NOT part of the metered usage. An app whose plan
+    // is missing from the catalog is skipped (the local ledger is unaffected).
+    let included_units = match lookup_plan_id(state, app_id).await? {
+        Some(plan_id) => match catalog.get(&plan_id).await? {
+            Some(plan) => plan.price.included_units,
+            None => {
+                tracing::warn!(
+                    app_id = %app_id, plan_id = %plan_id,
+                    "metering_export: plan not in catalog — skipping app's export"
+                );
+                return Ok(false);
+            }
+        },
+        None => 0, // no plan FK ⇒ no included quota
+    };
+    let current_units = gross_units.saturating_sub(included_units);
 
     let period_ts: DateTime<Utc> = Utc
         .timestamp_opt(period.start, 0)
@@ -264,8 +308,8 @@ async fn export_app(
 
     let conn = state.registry.conn().await?;
 
-    // 2. The per-(app, period) high-water (cumulative CU already pushed).
-    let exported_units: u64 = conn
+    // 2. The per-(app, period) high-water (cumulative billable CU already pushed).
+    let high_water: u64 = conn
         .query(
             "SELECT exported_units FROM zeroship.metering_exports \
              WHERE app_id = $1 AND period_start = $2",
@@ -275,47 +319,138 @@ async fn export_app(
         .first()
         .map_or(0, |r| r.get::<_, i64>("exported_units").max(0) as u64);
 
-    // 3. delta = current − exported. A 0 delta is the safe no-op (a re-run over
-    //    an unchanged total, or a crash AFTER the high-water write).
-    let delta = current_units.saturating_sub(exported_units);
-    if delta == 0 {
+    // 3. Fast-path no-op: the local high-water already covers `current`. A re-run
+    //    over an unchanged total (or a crash AFTER the high-water write) pushes
+    //    nothing and skips the external round-trip.
+    if current_units <= high_water {
         return Ok(false);
     }
 
-    // 4. Deterministic identifier for THIS exported→current window, then push
-    //    the delta through the provider (Stripe meter_events / future
-    //    CloudEvents). The provider holds its own external client.
-    let identifier = export_identifier(app_id, period.start, exported_units, current_units);
-    state
+    // C2 — close the >24h over-bill window. The local high-water is stale by
+    // construction if a prior drive crashed AFTER the Stripe push but BEFORE the
+    // high-water UPDATE: re-driven past Stripe's ~24h `identifier` dedup window, a
+    // blind re-push of `current − high_water` would be SUMMED twice. So reconcile
+    // against Stripe's OWN aggregated meter value: `already = max(high_water,
+    // stripe_aggregate)`; push only `current − already`. The MAX never
+    // double-counts (Stripe's aggregate authoritatively reflects what landed) and
+    // never under-counts on Stripe's read lag (the high-water floors it). The
+    // guarantee rides on Stripe's aggregate, NOT on the 24h identifier window.
+    let stripe_aggregate = match state
         .metering_provider
-        .report_usage(state, customer, *app_id, period, delta, &identifier)
+        .reported_total(state, customer, period)
         .await
-        .map_err(|e| {
-            RegistryError::Database(format!("metering_export: report_usage for app {app_id}: {e}"))
-        })?;
+    {
+        Ok(t) => t,
+        Err(e) => {
+            record_export_failure(&conn, app_id, &period_ts, &format!("reported_total: {e}")).await;
+            return Err(RegistryError::Database(format!(
+                "metering_export: reported_total for app {app_id}: {e}"
+            )));
+        }
+    };
+    let already = high_water.max(stripe_aggregate);
+    let delta = current_units.saturating_sub(already);
+    if delta == 0 {
+        // Stripe's aggregate already reflects `current` (a crash-then-re-drive
+        // where the push landed but the high-water never advanced). No re-push;
+        // just advance the local high-water to match + clear any failure state.
+        advance_high_water(&conn, app_id, &period_ts, current_units).await?;
+        return Ok(false);
+    }
+
+    // 4. Deterministic identifier for THIS already→current window, then push the
+    //    delta through the provider (Stripe meter_events), stamped at `now` (C1).
+    let identifier = export_identifier(app_id, period.start, already, current_units);
+    if let Err(e) = state
+        .metering_provider
+        .report_usage(state, customer, *app_id, period, delta, &identifier, now)
+        .await
+    {
+        // M2 — durable failure surface: a logged-only failure lets a permanently
+        // mis-provisioned app under-bill forever invisibly. Record it (bump
+        // consecutive_failures, stamp last_error/last_attempt_at) so it is
+        // queryable + alertable, then propagate (the sweep logs + continues; the
+        // high-water is NOT advanced ⇒ the next sweep retries the SAME window).
+        record_export_failure(&conn, app_id, &period_ts, &format!("report_usage: {e}")).await;
+        return Err(RegistryError::Database(format!(
+            "metering_export: report_usage for app {app_id}: {e}"
+        )));
+    }
     // `creator_billing` is threaded for parity with the billing sweep's
     // per-creator shape (and so an OpenMeter subject could key on the creator);
     // the Stripe rail keys on the customer, so it is currently unused here.
     let _ = creator_billing;
 
-    // 5. ONLY on a successful push, advance the high-water to `current`. A crash
-    //    BEFORE this write leaves the OLD high-water ⇒ the next sweep re-pushes
-    //    the SAME window ⇒ same identifier ⇒ Stripe dedups ⇒ no double-count.
+    // 5. ONLY on a successful push, advance the high-water to `current` and clear
+    //    the failure state. A crash BEFORE this write leaves the OLD high-water ⇒
+    //    the next sweep reconciles against Stripe's aggregate (which now reflects
+    //    this push) ⇒ delta 0 ⇒ no double-count.
+    advance_high_water(&conn, app_id, &period_ts, current_units).await?;
+
+    Ok(true)
+}
+
+/// Advance the per-(app, period) high-water to `current` and RESET the failure
+/// surface (consecutive_failures → 0, last_error → NULL) — the success path.
+#[allow(clippy::future_not_send)]
+async fn advance_high_water(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    period_ts: &DateTime<Utc>,
+    current_units: u64,
+) -> Result<(), RegistryError> {
     let current_i64 = i64::try_from(current_units).map_err(|_| {
         RegistryError::Database(format!(
             "metering_export: current_units {current_units} exceeds i64::MAX — refusing to clamp"
         ))
     })?;
     conn.execute(
-        "INSERT INTO zeroship.metering_exports (app_id, period_start, exported_units, updated_at) \
-         VALUES ($1, $2, $3, NOW()) \
+        "INSERT INTO zeroship.metering_exports \
+             (app_id, period_start, exported_units, updated_at, \
+              consecutive_failures, last_error, last_attempt_at) \
+         VALUES ($1, $2, $3, NOW(), 0, NULL, NOW()) \
          ON CONFLICT (app_id, period_start) \
-         DO UPDATE SET exported_units = EXCLUDED.exported_units, updated_at = NOW()",
-        &[app_id, &period_ts, &current_i64],
+         DO UPDATE SET exported_units = EXCLUDED.exported_units, updated_at = NOW(), \
+                       consecutive_failures = 0, last_error = NULL, last_attempt_at = NOW()",
+        &[app_id, period_ts, &current_i64],
     )
     .await?;
+    Ok(())
+}
 
-    Ok(true)
+/// M2 — record a durable export failure for `(app, period)`: bump
+/// `consecutive_failures`, stamp `last_error` + `last_attempt_at`, WITHOUT
+/// touching the `exported_units` high-water (a failed push exported nothing). The
+/// row is UPSERTed so a from-the-FIRST-attempt failure (no prior success) is
+/// still recorded. Best-effort: a bookkeeping write failure is logged, never
+/// allowed to mask the original export error.
+#[allow(clippy::future_not_send)]
+async fn record_export_failure(
+    conn: &compio_postgres::Client,
+    app_id: &Uuid,
+    period_ts: &DateTime<Utc>,
+    error: &str,
+) {
+    // Cap the stored error so a pathological message can't bloat the row.
+    let truncated: String = error.chars().take(1000).collect();
+    if let Err(e) = conn
+        .execute(
+            "INSERT INTO zeroship.metering_exports \
+                 (app_id, period_start, exported_units, updated_at, \
+                  consecutive_failures, last_error, last_attempt_at) \
+             VALUES ($1, $2, 0, NOW(), 1, $3, NOW()) \
+             ON CONFLICT (app_id, period_start) \
+             DO UPDATE SET consecutive_failures = zeroship.metering_exports.consecutive_failures + 1, \
+                           last_error = EXCLUDED.last_error, last_attempt_at = NOW()",
+            &[app_id, period_ts, &truncated],
+        )
+        .await
+    {
+        tracing::warn!(
+            app_id = %app_id, error = %e,
+            "metering_export: failed to record export-failure bookkeeping (continuing)"
+        );
+    }
 }
 
 #[cfg(test)]

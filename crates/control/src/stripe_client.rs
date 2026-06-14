@@ -136,6 +136,27 @@ pub trait StripeApi {
         identifier: &str,
         timestamp: i64,
     ) -> Result<(), StripeError>;
+
+    /// Read the Stripe Meter's *aggregated* value for one `(customer, period)`
+    /// window — the SUM of every meter event Stripe has accepted for it
+    /// (`GET /v1/billing/meters/{meter_id}/event_summaries?customer=…&
+    /// start_time=…&end_time=…`, `value_grouping_window=day`, summed).
+    ///
+    /// This is the C2 re-drive guard: the export cron pushes
+    /// `current_local − stripe_aggregate`, so a re-drive PAST Stripe's ~24h
+    /// `identifier` dedup window (where a blind re-push would be SUMMED twice)
+    /// instead pushes only the still-missing remainder. The guarantee no longer
+    /// depends on the local high-water being fresh, nor on the 24h window.
+    ///
+    /// `meter_id` is the `mtr_…` id; `start_time`/`end_time` are unix seconds
+    /// (the billing period `[start, end)`). Returns the aggregated CU total.
+    async fn meter_event_summary(
+        &self,
+        meter_id: &str,
+        stripe_customer_id: &str,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<u64, StripeError>;
 }
 
 /// Production `cyper`-based Stripe client. Holds the secret key (never logged —
@@ -430,6 +451,45 @@ impl StripeApi for StripeClient {
         self.post_form("/v1/billing/meter_events", &form, Some(identifier))
             .await?;
         Ok(())
+    }
+
+    async fn meter_event_summary(
+        &self,
+        meter_id: &str,
+        stripe_customer_id: &str,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<u64, StripeError> {
+        // Read the meter's aggregated value for the window. `value_grouping_
+        // window=day` keeps the page bounded (≤31 summary rows/month); we SUM the
+        // per-window `aggregated_value`s to the period total. A `limit=100` covers
+        // a calendar month comfortably. (The reconcile decision is "current −
+        // aggregate"; an under-read here would only RE-PUSH a delta that the
+        // identifier still dedups within 24h — never a double-count.)
+        let enc_meter = encode_query_component(meter_id);
+        let enc_customer = encode_query_component(stripe_customer_id);
+        let path = format!(
+            "/v1/billing/meters/{enc_meter}/event_summaries\
+             ?customer={enc_customer}&start_time={start_time}&end_time={end_time}\
+             &value_grouping_window=day&limit=100"
+        );
+        let json = self.get_json(&path).await?;
+        let Some(rows) = json.get("data").and_then(|d| d.as_array()) else {
+            return Ok(0);
+        };
+        let mut total: u64 = 0;
+        for row in rows {
+            // `aggregated_value` is a JSON number; Stripe sums integer CU, so it
+            // is an exact non-negative integer. Be defensive about float repr.
+            let v = row
+                .get("aggregated_value")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            if v.is_finite() && v > 0.0 {
+                total = total.saturating_add(v as u64);
+            }
+        }
+        Ok(total)
     }
 }
 
