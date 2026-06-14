@@ -47,6 +47,28 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// Process-global gate serializing the act of SWEEPING across this binary's tests.
+///
+/// The notify cron is FLEET-WIDE by design: one tick scans ALL creators and sends every
+/// pending row through the `AppState.notifier` of whichever fixture drove that tick. Under
+/// the default parallel runner that means a sibling test's tick can deliver MY creator's
+/// email into the SIBLING's `RecordingNotifier` and flip the shared-DB row to `sent` —
+/// invisible to my recorder. The DB ledger is immune (assert there where we can), but the
+/// re-drive test must observe TWO send attempts for the SAME key on ITS OWN recorder to
+/// prove the provider-side idempotency dedup, which only holds if no sibling steals the
+/// row mid-sequence. This gate makes the SWEEP single-threaded across the binary's tests
+/// WITHOUT weakening the cron: every gated tick still acquires the real advisory lock,
+/// claims-before-send, and sends for real — only concurrent sibling SWEEPS are excluded,
+/// exactly as a real fleet has at most one sweeper per tick (the cron's own invariant).
+static TICK_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold the sweep gate for a critical region that drives ticks. `lock().unwrap_or_else`
+/// recovers a poisoned gate (a sibling test panicking mid-sweep must not cascade-fail the
+/// rest) so an unrelated failure does not mask the result under test.
+fn lock_tick_gate() -> std::sync::MutexGuard<'static, ()> {
+    TICK_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -244,6 +266,66 @@ async fn ledger_count(pg: &compio_postgres::Client, creator: Uuid, status: &str)
         .get::<_, i64>("c")
 }
 
+/// Count `sent` ledger rows for a creator of a given kind. This is the AUTHORITATIVE,
+/// cross-fixture-safe record of "a notification was claimed AND delivered" — the cron
+/// only flips a row to `sent` AFTER a successful (or suppressed/no-recipient) send. We
+/// assert delivery off the shared DB ledger (per-creator, per-kind) rather than off the
+/// per-fixture `RecordingNotifier`, because the cron is FLEET-WIDE: under the default
+/// parallel runner, whichever test's tick wins the global advisory lock sends ALL
+/// creators' pending rows through ITS OWN recorder — so a sibling's tick can deliver MY
+/// creator's email and record it in the sibling's recorder, never mine. The ledger row,
+/// keyed by my creator_id + kind, is immune to that and is the real artifact under test.
+async fn sent_count_kind(
+    pg: &compio_postgres::Client,
+    creator: Uuid,
+    kind: BillingNotificationKind,
+) -> i64 {
+    pg.query(
+        "SELECT COUNT(*) AS c FROM zeroship.billing_notifications \
+          WHERE creator_id = $1 AND status = 'sent' \
+            AND kind = $2::text::zeroship.billing_notification_kind",
+        &[&creator, &kind.as_str()],
+    )
+    .await
+    .expect("count sent-by-kind")[0]
+        .get::<_, i64>("c")
+}
+
+/// Drive `billing_notify::tick` until every `(creator, expected_sent)` in `want` has at
+/// least `expected_sent` `sent` ledger rows AND zero `pending` rows — i.e. THIS test's
+/// own transitions are fully delivered.
+///
+/// WHY a loop and not a single `tick`: the cron's single-flight advisory lock is
+/// FLEET-WIDE (one global key). Under the DEFAULT parallel test runner a sibling test's
+/// concurrent `tick` (or its held side-lock) can own the lock when this test ticks, so a
+/// given `tick` legitimately wins nothing and returns 0 — exactly the multi-node
+/// "loser skips this tick" path the production cron retries on its next ~5min cycle. We
+/// reproduce that retry here so the assertion is scoped to THIS creator's settled state,
+/// never to a global per-tick send count. The cron, the claim-before-send, and the lock
+/// are exercised UNCHANGED — only the test waits out lock contention instead of assuming
+/// one tick wins. The bound keeps a genuine bug (rows that never settle) from hanging.
+async fn tick_until_sent(state: &AppState, pg: &compio_postgres::Client, want: &[(Uuid, i64)]) {
+    for _ in 0..200 {
+        {
+            let _gate = lock_tick_gate();
+            billing_notify::tick(state).await.expect("tick");
+        }
+        let mut all_settled = true;
+        for &(creator, expected_sent) in want {
+            let sent = ledger_count(pg, creator, "sent").await;
+            let pending = ledger_count(pg, creator, "pending").await;
+            if sent < expected_sent || pending > 0 {
+                all_settled = false;
+                break;
+            }
+        }
+        if all_settled {
+            return;
+        }
+    }
+    panic!("tick_until_sent did not settle creators {want:?} within the retry bound");
+}
+
 /// Force a pending claim's `claimed_at` back so it is past the re-drive horizon.
 async fn age_pending(pg: &compio_postgres::Client, creator: Uuid) {
     let back = i64::try_from(NOTIFY_REDRIVE_HORIZON.as_secs()).unwrap() + 60;
@@ -299,68 +381,90 @@ async fn each_kind_produces_exactly_one_notification() {
     let inv = finalize_invoice(&fx.pg, c_inv, 1_234).await;
     let _refund = issue_refund(&fx.pg, &inv, 500, "cash").await;
 
-    // One sweep delivers each pending transition once. The cron sweeps a SHARED test DB,
-    // so assert per-MY-creator (the idempotency key is `{creator}:{kind}:{transition}`)
-    // rather than on a global per-kind count.
-    let _sent = billing_notify::tick(st).await.expect("tick");
+    // Drive the cron until each of MY creators' transitions are delivered. The cron sweeps
+    // a SHARED test DB and single-flights on a FLEET-WIDE advisory lock, so a single tick
+    // can lose the lock to a concurrent sibling test and win nothing for my creators — we
+    // tick until MY creators settle (the production cron's next-cycle retry), then assert
+    // per-MY-creator (the idempotency key is `{creator}:{kind}:{transition}`) rather than
+    // on any global per-kind or global-total count that a sibling could perturb.
+    //   c_pd:   1 transition (past_due)
+    //   c_rec:  2 (active→past_due AND past_due→active)
+    //   c_susp: 2 (past_due AND suspended)
+    //   c_inv:  2 (invoice_finalized AND refunded)
+    tick_until_sent(
+        st,
+        &fx.pg,
+        &[(c_pd, 1), (c_rec, 2), (c_susp, 2), (c_inv, 2)],
+    )
+    .await;
 
-    // Each of MY seeded creators gets exactly one notification of its kind.
-    let pd = |c: Uuid, k: BillingNotificationKind| format!("{c}:{}:", k.as_str());
+    // Each of MY seeded creators gets exactly one notification of its kind. We assert off
+    // the shared DB LEDGER (cross-fixture-safe; see `sent_count_kind`) — exactly one `sent`
+    // row of the kind for my creator — not off the per-fixture recorder, since a sibling's
+    // tick can deliver my creator's email into the sibling's recorder.
+    use BillingNotificationKind::{InvoiceFinalized, PastDue, Recovered, Refunded, Suspended};
     assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&pd(c_pd, BillingNotificationKind::PastDue)),
+        sent_count_kind(&fx.pg, c_pd, PastDue).await,
         1,
-        "the active→past_due creator gets exactly one past_due email"
+        "the active→past_due creator gets exactly one past_due notification"
     );
     assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&pd(c_rec, BillingNotificationKind::Recovered)),
+        sent_count_kind(&fx.pg, c_rec, Recovered).await,
         1,
-        "the recovered creator gets exactly one recovered email"
+        "the recovered creator gets exactly one recovered notification"
     );
     // c_susp legitimately has BOTH a past_due AND a suspended transition — each fires its
     // own kind exactly once.
+    assert_eq!(sent_count_kind(&fx.pg, c_susp, PastDue).await, 1);
     assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&pd(c_susp, BillingNotificationKind::PastDue)),
-        1
+        sent_count_kind(&fx.pg, c_susp, Suspended).await,
+        1,
+        "the dunning-exhausted creator gets exactly one suspended notification"
     );
     assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&pd(c_susp, BillingNotificationKind::Suspended)),
+        sent_count_kind(&fx.pg, c_inv, InvoiceFinalized).await,
         1,
-        "the dunning-exhausted creator gets exactly one suspended email"
+        "the finalized-invoice creator gets exactly one invoice_finalized notification"
     );
     assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&pd(c_inv, BillingNotificationKind::InvoiceFinalized)),
+        sent_count_kind(&fx.pg, c_inv, Refunded).await,
         1,
-        "the finalized-invoice creator gets exactly one invoice_finalized email"
-    );
-    assert_eq!(
-        fx.notifier.delivered_for_key_prefix(&pd(c_inv, BillingNotificationKind::Refunded)),
-        1,
-        "the refunded creator gets exactly one refunded email"
+        "the refunded creator gets exactly one refunded notification"
     );
 
-    // A SECOND sweep delivers NOTHING NEW for my creators (every row is now `sent`).
-    let pre = fx.notifier.delivered_count();
-    let _again = billing_notify::tick(st).await.expect("second tick");
-    for c in [c_pd, c_rec, c_susp, c_inv] {
-        assert_eq!(
-            fx.notifier.delivered_for_key_prefix(&format!("{c}:")),
-            // each creator's full delivered count is unchanged by the second sweep
-            fx.notifier.delivered_for_key_prefix(&format!("{c}:")),
-            "second sweep must not re-deliver for creator {c}"
-        );
-    }
-    // No NEW deliveries for my creators on the second sweep (the recording notifier dedup
-    // + the `sent` ledger both guarantee it).
-    assert_eq!(
-        fx.notifier.delivered_count(),
-        pre,
-        "a second sweep with no new transitions delivers nothing new"
-    );
-    // Every delivered key is exactly-once (no dup deliveries) across both sweeps.
-    for (_, _, key, delivered) in fx.notifier.attempts() {
-        if delivered {
-            assert_eq!(fx.notifier.delivered_for_key(&key), 1, "key {key} delivered >1");
+    // A SECOND sweep delivers NOTHING NEW for MY creators: every ledger row is `sent`, none
+    // `pending`, and the per-(creator,kind) `sent` counts are unchanged. Read off the
+    // ledger (per-creator) — a global recorder count would move if this tick swept a
+    // sibling's freshly-pending rows in the shared DB.
+    let pre: Vec<(Uuid, BillingNotificationKind, i64)> = {
+        let mut v = Vec::new();
+        for (c, k) in [
+            (c_pd, PastDue),
+            (c_rec, Recovered),
+            (c_susp, PastDue),
+            (c_susp, Suspended),
+            (c_inv, InvoiceFinalized),
+            (c_inv, Refunded),
+        ] {
+            v.push((c, k, sent_count_kind(&fx.pg, c, k).await));
         }
+        v
+    };
+    {
+        let _gate = lock_tick_gate();
+        billing_notify::tick(st).await.expect("second tick");
+    }
+    for (c, k, before) in pre {
+        assert_eq!(
+            sent_count_kind(&fx.pg, c, k).await,
+            before,
+            "second sweep must not produce a new {k:?} sent row for creator {c}"
+        );
+        assert_eq!(
+            ledger_count(&fx.pg, c, "pending").await,
+            0,
+            "no pending rows remain for creator {c} after settle"
+        );
     }
 }
 
@@ -407,21 +511,34 @@ async fn concurrent_ticks_send_each_event_once() {
     // Two ticks racing on the SAME state. Whatever the interleaving, the claim INSERT
     // (the PK `(creator, kind, transition_id)`) arbitrates: the row is claimed by exactly
     // ONE flight, and the provider Idempotency-Key dedups any duplicate send so the
-    // recipient sees ONE email. (The per-tick `sent` count can be 1 or 2 depending on
-    // interleaving — the GUARANTEE is one ledger row + one DELIVERY, which is what we
-    // assert; `total >= 1` proves the transition was delivered at all.)
+    // recipient sees ONE email.
+    //
+    // The dual-flight join below exercises the REAL race + PK arbitration. But the cron's
+    // single-flight lock is FLEET-WIDE, so under the default parallel runner BOTH racing
+    // ticks can lose the lock to a concurrent sibling test and win nothing this round —
+    // the multi-node loser path. So we do NOT assert on the per-tick send count of this
+    // one race (it can be 0, 1, or 2 depending on lock ownership); instead we run the
+    // genuine race and THEN drain until MY creator settles. The exactly-once GUARANTEE is
+    // unchanged: no matter how many ticks (racing or retried) touch this transition, the
+    // PK admits exactly ONE ledger row and the Idempotency-Key dedups to ONE delivery.
     let (a, b) = futures::future::join(billing_notify::tick(st), billing_notify::tick(st)).await;
-    let total = a.expect("tick a") + b.expect("tick b");
-    assert!(total >= 1, "the transition must be delivered at least once, got {total}");
-    // Scope to THIS test's creator (the cron sweeps a shared DB): the key prefix is
-    // `{creator}:past_due:`.
+    a.expect("tick a");
+    b.expect("tick b");
+    // Drain MY creator's single past_due transition to `sent` (retrying past any sibling
+    // lock contention — the production cron's next-cycle retry).
+    tick_until_sent(st, &fx.pg, &[(creator, 1)]).await;
+
+    // Exactly-once claim + delivery, asserted off the shared DB ledger scoped to THIS
+    // creator (cross-fixture-safe): the PK `(creator, kind, transition_id)` admits exactly
+    // ONE row for the past_due transition no matter how many racing/retried ticks touch it,
+    // and the cron only flips it to `sent` after a successful send — so exactly one `sent`
+    // past_due row for my creator proves "the recipient sees ONE past_due email."
     assert_eq!(
-        fx.notifier
-            .delivered_for_key_prefix(&format!("{creator}:{}:", BillingNotificationKind::PastDue.as_str())),
+        sent_count_kind(&fx.pg, creator, BillingNotificationKind::PastDue).await,
         1,
-        "exactly-once claim + idempotent delivery: the recipient sees ONE past_due email \
-         even under dual-flight (the duplicate claim is rejected by the PK; a duplicate \
-         send is deduped by the Idempotency-Key)"
+        "exactly-once claim + idempotent delivery: ONE past_due notification even under \
+         dual-flight (the duplicate claim is rejected by the PK; a duplicate send is \
+         deduped by the Idempotency-Key)"
     );
     // The PK guarantees exactly ONE ledger row for the transition, now `sent`.
     assert_eq!(ledger_count(&fx.pg, creator, "sent").await, 1);
@@ -441,6 +558,17 @@ async fn crash_before_flip_redrives_idempotent() {
     let fx = build_fixture(&url, "redrive").await;
     let st = &*fx.state;
 
+    // This test is the ONE that must observe its OWN recorder across the whole
+    // seed → first-send → crash → re-drive sequence (the provider-dedup proof = TWO
+    // attempts / ONE delivery on MY key). A sibling tick that swept MY pending row would
+    // record the send in the sibling's recorder and flip my row in the shared DB, stealing
+    // the observation. So we hold the fleet-wide sweep gate for the entire critical region
+    // — INCLUDING the seeding, so no sibling can sweep my freshly-seeded row before MY tick
+    // sends it. Every tick below is still a REAL gated sweep (advisory lock +
+    // claim-before-send + send); only concurrent sibling sweeps are excluded, matching the
+    // cron's own "one sweeper per tick" invariant, made deterministic for the binary.
+    let _gate = lock_tick_gate();
+
     let creator = make_creator(&fx.pg).await;
     fail_payment(st, creator, 1_000).await;
 
@@ -456,8 +584,20 @@ async fn crash_before_flip_redrives_idempotent() {
         // the transition_id is the cbh_ id of the only history row for this creator
         cbh_id(&fx.pg, creator).await,
     );
-    let sent = billing_notify::tick(st).await.expect("first tick");
-    assert!(sent >= 1, "first sweep sends at least my transition");
+
+    // FIRST send: drive (gated) ticks until MY transition is delivered+settled. With the
+    // gate held, no sibling sweeps, so THIS fixture's notifier makes the send.
+    let mut settled = false;
+    for _ in 0..200 {
+        billing_notify::tick(st).await.expect("first tick");
+        if ledger_count(&fx.pg, creator, "sent").await >= 1
+            && ledger_count(&fx.pg, creator, "pending").await == 0
+        {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "first sweep settled MY transition to sent");
     assert_eq!(
         fx.notifier.delivered_for_key(&key),
         1,
@@ -476,16 +616,19 @@ async fn crash_before_flip_redrives_idempotent() {
         .expect("reset to pending");
     age_pending(&fx.pg, creator).await;
 
-    // Next tick RE-DRIVES the SAME row (re-claims past the horizon, re-sends). The
+    // The next sweep RE-DRIVES the SAME row (re-claims past the horizon, re-sends). The
     // recording notifier dedups on the SAME Idempotency-Key, so the recipient sees ONE
-    // email even though TWO send attempts were made (at-least-once delivery /
-    // exactly-once claim / idempotent effect).
-    let redriven = billing_notify::tick(st).await.expect("re-drive tick");
-    assert!(redriven >= 1, "the stale pending row is re-driven (re-sent)");
-    assert!(
-        fx.notifier.attempts_for_key(&key) >= 2,
-        "the re-drive made a SECOND send attempt for the same key"
-    );
+    // email even though TWO send attempts were made (at-least-once delivery / exactly-once
+    // claim / idempotent effect). (Gate still held — no sibling can steal the re-drive.)
+    let mut redrove = false;
+    for _ in 0..200 {
+        billing_notify::tick(st).await.expect("re-drive tick");
+        if fx.notifier.attempts_for_key(&key) >= 2 {
+            redrove = true;
+            break;
+        }
+    }
+    assert!(redrove, "the stale pending row is re-driven (a SECOND send attempt for the key)");
     assert_eq!(
         fx.notifier.delivered_for_key(&key),
         1,
