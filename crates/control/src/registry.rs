@@ -531,17 +531,38 @@ impl Registry {
         // NULL ⇒ default `AccountState::Active`. The gateway gates dispatch on
         // this pulled value as an OUTER AND with spend (Suspended → 402 before
         // spend is even consulted).
+        //
+        // FAN-OUT SAFETY (critic #5): one owner per app by construction (0031),
+        // but a data-integrity fan-out of multiple `role='owner'` rows would make
+        // a plain join non-deterministic — `map.insert(id, …)` is last-write-wins,
+        // so `account_state` (and every other RouteEntry field) could flip
+        // arbitrarily, even un-suspending a suspended creator. `acct` collapses the
+        // owner→status join to AT MOST ONE row per app via `DISTINCT ON (app_id)`,
+        // and ORDERs so the MOST-RESTRICTIVE state wins on a fan-out (suspended >
+        // past_due > active > none) — a fan-out can never relax enforcement. This
+        // mirrors the reconciler's `DISTINCT ON (app_id)` owner collapse.
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
                         c.sector_identifier, s.state AS spend_state, \
-                        cbs.state AS account_state \
+                        acct.account_state \
                  FROM zeroship.apps a \
                  LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id \
                  LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
-                 LEFT JOIN zeroship.app_members m ON m.app_id = a.id AND m.role = 'owner' \
-                 LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id",
+                 LEFT JOIN LATERAL ( \
+                     SELECT DISTINCT ON (m.app_id) cbs.state AS account_state \
+                     FROM zeroship.app_members m \
+                     LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id \
+                     WHERE m.app_id = a.id AND m.role = 'owner' \
+                     ORDER BY m.app_id, \
+                              CASE cbs.state \
+                                  WHEN 'suspended' THEN 0 \
+                                  WHEN 'past_due'  THEN 1 \
+                                  WHEN 'active'    THEN 2 \
+                                  ELSE 3 END, \
+                              m.user_id \
+                 ) acct ON TRUE",
                 &[],
             )
             .await?;

@@ -42,11 +42,23 @@ CREATE TABLE zeroship.creator_billing_status (
     past_due_since        TIMESTAMPTZ,
     -- When the creator was suspended (audit / dashboard). NULL unless suspended.
     suspended_at          TIMESTAMPTZ,
-    -- Most recent failed-invoice signal — the guard for idempotent
-    -- payment_failed handling (a re-delivered event for the SAME invoice does
-    -- not reset the dunning clock).
+    -- Most recent failed-invoice signal. `failed_invoice_id` records WHICH
+    -- invoice last failed (audit). Redelivery idempotency is by STATE guard
+    -- (an already-past_due creator does not restart the dunning clock), NOT by
+    -- a (creator, failed_invoice_id) uniqueness check.
     last_payment_failure_at TIMESTAMPTZ,
     failed_invoice_id     TEXT,
+    -- ORDER-SAFETY (G2 critic #1): Stripe webhooks can arrive / be redelivered
+    -- out of order. `last_recovered_at` is the Stripe `event.created` of the
+    -- most recent RECOVERY (invoice.paid → active); `last_event_at` is the
+    -- `event.created` of the most recent event we applied (audit / monotonic
+    -- bookkeeping). A `payment_failed` whose `event.created` predates
+    -- `last_recovered_at` is a STALE failure — the creator already recovered
+    -- AFTER that failure was emitted — and MUST NOT re-arm past_due, otherwise a
+    -- redelivered/late failure false-suspends a paying creator. Both default
+    -- NULL (no event applied yet ⇒ nothing to gate against).
+    last_event_at         TIMESTAMPTZ,
+    last_recovered_at     TIMESTAMPTZ,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 -- Append-only transition history (mirrors spend_state_history): every

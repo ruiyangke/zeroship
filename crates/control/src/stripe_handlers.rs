@@ -487,6 +487,25 @@ fn extract_creator_id(obj: &StripeObject) -> Option<String> {
             .and_then(|sd| sd.metadata.as_ref()).and_then(get))
 }
 
+/// `true` iff the invoice carries the platform's POSITIVE infra marker
+/// (`metadata.invoice_kind == "infra"`, stamped by the billing reconciler's
+/// `create_invoice`). This is the recovery gate (critic #6): an `invoice.paid`
+/// without this marker is NOT a platform infra invoice — even if its Stripe
+/// Customer reverse-resolves to a `creator_billing.stripe_customer_id` (a Connect
+/// end-user invoice could collide) — so it must NOT un-suspend a creator. The
+/// marker is checked across the same wire locations as `creator_id` because
+/// Stripe surfaces invoice metadata directly and via subscription details.
+fn is_infra_invoice(obj: &StripeObject) -> bool {
+    let has = |m: &serde_json::Map<String, serde_json::Value>| {
+        m.get("invoice_kind").and_then(|v| v.as_str()) == Some("infra")
+    };
+    obj.metadata.as_ref().is_some_and(has)
+        || obj.parent.as_ref().and_then(|p| p.subscription_details.as_ref())
+            .and_then(|sd| sd.metadata.as_ref()).is_some_and(has)
+        || obj.subscription_details.as_ref()
+            .and_then(|sd| sd.metadata.as_ref()).is_some_and(has)
+}
+
 /// Max raw webhook body we'll accept. Stripe's own `invoice.paid` is a
 /// few KB; we pad generously. Larger is rejected before we allocate
 /// anything for parsing — defense against POSTing gigabytes.
@@ -569,13 +588,24 @@ pub async fn webhook(
         //   * Stream-2 (Connect revenue): the payout-ledger record below (only
         //     when `metadata.creator_id` is present).
         "invoice.paid" => {
-            if let Some(cid) = resolve_infra_creator(&state, obj).await {
-                let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
-                match store.record_payment_recovered(cid).await {
-                    Ok(Some(t)) => audit_account_transition(&req, &state, &t, &event.id).await,
-                    Ok(None) => { /* nothing to recover (already active / no row) */ }
-                    Err(e) => {
-                        tracing::error!(error = %e, "stripe: invoice.paid status recovery failed");
+            // RECOVERY GATE (critic #6): only a PLATFORM INFRA invoice may
+            // un-suspend a creator. Gate on the POSITIVE `invoice_kind=infra`
+            // marker the reconciler stamps — NOT on the mere absence of Connect
+            // metadata. A Connect end-user `invoice.paid` whose Stripe Customer
+            // happens to collide with a platform `creator_billing.stripe_customer_id`
+            // lacks this marker, so it can never falsely recover a suspension.
+            // (`billing_runs` match is the defense-in-depth alternative, but the
+            // marker is the load-bearing signal and is present on every
+            // reconciler-created invoice.)
+            if is_infra_invoice(obj) {
+                if let Some(cid) = resolve_infra_creator(&state, obj).await {
+                    let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
+                    match store.record_payment_recovered(cid, event.created).await {
+                        Ok(Some(t)) => audit_account_transition(&req, &state, &t, &event.id).await,
+                        Ok(None) => { /* nothing to recover (already active / no row) */ }
+                        Err(e) => {
+                            tracing::error!(error = %e, "stripe: invoice.paid status recovery failed");
+                        }
                     }
                 }
             }
@@ -740,10 +770,11 @@ async fn handle_invoice_payment_failed(
 
     // G2 state mutation — only with a resolved creator. The signature was already
     // verified by `webhook` before we got here (webhook-truth-only); a forged /
-    // unsigned event never reaches this function. Idempotent on the invoice id.
+    // unsigned event never reaches this function. Order-safe: `event.created` is
+    // threaded so a stale failure that predates a recovery can't re-arm past_due.
     if let Some(cid) = creator_id {
         let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
-        match store.record_payment_failed(cid, obj.id.as_deref()).await {
+        match store.record_payment_failed(cid, obj.id.as_deref(), event.created).await {
             Ok(Some(t)) => {
                 audit_account_transition(req, state, &t, &event.id).await;
             }

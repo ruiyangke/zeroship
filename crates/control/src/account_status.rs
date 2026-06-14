@@ -22,10 +22,14 @@
 //!   the gateway 402s. REVERSIBLE: a later `invoice.paid` flips straight back to
 //!   active. Suspension is never a one-way trap.
 //!
-//! **Webhook-truth-only + reversible** is the false-suspend guard: only a
-//! signature-verified Stripe event (the webhook caller verifies the signature
-//! BEFORE invoking these methods) ever moves the state, and a recovered payment
-//! always un-suspends. No creator input sets it.
+//! **Webhook-truth-only + reversible + order-safe** is the false-suspend guard:
+//! only a signature-verified Stripe event (the webhook caller verifies the
+//! signature BEFORE invoking these methods) ever moves the state; a recovered
+//! payment always un-suspends; and a STALE `payment_failed` (one whose Stripe
+//! `event.created` predates the creator's last recovery) is IGNORED so an
+//! out-of-order/redelivered failure can never re-arm `past_due` on an
+//! already-paying creator (critic #1 — `last_recovered_at` high-water). No
+//! creator input sets it.
 
 use uuid::Uuid;
 
@@ -107,17 +111,26 @@ impl AccountStatusStore {
 
     /// `invoice.payment_failed` webhook → move the creator to `past_due`.
     ///
-    /// Idempotent on `(creator, failed_invoice_id)`: a re-delivered event for
-    /// the SAME invoice does NOT reset the dunning clock (`past_due_since`) — it
-    /// only refreshes `last_payment_failure_at`. A NEW failed invoice starts a
-    /// fresh window only if the creator was already `active`. A `suspended`
-    /// creator stays `suspended` (the failure is consistent with suspension).
+    /// **Order-safe (critic #1).** `event_created` is the Stripe `event.created`
+    /// of THIS failure. Stripe can redeliver / reorder webhooks, so a stale
+    /// `payment_failed` can land AFTER an `invoice.paid` recovery. We persist the
+    /// `event.created` of the last recovery in `last_recovered_at`; a failure
+    /// whose `event_created <= last_recovered_at` is STALE (the creator already
+    /// recovered after it was emitted) and is IGNORED — it must never re-arm
+    /// `past_due` on an already-paying creator. This is the primary false-suspend
+    /// guard.
+    ///
+    /// Otherwise: a re-delivered/repeat failure does NOT reset the dunning clock
+    /// (`past_due_since`) — it only refreshes `last_payment_failure_at`. A NEW
+    /// failed invoice starts a fresh window only if the creator was `active`. A
+    /// `suspended` creator stays `suspended` (the failure is consistent with it).
     ///
     /// Returns the transition iff the state actually changed (active→past_due).
     pub async fn record_payment_failed(
         &self,
         creator_id: Uuid,
         failed_invoice_id: Option<&str>,
+        event_created: i64,
     ) -> Result<Option<AccountTransition>, StripeError> {
         let conn = self
             .registry
@@ -126,12 +139,20 @@ impl AccountStatusStore {
             .map_err(|e| StripeError::Db(format!("{e}")))?;
         // UPSERT with a guarded transition. A `prior` CTE snapshots the
         // pre-write state (the INSERT…ON CONFLICT can't see its own old row in
-        // RETURNING), so we can tell a genuine active→past_due edge from a no-op:
-        //   * no row / active → past_due, set past_due_since = NOW() (starts the
-        //     dunning window).
-        //   * already past_due → keep past_due_since (do NOT restart the clock —
-        //     idempotent for redelivery AND for subsequent failures within the
-        //     same window).
+        // RETURNING), so we can tell a genuine active→past_due edge from a no-op.
+        //
+        // ORDER-SAFETY: `evt` is THIS event's `event.created` (passed as a unix
+        // timestamp, converted to TIMESTAMPTZ). The ON CONFLICT branch is GATED:
+        // when `evt <= last_recovered_at`, the row already saw a recovery emitted
+        // AFTER this failure ⇒ this is a stale/redelivered failure and we leave
+        // EVERY column unchanged (state, past_due_since, last_*). It can never
+        // re-arm past_due on a recovered creator. For the no-row INSERT path
+        // there is no prior recovery, so a first-seen failure always arms.
+        //
+        // Otherwise:
+        //   * active → past_due, set past_due_since = NOW() (start the window).
+        //   * already past_due → keep past_due_since (idempotent — do NOT restart
+        //     the clock on redelivery or subsequent failures in the same window).
         //   * suspended → stays suspended (clock already elapsed).
         let rows = conn
             .query(
@@ -139,21 +160,40 @@ impl AccountStatusStore {
                     SELECT state FROM zeroship.creator_billing_status WHERE creator_id = $1 \
                  ), upserted AS ( \
                     INSERT INTO zeroship.creator_billing_status \
-                        (creator_id, state, past_due_since, last_payment_failure_at, failed_invoice_id, updated_at) \
-                     VALUES ($1, 'past_due', NOW(), NOW(), $2, NOW()) \
+                        (creator_id, state, past_due_since, last_payment_failure_at, \
+                         failed_invoice_id, last_event_at, updated_at) \
+                     VALUES ($1, 'past_due', NOW(), NOW(), $2, to_timestamp($3::bigint), NOW()) \
                      ON CONFLICT (creator_id) DO UPDATE SET \
-                        state = CASE WHEN zeroship.creator_billing_status.state = 'active' \
-                                     THEN 'past_due' ELSE zeroship.creator_billing_status.state END, \
-                        past_due_since = CASE WHEN zeroship.creator_billing_status.state = 'active' \
-                                              THEN NOW() ELSE zeroship.creator_billing_status.past_due_since END, \
-                        last_payment_failure_at = NOW(), \
-                        failed_invoice_id = $2, \
+                        state = CASE \
+                            WHEN zeroship.creator_billing_status.last_recovered_at IS NOT NULL \
+                                 AND to_timestamp($3::bigint) <= zeroship.creator_billing_status.last_recovered_at \
+                                 THEN zeroship.creator_billing_status.state \
+                            WHEN zeroship.creator_billing_status.state = 'active' THEN 'past_due' \
+                            ELSE zeroship.creator_billing_status.state END, \
+                        past_due_since = CASE \
+                            WHEN zeroship.creator_billing_status.last_recovered_at IS NOT NULL \
+                                 AND to_timestamp($3::bigint) <= zeroship.creator_billing_status.last_recovered_at \
+                                 THEN zeroship.creator_billing_status.past_due_since \
+                            WHEN zeroship.creator_billing_status.state = 'active' THEN NOW() \
+                            ELSE zeroship.creator_billing_status.past_due_since END, \
+                        last_payment_failure_at = CASE \
+                            WHEN zeroship.creator_billing_status.last_recovered_at IS NOT NULL \
+                                 AND to_timestamp($3::bigint) <= zeroship.creator_billing_status.last_recovered_at \
+                                 THEN zeroship.creator_billing_status.last_payment_failure_at \
+                            ELSE NOW() END, \
+                        failed_invoice_id = CASE \
+                            WHEN zeroship.creator_billing_status.last_recovered_at IS NOT NULL \
+                                 AND to_timestamp($3::bigint) <= zeroship.creator_billing_status.last_recovered_at \
+                                 THEN zeroship.creator_billing_status.failed_invoice_id \
+                            ELSE $2 END, \
+                        last_event_at = GREATEST( \
+                            zeroship.creator_billing_status.last_event_at, to_timestamp($3::bigint)), \
                         updated_at = NOW() \
                      RETURNING state \
                  ) \
                  SELECT (SELECT state FROM prior) AS prior_state, \
                         (SELECT state FROM upserted) AS new_state",
-                &[&creator_id, &failed_invoice_id],
+                &[&creator_id, &failed_invoice_id, &event_created],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -165,10 +205,17 @@ impl AccountStatusStore {
     /// it un-suspends a `suspended` creator (suspension is never permanent) and
     /// clears `past_due`. Idempotent: an already-`active` creator is a no-op.
     ///
+    /// **Order-safe (critic #1).** `event_created` (the Stripe `event.created` of
+    /// this recovery) is stamped into `last_recovered_at` (advanced monotonically
+    /// via `GREATEST`). A later-but-stale `payment_failed` whose `event.created`
+    /// predates this value is then ignored by [`Self::record_payment_failed`], so
+    /// a recovery can never be undone by an out-of-order failure.
+    ///
     /// Returns the transition iff the state actually changed.
     pub async fn record_payment_recovered(
         &self,
         creator_id: Uuid,
+        event_created: i64,
     ) -> Result<Option<AccountTransition>, StripeError> {
         let conn = self
             .registry
@@ -179,7 +226,11 @@ impl AccountStatusStore {
         // a payment success for a creator with no prior failure needs no state).
         // A `prior` CTE snapshots the pre-UPDATE state so we can tell a real
         // {past_due,suspended}→active edge from a no-op (already active). The
-        // UPDATE clears the window + suspension (REVERSIBILITY: un-suspends).
+        // UPDATE clears the window + suspension (REVERSIBILITY: un-suspends) AND
+        // advances `last_recovered_at`/`last_event_at` to this event's
+        // `event.created` (monotonic via GREATEST) so a stale later failure is
+        // gated out. We stamp the recovery timestamp EVEN on an already-active
+        // no-op so the ordering high-water still advances.
         let rows = conn
             .query(
                 "WITH prior AS ( \
@@ -190,13 +241,15 @@ impl AccountStatusStore {
                         past_due_since = NULL, \
                         suspended_at = NULL, \
                         failed_invoice_id = NULL, \
+                        last_recovered_at = GREATEST(last_recovered_at, to_timestamp($2::bigint)), \
+                        last_event_at = GREATEST(last_event_at, to_timestamp($2::bigint)), \
                         updated_at = NOW() \
                      WHERE creator_id = $1 \
                      RETURNING state \
                  ) \
                  SELECT (SELECT state FROM prior) AS prior_state, \
                         (SELECT state FROM updated) AS new_state",
-                &[&creator_id],
+                &[&creator_id, &event_created],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;

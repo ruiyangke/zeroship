@@ -398,11 +398,18 @@ impl StripeApi for StripeClient {
         // auto_advance=false so WE control finalization (no surprise charge
         // timing); the deterministic key makes the create replay-safe within 24h.
         // metadata[creator_id] lets invoice.payment_failed resolve the creator.
+        // `metadata[invoice_kind]=infra` is the POSITIVE infra signal (critic #6):
+        // the `invoice.paid` recovery path only un-suspends when THIS marker is
+        // present, so a Connect end-user `invoice.paid` whose customer happens to
+        // collide with a platform `creator_billing.stripe_customer_id` can never
+        // falsely recover a suspension. Stripe copies invoice metadata onto the
+        // `invoice.paid`/`invoice.payment_failed` events, so the webhook sees it.
         let create_form = vec![
             ("customer".to_string(), customer.to_string()),
             ("auto_advance".to_string(), "false".to_string()),
             ("collection_method".to_string(), "charge_automatically".to_string()),
             ("metadata[creator_id]".to_string(), creator_id.to_string()),
+            ("metadata[invoice_kind]".to_string(), "infra".to_string()),
         ];
         let invoice = self
             .post_form("/v1/invoices", &create_form, Some(idempotency_key))
