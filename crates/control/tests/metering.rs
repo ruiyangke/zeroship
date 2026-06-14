@@ -252,6 +252,73 @@ async fn month_rollover_lands_in_separate_period_rows() {
     assert_eq!(metering.total(&app, july, "requests").await.unwrap(), 7);
 }
 
+/// Metering coverage (#27, H2): the gateway is a SECOND metering producer.
+/// Drive the FAITHFUL producer→ingest seam — a real `zeroship_metering::Meter`
+/// records `gateway_egress_bytes`, the gateway drains it and builds a
+/// `UsageReport` with a `gate-…` restart-unique producer id (exactly what the
+/// gateway flush task does), then it ingests through the REAL `Metering` path
+/// and aggregates into `usage_aggregates` under the route's app_id. A worker
+/// report for the SAME app then sums alongside it (the two egress metrics are
+/// disjoint, so "total egress" is their sum) — no double-count, no collision
+/// between the `gate-` and worker producer ids.
+#[compio::test]
+async fn gateway_egress_report_aggregates_into_usage_aggregates() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry);
+    let app = make_app(&client).await;
+    let period = period_start_unix(1_900_000_000);
+
+    // --- Gateway producer side (the real Meter, the real producer id) ---
+    let gate_meter = zeroship_metering::Meter::new();
+    gate_meter.increment(&app.to_string(), "gateway_egress_bytes", 4096);
+    let snapshot = gate_meter.drain();
+    let gate_producer = zeroship_metering::boot_worker_id("gate-test-host");
+    assert!(gate_producer.starts_with("gate-"), "gateway producer id prefix");
+    let gate_report = zeroship_metering::build_report(&gate_producer, 1, snapshot)
+        .expect("non-empty gateway snapshot builds a report");
+
+    let out = metering
+        .ingest_at(&gate_report, period)
+        .await
+        .expect("gateway report ingests");
+    assert!(!out.duplicate, "first gateway report is fresh");
+
+    // The gateway-owned egress landed under the right app_id + metric.
+    assert_eq!(
+        metering.total(&app, period, "gateway_egress_bytes").await.unwrap(),
+        4096,
+        "gateway_egress_bytes aggregated for the route's app",
+    );
+
+    // --- A worker report for the SAME app sums alongside (no collision) ---
+    let worker_id = format!("worker-host-{}", Uuid::new_v4());
+    metering
+        .ingest_at(
+            &report(&worker_id, 1, app, AppUsage { egress_bytes: 1000, ..Default::default() }),
+            period,
+        )
+        .await
+        .expect("worker report ingests");
+
+    // The two egress metrics are DISJOINT — the worker's `egress_bytes` and the
+    // gateway's `gateway_egress_bytes` coexist; "total egress" is their sum.
+    assert_eq!(
+        metering.total(&app, period, "gateway_egress_bytes").await.unwrap(),
+        4096,
+        "gateway egress unchanged by the worker report (disjoint metric)",
+    );
+    assert_eq!(
+        metering.total(&app, period, "egress_bytes").await.unwrap(),
+        1000,
+        "worker egress recorded under its own metric (no double-count)",
+    );
+}
+
 #[compio::test]
 async fn current_period_totals_returns_metric_map() {
     let Some(url) = db_url() else {

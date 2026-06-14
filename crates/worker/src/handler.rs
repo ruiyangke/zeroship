@@ -17,6 +17,19 @@ use zeroship_runtime::{
 use crate::sync::SharedEnvs;
 use crate::{cache, metrics, WorkerConfig};
 
+/// Streaming-usage incremental-flush cadence (metering coverage #27, H1).
+///
+/// The streaming drain records an `egress_bytes` + `stream_wall_us` delta
+/// whenever EITHER threshold is crossed, so a long-lived SSE/streaming
+/// response bills continuously and a worker crash loses at most one
+/// interval's delta. These are RECORDING-cadence knobs (crash-loss
+/// granularity), distinct from the meter's flush-to-control cadence
+/// (`DEFAULT_FLUSH_INTERVAL`). The interval matches the flush cadence so a
+/// recorded delta is rarely stranded in-memory more than one flush.
+const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// ~1 MiB bounds the in-memory un-recorded egress between deltas.
+const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
+
 /// Cap on the dispatch envelope body. The envelope wraps a creator-app
 /// HTTP request including headers and body — most apps don't need
 /// huge inbound bodies on this surface (file uploads typically go
@@ -286,12 +299,8 @@ pub async fn dispatch(
         }
         FetchOutcome::Stream { status, headers, body_reader, logs: request_logs } => {
             crate::logs::append(&logs, app_id, request_logs);
-            stream_response(
-                status,
-                &headers,
-                body_reader,
-                metering_on_complete(app_id, cpu_us, ingress_bytes, wall_start),
-            )
+            record_stream_unary(app_id, cpu_us, ingress_bytes, wall_start);
+            stream_response(status, &headers, body_reader, app_id)
         }
         FetchOutcome::WebSocketUpgrade { .. } => {
             // WS upgrades over the HTTP dispatch endpoint aren't supported —
@@ -318,12 +327,8 @@ pub async fn dispatch(
                     logs: request_logs,
                 })) => {
                     crate::logs::append(&logs, app_id, request_logs);
-                    stream_response(
-                        status,
-                        &headers,
-                        body_reader,
-                        metering_on_complete(app_id, cpu_us, ingress_bytes, wall_start),
-                    )
+                    record_stream_unary(app_id, cpu_us, ingress_bytes, wall_start);
+                    stream_response(status, &headers, body_reader, app_id)
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade { logs: request_logs, .. })) => {
                     crate::logs::append(&logs, app_id, request_logs);
@@ -343,25 +348,26 @@ pub async fn dispatch(
     }
 }
 
-/// Build the per-request metering callback the streaming drain task invokes
-/// once the response body has fully flushed, with the total egress bytes it
-/// observed. Records all five platform auto-counters (the wall clock is
-/// finalized here so it spans the whole stream lifetime, not just the
-/// synchronous handler entry).
+/// Record the UNARY metering counters for a streaming response EXACTLY ONCE,
+/// at stream start (metering coverage #27, H1).
 ///
-/// `Box<dyn FnOnce>` so it can be moved into the spawned drain task; the
-/// `METER` thread-local it ultimately writes lives on the worker's V8 actor
-/// thread, the same thread `compio::runtime::spawn` schedules onto.
-fn metering_on_complete(
+/// A stream is one request, so `requests`/`cpu_us`/`ingress_bytes` (and the
+/// unary `wall_us` — the synchronous-handler elapsed up to stream start) are
+/// recorded here a single time, immediately — not deferred to finalize where
+/// a crash would lose them. `egress_bytes` is recorded as 0 here; the
+/// streamed body bytes and the held-open duration (`stream_wall_us`) accrue
+/// INCREMENTALLY in the drain task via [`cache::record_stream_delta`], so a
+/// multi-hour stream bills continuously and a crash loses ≤ one interval.
+fn record_stream_unary(
     app_id: Uuid,
     cpu_us: u64,
     ingress_bytes: u64,
     wall_start: std::time::Instant,
-) -> Box<dyn FnOnce(u64)> {
-    Box::new(move |egress_bytes: u64| {
-        let wall_us = wall_start.elapsed().as_micros() as u64;
-        cache::record_request(&app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
-    })
+) {
+    let wall_us = wall_start.elapsed().as_micros() as u64;
+    // egress = 0: the streamed body accrues as incremental `egress_bytes`
+    // deltas in the drain; `requests` is counted once here and never again.
+    cache::record_request(&app_id, cpu_us, wall_us, 0, ingress_bytes);
 }
 
 /// Build an HTTP response forwarding the JS handler's status, headers, and body.
@@ -389,7 +395,7 @@ fn stream_response(
     status: u16,
     headers: &[(String, String)],
     reader: StreamReader,
-    on_complete: Box<dyn FnOnce(u64)>,
+    app_id: Uuid,
 ) -> HttpResponse {
     let status_code = ntex::http::StatusCode::from_u16(status)
         .unwrap_or(ntex::http::StatusCode::OK);
@@ -403,46 +409,87 @@ fn stream_response(
     // Spawn a drain task — waker-based, not busy-polling.
     // StreamWriter.push() wakes this task when new chunks arrive.
     //
-    // `egress` accumulates every byte forwarded to the client; whichever
-    // way the loop terminates (client disconnect, stream complete) we call
-    // `on_complete(egress)` to land the metering auto-counters with the
-    // true response body size this stream produced.
+    // Metering coverage (#27, H1): the drain records `egress_bytes` +
+    // `stream_wall_us` INCREMENTALLY — a delta whenever ≥ STREAM_FLUSH_BYTES
+    // have streamed OR ≥ STREAM_FLUSH_INTERVAL has elapsed, plus a final
+    // delta when the loop ends (client disconnect or stream complete). So a
+    // multi-hour stream bills continuously and a worker crash loses at most
+    // one interval's delta, instead of the whole stream (the pre-fix
+    // finalize-only behaviour). `requests`/`cpu_us`/`ingress_bytes` were
+    // already recorded once at stream start (`record_stream_unary`) and are
+    // NOT touched here — a stream is one request.
     compio::runtime::spawn(async move {
-        let mut egress: u64 = 0;
+        let stream_start = std::time::Instant::now();
+        // Running deltas SINCE the last recorded flush.
+        let mut bytes_since_flush: u64 = 0;
+        // Stream-wall already recorded (so each delta is `elapsed - recorded`).
+        let mut wall_recorded_us: u64 = 0;
+
+        // Record a delta of egress + stream-wall since the last flush, then
+        // reset the byte counter and advance the recorded-wall marker.
+        macro_rules! flush_delta {
+            () => {{
+                let elapsed_us = stream_start.elapsed().as_micros() as u64;
+                let wall_delta = elapsed_us.saturating_sub(wall_recorded_us);
+                cache::record_stream_delta(&app_id, bytes_since_flush, wall_delta);
+                bytes_since_flush = 0;
+                wall_recorded_us = elapsed_us;
+            }};
+        }
+
         loop {
             // Drain all available chunks
             while let Some(chunk) = reader.pop() {
                 if !chunk.is_empty() {
-                    egress += chunk.len() as u64;
+                    bytes_since_flush += chunk.len() as u64;
                     if tx.send(Ok::<Bytes, std::io::Error>(Bytes::from(chunk))).is_err() {
-                        on_complete(egress);
-                        return; // client disconnected
+                        flush_delta!(); // client disconnected — land the trailing delta
+                        return;
                     }
                 }
+            }
+
+            // Incremental byte-threshold flush mid-stream.
+            if bytes_since_flush >= STREAM_FLUSH_BYTES {
+                flush_delta!();
             }
 
             // Check if stream is complete
             if reader.is_done() {
                 while let Some(chunk) = reader.pop() {
                     if !chunk.is_empty() {
-                        egress += chunk.len() as u64;
+                        bytes_since_flush += chunk.len() as u64;
                         let _ = tx.send(Ok(Bytes::from(chunk)));
                     }
                 }
-                on_complete(egress);
+                flush_delta!(); // final delta
                 return; // tx drops → stream ends → HTTP response completes
             }
 
-            // Wait for new data (waker-based — no CPU burn)
-            // StreamWriter.push() or .close() will wake us
-            std::future::poll_fn(|cx| {
+            // Wait for new data (waker-based — no CPU burn), but bounded by
+            // STREAM_FLUSH_INTERVAL so an idle-but-open stream still wakes to
+            // record its held-open duration (and a crash bounds loss to one
+            // interval). The waker (StreamWriter.push()/.close()) wins when
+            // data arrives sooner.
+            let wait = std::future::poll_fn(|cx| {
                 if reader.has_data() || reader.is_done() {
                     std::task::Poll::Ready(())
                 } else {
                     reader.register_waker(cx.waker());
                     std::task::Poll::Pending
                 }
-            }).await;
+            })
+            .fuse();
+            let tick = compio::time::sleep(STREAM_FLUSH_INTERVAL).fuse();
+            pin_mut!(wait, tick);
+            futures::select! {
+                _ = wait => {}
+                _ = tick => {
+                    // Interval elapsed with no new data → record the duration
+                    // delta so a long idle stream bills continuously.
+                    flush_delta!();
+                }
+            }
         }
     }).detach();
 
@@ -956,6 +1003,171 @@ mod tests {
     fn base64_encode_hi() -> String {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(b"hi")
+    }
+
+    // -----------------------------------------------------------------------
+    // Metering coverage (#27, H1) — SSE/streaming incremental flush
+    // -----------------------------------------------------------------------
+
+    /// Wire the cache's `METER` thread-local to a fresh meter we hold, so the
+    /// drain task's `record_stream_delta` writes land somewhere we can drain.
+    fn init_meter_for_stream_test() -> Arc<zeroship_metering::Meter> {
+        let meter = Arc::new(zeroship_metering::Meter::new());
+        crate::cache::init_cache(
+            4,
+            crate::cache::KernelConfig {
+                db_url: None,
+                kv_url: None,
+                storage_backend: None,
+                meter: Arc::clone(&meter),
+            },
+        );
+        meter
+    }
+
+    /// Yield to the compio runtime enough times that the spawned stream-drain
+    /// task gets scheduled and processes the chunks we pushed.
+    async fn let_drain_run() {
+        for _ in 0..8 {
+            let _ = compio::runtime::spawn(async {}).await;
+        }
+    }
+
+    /// THE H1 regression: a long stream accrues `egress_bytes` +
+    /// `stream_wall_us` deltas INCREMENTALLY — usage is recorded BEFORE the
+    /// stream finalizes (so a multi-hour stream bills continuously and a
+    /// crash loses ≤ one interval), not only once at close.
+    ///
+    /// Drives the REAL `stream_response` drain (the worker's streaming path)
+    /// against a real `StreamReader`, pushing > STREAM_FLUSH_BYTES so the
+    /// byte-threshold mid-stream flush fires, then drains the meter while the
+    /// stream is STILL OPEN and asserts a non-zero partial. RED pre-fix: the
+    /// old drain recorded nothing until `on_complete` at finalize.
+    #[test]
+    fn long_stream_accrues_egress_before_close() {
+        let Ok(rt) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+        rt.block_on(async {
+            let meter = init_meter_for_stream_test();
+            let app_id = Uuid::new_v4();
+
+            // Generous cap so a > 1 MiB push isn't rejected by the per-stream
+            // overflow guard.
+            let (writer, reader) =
+                zeroship_runtime::core::channel::stream_buffer_with_cap(16 * 1024 * 1024);
+
+            // Hold the response so its `rx` stays alive (a dropped rx would
+            // make `tx.send` fail and finalize early).
+            let _resp = stream_response(200, &[], reader, app_id);
+
+            // Push > STREAM_FLUSH_BYTES so the mid-stream byte-threshold flush
+            // fires while the stream is still open (NOT closed yet).
+            let big = vec![b'x'; (STREAM_FLUSH_BYTES + 4096) as usize];
+            let pushed = big.len() as u64;
+            assert!(matches!(
+                writer.push(big),
+                zeroship_runtime::core::channel::StreamPushResult::Ok
+            ));
+
+            let_drain_run().await;
+
+            // BEFORE close: a delta must already be recorded (the crash-loss
+            // bound). Pre-fix this is empty (finalize-only recording).
+            let snap = meter.drain();
+            let usage = snap
+                .get(&app_id)
+                .expect("a streaming delta must be recorded BEFORE the stream closes");
+            assert_eq!(
+                usage.egress_bytes, pushed,
+                "the mid-stream byte-threshold flush records the streamed bytes \
+                 before finalize"
+            );
+            assert!(
+                usage.custom.get("stream_wall_us").copied().unwrap_or(0) >= 0,
+                "stream_wall_us is recorded as a custom metric on the incremental flush"
+            );
+            // The drain task NEVER counts `requests` (a stream is one request,
+            // counted by record_stream_unary — not exercised here).
+            assert_eq!(usage.requests, 0, "stream_response must not touch requests");
+
+            // Push a second batch, then close → the final delta lands the
+            // remainder. The total across deltas equals the bytes streamed.
+            let more = vec![b'y'; 2048];
+            let more_len = more.len() as u64;
+            assert!(matches!(
+                writer.push(more),
+                zeroship_runtime::core::channel::StreamPushResult::Ok
+            ));
+            writer.close();
+            let_drain_run().await;
+
+            let snap2 = meter.drain();
+            // `drain()` reset after the first read, so this second drain holds
+            // only the post-first-drain deltas (the second batch + any final
+            // wall delta).
+            let usage2 = snap2.get(&app_id).expect("final delta recorded at close");
+            assert_eq!(
+                usage2.egress_bytes, more_len,
+                "the final delta records the remaining streamed bytes"
+            );
+            assert_eq!(usage2.requests, 0, "still no requests from the drain");
+        });
+    }
+
+    /// `requests` is counted EXACTLY ONCE for a stream (a stream is one
+    /// request), by `record_stream_unary` at stream start — never by the
+    /// per-delta drain. This pins that the unary recorder bumps `requests`
+    /// once and the drain bumps it zero times, so N incremental deltas can
+    /// never inflate the request count.
+    #[test]
+    fn streaming_counts_request_exactly_once() {
+        let Ok(rt) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+        rt.block_on(async {
+            let meter = init_meter_for_stream_test();
+            let app_id = Uuid::new_v4();
+
+            // The unary recorder runs once at stream start (as the dispatch
+            // arm does), counting requests + cpu + ingress.
+            let wall_start = std::time::Instant::now();
+            record_stream_unary(app_id, 123, 456, wall_start);
+
+            let (writer, reader) =
+                zeroship_runtime::core::channel::stream_buffer_with_cap(16 * 1024 * 1024);
+            let _resp = stream_response(200, &[], reader, app_id);
+
+            // Two large batches → two mid-stream byte-threshold deltas + a
+            // final delta = three drain-side increments of egress/stream_wall.
+            for _ in 0..2 {
+                let big = vec![b'z'; (STREAM_FLUSH_BYTES + 1) as usize];
+                assert!(matches!(
+                    writer.push(big),
+                    zeroship_runtime::core::channel::StreamPushResult::Ok
+                ));
+                let_drain_run().await;
+            }
+            writer.close();
+            let_drain_run().await;
+
+            let snap = meter.drain();
+            let usage = snap.get(&app_id).expect("usage recorded for the stream");
+            assert_eq!(
+                usage.requests, 1,
+                "a stream counts exactly one request despite many incremental deltas"
+            );
+            assert_eq!(usage.cpu_us, 123, "unary cpu_us recorded once");
+            assert_eq!(usage.ingress_bytes, 456, "unary ingress_bytes recorded once");
+            assert!(usage.egress_bytes > 0, "incremental egress accrued across deltas");
+            assert!(
+                usage.custom.get("stream_wall_us").copied().unwrap_or(0) > 0
+                    || usage.egress_bytes > 0,
+                "stream_wall_us accrues over the stream lifetime"
+            );
+        });
     }
 }
 

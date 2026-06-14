@@ -680,6 +680,21 @@ fn main() -> std::io::Result<()> {
         stash_signing_key_bytes,
     ));
 
+    // ── Metering infrastructure (coverage #27) ───────────────────────────
+    // The gateway is a SECOND metering producer. ONE process-wide meter,
+    // shared into `GateState` (so the response path records
+    // `gateway_egress_bytes` for static/redirect/error bodies the worker
+    // never sees) AND drained by the single flush task spawned just below.
+    // Mirrors the worker's wiring exactly — same `Meter`, same
+    // `spawn_flush_task`, same `/internal/usage` ingest. The producer id is
+    // restart-unique (`boot_worker_id` folds a per-boot nonce onto a stable
+    // base) so the per-process `SequenceSource` resetting to 1 each boot
+    // cannot collide with pre-restart `(worker_id, sequence)` rows and be
+    // dropped as a phantom duplicate (silent under-bill — the boot-nonce
+    // lesson). The `gate-` prefix makes gateway and worker producer ids
+    // never collide, so their reports simply SUM in `usage_aggregates`.
+    let meter = Arc::new(zeroship_metering::Meter::new());
+
     let state = Arc::new(GateState {
         config: GateConfig {
             control_url,
@@ -713,11 +728,34 @@ fn main() -> std::io::Result<()> {
         session_verifier,
         anchor_enc_key,
         pairwise_salt,
+        meter: Arc::clone(&meter),
     });
 
     sync::start_sync(state.clone());
 
     let bind_addr = format!("{bind_host}:{port}");
+
+    // Spawn the metering flush task (coverage #27). Drains the gateway's
+    // meter every ~10s and POSTs a `UsageReport` to control's
+    // `/internal/usage` — the SAME idempotent ingest the worker uses. The
+    // restart-unique producer base is `$HOSTNAME` (k8s/compose) else the
+    // bind addr; `boot_worker_id` folds the per-boot nonce. Detached
+    // background task: it never sits on the proxy hot path.
+    let gate_meter_base = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| bind_addr.clone());
+    let gate_producer_id = zeroship_metering::boot_worker_id(&format!("gate-{gate_meter_base}"));
+    zeroship_metering::spawn_flush_task(
+        Arc::clone(&meter),
+        zeroship_metering::FlushConfig {
+            control_url: state.config.control_url.clone(),
+            control_key: state.config.control_key.clone(),
+            worker_id: gate_producer_id.clone(),
+            interval: zeroship_metering::DEFAULT_FLUSH_INTERVAL,
+        },
+    );
+    tracing::info!(producer_id = %gate_producer_id, "gateway metering flush task started");
     if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
         tracing::warn!(
             bind = %bind_addr,

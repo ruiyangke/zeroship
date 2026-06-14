@@ -449,6 +449,7 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         session_verifier: None::<Arc<zeroship_gateway::session_token::Verifier>>,
         anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+        meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }
 

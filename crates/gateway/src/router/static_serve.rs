@@ -1007,6 +1007,7 @@ mod tests {
             session_verifier: None,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+            meter: Arc::new(zeroship_metering::Meter::new()),
         }
     }
 

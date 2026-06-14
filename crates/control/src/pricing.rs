@@ -397,6 +397,36 @@ mod tests {
         assert_eq!(total_units(&weights(), &usage).unwrap(), 10);
     }
 
+    /// Metering coverage (#27): the two NEW metrics (changeset 0047) price
+    /// through the UNCHANGED CU pipeline once their weights exist —
+    /// `gateway_egress_bytes` mirrors `egress_bytes` (1 CU / 1000 B) and
+    /// `stream_wall_us` mirrors `wall_us` (1 CU / 10 ms). This pins both the
+    /// per-metric flooring and that the gateway/worker egress sums coherently.
+    #[test]
+    fn metering_coverage_metrics_price_through_unchanged_pipeline() {
+        // The 0047 weights, alongside the worker-owned egress_bytes (so we can
+        // assert the two egress metrics sum coherently).
+        let mut t = MetricWeights::new();
+        t.insert("egress_bytes".to_string(), w(1, 1_000));
+        t.insert("gateway_egress_bytes".to_string(), w(1, 1_000));
+        t.insert("stream_wall_us".to_string(), w(1, 10_000));
+
+        let mut usage = HashMap::new();
+        // Worker-served body + gateway-served (static) body: disjoint metrics,
+        // so "total egress CU" is the sum — 4000 B worker + 3000 B gateway.
+        usage.insert("egress_bytes".to_string(), 4_000); // 4 CU
+        usage.insert("gateway_egress_bytes".to_string(), 3_500); // floor(3500/1000)=3 CU
+        // A held-open stream's duration: 25 ms = 25_000 us → floor(25000/10000)=2 CU.
+        usage.insert("stream_wall_us".to_string(), 25_000); // 2 CU
+
+        assert_eq!(
+            total_units(&t, &usage).unwrap(),
+            4 + 3 + 2,
+            "gateway_egress_bytes + stream_wall_us price through total_units \
+             exactly like egress_bytes / wall_us"
+        );
+    }
+
     #[test]
     fn included_units_quota_then_overage() {
         // included_units fully covers usage ⇒ base only; over the quota ⇒ the

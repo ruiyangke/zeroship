@@ -183,6 +183,39 @@ pub fn record_request(
     });
 }
 
+/// Record an INCREMENTAL streaming-usage delta (metering coverage #27, H1).
+///
+/// A long-lived SSE/streaming response accrues `egress_bytes` and
+/// `stream_wall_us` continuously while it is open, so (a) usage bills
+/// throughout a multi-hour stream instead of only at close, and (b) a worker
+/// crash loses at most one recording interval's delta rather than the whole
+/// stream. The streaming drain task ([`crate::handler::stream_response`])
+/// calls this every ~10s / ~1 MiB and once more at finalize with the
+/// trailing delta.
+///
+/// `requests`/`cpu_us`/`ingress_bytes` are NOT touched here — they are the
+/// unary parts of the request, recorded EXACTLY ONCE at stream start via
+/// [`record_request`]. A stream is one request, so `requests` must never be
+/// re-incremented per delta. `stream_wall_us` is a distinct metric from the
+/// unary `wall_us` (the held-open duration is priced/observed on its own).
+/// No-op when the meter is unset (degraded config) or both deltas are zero.
+pub fn record_stream_delta(app_id: &Uuid, egress_bytes_delta: u64, stream_wall_us_delta: u64) {
+    if egress_bytes_delta == 0 && stream_wall_us_delta == 0 {
+        return;
+    }
+    METER.with(|m| {
+        if let Some(meter) = m.borrow().as_ref() {
+            let id = app_id.to_string();
+            if egress_bytes_delta > 0 {
+                meter.increment(&id, "egress_bytes", egress_bytes_delta);
+            }
+            if stream_wall_us_delta > 0 {
+                meter.increment(&id, "stream_wall_us", stream_wall_us_delta);
+            }
+        }
+    });
+}
+
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
 pub fn get_runtime(app_id: &Uuid) -> Option<Runtime> {
     CACHE.with(|c| {

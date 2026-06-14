@@ -803,6 +803,20 @@ async fn execute_resource_tree(
     };
 
     // 8. Execute the resolved action.
+    //
+    //    Metering coverage (#27): track whether THIS arm produced
+    //    gateway-originated egress — a body the worker never sees (static
+    //    asset, redirect, or the gateway's own error page for those arms).
+    //    Only such bodies are metered as `gateway_egress_bytes` in step 8b
+    //    below. The worker-proxy arms (`WorkerRpc`/`WorkerSsr`/`Rewrite`)
+    //    are NOT gateway-owned: the worker already counts its response body
+    //    as `egress_bytes`, so the gateway must never meter it (that would
+    //    double-bill the same byte — the one over-bill vector). The two
+    //    metrics are disjoint BY CONSTRUCTION (worker-body vs gateway-body).
+    let gateway_owned_egress = matches!(
+        policy.action,
+        ResolvedAction::Static { .. } | ResolvedAction::Redirect { .. }
+    );
     let mut response = match &policy.action {
         ResolvedAction::WorkerRpc | ResolvedAction::WorkerSsr => {
             // Subscription procedures need a WebSocket-aware proxy
@@ -882,6 +896,22 @@ async fn execute_resource_tree(
         }
     };
 
+    // 8b. Gateway egress metering (#27). For gateway-owned arms only, record
+    //     the served body length as `gateway_egress_bytes` against the
+    //     route's server-resolved `app_id` (never a client value). The body
+    //     size is known here for both buffered (`Bytes`) and streamed
+    //     (`SizedStream`) static responses — ntex reports `BodySize::Sized(n)`
+    //     for both, and a static asset is finite/bounded, so a one-shot
+    //     record at response-build time is exact (no incremental flush needed,
+    //     unlike the worker's open-ended SSE streams). A lock-free atomic
+    //     bump: it adds no await and does not slow the proxy hot path (the
+    //     worker arms skip this entirely). This is disjoint from the worker's
+    //     `egress_bytes` by construction; the gateway NEVER touches
+    //     `egress_bytes`.
+    if gateway_owned_egress {
+        record_gateway_egress(&state, app_id, &response);
+    }
+
     // 9. Idempotency capture — store the worker's response under the
     //    dedupe key when we held the in-flight lock through dispatch.
     //    Errors here are logged but never block the response.
@@ -898,6 +928,34 @@ async fn execute_resource_tree(
     }
 
     response
+}
+
+/// Record a gateway-originated response's body length as
+/// `gateway_egress_bytes` for `app_id` (metering coverage #27).
+///
+/// Called ONLY for gateway-owned arms (static asset / redirect / the
+/// gateway error page those arms emit) — bodies the worker never sees. The
+/// worker owns `egress_bytes` for its proxied response bodies, so this
+/// function (and the gateway in general) NEVER touches `egress_bytes`: the
+/// two metrics are disjoint by construction and can never count the same
+/// byte. `app_id` is the route's server-resolved id (never a client value).
+///
+/// Reads the size from the built response's body hint, which is
+/// `BodySize::Sized(n)` for both the buffered `Bytes` path and the
+/// `SizedStream` static path (a static asset's length is known up front).
+/// A non-`Sized` body (chunked/unknown) records nothing rather than guess —
+/// gateway-owned bodies are always sized today, so this is defensive.
+/// The increment is a lock-free atomic bump; the flush to control runs in a
+/// detached background task, so this adds no latency to the response path.
+fn record_gateway_egress(state: &GateState, app_id: &Uuid, response: &HttpResponse) {
+    use ntex::http::body::{BodySize, MessageBody};
+    if let BodySize::Sized(n) = response.body().size() {
+        if n > 0 {
+            state
+                .meter
+                .increment(&app_id.to_string(), "gateway_egress_bytes", n);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1972,6 +2030,7 @@ mod tests {
             session_verifier: None,
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
+            meter: Arc::new(zeroship_metering::Meter::new()),
         })
     }
 
@@ -3508,6 +3567,130 @@ mod tests {
             ntex::http::StatusCode::PAYMENT_REQUIRED,
             "an Allowed app must NOT be spend-blocked on a static resource",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Metering coverage (#27) — gateway egress + the no-double-count partition
+    // -----------------------------------------------------------------------
+
+    /// THE load-bearing regression (§2.4): the egress ownership partition.
+    ///
+    /// A gateway-owned response (here a STATIC action whose blob 404s — the
+    /// gateway's own error body, a body the worker never sees) must record
+    /// `gateway_egress_bytes` for the route's app and must NOT touch
+    /// `egress_bytes` (which the WORKER owns). This drives the REAL
+    /// `handle_request` → `execute_resource_tree` → static arm against the
+    /// SAME `Arc<Meter>` in `GateState`, then drains it.
+    ///
+    /// RED pre-fix: the gateway had no meter and recorded nothing, so
+    /// `gateway_egress_bytes` is absent. GREEN post-fix: the static arm
+    /// records the served body length, and `egress_bytes` stays untouched.
+    #[compio::test]
+    async fn static_response_meters_gateway_egress_not_worker_egress() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let meter = Arc::clone(&state.meter);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/about")
+            .header("host", "static-spend-app.zeroship.localhost")
+            .to_http_request();
+        let mut resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "static-spend-app.zeroship.localhost",
+            "/about",
+            Bytes::new(),
+        )
+        .await;
+        // The stub blob store has no bytes, so the static arm emits a 404
+        // JSON error body — gateway-owned egress all the same.
+        let served = collect_body(resp.take_body()).await;
+        assert!(!served.is_empty(), "the gateway-owned 404 body is non-empty");
+
+        let snap = meter.drain();
+        let usage = snap
+            .get(&app_id)
+            .expect("gateway recorded usage for the static route's app");
+        assert_eq!(
+            usage.custom.get("gateway_egress_bytes").copied(),
+            Some(served.len() as u64),
+            "static (gateway-owned) egress must be metered as gateway_egress_bytes \
+             equal to the served body length",
+        );
+        assert_eq!(
+            usage.egress_bytes, 0,
+            "the gateway must NEVER touch the worker-owned egress_bytes metric",
+        );
+    }
+
+    /// The other half of the partition: a WORKER-proxied action must NOT
+    /// record `gateway_egress_bytes` — the worker already counts its body as
+    /// `egress_bytes`, and metering it here too would double-bill the same
+    /// byte (the one over-bill vector). The proxy 502s against the stub
+    /// hash-ring (no reachable worker), which is exactly the worker-arm path;
+    /// the gateway must still record NO gateway_egress_bytes for it.
+    ///
+    /// RED if someone later meters the worker-proxy body in the gateway.
+    #[compio::test]
+    async fn gateway_does_not_meter_worker_proxy_body() {
+        use zeroship_core::types::SpendState;
+        let state = build_idempotency_state();
+        let meter = Arc::clone(&state.meter);
+        let app_id = Uuid::new_v4();
+
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .to_http_request();
+        let _resp = handle_request(
+            req,
+            web_state(state.clone()).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            Bytes::new(),
+        )
+        .await;
+
+        let snap = meter.drain();
+        // Either the app has no entry at all, or it has one but with NO
+        // gateway_egress_bytes — the gateway must not meter the worker arm.
+        if let Some(usage) = snap.get(&app_id) {
+            assert_eq!(
+                usage.custom.get("gateway_egress_bytes").copied(),
+                None,
+                "the gateway must NOT meter a worker-proxied response body as \
+                 gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
+            );
+        }
+    }
+
+    /// Restart-safety (§2.3 / the boot-nonce lesson): two
+    /// `boot_worker_id("gate-…")` calls for the SAME stable base must differ,
+    /// so the gateway's per-process `SequenceSource` resetting to 1 each boot
+    /// can't collide with pre-restart `(producer_id, sequence)` rows and be
+    /// dropped as a phantom duplicate (silent under-bill).
+    #[test]
+    fn gateway_producer_id_is_restart_unique() {
+        let base = "gate-pod-3";
+        let a = zeroship_metering::boot_worker_id(base);
+        let b = zeroship_metering::boot_worker_id(base);
+        assert_ne!(a, b, "each gateway boot must get a fresh metering identity");
+        assert!(a.starts_with(&format!("{base}-")));
+        assert!(b.starts_with(&format!("{base}-")));
     }
 
     /// Allow → the gate passes (so dispatch proceeds to the proxy, which fails

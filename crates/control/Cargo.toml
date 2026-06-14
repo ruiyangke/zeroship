@@ -76,5 +76,10 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
+# Metering coverage (#27): the faithful gateway-egress ingest test builds a
+# REAL gateway `Meter`, records `gateway_egress_bytes`, drains + `build_report`
+# with a `gate-…` producer id, and ingests through the real `Metering` path —
+# exercising the producer→ingest seam end to end, not a hand-built report.
+zeroship-metering = { workspace = true }
 [lints]
 workspace = true

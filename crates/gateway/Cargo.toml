@@ -11,6 +11,13 @@ path = "src/main.rs"
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
+# Metering coverage (#27): the gateway is a SECOND metering producer. It
+# builds its own process-wide `Arc<Meter>` + `spawn_flush_task` (same wire
+# type, same `/internal/usage` ingest as the worker) and emits
+# `gateway_egress_bytes` for the bodies the worker never sees (static
+# assets, redirects, gateway error pages). The crate is service-agnostic
+# (no V8), so this is a plain dependency with no new abstraction.
+zeroship-metering = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
 serde = { workspace = true }
@@ -49,6 +56,10 @@ compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
+# Integration tests construct `GateState`, whose `meter` field is an
+# `Arc<zeroship_metering::Meter>` (coverage #27). They need the type in
+# scope to build the fixture.
+zeroship-metering = { workspace = true }
 async-trait = { workspace = true }
 # Phase 3 U4 smoke test runs `zeroship_auth::store::migrations::migrate`
 # against a live PG to guarantee the `auth.gateway_sessions` table

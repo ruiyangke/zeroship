@@ -194,6 +194,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
         pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
+        meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }
 
