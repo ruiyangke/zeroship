@@ -74,10 +74,10 @@ pub const DEFAULT_TICK_SECS: u64 = 3600;
 
 /// Stable `pg_advisory_lock` key for the billing-reconcile sweep. Distinct from
 /// the spend-sweep key. Two control instances racing this sweep would both try
-/// to claim+bill; the per-period `billing_runs` PK already prevents a double
-/// invoice, but the advisory lock avoids the wasted duplicate Stripe round-trips
-/// and keeps the sweep single-flight fleet-wide. Arbitrary FIXED 64-bit constant
-/// (derived from "zsbill01").
+/// to claim+bill; the per-period `invoices(creator_id, period)` UNIQUE claim
+/// already prevents a double invoice, but the advisory lock avoids the wasted
+/// duplicate Stripe round-trips and keeps the sweep single-flight fleet-wide.
+/// Arbitrary FIXED 64-bit constant (derived from "zsbill01").
 const BILLING_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6269_6c6c_0001;
 
 /// Currency for infra-cost invoices (v1: USD only).
@@ -152,8 +152,8 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 }
 
 /// Run one reconcile sweep against the live Stripe client built from `state`.
-/// Returns the number of creators billed (a freshly-claimed `billing_runs` row
-/// that resulted in a finalized invoice).
+/// Returns the number of creators billed (a freshly-claimed `invoices` row that
+/// resulted in a finalized invoice).
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     let stripe = StripeClient::new(
@@ -178,8 +178,8 @@ pub async fn tick_with<S: StripeApi>(
     let period_start = previous_period_start_unix(now_unix);
 
     // Multi-instance safety: single-flight the sweep fleet-wide. A loser skips
-    // this tick (the per-period `billing_runs` PK still prevents a double bill,
-    // but the lock avoids duplicate Stripe round-trips).
+    // this tick (the per-period `invoices(creator_id, period)` UNIQUE claim still
+    // prevents a double bill, but the lock avoids duplicate Stripe round-trips).
     let lock_conn = state.registry.conn().await?;
     let got = lock_conn
         .query(
@@ -331,7 +331,9 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // NaiveDate); reads need no cast.
     let period = period_date(period_start);
 
-    let conn = state.registry.conn().await?;
+    // `mut` so the finalize→provider-ref pair can run in ONE `conn.transaction()`
+    // (M1). Every read/UPSERT before that still borrows `&conn` immutably.
+    let mut conn = state.registry.conn().await?;
 
     // MAJOR-6: short-circuit BEFORE any pricing. A `status='finalized'` invoice
     // for (creator, period) means this period is fully billed — do no pricing
@@ -408,20 +410,24 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         // The FX actually charged (resolved on `price`; always Some here because
         // charge_cents succeeded). Frozen onto the line.
         let charged_fx = price.fx_pico_cents_per_unit.unwrap_or(0);
-        // Only the weights ACTUALLY APPLIED to this app's usage metrics are
-        // frozen (a metric with no weight contributes 0 CU — recording the whole
-        // global table would bloat every snapshot and obscure what was applied).
-        let applied_weights: std::collections::BTreeMap<String, MetricWeight> = usage
-            .keys()
-            .filter_map(|m| weights.get(m).map(|w| (m.clone(), *w)))
-            .collect();
+        // C1 (replay-faithful snapshot): freeze the FULL weights map that was
+        // ACTUALLY PASSED to `charge_cents` above — not a subset filtered to
+        // `usage.keys()`. `total_units` iterates `usage` keys (so it only reads
+        // weights for metrics present in `usage`), which made the filtered subset
+        // *happen* to be equivalent — but that equivalence was an unenforced
+        // coupling to `pricing.rs`'s loop direction. Freezing the full map (a
+        // superset; extra weights are ignored under either loop direction) makes
+        // the snapshot equal the real charge INPUT, so a replay over the frozen
+        // snapshot reproduces `amount_cents` regardless of how the pricer iterates.
+        let weights_snapshot: std::collections::BTreeMap<String, MetricWeight> =
+            weights.iter().map(|(m, w)| (m.clone(), *w)).collect();
         let desc = format!("Infra usage — app {app_id} — {}", month_label(period_start));
         lines.push(BilledLine {
             app_id: *app_id,
             desc,
             amount: breakdown.total_cents,
             usage,
-            applied_weights,
+            weights_snapshot,
             included_units: price.included_units,
             fx_pico_cents_per_unit: charged_fx,
             base_fee_cents: price.base_fee_cents,
@@ -540,7 +546,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         let base_i64 = i64::try_from(line.base_fee_cents).unwrap_or(i64::MAX);
         let usage_json = serde_json::to_value(&line.usage)
             .map_err(|e| RegistryError::Database(format!("usage_snapshot serialize: {e}")))?;
-        let weights_json = serde_json::to_value(&line.applied_weights)
+        let weights_json = serde_json::to_value(&line.weights_snapshot)
             .map_err(|e| RegistryError::Database(format!("weights_snapshot serialize: {e}")))?;
         conn.execute(
             "INSERT INTO zeroship.invoice_lines \
@@ -659,17 +665,45 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         }
     };
 
-    let provider_invoice_id = stripe
-        .finalize_invoice(&draft_id)
-        .await
-        .map_err(|e| RegistryError::Database(format!("finalize_invoice: {e}")))?;
+    // M2 (re-finalize converges): a crash AFTER Stripe finalized but BEFORE our
+    // local finalize-UPDATE leaves Stripe-finalized + DB-draft. The re-drive
+    // re-calls `finalize_invoice(&draft_id)`; Stripe rejects finalizing an
+    // already-finalized invoice with a 4xx (`error.code = invoice_already_finalized`).
+    // Treat that as SUCCESS — the invoice IS finalized on Stripe, and finalize does
+    // NOT change the invoice id, so the provider invoice id == `draft_id`. We then
+    // proceed to the local finalize-UPDATE so a re-drive CONVERGES instead of
+    // error-looping forever (which would strand the DB at 'draft').
+    let provider_invoice_id = match stripe.finalize_invoice(&draft_id).await {
+        Ok(id) => id,
+        Err(e) if is_already_finalized(&e) => {
+            tracing::warn!(
+                creator_id = %creator_id,
+                draft_id = %draft_id,
+                "billing_reconcile: invoice already finalized on Stripe (crash-after-finalize \
+                 recovery) — converging the local finalize"
+            );
+            draft_id.clone()
+        }
+        Err(e) => return Err(RegistryError::Database(format!("finalize_invoice: {e}"))),
+    };
 
-    // FINALIZE-IN-ONE-UPDATE: write subtotal/credit/tax/total/status/finalized_at
-    // in ONE statement so the `invoice_total_balances` CHECK
-    // (total = subtotal − credit + tax) never sees a half-written row. Credit/tax
-    // are 0 at launch ⇒ total == subtotal == amount_i64. The immutability trigger
-    // then freezes the invoice + its lines.
-    conn.execute(
+    // M1 (atomic finalize→provider-ref): the local finalize-UPDATE (status →
+    // 'finalized') and the `billing_provider_refs(ref_kind='invoice')` INSERT must
+    // commit TOGETHER. As two separate autocommits, a crash between them leaves a
+    // finalized invoice with NO 'invoice' ref; the re-drive short-circuits on
+    // status='finalized' (returns Ok(false)) and NEVER backfills it, so
+    // `native.rs::lookup_invoice_id` returns None forever (un-auditable). Wrapping
+    // both in ONE transaction makes that partial state impossible. Both are local
+    // PG writes (the Stripe POST already happened above), so the txn holds no
+    // network call.
+    //
+    // FINALIZE-IN-ONE-UPDATE is preserved: the UPDATE writes
+    // subtotal/credit/tax/total/status/finalized_at in ONE statement so the
+    // `invoice_total_balances` CHECK (total = subtotal − credit + tax) never sees a
+    // half-written row. Credit/tax are 0 at launch ⇒ total == subtotal ==
+    // amount_i64. The immutability trigger then freezes the invoice + its lines.
+    let tx = conn.transaction().await?;
+    tx.execute(
         "UPDATE zeroship.invoices \
          SET subtotal_cents = $2, credit_cents = 0, tax_cents = 0, total_cents = $2, \
              status = 'finalized', finalized_at = NOW(), updated_at = NOW() \
@@ -677,10 +711,9 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         &[&invoice_id, &amount_i64],
     )
     .await?;
-
     // Record the finalized provider invoice id (the seam — core invoices carry no
-    // provider ids).
-    conn.execute(
+    // provider ids) in the SAME txn as the finalize-UPDATE.
+    tx.execute(
         "INSERT INTO zeroship.billing_provider_refs \
            (invoice_id, provider, ref_kind, external_id) \
          VALUES ($1, 'stripe', 'invoice', $2) \
@@ -688,8 +721,22 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         &[&invoice_id, &provider_invoice_id],
     )
     .await?;
+    tx.commit().await?;
 
     Ok(true)
+}
+
+/// True if a [`StripeError`] from `finalize_invoice` means the invoice was ALREADY
+/// finalized on Stripe (a re-drive of a crash-after-finalize window). Stripe
+/// returns a 4xx with `error.code = "invoice_already_finalized"` in that case;
+/// treating it as success lets the local finalize converge (M2). Matched on the
+/// machine-readable code, not the human message.
+fn is_already_finalized(e: &crate::stripe_store::StripeError) -> bool {
+    matches!(
+        e,
+        crate::stripe_store::StripeError::Api { code: Some(code), .. }
+            if code == "invoice_already_finalized"
+    )
 }
 
 /// One priced per-app line during a reconcile, carrying the frozen charge inputs
@@ -699,7 +746,7 @@ struct BilledLine {
     desc: String,
     amount: u64,
     usage: std::collections::HashMap<String, i64>,
-    applied_weights: std::collections::BTreeMap<String, MetricWeight>,
+    weights_snapshot: std::collections::BTreeMap<String, MetricWeight>,
     included_units: u64,
     fx_pico_cents_per_unit: u64,
     base_fee_cents: u64,

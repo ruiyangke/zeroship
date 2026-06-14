@@ -29,6 +29,7 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::metering::Metering;
+use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice};
 use zeroship_control::stripe_client::{Period, StripeApi, StripeClient};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -697,6 +698,41 @@ async fn confirmed_lines_count(state: &AppState, creator: Uuid) -> i64 {
         .await
         .expect("count confirmed lines")[0]
         .get::<_, i64>("n")
+}
+
+/// Read back ONE finalized invoice line's persisted snapshot columns for
+/// `(creator, app)` — exactly the bytes `bill_creator` wrote. Returns
+/// `(included_units, fx_pico_cents_per_unit, base_fee_cents, amount_cents,
+/// usage_snapshot, weights_snapshot)`.
+#[allow(clippy::type_complexity)]
+async fn read_line_snapshot(
+    state: &AppState,
+    creator: Uuid,
+    app: Uuid,
+) -> (i64, i64, i64, i64, serde_json::Value, serde_json::Value) {
+    let row = state
+        .control_pg
+        .query(
+            "SELECT l.included_units, l.fx_pico_cents_per_unit, l.base_fee_cents, \
+                    l.amount_cents, l.usage_snapshot, l.weights_snapshot \
+             FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id \
+             WHERE i.creator_id = $1 AND l.app_id = $2",
+            &[&creator, &app],
+        )
+        .await
+        .expect("read line snapshot")
+        .into_iter()
+        .next()
+        .expect("one line for the (creator, app)");
+    (
+        row.get("included_units"),
+        row.get("fx_pico_cents_per_unit"),
+        row.get("base_fee_cents"),
+        row.get("amount_cents"),
+        row.get("usage_snapshot"),
+        row.get("weights_snapshot"),
+    )
 }
 
 // ===========================================================================
@@ -1808,5 +1844,386 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
     assert!(
         finalized_invoice_id(&fx.state, creator, period).await.is_some(),
         "the reconciled invoice carries a finalized provider invoice id",
+    );
+}
+
+// ===========================================================================
+// C1 (replay is FAITHFUL): drive bill_creator end-to-end, then read the
+// PERSISTED invoice_lines row BACK from the DB and assert charge_cents over the
+// FROZEN snapshot reproduces the stored amount_cents bit-for-bit. The test reads
+// what bill_creator WROTE, not what the test built. The snapshot must freeze the
+// FULL weights map that was actually passed to charge_cents (a superset), so a
+// weight for a metric the app did NOT use is still frozen — proving the snapshot
+// equals the real charge INPUT and does not silently depend on pricing.rs's loop
+// iterating usage keys.
+// ===========================================================================
+
+#[compio::test]
+async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "c1replay").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "c1replay").await;
+    let plan = make_plan(&fx.state).await; // seeds `requests` = 1 CU/op, fx 1c/CU
+    // Seed a SECOND global weight for a metric the app will NOT use, so the frozen
+    // weights_snapshot is a strict SUPERSET of the app's usage keys. Pre-fix (the
+    // snapshot filtered to usage.keys()) this metric would be ABSENT from the
+    // frozen map; the C1 fix freezes the full map. Either way the replay must equal
+    // amount_cents (an unused weight contributes 0), but freezing the full map is
+    // what makes the snapshot equal to the real charge INPUT.
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+             VALUES ('cpu_us', 1, 1000) \
+             ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1000",
+            &[],
+        )
+        .await
+        .expect("seed second weight");
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_c1replay_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+    ingest_at(&fx.state, app, 640, period, 1).await; // 640 requests → 640 CU → 640c
+
+    // Drive the REAL bill_creator path (via the sweep) against live PG + mock.
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1, "the creator is billed");
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await,
+        Some(("finalized".to_string(), 640)),
+        "the invoice is finalized at the real amount",
+    );
+
+    // Read the PERSISTED line snapshot back (what bill_creator wrote).
+    let (included, fx_pico, base, amount, usage_json, weights_json) =
+        read_line_snapshot(&fx.state, creator, app).await;
+
+    // The frozen weights snapshot is the FULL global map — it includes the unused
+    // `cpu_us` weight (C1: superset), not just the applied `requests`.
+    let frozen_weights: MetricWeights =
+        serde_json::from_value(weights_json).expect("parse frozen weights");
+    assert!(
+        frozen_weights.contains_key("requests") && frozen_weights.contains_key("cpu_us"),
+        "the snapshot freezes the FULL weights map passed to charge_cents (a superset), \
+         including the metric the app never used; got {:?}",
+        frozen_weights.keys().collect::<Vec<_>>(),
+    );
+
+    // REPLAY: re-run charge_cents over the frozen snapshot read back from the DB.
+    let replay_usage: HashMap<String, i64> =
+        serde_json::from_value(usage_json).expect("parse frozen usage");
+    let replay_price = PlanPrice {
+        base_fee_cents: u64::try_from(base).unwrap(),
+        included_units: u64::try_from(included).unwrap(),
+        fx_pico_cents_per_unit: Some(u64::try_from(fx_pico).unwrap()),
+        spend_limit_default_cents: 0,
+    };
+    let replayed = charge_cents(&replay_price, &replay_usage, &frozen_weights).expect("replay");
+    assert_eq!(
+        i64::try_from(replayed.total_cents).unwrap(),
+        amount,
+        "re-running charge_cents over the PERSISTED frozen snapshot reproduces the stored \
+         amount_cents bit-for-bit (the snapshot equals the real charge input)",
+    );
+}
+
+/// M2 decorator: `finalize_invoice` returns Stripe's `invoice_already_finalized`
+/// API error (a 4xx), simulating a re-drive of the crash window where Stripe
+/// finalized but our local UPDATE never committed. Everything else forwards to the
+/// real client (so items + draft land on the mock for real).
+struct FinalizeAlreadyFinalized {
+    inner: StripeClient,
+}
+
+impl StripeApi for FinalizeAlreadyFinalized {
+    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_customer(email, creator_id).await
+    }
+    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_checkout_setup_session(c, ok, cancel).await
+    }
+    async fn create_invoice_item(
+        &self,
+        customer: &str,
+        amount_cents: u64,
+        currency: &str,
+        description: &str,
+        period: Period,
+        idempotency_key: &str,
+        lookup_key: &str,
+    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .await
+    }
+    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
+        self.inner.find_invoice_item_by_key(customer, lookup_key).await
+    }
+    async fn create_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_invoice(customer, creator_id, idempotency_key).await
+    }
+    async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        // Stripe rejects finalizing an already-finalized invoice with a 4xx whose
+        // machine-readable code is `invoice_already_finalized`.
+        Err(zeroship_control::stripe_store::StripeError::Api {
+            status: 400,
+            code: Some("invoice_already_finalized".to_string()),
+        })
+    }
+    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
+    }
+    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
+        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
+    }
+    async fn create_connect_account(&self, email: &str, creator_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_account(email, creator_id, country).await
+    }
+    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_account_link(account_id, refresh_url, return_url).await
+    }
+    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
+        self.inner.retrieve_account(account_id).await
+    }
+    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
+    }
+}
+
+// ===========================================================================
+// M2 (re-finalize converges): a re-drive of the crash window where Stripe
+// finalized but our DB stayed draft. Stripe's `finalize_invoice` now returns
+// `invoice_already_finalized`; bill_creator must treat that as SUCCESS, read back
+// the finalized id (== the draft id), and converge the LOCAL finalize — never
+// error-loop forever leaving the DB stranded at 'draft'.
+//
+// RED→GREEN: pre-fix, finalize_invoice's Api error propagates as
+// RegistryError::Database, the sweep swallows it (Ok(0)) and the DB stays 'draft'
+// FOREVER on every re-drive (each re-drive re-finalizes → same error). The M2 fix
+// makes the re-drive converge to 'finalized' with the invoice ref recorded.
+// ===========================================================================
+
+#[compio::test]
+async fn refinalize_already_finalized_converges_locally() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "m2converge").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "m2converge").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_m2converge_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+    ingest_at(&fx.state, app, 450, period, 1).await; // 450c
+
+    // First drive: items + draft post for real, but finalize reports the invoice
+    // is ALREADY finalized on Stripe (the crash-after-finalize window). The drive
+    // must CONVERGE the local finalize, not error-loop.
+    let decorated = FinalizeAlreadyFinalized { inner: dummy_passthrough(&fx) };
+    // `billed` is a FLEET-wide count (the sweep bills every un-finalized creator
+    // with usage in `period`), so other tests' leftovers can inflate it; assert
+    // on THIS creator's converged outcome below rather than the exact count. The
+    // key M2 guarantee is that the drive did NOT error-loop (it returned Ok and
+    // this creator converged), which a pre-fix run could not do.
+    let billed = billing_reconcile::tick_with(&fx.state, &decorated, now)
+        .await
+        .expect("tick converges on already-finalized (no error loop)");
+    assert!(billed >= 1, "the re-finalize converges (at least this creator billed)");
+
+    // The DB is now finalized at the real amount — NOT stranded at 'draft'.
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await,
+        Some(("finalized".to_string(), 450)),
+        "local finalize converged to 'finalized' with the real amount",
+    );
+    // The invoice provider-ref was recorded (M1's atomic pair), so lookup is
+    // auditable. The recorded id is the draft id (finalize does not change the id).
+    let persisted_draft = draft_invoice_id(&fx.state, creator, period).await.expect("draft id persisted");
+    let finalized = finalized_invoice_id(&fx.state, creator, period).await.expect("finalized ref recorded");
+    assert_eq!(
+        finalized, persisted_draft,
+        "the recorded finalized id is the draft id (Stripe finalize does not change the id)",
+    );
+}
+
+/// M1 decorator: `finalize_invoice` returns a FIXED provider invoice id, so the
+/// test can pre-seed a colliding `billing_provider_refs(provider,ref_kind,external_id)`
+/// row and force the finalize-ref INSERT to violate the UNIQUE constraint —
+/// exercising the failure window BETWEEN the finalize UPDATE and the ref INSERT.
+struct FinalizeReturnsFixedId {
+    inner: StripeClient,
+    fixed_id: String,
+}
+
+impl StripeApi for FinalizeReturnsFixedId {
+    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_customer(email, creator_id).await
+    }
+    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_checkout_setup_session(c, ok, cancel).await
+    }
+    async fn create_invoice_item(
+        &self,
+        customer: &str,
+        amount_cents: u64,
+        currency: &str,
+        description: &str,
+        period: Period,
+        idempotency_key: &str,
+        lookup_key: &str,
+    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner
+            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key)
+            .await
+    }
+    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
+        self.inner.find_invoice_item_by_key(customer, lookup_key).await
+    }
+    async fn create_invoice(&self, customer: &str, creator_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_invoice(customer, creator_id, idempotency_key).await
+    }
+    async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        Ok(self.fixed_id.clone())
+    }
+    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
+        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
+    }
+    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
+        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
+    }
+    async fn create_connect_account(&self, email: &str, creator_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_account(email, creator_id, country).await
+    }
+    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_account_link(account_id, refresh_url, return_url).await
+    }
+    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
+        self.inner.retrieve_account(account_id).await
+    }
+    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
+    }
+}
+
+// ===========================================================================
+// M1 (atomic finalize→provider-ref): the finalize UPDATE and the invoice
+// provider-ref INSERT commit in ONE transaction, so a failure of the ref INSERT
+// rolls BACK the finalize — the invoice can never be left 'finalized' with NO
+// 'invoice' ref (the un-auditable partial state where lookup_invoice_id returns
+// None forever).
+//
+// We force the ref INSERT to fail by pre-seeding a DIFFERENT invoice whose
+// `billing_provider_refs(provider='stripe', ref_kind='invoice', external_id=<fixed>)`
+// collides on the UNIQUE(provider, ref_kind, external_id) constraint with the id
+// the decorated finalize returns. The ref INSERT then errors INSIDE the txn.
+//
+// RED→GREEN: pre-fix (two separate autocommits) the finalize UPDATE commits FIRST,
+// then the ref INSERT errors — leaving 'finalized' + NO invoice ref. Post-fix the
+// transaction rolls back the finalize too, so the invoice stays 'draft' (a clean
+// retry) and is NEVER finalized-without-ref.
+// ===========================================================================
+
+#[compio::test]
+async fn finalize_and_invoice_ref_commit_atomically() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "m1atomic").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Use a DISTINCT closed period (~5 months back) so this test's PERMANENT
+    // draft-invoice leftover (the finalize is intentionally never allowed to
+    // commit) can never be swept by a sibling reconcile test billing the
+    // current-prev month — which would inflate that sibling's fleet-wide `billed`.
+    let now = now_for_closed_period() - 150 * 86_400;
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "m1atomic").await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_m1atomic_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+    ingest_at(&fx.state, app, 350, period, 1).await; // 350c
+
+    // Pre-seed a SEPARATE finalized invoice that already owns the fixed external_id
+    // under (provider='stripe', ref_kind='invoice') — so the decorated finalize's
+    // ref INSERT will violate UNIQUE(provider, ref_kind, external_id).
+    let fixed_id = format!("in_collide_{}", Uuid::new_v4().simple());
+    let other_creator = make_user(&fx.state, "m1other").await;
+    fx.state
+        .stripe_store
+        .set_customer(other_creator, &format!("cus_m1other_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+    let other_inv = zeroship_core::typed_id::new_invoice_id();
+    // A finalized invoice for a DIFFERENT (creator, period) holding the fixed id.
+    let other_period = period_d(billing_reconcile::previous_period_start_unix(
+        billing_reconcile::previous_period_start_unix(now),
+    ));
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, subtotal_cents, total_cents, \
+               status, finalized_at) VALUES ($1, $2, $3::date, 1, 1, 'finalized', NOW())",
+            &[&other_inv, &other_creator, &other_period],
+        )
+        .await
+        .expect("seed other finalized invoice");
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+             VALUES ($1, 'stripe', 'invoice', $2)",
+            &[&other_inv, &fixed_id],
+        )
+        .await
+        .expect("seed colliding invoice ref");
+
+    // Drive the reconcile: finalize returns the fixed id → the ref INSERT collides
+    // → the txn must roll back the finalize.
+    let decorated = FinalizeReturnsFixedId { inner: dummy_passthrough(&fx), fixed_id: fixed_id.clone() };
+    // The colliding finalize is a per-creator error the sweep swallows + continues
+    // past (so the tick still returns Ok). We assert on THIS creator's state below
+    // rather than the fleet-wide count (other tests' creators may also be swept).
+    let _ = billing_reconcile::tick_with(&fx.state, &decorated, now)
+        .await
+        .expect("sweep swallows the per-creator error and returns Ok");
+
+    // THE guarantee: the invoice is NOT left 'finalized' (the txn rolled the
+    // finalize UPDATE back when the ref INSERT failed). It stays 'draft' — a clean
+    // retry — and crucially is NEVER finalized-without-an-invoice-ref.
+    let inv = read_invoice(&fx.state, creator, period).await;
+    assert_eq!(
+        inv.map(|(s, _)| s).as_deref(),
+        Some("draft"),
+        "finalize+ref are atomic: a failed ref INSERT rolls back the finalize (no half-commit)",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_none(),
+        "no finalized invoice ref — and since the invoice is not finalized, the partial \
+         'finalized-without-ref' state never occurs (lookup_invoice_id can't strand at None)",
     );
 }
