@@ -274,6 +274,19 @@ async fn make_app(registry: &Registry, plan_id: &str, owner: &Uuid) -> Uuid {
         .id
 }
 
+/// Add `user` as a NON-owner member (e.g. `viewer`/`editor`) of `app`. Used to
+/// model the cross-creator hole: a victim-creator who is merely a viewer on the
+/// attacker's app appears in the attacker's role-AGNOSTIC `list_apps_for_owner`.
+async fn add_member(pg: &Client, app: &Uuid, user: &Uuid, role: &str) {
+    pg.execute(
+        "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3) \
+         ON CONFLICT DO NOTHING",
+        &[app, user, &role],
+    )
+    .await
+    .expect("add non-owner member");
+}
+
 /// Ensure a `creator_billing` row exists (the FK target for invoices/credit).
 async fn ensure_creator_billing(pg: &Client, creator_id: &Uuid, default_pm_set: bool) {
     pg.execute(
@@ -1030,6 +1043,202 @@ async fn invoice_detail_denies_a_different_creator() {
         &[creator_a, creator_b, op_user],
         &[app_a, app_b],
         &[&pat_a, &pat_b, &pat_op],
+    )
+    .await;
+}
+
+// ==========================================================================
+// (CRITICAL-1): cross-creator invoice read via SHARED app membership.
+//
+// Attacker A owns app Z; victim-creator C is merely a VIEWER on Z. C owns app C
+// and has their own invoice. Pre-fix, `get_invoice` looped
+// `list_apps_for_owner(C)` (role-AGNOSTIC → includes Z because C is a member of
+// Z in ANY role) and accepted A's `BillingRead` on Z, leaking C's ENTIRE invoice
+// to A. The fix makes the read creator-LEVEL (caller == invoice.creator_id ||
+// operator), so A → 403. RED pre-fix: A got 200 and C's invoice body.
+// ==========================================================================
+
+#[compio::test]
+async fn invoice_read_denied_via_shared_app_membership() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_test_state(&url, "shared-membership").await;
+    let pg = fx.state.control_pg.clone();
+    let period = current_period();
+
+    let plan = seed_plan(&pg, 100, 0, FX_SCALE as i64, 0).await;
+
+    // Attacker A owns app Z. Victim-creator C owns app C (and an invoice).
+    let attacker_a = make_user(&pg, "attackerA").await;
+    let victim_c = make_user(&pg, "victimC").await;
+    ensure_creator_billing(&pg, &attacker_a, false).await;
+    ensure_creator_billing(&pg, &victim_c, false).await;
+    let app_z = make_app(&fx.state.registry, &plan, &attacker_a).await;
+    let app_c = make_app(&fx.state.registry, &plan, &victim_c).await;
+
+    // The shared-membership hole: victim-creator C is a (non-owner) VIEWER on Z.
+    add_member(&pg, &app_z, &victim_c, "viewer").await;
+
+    // C's own finalized invoice (creator-keyed to C, lines on app C).
+    let price = PlanPrice {
+        base_fee_cents: 100,
+        included_units: 0,
+        fx_pico_cents_per_unit: Some(FX_SCALE as u64),
+        spend_limit_default_cents: 0,
+    };
+    let (inv_c, _amt) = seed_finalized_invoice(
+        &pg,
+        &victim_c,
+        &app_c,
+        &plan,
+        period,
+        &price,
+        &std::collections::HashMap::new(),
+        &MetricWeights::new(),
+    )
+    .await;
+
+    // Attacker A holds BillingRead on the app they own (Z) — nothing more.
+    let pat_a = issue_pat(&fx.state, attacker_a, None, billing_read_on_app(app_z)).await;
+
+    let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
+        .await;
+    let get = |bearer: String, uri: String| {
+        test::TestRequest::get().uri(&uri).header("authorization", bearer).to_request()
+    };
+
+    // A requests C's invoice. Pre-fix this was 200 (leak); the fix denies it.
+    let resp = test::call_service(&svc, get(pat_a.bearer(), format!("/api/invoices/{inv_c}"))).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "attacker who shares an app with the victim must NOT read the victim's invoice",
+    );
+
+    cleanup(
+        &pg,
+        &[attacker_a, victim_c],
+        &[app_z, app_c],
+        &[&pat_a],
+    )
+    .await;
+}
+
+// ==========================================================================
+// (over-disclosure): a NON-OWNER member of the owner's app must NOT read the
+// owner's cross-app invoice HISTORY via `GET /api/apps/{ownerApp}/invoices`.
+//
+// The owner O owns app O. A VIEWER V is a member of app O — the viewer creator
+// policy DOES grant `billing:read` on the app (policies/creator/app_viewer.cedar),
+// so V clears the `BillingRead on App{O}` gate, but V is NOT the owner. Pre-fix
+// the handler gated ONLY that capability and returned
+// `list_invoices_for_creator(owner_of_app(O))` = O's whole history, so V saw O's
+// billing envelope. The fix requires owner==principal || operator → V gets 403.
+// ==========================================================================
+
+#[compio::test]
+async fn app_invoice_history_denied_to_non_owner_member() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_test_state(&url, "history-nonowner").await;
+    let pg = fx.state.control_pg.clone();
+    let period = current_period();
+
+    let plan = seed_plan(&pg, 100, 0, FX_SCALE as i64, 0).await;
+
+    let owner = make_user(&pg, "ownerO").await;
+    let viewer = make_user(&pg, "viewerV").await;
+    ensure_creator_billing(&pg, &owner, false).await;
+    let app_o = make_app(&fx.state.registry, &plan, &owner).await;
+
+    // Viewer V is a non-owner member of app O; the viewer policy grants
+    // billing:read on the app, so V clears the per-app gate but is not the owner.
+    add_member(&pg, &app_o, &viewer, "viewer").await;
+
+    let price = PlanPrice {
+        base_fee_cents: 100,
+        included_units: 0,
+        fx_pico_cents_per_unit: Some(FX_SCALE as u64),
+        spend_limit_default_cents: 0,
+    };
+    let (inv_o, _amt) = seed_finalized_invoice(
+        &pg,
+        &owner,
+        &app_o,
+        &plan,
+        period,
+        &price,
+        &std::collections::HashMap::new(),
+        &MetricWeights::new(),
+    )
+    .await;
+
+    // Both PATs carry BillingRead on app O; the difference is owner-vs-member.
+    let pat_owner = issue_pat(&fx.state, owner, None, billing_read_on_app(app_o)).await;
+    let pat_viewer = issue_pat(&fx.state, viewer, None, billing_read_on_app(app_o)).await;
+    let op_user = make_user(&pg, "operator").await;
+    let pat_op = issue_pat(&fx.state, op_user, Some("billing"), billing_read_any()).await;
+
+    let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
+        .await;
+    let get = |bearer: String, uri: String| {
+        test::TestRequest::get().uri(&uri).header("authorization", bearer).to_request()
+    };
+
+    // Owner reads their own app's invoice history → 200 with their invoice.
+    let body: serde_json::Value = test::read_response_json(
+        &svc,
+        get(pat_owner.bearer(), format!("/api/apps/{app_o}/invoices")),
+    )
+    .await;
+    let invoices = body["invoices"].as_array().expect("invoices array");
+    assert_eq!(invoices.len(), 1, "owner sees their own invoice");
+    assert_eq!(invoices[0]["id"], inv_o);
+
+    // First prove the per-app gate is actually CLEARED by the viewer (so the 403
+    // below is the OWNER-grain check firing, not merely the capability gate): the
+    // viewer reads the app's billing-STATUS (app-scoped, BillingRead) → 200.
+    let resp = test::call_service(
+        &svc,
+        get(pat_viewer.bearer(), format!("/api/apps/{app_o}/billing-status")),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "sanity: viewer DOES hold BillingRead on app O (clears the per-app gate)",
+    );
+
+    // Non-owner viewer V (BillingRead on app O) → 403 on the OWNER's invoice
+    // history. Pre-fix this was 200 and leaked the owner's whole history.
+    let resp = test::call_service(
+        &svc,
+        get(pat_viewer.bearer(), format!("/api/apps/{app_o}/invoices")),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non-owner member must NOT read the owner's invoice history",
+    );
+
+    // Operator reads the owner's history → 200 (no regression).
+    let resp = test::call_service(
+        &svc,
+        get(pat_op.bearer(), format!("/api/apps/{app_o}/invoices")),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "operator reads any app's invoice history");
+
+    cleanup(
+        &pg,
+        &[owner, viewer, op_user],
+        &[app_o],
+        &[&pat_owner, &pat_viewer, &pat_op],
     )
     .await;
 }

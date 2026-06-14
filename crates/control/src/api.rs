@@ -991,8 +991,15 @@ async fn owner_of_app(state: &AppState, app_id: &Uuid) -> Result<Option<Uuid>, R
     Ok(rows.first().map(|r| r.get::<_, Uuid>("user_id")))
 }
 
-/// `GET /api/apps/{id}/invoices` — invoice history for ONE owned app's creator,
-/// newest-first, paginated. Authz: `BillingRead` on `Resource::App{id}`.
+/// `GET /api/apps/{id}/invoices` — invoice history for the OWNER of app `{id}`,
+/// newest-first, paginated.
+///
+/// AUTHZ GRAIN — OWNER-LEVEL (SEC). The response is the OWNER's entire cross-app
+/// invoice history (an invoice is creator-keyed), so a non-owner app member
+/// (editor/viewer with `billing:read` on this one app) must NOT see the owner's
+/// whole billing envelope. We gate `BillingRead on App{id}` (capability +
+/// existence), then require the caller to BE the owner of `{id}`
+/// (`owner_of_app(id) == principal_id`) OR an operator (`Resource::Any`).
 pub async fn list_app_invoices(
     id: Path<String>,
     query: web::types::Query<InvoiceListQuery>,
@@ -1017,6 +1024,18 @@ pub async fn list_app_invoices(
         Ok(None) => return web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": [] })),
         Err(e) => return error_response(e),
     };
+    // OWNER-or-operator: only the app's OWNER (the invoice creator) reads the
+    // owner's cross-app invoice history; a non-owner member does not.
+    if creator_id != authz.principal_id {
+        match authz.is_operator(Action::BillingRead, &state).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return web::HttpResponse::Forbidden()
+                    .json(&serde_json::json!({"error": "forbidden"}))
+            }
+            Err(resp) => return resp,
+        }
+    }
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
     match crate::billing_read::list_invoices_for_creator(&state.registry, &creator_id, limit, offset)
@@ -1027,9 +1046,19 @@ pub async fn list_app_invoices(
     }
 }
 
-/// `GET /api/invoices/{id}` — frozen-snapshot line detail. Authz is via the
-/// invoice's `creator_id` → the owning creator's apps (operator via
-/// `Resource::Any`). The `{id}` is the internal `inv_…` id.
+/// `GET /api/invoices/{id}` — frozen-snapshot line detail. The `{id}` is the
+/// internal `inv_…` id.
+///
+/// AUTHZ GRAIN — CREATOR-LEVEL (SEC, CRITICAL-1). An invoice is creator-keyed:
+/// the reconciler stamps `invoice.creator_id` as the `role='owner'` user
+/// (`cron/billing_reconcile.rs`). The invoice envelope spans EVERY app that
+/// creator owns, so the caller must BE that creator OR an operator
+/// (`Resource::Any`). We do NOT loop the creator's apps and accept any
+/// `BillingRead` grant: `list_apps_for_owner` is role-AGNOSTIC, so a creator who
+/// is merely a viewer/editor on the attacker's app would appear in the list and
+/// let the attacker read the victim's whole invoice. A single
+/// `creator_id == principal_id || is_operator` check closes that cross-creator
+/// hole AND removes the per-app Cedar-loop audit amplification.
 pub async fn get_invoice(
     id: Path<String>,
     authz: AuthzGuard,
@@ -1055,29 +1084,15 @@ pub async fn get_invoice(
         Err(e) => return error_response(e),
     };
 
-    let is_op = match authz.is_operator(Action::BillingRead, &state).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
-    if !is_op {
-        let owned = match state.registry.list_apps_for_owner(&detail.creator_id).await {
-            Ok(apps) => apps,
-            Err(e) => return error_response(e),
-        };
-        let mut authorized = false;
-        for app in &owned {
-            if authz
-                .require(Action::BillingRead, Resource::App { id: app.id.to_string() }, &state)
-                .await
-                .is_ok()
-            {
-                authorized = true;
-                break;
+    // The caller is the invoice's creator, OR an operator. Nothing else reads it.
+    if detail.creator_id != authz.principal_id {
+        match authz.is_operator(Action::BillingRead, &state).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return web::HttpResponse::Forbidden()
+                    .json(&serde_json::json!({"error": "forbidden"}))
             }
-        }
-        if !authorized {
-            return web::HttpResponse::Forbidden()
-                .json(&serde_json::json!({"error": "forbidden"}));
+            Err(resp) => return resp,
         }
     }
     web::HttpResponse::Ok().json(&detail)
