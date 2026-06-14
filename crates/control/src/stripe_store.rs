@@ -51,6 +51,11 @@ pub struct CreatorAccount {
     pub creator_id: Uuid,
     pub stripe_account_id: String,
     pub onboarded_at: String, // RFC3339 — callers can parse as needed
+    /// Stripe's verified onboarding signal (changeset 0044), written by the
+    /// `callback` handler from a server-side `retrieve_account`. `false` until
+    /// the creator finishes onboarding — the charge path MUST gate on this so a
+    /// half-onboarded account can't reach a PaymentIntent (M1).
+    pub charges_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +164,7 @@ impl StripeStore {
                 // Return None for a soft-deleted creator — caller treats
                 // the link as gone. History is still queryable via
                 // get_account_history.
-                "SELECT creator_id, stripe_account_id,
+                "SELECT creator_id, stripe_account_id, charges_enabled,
                     to_char(onboarded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS onboarded_at
                  FROM zeroship.creator_accounts
                  WHERE creator_id = $1 AND unlinked_at IS NULL",
@@ -171,6 +176,7 @@ impl StripeStore {
             creator_id: r.get("creator_id"),
             stripe_account_id: r.get("stripe_account_id"),
             onboarded_at: r.get("onboarded_at"),
+            charges_enabled: r.get("charges_enabled"),
         }))
     }
 

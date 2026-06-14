@@ -134,8 +134,18 @@ impl FeePolicyStore {
                     Some(a) if a >= 0 => Ok(FeePolicy::Fixed {
                         amount_cents: a as u64,
                     }),
-                    // CHECK prevents this; fail closed to default if it ever happens.
-                    _ => Ok(FeePolicy::default_percent()),
+                    // CHECK prevents this; fail closed to default if it ever
+                    // happens. Failing closed to 15% can silently OVER-charge a
+                    // creator the operator meant to set LOWER, so make the
+                    // corrupt row observable (m3).
+                    bad => {
+                        tracing::error!(
+                            creator_id = %creator_id,
+                            amount_cents = ?bad,
+                            "fee_policy: corrupt 'fixed' row (amount_cents not non-negative) — failing closed to 15% default"
+                        );
+                        Ok(FeePolicy::default_percent())
+                    }
                 }
             }
             "percent" => {
@@ -148,10 +158,24 @@ impl FeePolicyStore {
                         cap_cents: cap.and_then(|c| u64::try_from(c).ok()),
                         floor_cents: floor.and_then(|f| u64::try_from(f).ok()),
                     }),
-                    _ => Ok(FeePolicy::default_percent()),
+                    bad => {
+                        tracing::error!(
+                            creator_id = %creator_id,
+                            percent_bps = ?bad,
+                            "fee_policy: corrupt 'percent' row (percent_bps out of [0,10000]) — failing closed to 15% default"
+                        );
+                        Ok(FeePolicy::default_percent())
+                    }
                 }
             }
-            _ => Ok(FeePolicy::default_percent()),
+            other => {
+                tracing::error!(
+                    creator_id = %creator_id,
+                    kind = %crate::stripe_store::sanitize_for_display(other),
+                    "fee_policy: corrupt row with unknown kind — failing closed to 15% default"
+                );
+                Ok(FeePolicy::default_percent())
+            }
         }
     }
 

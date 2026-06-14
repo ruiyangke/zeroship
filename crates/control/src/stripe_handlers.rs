@@ -76,6 +76,13 @@ fn stripe_err_response(e: StripeError) -> web::HttpResponse {
 
 fn bad_creator_id() -> web::HttpResponse { err_json(400, "bad creator_id") }
 
+/// `true` iff `s` is a 3-letter lowercase ISO currency code (`^[a-z]{3}$`).
+/// Stripe currencies are lowercase 3-letter codes; reject anything else before
+/// it reaches the wire (m1).
+fn is_valid_currency(s: &str) -> bool {
+    s.len() == 3 && s.bytes().all(|b| b.is_ascii_lowercase())
+}
+
 // ----------------------------------------------------------------
 // Onboarding (master-key)
 // ----------------------------------------------------------------
@@ -151,7 +158,7 @@ pub async fn onboard(
                 creator_id: Some(creator_id),
                 actor_user_id: Some(authz.principal_id),
                 actor_token_id: authz.token_id,
-                action: Action::LinkAccount,
+                action: Action::CreateAccount,
                 resource: Some(&acct),
                 source_ip: ip.as_deref(),
             }).await;
@@ -200,11 +207,6 @@ pub async fn billing_setup(
     // Parse + bind the path id BEFORE authz so we can enforce ownership.
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
-    // CRIT-10: billing/setup is SELF-SERVICE — a creator sets up their OWN card.
-    // Allow when the authenticated principal IS the creator (`:id` bound to the
-    // principal), OR when a platform billing operator acts (Cedar BillingWrite).
-    // This both opens self-service and closes the cross-creator hole (a creator
-    // calling billing/setup for a DIFFERENT creator's id is denied).
     // CRIT-10: billing/setup is SELF-SERVICE — a creator sets up their OWN card.
     // Allow when the authenticated principal IS the creator (`:id` bound to the
     // principal), OR when a platform billing operator acts (Cedar BillingWrite).
@@ -456,6 +458,18 @@ pub async fn connect_checkout(
     if body.amount_cents == 0 {
         return err_json(400, "amount_cents must be positive");
     }
+    // m1: validate the currency is a 3-letter ISO code (`^[a-z]{3}$`) before it
+    // touches the Stripe wire — keep junk off the upstream call.
+    if !is_valid_currency(&body.currency) {
+        return err_json(400, "currency must be a 3-letter ISO code (lowercase)");
+    }
+    // M2: a non-empty `cart_id` is REQUIRED. Without it every checkout for a
+    // creator collapses onto one idempotency key, replaying the first
+    // PaymentIntent (a different-amount charge silently returns a stale intent).
+    let cart = body.cart_id.as_deref().map(str::trim).unwrap_or("");
+    if cart.is_empty() {
+        return err_json(400, "cart_id is required");
+    }
     if state.stripe_secret_key.is_empty() {
         tracing::error!("stripe: connect_checkout called with no STRIPE_SECRET_KEY configured");
         return err_json(500, "stripe not configured");
@@ -468,6 +482,13 @@ pub async fn connect_checkout(
         Ok(None) => return err_json(400, "creator has no connected stripe account"),
         Err(e) => return stripe_err_response(e),
     };
+    // M1: the `charges_enabled` flag (verified by `callback` from Stripe's truth)
+    // gates the charge path. A creator who ran `onboard` but never finished
+    // Stripe onboarding has the account row but charges_enabled=false — reject
+    // BEFORE any PaymentIntent POST.
+    if !account.charges_enabled {
+        return err_json(400, "creator stripe account not ready (complete onboarding)");
+    }
 
     // Resolve the SERVER-HELD fee policy and compute the fee. The default (no
     // row) is 15%. The creator cannot influence this value.
@@ -483,10 +504,15 @@ pub async fn connect_checkout(
     ))
     .with_base_url(state.stripe_base_url.clone());
 
-    // Deterministic idempotency key per (creator, cart) so an at-least-once
-    // retry replays the same PaymentIntent rather than double-charging.
-    let cart = body.cart_id.as_deref().unwrap_or("");
-    let idempotency_key = format!("connect_pi:{creator_id}:{cart}");
+    // Deterministic idempotency key per (creator, cart, amount, currency) so an
+    // at-least-once retry of the SAME cart replays the same PaymentIntent, but a
+    // changed amount/currency (or a different cart) gets a DISTINCT key — Stripe
+    // can no longer replay a stale intent for a different charge (M2). `cart` is
+    // guaranteed non-empty (validated above).
+    let idempotency_key = format!(
+        "connect_pi:{creator_id}:{cart}:{}:{}",
+        body.amount_cents, body.currency
+    );
     let description = body.description.as_deref().unwrap_or("zeroship connect charge");
 
     match stripe
@@ -565,6 +591,14 @@ pub async fn set_fee_policy(
             };
             if bps > 10_000 {
                 return err_json(400, "percent_bps must be in [0, 10000]");
+            }
+            // m2: a floor above the cap pins every fee to the cap regardless of
+            // percent — almost certainly an operator typo. Reject it (the DB has
+            // a matching CHECK as defense in depth).
+            if let (Some(floor), Some(cap)) = (body.floor_cents, body.cap_cents) {
+                if floor > cap {
+                    return err_json(400, "floor_cents must not exceed cap_cents");
+                }
             }
             crate::fee_policy::FeePolicy::Percent {
                 bps,

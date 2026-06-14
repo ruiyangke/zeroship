@@ -645,17 +645,25 @@ async fn checkout_stamps_server_fee_not_client_value() {
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/creators/{id}")
                 .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
                 .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
         ),
     )
     .await;
 
-    // Onboard to mint a connected account.
+    // Onboard to mint a connected account, then complete onboarding (callback
+    // persists charges_enabled=true — the M1 gate requires a ready account).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
         .header("authorization", pat.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    let cb = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/callback"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
 
     // No fee policy row → DEFAULT 15%. Charge $200.00 (20000 cents). A MALICIOUS
     // client tries to set application_fee_amount=1 in the body — it has no wire
@@ -717,18 +725,25 @@ async fn checkout_honors_operator_set_fee_policy() {
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/creators/{id}")
                 .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
                 .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout)))
                 .service(web::resource("/fee-policy").route(web::put().to(stripe_handlers::set_fee_policy))),
         ),
     )
     .await;
 
-    // Onboard the creator.
+    // Onboard the creator, then complete onboarding (charges_enabled=true).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
         .header("authorization", creator_pat.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    let cb = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/callback"))
+        .header("authorization", creator_pat.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
 
     // Operator sets a 25% policy capped at $40 (4000 cents).
     let set = test::TestRequest::put()
@@ -755,6 +770,276 @@ async fn checkout_honors_operator_set_fee_policy() {
     assert_eq!(body["application_fee_cents"], serde_json::json!(4000), "25% capped at 4000");
 
     cleanup(&fx.state, &[creator, op], &[&creator_pat, &op_pat]).await;
+}
+
+/// M1 (RED→GREEN): a creator who ran `onboard` but whose Stripe account is NOT
+/// yet `charges_enabled` MUST NOT reach the charge path. `connect_checkout`
+/// returns 400 and posts NO PaymentIntent.
+#[compio::test]
+async fn checkout_rejected_when_charges_not_enabled() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "checkout-not-ready").await;
+    let creator = make_user(&fx.state, "creator").await;
+    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    // The account exists but onboarding is incomplete: charges are NOT enabled.
+    fx.mock.set_flags(false, false, false);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/creators/{id}")
+                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
+                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+        ),
+    )
+    .await;
+
+    // Onboard mints the acct_… (charges_enabled defaults to false on the row).
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/onboard"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+
+    // Callback verifies + persists the (false) flags from Stripe's truth.
+    let cb = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/callback"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    let pis_before = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .count();
+
+    // Checkout must be REJECTED with 400 before any PI POST.
+    let checkout = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/connect/checkout"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-x" }))
+        .to_request();
+    let resp = test::call_service(&svc, checkout).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "checkout must be rejected when the connected account is not charges_enabled (M1)"
+    );
+
+    let pis_after = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .count();
+    assert_eq!(
+        pis_before, pis_after,
+        "no PaymentIntent may be POSTed when charges are not enabled (M1)"
+    );
+
+    cleanup(&fx.state, &[creator], &[&pat]).await;
+}
+
+/// M2 (RED→GREEN): an empty `cart_id` must be rejected (it would otherwise
+/// collapse every checkout for a creator onto ONE idempotency key, replaying a
+/// stale charge for a different amount). Two checkouts with empty cart_id and
+/// different amounts must NOT return the same PaymentIntent. After the fix the
+/// empty cart_id is a 400 — no PI is created at all, so no stale replay.
+#[compio::test]
+async fn checkout_rejects_empty_cart_id_no_stale_replay() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "checkout-cartid").await;
+    let creator = make_user(&fx.state, "creator").await;
+    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    fx.mock.set_flags(true, true, true);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/creators/{id}")
+                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
+                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+        ),
+    )
+    .await;
+
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/onboard"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    let cb = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/callback"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    // First checkout with NO cart_id, amount $200.
+    let c1 = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/connect/checkout"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd" }))
+        .to_request();
+    let r1 = test::call_service(&svc, c1).await;
+    assert_eq!(
+        r1.status(),
+        StatusCode::BAD_REQUEST,
+        "an absent/empty cart_id must be rejected (M2 — would otherwise replay a stale charge)"
+    );
+
+    // Second checkout with NO cart_id, DIFFERENT amount $50.
+    let c2 = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/connect/checkout"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd" }))
+        .to_request();
+    let r2 = test::call_service(&svc, c2).await;
+    assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+
+    // Neither created a PaymentIntent → no stale replay is even possible.
+    let pis = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .count();
+    assert_eq!(pis, 0, "rejected empty-cart_id checkouts must not POST any PaymentIntent (M2)");
+
+    // And an EXPLICIT cart_id still works AND folds amount into the idempotency
+    // key — two carts with different amounts get DISTINCT idempotency keys.
+    let c3 = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/connect/checkout"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-A" }))
+        .to_request();
+    assert_eq!(test::call_service(&svc, c3).await.status(), StatusCode::OK);
+    let c4 = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/connect/checkout"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd", "cart_id": "cart-A" }))
+        .to_request();
+    assert_eq!(test::call_service(&svc, c4).await.status(), StatusCode::OK);
+
+    let keys: Vec<String> = fx
+        .mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/payment_intents")
+        .filter_map(|r| r.idempotency_key)
+        .collect();
+    assert_eq!(keys.len(), 2, "both explicit-cart checkouts POSTed a PI");
+    assert_ne!(
+        keys[0], keys[1],
+        "same cart_id but DIFFERENT amount must yield distinct idempotency keys (M2)"
+    );
+
+    cleanup(&fx.state, &[creator], &[&pat]).await;
+}
+
+/// m2 (RED→GREEN): an operator cannot set floor_cents > cap_cents (it would pin
+/// every fee to the cap regardless of percent). The handler rejects it 400.
+#[compio::test]
+async fn fee_policy_rejects_floor_above_cap() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "fee-floor-cap").await;
+    let creator = make_user(&fx.state, "creator").await;
+    let op = make_user(&fx.state, "operator").await;
+    let op_pat = issue_pat(&fx.state, op, Some("billing"), billing_write_any()).await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/creators/{id}/fee-policy")
+                .route(web::put().to(stripe_handlers::set_fee_policy)),
+        ),
+    )
+    .await;
+
+    let set = test::TestRequest::put()
+        .uri(&format!("/api/creators/{creator}/fee-policy"))
+        .header("authorization", op_pat.bearer())
+        .set_json(&serde_json::json!({
+            "kind": "percent", "percent_bps": 1500, "floor_cents": 1000, "cap_cents": 100
+        }))
+        .to_request();
+    let resp = test::call_service(&svc, set).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "floor_cents > cap_cents must be rejected (m2)"
+    );
+    let n = fx
+        .state
+        .control_pg
+        .query("SELECT 1 FROM zeroship.creator_fee_policy WHERE creator_id = $1", &[&creator])
+        .await
+        .expect("query")
+        .len();
+    assert_eq!(n, 0, "the rejected floor>cap policy must not persist");
+
+    cleanup(&fx.state, &[creator, op], &[&op_pat]).await;
+}
+
+/// m1 (RED→GREEN): a malformed currency is rejected with 400 before any Stripe
+/// call.
+#[compio::test]
+async fn checkout_rejects_bad_currency() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "checkout-currency").await;
+    let creator = make_user(&fx.state, "creator").await;
+    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    fx.mock.set_flags(true, true, true);
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/creators/{id}")
+                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
+                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+        ),
+    )
+    .await;
+
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/onboard"))
+        .header("authorization", pat.bearer())
+        .to_request();
+    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    let cb = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/stripe/callback"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({}))
+        .to_request();
+    assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
+
+    let checkout = test::TestRequest::post()
+        .uri(&format!("/api/creators/{creator}/connect/checkout"))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "US Dollars", "cart_id": "cart-z" }))
+        .to_request();
+    let resp = test::call_service(&svc, checkout).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a non ^[a-z]{{3}}$ currency must be rejected (m1)"
+    );
+
+    cleanup(&fx.state, &[creator], &[&pat]).await;
 }
 
 #[compio::test]

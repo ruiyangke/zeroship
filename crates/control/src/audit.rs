@@ -21,6 +21,11 @@ pub enum Action {
     /// creator has opted to surface in `process.env`. Audited so ops
     /// can answer "when did we let X out of the secret namespace."
     SetEnvExpose,
+    /// A Connect Express account was MINTED on Stripe for a creator (the
+    /// `onboard` handler created a new `acct_…`). Distinct from `LinkAccount`
+    /// (which records the verified-link in `callback`) so the trail separates
+    /// "account minted" from "account verified-linked" (m6).
+    CreateAccount,
     LinkAccount,
     UnlinkAccount,
     RecordPayout,
@@ -64,6 +69,7 @@ impl Action {
             Self::SetSecret => "set_secret",
             Self::DeleteSecret => "delete_secret",
             Self::SetEnvExpose => "set_env_expose",
+            Self::CreateAccount => "create_account",
             Self::LinkAccount => "link_account",
             Self::UnlinkAccount => "unlink_account",
             Self::RecordPayout => "record_payout",

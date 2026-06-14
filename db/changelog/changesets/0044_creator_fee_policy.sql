@@ -50,7 +50,13 @@ CREATE TABLE zeroship.creator_fee_policy (
          OR (kind = 'percent' AND percent_bps  IS NOT NULL AND percent_bps BETWEEN 0 AND 10000)
     ),
     CONSTRAINT creator_fee_policy_cap_nonneg   CHECK (cap_cents   IS NULL OR cap_cents   >= 0),
-    CONSTRAINT creator_fee_policy_floor_nonneg CHECK (floor_cents IS NULL OR floor_cents >= 0)
+    CONSTRAINT creator_fee_policy_floor_nonneg CHECK (floor_cents IS NULL OR floor_cents >= 0),
+    -- A floor above the cap pins every fee to the cap regardless of percent —
+    -- almost certainly an operator typo (e.g. floor=1000, cap=100). Reject it at
+    -- the schema boundary (the handler rejects it too, with a 400). (m2)
+    CONSTRAINT creator_fee_policy_floor_le_cap CHECK (
+        floor_cents IS NULL OR cap_cents IS NULL OR floor_cents <= cap_cents
+    )
 );
 --rollback DROP TABLE zeroship.creator_fee_policy;
 
