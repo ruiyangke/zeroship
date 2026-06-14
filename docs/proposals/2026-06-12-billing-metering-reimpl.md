@@ -1285,3 +1285,126 @@ block merge; each is a clean future plug-in, not a rewrite.
   Stripe `meter_events`) plugs in later without a rewrite.
 - **(g) `MeterHandle` `String`→`Arc<str>` micro-opt.** Drop the per-op `app_id`
   heap clone by holding the id as `Arc<str>`.
+
+---
+
+## Holistic re-review + hardening (2026-06-13)
+
+After billing-v2, the whole pipeline was re-reviewed **end-to-end** with four
+parallel adversarial passes (a holistic re-review catches cross-cutting issues the
+per-PR reviews structurally cannot — each per-PR review saw only one side of an
+interaction):
+
+| Lens | Score | Outcome |
+| --- | --- | --- |
+| Consistency / integration | 92 | metric names round-trip emit↔seed↔consume; no $0 leak |
+| Money-flow numerics | 84 | two spend↔invoice **divergences** + a global-FX gap |
+| Concurrency / failure | 84 | **two CRITICAL crash-window money bugs** |
+| Security / trust boundaries | 91 | trust model sound; one underpay vector |
+
+**Security posture confirmed sound:** `app_id` is server-injected at every emit
+(no JS path); FX / weights / plan writes are provably operator-only (creators
+can't reach `Resource::Any` via Cedar); the Stripe webhook is signature-verified
+before any mutation; the six billing tables are RLS-fail-closed with
+deny-by-absence grants.
+
+### CRITICAL — fixed in `d7ea29b2`
+- **C1 double-bill.** The per-app `billing_run_items` ledger row was written
+  *after* `create_invoice_item`; a crash between the Stripe POST and the ledger
+  commit, re-driven **>24h later** (Stripe Idempotency-Key expired), re-POSTed.
+  **Fix:** claim-then-call — a durable intent row (`stripe_item_id = NULL`) is
+  written *before* the Stripe POST; on re-drive a NULL-intent row triggers a Stripe
+  metadata lookup (`find_invoice_item_by_key` via `metadata.zs_item_key`) to adopt
+  the already-posted item rather than blindly re-POST. The >24h window is *closed*,
+  not documented-around.
+- **C2 under-bill.** `create_and_finalize_invoice` was non-atomic and the draft id
+  was never persisted; a crash after create-draft (which sweeps the items) but
+  before finalize, re-driven >24h later, created a new empty draft and finalized a
+  $0 invoice. **Fix:** split into `create_invoice` + `finalize_invoice`; persist
+  `billing_runs.draft_invoice_id` *before* finalize; on re-drive finalize the
+  *existing* draft. Schema: `billing_runs.draft_invoice_id`,
+  `billing_run_items.stripe_item_id` nullable.
+
+### MAJOR — fixed in the fixer-B pass
+- **Overflow-posture divergence.** `spend.rs` silently clamped `i64::MAX` while
+  `billing_reconcile` hard-errors → an overflowing app was Blocked-via-clamp by
+  enforcement but skipped (unbilled) by reconcile. Fix: spend skips+warns to match.
+- **Catalog poison divergence.** Spend used `catalog.list()` (tolerant → app runs
+  *uncapped*) while reconcile used `catalog.get()` (strict → that creator's bill
+  errors). A corrupt `runtime_limits_json` left an app both uncapped *and* unbilled.
+  Fix: both paths price off the scalar columns; poison in `runtime_limits_json`
+  never blocks pricing.
+- **Global FX had no near-zero floor** (per-plan `fx` did) → a `0`/near-zero global
+  `pricing_config.fx` silently priced all overage to $0 platform-wide. Fix:
+  `CHECK (fx >= MIN_FX)` + fail-closed in `pricing_store`.
+- **`set_plan` underpay.** A creator (app_owner) could self-assign a cheaper
+  operator plan. Fix: an `assignable_by_creator` flag on `plans` — creators
+  self-select only among public tiers (free/pro); operator plans aren't
+  creator-assignable. (Self-service preserved, with a guardrail; analogous to the
+  reduction-only spend-limit override.)
+
+### MINOR — fixer-B pass
+Dead `db_rows_read` seed dropped; `u64→i64` ingest cast hardened to `try_from`+warn;
+`period_start` bind converged to integer `TIMESTAMPTZ` across metering/spend;
+`plan_catalog::upsert` now calls `PlanPrice::validate()` (no silent write-path clamp).
+
+---
+
+## Pluggable metering providers — design direction (confirmed 2026-06-13)
+
+**Goal:** make the *billing-aggregation backend* swappable — **Native** (default),
+**Stripe** (Billing Meters), **OpenMeter** — selected per deployment.
+
+### The non-negotiable constraint
+The **local meter stays the enforcement source of truth.** The gateway's
+Warn→Degrade→Block loop needs the current-period CU aggregate *locally and within
+~a minute*; no external provider can own that (rate-limited APIs, network hop). So
+"pluggable metering" does **not** outsource metering — the local CU aggregate is
+*always* maintained; the provider decides where usage *also* goes for billing.
+OpenMeter/Stripe-Meters are **export sinks**, not replacements.
+
+### The seam (CU is the contract)
+Because the model already produces **compute units** as the single neutral
+quantity, every provider just receives a CU number — weights + FX + enforcement
+stay ours. Two traits draw the layers:
+
+- **`UsageLedger`** (below) — the read contract over `usage_aggregates`
+  (`period_totals(app, period) -> map<metric,u64>`). Metering = *fact*. An external
+  meter could even back this.
+- **`MeteringProvider` / `BillingProvider`** (above) — where CU usage goes for
+  billing:
+  ```rust
+  trait MeteringProvider {
+      async fn ensure_customer(creator) -> CustomerRef;
+      async fn report_usage(customer, period, compute_units, idempotency_key);
+      async fn invoice(customer, period) -> InvoiceRef;   // no-op if provider self-invoices
+      async fn handle_webhook(payload, sig);
+  }
+  ```
+
+### The providers
+| Provider | CU handoff | Aggregates? | Invoices? |
+| --- | --- | --- | --- |
+| **Native** (default) | control aggregation → CU×FX → reconciler | ours | ours (Stripe invoice items) |
+| **Stripe** (Billing Meters) | CU → `meter_events`; FX = a metered Price | Stripe | Stripe |
+| **OpenMeter** | CU → CloudEvents | OpenMeter | stays Native / other rail |
+
+### Decisions
+- **Metering & billing are separated** at `usage_aggregates`: metering = fact
+  (produce the ledger); billing = policy + money (price/enforce/invoice on top).
+  Logical (crate/module) separation + the contracts; **physical/service** separation
+  deferred (spend enforcement wants the ledger co-located).
+- **Config = per-deployment** (`--metering-provider native|stripe|openmeter`).
+- External clients are **zero-tokio cyper adapters** (no SDK that pulls tokio), like
+  the Stripe client.
+- **Second provider = OpenMeter** (confirmed) — self-hostable, no vendor lock,
+  architecturally most different from Stripe (pure aggregation), so it exercises the
+  abstraction rather than cloning Stripe.
+
+### Build order (after the review fixes above land)
+The abstraction **wraps the reconciler** that the C1/C2 + MAJOR fixes restructure,
+so the implementation blueprint is written against the *corrected* code:
+1. blueprint the `MeteringProvider`/`UsageLedger` seams (exact placement vs the
+   reconciler; how `Native` retains enforcement; per-deployment wiring) — dual-reviewed;
+2. implement `Native` (refactor current behind the trait) + `Stripe` (Billing
+   Meters) + `OpenMeter`, TDD with a faithful mock per provider.
