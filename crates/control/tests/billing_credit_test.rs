@@ -1036,3 +1036,420 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing Idempotency-Key is a 400");
 }
+
+// ===========================================================================
+// MINOR-2: `note` IS part of the grant fingerprint. A reused key with a DIFFERENT
+// note is a body change ⇒ 409, never a silent return of the first grant.
+// (RED pre-fix: `grant_fingerprint` excluded `note`, so the second call returned
+//  Duplicate(first) and the assertion `== Conflict` failed.)
+// ===========================================================================
+
+#[compio::test]
+async fn grant_note_change_is_a_conflict() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "notefp").await;
+    let creator = make_user(&fx.state, "notefp").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    let key = format!("idem-{}", Uuid::new_v4());
+
+    // First grant carries note "promo A".
+    let r1 = credit::grant(
+        &*fx.state.control_pg, &creator, 500, "usd", "grant", None, Some("promo A"), &key,
+    )
+    .await
+    .expect("grant 1");
+    let id1 = match r1 {
+        GrantOutcome::Created(id) => id,
+        other => panic!("expected Created, got {other:?}"),
+    };
+
+    // Same key + same body INCLUDING the note ⇒ Duplicate (safe retry).
+    let r_same = credit::grant(
+        &*fx.state.control_pg, &creator, 500, "usd", "grant", None, Some("promo A"), &key,
+    )
+    .await
+    .expect("grant same");
+    assert_eq!(
+        r_same,
+        GrantOutcome::Duplicate(id1.clone()),
+        "same key + identical body (note included) is a safe-retry Duplicate",
+    );
+
+    // Same key + DIFFERENT note ⇒ Conflict (note is in the fingerprint).
+    let r_diff = credit::grant(
+        &*fx.state.control_pg, &creator, 500, "usd", "grant", None, Some("promo B"), &key,
+    )
+    .await
+    .expect("grant diff note");
+    assert_eq!(
+        r_diff,
+        GrantOutcome::Conflict,
+        "a reused key with a CHANGED note is a 409 conflict (note is fingerprinted)",
+    );
+
+    // Some("") vs None must also be distinguishable (presence byte).
+    let key2 = format!("idem-{}", Uuid::new_v4());
+    let none_grant = credit::grant(
+        &*fx.state.control_pg, &creator, 100, "usd", "grant", None, None, &key2,
+    )
+    .await
+    .expect("none note");
+    assert!(matches!(none_grant, GrantOutcome::Created(_)));
+    let empty_note = credit::grant(
+        &*fx.state.control_pg, &creator, 100, "usd", "grant", None, Some(""), &key2,
+    )
+    .await
+    .expect("empty note");
+    assert_eq!(
+        empty_note,
+        GrantOutcome::Conflict,
+        "Some(\"\") differs from None in the fingerprint — a body change ⇒ conflict",
+    );
+
+    // Exactly ONE grant row for `key` — no second grant ever appended.
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger WHERE idempotency_key = $1",
+            &[&key],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 1, "the note conflict never created a second grant");
+}
+
+// ===========================================================================
+// MINOR-3: the idempotency conflict re-SELECT is creator-scoped. A key reused
+// ACROSS creators is a Conflict for the second creator (never another creator's
+// grant id) and appends no grant for them.
+// NOTE on RED: this finding is DEFENSE-IN-DEPTH — it cannot produce a behavioral
+// RED against the pre-fix helper, because `creator_id` is ALREADY part of
+// `grant_fingerprint`. With the old unscoped `WHERE idempotency_key = $1`, creator
+// B's reuse read A's row, computed B's (different) fingerprint, and returned
+// Conflict anyway. The scoped re-SELECT makes that explicit (B's `else` branch
+// returns Conflict without ever touching A's row) and forecloses any future
+// fingerprint scheme that drops creator_id. The assertions below hold under both,
+// so this test is a correctness GUARD, not a RED-distinguishing regression.
+// ===========================================================================
+
+#[compio::test]
+async fn grant_idempotency_key_is_creator_scoped() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "xtenant").await;
+    let creator_a = make_user(&fx.state, "xtenant-a").await;
+    let creator_b = make_user(&fx.state, "xtenant-b").await;
+    ensure_creator_billing(&fx.state, creator_a).await;
+    ensure_creator_billing(&fx.state, creator_b).await;
+
+    // Both creators share the SAME idempotency key (cross-tenant reuse).
+    let key = format!("idem-shared-{}", Uuid::new_v4());
+
+    let r_a = credit::grant(
+        &*fx.state.control_pg, &creator_a, 500, "usd", "grant", None, None, &key,
+    )
+    .await
+    .expect("grant a");
+    let id_a = match r_a {
+        GrantOutcome::Created(id) => id,
+        other => panic!("expected Created for creator A, got {other:?}"),
+    };
+
+    // Creator B reuses A's key. The globally-unique index makes the INSERT no-op;
+    // the creator-scoped re-SELECT finds no row for B ⇒ Conflict (NOT A's id).
+    let r_b = credit::grant(
+        &*fx.state.control_pg, &creator_b, 500, "usd", "grant", None, None, &key,
+    )
+    .await
+    .expect("grant b");
+    assert_eq!(
+        r_b,
+        GrantOutcome::Conflict,
+        "a cross-tenant key reuse is a Conflict for creator B, never creator A's grant id",
+    );
+    assert_ne!(
+        r_b,
+        GrantOutcome::Duplicate(id_a.clone()),
+        "creator B must NEVER receive creator A's grant id",
+    );
+
+    // No credit_ledger row for creator B with that key.
+    let n_b: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger \
+             WHERE idempotency_key = $1 AND creator_id = $2",
+            &[&key, &creator_b],
+        )
+        .await
+        .expect("count b")[0]
+        .get("n");
+    assert_eq!(n_b, 0, "no grant was appended for creator B");
+    // Creator A's grant is intact.
+    let bal_a = credit::balance(&*fx.state.control_pg, &creator_a, "usd").await.unwrap();
+    assert_eq!(bal_a, 500, "creator A's grant is untouched");
+    let bal_b = credit::balance(&*fx.state.control_pg, &creator_b, "usd").await.unwrap();
+    assert_eq!(bal_b, 0, "creator B has no credit");
+}
+
+// ===========================================================================
+// MINOR-6: `kind` is normalized case-insensitively (uniform with `currency`).
+// `GRANT` / `Promo` are accepted and stored lowercase; the domain CHECK is
+// lowercase-only, so a non-normalized kind would have FK/domain-violated.
+// (RED pre-fix: `matches!(kind, "grant"|...)` was case-sensitive ⇒ "GRANT" was
+//  rejected with InvalidInput before it ever reached the INSERT.)
+// ===========================================================================
+
+#[compio::test]
+async fn grant_kind_is_case_insensitive() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "kindcase").await;
+    let creator = make_user(&fx.state, "kindcase").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    let key = format!("idem-{}", Uuid::new_v4());
+    let r = credit::grant(
+        &*fx.state.control_pg, &creator, 700, "usd", "GRANT", None, None, &key,
+    )
+    .await
+    .expect("uppercase kind accepted");
+    let id = match r {
+        GrantOutcome::Created(id) => id,
+        other => panic!("expected Created, got {other:?}"),
+    };
+
+    // Stored lowercase (the domain CHECK is lowercase-only).
+    let kind: String = fx
+        .state
+        .control_pg
+        .query("SELECT kind FROM zeroship.credit_ledger WHERE id = $1", &[&id])
+        .await
+        .expect("read kind")[0]
+        .get("kind");
+    assert_eq!(kind, "grant", "an uppercase kind is normalized to lowercase before INSERT");
+
+    // A mixed-case "Promo" is also accepted.
+    let r2 = credit::grant(
+        &*fx.state.control_pg,
+        &creator,
+        100,
+        "usd",
+        "Promo",
+        None,
+        None,
+        &format!("idem-{}", Uuid::new_v4()),
+    )
+    .await
+    .expect("mixed-case promo accepted");
+    assert!(matches!(r2, GrantOutcome::Created(_)));
+}
+
+// ===========================================================================
+// MINOR-5 (+ MINOR-4): the grant endpoint classifies the `creator_billing` INSERT
+// failure by SQLSTATE — only a foreign_key_violation (23503, a non-existent user) is
+// a 400 "unknown creator". A grant for a NON-EXISTENT creator_id (no users row) ⇒
+// 400; a grant for a real creator ⇒ 201 — both through the REAL one-`transaction()`
+// upsert+grant path (MINOR-4). NOTE on RED: the ghost→400 outcome matches the pre-fix
+// string-match behaviour (the pre-fix code 400'd ANY error), so this is not a
+// RED-distinguishing test for the mis-classification per se — faithfully injecting a
+// transient/non-FK error against real PG mid-INSERT is impractical. It GUARDS that the
+// FK→400 path and the real→201 path both still hold under the SQLSTATE classifier and
+// the single transaction (a non-FK error now routes to 500 via `error_response`).
+// ===========================================================================
+
+#[compio::test]
+async fn grant_endpoint_unknown_creator_is_fk_400() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "fk400").await;
+    let op_user = make_user(&fx.state, "operator-fk").await;
+    let op_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_any()).await;
+
+    let app = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/billing/credit")
+                .route(web::post().to(zeroship_control::api::grant_credit)),
+        ),
+    )
+    .await;
+
+    // A creator_id with NO `users` row ⇒ the creator_billing FK violates ⇒ 400.
+    let ghost = Uuid::new_v4();
+    let body = serde_json::json!({"creator_id": ghost, "amount_cents": 500});
+    let req = test::TestRequest::post()
+        .uri("/api/billing/credit")
+        .header("idempotency-key", format!("idem-{}", Uuid::new_v4()))
+        .header("authorization", op_pat.bearer())
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a grant for a non-existent creator is a 400 (FK violation classified by SQLSTATE 23503)",
+    );
+
+    // A grant for a REAL creator still succeeds (201) through the same path.
+    let real = make_user(&fx.state, "real-creator").await;
+    let body_ok = serde_json::json!({"creator_id": real, "amount_cents": 500});
+    let req = test::TestRequest::post()
+        .uri("/api/billing/credit")
+        .header("idempotency-key", format!("idem-{}", Uuid::new_v4()))
+        .header("authorization", op_pat.bearer())
+        .set_json(&body_ok)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "a grant for a real creator is 201");
+}
+
+// ===========================================================================
+// MAJOR-1: `consume_at_finalize` self-serializes per creator via a
+// transaction-scoped advisory lock. Two assertions:
+//   (1) while a tx holds the consume lock for a creator, a SECOND connection's
+//       `pg_try_advisory_xact_lock` on the SAME key fails (the lock is held);
+//       a DIFFERENT creator's key still succeeds (per-creator, not global).
+//   (2) sequential over-draw is impossible: two consumes against ONE grant draw
+//       at most the grant balance, and the balance never goes negative.
+// (RED pre-fix: no lock was taken in `consume_at_finalize`, so assertion (1)'s
+//  try-lock on the same key would SUCCEED even mid-consume-tx.)
+// ===========================================================================
+
+#[compio::test]
+async fn consume_takes_per_creator_advisory_lock() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "lock").await;
+    let creator = make_user(&fx.state, "lock").await;
+    let other = make_user(&fx.state, "lock-other").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    ensure_creator_billing(&fx.state, other).await;
+    insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
+
+    // A draft invoice anchor for the consume.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+        )
+        .await
+        .expect("claim draft");
+
+    // A SECOND independent connection used as the lock observer.
+    let (obs_client, obs_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("observer connect");
+    compio::runtime::spawn(async move {
+        let _ = obs_conn.run().await;
+    })
+    .detach();
+
+    // Open a transaction on a DEDICATED connection and run consume inside it; the
+    // transaction-scoped advisory lock is held until we commit/rollback.
+    let (mut conn, conn_run) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("consume connect");
+    compio::runtime::spawn(async move {
+        let _ = conn_run.run().await;
+    })
+    .detach();
+    let tx = conn.transaction().await.expect("tx");
+    let applied = credit::consume_at_finalize(&tx, &creator, &inv, 600, "usd")
+        .await
+        .expect("consume");
+    assert_eq!(applied.applied_cents, 600, "drew $6 of the $10 grant");
+
+    // (1) While the consume tx is OPEN (lock held), a try-lock on the SAME key from
+    //     the observer connection must FAIL.
+    let key_held: bool = obs_client
+        .query(
+            "SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got",
+            &[&creator.to_string()],
+        )
+        .await
+        .expect("try-lock held")[0]
+        .get("got");
+    assert!(
+        !key_held,
+        "the consume tx holds the per-creator advisory lock — a concurrent try-lock must fail",
+    );
+
+    // A DIFFERENT creator's key is free (the lock is per-creator, not global).
+    let key_other: bool = obs_client
+        .query(
+            "SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got",
+            &[&other.to_string()],
+        )
+        .await
+        .expect("try-lock other")[0]
+        .get("got");
+    assert!(
+        key_other,
+        "a DIFFERENT creator's advisory lock is free — the lock serializes per creator only",
+    );
+    // The observer's own try-lock (creator=other) is xact-scoped to ITS implicit
+    // txn; release it explicitly so it can't leak into other tests on this conn.
+    obs_client
+        .execute("SELECT pg_advisory_unlock_all()", &[])
+        .await
+        .ok();
+
+    // Commit the consume; the lock releases at commit.
+    tx.commit().await.expect("commit consume");
+
+    // (2) A SECOND consume on a fresh invoice draws at most the REMAINING balance —
+    //     never over-drawing the grant. Remaining is $4; ask for $9, get $4.
+    let inv2 = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[
+                &inv2,
+                &creator,
+                &period_d(prev_period(now_for_closed_period() - 86_400 * 40)),
+            ],
+        )
+        .await
+        .expect("claim draft 2");
+    let (mut conn2, conn2_run) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("consume2 connect");
+    compio::runtime::spawn(async move {
+        let _ = conn2_run.run().await;
+    })
+    .detach();
+    let tx2 = conn2.transaction().await.expect("tx2");
+    let applied2 = credit::consume_at_finalize(&tx2, &creator, &inv2, 900, "usd")
+        .await
+        .expect("consume 2");
+    tx2.commit().await.expect("commit 2");
+    assert_eq!(
+        applied2.applied_cents, 400,
+        "the second consume draws only the remaining $4 — the grant is never over-drawn",
+    );
+
+    // Balance is exactly 0 (never negative): $10 − $6 − $4 = $0.
+    let bal = credit::balance(&*fx.state.control_pg, &creator, "usd").await.unwrap();
+    assert_eq!(bal, 0, "balance is non-negative and exact after both draws ($10 − $6 − $4)");
+    assert!(bal >= 0, "balance MUST never go negative");
+}

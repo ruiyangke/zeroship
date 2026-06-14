@@ -5,9 +5,14 @@
 -- NEVER a stored column (it cannot drift from its history). A grant is a POSITIVE
 -- entry; at finalize the reconciler appends ONE NEGATIVE `consumed` entry PER DRAWN
 -- GRANT (design MAJOR-2 — per-grant, not a single aggregate companion, so
--- credit-expiry attribution is exact). Balance for a creator = SUM(amount_cents) >= 0
--- (enforced not by a column but by the reconciler consuming at most the balance,
--- filtered by currency).
+-- credit-expiry attribution is exact). Balance for a creator = SUM(amount_cents) >= 0.
+-- That non-negativity is intrinsic to the consume operation: `consume_at_finalize`
+-- takes a TRANSACTION-SCOPED per-creator advisory lock (`pg_advisory_xact_lock(
+-- hashtext(creator_id::text)::bigint)`) as its first act, so two concurrent consumes
+-- for one creator SERIALIZE — each reads `remaining` and draws under the lock, and a
+-- grant can never be over-drawn. The guarantee therefore does NOT depend on any outer
+-- fleet-wide sweep lock (which an on-demand finalizer would not hold); the consume op
+-- self-serializes per creator and draws at most the balance, filtered by currency.
 --
 -- RLS posture: creator-keyed control bookkeeping ⇒ NO app FORCE RLS (control runs
 -- BYPASSRLS; the key is a creator_id, not a tenant app_id) — uniform with

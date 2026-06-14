@@ -1220,11 +1220,20 @@ pub async fn grant_credit(
     // exists — the same lazy create the Stripe-store / account-status paths use —
     // so an operator can grant credit before the creator's first invoice. A missing
     // `users` row surfaces as a clean FK error → 400, not a 500.
-    let conn = match state.registry.conn().await {
+    //
+    // MINOR-4: the lazy `creator_billing` upsert and the `credit_ledger` grant
+    // INSERT run in ONE `conn.transaction()` so the endpoint's atomicity matches
+    // its prose. (Grant idempotency already covers a retry; the txn makes the
+    // upsert+grant a single unit so a half-applied grant can never be observed.)
+    let mut conn = match state.registry.conn().await {
         Ok(c) => c,
         Err(e) => return error_response(RegistryError::Database(e.to_string())),
     };
-    if let Err(e) = conn
+    let tx = match conn.transaction().await {
+        Ok(t) => t,
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+    if let Err(e) = tx
         .execute(
             "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
              ON CONFLICT (creator_id) DO NOTHING",
@@ -1232,15 +1241,21 @@ pub async fn grant_credit(
         )
         .await
     {
-        // A non-existent user FK-violates here — return a clean 400.
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "unknown creator",
-            "detail": format!("no billable creator for creator_id {}: {e}", body.creator_id),
-        }));
+        // MINOR-5: classify by SQLSTATE. Only a foreign_key_violation (23503) —
+        // a non-existent `users` row — is a genuine "unknown creator" 400. Any
+        // OTHER error (a transient DB failure, etc.) must NOT be mis-labelled a
+        // 400; it falls through to the standard `error_response` → 500.
+        if e.code() == Some(&compio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) {
+            return web::HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "unknown creator",
+                "detail": format!("no billable creator for creator_id {}", body.creator_id),
+            }));
+        }
+        return error_response(RegistryError::Database(e.to_string()));
     }
 
     let outcome = crate::credit::grant(
-        &conn,
+        &tx,
         &body.creator_id,
         body.amount_cents,
         &body.currency,
@@ -1251,8 +1266,19 @@ pub async fn grant_credit(
     )
     .await;
 
+    // On a grant error, roll back (drop the tx) and surface it — never commit a
+    // half-applied unit. On success, commit the upsert+grant together; a commit
+    // failure is a 500 (the grant did not durably land).
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => return error_response(e),
+    };
+    if let Err(e) = tx.commit().await {
+        return error_response(RegistryError::Database(e.to_string()));
+    }
+
     match outcome {
-        Ok(crate::credit::GrantOutcome::Created(id)) => {
+        crate::credit::GrantOutcome::Created(id) => {
             crate::audit::log_with_detail(
                 &state.registry,
                 crate::audit::AuditEntry {
@@ -1280,21 +1306,20 @@ pub async fn grant_credit(
             }))
         }
         // Same key + same body — return the first grant (safe retry, no second grant).
-        Ok(crate::credit::GrantOutcome::Duplicate(id)) => {
+        crate::credit::GrantOutcome::Duplicate(id) => {
             web::HttpResponse::Ok().json(&serde_json::json!({
                 "credit_id": id,
                 "created": false,
             }))
         }
         // Same key + DIFFERENT body — reject (mirrors Stripe's idempotency-conflict).
-        Ok(crate::credit::GrantOutcome::Conflict) => web::HttpResponse::Conflict()
+        crate::credit::GrantOutcome::Conflict => web::HttpResponse::Conflict()
             .json(&serde_json::json!({
                 "error": "idempotency-key-reuse-conflict",
                 "detail": "the Idempotency-Key was reused with a different request body; \
                            a credit grant key is bound to its exact (creator, amount, \
-                           currency, kind, expiry) — no second grant was created",
+                           currency, kind, expiry, note) — no second grant was created",
             })),
-        Err(e) => error_response(e),
     }
 }
 
