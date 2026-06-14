@@ -106,6 +106,10 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
                 &zeroship_control::metering::provider::MeteringProviderConfig::native(),
             )
             .expect("native provider builds"),
+            tax_provider: zeroship_control::tax::build_tax_provider(
+                &zeroship_control::tax::TaxProviderConfig::native(),
+            )
+            .expect("native tax provider builds"),
             pairwise_salt: [0u8; 32],
         }),
         blob_root,

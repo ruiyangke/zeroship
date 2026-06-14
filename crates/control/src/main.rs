@@ -110,6 +110,13 @@ struct ControlCli {
     )]
     metering_provider: String,
 
+    /// Tax provider backend (billing-ops gap #26, PR-5). `native` (default)
+    /// computes `0` — the USD launch owes no tax. The seam exists so enabling a
+    /// real `StripeTaxProvider` (Stripe `automatic_tax`) later is a provider swap,
+    /// not a schema change (`invoices.tax_cents` already exists).
+    #[arg(long = "tax-provider", env = "TAX_PROVIDER", default_value = "native")]
+    tax_provider: String,
+
     /// Stripe **Billing Meter** event name (M-Stripe). REQUIRED when
     /// `--metering-provider stripe` (else the deployment refuses to boot — a
     /// Stripe-Meters deployment with no meter is a silent revenue black hole).
@@ -1152,6 +1159,27 @@ fn main() -> std::io::Result<()> {
         "control: metering provider selected"
     );
 
+    // Tax provider (PR-5): parse the kind, then build it. `native` (default)
+    // computes 0 (USD launch). An unknown value refuses to boot rather than
+    // silently mis-taxing.
+    let tax_provider_kind = match zeroship_control::tax::TaxProviderKind::parse(&cli.tax_provider) {
+        Ok(k) => k,
+        Err(bad) => {
+            tracing::error!(value = %bad, "control: unknown --tax-provider (expected native)");
+            std::process::exit(1);
+        }
+    };
+    let tax_provider = match zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig { kind: tax_provider_kind },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "control: refusing to start — tax provider not available");
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(tax_provider = tax_provider_kind.as_str(), "control: tax provider selected");
+
     let state = Arc::new(AppState {
         registry,
         env_store,
@@ -1185,6 +1213,7 @@ fn main() -> std::io::Result<()> {
         hydra_introspector,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider,
+        tax_provider,
         pairwise_salt,
     });
 

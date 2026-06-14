@@ -902,21 +902,45 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // balance CHECK's `total = subtotal − credit + tax` ordering). One `consumed`
     // entry per drawn grant is appended, keyed to THIS invoice id so a reconcile
     // re-run (crash-window re-drive of the same draft claim) recomputes the same
-    // applied credit and NEVER double-consumes (see `consume_at_finalize`). Tax is 0
-    // at launch (the seam is PR-5), so `total = subtotal − credit`.
+    // applied credit and NEVER double-consumes (see `consume_at_finalize`).
+    //
+    // TAX AT FINALIZE (billing-ops PR-5, design flow E): AFTER credit is applied and
+    // BEFORE the finalize UPDATE — still inside this same txn — call the `TaxProvider`
+    // seam over the POST-CREDIT subtotal (`subtotal − applied_credit`, the amount the
+    // creator actually owes; tax is computed on the post-credit base, matching the
+    // balance CHECK's `total = subtotal − credit + tax` ordering). The result is frozen
+    // into `tax_cents` in the ONE-statement finalize UPDATE (replacing today's hard-wired
+    // `0`), so `total = subtotal − credit + tax` holds without the CHECK ever seeing a
+    // half-written row. Tax is computed ONCE per invoice over the summed segment subtotal
+    // (the multi-segment proration composes: `amount_i64` is the sum of every app/segment
+    // line). `NativeTaxProvider` returns 0 at launch (USD), so `total = subtotal − credit`
+    // is unchanged; enabling Stripe Tax later is a provider swap (`automatic_tax`), not a
+    // schema change — `tax_cents` already exists.
     let tx = conn.transaction().await?;
     let credit = crate::credit::consume_at_finalize(
         &tx, creator_id, &invoice_id, amount_i64, BILLING_CURRENCY,
     )
     .await?;
     let credit_i64 = credit.applied_cents;
-    let total_i64 = amount_i64 - credit_i64; // tax = 0 at launch (PR-5 seam)
+    let taxable_base_cents = (amount_i64 - credit_i64).max(0);
+    let tax = state
+        .tax_provider
+        .compute_tax(&crate::tax::TaxContext {
+            creator_id: *creator_id,
+            taxable_base_cents,
+            currency: BILLING_CURRENCY,
+            period,
+        })
+        .await
+        .map_err(RegistryError::from)?;
+    let tax_i64 = tax.tax_cents;
+    let total_i64 = amount_i64 - credit_i64 + tax_i64;
     tx.execute(
         "UPDATE zeroship.invoices \
-         SET subtotal_cents = $2, credit_cents = $3, tax_cents = 0, total_cents = $4, \
+         SET subtotal_cents = $2, credit_cents = $3, tax_cents = $5, total_cents = $4, \
              status = 'finalized', finalized_at = NOW(), updated_at = NOW() \
          WHERE id = $1",
-        &[&invoice_id, &amount_i64, &credit_i64, &total_i64],
+        &[&invoice_id, &amount_i64, &credit_i64, &total_i64, &tax_i64],
     )
     .await?;
     // Record the finalized provider invoice id (the seam — core invoices carry no

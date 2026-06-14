@@ -155,6 +155,10 @@ async fn build_fixture(db_url: &str, om_base: &str, label: &str) -> Fixture {
         )),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: provider,
+        tax_provider: zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
         pairwise_salt: [0u8; 32],
     });
 

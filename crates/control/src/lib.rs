@@ -37,6 +37,7 @@ pub mod spend;
 pub mod stripe_client;
 pub mod stripe_handlers;
 pub mod stripe_store;
+pub mod tax;
 pub mod token_handlers;
 pub mod void_reissue;
 
@@ -208,6 +209,13 @@ pub struct AppState {
     /// `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the local ledger,
     /// provider-independent). See [`metering::provider::MeteringProvider`].
     pub metering_provider: Arc<dyn metering::provider::MeteringProvider>,
+    /// The configured tax provider, built once at boot (`--tax-provider`, default
+    /// `native`). The billing-reconcile cron calls `compute_tax` at finalize and
+    /// freezes the result into `invoices.tax_cents`. `Native` computes `0` (the
+    /// USD launch owes no tax); enabling a real `StripeTaxProvider` later is a
+    /// provider swap, not a schema change (`tax_cents` already exists). See
+    /// [`tax::TaxProvider`].
+    pub tax_provider: Arc<dyn tax::TaxProvider>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
     /// stash signing key the gateway uses via
     /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a

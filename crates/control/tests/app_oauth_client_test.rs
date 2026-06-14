@@ -346,6 +346,10 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),
         )
         .expect("native provider builds"),
+        tax_provider: zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
         pairwise_salt: [0u8; 32],
     })
 }
