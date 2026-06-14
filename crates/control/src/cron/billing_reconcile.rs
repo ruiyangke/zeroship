@@ -117,11 +117,22 @@ pub fn period_end_unix(period_start_unix: i64) -> i64 {
         .map_or(period_start_unix, |d| d.timestamp())
 }
 
-/// Deterministic Stripe `Idempotency-Key` for the per-app invoice-ITEM create.
-/// Stable for a fixed `(creator, app, period)` so a retry replays the same item.
+/// Deterministic Stripe `Idempotency-Key` for the per-SEGMENT invoice-ITEM create.
+/// Stable for a fixed `(creator, app, period, segment_no)` so a retry replays the
+/// same item. round 4, CRITICAL-1: the key includes `segment_no` — an app posts
+/// N+1 items in a period (one per plan segment), and a segment-blind key would
+/// dedup them to a SINGLE Stripe item (only segment 0 posts, the rest silently
+/// dropped — an under-bill). The N=0 degenerate path passes `segment_no = 0`, so
+/// its key is `billitem:{creator}:{app}:{period}:0` — a stable superset of the
+/// pre-PR-4 shape (the `:0` suffix is the only change).
 #[must_use]
-pub fn invoice_item_idempotency_key(creator_id: &Uuid, app_id: &Uuid, period_start_unix: i64) -> String {
-    format!("billitem:{creator_id}:{app_id}:{period_start_unix}")
+pub fn invoice_item_idempotency_key(
+    creator_id: &Uuid,
+    app_id: &Uuid,
+    period_start_unix: i64,
+    segment_no: i16,
+) -> String {
+    format!("billitem:{creator_id}:{app_id}:{period_start_unix}:{segment_no}")
 }
 
 /// Deterministic Stripe `Idempotency-Key` for the per-run invoice create.
@@ -374,71 +385,140 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // Price each owned app's closed-period usage, capturing the SNAPSHOT inputs
     // (usage, applied weights, included_units, resolved FX, base fee, authoritative
     // amount) so a finalized line replays bit-for-bit via charge_cents.
+    //
+    // PR-4 (full usage-segment proration): an app with N plan-change events in the
+    // period splits into N+1 SEGMENTS. Each segment is priced under ITS OWN plan
+    // over the cumulative-snapshot usage DELTA and emitted as a SEPARATE line. The
+    // no-change case degenerates to exactly one segment_no=0 line (full period,
+    // current plan) — byte-for-byte today's behaviour.
+    //
+    // C1 (replay-faithful snapshot): freeze the FULL weights map that was ACTUALLY
+    // PASSED to `charge_cents` — weights are GLOBAL (segment-agnostic). Each segment
+    // line's `usage_snapshot` is its own DELTA, so the segments' snapshots telescope
+    // back to the full-period total.
+    let weights_snapshot: std::collections::BTreeMap<String, MetricWeight> =
+        weights.iter().map(|(m, w)| (m.clone(), *w)).collect();
     let mut lines: Vec<BilledLine> = Vec::new();
     let mut total_cents: u64 = 0;
     for app_id in app_ids {
-        // Resolve the app's plan (FK into the catalog). A missing/poison plan is
-        // skipped, not fatal.
+        // Resolve the app's CURRENT plan (FK into the catalog) — the tail's source
+        // of truth (MAJOR-4) and the single segment's plan on the no-change path. A
+        // missing/poison plan is skipped, not fatal.
         let plan_id = lookup_plan_id_on(&conn, app_id).await?;
-        let Some(plan_id) = plan_id else { continue };
-        let Some(plan) = catalog.get(&plan_id).await? else {
-            tracing::warn!(app_id = %app_id, plan_id = %plan_id, "billing_reconcile: plan not in catalog — skipping app");
-            continue;
-        };
-        let usage = Metering::period_totals_on(&conn, app_id, period_start).await?;
-        let price = plan.price.with_effective_fx(default_fx);
-        // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
-        //   * UnresolvedFx (global default FX missing) ⇒ the platform cannot
-        //     price ⇒ propagate so the sweep ABORTS (see `sweep`), never a
-        //     base-only $0 invoice.
-        //   * ComputeUnitOverflow ⇒ a hard error that skips THIS creator (the
-        //     per-creator loop catches it + warns), never a clamped bill —
-        //     matching the cents→i64 hard-error posture below.
-        let breakdown = match charge_cents(&price, &usage, weights) {
-            Ok(b) => b,
-            Err(crate::pricing::PricingError::UnresolvedFx) => {
-                tracing::error!(
-                    app_id = %app_id,
-                    plan_id = %plan_id,
-                    "billing_reconcile: global default FX missing — cannot price; ABORTING sweep"
-                );
-                return Err(RegistryError::FxUnresolved);
-            }
-            Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
-                return Err(RegistryError::Database(format!(
-                    "billing_reconcile: {e} — refusing to bill app {app_id}"
-                )));
-            }
-        };
-        if breakdown.total_cents == 0 {
+        let Some(current_plan_id) = plan_id else { continue };
+        if catalog.get(&current_plan_id).await?.is_none() {
+            tracing::warn!(app_id = %app_id, plan_id = %current_plan_id, "billing_reconcile: plan not in catalog — skipping app");
             continue;
         }
-        // The FX actually charged (resolved on `price`; always Some here because
-        // charge_cents succeeded). Frozen onto the line.
-        let charged_fx = price.fx_pico_cents_per_unit.unwrap_or(0);
-        // C1 (replay-faithful snapshot): freeze the FULL weights map that was
-        // ACTUALLY PASSED to `charge_cents` above — not a subset filtered to
-        // `usage.keys()`. `total_units` iterates `usage` keys (so it only reads
-        // weights for metrics present in `usage`), which made the filtered subset
-        // *happen* to be equivalent — but that equivalence was an unenforced
-        // coupling to `pricing.rs`'s loop direction. Freezing the full map (a
-        // superset; extra weights are ignored under either loop direction) makes
-        // the snapshot equal the real charge INPUT, so a replay over the frozen
-        // snapshot reproduces `amount_cents` regardless of how the pricer iterates.
-        let weights_snapshot: std::collections::BTreeMap<String, MetricWeight> =
-            weights.iter().map(|(m, w)| (m.clone(), *w)).collect();
-        let desc = format!("Infra usage — app {app_id} — {}", month_label(period_start));
-        lines.push(BilledLine {
-            app_id: *app_id,
-            desc,
-            amount: breakdown.total_cents,
-            usage,
-            weights_snapshot,
-            included_units: price.included_units,
-            fx_pico_cents_per_unit: charged_fx,
-            base_fee_cents: price.base_fee_cents,
-        });
-        total_cents = total_cents.saturating_add(breakdown.total_cents);
+
+        // The period-end cumulative totals (the END of the last segment).
+        let period_end_totals = Metering::period_totals_on(&conn, app_id, period_start).await?;
+
+        // The period's plan-change events, effective_at order. Each opens a segment.
+        let change_rows = conn
+            .query(
+                "SELECT to_plan_id, from_plan_id, effective_at, usage_at_change \
+                 FROM zeroship.plan_change_events \
+                 WHERE app_id = $1 AND period = $2::date \
+                 ORDER BY effective_at, id",
+                &[app_id, &period],
+            )
+            .await?;
+        let mut period_changes: Vec<crate::proration::PlanChange> = Vec::with_capacity(change_rows.len());
+        for r in &change_rows {
+            let usage_json: serde_json::Value = r.get("usage_at_change");
+            let usage_at_change: std::collections::HashMap<String, i64> =
+                serde_json::from_value(usage_json).unwrap_or_default();
+            period_changes.push(crate::proration::PlanChange {
+                to_plan_id: r.get::<_, String>("to_plan_id"),
+                effective_at: r.get::<_, chrono::DateTime<Utc>>("effective_at"),
+                usage_at_change,
+            });
+        }
+        // The plan running at period START (segment 0's plan): the first change's
+        // from-plan if recorded, else the current plan (no change in this period).
+        let prior_plan_id: String = change_rows
+            .first()
+            .and_then(|r| r.get::<_, Option<String>>("from_plan_id"))
+            .unwrap_or_else(|| current_plan_id.clone());
+
+        // Resolve the (FX-effective) PlanPrice for every plan a segment may use:
+        // the prior plan, the current plan, and each change's to-plan.
+        let mut plan_prices: std::collections::HashMap<String, crate::pricing::PlanPrice> =
+            std::collections::HashMap::new();
+        let mut needed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        needed.insert(prior_plan_id.clone());
+        needed.insert(current_plan_id.clone());
+        for ch in &period_changes {
+            needed.insert(ch.to_plan_id.clone());
+        }
+        for pid in &needed {
+            if let Some(p) = catalog.get(pid).await? {
+                plan_prices.insert(pid.clone(), p.price.with_effective_fx(default_fx));
+            }
+        }
+
+        let segments = crate::proration::build_segments_with_prior(
+            period_start,
+            &prior_plan_id,
+            &period_changes,
+            &period_end_totals,
+            &current_plan_id,
+            &plan_prices,
+        );
+
+        for seg in &segments {
+            // Price the segment under ITS OWN plan: the day-pro-rated base fee +
+            // quota and the segment plan's FX, over the segment's usage DELTA.
+            let seg_price = crate::pricing::PlanPrice {
+                base_fee_cents: seg.base_fee_cents,
+                included_units: seg.included_units,
+                // None ⇒ unresolved FX ⇒ charge_cents fails closed (no silent $0).
+                fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit,
+                spend_limit_default_cents: 0,
+            };
+            // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
+            //   * UnresolvedFx ⇒ propagate so the sweep ABORTS, never a $0 invoice.
+            //   * ComputeUnitOverflow ⇒ a hard error that skips THIS creator.
+            let breakdown = match charge_cents(&seg_price, &seg.usage_delta, weights) {
+                Ok(b) => b,
+                Err(crate::pricing::PricingError::UnresolvedFx) => {
+                    tracing::error!(
+                        app_id = %app_id,
+                        plan_id = %seg.plan_id,
+                        segment_no = seg.segment_no,
+                        "billing_reconcile: global default FX missing — cannot price; ABORTING sweep"
+                    );
+                    return Err(RegistryError::FxUnresolved);
+                }
+                Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
+                    return Err(RegistryError::Database(format!(
+                        "billing_reconcile: {e} — refusing to bill app {app_id} segment {}",
+                        seg.segment_no
+                    )));
+                }
+            };
+            if breakdown.total_cents == 0 {
+                // A $0 segment posts no Stripe item / line (mirrors the per-app
+                // skip today). The N=0 path skips a $0 app exactly as before.
+                continue;
+            }
+            let desc = segment_description(*app_id, seg, period_start, segments.len());
+            lines.push(BilledLine {
+                app_id: *app_id,
+                segment_no: seg.segment_no,
+                plan_id: seg.plan_id.clone(),
+                desc,
+                amount: breakdown.total_cents,
+                usage: seg.usage_delta.clone(),
+                weights_snapshot: weights_snapshot.clone(),
+                included_units: seg.included_units,
+                // charge_cents succeeded above ⇒ the FX resolved to Some; freeze it.
+                fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit.unwrap_or(0),
+                base_fee_cents: seg.base_fee_cents,
+            });
+            total_cents = total_cents.saturating_add(breakdown.total_cents);
+        }
     }
 
     if total_cents == 0 {
@@ -511,29 +591,35 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         }
     };
 
-    // CRIT-1 (claim-then-call): the per-app `invoice_lines` row is the DURABLE
+    // CRIT-1 (claim-then-call): the per-SEGMENT `invoice_lines` row is the DURABLE
     // double-bill guard, and the DURABLE INTENT (the line + its frozen snapshot)
     // must PRECEDE the irreversible Stripe POST. Presence of a
     // `billing_line_provider_refs` row (a real composite FK → the line) == old
-    // `stripe_item_id NOT NULL`. Load the current per-app posted set.
+    // `stripe_item_id NOT NULL`. round 4, CRITICAL-1: post-`0051` the guards are
+    // keyed `(app_id, segment_no)` — keyed by `app_id` ALONE, N segments of an app
+    // would collide to ONE Stripe item and only segment 0 would post (under-bill).
     let posted_rows = conn
         .query(
-            "SELECT app_id FROM zeroship.billing_line_provider_refs \
+            "SELECT app_id, segment_no FROM zeroship.billing_line_provider_refs \
              WHERE invoice_id = $1 AND provider = 'stripe' AND ref_kind = 'invoice_item'",
             &[&invoice_id],
         )
         .await?;
-    let posted: std::collections::HashSet<Uuid> =
-        posted_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
-    // Which lines already have an intent (snapshot) row written?
+    let posted: std::collections::HashSet<(Uuid, i16)> = posted_rows
+        .iter()
+        .map(|r| (r.get::<_, Uuid>("app_id"), r.get::<_, i16>("segment_no")))
+        .collect();
+    // Which (app, segment) lines already have an intent (snapshot) row written?
     let line_rows = conn
         .query(
-            "SELECT app_id FROM zeroship.invoice_lines WHERE invoice_id = $1",
+            "SELECT app_id, segment_no FROM zeroship.invoice_lines WHERE invoice_id = $1",
             &[&invoice_id],
         )
         .await?;
-    let line_exists: std::collections::HashSet<Uuid> =
-        line_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+    let line_exists: std::collections::HashSet<(Uuid, i16)> = line_rows
+        .iter()
+        .map(|r| (r.get::<_, Uuid>("app_id"), r.get::<_, i16>("segment_no")))
+        .collect();
 
     let period_window = Period {
         start: period_start,
@@ -541,14 +627,15 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     };
     for line in &lines {
         let app_id = &line.app_id;
+        let key = (*app_id, line.segment_no);
         // Confirmed posted in a prior drive — skip outright (no re-POST).
-        if posted.contains(app_id) {
+        if posted.contains(&key) {
             continue;
         }
-        let intent_only = line_exists.contains(app_id);
+        let intent_only = line_exists.contains(&key);
 
-        // SNAPSHOT-ONTO-LINE before the POST: write (or refresh, while still
-        // draft) the line carrying the frozen charge inputs + authoritative
+        // SNAPSHOT-ONTO-(SEGMENT-)LINE before the POST: write (or refresh, while
+        // still draft) the line carrying the frozen charge inputs + authoritative
         // amount. The line trigger keeps these mutable until the parent finalizes.
         let item_amount = i64::try_from(line.amount).map_err(|_| {
             RegistryError::Database(format!(
@@ -565,10 +652,12 @@ pub(crate) async fn bill_creator<S: StripeApi>(
             .map_err(|e| RegistryError::Database(format!("weights_snapshot serialize: {e}")))?;
         conn.execute(
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, \
                 amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-             ON CONFLICT (invoice_id, app_id) DO UPDATE SET \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (invoice_id, app_id, segment_no) DO UPDATE SET \
+               plan_id = EXCLUDED.plan_id, \
                included_units = EXCLUDED.included_units, \
                fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit, \
                base_fee_cents = EXCLUDED.base_fee_cents, \
@@ -578,6 +667,8 @@ pub(crate) async fn bill_creator<S: StripeApi>(
             &[
                 &invoice_id,
                 app_id,
+                &line.segment_no,
+                &line.plan_id,
                 &included_i64,
                 &fx_i64,
                 &base_i64,
@@ -588,7 +679,8 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         )
         .await?;
 
-        let item_key = invoice_item_idempotency_key(creator_id, app_id, period_start);
+        let item_key =
+            invoice_item_idempotency_key(creator_id, app_id, period_start, line.segment_no);
 
         // For an intent-only re-drive, first try to ADOPT an already-posted item
         // by its deterministic metadata key (closes the >24h window where the
@@ -603,6 +695,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
                 tracing::warn!(
                     creator_id = %creator_id,
                     app_id = %app_id,
+                    segment_no = line.segment_no,
                     "billing_reconcile: adopted an already-posted invoice item on re-drive (intent recovery)"
                 );
             }
@@ -623,15 +716,15 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         };
 
         // Confirm the post: write the line provider-ref (the real composite FK ⇒
-        // a malformed key is rejected at write). A crash AFTER the POST but BEFORE
-        // this INSERT leaves the line with no ref — the next drive adopts via the
-        // metadata lookup, so the item is still posted AT MOST ONCE.
+        // a malformed (invoice, app, segment) key is rejected at write). A crash
+        // AFTER the POST but BEFORE this INSERT leaves the line with no ref — the
+        // next drive adopts via the metadata lookup, so the item posts AT MOST ONCE.
         conn.execute(
             "INSERT INTO zeroship.billing_line_provider_refs \
-               (invoice_id, app_id, provider, ref_kind, external_id) \
-             VALUES ($1, $2, 'stripe', 'invoice_item', $3) \
-             ON CONFLICT (invoice_id, app_id, provider, ref_kind) DO NOTHING",
-            &[&invoice_id, app_id, &item_id],
+               (invoice_id, app_id, segment_no, provider, ref_kind, external_id) \
+             VALUES ($1, $2, $3, 'stripe', 'invoice_item', $4) \
+             ON CONFLICT (invoice_id, app_id, segment_no, provider, ref_kind) DO NOTHING",
+            &[&invoice_id, app_id, &line.segment_no, &item_id],
         )
         .await?;
     }
@@ -768,17 +861,46 @@ fn is_already_finalized(e: &crate::stripe_store::StripeError) -> bool {
     )
 }
 
-/// One priced per-app line during a reconcile, carrying the frozen charge inputs
-/// (the snapshot) so a finalized invoice replays bit-for-bit.
+/// One priced per-SEGMENT line during a reconcile, carrying the frozen charge
+/// inputs (the snapshot) so a finalized invoice replays bit-for-bit. PR-4: an app
+/// with N plan-change events emits N+1 of these (one per segment); the no-change
+/// path emits exactly one at `segment_no = 0`.
 struct BilledLine {
     app_id: Uuid,
+    segment_no: i16,
+    plan_id: String,
     desc: String,
     amount: u64,
+    /// The segment's usage DELTA (`max(0, end−start)` per metric), NOT a cumulative.
     usage: std::collections::HashMap<String, i64>,
     weights_snapshot: std::collections::BTreeMap<String, MetricWeight>,
     included_units: u64,
     fx_pico_cents_per_unit: u64,
     base_fee_cents: u64,
+}
+
+/// Per-segment Stripe line-item description (MISSING-3). The no-change path (a
+/// single full-period segment) keeps today's description with no day-span suffix;
+/// a prorated segment carries its plan + half-open day-span so the creator's
+/// Stripe-hosted invoice reads correctly per segment, e.g.
+/// `"Infra usage — app <id> — 2026-05 (pln_… days 11–30)"`.
+fn segment_description(
+    app_id: Uuid,
+    seg: &crate::proration::BilledSegment,
+    period_start_unix: i64,
+    segment_count: usize,
+) -> String {
+    let label = month_label(period_start_unix);
+    if segment_count <= 1 {
+        format!("Infra usage — app {app_id} — {label}")
+    } else {
+        // Half-open `[start_day, end_day)` rendered as an inclusive day range.
+        let last_day = seg.end_day.saturating_sub(1);
+        format!(
+            "Infra usage — app {app_id} — {label} ({}, days {}–{})",
+            seg.plan_id, seg.start_day, last_day
+        )
+    }
 }
 
 /// Resolve the apps owned by ONE creator (the per-creator slice of the same
@@ -805,6 +927,10 @@ pub(crate) async fn owned_app_ids(
 }
 
 /// Resolve an app's `plan_id`. Returns `None` if the app row is gone.
+// PR-4 made the per-app reconcile path read the plan via `lookup_plan_id_on` on
+// a borrowed connection (it already holds one), so this owned-connection variant
+// has no in-tree caller; kept as the documented sibling of `lookup_plan_id_on`.
+#[allow(dead_code)]
 #[allow(clippy::future_not_send)]
 pub(crate) async fn lookup_plan_id(state: &AppState, app_id: &Uuid) -> Result<Option<String>, RegistryError> {
     let conn = state.registry.conn().await?;
@@ -869,17 +995,23 @@ mod tests {
         let p = 1_700_000_000i64;
         // Stable for a fixed tuple.
         assert_eq!(
-            invoice_item_idempotency_key(&creator, &app_a, p),
-            invoice_item_idempotency_key(&creator, &app_a, p),
+            invoice_item_idempotency_key(&creator, &app_a, p, 0),
+            invoice_item_idempotency_key(&creator, &app_a, p, 0),
         );
         // Distinct per app and per period.
         assert_ne!(
-            invoice_item_idempotency_key(&creator, &app_a, p),
-            invoice_item_idempotency_key(&creator, &app_b, p),
+            invoice_item_idempotency_key(&creator, &app_a, p, 0),
+            invoice_item_idempotency_key(&creator, &app_b, p, 0),
         );
         assert_ne!(
-            invoice_item_idempotency_key(&creator, &app_a, p),
-            invoice_item_idempotency_key(&creator, &app_a, p + 1),
+            invoice_item_idempotency_key(&creator, &app_a, p, 0),
+            invoice_item_idempotency_key(&creator, &app_a, p + 1, 0),
+        );
+        // round 4, CRITICAL-1: distinct per SEGMENT — else N segments collide to
+        // one Stripe item and only segment 0 posts (under-bill).
+        assert_ne!(
+            invoice_item_idempotency_key(&creator, &app_a, p, 0),
+            invoice_item_idempotency_key(&creator, &app_a, p, 1),
         );
         // Invoice key format.
         assert_eq!(invoice_idempotency_key(&creator, p), format!("billrun:{creator}:{p}"));
@@ -1062,7 +1194,7 @@ mod tests {
         assert_eq!(breakdown.total_cents, 750);
 
         let fake = RecordingStripe::default();
-        let item_key = invoice_item_idempotency_key(&creator, &app, period);
+        let item_key = invoice_item_idempotency_key(&creator, &app, period, 0);
         fake.create_invoice_item(
             "cus_fake",
             breakdown.total_cents,
@@ -1081,7 +1213,7 @@ mod tests {
         let items = fake.items.borrow();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].1, 750, "the per-app amount equals charge_cents total");
-        assert_eq!(items[0].2, format!("billitem:{creator}:{app}:{period}"));
+        assert_eq!(items[0].2, format!("billitem:{creator}:{app}:{period}:0"));
         assert_eq!(fake.invoices.borrow()[0].1, format!("billrun:{creator}:{period}"));
     }
 }

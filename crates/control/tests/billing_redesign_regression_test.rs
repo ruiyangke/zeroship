@@ -188,10 +188,15 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
     .unwrap();
     client
         .execute(
+            // PR-4 reshape: invoice_lines now carries segment_no + plan_id (both
+            // NOT NULL). A single full-period line is segment_no=0 with the app's
+            // current plan (resolved via subquery so the plan_id FK always holds).
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, \
                 amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
+                     $3, $4, $5, $6, $7, $8)",
             &[
                 &inv,
                 &app,
@@ -347,9 +352,10 @@ async fn finalized_invoice_with_line(
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
-                amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, 0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
+                     0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
             &[&inv, &app],
         )
         .await
@@ -471,9 +477,10 @@ async fn finalized_invoice_rejects_line_insert() {
     let res = client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
-                amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, 0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
+                     0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
             &[&inv, &app2],
         )
         .await;
@@ -489,9 +496,10 @@ async fn finalized_invoice_rejects_line_insert() {
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
-                amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, 0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
+                     0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
             &[&draft, &app3],
         )
         .await
@@ -510,9 +518,10 @@ async fn draft_invoice_lines_stay_mutable_until_finalize() {
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
-                amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, 0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
+                     0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
             &[&inv, &app],
         )
         .await

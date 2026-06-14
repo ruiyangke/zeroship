@@ -716,11 +716,96 @@ pub async fn set_plan(
         }
     }
 
-    match state.registry.set_plan(&uid, &body.plan_id).await {
-        Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
-        Ok(false) => {
+    // PR-4 (full usage-segment proration): record a plan-change-events row with
+    // SERVER-DERIVED frozen base fees + a cumulative usage_at_change snapshot IN
+    // THE SAME TXN as the apps.plan_id flip, under the per-creator advisory lock.
+    // The target plan must be a real, non-archived plan; resolve the catalog base
+    // fee for it (server-side — never client-supplied) and for the from-plan.
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    let to_plan = match catalog.get(&body.plan_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "unknown plan"}))
+        }
+        Err(e) => return error_response(e),
+    };
+    let to_base_fee = match i64::try_from(to_plan.price.base_fee_cents) {
+        Ok(v) => v,
+        Err(_) => {
+            return error_response(RegistryError::Database(
+                "to_plan base_fee_cents exceeds i64::MAX".to_string(),
+            ))
+        }
+    };
+
+    // Resolve the app's current plan (the from-plan) and its owning creator (for
+    // the advisory lock + period attribution). An app with NO owner row (e.g. the
+    // system console) has no billable creator — flip the plan without recording a
+    // proration timeline (there is no creator to bill).
+    let conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+    let from_plan_id: Option<String> = match conn
+        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&uid])
+        .await
+    {
+        Ok(rows) => rows.first().map(|r| r.get::<_, String>("plan_id")),
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+    if from_plan_id.is_none() {
+        // The app row does not exist at all.
+        return web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}));
+    }
+    let from_base_fee: Option<i64> = match &from_plan_id {
+        Some(fp) => match catalog.get(fp).await {
+            Ok(Some(p)) => i64::try_from(p.price.base_fee_cents).ok(),
+            _ => None,
+        },
+        None => None,
+    };
+    let owner: Option<Uuid> = match conn
+        .query(
+            "SELECT user_id FROM zeroship.app_members WHERE app_id = $1 AND role = 'owner' LIMIT 1",
+            &[&uid],
+        )
+        .await
+    {
+        Ok(rows) => rows.first().map(|r| r.get::<_, Uuid>("user_id")),
+        Err(e) => return error_response(RegistryError::Database(e.to_string())),
+    };
+    drop(conn);
+
+    let Some(creator_id) = owner else {
+        // No billable creator (system app): plain flip, no proration timeline.
+        return match state.registry.set_plan(&uid, &body.plan_id).await {
+            Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
+            Ok(false) => {
+                web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+            }
+            Err(e) => error_response(e),
+        };
+    };
+
+    // The shared server-side write path (advisory lock + server-derived usage
+    // snapshot + plan flip + cap + finalized-period attribution) in ONE txn.
+    match crate::proration::record_plan_change_tx(
+        &state.registry,
+        &uid,
+        &creator_id,
+        from_plan_id.as_deref(),
+        &body.plan_id,
+        from_base_fee,
+        to_base_fee,
+        chrono::Utc::now().timestamp(),
+    )
+    .await
+    {
+        Ok(crate::proration::PlanChangeOutcome::AppNotFound) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
+        Ok(_) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
         Err(e) => error_response(e),
     }
 }

@@ -29,6 +29,7 @@ pub mod openmeter_client;
 pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
+pub mod proration;
 pub mod rate_limit;
 pub mod refund;
 pub mod registry;

@@ -103,10 +103,13 @@ async fn delete_app_with_invoice_history_returns_typed_conflict() {
         .expect("seed draft invoice");
     client
         .execute(
+            // PR-4 reshape: segment_no + plan_id (NOT NULL). A single full-period
+            // line is segment_no=0 with the app's current plan (subquery FK).
             "INSERT INTO zeroship.invoice_lines \
-               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
-                amount_cents, usage_snapshot, weights_snapshot) \
-             VALUES ($1, $2, 0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
+                     0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
             &[&inv, &app.id],
         )
         .await

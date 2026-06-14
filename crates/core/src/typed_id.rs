@@ -252,6 +252,16 @@ pub const CREDIT_PREFIX: &str = "crd";
 /// `DEFAULT` — there is no in-DB base62 generator).
 pub const REFUND_PREFIX: &str = "ref";
 
+/// Plan-change-event typed-id prefix (billing-ops gap #26, PR-4: full usage-segment
+/// proration). Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
+/// every other entity uses (R16-API2), and disjoint from `inv`/`ipy`/`crd`/`ref`/`pln`
+/// so a plan-change-event id can never be confused with the plan it names or the
+/// invoice line its segment becomes. The `zeroship.plan_change_events.id` column
+/// stores the full typed-id string (`pce_<base62>`), minted in Rust by `set_plan`
+/// when it appends a proration-timeline row (no SQL `DEFAULT` — there is no in-DB
+/// base62 generator).
+pub const PLAN_CHANGE_EVENT_PREFIX: &str = "pce";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -325,6 +335,14 @@ pub fn new_credit_id() -> String {
 /// bridge (billing-ops gap #26, PR-3).
 pub fn new_refund_id() -> String {
     generate(REFUND_PREFIX)
+}
+
+/// Generate a new plan-change-event ID: `pce_{base62(uuidv7)}`. Minted by
+/// `api.rs::set_plan` when it appends a proration-timeline row recording a plan
+/// change with its server-derived frozen base fees + cumulative `usage_at_change`
+/// snapshot (billing-ops gap #26, PR-4: full usage-segment proration).
+pub fn new_plan_change_event_id() -> String {
+    generate(PLAN_CHANGE_EVENT_PREFIX)
 }
 
 #[cfg(test)]
@@ -474,6 +492,28 @@ mod tests {
         assert_ne!(prefix, INVOICE_PREFIX);
         assert_ne!(prefix, INVOICE_PAYMENT_PREFIX);
         assert_ne!(prefix, CREDIT_PREFIX);
+    }
+
+    #[test]
+    fn plan_change_event_prefix_is_three_chars_and_disjoint() {
+        assert_eq!(
+            PLAN_CHANGE_EVENT_PREFIX.len(),
+            3,
+            "plan-change-event prefix must be 3 chars (R16-API2)"
+        );
+        let p = new_plan_change_event_id();
+        assert!(p.starts_with("pce_"));
+        assert_eq!(p.len(), 26, "pce_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&p).expect("new_plan_change_event_id must roundtrip");
+        assert_eq!(prefix, "pce");
+        // Disjoint from every sibling money/plan-record prefix so a plan-change-event
+        // id can never be confused with the plan it names or the invoice line its
+        // segment becomes.
+        assert_ne!(prefix, INVOICE_PREFIX);
+        assert_ne!(prefix, INVOICE_PAYMENT_PREFIX);
+        assert_ne!(prefix, CREDIT_PREFIX);
+        assert_ne!(prefix, REFUND_PREFIX);
+        assert_ne!(prefix, PLAN_PREFIX);
     }
 
     #[test]
