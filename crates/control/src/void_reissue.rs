@@ -10,10 +10,30 @@
 //! A finalized invoice is NEVER edited in place (the immutability trigger permits
 //! exactly one transition: `finalized → void`, with the four money columns held
 //! equal). To correct a wrong bill, an operator VOIDS it and the reconciler reissues a
-//! fresh, re-priced invoice into the released period slot. The whole sequence runs
-//! under the SAME per-creator advisory lock the reconciler's credit-consume takes, so
-//! a void+reissue can never interleave with a concurrent reconcile claim/finalize for
-//! the same creator.
+//! fresh, re-priced invoice into the released period slot.
+//!
+//! ## Re-drivable to completion (MAJOR-2)
+//!
+//! The sequence is three phases — Phase 1 (void + `void_reversal`), Phase 2 (reissue),
+//! Phase 3 (true-up) — and each MONEY mutation is individually serialized per creator:
+//!   * Phase 1 takes the per-creator advisory lock and appends `void_reversal` + flips
+//!     the invoice to `void` in ONE txn.
+//!   * Phase 2's `bill_creator` re-acquires the SAME lock inside its own `consume_at_finalize`
+//!     txn (a separate session — it CANNOT share Phase 1's txn, so a single all-phases
+//!     transaction would self-deadlock; hence the phases stay separate but each is locked).
+//!   * Phase 3's true-up refund takes the SAME lock inside `claim_refund_locked`.
+//!
+//! Crucially the WHOLE operation is RE-DRIVABLE: [`void_and_reissue`] accepts an
+//! ALREADY-VOID invoice and converges the reissue + true-up tail. A crash between the
+//! Phase-1 commit and Phase 3 therefore is NOT terminal — re-invoking the endpoint (or a
+//! sweep) on the voided invoice completes the reissue + true-up idempotently:
+//!   * Phase 1 is skipped when the invoice is already void (the `already_reversed` guard
+//!     also makes the `void_reversal` append a no-op on re-drive);
+//!   * Phase 2's `bill_creator` short-circuits on an already-finalized active invoice for
+//!     the period (it never double-reissues);
+//!   * Phase 3's true-up is idempotency-keyed on `trueup:{invoice_id}` (it never
+//!     double-refunds).
+//! So a re-invocation observes the same `VoidReissueOutcome` and the balance is conserved.
 //!
 //! ## void_reversal — conserving consumed credit (CRITICAL-2)
 //!
@@ -115,64 +135,83 @@ pub async fn void_and_reissue<S: StripeApi>(
     let creator_id: uuid::Uuid = row.get("creator_id");
     let period: chrono::NaiveDate = row.get("period");
     let status: String = row.get("status");
-    if status != "finalized" {
+    // MAJOR-2: a `finalized` invoice is voided then reissued. An ALREADY-`void` invoice
+    // is a RE-DRIVE of a crash between the Phase-1 commit and Phase 3 — we skip Phase 1
+    // (it is already void + reversed) and converge the reissue + true-up tail. A `draft`
+    // invoice is never voidable.
+    if status != "finalized" && status != "void" {
         return Err(RegistryError::InvalidInput(format!(
             "invoice {invoice_id} is {status}, not finalized — only a finalized invoice can be voided"
         )));
     }
+    let needs_void = status == "finalized";
 
     // ── Phase 1: void + void_reversal, in ONE txn, under the per-creator lock ──
-    let tx = conn.transaction().await?;
-    take_per_creator_lock(&tx, &creator_id).await?;
+    // Skipped on a re-drive (already void): the `void_reversal` is already appended and
+    // the invoice is already flipped — Phase 1 has nothing left to do.
+    if needs_void {
+        let tx = conn.transaction().await?;
+        take_per_creator_lock(&tx, &creator_id).await?;
 
-    // CRITICAL-2: restore the credit the voided invoice consumed BEFORE it is voided,
-    // so the reissue re-consumes from the restored balance. One positive `void_reversal`
-    // per `consumed` row the voided invoice drew (`-c.amount_cents` flips negative→positive,
-    // matching the kind↔sign + grant-ref CHECKs). Idempotent: if void_reversal entries
-    // already exist for this invoice (a re-drive), skip the append.
-    let already_reversed = tx
-        .query(
-            "SELECT 1 FROM zeroship.credit_ledger \
-             WHERE applied_invoice_id = $1 AND kind = 'void_reversal' LIMIT 1",
-            &[&invoice_id],
-        )
-        .await?;
-    if already_reversed.first().is_none() {
-        // Mint the ids in Rust (no in-DB base62 generator) — one per consumed row.
-        let consumed = tx
+        // CRITICAL-2: restore the credit the voided invoice consumed BEFORE it is voided,
+        // so the reissue re-consumes from the restored balance. One positive `void_reversal`
+        // per `consumed` row the voided invoice drew (`-c.amount_cents` flips negative→positive,
+        // matching the kind↔sign + grant-ref CHECKs). Idempotent: if void_reversal entries
+        // already exist for this invoice (a re-drive that crashed mid-Phase-1), skip the append.
+        let already_reversed = tx
             .query(
-                "SELECT amount_cents, currency, consumed_from_grant_id \
-                 FROM zeroship.credit_ledger \
-                 WHERE applied_invoice_id = $1 AND kind = 'consumed'",
+                "SELECT 1 FROM zeroship.credit_ledger \
+                 WHERE applied_invoice_id = $1 AND kind = 'void_reversal' LIMIT 1",
                 &[&invoice_id],
             )
             .await?;
-        for c in &consumed {
-            let amount: i64 = c.get("amount_cents"); // negative
-            let currency: String = c.get("currency");
-            let grant_id: Option<String> = c.get("consumed_from_grant_id");
-            let entry_id = zeroship_core::typed_id::new_credit_id();
-            tx.execute(
-                "INSERT INTO zeroship.credit_ledger \
-                   (id, creator_id, kind, amount_cents, currency, applied_invoice_id, \
-                    consumed_from_grant_id) \
-                 VALUES ($1, $2, 'void_reversal', $3, $4, $5, $6)",
-                &[&entry_id, &creator_id, &(-amount), &currency, &invoice_id, &grant_id],
-            )
-            .await?;
+        if already_reversed.first().is_none() {
+            // Mint the ids in Rust (no in-DB base62 generator) — one per consumed row.
+            let consumed = tx
+                .query(
+                    "SELECT amount_cents, currency, consumed_from_grant_id \
+                     FROM zeroship.credit_ledger \
+                     WHERE applied_invoice_id = $1 AND kind = 'consumed'",
+                    &[&invoice_id],
+                )
+                .await?;
+            for c in &consumed {
+                let amount: i64 = c.get("amount_cents"); // negative
+                let currency: String = c.get("currency");
+                // MINOR: a `consumed` row ALWAYS names its grant (the 0048
+                // credit_ledger_grant_ref CHECK requires it; PR-2 always sets it). Guard
+                // defensively: a NULL would violate that CHECK on the void_reversal INSERT
+                // and abort the whole void cryptically — surface it clearly instead.
+                let Some(grant_id) = c.get::<_, Option<String>>("consumed_from_grant_id") else {
+                    return Err(RegistryError::Database(format!(
+                        "consumed credit_ledger row on invoice {invoice_id} has NULL \
+                         consumed_from_grant_id — cannot build its void_reversal (0048 grant-ref \
+                         CHECK would abort the void); data is inconsistent"
+                    )));
+                };
+                let entry_id = zeroship_core::typed_id::new_credit_id();
+                tx.execute(
+                    "INSERT INTO zeroship.credit_ledger \
+                       (id, creator_id, kind, amount_cents, currency, applied_invoice_id, \
+                        consumed_from_grant_id) \
+                     VALUES ($1, $2, 'void_reversal', $3, $4, $5, $6)",
+                    &[&entry_id, &creator_id, &(-amount), &currency, &invoice_id, &grant_id],
+                )
+                .await?;
+            }
         }
-    }
 
-    // The finalized→void transition: status='void', money columns held EQUAL (the
-    // immutability trigger permits exactly this). voided_at=NOW(). The payment rows
-    // stay in place as the voided invoice's permanent cash record.
-    tx.execute(
-        "UPDATE zeroship.invoices \
-         SET status = 'void', voided_at = NOW(), updated_at = NOW() WHERE id = $1",
-        &[&invoice_id],
-    )
-    .await?;
-    tx.commit().await?;
+        // The finalized→void transition: status='void', money columns held EQUAL (the
+        // immutability trigger permits exactly this). voided_at=NOW(). The payment rows
+        // stay in place as the voided invoice's permanent cash record.
+        tx.execute(
+            "UPDATE zeroship.invoices \
+             SET status = 'void', voided_at = NOW(), updated_at = NOW() WHERE id = $1",
+            &[&invoice_id],
+        )
+        .await?;
+        tx.commit().await?;
+    }
 
     // ── Phase 2: reissue via the REAL reconciler path for the same (creator, period) ──
     // The void released the period claim (the partial unique index `WHERE status <>
@@ -192,7 +231,7 @@ pub async fn void_and_reissue<S: StripeApi>(
     .await?;
 
     // Read back the reissued (active, non-void) invoice id + total for this period.
-    let conn2 = state.registry.conn().await?;
+    let mut conn2 = state.registry.conn().await?;
     let reissued = conn2
         .query(
             "SELECT id, total_cents FROM zeroship.invoices \
@@ -219,7 +258,7 @@ pub async fn void_and_reissue<S: StripeApi>(
         let idem = format!("trueup:{invoice_id}");
         let provider = refund::StripeRefundProvider { stripe };
         let outcome = refund::issue_true_up_refund(
-            &conn2,
+            &mut conn2,
             &provider,
             invoice_id,
             over_collection,

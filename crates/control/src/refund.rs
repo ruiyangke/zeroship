@@ -28,17 +28,34 @@
 //!
 //! ## Claim-then-call idempotency (mirrors the line provider-refs)
 //!
-//! 1. **Idempotency precheck + claim** (in [`issue_refund`]): `INSERT refunds (…,
-//!    'pending', idempotency_key, request_fingerprint) ON CONFLICT (idempotency_key)
-//!    DO NOTHING RETURNING`. 0 rows ⇒ a key hit ⇒ compare the stored fingerprint:
-//!    matches → return the existing refund (safe retry); differs → 409 conflict. The
-//!    over-refund trigger (`0049`) rejects the claim INSERT unless all three
-//!    cash-anchored bounds hold (the Rust path also re-checks before claiming).
+//! 1. **Idempotency precheck + claim** (in [`claim_refund_locked`], run inside a
+//!    transaction that takes the per-creator advisory lock as its FIRST act —
+//!    mirroring [`crate::credit::consume_at_finalize`]): `INSERT refunds (…, 'pending',
+//!    idempotency_key, request_fingerprint) ON CONFLICT (idempotency_key) DO NOTHING
+//!    RETURNING`. 0 rows ⇒ a key hit ⇒ compare the stored fingerprint: matches → re-drive
+//!    the existing refund (safe retry); differs → 409 conflict. The over-refund trigger
+//!    (`0049`) rejects the claim INSERT unless all three cash-anchored bounds hold (the
+//!    Rust path also re-checks before claiming).
 //! 2. **Call** the provider (cash) / append the `refund_to_credit` grant (credit).
 //! 3. **Record claim-AFTER-success:** write the `refund_provider_refs` row (for cash)
 //!    and flip `status='issued'`/`issued_at=NOW()`. A crash BEFORE this leaves the
 //!    refund `pending` with no ref → a re-drive re-issues it (idempotent on the
 //!    deterministic Stripe `Idempotency-Key`); a refund WITH a ref is skipped.
+//!
+//! ## The per-creator advisory lock (over-refund correctness under concurrency)
+//!
+//! The over-refund cap is enforced by both the Rust precheck and the `0049`
+//! BEFORE-INSERT trigger, each reading `Σ(invoice_payments)` against `Σ(refunds)`. Under
+//! READ COMMITTED neither can see a CONCURRENT, still-uncommitted sibling refund: two
+//! simultaneous refunds could each pass the 3-way bound and together exceed
+//! `cash_collected`. So the precheck + claim INSERT run inside a transaction whose FIRST
+//! statement is `pg_advisory_xact_lock(hashtext(creator_id::text)::bigint)` — the SAME
+//! per-creator key [`crate::credit::consume_at_finalize`] takes. Two refunds for one
+//! creator therefore SERIALIZE: the second's precheck/claim sees the first's committed
+//! `pending` row and is rejected. The trigger is a single-statement BACKSTOP; the
+//! application-side lock is what makes the bound hold under concurrency. The provider
+//! (network) call runs AFTER the claim txn commits — a network call never holds a DB txn
+//! (or the lock) open.
 
 use compio_postgres::GenericClient;
 use sha2::{Digest, Sha256};
@@ -267,23 +284,25 @@ pub async fn refunds_total_for_destination<C: GenericClient + Sync>(
 
 /// Issue a refund against a finalized invoice — the operator flow's core helper.
 ///
-/// `conn` MUST be a live connection (a fresh `conn.transaction()` is taken
-/// internally for the claim, and the provider call happens OUTSIDE any txn — a
-/// network call must never hold a DB txn open). Generic over the [`StripeApi`] so a
-/// test drives a recording fake.
+/// `conn` MUST be a live, OWNED connection (`&mut`): the precheck + claim INSERT run
+/// inside a `conn.transaction()` whose first act is the per-creator advisory lock
+/// (mirroring [`crate::credit::consume_at_finalize`]), so the over-refund bound holds
+/// under concurrency. The provider (network) call happens AFTER that txn commits —
+/// a network call must never hold a DB txn (or the lock) open. Generic over the
+/// [`StripeApi`] so a test drives a recording fake.
 ///
 /// Steps (claim-then-call):
 ///   1. Validate the invoice is finalized + read its creator_id/currency.
-///   2. Rust-side over-refund precheck against `Σ(invoice_payments)` (the DB trigger
-///      is the backstop).
-///   3. Claim the `refunds` row `ON CONFLICT (idempotency_key) DO NOTHING` →
-///      Duplicate/Conflict on a key hit (fingerprint compare); OverRefund if the
-///      trigger rejects.
-///   4. Call the provider (cash) / append the `refund_to_credit` grant (credit).
-///   5. Record claim-after-success: the provider ref + `status='issued'`.
+///   2. Open a txn, take `pg_advisory_xact_lock(creator)`, run the Rust-side
+///      over-refund precheck against `Σ(invoice_payments)` (the DB trigger is the
+///      backstop) and claim the `refunds` row `ON CONFLICT (idempotency_key) DO NOTHING`
+///      → Duplicate/Conflict on a key hit (fingerprint compare); OverRefund if the
+///      trigger rejects. Commit the claim txn (releasing the lock).
+///   3. Call the provider (cash) / append the `refund_to_credit` grant (credit).
+///   4. Record claim-after-success: the provider ref + `status='issued'`.
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_refund<C: GenericClient + Sync, P: RefundProvider>(
-    conn: &C,
+    conn: &mut C,
     provider: &P,
     invoice_id: &str,
     amount_cents: i64,
@@ -307,7 +326,7 @@ pub async fn issue_refund<C: GenericClient + Sync, P: RefundProvider>(
 /// always goes through [`issue_refund`] (finalized-only).
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
-    conn: &C,
+    conn: &mut C,
     provider: &P,
     invoice_id: &str,
     amount_cents: i64,
@@ -326,7 +345,7 @@ pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
 
 #[allow(clippy::too_many_arguments)]
 async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
-    conn: &C,
+    conn: &mut C,
     provider: &P,
     invoice_id: &str,
     amount_cents: i64,
@@ -354,7 +373,8 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     }
 
     // (1) The invoice must exist and be finalized. A void/draft invoice is not
-    // refundable. Read its currency + creator for the credit-destination grant.
+    // refundable. Read its currency + creator: the creator_id keys the advisory lock
+    // the claim txn takes (CRITICAL-1).
     let inv = conn
         .query(
             "SELECT creator_id, currency, status FROM zeroship.invoices WHERE id = $1",
@@ -365,13 +385,13 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     let Some(row) = inv.first() else {
         return Ok(RefundOutcome::InvalidInvoice(format!("no invoice {invoice_id}")));
     };
+    let creator_id: uuid::Uuid = row.get("creator_id");
     let currency: String = row.get("currency");
     let status: String = row.get("status");
     // A finalized invoice is refundable. The true-up bridge (`allow_voided`) also
     // refunds a deliberately-VOIDED invoice's over-collection — the cap reads
     // Σ(invoice_payments), which survives the void, so it stays money-correct. A draft
-    // invoice is never refundable. (The creator_id for a credit-destination grant is
-    // re-read inside `drive_pending_refund` via the refunds→invoices join.)
+    // invoice is never refundable.
     let refundable = status == "finalized" || (allow_voided && status == "void");
     if !refundable {
         return Ok(RefundOutcome::InvalidInvoice(format!(
@@ -379,34 +399,109 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
         )));
     }
 
+    // (2)+(3) CRITICAL-1: precheck + claim under the per-creator advisory lock so the
+    // over-refund bound holds under concurrency. The claim runs in its OWN txn (a
+    // trigger RAISE rolls back only the claim, never the caller's connection state) and
+    // commits BEFORE the provider call — a network call must never hold the lock open.
+    let claim = {
+        let tx = conn.transaction().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        let claim = claim_refund_locked(
+            &tx, &creator_id, invoice_id, amount_cents, subtotal_cents, tax_cents, &currency,
+            destination, reason, idempotency_key,
+        )
+        .await?;
+        // OverRefund / Conflict need no committed row; but committing is harmless (the
+        // claim INSERT either did nothing or wrote a `pending` row we now drive).
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        claim
+    };
+
+    // (4)+(5): drive the claimed/duplicate refund to `issued` (provider call OUTSIDE
+    // any txn). Re-driving a refund WITH a ref is a no-op skip.
+    match claim {
+        ClaimResult::Claimed(refund_id) | ClaimResult::DuplicateSameBody(refund_id) => {
+            drive_pending_refund(conn, provider, &refund_id).await
+        }
+        ClaimResult::OverRefund(msg) => Ok(RefundOutcome::OverRefund(msg)),
+        ClaimResult::Conflict => Ok(RefundOutcome::Conflict),
+    }
+}
+
+/// The outcome of [`claim_refund_locked`]: the locked precheck + claim step.
+/// `pub` so the lock regression test can drive the claim on a caller-held tx and
+/// observe the per-creator advisory lock (mirroring the PR-2 consume-lock test); not
+/// part of the operator surface.
+#[derive(Debug)]
+pub enum ClaimResult {
+    /// A fresh `pending` row was claimed; carries its `ref_…` id (drive it next).
+    Claimed(String),
+    /// The idempotency key was reused with the SAME body — the first refund's id
+    /// (re-drive it to converge a prior crash; a fully-issued one is a no-op skip).
+    DuplicateSameBody(String),
+    /// Over the cash-anchored cap (precheck or the trigger backstop). No row claimed.
+    OverRefund(String),
+    /// Idempotency key reused with a DIFFERENT body. No row claimed.
+    Conflict,
+}
+
+/// Precheck the over-refund bound and claim the `refunds` row, SERIALIZED per creator.
+///
+/// MUST run inside a transaction (`tx`): the FIRST statement is
+/// `pg_advisory_xact_lock(hashtext(creator_id::text)::bigint)` — the SAME key
+/// [`crate::credit::consume_at_finalize`] takes — so two concurrent refunds for one
+/// creator serialize and the second sees the first's committed `pending` row. The
+/// over-refund trigger (`0049`) is the single-statement BACKSTOP; this lock is what
+/// makes the cap hold under concurrency.
+///
+/// `pub` only so the lock regression test can drive it directly on a caller-held tx (as
+/// the PR-2 consume-lock test drives `consume_at_finalize`); the operator path goes
+/// through [`issue_refund`].
+#[allow(clippy::too_many_arguments)]
+pub async fn claim_refund_locked<C: GenericClient + Sync>(
+    tx: &C,
+    creator_id: &uuid::Uuid,
+    invoice_id: &str,
+    amount_cents: i64,
+    subtotal_cents: i64,
+    tax_cents: i64,
+    currency: &str,
+    destination: RefundDestination,
+    reason: Option<&str>,
+    idempotency_key: &str,
+) -> Result<ClaimResult, RegistryError> {
+    // SERIALIZE per creator — the first act of the txn (mirrors consume_at_finalize).
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
+        &[&creator_id.to_string()],
+    )
+    .await
+    .map_err(|e| RegistryError::Database(e.to_string()))?;
+
     let fingerprint =
         refund_fingerprint(invoice_id, amount_cents, subtotal_cents, tax_cents, destination);
 
-    // (2) Rust-side over-refund precheck against Σ(invoice_payments). The DB trigger
-    // is the authoritative backstop; this gives a clean OverRefund outcome (vs a raw
-    // CHECK error) before we mint an id.
-    let cash = cash_collected(conn, invoice_id).await?;
-    let prior_cash = refunds_total_for_destination(conn, invoice_id, RefundDestination::Cash).await?;
+    // Rust-side over-refund precheck against Σ(invoice_payments). Under the lock this
+    // sees every COMMITTED sibling refund; the DB trigger is the authoritative backstop.
+    let cash = cash_collected(tx, invoice_id).await?;
+    let prior_cash = refunds_total_for_destination(tx, invoice_id, RefundDestination::Cash).await?;
     let prior_credit =
-        refunds_total_for_destination(conn, invoice_id, RefundDestination::Credit).await?;
+        refunds_total_for_destination(tx, invoice_id, RefundDestination::Credit).await?;
     let (new_cash, new_credit) = match destination {
         RefundDestination::Cash => (prior_cash + amount_cents, prior_credit),
         RefundDestination::Credit => (prior_cash, prior_credit + amount_cents),
     };
     if new_cash > cash || new_credit > cash || new_cash + new_credit > cash {
-        return Ok(RefundOutcome::OverRefund(format!(
+        return Ok(ClaimResult::OverRefund(format!(
             "refund of {amount_cents} ({}) would exceed cash collected {cash} on invoice {invoice_id} \
              (existing cash {prior_cash} / credit {prior_credit})",
             destination.as_str()
         )));
     }
 
-    // (3) Claim. INSERT … ON CONFLICT (idempotency_key) DO NOTHING. The over-refund
-    // trigger fires on this INSERT; if it RAISEs (a concurrent claim pushed past the
-    // cap between our precheck and now) we surface OverRefund. We do the claim in its
-    // OWN short txn so a trigger RAISE doesn't poison the caller's connection state.
+    // Claim. INSERT … ON CONFLICT (idempotency_key) DO NOTHING. The over-refund trigger
+    // fires on this INSERT; if it RAISEs we surface OverRefund.
     let refund_id = zeroship_core::typed_id::new_refund_id();
-    let claim = conn
+    let claim = tx
         .query(
             "INSERT INTO zeroship.refunds \
                (id, invoice_id, amount_cents, subtotal_cents, tax_cents, currency, \
@@ -434,7 +529,7 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
             // The over-refund trigger RAISEs as a raised_exception (P0001). Map it to
             // a clean OverRefund; any other DB error propagates.
             if e.code() == Some(&compio_postgres::error::SqlState::RAISE_EXCEPTION) {
-                return Ok(RefundOutcome::OverRefund(format!(
+                return Ok(ClaimResult::OverRefund(format!(
                     "over-refund trigger rejected the claim on invoice {invoice_id}"
                 )));
             }
@@ -444,7 +539,7 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
 
     if claim.first().is_none() {
         // Key hit — compare the stored fingerprint (safe retry vs reuse-conflict).
-        let existing = conn
+        let existing = tx
             .query(
                 "SELECT id, request_fingerprint FROM zeroship.refunds WHERE idempotency_key = $1",
                 &[&idempotency_key],
@@ -452,21 +547,17 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
             .await
             .map_err(|e| RegistryError::Database(e.to_string()))?;
         let Some(er) = existing.first() else {
-            return Ok(RefundOutcome::Conflict);
+            return Ok(ClaimResult::Conflict);
         };
         let existing_id: String = er.get("id");
         let existing_fp: String = er.get("request_fingerprint");
         if existing_fp == fingerprint {
-            // Same key + same body. The first refund may still be 'pending' (a prior
-            // crash before the provider call) — re-drive it to converge. Re-driving a
-            // refund WITH a ref is a no-op skip.
-            return drive_pending_refund(conn, provider, &existing_id).await;
+            return Ok(ClaimResult::DuplicateSameBody(existing_id));
         }
-        return Ok(RefundOutcome::Conflict);
+        return Ok(ClaimResult::Conflict);
     }
 
-    // (4) + (5): the row is claimed ('pending'). Drive it to 'issued'.
-    drive_pending_refund(conn, provider, &refund_id).await
+    Ok(ClaimResult::Claimed(refund_id))
 }
 
 /// Drive a claimed `pending` refund to `issued`: call the provider (cash) / append
@@ -558,9 +649,12 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
         }
         RefundDestination::Credit => {
             // Platform-native: append a `refund_to_credit` grant, NO Stripe call. The
-            // grant is keyed off the refund id (one grant per refund) so a re-drive
-            // does not double-grant: guard on an existing grant for this invoice with
-            // a matching note marker.
+            // grant's `note` carries the refund identity (one grant per refund). MAJOR-1:
+            // the DURABLE dedup is the `credit_ledger_refund_to_credit_note_idx` partial
+            // UNIQUE on that note — so a concurrent / crash-window re-drive can NEVER
+            // double-grant, even without the lock. The SELECT below is a cheap fast-path
+            // skip (avoids minting an id), and the INSERT is `ON CONFLICT DO NOTHING` so a
+            // racing sibling that wins the unique simply no-ops here.
             let marker = refund_to_credit_note(refund_id);
             let existing_grant = conn
                 .query(
@@ -575,7 +669,8 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
                 conn.execute(
                     "INSERT INTO zeroship.credit_ledger \
                        (id, creator_id, kind, amount_cents, currency, applied_invoice_id, note) \
-                     VALUES ($1, $2, 'refund_to_credit', $3, $4, $5, $6)",
+                     VALUES ($1, $2, 'refund_to_credit', $3, $4, $5, $6) \
+                     ON CONFLICT (note) WHERE kind = 'refund_to_credit' DO NOTHING",
                     &[&grant_id, &creator_id, &amount_cents, &currency, &invoice_id, &marker],
                 )
                 .await
@@ -595,7 +690,9 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
 
 /// The stable `credit_ledger.note` marker for the `refund_to_credit` grant a
 /// `destination='credit'` refund appends — the re-drive dedup key (one grant per
-/// refund, even though `credit_ledger` carries no refund FK).
+/// refund). `credit_ledger` carries no refund FK, so this note IS the refund identity;
+/// the `credit_ledger_refund_to_credit_note_idx` partial UNIQUE over it (0048, MAJOR-1)
+/// makes a duplicate `refund_to_credit` grant a DB impossibility.
 #[must_use]
 pub fn refund_to_credit_note(refund_id: &str) -> String {
     format!("refund_to_credit:{refund_id}")

@@ -97,6 +97,20 @@ CREATE INDEX credit_ledger_creator_created_idx
 CREATE UNIQUE INDEX credit_ledger_idempotency_key_idx
     ON zeroship.credit_ledger (idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+-- REFUND-TO-CREDIT DEDUP (PR-3 MAJOR-1). A destination='credit' refund appends ONE
+-- `refund_to_credit` grant whose `note` carries the refund identity
+-- (`refund_to_credit:<refund_id>`, one per refund). The Rust re-drive guard is a
+-- SELECT-then-INSERT, which races under concurrency (or a crash-window re-drive); a
+-- note-string match with NO backing constraint cannot make a second append impossible.
+-- This PARTIAL unique on the per-refund note makes a duplicate `refund_to_credit` grant
+-- a DB impossibility, so the insert is `ON CONFLICT DO NOTHING` (defence in depth,
+-- mirroring how cash dedup rests on the refund_provider_refs PK). PARTIAL on
+-- kind='refund_to_credit' so it never constrains grants/promo/consumed/void_reversal
+-- (which legitimately share NULL/non-unique notes).
+CREATE UNIQUE INDEX credit_ledger_refund_to_credit_note_idx
+    ON zeroship.credit_ledger (note)
+    WHERE kind = 'refund_to_credit';
+--rollback DROP INDEX IF EXISTS zeroship.credit_ledger_refund_to_credit_note_idx;
 --rollback DROP INDEX IF EXISTS zeroship.credit_ledger_idempotency_key_idx;
 --rollback DROP INDEX IF EXISTS zeroship.credit_ledger_creator_created_idx;
 --rollback DROP TABLE zeroship.credit_ledger;

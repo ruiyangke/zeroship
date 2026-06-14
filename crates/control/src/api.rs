@@ -1395,7 +1395,7 @@ pub async fn refund_invoice(
         }));
     };
 
-    let conn = match state.registry.conn().await {
+    let mut conn = match state.registry.conn().await {
         Ok(c) => c,
         Err(e) => return error_response(RegistryError::Database(e.to_string())),
     };
@@ -1446,7 +1446,7 @@ pub async fn refund_invoice(
     let provider = crate::refund::StripeRefundProvider { stripe: &stripe };
 
     let outcome = crate::refund::issue_refund(
-        &conn,
+        &mut conn,
         &provider,
         &invoice_id,
         body.amount_cents,

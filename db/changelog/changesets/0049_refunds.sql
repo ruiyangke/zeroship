@@ -109,10 +109,21 @@ CREATE TABLE zeroship.refund_provider_refs (
 -- (i)+(ii) stop EITHER channel alone exceeding the cash actually collected; (iii) stops
 -- the two channels SUMMING past it. Credit-funded value (total_cents − cash_collected) is
 -- NEVER re-granted as cash OR as fresh credit — the credit-laundering defence. A CHECK
--- cannot span rows, so this is a BEFORE-INSERT trigger (the DB-level backstop; the Rust
--- path also checks before claiming). status carries no 'void', so every existing refund
--- row counts. invoice_payments (0046) exists before this function is created (lexicographic
--- changelog order); the SELECT references it directly so 0049 needs no helper function.
+-- cannot span rows, so this is a BEFORE-INSERT trigger.
+--
+-- IMPORTANT — this trigger is a SINGLE-STATEMENT BACKSTOP, not the concurrency guard.
+-- It reads `Σ(refunds … id <> NEW.id)` under READ COMMITTED, so it CANNOT see a
+-- concurrent, still-UNCOMMITTED sibling refund: two simultaneous refunds would each pass
+-- all three bounds and together exceed cash_collected. Concurrent correctness comes from
+-- the APPLICATION-SIDE per-creator advisory lock (`pg_advisory_xact_lock(hashtext(
+-- creator_id::text)::bigint)`, the SAME key credit-consume takes) that
+-- `refund::claim_refund_locked` holds across the precheck + this claim INSERT — so the
+-- second refund serializes behind the first's committed row. Do NOT assume the DB makes
+-- over-refund impossible on its own; the trigger only catches a single in-flight INSERT
+-- that violates the cap against ALREADY-COMMITTED refunds. status carries no 'void', so
+-- every committed refund row counts. invoice_payments (0046) exists before this function
+-- is created (lexicographic changelog order); the SELECT references it directly so 0049
+-- needs no helper function.
 CREATE FUNCTION zeroship.refunds_no_over_refund() RETURNS trigger AS $fn$
 DECLARE cash BIGINT; sum_cash BIGINT; sum_credit BIGINT;
 BEGIN
