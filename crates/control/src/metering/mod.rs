@@ -289,6 +289,18 @@ impl Metering {
         period_start_unix_secs: i64,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         let conn = self.registry.conn().await?;
+        Self::period_totals_on(&conn, app_id, period_start_unix_secs).await
+    }
+
+    /// As [`Metering::period_totals`] but on a BORROWED connection, so a caller
+    /// that already holds a connection (e.g. the metering-export sweep, which
+    /// reads many app reads per tick) does not pay a fresh per-query connection
+    /// handshake. Same query + result shape.
+    pub async fn period_totals_on<C: compio_postgres::GenericClient + Sync>(
+        conn: &C,
+        app_id: &Uuid,
+        period_start_unix_secs: i64,
+    ) -> Result<HashMap<String, i64>, RegistryError> {
         let rows = conn
             .query(
                 "SELECT metric, total FROM zeroship.usage_aggregates \

@@ -53,7 +53,7 @@ use std::time::Duration;
 use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 
-use crate::cron::billing_reconcile::{lookup_plan_id, period_end_unix};
+use crate::cron::billing_reconcile::{lookup_plan_id_on, period_end_unix};
 use crate::metering::{current_period_start_unix, Metering};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::total_units;
@@ -180,11 +180,42 @@ async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, R
             &[],
         )
         .await?;
-    // BTreeMap for deterministic creator ordering.
+    // Bulk pre-filter (single fleet-wide query): the set of apps that COULD have
+    // a non-zero delta this period — those with at least one `usage_aggregates`
+    // row for the swept period (gross usage exists) UNION those carrying a
+    // non-zero export high-water (a prior export whose C2 self-heal / further
+    // delta must still be considered). An app in NEITHER set has gross 0 AND
+    // high-water 0, so its per-app delta is unconditionally 0 (`gross ≤ hw`) — a
+    // guaranteed no-op. Skipping those here means the per-app path (which opens a
+    // fresh, SCRAM-authenticated PG connection per app — there is no pool) runs
+    // only O(apps-with-activity), not O(every-app-ever-owned). Without this, a
+    // long-lived deployment's sweep cost grows with the TOTAL app count even
+    // though almost none have new usage in any given tick.
+    let period_ts: DateTime<Utc> = Utc
+        .timestamp_opt(period_start, 0)
+        .single()
+        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {period_start}")))?;
+    let active_app_rows = conn
+        .query(
+            "SELECT app_id FROM zeroship.usage_aggregates WHERE period_start = $1 \
+             UNION \
+             SELECT app_id FROM zeroship.metering_exports \
+               WHERE period_start = $1 AND exported_units > 0",
+            &[&period_ts],
+        )
+        .await?;
+    let active_apps: std::collections::HashSet<Uuid> =
+        active_app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+
+    // BTreeMap for deterministic creator ordering. Only apps in the active set are
+    // retained — the rest are provable no-ops (see the bulk pre-filter above).
     let mut apps_by_creator: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
     for row in &owner_rows {
-        let creator_id: Uuid = row.get("creator_id");
         let app_id: Uuid = row.get("app_id");
+        if !active_apps.contains(&app_id) {
+            continue;
+        }
+        let creator_id: Uuid = row.get("creator_id");
         apps_by_creator.entry(creator_id).or_default().push(app_id);
     }
 
@@ -192,7 +223,6 @@ async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, R
     // and the billing reconciler use, so the CU pushed == the CU enforced.
     let pricing = PricingStore::new(state.registry.clone());
     let weights = pricing.weights().await?;
-    let metering = Metering::new(state.registry.clone());
     // The catalog resolves each app's plan so the export can subtract the plan's
     // `included_units` — pushing BILLABLE CU (M1), matching what `charge_cents`
     // (and thus the spend cap) treats as billable. Built ONCE per sweep.
@@ -227,7 +257,7 @@ async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, R
 
         for app_id in app_ids {
             match export_app(
-                state, &metering, &catalog, &weights, &customer, &creator_billing, app_id,
+                state, &catalog, &weights, &customer, &creator_billing, app_id,
                 period, now,
             )
             .await
@@ -261,7 +291,6 @@ async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, R
 #[allow(clippy::future_not_send)]
 async fn export_app(
     state: &AppState,
-    metering: &Metering,
     catalog: &PlanCatalog,
     weights: &crate::pricing::MetricWeights,
     customer: &CustomerRef,
@@ -270,8 +299,22 @@ async fn export_app(
     period: BillingPeriod,
     now: i64,
 ) -> Result<bool, RegistryError> {
+    // Open ONE connection for ALL of this app's reads + writes this tick. The
+    // control-plane `Registry` opens a fresh PG connection per query (no pool), so
+    // a fleet-wide sweep that opened a connection per helper call would pay a TCP
+    // + startup handshake several times PER APP — O(apps) handshakes per tick. The
+    // sweep is read-heavy and per-app independent, so a single borrowed connection
+    // (threaded through `period_totals_on` / `lookup_plan_id_on` / the high-water
+    // read + writes) collapses that to one handshake per app.
+    let conn = state.registry.conn().await?;
+
+    let period_ts: DateTime<Utc> = Utc
+        .timestamp_opt(period.start, 0)
+        .single()
+        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {}", period.start)))?;
+
     // 1. CURRENT cumulative GROSS CU — the SAME derivation the spend cap uses.
-    let usage = metering.period_totals(app_id, period.start).await?;
+    let usage = Metering::period_totals_on(&conn, app_id, period.start).await?;
     let gross_units = total_units(weights, &usage).map_err(|e| {
         // An overflow is a hard error (never a clamp) — skip this app's export
         // this tick; the high-water is untouched so a later (fixed) tick retries.
@@ -280,13 +323,35 @@ async fn export_app(
         ))
     })?;
 
+    // 2. The per-(app, period) high-water (cumulative billable CU already pushed).
+    let high_water: u64 = conn
+        .query(
+            "SELECT exported_units FROM zeroship.metering_exports \
+             WHERE app_id = $1 AND period_start = $2",
+            &[app_id, &period_ts],
+        )
+        .await?
+        .first()
+        .map_or(0, |r| r.get::<_, i64>("exported_units").max(0) as u64);
+
+    // 3a. EARLY fast-path no-op (before the plan lookup): `current_units` is
+    //     `gross − included ≤ gross`, so if the high-water already covers the
+    //     GROSS total it certainly covers the billable `current`. The fleet-wide
+    //     sweep visits EVERY owned app each tick, and the vast majority have no new
+    //     usage for the swept period (gross == high_water, both often 0). Bailing
+    //     here skips BOTH the plan-catalog round-trip AND the external read for
+    //     those apps — the dominant cost when the sweep scans many apps.
+    if gross_units <= high_water {
+        return Ok(false);
+    }
+
     // M1 — BILLABLE CU parity: subtract the plan's `included_units` so the CU
     // pushed to Stripe == the CU `charge_cents` (and thus the spend cap) treats
     // as billable. `billable = max(0, gross − included)`, identical to
     // `ChargeBreakdown.billable_units`. The plan's `base_fee_cents` is a SEPARATE
     // Stripe subscription line — NOT part of the metered usage. An app whose plan
     // is missing from the catalog is skipped (the local ledger is unaffected).
-    let included_units = match lookup_plan_id(state, app_id).await? {
+    let included_units = match lookup_plan_id_on(&conn, app_id).await? {
         Some(plan_id) => match catalog.get(&plan_id).await? {
             Some(plan) => plan.price.included_units,
             None => {
@@ -301,27 +366,11 @@ async fn export_app(
     };
     let current_units = gross_units.saturating_sub(included_units);
 
-    let period_ts: DateTime<Utc> = Utc
-        .timestamp_opt(period.start, 0)
-        .single()
-        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {}", period.start)))?;
-
-    let conn = state.registry.conn().await?;
-
-    // 2. The per-(app, period) high-water (cumulative billable CU already pushed).
-    let high_water: u64 = conn
-        .query(
-            "SELECT exported_units FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period_start = $2",
-            &[app_id, &period_ts],
-        )
-        .await?
-        .first()
-        .map_or(0, |r| r.get::<_, i64>("exported_units").max(0) as u64);
-
-    // 3. Fast-path no-op: the local high-water already covers `current`. A re-run
-    //    over an unchanged total (or a crash AFTER the high-water write) pushes
-    //    nothing and skips the external round-trip.
+    // 3b. Fast-path no-op after the included-units subtraction: the local
+    //     high-water already covers the BILLABLE `current` (e.g. all of this
+    //     period's gross usage is within the plan's included quota). A re-run over
+    //     an unchanged total (or a crash AFTER the high-water write) pushes
+    //     nothing and skips the external round-trip.
     if current_units <= high_water {
         return Ok(false);
     }

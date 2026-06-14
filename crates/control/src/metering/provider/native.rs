@@ -30,7 +30,6 @@ use super::types::{
 };
 use super::MeteringProvider;
 use crate::cron::billing_reconcile;
-use crate::metering::Metering;
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing_store::PricingStore;
 use crate::stripe_client::StripeClient;
@@ -131,7 +130,6 @@ impl MeteringProvider for NativeProvider {
         // `bill_creator` carries the hardened C1/C2 + MAJOR crash-window logic
         // unchanged.
         let stripe = Self::stripe(state);
-        let metering = Metering::new(state.registry.clone());
         let catalog = PlanCatalog::new(state.registry.clone());
         let pricing = PricingStore::new(state.registry.clone());
         let weights = pricing.weights().await?;
@@ -142,7 +140,6 @@ impl MeteringProvider for NativeProvider {
         let billed = billing_reconcile::bill_creator(
             state,
             &stripe,
-            &metering,
             &catalog,
             &weights,
             default_fx,

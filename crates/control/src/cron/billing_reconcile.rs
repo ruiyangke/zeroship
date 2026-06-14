@@ -226,15 +226,41 @@ async fn sweep<S: StripeApi>(
             &[],
         )
         .await?;
+    // Bulk pre-filter (single fleet-wide query): only apps with at least one
+    // `usage_aggregates` row for the CLOSED period can produce a non-zero charge —
+    // every other app prices to `total_cents == 0` and is skipped inside
+    // `bill_creator` anyway. Dropping them BEFORE the per-creator/per-app loop
+    // means the per-app pricing reads (each of which opens a fresh,
+    // SCRAM-authenticated PG connection — `Registry` has no pool) run only over
+    // apps that actually accrued usage, not over every app ever owned. A creator
+    // left with no active app would have billed `total_cents == 0` (a no-op), so
+    // skipping them is observably identical (no invoice either way). This keeps
+    // the sweep cost O(apps-with-usage) instead of O(every-app-ever-owned).
+    let period_ts: DateTime<Utc> = Utc
+        .timestamp_opt(period_start, 0)
+        .single()
+        .ok_or_else(|| RegistryError::Database(format!("invalid period_start {period_start}")))?;
+    let active_app_rows = conn
+        .query(
+            "SELECT DISTINCT app_id FROM zeroship.usage_aggregates WHERE period_start = $1",
+            &[&period_ts],
+        )
+        .await?;
+    let active_apps: std::collections::HashSet<Uuid> =
+        active_app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+
     // BTreeMap for deterministic creator ordering (stable invoice sequencing).
+    // Only apps that accrued usage this period are retained (see pre-filter above).
     let mut apps_by_creator: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
     for row in &owner_rows {
-        let creator_id: Uuid = row.get("creator_id");
         let app_id: Uuid = row.get("app_id");
+        if !active_apps.contains(&app_id) {
+            continue;
+        }
+        let creator_id: Uuid = row.get("creator_id");
         apps_by_creator.entry(creator_id).or_default().push(app_id);
     }
 
-    let metering = Metering::new(state.registry.clone());
     let catalog = PlanCatalog::new(state.registry.clone());
 
     // Compute-unit pricing (Refactor B): load the GLOBAL cost model + the
@@ -249,7 +275,7 @@ async fn sweep<S: StripeApi>(
 
     for (creator_id, app_ids) in &apps_by_creator {
         match bill_creator(
-            state, stripe, &metering, &catalog, &weights, default_fx, creator_id, app_ids,
+            state, stripe, &catalog, &weights, default_fx, creator_id, app_ids,
             period_start,
         )
         .await
@@ -290,7 +316,6 @@ async fn sweep<S: StripeApi>(
 pub(crate) async fn bill_creator<S: StripeApi>(
     state: &AppState,
     stripe: &S,
-    metering: &Metering,
     catalog: &PlanCatalog,
     weights: &MetricWeights,
     default_fx: Option<u64>,
@@ -343,13 +368,13 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     for app_id in app_ids {
         // Resolve the app's plan (FK into the catalog). A missing/poison plan is
         // skipped, not fatal.
-        let plan_id = lookup_plan_id(state, app_id).await?;
+        let plan_id = lookup_plan_id_on(&conn, app_id).await?;
         let Some(plan_id) = plan_id else { continue };
         let Some(plan) = catalog.get(&plan_id).await? else {
             tracing::warn!(app_id = %app_id, plan_id = %plan_id, "billing_reconcile: plan not in catalog — skipping app");
             continue;
         };
-        let usage = metering.period_totals(app_id, period_start).await?;
+        let usage = Metering::period_totals_on(&conn, app_id, period_start).await?;
         let price = plan.price.with_effective_fx(default_fx);
         // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
         //   * UnresolvedFx (global default FX missing) ⇒ the platform cannot
@@ -612,6 +637,17 @@ pub(crate) async fn owned_app_ids(
 #[allow(clippy::future_not_send)]
 pub(crate) async fn lookup_plan_id(state: &AppState, app_id: &Uuid) -> Result<Option<String>, RegistryError> {
     let conn = state.registry.conn().await?;
+    lookup_plan_id_on(&conn, app_id).await
+}
+
+/// As [`lookup_plan_id`] but on a BORROWED connection, so a caller already
+/// holding one (the metering-export sweep) avoids a fresh per-query connection
+/// handshake.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn lookup_plan_id_on<C: compio_postgres::GenericClient + Sync>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<Option<String>, RegistryError> {
     let rows = conn
         .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[app_id])
         .await?;
