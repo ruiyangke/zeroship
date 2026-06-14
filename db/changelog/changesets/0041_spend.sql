@@ -41,14 +41,20 @@ ALTER TABLE zeroship.app_spend_limit     FORCE  ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON zeroship.app_spend_limit
     USING      (app_id = current_setting('zeroship.tenant_app', true)::uuid)
     WITH CHECK (app_id = current_setting('zeroship.tenant_app', true)::uuid);
+-- MINOR-4: USING-only (no WITH CHECK) is INTENTIONAL on the writer-restricted
+-- tables below. Under FORCE ROW LEVEL SECURITY, Postgres applies the USING
+-- predicate as the WITH CHECK fallback for INSERT/UPDATE, so a write whose app_id
+-- doesn't match the tenant is still rejected; control connects BYPASSRLS, so these
+-- tables are only ever written by the platform. A separate WITH CHECK clause would
+-- be redundant here — do NOT add one unless a non-bypass writer is introduced.
 ALTER TABLE zeroship.app_spend_state     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE zeroship.app_spend_state     FORCE  ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON zeroship.app_spend_state
-    USING (app_id = current_setting('zeroship.tenant_app', true)::uuid);
+    USING (app_id = current_setting('zeroship.tenant_app', true)::uuid);  -- USING-as-CHECK fallback (MINOR-4)
 ALTER TABLE zeroship.spend_state_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE zeroship.spend_state_history FORCE  ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON zeroship.spend_state_history
-    USING (app_id = current_setting('zeroship.tenant_app', true)::uuid);
+    USING (app_id = current_setting('zeroship.tenant_app', true)::uuid);  -- USING-as-CHECK fallback (MINOR-4)
 --rollback DROP POLICY IF EXISTS tenant_isolation ON zeroship.spend_state_history;
 --rollback ALTER TABLE zeroship.spend_state_history NO FORCE ROW LEVEL SECURITY;
 --rollback ALTER TABLE zeroship.spend_state_history DISABLE ROW LEVEL SECURITY;
