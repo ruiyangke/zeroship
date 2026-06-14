@@ -29,6 +29,7 @@
 //! an `AppState`→provider→`AppState` ownership cycle (the provider stays a ZST).
 
 pub mod native;
+pub mod stripe_meters;
 pub mod types;
 
 use uuid::Uuid;
@@ -94,43 +95,101 @@ pub trait MeteringProvider: Send + Sync {
     ) -> Result<(), ProviderError>;
 }
 
+/// Stripe Billing Meters configuration (M-Stripe / §M6). The operator
+/// provisions a Stripe **Meter** (with `event_name`) + a metered **Price** +
+/// **Subscription** ONCE; the export cron pushes CU as `meter_events` against
+/// that meter and Stripe self-invoices. The provider assumes the Price /
+/// Subscription already exist — it does NOT create them.
+pub struct StripeMeterConfig {
+    /// The Stripe Meter's configured `event_name` (e.g. `compute_units`).
+    pub event_name: String,
+    /// The platform Stripe secret key (same account the Native rail uses).
+    pub secret_key: crate::SecretString,
+    /// Stripe API base URL (overridable so tests point at a localhost mock).
+    pub base_url: String,
+}
+
+// `SecretString` is intentionally NOT `Clone` (leak-resistant); re-wrap it by
+// re-exposing through the sanctioned accessor so the config can be cloned at
+// boot (built once, threaded into the provider) without a derive.
+impl Clone for StripeMeterConfig {
+    fn clone(&self) -> Self {
+        Self {
+            event_name: self.event_name.clone(),
+            secret_key: crate::SecretString::new(self.secret_key.expose_secret().to_string()),
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for StripeMeterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never leak the secret key in Debug output.
+        f.debug_struct("StripeMeterConfig")
+            .field("event_name", &self.event_name)
+            .field("secret_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
 /// Per-deployment provider configuration (M6). Parsed from CLI/env in `main.rs`.
-/// For the M-Native phase only the kind is load-bearing; the export-backend
-/// creds will be carried here in a later phase without a config-shape change.
+/// The `kind` selects the backend; the export-backend creds are carried in the
+/// matching `Option` field (present iff that kind is selected).
 #[derive(Debug, Clone)]
 pub struct MeteringProviderConfig {
     pub kind: MeteringProviderKind,
+    /// Stripe Billing Meters creds — required (and present) iff `kind == Stripe`.
+    pub stripe_meter: Option<StripeMeterConfig>,
 }
 
 impl MeteringProviderConfig {
-    /// Native is the default backend.
+    /// Native is the default backend (no export creds).
     #[must_use]
     pub fn native() -> Self {
         Self {
             kind: MeteringProviderKind::Native,
+            stripe_meter: None,
+        }
+    }
+
+    /// Stripe Billing Meters backend with its operator-provisioned meter creds.
+    #[must_use]
+    pub fn stripe(meter: StripeMeterConfig) -> Self {
+        Self {
+            kind: MeteringProviderKind::Stripe,
+            stripe_meter: Some(meter),
         }
     }
 }
 
 /// Build the configured metering provider once at boot (M6).
 ///
-/// In the M-Native phase only `Native` is functional. `Stripe` / `OpenMeter`
-/// return a guarded `Config` error so a deployment that asks for an
-/// unimplemented backend fails to boot with a clear message rather than
-/// silently doing nothing (a silent revenue black hole — blueprint §M9 risk 3).
+/// `Native` and `Stripe` (Stripe Billing Meters) are functional. `OpenMeter`
+/// is not yet implemented and returns a guarded `Config` error so a deployment
+/// that asks for it fails to boot with a clear message rather than silently
+/// doing nothing (a silent revenue black hole — blueprint §M9 risk 3). A
+/// `Stripe` selection with no `stripe_meter` creds is likewise rejected.
 ///
 /// # Errors
-/// Returns [`ProviderError::Config`] for a not-yet-implemented backend.
+/// Returns [`ProviderError::Config`] for a not-yet-implemented backend or a
+/// `Stripe` selection missing its meter creds.
 pub fn build_provider(
     cfg: &MeteringProviderConfig,
 ) -> Result<std::sync::Arc<dyn MeteringProvider>, ProviderError> {
     match cfg.kind {
         MeteringProviderKind::Native => Ok(std::sync::Arc::new(native::NativeProvider::new())),
-        MeteringProviderKind::Stripe => Err(ProviderError::Config(
-            "metering-provider 'stripe' (Stripe Billing Meters) is not yet implemented — \
-             use 'native' (the default)"
-                .to_string(),
-        )),
+        MeteringProviderKind::Stripe => {
+            let meter = cfg.stripe_meter.clone().ok_or_else(|| {
+                ProviderError::Config(
+                    "metering-provider 'stripe' requires --stripe-meter-event-name (the \
+                     operator-provisioned Stripe Meter's event name) — refusing to boot a \
+                     Stripe-Meters deployment with no meter (a silent revenue black hole)"
+                        .to_string(),
+                )
+            })?;
+            Ok(std::sync::Arc::new(stripe_meters::StripeProvider::new(meter)))
+        }
         MeteringProviderKind::OpenMeter => Err(ProviderError::Config(
             "metering-provider 'openmeter' is not yet implemented — use 'native' (the default)"
                 .to_string(),
@@ -162,28 +221,41 @@ mod tests {
     fn build_native_via_parsed_native_flag_succeeds() {
         // `--metering-provider native` parses to the Native kind and builds.
         let kind = MeteringProviderKind::parse("native").expect("native parses");
-        let provider = build_provider(&MeteringProviderConfig { kind })
+        let provider = build_provider(&MeteringProviderConfig { kind, stripe_meter: None })
             .expect("native provider must build");
         assert_eq!(provider.kind(), MeteringProviderKind::Native);
     }
 
     #[test]
-    fn build_stripe_provider_is_rejected_at_boot() {
-        // M-Native: the export backends are guarded stubs — a deployment that
-        // asks for one must FAIL to boot (clear error), never silently no-op.
+    fn build_stripe_provider_with_creds_succeeds_and_reports_stripe_kind() {
+        // M-Stripe: a stripe deployment WITH its operator-provisioned meter creds
+        // builds and reports the Stripe kind (the value `spawn_all` keys the
+        // export-cron spawn on).
+        let cfg = MeteringProviderConfig::stripe(StripeMeterConfig {
+            event_name: "compute_units".to_string(),
+            secret_key: crate::SecretString::new("sk_test_x".to_string()),
+            base_url: "http://localhost:0".to_string(),
+        });
+        let provider = build_provider(&cfg).expect("stripe provider must build with creds");
+        assert_eq!(provider.kind(), MeteringProviderKind::Stripe);
+    }
+
+    #[test]
+    fn build_stripe_provider_without_meter_creds_is_rejected_at_boot() {
+        // A Stripe-Meters deployment with no meter is a silent revenue black hole
+        // (blueprint §M9 risk 3) — it MUST fail to boot with a clear error.
         let kind = MeteringProviderKind::parse("stripe").expect("stripe parses to a kind");
-        // `dyn MeteringProvider` is not Debug, so match instead of `expect_err`.
-        let Err(err) = build_provider(&MeteringProviderConfig { kind }) else {
-            panic!("stripe must be rejected until implemented");
+        let Err(err) = build_provider(&MeteringProviderConfig { kind, stripe_meter: None }) else {
+            panic!("stripe must be rejected without meter creds");
         };
         assert!(matches!(err, ProviderError::Config(_)), "got {err:?}");
-        assert!(err.to_string().contains("not yet implemented"), "msg: {err}");
+        assert!(err.to_string().contains("stripe-meter-event-name"), "msg: {err}");
     }
 
     #[test]
     fn build_openmeter_provider_is_rejected_at_boot() {
         let kind = MeteringProviderKind::parse("openmeter").expect("openmeter parses to a kind");
-        let Err(err) = build_provider(&MeteringProviderConfig { kind }) else {
+        let Err(err) = build_provider(&MeteringProviderConfig { kind, stripe_meter: None }) else {
             panic!("openmeter must be rejected until implemented");
         };
         assert!(matches!(err, ProviderError::Config(_)), "got {err:?}");

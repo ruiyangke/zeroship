@@ -755,6 +755,16 @@ mod tests {
         async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, StripeError> {
             Ok("in_fake".to_string())
         }
+        async fn create_meter_event(
+            &self,
+            _event_name: &str,
+            _stripe_customer_id: &str,
+            _value: u64,
+            _identifier: &str,
+            _timestamp: i64,
+        ) -> Result<(), StripeError> {
+            Ok(())
+        }
     }
 
     #[compio::test]

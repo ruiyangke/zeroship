@@ -109,6 +109,33 @@ pub trait StripeApi {
     /// Finalize an existing DRAFT invoice by id (draft → open/issued). Idempotent:
     /// finalizing an already-finalized invoice returns the same `in_…`.
     async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, StripeError>;
+
+    /// Push ONE Stripe **Billing Meter** event (M-Stripe): the compute-unit
+    /// `value` for a `(customer, period)` window onto a Stripe Meter that an
+    /// operator has provisioned (the metered Price + Subscription self-invoice
+    /// from these events on Stripe's own billing cycle — we never invoice on
+    /// this rail). `POST /v1/billing/meter_events`, form-encoded:
+    ///   * `event_name`                  — the Meter's configured event name
+    ///     (e.g. `compute_units`).
+    ///   * `payload[stripe_customer_id]` — the `cus_…` the meter aggregates by.
+    ///   * `payload[value]`              — the CU delta this push carries.
+    ///   * `identifier`                  — the dedup key; Stripe drops a repeat
+    ///     event with the same `identifier` within its window (defense in depth
+    ///     on top of the export-ledger high-water).
+    ///   * `timestamp`                   — the event time (unix secs).
+    ///
+    /// Stripe meter events are SUMMED, so the caller pushes the CU CONSUMED
+    /// SINCE THE LAST EXPORT (a delta), never the cumulative total. The mutating
+    /// POST carries `identifier` as its `Idempotency-Key` so a transport-level
+    /// retry replays rather than double-counts.
+    async fn create_meter_event(
+        &self,
+        event_name: &str,
+        stripe_customer_id: &str,
+        value: u64,
+        identifier: &str,
+        timestamp: i64,
+    ) -> Result<(), StripeError>;
 }
 
 /// Production `cyper`-based Stripe client. Holds the secret key (never logged —
@@ -375,6 +402,34 @@ impl StripeApi for StripeClient {
             )
             .await?;
         extract_id(&finalized, "finalized invoice")
+    }
+
+    async fn create_meter_event(
+        &self,
+        event_name: &str,
+        stripe_customer_id: &str,
+        value: u64,
+        identifier: &str,
+        timestamp: i64,
+    ) -> Result<(), StripeError> {
+        let form = vec![
+            ("event_name".to_string(), event_name.to_string()),
+            (
+                "payload[stripe_customer_id]".to_string(),
+                stripe_customer_id.to_string(),
+            ),
+            ("payload[value]".to_string(), value.to_string()),
+            ("identifier".to_string(), identifier.to_string()),
+            ("timestamp".to_string(), timestamp.to_string()),
+        ];
+        // The `identifier` doubles as the Idempotency-Key so a transport retry
+        // replays the same event instead of summing it twice. A meter_event
+        // response is `{ "object": "billing.meter_event", ... }` (no top-level
+        // billable `id` we need) — a 2xx is success; `post_form` already maps a
+        // non-2xx to StripeError::Api.
+        self.post_form("/v1/billing/meter_events", &form, Some(identifier))
+            .await?;
+        Ok(())
     }
 }
 

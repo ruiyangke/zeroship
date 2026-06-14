@@ -15,6 +15,7 @@
 
 pub mod audit_retention;
 pub mod billing_reconcile;
+pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
 
@@ -53,22 +54,96 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     })
     .detach();
 
-    // Billing-reconcile sweep (billing PR6) — at month close, prices each
-    // creator's owned apps' CLOSED-period usage and pushes Stripe invoice items
-    // + a finalized invoice on the creator's platform Customer. Idempotent per
-    // (creator, period) via `billing_runs`. Infra-cost billing only (Stream-1).
+    // Provider-aware cron spawning (blueprint §M5 table). The metering provider
+    // decides which of the two export/invoice sweeps actually do work:
     //
-    // Provider-aware (blueprint §M5): the reconcile sweep IS the Native
-    // provider's `invoice` rail, so it spawns for `native` (the only functional
-    // backend in the M-Native phase). For an export backend whose `invoice` is a
-    // no-op it would be skipped — but those backends fail to boot today
-    // (`build_provider`), so under M-Native the kind is always `native` here and
-    // the spawn is identical to before.
-    if state.metering_provider.kind() == crate::metering::provider::MeteringProviderKind::Native {
-        let billing_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            billing_reconcile::run(billing_state, billing_reconcile::DEFAULT_TICK_SECS).await;
-        })
-        .detach();
+    //   | provider | metering_export       | billing_reconcile          |
+    //   | -------- | --------------------- | -------------------------- |
+    //   | native   | NOT spawned (no-op)   | spawned → NativeProvider   |
+    //   | stripe   | spawned → meter_events| NOT spawned (invoice no-op)|
+    //   | openmeter| spawned → CloudEvents | NOT spawned (invoice no-op)|
+    //
+    // `spend_reconcile` above is provider-agnostic and ALWAYS spawned.
+    use crate::metering::provider::MeteringProviderKind;
+    match state.metering_provider.kind() {
+        // Native: the billing-reconcile sweep IS the Native provider's `invoice`
+        // rail (at month close it prices each creator's CLOSED-period usage and
+        // pushes Stripe invoice items + a finalized invoice). The export sweep is
+        // a no-op under native (report_usage is a no-op) so it is NOT spawned —
+        // spawning it would be pure waste.
+        MeteringProviderKind::Native => {
+            let billing_state = Arc::clone(&state);
+            compio::runtime::spawn(async move {
+                billing_reconcile::run(billing_state, billing_reconcile::DEFAULT_TICK_SECS).await;
+            })
+            .detach();
+        }
+        // Export backends (stripe / openmeter): the export sweep pushes CU to the
+        // external meter (Stripe self-invoices; OpenMeter aggregates). The
+        // billing-reconcile sweep's `invoice` verb is a no-op here, so it is NOT
+        // spawned. FORGETTING this export spawn would enforce locally but bill
+        // the external meter $0 — a silent revenue black hole (blueprint §M9
+        // risk 3); the `$0-revenue guard` test asserts it IS spawned.
+        MeteringProviderKind::Stripe | MeteringProviderKind::OpenMeter => {
+            let export_state = Arc::clone(&state);
+            compio::runtime::spawn(async move {
+                metering_export::run(export_state, metering_export::DEFAULT_TICK_SECS).await;
+            })
+            .detach();
+        }
+    }
+}
+
+/// The set of provider-aware cron tasks `spawn_all` would spawn for a given
+/// provider kind (the export/invoice sweeps; the always-on sweeps —
+/// audit-retention, orphaned-app reaper, spend-reconcile — are not listed).
+///
+/// This is the single source of truth the `$0-revenue guard` test asserts on
+/// (blueprint §M5 table / §M9 risk 3) WITHOUT having to spin up the compio
+/// runtime: it makes the "which crons run per provider" decision testable.
+#[must_use]
+pub fn provider_aware_cron_tasks(
+    kind: crate::metering::provider::MeteringProviderKind,
+) -> &'static [&'static str] {
+    use crate::metering::provider::MeteringProviderKind;
+    match kind {
+        MeteringProviderKind::Native => &["billing_reconcile"],
+        MeteringProviderKind::Stripe | MeteringProviderKind::OpenMeter => &["metering_export"],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_aware_cron_tasks;
+    use crate::metering::provider::MeteringProviderKind;
+
+    /// THE $0-revenue guard (blueprint §M9 risk 3): under `stripe`, the
+    /// `metering_export` cron — where CU is PUSHED — MUST be in the spawned set.
+    /// Forgetting it yields a Stripe deployment that enforces locally but bills
+    /// Stripe $0 (a silent revenue black hole). And `billing_reconcile` (whose
+    /// `invoice` is a no-op under stripe) must NOT be spawned.
+    #[test]
+    fn stripe_spawns_metering_export_not_billing_reconcile() {
+        let tasks = provider_aware_cron_tasks(MeteringProviderKind::Stripe);
+        assert!(
+            tasks.contains(&"metering_export"),
+            "stripe MUST spawn metering_export (else $0 revenue) — got {tasks:?}"
+        );
+        assert!(
+            !tasks.contains(&"billing_reconcile"),
+            "stripe must NOT spawn billing_reconcile (invoice is a no-op) — got {tasks:?}"
+        );
+    }
+
+    /// Native is the mirror: `billing_reconcile` (the Native invoice rail) IS
+    /// spawned; `metering_export` (a no-op under native) is NOT (pure waste).
+    #[test]
+    fn native_spawns_billing_reconcile_not_metering_export() {
+        let tasks = provider_aware_cron_tasks(MeteringProviderKind::Native);
+        assert!(tasks.contains(&"billing_reconcile"), "native spawns billing_reconcile — got {tasks:?}");
+        assert!(
+            !tasks.contains(&"metering_export"),
+            "native must NOT spawn metering_export (report_usage is a no-op) — got {tasks:?}"
+        );
     }
 }

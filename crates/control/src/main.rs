@@ -109,6 +109,18 @@ struct ControlCli {
     )]
     metering_provider: String,
 
+    /// Stripe **Billing Meter** event name (M-Stripe). REQUIRED when
+    /// `--metering-provider stripe` (else the deployment refuses to boot — a
+    /// Stripe-Meters deployment with no meter is a silent revenue black hole).
+    /// This is the operator-provisioned Meter's configured `event_name` (e.g.
+    /// `compute_units`); the export cron pushes CU as `meter_events` against it.
+    #[arg(
+        long = "stripe-meter-event-name",
+        env = "STRIPE_METER_EVENT_NAME",
+        default_value = ""
+    )]
+    stripe_meter_event_name: String,
+
     /// Comma-separated previous master keys accepted during key rotation.
     #[arg(
         long = "legacy-master-keys",
@@ -650,6 +662,22 @@ fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
+        // M-Stripe prod guard (blueprint §M6 / §M9 risk 3): a `stripe`
+        // (Billing Meters) deployment REQUIRES its operator-provisioned meter
+        // event name. Booting `stripe` with no meter would push CU nowhere —
+        // enforcing locally while billing Stripe $0 (a silent revenue black
+        // hole). Refuse to boot. (`build_provider` also rejects it; this is the
+        // earlier, clearer message on the prod path.)
+        if cli.metering_provider.trim().eq_ignore_ascii_case("stripe")
+            && cli.stripe_meter_event_name.trim().is_empty()
+        {
+            tracing::error!(
+                "control: --metering-provider stripe requires --stripe-meter-event-name (the \
+                 operator-provisioned Stripe Meter's event name). Refusing to boot a Stripe-Meters \
+                 deployment with no meter (it would bill Stripe $0)."
+            );
+            std::process::exit(1);
+        }
         // The dedicated pairwise-salt secret MUST be a strong, stable,
         // operator-set value outside dev — it seeds the PERMANENT per-app `pws_`
         // anchor and MUST equal the gateway's value. Skip the strength check
@@ -977,17 +1005,36 @@ fn main() -> std::io::Result<()> {
                 std::process::exit(1);
             }
         };
-    let metering_provider = match zeroship_control::metering::provider::build_provider(
-        &zeroship_control::metering::provider::MeteringProviderConfig {
-            kind: metering_provider_kind,
-        },
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "control: refusing to start — metering provider not available");
-            std::process::exit(1);
+    // Build the per-deployment provider config. For the `stripe` backend, carry
+    // the operator-provisioned meter creds (event name + the platform Stripe
+    // secret + base URL — the SAME account/url the Native rail uses). An empty
+    // event name leaves `stripe_meter = None`, which `build_provider` rejects
+    // (and the prod guard below catches earlier with a clearer message).
+    let metering_provider_config = match metering_provider_kind {
+        zeroship_control::metering::provider::MeteringProviderKind::Stripe
+            if !cli.stripe_meter_event_name.trim().is_empty() =>
+        {
+            zeroship_control::metering::provider::MeteringProviderConfig::stripe(
+                zeroship_control::metering::provider::StripeMeterConfig {
+                    event_name: cli.stripe_meter_event_name.trim().to_string(),
+                    secret_key: zeroship_control::SecretString::new(stripe_secret_key.clone()),
+                    base_url: cli.stripe_base_url.clone(),
+                },
+            )
         }
+        kind => zeroship_control::metering::provider::MeteringProviderConfig {
+            kind,
+            stripe_meter: None,
+        },
     };
+    let metering_provider =
+        match zeroship_control::metering::provider::build_provider(&metering_provider_config) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "control: refusing to start — metering provider not available");
+                std::process::exit(1);
+            }
+        };
     tracing::info!(
         metering_provider = metering_provider_kind.as_str(),
         "control: metering provider selected"
