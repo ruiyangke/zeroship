@@ -477,3 +477,48 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
     assert_eq!(re.to, AccountState::PastDue);
     assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("past_due"));
 }
+
+// ---------------------------------------------------------------------------
+// Redesign regression (change 7a): `creator_billing_status.creator_id` now FKs
+// `creator_billing(creator_id)` (NOT users directly). A payment failure can be
+// the FIRST billing signal for a creator with NO prior `creator_billing` row, so
+// `record_payment_failed` must create the FK parent FIRST. (RED before the
+// parent-first insert: the status INSERT FK-violates and the call errors.)
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn payment_failed_creates_creator_billing_parent_first() {
+    let Some(_url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let f = fx().await;
+    let store = AccountStatusStore::new(f.registry.clone());
+
+    // A creator with a users row but NO creator_billing row yet (never ran
+    // billing/setup) — the common "first billing signal is a failure" case.
+    let creator = make_creator(&f.pg).await;
+    let pre = f
+        .pg
+        .query("SELECT 1 FROM zeroship.creator_billing WHERE creator_id = $1", &[&creator])
+        .await
+        .unwrap();
+    assert!(pre.is_empty(), "precondition: no creator_billing row yet");
+
+    // The failure must SUCCEED (parent-first), moving the creator to past_due.
+    let t = store
+        .record_payment_failed(creator, Some("in_first"), 1_000)
+        .await
+        .expect("payment failure must succeed even with no prior creator_billing row")
+        .expect("active→past_due");
+    assert_eq!(t.to, AccountState::PastDue);
+    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("past_due"));
+
+    // The FK parent was created.
+    let parent = f
+        .pg
+        .query("SELECT 1 FROM zeroship.creator_billing WHERE creator_id = $1", &[&creator])
+        .await
+        .unwrap();
+    assert_eq!(parent.len(), 1, "record_payment_failed created the creator_billing FK parent");
+}

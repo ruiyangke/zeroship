@@ -350,3 +350,103 @@ async fn raising_limit_recovers_block_immediately() {
     assert_eq!(state.as_deref(), Some("allow"));
     assert_eq!(hist, 2, "Block→Allow appends a second history row");
 }
+
+// ---------------------------------------------------------------------------
+// Redesign regression (change 2): `set_limit` UPSERTs the CONFIG table
+// `app_spend_limit` ONLY (not the derived `app_spend_state`), and the fleet
+// evaluation reflects that override; AND every transition's
+// `spend_state_history` row carries a NON-NULL `period` (the column is NOT NULL
+// in the redesigned schema).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry.clone());
+    let engine = SpendEngine::new(registry);
+
+    // Plan default = 100c. Ingest 100 requests = 100c ⇒ at the plan default this
+    // is 100% ⇒ Block.
+    let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
+    let worker = format!("w-{}", Uuid::new_v4());
+    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+
+    // Set a generous override BEFORE the first eval. It must land in the dedicated
+    // CONFIG table `app_spend_limit` — NOT in `app_spend_state` (which has no
+    // override column anymore).
+    engine.set_limit(&app, Some(100_000)).await.unwrap();
+
+    // The override is in app_spend_limit…
+    let override_row = client
+        .query(
+            "SELECT spend_limit_cents FROM zeroship.app_spend_limit WHERE app_id = $1",
+            &[&app],
+        )
+        .await
+        .unwrap();
+    assert_eq!(override_row.len(), 1, "set_limit wrote an app_spend_limit row");
+    assert_eq!(
+        override_row[0].get::<_, Option<i64>>("spend_limit_cents"),
+        Some(100_000),
+        "the override cents landed in app_spend_limit (the config table)",
+    );
+    // …and set_limit did NOT create an app_spend_state row (no derived write).
+    assert_eq!(
+        read_state(&client, &app).await.0,
+        None,
+        "set_limit must NOT write the derived app_spend_state row",
+    );
+
+    // Now the fleet eval must reflect the override: 100c against a 100_000c cap is
+    // 0.1% ⇒ Allow (NOT Block at the plan default). This proves the double LEFT
+    // JOIN reads the override from app_spend_limit.
+    engine.evaluate_all().await.unwrap();
+    let (state, _hist) = read_state(&client, &app).await;
+    assert_eq!(
+        state.as_deref(),
+        Some("allow"),
+        "the fleet eval honored the app_spend_limit override (Allow, not Block at plan default)",
+    );
+}
+
+#[compio::test]
+async fn transition_history_row_binds_non_null_period() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry.clone());
+    let engine = SpendEngine::new(registry);
+
+    // 100c cap, 100 requests ⇒ Block (a transition that writes history).
+    let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
+    let worker = format!("w-{}", Uuid::new_v4());
+    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    engine.evaluate_all().await.unwrap();
+
+    // `spend_state_history.period` is NOT NULL in the redesigned schema — the
+    // INSERT MUST bind it (this is why the 0041 DDL + the code landed together).
+    // Reading the bound period back as a DATE proves the bind. (RED if the code
+    // omitted the period bind: the INSERT would fail the NOT NULL, so no row.)
+    let rows = client
+        .query(
+            "SELECT period::date AS period FROM zeroship.spend_state_history \
+             WHERE app_id = $1 ORDER BY at DESC LIMIT 1",
+            &[&app],
+        )
+        .await
+        .expect("read history period");
+    assert_eq!(rows.len(), 1, "the transition wrote a history row");
+    let period: chrono::NaiveDate = rows[0].get("period");
+    use chrono::Datelike;
+    assert_eq!(period.day(), 1, "the history period is a first-of-month billing_period DATE");
+}

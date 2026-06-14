@@ -342,3 +342,133 @@ async fn current_period_totals_returns_metric_map() {
     assert_eq!(totals.get("requests").copied(), Some(3));
     assert_eq!(totals.get("widgets").copied(), Some(9));
 }
+
+// ---------------------------------------------------------------------------
+// Redesign regression (change 1): the dedup key stays (worker_id, sequence) —
+// NEVER (worker_id, sequence, period) — so a retried report straddling the UTC
+// month boundary cannot pass the gate a second time and DOUBLE-APPLY.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn month_boundary_retry_does_not_double_apply() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry);
+    let app = make_app(&client).await;
+    let worker = format!("w-{}", Uuid::new_v4());
+
+    // Use two periods that are CALENDAR-MONTH apart so they map to DIFFERENT
+    // `billing_period` DATE buckets. The retry presents the SAME (worker, seq).
+    let june = period_start_unix(
+        chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_900_000_000, 0)
+            .single()
+            .unwrap()
+            .timestamp(),
+    );
+    let july = {
+        use chrono::{Datelike, TimeZone};
+        let dt = chrono::Utc.timestamp_opt(june, 0).single().unwrap();
+        let (y, m) = if dt.month() == 12 { (dt.year() + 1, 1) } else { (dt.year(), dt.month() + 1) };
+        chrono::Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0).single().unwrap().timestamp()
+    };
+
+    // First apply lands in the June bucket.
+    let out1 = metering
+        .ingest_at(&report(&worker, 1, app, AppUsage { requests: 10, ..Default::default() }), june)
+        .await
+        .expect("ingest june");
+    assert!(!out1.duplicate, "first sight applies");
+    assert_eq!(metering.total(&app, june, "requests").await.unwrap(), 10);
+
+    // The SAME (worker, sequence) retried, now bucketed to JULY (month boundary).
+    // The dedup gate keys ONLY on (worker_id, sequence), so this is a DUPLICATE —
+    // it must NOT apply to the July bucket. (RED if `period` were in the dedup
+    // PK: the new (w,seq,july) key would pass and double-apply 10 to July.)
+    let out2 = metering
+        .ingest_at(&report(&worker, 1, app, AppUsage { requests: 10, ..Default::default() }), july)
+        .await
+        .expect("ingest july retry");
+    assert!(out2.duplicate, "the month-boundary retry is a DUPLICATE (dedup keys on worker,seq only)");
+    assert_eq!(
+        metering.total(&app, july, "requests").await.unwrap(),
+        0,
+        "the month-boundary retry did NOT double-apply into the July bucket",
+    );
+    assert_eq!(metering.total(&app, june, "requests").await.unwrap(), 10, "June bucket unchanged");
+}
+
+// ---------------------------------------------------------------------------
+// Redesign regression (change 1): a custom metric REFUSED at the per-app cap is
+// dropped-with-warn — it does NOT FK-abort the report. The platform/primitive
+// metrics (always cataloged) AND already-registered custom metrics still apply.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn capped_custom_metric_is_dropped_without_fk_aborting_the_report() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry);
+    let app = make_app(&client).await;
+    let period = period_start_unix(1_900_000_000);
+    let worker = format!("w-{}", Uuid::new_v4());
+
+    // Fill the app's custom-metric catalog to EXACTLY the cap by pre-seeding cap
+    // rows directly (faithful: same shape the ingest path writes).
+    let cap = zeroship_control::metering::MAX_CUSTOM_METRICS_PER_APP;
+    for i in 0..cap {
+        client
+            .execute(
+                "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app, last_seen_at) \
+                 VALUES ($1, 'custom', 'unit', $2, NOW())",
+                &[&format!("cap_fill_{}_{i}", app.simple()), &app],
+            )
+            .await
+            .expect("seed cap-fill metric");
+    }
+
+    // A report carrying BOTH a platform metric (requests, always cataloged) AND a
+    // BRAND-NEW custom metric that would exceed the cap. The over-cap metric must
+    // be dropped-with-warn (NOT registered, NOT applied) and MUST NOT FK-abort the
+    // whole report — so `requests` still lands. (RED if the ingest applied the
+    // over-cap delta: the usage_aggregates.metric FK to billing_metrics would
+    // RESTRICT-abort the entire report tx, losing the `requests` delta too.)
+    let mut custom = HashMap::new();
+    let over_cap = format!("over_cap_{}", Uuid::new_v4().simple());
+    custom.insert(over_cap.clone(), 7u64);
+    metering
+        .ingest_at(
+            &report(&worker, 1, app, AppUsage { requests: 42, custom, ..Default::default() }),
+            period,
+        )
+        .await
+        .expect("ingest must succeed (the over-cap metric is dropped, not FK-aborting)");
+
+    // The platform metric applied; the over-cap custom metric did NOT.
+    assert_eq!(
+        metering.total(&app, period, "requests").await.unwrap(),
+        42,
+        "the platform metric still applied (the report was not FK-aborted)",
+    );
+    assert_eq!(
+        metering.total(&app, period, &over_cap).await.unwrap(),
+        0,
+        "the over-cap custom metric was dropped (never applied)",
+    );
+    // And it was NOT registered in the catalog.
+    let cataloged = client
+        .query(
+            "SELECT 1 FROM zeroship.billing_metrics WHERE metric = $1",
+            &[&over_cap],
+        )
+        .await
+        .expect("query catalog");
+    assert!(cataloged.is_empty(), "the refused custom metric was NOT registered (capped)");
+}

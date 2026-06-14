@@ -447,3 +447,104 @@ async fn relink_clears_unlinked_at_and_records_history() {
     assert_eq!(h[1].stripe_account_id, "acct_firstAccount12");
     assert!(h[1].unlinked_at.is_some(), "old link is closed");
 }
+
+// ---------------------------------------------------------------------------
+// Redesign regression (change 4): the customer id is RELOCATED to
+// `billing_customer_refs` (a real-FK side table). `set_customer` round-trips
+// through `get_creator_by_customer` (the providerless reverse probe backed by
+// UNIQUE(external_id)), and the id is ABSENT from `creator_billing` (which is
+// identity-only now). `set_customer` also creates the FK parent (creator_billing).
+// ---------------------------------------------------------------------------
+
+/// Insert a real `users` row (the FK parent of `creator_billing`). Returns its id.
+async fn make_real_user(client: &compio_postgres::Client) -> Uuid {
+    let email = format!("ss-cust-{}@test.invalid", Uuid::new_v4().simple());
+    client
+        .query(
+            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'ss-cust') RETURNING id",
+            &[&email],
+        )
+        .await
+        .expect("insert user")[0]
+        .get("id")
+}
+
+#[compio::test]
+async fn set_customer_relocates_to_refs_and_reverse_lookup_round_trips() {
+    let Some(url) = db_url() else { return; };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = make_real_user(&client).await;
+    let cus = format!("cus_relocate_{}", Uuid::new_v4().simple());
+
+    // set_customer creates the creator_billing parent + the side-table ref.
+    store.set_customer(creator, &cus).await.expect("set_customer");
+
+    // Forward read resolves the id from the side table.
+    assert_eq!(
+        store.get_customer(creator).await.unwrap().as_deref(),
+        Some(cus.as_str()),
+        "get_customer reads the id from billing_customer_refs",
+    );
+    // Reverse (providerless) lookup resolves the creator — UNIQUE(external_id).
+    assert_eq!(
+        store.get_creator_by_customer(&cus).await.unwrap(),
+        Some(creator),
+        "get_creator_by_customer round-trips via UNIQUE(external_id)",
+    );
+
+    // The id is in billing_customer_refs…
+    let ref_rows = client
+        .query(
+            "SELECT external_id FROM zeroship.billing_customer_refs \
+             WHERE creator_id = $1 AND provider = 'stripe'",
+            &[&creator],
+        )
+        .await
+        .unwrap();
+    assert_eq!(ref_rows.len(), 1, "exactly one stripe customer ref");
+    assert_eq!(ref_rows[0].get::<_, String>("external_id"), cus);
+
+    // …and creator_billing carries NO stripe_customer_id column (fully relocated):
+    // a query referencing that column must ERROR (the column no longer exists).
+    let no_col = client
+        .query(
+            "SELECT stripe_customer_id FROM zeroship.creator_billing WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await;
+    assert!(
+        no_col.is_err(),
+        "creator_billing has NO stripe_customer_id column — the id is fully relocated to billing_customer_refs",
+    );
+
+    // The identity (FK parent) row exists.
+    let parent = client
+        .query("SELECT 1 FROM zeroship.creator_billing WHERE creator_id = $1", &[&creator])
+        .await
+        .unwrap();
+    assert_eq!(parent.len(), 1, "set_customer created the creator_billing identity (FK parent)");
+}
+
+#[compio::test]
+async fn set_customer_is_idempotent_on_reset() {
+    let Some(url) = db_url() else { return; };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = make_real_user(&client).await;
+    let cus = format!("cus_idem_{}", Uuid::new_v4().simple());
+
+    store.set_customer(creator, &cus).await.unwrap();
+    // Re-setting the SAME id is a no-op write (ON CONFLICT (creator_id, provider)).
+    store.set_customer(creator, &cus).await.expect("re-set same id is idempotent");
+    let rows = client
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_customer_refs WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows[0].get::<_, i64>("n"), 1, "still exactly one customer ref after re-set");
+}
