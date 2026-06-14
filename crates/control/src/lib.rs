@@ -4,6 +4,7 @@
 //! registry + env store + handler types. The `zeroship-control` binary
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
+pub mod account_status;
 pub mod api;
 pub mod admin_handlers;
 pub mod app_oauth_client;

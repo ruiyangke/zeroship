@@ -93,6 +93,38 @@ pub enum SpendState {
     Block,
 }
 
+/// Per-creator payment/account-enforcement state (billing G2), derived by the
+/// control plane from Stripe webhook truth and projected onto the gateway's
+/// pulled [`RouteEntry`] (creator-keyed in the DB, surfaced per-app via the
+/// owner join).
+///
+/// This is ORTHOGONAL to [`SpendState`]: spend caps USAGE within a paid
+/// relationship; account state is the payment gate on the relationship itself.
+/// They compose as an AND at the gateway — a request is served iff
+/// `account_state ∈ {Active, PastDue}` AND `spend_state != Block`.
+///
+/// - `Active` — payment current; served (subject to spend).
+/// - `PastDue` — ≥1 infra invoice failed and Stripe's retries are running; the
+///   customer-favourable GRACE window — STILL SERVED (not blocked), just the
+///   warning state.
+/// - `Suspended` — the dunning window elapsed; the gateway rejects new requests
+///   with 402 `ACCOUNT_SUSPENDED` before any worker proxy. Reversible: a later
+///   recovered payment flips back to `Active`.
+///
+/// Serde is `snake_case` so the TEXT column / wire form is `"active"` …
+/// `"suspended"`. `Default` is `Active` — a `RouteEntry` with no status row
+/// (free/cardless apps, the common case) is unrestricted, and the
+/// `#[serde(default)]` on the field keeps a wire payload predating the field
+/// loadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountState {
+    #[default]
+    Active,
+    PastDue,
+    Suspended,
+}
+
 /// A routing entry resolved from an incoming request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -132,6 +164,16 @@ pub struct RouteEntry {
     /// for an app with no spend row or a wire payload predating the field.
     #[serde(default)]
     pub spend_state: SpendState,
+    /// Current payment/account-enforcement state for the app's CREATOR (billing
+    /// G2), JOINed from `zeroship.creator_billing_status` via the app's
+    /// `app_members(role='owner')` row by the control-plane registry. The
+    /// gateway gates on this BEFORE spend (an outer AND): `Suspended` → 402
+    /// `ACCOUNT_SUSPENDED`; `PastDue`/`Active` pass (PastDue is the grace
+    /// window). `#[serde(default)]` ⇒ `Active` for an app whose creator has no
+    /// status row (free/cardless, the common case) or a wire payload predating
+    /// the field.
+    #[serde(default)]
+    pub account_state: AccountState,
 }
 
 /// Map of app id → current deploy/config snapshot.

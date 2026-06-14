@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use ntex::web::HttpResponse;
 use uuid::Uuid;
 use zeroship_bundle::{RateLimit, RateLimitPer};
-use zeroship_core::types::SpendState;
+use zeroship_core::types::{AccountState, SpendState};
 
 /// Throttle multiplier applied to a Degraded app: its effective concurrency
 /// ceiling is divided by this, and each of its requests consumes this many
@@ -25,6 +25,24 @@ pub fn check_spend(state: SpendState) -> Result<(), HttpResponse> {
         SpendState::Block => Err(HttpResponse::PaymentRequired()
             .json(&serde_json::json!({"code": "SPEND_LIMIT"}))),
         SpendState::Allow | SpendState::Warn | SpendState::Degrade => Ok(()),
+    }
+}
+
+/// Payment/account gate (billing G2). The OUTER AND with [`check_spend`]: a
+/// request is served iff the creator's account is `Active`/`PastDue` AND spend
+/// is not `Block`. Run this BEFORE `check_spend` at the same hoist point spend
+/// uses, so a `Suspended` creator's apps 402 across EVERY action class (worker,
+/// redirect, rewrite, AND static egress) before any worker proxy.
+///
+/// `Suspended` → 402 `ACCOUNT_SUSPENDED`. `PastDue` is the GRACE window (still
+/// served — it is the warning state, not a block) and `Active` passes. The
+/// two gates emit DISTINCT codes (`ACCOUNT_SUSPENDED` vs `SPEND_LIMIT`) so a
+/// caller can tell a dead-card suspension from a usage-cap block.
+pub fn check_account(state: AccountState) -> Result<(), HttpResponse> {
+    match state {
+        AccountState::Suspended => Err(HttpResponse::PaymentRequired()
+            .json(&serde_json::json!({"code": "ACCOUNT_SUSPENDED"}))),
+        AccountState::Active | AccountState::PastDue => Ok(()),
     }
 }
 
@@ -550,6 +568,21 @@ mod tests {
         assert!(
             check_rate_limit(&reg, &app).is_err(),
             "the drained bucket throttles the next immediate request",
+        );
+    }
+
+    /// G2: `check_account` is a pure match — Suspended 402s with
+    /// `ACCOUNT_SUSPENDED`; Active/PastDue pass. PastDue is the grace window
+    /// (NOT a block), distinguishing it from spend's Block.
+    #[test]
+    fn check_account_suspended_402s_others_pass() {
+        let err = check_account(AccountState::Suspended)
+            .expect_err("suspended must 402");
+        assert_eq!(err.status(), ntex::http::StatusCode::PAYMENT_REQUIRED);
+        assert!(check_account(AccountState::Active).is_ok(), "active passes");
+        assert!(
+            check_account(AccountState::PastDue).is_ok(),
+            "past_due is the grace window, not a block",
         );
     }
 

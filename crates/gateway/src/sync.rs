@@ -245,6 +245,7 @@ mod tests {
             oauth_client_id: oauth_client_id.map(str::to_string),
             sector_identifier: sector.map(str::to_string),
             spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         }
     }
 
@@ -360,6 +361,7 @@ mod tests {
                 oauth_client_id: Some("oac_billing".to_string()),
                 sector_identifier: Some("https://billing-app.zeroship.localhost".to_string()),
                 spend_state: zeroship_core::types::SpendState::Allow,
+                account_state: zeroship_core::types::AccountState::Active,
             },
         );
 

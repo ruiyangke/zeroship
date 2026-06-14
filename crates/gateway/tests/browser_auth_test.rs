@@ -211,6 +211,7 @@ fn build_route_map(provisioned: bool) -> zeroship_core::types::RouteMap {
             oauth_client_id: provisioned.then(|| CLIENT_ID.to_string()),
             sector_identifier: provisioned.then(|| format!("https://{APP_HOST}")),
             spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         },
     );
     m

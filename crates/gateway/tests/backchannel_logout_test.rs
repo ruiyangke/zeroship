@@ -668,6 +668,7 @@ fn build_handler_state_with_route(
             oauth_client_id: Some(oauth_client_id.to_string()),
             sector_identifier: Some(sector.to_string()),
             spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         },
     );
     state.routes.update(map, &state.rate_limiters, &state.concurrency);

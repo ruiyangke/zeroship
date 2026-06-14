@@ -522,14 +522,26 @@ impl Registry {
         // default `SpendState::Allow` (the common, unrestricted case). The
         // gateway gates dispatch on this pulled value (decision D1 — spend
         // state is PULLed on the RouteEntry, not pushed).
+        //
+        // LEFT JOIN zeroship.creator_billing_status (G2): payment/account state
+        // is CREATOR-keyed (one row per creator), so we surface it per-app via
+        // the app's `app_members(role='owner')` row — the same owner mapping the
+        // billing reconciler uses (there is no apps.creator_id column). An app
+        // whose creator has no status row (free/cardless, the common case) yields
+        // NULL ⇒ default `AccountState::Active`. The gateway gates dispatch on
+        // this pulled value as an OUTER AND with spend (Suspended → 402 before
+        // spend is even consulted).
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
-                        c.sector_identifier, s.state AS spend_state \
+                        c.sector_identifier, s.state AS spend_state, \
+                        cbs.state AS account_state \
                  FROM zeroship.apps a \
                  LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id \
-                 LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id",
+                 LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
+                 LEFT JOIN zeroship.app_members m ON m.app_id = a.id AND m.role = 'owner' \
+                 LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id",
                 &[],
             )
             .await?;
@@ -578,6 +590,18 @@ impl Registry {
                         .get::<_, Option<String>>("spend_state")
                         .as_deref()
                         .map_or(zeroship_core::types::SpendState::Allow, crate::spend::parse_spend_state),
+                    // G2: creator account state from the LEFT-JOINed
+                    // creator_billing_status (via the owner membership). NULL
+                    // (no status row) ⇒ Active; an unrecognised TEXT value fails
+                    // closed to Suspended (defensive — the writer only ever
+                    // persists the three known states, guarded by a CHECK).
+                    account_state: row
+                        .get::<_, Option<String>>("account_state")
+                        .as_deref()
+                        .map_or(
+                            zeroship_core::types::AccountState::Active,
+                            crate::account_status::parse_account_state,
+                        ),
                 },
             );
         }

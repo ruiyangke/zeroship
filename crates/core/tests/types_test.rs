@@ -3,7 +3,8 @@ use zeroship_bundle::{
     ProcedureKind, RedirectAction, ResourceEntry, StaticAction, WorkerCode,
 };
 use zeroship_core::types::{
-    AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent, RouteEntry, SpendState, UsageReport,
+    AccountState, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent, RouteEntry, SpendState,
+    UsageReport,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -111,6 +112,7 @@ fn route_entry_roundtrip() {
         oauth_client_id: Some("oac_myapp".to_string()),
         sector_identifier: Some("https://my-app.zeroship.ai".to_string()),
         spend_state: SpendState::Degrade,
+        account_state: AccountState::PastDue,
     };
 
     let json = serde_json::to_string(&entry).unwrap();
@@ -118,6 +120,8 @@ fn route_entry_roundtrip() {
 
     assert_eq!(decoded.name, "my-app");
     assert_eq!(decoded.spend_state, SpendState::Degrade);
+    // G2: account_state survives the round trip independently of spend_state.
+    assert_eq!(decoded.account_state, AccountState::PastDue);
     assert_eq!(decoded.plan_id, "pro");
     assert_eq!(decoded.deploy_hash, Some("abc123".to_string()));
     assert_eq!(decoded.oauth_client_id, Some("oac_myapp".to_string()));
@@ -147,12 +151,14 @@ fn route_entry_oauth_fields_none_round_trip() {
         oauth_client_id: None,
         sector_identifier: None,
         spend_state: SpendState::default(),
+        account_state: AccountState::default(),
     };
     let json = serde_json::to_string(&entry).unwrap();
     let decoded: RouteEntry = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.oauth_client_id, None);
     assert_eq!(decoded.sector_identifier, None);
     assert_eq!(decoded.spend_state, SpendState::Allow);
+    assert_eq!(decoded.account_state, AccountState::Active);
 }
 
 #[test]

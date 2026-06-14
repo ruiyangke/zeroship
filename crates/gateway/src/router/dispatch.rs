@@ -592,7 +592,18 @@ async fn execute_resource_tree(
             .json(&serde_json::json!({"error": "no resource matched"}));
     };
 
-    // 1a. Spend gate (PR5, decision D1): hoisted to the TOP — BEFORE the action
+    // 1a. Account gate (G2): the OUTER AND, evaluated BEFORE spend at the SAME
+    //     hoist point so a `Suspended` creator's apps 402 across every action
+    //     class (worker, redirect, rewrite, AND static egress) before any worker
+    //     proxy — a suspended creator must not serve billed static/redirect
+    //     egress either. `Suspended` → 402 `ACCOUNT_SUSPENDED`; `PastDue` (the
+    //     grace window) and `Active` pass. Distinct from the spend 402 below
+    //     (`SPEND_LIMIT`) so a dead-card suspension is told apart from a usage cap.
+    if let Err(resp) = enforce::check_account(compiled_route.entry.account_state) {
+        return resp;
+    }
+
+    // 1b. Spend gate (PR5, decision D1): hoisted to the TOP — BEFORE the action
     //     match — so `Block` 402s every action class uniformly (worker forward,
     //     redirect, rewrite, AND static), not just the worker path. A Blocked
     //     app must not serve static assets / redirects either: that egress is
@@ -3286,6 +3297,7 @@ mod tests {
             oauth_client_id: None,
             sector_identifier: None,
             spend_state,
+            account_state: zeroship_core::types::AccountState::Active,
         }
     }
 
@@ -3321,6 +3333,7 @@ mod tests {
             oauth_client_id: None,
             sector_identifier: None,
             spend_state,
+            account_state: zeroship_core::types::AccountState::Active,
         }
     }
 
@@ -3358,6 +3371,7 @@ mod tests {
             oauth_client_id: None,
             sector_identifier: None,
             spend_state,
+            account_state: zeroship_core::types::AccountState::Active,
         }
     }
 
@@ -3602,6 +3616,151 @@ mod tests {
                 acquire_concurrency(&concurrency, &app)
                     .unwrap_or_else(|_| panic!("recovered app admits request {i}")),
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // G2 — faithful account-suspension enforcement at the gateway edge.
+    //
+    // Drives the REAL path: a `RouteEntry` carrying the pulled `account_state`
+    // (and `spend_state`) is pushed through the REAL `RouteCache::update`, then
+    // the public `handle_request` is invoked. The stub hash-ring points at
+    // `0.0.0.0:0`, so a request that PASSES the gates surfaces a 502 (worker
+    // unreachable); a 402 therefore proves the gate short-circuited BEFORE any
+    // worker proxy. The account gate composes with spend as an AND.
+    // -----------------------------------------------------------------------
+
+    /// A worker route (public RPC query at `ping`) with explicit account + spend
+    /// state — exercises the hoisted G2 account gate AND its composition with
+    /// the spend gate through the real dispatch path.
+    fn account_worker_route(
+        account_state: zeroship_core::types::AccountState,
+        spend_state: zeroship_core::types::SpendState,
+    ) -> zeroship_core::types::RouteEntry {
+        let mut entry = worker_spend_route(spend_state);
+        entry.account_state = account_state;
+        entry
+    }
+
+    async fn drive_ping(state: Arc<GateState>) -> HttpResponse {
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/__zeroship/v1/ping")
+            .header("host", "spend-app.zeroship.localhost")
+            .to_http_request();
+        handle_request(
+            req,
+            web_state(state).await,
+            "spend-app.zeroship.localhost",
+            "/__zeroship/v1/ping",
+            Bytes::new(),
+        )
+        .await
+    }
+
+    async fn assert_402_code(mut resp: HttpResponse, code: &str) {
+        assert_eq!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "expected a 402 with code {code}",
+        );
+        let body = collect_body(resp.take_body()).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("402 body is JSON");
+        assert_eq!(json["code"], code, "402 envelope code");
+    }
+
+    /// A `Suspended` creator's app → 402 `ACCOUNT_SUSPENDED` BEFORE any worker
+    /// proxy. Fed via the REAL `RouteCache::update`, driven through the REAL
+    /// `handle_request`. Spend is `Allow`, so the ONLY thing that can 402 is the
+    /// account gate — proving suspension enforces independently of spend.
+    #[compio::test]
+    async fn suspended_account_blocked_at_gateway() {
+        use zeroship_core::types::{AccountState, SpendState};
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+
+        assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
+    }
+
+    /// A `PastDue` creator's app is NOT blocked (the grace window). With spend
+    /// `Allow`, the request passes both gates and reaches the proxy (→ 502 vs the
+    /// stub ring, NOT 402). Proves past_due is the WARNING state, not a block.
+    #[compio::test]
+    async fn past_due_account_not_blocked_at_gateway() {
+        use zeroship_core::types::{AccountState, SpendState};
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, account_worker_route(AccountState::PastDue, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+
+        let resp = drive_ping(state.clone()).await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "a past_due (grace) app must NOT be account-blocked",
+        );
+    }
+
+    /// An `Active` creator with `Allow` spend passes the account gate (→ proxy →
+    /// 502, NOT 402). Pins that the account gate only fires on Suspended.
+    #[compio::test]
+    async fn active_account_passes_gate() {
+        use zeroship_core::types::{AccountState, SpendState};
+        let state = build_idempotency_state();
+        let app_id = Uuid::new_v4();
+        let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+        routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+
+        let resp = drive_ping(state.clone()).await;
+        assert_ne!(
+            resp.status(),
+            ntex::http::StatusCode::PAYMENT_REQUIRED,
+            "an active app with Allow spend must not be 402'd",
+        );
+    }
+
+    /// The two gates compose as an AND with DISTINCT codes:
+    ///   * Suspended + Allow spend → 402 ACCOUNT_SUSPENDED (account beats spend).
+    ///   * Active + Block spend     → 402 SPEND_LIMIT (spend fires when account ok).
+    ///   * Suspended + Block spend  → 402 ACCOUNT_SUSPENDED (account is the OUTER
+    ///     gate, evaluated first).
+    #[compio::test]
+    async fn account_and_spend_gates_compose() {
+        use zeroship_core::types::{AccountState, SpendState};
+
+        // Suspended beats Allow spend.
+        {
+            let state = build_idempotency_state();
+            let app_id = Uuid::new_v4();
+            let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
+        }
+
+        // Active account, Block spend → spend gate fires.
+        {
+            let state = build_idempotency_state();
+            let app_id = Uuid::new_v4();
+            let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+            routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Block));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            assert_402_code(drive_ping(state.clone()).await, "SPEND_LIMIT").await;
+        }
+
+        // Suspended account AND Block spend → the OUTER account gate wins (it is
+        // evaluated first), so the code is ACCOUNT_SUSPENDED, not SPEND_LIMIT.
+        {
+            let state = build_idempotency_state();
+            let app_id = Uuid::new_v4();
+            let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
+            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Block));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
     }
 }

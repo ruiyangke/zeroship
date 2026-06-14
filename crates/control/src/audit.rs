@@ -36,6 +36,11 @@ pub enum Action {
     /// A finalized infra-billing invoice could not be charged
     /// (`invoice.payment_failed` webhook, billing PR6 Stream-1).
     InvoicePaymentFailed,
+    /// A creator payment/account-state transition (billing G2): the
+    /// active→past_due→suspended→active dunning lifecycle. Written by the
+    /// webhook (`invoice.payment_failed`/`invoice.paid`) and the dunning cron.
+    /// The detail JSON carries `{ from, to, reason, creator_id }`.
+    AccountStateChange,
     /// An operator created or updated a plan in the catalog via `PUT
     /// /api/plans/:id` (billing-v2 MINOR-1). The plan's FX/price is the
     /// highest-leverage money lever, so the write is audited with the actor +
@@ -61,6 +66,7 @@ impl Action {
             Self::SetSpendLimit => "set_spend_limit",
             Self::SetupIntentSucceeded => "setup_intent_succeeded",
             Self::InvoicePaymentFailed => "invoice_payment_failed",
+            Self::AccountStateChange => "account_state_change",
             Self::PlanUpserted => "plan_upserted",
             Self::PlanArchived => "plan_archived",
         }

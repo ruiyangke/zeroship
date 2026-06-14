@@ -403,6 +403,7 @@ fn build_route_map() -> zeroship_core::types::RouteMap {
             oauth_client_id: Some(CLIENT_ID.into()),
             sector_identifier: Some(format!("https://{APP_HOST}")),
             spend_state: zeroship_core::types::SpendState::Allow,
+            account_state: zeroship_core::types::AccountState::Active,
         },
     );
     m

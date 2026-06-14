@@ -560,9 +560,26 @@ pub async fn webhook(
         "invoice.payment_failed" => {
             return handle_invoice_payment_failed(&req, &state, &event, obj).await;
         }
-        // Stream-2 (Connect revenue) — the only event that moves money on the
-        // platform payout ledger today.
-        "invoice.paid" => {}
+        // `invoice.paid` carries TWO concerns:
+        //   * Stream-1 (infra recovery, G2): a previously-failed infra invoice
+        //     was paid → recover the creator's account status (past_due/suspended
+        //     → active). This is the REVERSIBILITY rail. Handled here for the
+        //     infra creator (resolved by metadata OR customer reverse-resolve)
+        //     regardless of whether the event also carries Connect metadata.
+        //   * Stream-2 (Connect revenue): the payout-ledger record below (only
+        //     when `metadata.creator_id` is present).
+        "invoice.paid" => {
+            if let Some(cid) = resolve_infra_creator(&state, obj).await {
+                let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
+                match store.record_payment_recovered(cid).await {
+                    Ok(Some(t)) => audit_account_transition(&req, &state, &t, &event.id).await,
+                    Ok(None) => { /* nothing to recover (already active / no row) */ }
+                    Err(e) => {
+                        tracing::error!(error = %e, "stripe: invoice.paid status recovery failed");
+                    }
+                }
+            }
+        }
         _ => {
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "ignored"}));
         }
@@ -699,35 +716,44 @@ async fn handle_setup_intent_succeeded(
 }
 
 /// `invoice.payment_failed` — a finalized infra-billing invoice could not be
-/// charged. Audit it (future dunning hangs off this). We do NOT mutate billing
-/// state here; the invoice stays open and Stripe's own retry/dunning runs.
+/// charged. Audit it AND (billing G2) move the creator's account status to
+/// `past_due`, starting the dunning window. We do NOT mark the Stripe invoice
+/// uncollectible — Stripe's own retry/dunning keeps running; the platform's
+/// `max_dunning_days` timeout (the dunning cron) is the suspension deadline.
+///
+/// `past_due` is the GRACE state — the gateway STILL serves the creator's apps.
+/// Only the later dunning-exhaustion sweep suspends (402). Reversible: a recovery
+/// (`invoice.paid`) clears it back to active.
 async fn handle_invoice_payment_failed(
     req: &web::HttpRequest,
     state: &AppState,
     event: &StripeEvent,
     obj: &StripeObject,
 ) -> web::HttpResponse {
-    // Resolve the creator: prefer metadata.creator_id (stamped on PR6 invoices),
-    // then fall back to reverse-resolving the Customer (`cus_…`) on the invoice
-    // via creator_billing — exactly the case PR6's own infra invoices hit, where
-    // Stripe surfaces `customer` but not creator metadata on the invoice object.
-    let mut creator_id = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok());
-    if creator_id.is_none() {
-        if let Some(customer) = obj.customer.as_deref() {
-            match state.stripe_store.get_creator_by_customer(customer).await {
-                Ok(c) => creator_id = c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "stripe: invoice.payment_failed customer reverse-resolve failed");
-                }
-            }
-        }
-    }
+    let creator_id = resolve_infra_creator(state, obj).await;
     if creator_id.is_none() {
         tracing::warn!(
             event_id = %sanitize_event_id(&event.id),
             "stripe: invoice.payment_failed could not resolve creator_id (no metadata, no matching customer)"
         );
     }
+
+    // G2 state mutation — only with a resolved creator. The signature was already
+    // verified by `webhook` before we got here (webhook-truth-only); a forged /
+    // unsigned event never reaches this function. Idempotent on the invoice id.
+    if let Some(cid) = creator_id {
+        let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
+        match store.record_payment_failed(cid, obj.id.as_deref()).await {
+            Ok(Some(t)) => {
+                audit_account_transition(req, state, &t, &event.id).await;
+            }
+            Ok(None) => { /* no state change (redelivery / already past_due/suspended) */ }
+            Err(e) => {
+                tracing::error!(error = %e, "stripe: invoice.payment_failed status update failed");
+            }
+        }
+    }
+
     let ip = source_ip(req, state);
     audit::log_with_detail(
         &state.registry,
@@ -748,6 +774,56 @@ async fn handle_invoice_payment_failed(
     )
     .await;
     web::HttpResponse::Ok().json(&serde_json::json!({"status": "payment_failed_recorded"}))
+}
+
+/// Resolve the creator owning an infra-billing invoice: prefer
+/// `metadata.creator_id` (stamped on PR6 invoices), else reverse-resolve the
+/// Customer (`cus_…`) via `creator_billing` (the case PR6 infra invoices hit,
+/// where Stripe surfaces `customer` but no creator metadata on the invoice).
+async fn resolve_infra_creator(state: &AppState, obj: &StripeObject) -> Option<Uuid> {
+    if let Some(cid) = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok()) {
+        return Some(cid);
+    }
+    if let Some(customer) = obj.customer.as_deref() {
+        match state.stripe_store.get_creator_by_customer(customer).await {
+            Ok(c) => return c,
+            Err(e) => {
+                tracing::warn!(error = %e, "stripe: infra-invoice customer reverse-resolve failed");
+            }
+        }
+    }
+    None
+}
+
+/// Audit one account-state transition (G2). The detail carries the edge + reason
+/// so ops can answer "when/why was this creator past_due/suspended/recovered."
+async fn audit_account_transition(
+    req: &web::HttpRequest,
+    state: &AppState,
+    t: &crate::account_status::AccountTransition,
+    event_id: &str,
+) {
+    use crate::account_status::account_state_str;
+    let ip = source_ip(req, state);
+    audit::log_with_detail(
+        &state.registry,
+        AuditEntry {
+            app_id: None,
+            creator_id: Some(t.creator_id),
+            actor_user_id: None,
+            actor_token_id: None,
+            action: Action::AccountStateChange,
+            resource: Some(event_id),
+            source_ip: ip.as_deref(),
+        },
+        &serde_json::json!({
+            "from": account_state_str(t.from),
+            "to": account_state_str(t.to),
+            "reason": t.reason,
+            "creator_id": t.creator_id.to_string(),
+        }),
+    )
+    .await;
 }
 
 fn invalid_json_message() -> &'static str {

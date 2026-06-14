@@ -15,6 +15,7 @@
 
 pub mod audit_retention;
 pub mod billing_reconcile;
+pub mod dunning;
 pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
@@ -51,6 +52,17 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     let spend_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
+    })
+    .detach();
+
+    // Dunning sweep (billing G2) — suspends each `past_due` creator whose
+    // dunning window (`max_dunning_days`, default 7) has elapsed; the gateway
+    // 402s their apps on its next /internal/routes poll. Provider-agnostic and
+    // ALWAYS spawned (peer of spend_reconcile): payment status is orthogonal to
+    // which metering backend is configured.
+    let dunning_state = Arc::clone(&state);
+    compio::runtime::spawn(async move {
+        dunning::run(dunning_state, dunning::DEFAULT_TICK_SECS).await;
     })
     .detach();
 
