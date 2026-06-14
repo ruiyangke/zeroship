@@ -45,6 +45,13 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// `metering_export::tick_at`/`sweep` single-flights fleet-wide via
+/// `pg_try_advisory_lock` (production multi-instance safety) — a NON-blocking
+/// `try` lock, so two concurrent sweeps would have one return `Ok(0)` (skip),
+/// breaking a `n == 1` assertion. Serialize the sweep-driving tests with a
+/// process-wide lock to mirror the production single-flight (poison-recovered).
+static EXPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const OM_EVENT_TYPE: &str = "compute_units";
 const OM_METER_SLUG: &str = "compute_units";
@@ -605,6 +612,7 @@ async fn export_pushes_cu_as_cloudevent_with_correct_value_subject_and_id() {
         return;
     };
     let fx = build_fixture(&url, "push").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2032, 1);
 
     let creator = make_user(&fx.state, "push").await;
@@ -612,7 +620,8 @@ async fn export_pushes_cu_as_cloudevent_with_correct_value_subject_and_id() {
     let app = make_owned_app(&fx.state, &plan, creator).await;
     // OpenMeter keys the subject on the creator's customer handle (the cron's
     // existing per-creator resolution); seed one (the "OpenMeter + Native" shape).
-    fx.state.stripe_store.set_customer(creator, "cus_om_push").await.unwrap();
+    let cus = format!("cus_om_push_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 750, period, 1).await; // 750 requests × 1 CU = 750 CU
 
@@ -643,7 +652,7 @@ async fn export_pushes_cu_as_cloudevent_with_correct_value_subject_and_id() {
     );
     assert_eq!(
         cloudevent_field(&ev.body, &["subject"]).and_then(|v| v.as_str().map(String::from)),
-        Some("cus_om_push".to_string()),
+        Some(cus.clone()),
         "subject == creator handle; body={}", ev.body
     );
     assert_eq!(
@@ -677,7 +686,7 @@ async fn export_pushes_cu_as_cloudevent_with_correct_value_subject_and_id() {
     );
 
     // OpenMeter's aggregate reflects the accepted CU; the high-water advanced.
-    assert_eq!(fx.mock.aggregate_for("cus_om_push"), 750, "OpenMeter counted 750 CU");
+    assert_eq!(fx.mock.aggregate_for(&cus), 750, "OpenMeter counted 750 CU");
     let hw = read_high_water(&fx.state, &app, period).await;
     assert_eq!(hw, Some(750), "exported_units high-water == cumulative CU");
 }
@@ -692,12 +701,14 @@ async fn export_computes_delta_via_openmeter_aggregate_across_two_ticks() {
         return;
     };
     let fx = build_fixture(&url, "delta").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2032, 2);
 
     let creator = make_user(&fx.state, "delta").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_om_delta").await.unwrap();
+    let cus = format!("cus_om_delta_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 100, period, 1).await;
     let n1 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 1");
@@ -721,7 +732,7 @@ async fn export_computes_delta_via_openmeter_aggregate_across_two_ticks() {
         "tick 2 pushed the DELTA 150, not the cumulative 250"
     );
     // OpenMeter's aggregate SUM == cumulative 250.
-    assert_eq!(fx.mock.aggregate_for("cus_om_delta"), 250, "OpenMeter SUM == 250");
+    assert_eq!(fx.mock.aggregate_for(&cus), 250, "OpenMeter SUM == 250");
     assert_eq!(read_high_water(&fx.state, &app, period).await, Some(250));
 }
 
@@ -733,12 +744,13 @@ async fn second_export_tick_with_no_new_usage_is_a_noop() {
         return;
     };
     let fx = build_fixture(&url, "noop").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2032, 3);
 
     let creator = make_user(&fx.state, "noop").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_om_noop").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_om_noop_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 300, period, 1).await;
 
     let n1 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 1");
@@ -773,19 +785,21 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
         return;
     };
     let fx = build_fixture(&url, "c2redrive").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2032, 4);
 
     let creator = make_user(&fx.state, "c2").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_om_c2").await.unwrap();
+    let cus = format!("cus_om_c2_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 400, period, 1).await;
 
     // First sweep: pushes 400, lands in OpenMeter's aggregate, advances high-water.
     let n1 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 1");
     assert_eq!(n1, 1);
-    assert_eq!(fx.mock.aggregate_for("cus_om_c2"), 400, "OpenMeter counted 400 after tick 1");
+    assert_eq!(fx.mock.aggregate_for(&cus), 400, "OpenMeter counted 400 after tick 1");
     assert_eq!(read_high_water(&fx.state, &app, period).await, Some(400));
 
     // Simulate the crash window: roll the high-water BACK to 0 (as if the push had
@@ -809,7 +823,7 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
     let n2 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 2");
 
     assert_eq!(
-        fx.mock.aggregate_for("cus_om_c2"),
+        fx.mock.aggregate_for(&cus),
         400,
         "OpenMeter's aggregate stays 400 — the >24h re-drive did NOT double-count (reconciled against the aggregate)"
     );
@@ -832,13 +846,15 @@ async fn export_pushes_billable_cu_honoring_included_units() {
         return;
     };
     let fx = build_fixture(&url, "m1parity").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2032, 5);
 
     let creator = make_user(&fx.state, "m1").await;
     let included: i64 = 200; // gross 750 ⇒ billable 550
     let plan = make_plan_with_included(&fx.state, included).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_om_m1").await.unwrap();
+    let cus = format!("cus_om_m1_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 750, period, 1).await;
 
@@ -853,7 +869,7 @@ async fn export_pushes_billable_cu_honoring_included_units() {
         "pushed BILLABLE CU 550 (gross 750 − included 200), NOT gross; body={}",
         events[0].body
     );
-    assert_eq!(fx.mock.aggregate_for("cus_om_m1"), 550, "OpenMeter counted the BILLABLE 550");
+    assert_eq!(fx.mock.aggregate_for(&cus), 550, "OpenMeter counted the BILLABLE 550");
     assert_eq!(read_high_water(&fx.state, &app, period).await, Some(550));
 }
 
@@ -871,12 +887,13 @@ async fn export_failure_is_recorded_durably() {
         return;
     };
     let fx = build_fixture(&url, "m2fail").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2032, 6);
 
     let creator = make_user(&fx.state, "m2").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_om_m2").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_om_m2_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 300, period, 1).await;
 
     fx.mock.reject_all_ingest();
@@ -904,14 +921,21 @@ async fn export_failure_is_recorded_durably() {
     assert_eq!(last_error3, None, "last_error cleared on success");
 }
 
+/// The first-of-month `billing_period` DATE for a unix-seconds period start.
+fn period_d(period_start: i64) -> chrono::NaiveDate {
+    use chrono::{Datelike, TimeZone};
+    let dt = chrono::Utc.timestamp_opt(period_start, 0).single().unwrap();
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
+}
+
 /// Read the `metering_exports` high-water for an `(app, period)`.
 async fn read_high_water(state: &AppState, app: &Uuid, period: i64) -> Option<i64> {
     state
         .control_pg
         .query(
             "SELECT exported_units FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[app, &(period as f64)],
+             WHERE app_id = $1 AND period = $2::date",
+            &[app, &period_d(period)],
         )
         .await
         .expect("read high-water")
@@ -929,8 +953,8 @@ async fn read_failure_state(
         .control_pg
         .query(
             "SELECT consecutive_failures, last_error FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[app, &(period as f64)],
+             WHERE app_id = $1 AND period = $2::date",
+            &[app, &period_d(period)],
         )
         .await
         .expect("read failure state");

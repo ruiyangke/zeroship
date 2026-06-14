@@ -40,6 +40,13 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// `metering_export::tick_at`/`sweep` single-flights fleet-wide via
+/// `pg_try_advisory_lock` (production multi-instance safety) — a NON-blocking
+/// `try` lock, so two concurrent sweeps would have one return `Ok(0)` (skip),
+/// breaking a `n == 1` assertion. Serialize the sweep-driving tests with a
+/// process-wide lock to mirror the production single-flight (poison-recovered).
+static EXPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const METER_EVENT_NAME: &str = "compute_units";
 const METER_ID: &str = "mtr_test_compute_units";
@@ -646,12 +653,14 @@ async fn export_pushes_cu_as_meter_event_with_correct_value_customer_and_identif
         return;
     };
     let fx = build_fixture(&url, "push").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = fixed_period();
 
     let creator = make_user(&fx.state, "push").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_push").await.unwrap();
+    let cus = format!("cus_push_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 750, period, 1).await; // 750 requests × 1 CU = 750 CU
 
@@ -667,8 +676,8 @@ async fn export_pushes_cu_as_meter_event_with_correct_value_customer_and_identif
     assert!(ev.body.contains(&format!("event_name={METER_EVENT_NAME}")), "event_name; body={}", ev.body);
     assert!(ev.body.contains("payload%5Bvalue%5D=750"), "payload[value]=750 (the CU); body={}", ev.body);
     assert!(
-        ev.body.contains("payload%5Bstripe_customer_id%5D=cus_push"),
-        "payload[stripe_customer_id]=cus_push; body={}", ev.body
+        ev.body.contains(&format!("payload%5Bstripe_customer_id%5D={cus}")),
+        "payload[stripe_customer_id]={cus}; body={}", ev.body
     );
     // The deterministic identifier for the (app, period, 0→750) window, present
     // on the wire (form `identifier=…`, percent-encoded colons) AND verbatim as
@@ -703,12 +712,13 @@ async fn second_export_tick_with_no_new_usage_is_a_noop() {
         return;
     };
     let fx = build_fixture(&url, "noop").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = fixed_period();
 
     let creator = make_user(&fx.state, "noop").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_noop").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_noop_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 300, period, 1).await;
 
     let n1 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 1");
@@ -735,12 +745,13 @@ async fn export_computes_delta_across_two_ticks() {
         return;
     };
     let fx = build_fixture(&url, "delta").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = fixed_period();
 
     let creator = make_user(&fx.state, "delta").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_delta").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_delta_{}", Uuid::new_v4().simple())).await.unwrap();
 
     // Tick 1: N = 100 CU.
     ingest_at(&fx.state, app, 100, period, 1).await;
@@ -797,6 +808,7 @@ async fn export_stamps_event_at_now_not_future_period_end() {
         return;
     };
     let fx = build_fixture(&url, "c1ts").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // A far-future, ISOLATED period — its `period.end` is in the future (so the
     // C1 bug, stamping at period.end, would be a rejected future timestamp). The
     // event itself is stamped at `now` (today), inside Stripe's window.
@@ -805,7 +817,8 @@ async fn export_stamps_event_at_now_not_future_period_end() {
     let creator = make_user(&fx.state, "c1ts").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_c1ts").await.unwrap();
+    let cus = format!("cus_c1ts_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 500, period, 1).await;
 
@@ -830,7 +843,7 @@ async fn export_stamps_event_at_now_not_future_period_end() {
     );
 
     // Stripe's aggregate reflects the accepted CU (not lost).
-    assert_eq!(fx.mock.aggregate_for("cus_c1ts"), 500, "Stripe counted the 500 CU");
+    assert_eq!(fx.mock.aggregate_for(&cus), 500, "Stripe counted the 500 CU");
 }
 
 // ===========================================================================
@@ -856,12 +869,14 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
         return;
     };
     let fx = build_fixture(&url, "c2redrive").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2031, 2); // distinct isolated bucket
 
     let creator = make_user(&fx.state, "c2").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_c2").await.unwrap();
+    let cus = format!("cus_c2_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 400, period, 1).await;
 
@@ -869,7 +884,7 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
     let now = mock_now();
     let n1 = metering_export::tick_at(&fx.state, period, now).await.expect("tick 1");
     assert_eq!(n1, 1);
-    assert_eq!(fx.mock.aggregate_for("cus_c2"), 400, "Stripe counted 400 after tick 1");
+    assert_eq!(fx.mock.aggregate_for(&cus), 400, "Stripe counted 400 after tick 1");
     assert_eq!(read_high_water(&fx.state, &app, period).await, Some(400));
 
     // Simulate the crash window: roll the high-water BACK to 0 (as if the push
@@ -894,7 +909,7 @@ async fn redrive_past_dedupe_window_does_not_double_count() {
     let n2 = metering_export::tick_at(&fx.state, period, mock_now()).await.expect("tick 2");
 
     assert_eq!(
-        fx.mock.aggregate_for("cus_c2"),
+        fx.mock.aggregate_for(&cus),
         400,
         "Stripe's aggregate stays 400 — the >24h re-drive did NOT double-count (reconciled against the aggregate)"
     );
@@ -918,6 +933,7 @@ async fn export_pushes_billable_cu_honoring_included_units() {
         return;
     };
     let fx = build_fixture(&url, "m1parity").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2031, 3); // distinct isolated bucket
 
     let creator = make_user(&fx.state, "m1").await;
@@ -925,7 +941,8 @@ async fn export_pushes_billable_cu_honoring_included_units() {
     let included: i64 = 200;
     let plan = make_plan_with_included(&fx.state, included).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_m1").await.unwrap();
+    let cus = format!("cus_m1_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.set_customer(creator, &cus).await.unwrap();
 
     ingest_at(&fx.state, app, 750, period, 1).await; // gross 750 CU
 
@@ -951,7 +968,7 @@ async fn export_pushes_billable_cu_honoring_included_units() {
     let gross = zeroship_control::pricing::total_units(&weights, &totals).expect("total_units");
     let billable = gross.saturating_sub(included as u64);
     assert_eq!(billable, 550, "billable parity sanity");
-    assert_eq!(fx.mock.aggregate_for("cus_m1"), 550, "Stripe counted the BILLABLE 550");
+    assert_eq!(fx.mock.aggregate_for(&cus), 550, "Stripe counted the BILLABLE 550");
     // The high-water tracks billable CU (so the next delta is computed on billable).
     assert_eq!(read_high_water(&fx.state, &app, period).await, Some(550));
 }
@@ -973,12 +990,13 @@ async fn export_failure_is_recorded_durably() {
         return;
     };
     let fx = build_fixture(&url, "m2fail").await;
+    let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let period = month_period(2031, 4); // distinct isolated bucket
 
     let creator = make_user(&fx.state, "m2").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_m2").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_m2_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 300, period, 1).await;
 
     // Make the mock reject EVERY meter-event push (simulate a permanent 4xx, e.g.
@@ -1011,14 +1029,22 @@ async fn export_failure_is_recorded_durably() {
     assert_eq!(last_error3, None, "last_error cleared on success");
 }
 
+/// The first-of-month `billing_period` DATE for a unix-seconds period start —
+/// the key the redesigned `metering_exports` table uses.
+fn period_d(period_start: i64) -> chrono::NaiveDate {
+    use chrono::{Datelike, TimeZone};
+    let dt = chrono::Utc.timestamp_opt(period_start, 0).single().unwrap();
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
+}
+
 /// Read the `metering_exports` high-water for an `(app, period)`.
 async fn read_high_water(state: &AppState, app: &Uuid, period: i64) -> Option<i64> {
     state
         .control_pg
         .query(
             "SELECT exported_units FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[app, &(period as f64)],
+             WHERE app_id = $1 AND period = $2::date",
+            &[app, &period_d(period)],
         )
         .await
         .expect("read high-water")
@@ -1037,8 +1063,8 @@ async fn read_failure_state(
         .control_pg
         .query(
             "SELECT consecutive_failures, last_error FROM zeroship.metering_exports \
-             WHERE app_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[app, &(period as f64)],
+             WHERE app_id = $1 AND period = $2::date",
+            &[app, &period_d(period)],
         )
         .await
         .expect("read failure state");

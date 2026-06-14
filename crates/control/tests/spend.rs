@@ -23,6 +23,17 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// `SpendEngine::evaluate_all` is a FLEET-WIDE sweep (`SELECT id FROM apps` →
+/// price + transition every app). In production it is single-flighted by the
+/// reconcile cron's `pg_try_advisory_lock`, so two sweeps never run at once. The
+/// default multi-threaded test runner would otherwise run two `evaluate_all`
+/// tests concurrently — each seeing the OTHER's freshly-seeded Block-bound app
+/// and racing to transition it (double history rows / a stolen transition).
+/// Serialize the sweep-driving tests with a process-wide lock to mirror the
+/// production single-flight (a poisoned lock from a prior panic is recovered —
+/// we still want the next test to run).
+static SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
     compio::runtime::spawn(async move {
@@ -120,6 +131,7 @@ async fn evaluate_all_persists_and_returns_transitions() {
         return;
     };
     let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -173,6 +185,7 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
         return;
     };
     let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -236,6 +249,7 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
         return;
     };
     let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -308,6 +322,7 @@ async fn raising_limit_recovers_block_immediately() {
         return;
     };
     let client = pg(&url).await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);

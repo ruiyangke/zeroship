@@ -445,12 +445,12 @@ impl SpendEngine {
         let tx = conn.transaction().await?;
         tx.execute(
             "INSERT INTO zeroship.app_spend_state \
-               (app_id, state, spend_cents, eval_limit_cents, period, updated_at) \
-             VALUES ($1, $2, $3, $4, $5::date, NOW()) \
+               (app_id, state, spend_cents, eval_limit_cents, period, evaluated_at) \
+             VALUES ($1, $2::text, $3, $4, $5::date, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                state = EXCLUDED.state, spend_cents = EXCLUDED.spend_cents, \
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
-               period = EXCLUDED.period, updated_at = NOW()",
+               period = EXCLUDED.period, evaluated_at = NOW()",
             &[
                 app_id,
                 &spend_state_str(to),
@@ -461,11 +461,12 @@ impl SpendEngine {
         )
         .await?;
         // `spend_state_history.period` is NOT NULL — bind it (this is why the
-        // 0041 DDL and this code had to land together).
+        // 0041 DDL and this code had to land together). The `from_state`/`to_state`
+        // params are bound `::text` (the spend_state domain rejects a bare &str).
         tx.execute(
             "INSERT INTO zeroship.spend_state_history \
                (app_id, period, from_state, to_state, spend_cents, limit_cents) \
-             VALUES ($1, $2::date, $3, $4, $5, $6)",
+             VALUES ($1, $2::date, $3::text, $4::text, $5, $6)",
             &[
                 app_id,
                 &period,
@@ -494,12 +495,12 @@ impl SpendEngine {
     ) -> Result<(), RegistryError> {
         conn.execute(
             "INSERT INTO zeroship.app_spend_state \
-               (app_id, state, spend_cents, eval_limit_cents, period, updated_at) \
-             VALUES ($1, $2, $3, $4, $5::date, NOW()) \
+               (app_id, state, spend_cents, eval_limit_cents, period, evaluated_at) \
+             VALUES ($1, $2::text, $3, $4, $5::date, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                spend_cents = EXCLUDED.spend_cents, \
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
-               period = EXCLUDED.period, updated_at = NOW()",
+               period = EXCLUDED.period, evaluated_at = NOW()",
             &[
                 app_id,
                 &spend_state_str(state),

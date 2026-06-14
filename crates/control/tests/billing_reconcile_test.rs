@@ -39,6 +39,17 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// `billing_reconcile::tick_with`/`sweep` single-flights fleet-wide via
+/// `pg_try_advisory_lock` (production multi-instance safety) — a NON-blocking
+/// `try` lock, so two sweeps racing would have one LOSE the lock and return
+/// `Ok(0)` (skip). Under the default multi-threaded test runner two
+/// reconcile-driving tests would race and the loser's `billed == 1` assertion
+/// would fail. `missing_default_fx` additionally mutates the fleet-wide
+/// `pricing_config` singleton. Serialize the reconcile-driving tests with a
+/// process-wide lock to mirror the production single-flight (a poisoned lock from
+/// a prior panic is recovered).
+static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -581,6 +592,113 @@ fn prev_period(now: i64) -> i64 {
     billing_reconcile::previous_period_start_unix(now)
 }
 
+/// The first-of-month `billing_period` DATE for a unix-seconds period start —
+/// the key the redesigned `invoices`/`invoice_lines` tables use. Mirrors
+/// `metering::period_date` (re-derived here so the test owns its key shape).
+fn period_d(period_start: i64) -> chrono::NaiveDate {
+    use chrono::{Datelike, TimeZone};
+    let dt = chrono::Utc.timestamp_opt(period_start, 0).single().unwrap();
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
+}
+
+/// Read the `(status, total_cents)` of the invoice for `(creator, period)`, or
+/// `None` if no invoice row exists. Replaces the old `billing_runs` read.
+async fn read_invoice(
+    state: &AppState,
+    creator: Uuid,
+    period_start: i64,
+) -> Option<(String, i64)> {
+    state
+        .control_pg
+        .query(
+            "SELECT status, total_cents FROM zeroship.invoices \
+             WHERE creator_id = $1 AND period = $2::date",
+            &[&creator, &period_d(period_start)],
+        )
+        .await
+        .expect("read invoices")
+        .first()
+        .map(|r| (r.get::<_, String>("status"), r.get::<_, i64>("total_cents")))
+}
+
+/// The finalized provider invoice id (`in_…`) for `(creator, period)` via
+/// `invoices ⋈ billing_provider_refs(provider='stripe', ref_kind='invoice')`, or
+/// `None`. Replaces the old `billing_runs.stripe_invoice_id` read.
+async fn finalized_invoice_id(
+    state: &AppState,
+    creator: Uuid,
+    period_start: i64,
+) -> Option<String> {
+    state
+        .control_pg
+        .query(
+            "SELECT r.external_id FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.creator_id = $1 AND i.period = $2::date \
+               AND i.status = 'finalized' AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
+            &[&creator, &period_d(period_start)],
+        )
+        .await
+        .expect("read finalized invoice id")
+        .first()
+        .map(|r| r.get::<_, String>("external_id"))
+}
+
+/// The persisted draft provider id (`in_…`) for `(creator, period)` via
+/// `billing_provider_refs(ref_kind='draft_invoice')`, or `None`. Replaces the old
+/// `billing_runs.draft_invoice_id` read.
+async fn draft_invoice_id(
+    state: &AppState,
+    creator: Uuid,
+    period_start: i64,
+) -> Option<String> {
+    state
+        .control_pg
+        .query(
+            "SELECT r.external_id FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.creator_id = $1 AND i.period = $2::date \
+               AND r.provider = 'stripe' AND r.ref_kind = 'draft_invoice'",
+            &[&creator, &period_d(period_start)],
+        )
+        .await
+        .expect("read draft invoice id")
+        .first()
+        .map(|r| r.get::<_, String>("external_id"))
+}
+
+/// Count the invoice LINES for a creator (across all their invoices). Replaces
+/// the old `billing_run_items` row count.
+async fn lines_count(state: &AppState, creator: Uuid) -> i64 {
+    state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id WHERE i.creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("count lines")[0]
+        .get::<_, i64>("n")
+}
+
+/// Count CONFIRMED line provider-refs (== the old non-NULL `stripe_item_id`
+/// count) for a creator. A line WITH a `billing_line_provider_refs` row is a
+/// confirmed post; a line without one is intent-only.
+async fn confirmed_lines_count(state: &AppState, creator: Uuid) -> i64 {
+    state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_line_provider_refs r \
+             JOIN zeroship.invoices i ON i.id = r.invoice_id \
+             WHERE i.creator_id = $1 AND r.provider = 'stripe' AND r.ref_kind = 'invoice_item'",
+            &[&creator],
+        )
+        .await
+        .expect("count confirmed lines")[0]
+        .get::<_, i64>("n")
+}
+
 // ===========================================================================
 // Tests.
 // ===========================================================================
@@ -595,6 +713,7 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
         return;
     };
     let fx = build_fixture(&url, "items").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
@@ -603,7 +722,7 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let app1 = make_owned_app(&fx.state, &plan, creator).await;
     let app2 = make_owned_app(&fx.state, &plan, creator).await;
     // Customer must exist (set lazily by billing/setup in prod; here directly).
-    fx.state.stripe_store.set_customer(creator, "cus_test_items").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_items_{}", Uuid::new_v4().simple())).await.unwrap();
 
     ingest_at(&fx.state, app1, 500, period, 1).await; // 500c
     ingest_at(&fx.state, app2, 250, period, 2).await; // 250c
@@ -617,22 +736,17 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     assert_eq!(fx.mock.count_path("POST", "/v1/invoiceitems"), 2, "one item per app");
     assert_eq!(fx.mock.count_path("POST", "/v1/invoices"), 2, "create + finalize (both POST /v1/invoices…)");
 
-    // billing_runs records the finalized invoice + the summed amount (750c).
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT amount_cents, stripe_invoice_id FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[&creator, &(period as f64)],
-        )
-        .await
-        .expect("read billing_runs");
-    assert_eq!(rows.len(), 1, "exactly one billing_runs row for the period");
-    let amount: i64 = rows[0].get("amount_cents");
-    assert_eq!(amount, 750, "summed charge across both apps");
-    let invoice_id: Option<String> = rows[0].get("stripe_invoice_id");
-    assert!(invoice_id.is_some(), "stripe_invoice_id recorded after finalize");
+    // invoices records the finalized invoice + the summed total (750c).
+    let inv = read_invoice(&fx.state, creator, period).await;
+    assert_eq!(
+        inv,
+        Some(("finalized".to_string(), 750)),
+        "one finalized invoice totalling the summed charge across both apps",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "provider invoice id recorded after finalize",
+    );
 }
 
 /// THE no-double-bill guarantee. Run the tick TWICE for the same (creator,
@@ -649,13 +763,14 @@ async fn reconcile_is_idempotent_per_period() {
         return;
     };
     let fx = build_fixture(&url, "idem").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
     let creator = make_user(&fx.state, "idem").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_idem").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_idem_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 300, period, 1).await; // 300c
 
     let billed1 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
@@ -679,17 +794,17 @@ async fn reconcile_is_idempotent_per_period() {
         "no double-bill: the invoice item was created exactly once across two runs",
     );
 
-    // Still exactly one billing_runs row.
+    // Still exactly one invoice row.
     let rows = fx
         .state
         .control_pg
         .query(
-            "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_runs WHERE creator_id = $1",
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices WHERE creator_id = $1",
             &[&creator],
         )
         .await
-        .expect("count runs");
-    assert_eq!(rows[0].get::<_, i64>("n"), 1, "exactly one run row");
+        .expect("count invoices");
+    assert_eq!(rows[0].get::<_, i64>("n"), 1, "exactly one invoice row");
 }
 
 /// The REAL cyper client sends a non-empty `Idempotency-Key` + the
@@ -775,7 +890,7 @@ async fn setup_session_creates_customer_once() {
     );
     assert_eq!(fx.mock.count_path("POST", "/v1/checkout/sessions"), 2, "a session per setup");
     let stored = fx.state.stripe_store.get_customer(creator).await.unwrap();
-    assert!(stored.is_some(), "customer id persisted to creator_billing");
+    assert!(stored.is_some(), "customer id persisted to billing_customer_refs");
 }
 
 /// Two apps owned by the SAME user_id roll into ONE creator invoice spanning
@@ -788,6 +903,7 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
         return;
     };
     let fx = build_fixture(&url, "owner").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
@@ -795,7 +911,7 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
     let plan = make_plan(&fx.state).await;
     let owned_a = make_owned_app(&fx.state, &plan, creator).await;
     let owned_b = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_owner").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_owner_{}", Uuid::new_v4().simple())).await.unwrap();
 
     // An app with NO owner row — must be skipped (no billable creator).
     let unowned = {
@@ -825,19 +941,13 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
     // One invoice item per OWNED app (2), not 3.
     assert_eq!(fx.mock.count_path("POST", "/v1/invoiceitems"), 2, "two owned apps → two items");
 
-    // The creator's run amount spans both owned apps (300c), excluding unowned.
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT amount_cents FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[&creator, &(period as f64)],
-        )
-        .await
-        .expect("read run");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 300, "owned apps summed; unowned excluded");
+    // The creator's invoice total spans both owned apps (300c), excluding unowned.
+    let inv = read_invoice(&fx.state, creator, period).await;
+    assert_eq!(
+        inv,
+        Some(("finalized".to_string(), 300)),
+        "owned apps summed; unowned excluded",
+    );
 }
 
 /// Commit-then-crash recovery: a `billing_runs` row pre-exists with
@@ -851,25 +961,31 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
         return;
     };
     let fx = build_fixture(&url, "crash").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
     let creator = make_user(&fx.state, "crash").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_crash").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_crash_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 400, period, 1).await; // 400c
 
-    // Simulate the crash window: the run row exists (claimed) but no invoice id.
+    // Simulate the crash window: the invoice row exists (claimed, draft) but is
+    // not yet finalized.
     fx.state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.billing_runs (creator_id, period_start, amount_cents) \
-             VALUES ($1, to_timestamp($2::double precision), 400)",
-            &[&creator, &(period as f64)],
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, $3::date, 'draft')",
+            &[
+                &zeroship_core::typed_id::new_invoice_id(),
+                &creator,
+                &period_d(period),
+            ],
         )
         .await
-        .expect("pre-insert NULL-invoice run");
+        .expect("pre-insert draft invoice (crash-window claim)");
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -890,18 +1006,16 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
         "re-drive replays the SAME deterministic invoice idempotency key",
     );
 
-    // The row is now completed.
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT stripe_invoice_id FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[&creator, &(period as f64)],
-        )
-        .await
-        .expect("read run");
-    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "invoice id filled in");
+    // The invoice is now finalized + carries the provider invoice id.
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await.map(|(s, _)| s).as_deref(),
+        Some("finalized"),
+        "the draft invoice is finalized after re-drive",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "provider invoice id filled in",
+    );
 }
 
 /// MAJOR-2 (fail-closed) REGRESSION: weights present, a plan that INHERITS the
@@ -920,6 +1034,7 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
         return;
     };
     let fx = build_fixture(&url, "nofx").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
@@ -951,7 +1066,7 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
         .await
         .expect("seed inheriting plan");
     let app = make_owned_app(&fx.state, &plan_id, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_nofx").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_nofx_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 600, period, 1).await; // would be 600c IF priceable
 
     // Capture the shared singleton so we can RESTORE it before any assertion —
@@ -983,12 +1098,12 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
         .state
         .control_pg
         .query(
-            "SELECT amount_cents FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[&creator, &(period as f64)],
+            "SELECT total_cents FROM zeroship.invoices \
+             WHERE creator_id = $1 AND period = $2::date",
+            &[&creator, &period_d(period)],
         )
         .await
-        .expect("read billing_runs");
+        .expect("read invoices");
 
     // Restore the shared singleton BEFORE asserting.
     let restore_fx = saved_fx.unwrap_or(30_000_000);
@@ -1009,7 +1124,7 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     );
     assert_eq!(items, 0, "no item posted");
     assert_eq!(invoices, 0, "no invoice created");
-    assert!(runs.is_empty(), "no billing_runs row — bill no one when the platform can't price");
+    assert!(runs.is_empty(), "no invoice row — bill no one when the platform can't price");
 }
 
 /// Build the real `StripeClient` pointed at the fixture's mock — used by the
@@ -1105,6 +1220,7 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
         return;
     };
     let fx = build_fixture(&url, "partial").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
@@ -1112,7 +1228,7 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let plan = make_plan(&fx.state).await;
     let app_a = make_owned_app(&fx.state, &plan, creator).await;
     let app_b = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_partial").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_partial_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app_a, 100, period, 1).await; // 100c
     ingest_at(&fx.state, app_b, 200, period, 2).await; // 200c
 
@@ -1128,23 +1244,15 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 
     let created_after_crash = fx.mock.count_created("POST", "/v1/invoiceitems");
     assert_eq!(created_after_crash, 1, "exactly one item posted before the crash");
-    // Claim-then-call (C1): the intent row is written BEFORE each Stripe POST, so
-    // after the crash app A is CONFIRMED (non-NULL stripe_item_id) and app B is
-    // INTENT-only (NULL — its POST failed). Exactly ONE confirmed post.
-    let ledger_after_crash = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT app_id, stripe_item_id FROM zeroship.billing_run_items WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read ledger");
-    let confirmed_after_crash = ledger_after_crash
-        .iter()
-        .filter(|r| r.get::<_, Option<String>>("stripe_item_id").is_some())
-        .count();
-    assert_eq!(confirmed_after_crash, 1, "exactly one app CONFIRMED-posted after the crash (claim-then-call)");
+    // Claim-then-call (C1): the line (snapshot intent) is written BEFORE each
+    // Stripe POST, so after the crash app A is CONFIRMED (has a
+    // billing_line_provider_refs row) and app B is INTENT-only (a line with NO
+    // provider-ref — its POST failed). Exactly ONE confirmed post.
+    assert_eq!(
+        confirmed_lines_count(&fx.state, creator).await,
+        1,
+        "exactly one app CONFIRMED-posted after the crash (claim-then-call)",
+    );
 
     // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
     fx.mock.disable_dedupe();
@@ -1164,27 +1272,12 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
         "no double-bill: app A's item was created exactly once across both drives (ledger guard)",
     );
 
-    // Both apps are now ledgered, and the run is completed.
-    let ledger_final = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT app_id FROM zeroship.billing_run_items WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read ledger");
-    assert_eq!(ledger_final.len(), 2, "both apps ledgered after the re-drive");
-    let run = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read run");
-    assert!(run[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
+    // Both apps now have lines, and the invoice is finalized.
+    assert_eq!(lines_count(&fx.state, creator).await, 2, "both apps lined after the re-drive");
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "invoice finalized",
+    );
 }
 
 /// C1 decorator: `create_invoice_item` POSTS to the real Stripe (mock) — so the
@@ -1270,13 +1363,14 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
         return;
     };
     let fx = build_fixture(&url, "c1crash").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
     let creator = make_user(&fx.state, "c1crash").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_c1crash").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_c1crash_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 500, period, 1).await; // 500c
 
     // First drive: the item posts to Stripe, then we crash before the ledger
@@ -1287,20 +1381,13 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 
     // The item DID post to Stripe exactly once on the crashed drive.
     assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before the crash");
-    // The intent row exists (claim-then-call) but is NOT yet confirmed.
-    let intent = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT stripe_item_id FROM zeroship.billing_run_items WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read ledger");
-    assert_eq!(intent.len(), 1, "claim-then-call wrote one intent row before the POST");
-    assert!(
-        intent[0].get::<_, Option<String>>("stripe_item_id").is_none(),
-        "the intent row's stripe_item_id is NULL (post unconfirmed at crash time)",
+    // The line (snapshot intent) exists (claim-then-call) but has NO provider-ref
+    // yet (the post was unconfirmed at crash time).
+    assert_eq!(lines_count(&fx.state, creator).await, 1, "claim-then-call wrote one line before the POST");
+    assert_eq!(
+        confirmed_lines_count(&fx.state, creator).await,
+        0,
+        "the line has no billing_line_provider_refs row (post unconfirmed at crash time)",
     );
 
     // Simulate >24h: Stripe's Idempotency-Key no longer dedupes.
@@ -1322,29 +1409,22 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
         "no double-bill: the item was created exactly once (claim-then-call + metadata adopt)",
     );
 
-    // The ledger row is now confirmed and the run completed with the right amount.
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT stripe_invoice_id, amount_cents FROM zeroship.billing_runs WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read run");
-    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
-    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 500, "billed the real amount, not $0");
-    let confirmed = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT stripe_item_id FROM zeroship.billing_run_items WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read ledger");
-    assert_eq!(confirmed.len(), 1, "still exactly one ledger row (no duplicate)");
-    assert!(confirmed[0].get::<_, Option<String>>("stripe_item_id").is_some(), "the post is now confirmed in the ledger");
+    // The line is now confirmed and the invoice completed with the right total.
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await,
+        Some(("finalized".to_string(), 500)),
+        "invoice finalized with the real amount, not $0",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "provider invoice id recorded",
+    );
+    assert_eq!(lines_count(&fx.state, creator).await, 1, "still exactly one line (no duplicate)");
+    assert_eq!(
+        confirmed_lines_count(&fx.state, creator).await,
+        1,
+        "the post is now confirmed (one line provider-ref)",
+    );
 }
 
 /// A normal (≤24h) re-drive of the same crash window is STILL idempotent: with
@@ -1357,13 +1437,14 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
         return;
     };
     let fx = build_fixture(&url, "c1within").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
     let creator = make_user(&fx.state, "c1within").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_c1within").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_c1within_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 320, period, 1).await; // 320c
 
     let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
@@ -1380,17 +1461,15 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
         1,
         "no double-bill within 24h: the deterministic key replayed the original item",
     );
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT amount_cents, stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read run");
-    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 320, "billed the real amount");
-    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed");
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await,
+        Some(("finalized".to_string(), 320)),
+        "billed the real amount; invoice finalized",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "provider invoice id recorded",
+    );
 }
 
 /// C2 decorator: `create_invoice` creates the draft for real (it lands on Stripe
@@ -1471,13 +1550,14 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
         return;
     };
     let fx = build_fixture(&url, "c2crash").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
     let creator = make_user(&fx.state, "c2crash").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_c2crash").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_c2crash_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 700, period, 1).await; // 700c
 
     // First drive: items post, draft is created + persisted, then finalize crashes.
@@ -1488,18 +1568,17 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
     // The item posted, the draft was created exactly once and PERSISTED.
     assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once");
     assert_eq!(fx.mock.count_created_exact("POST", "/v1/invoices"), 1, "exactly one draft created (no finalize yet)");
-    let after_crash = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT draft_invoice_id, stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read run");
-    let persisted_draft: Option<String> = after_crash[0].get("draft_invoice_id");
+    let persisted_draft = draft_invoice_id(&fx.state, creator, period).await;
     assert!(persisted_draft.is_some(), "the draft invoice id was persisted BEFORE finalize (C2)");
-    assert!(after_crash[0].get::<_, Option<String>>("stripe_invoice_id").is_none(), "not finalized yet");
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await.map(|(s, _)| s).as_deref(),
+        Some("draft"),
+        "invoice still draft (not finalized yet)",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_none(),
+        "no finalized provider ref yet",
+    );
 
     // Simulate >24h: Stripe's create Idempotency-Key window has expired.
     fx.mock.disable_dedupe();
@@ -1531,18 +1610,16 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
         finalize_req.path,
     );
 
-    // The run is completed with the REAL amount (not $0).
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT amount_cents, stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("read run");
-    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 700, "finalized the real amount, NOT a $0 empty invoice");
-    assert!(rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(), "run completed with the finalized invoice id");
+    // The invoice is finalized with the REAL total (not $0).
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await,
+        Some(("finalized".to_string(), 700)),
+        "finalized the real amount, NOT a $0 empty invoice",
+    );
+    assert!(
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "completed with the finalized provider invoice id",
+    );
 }
 
 // ===========================================================================
@@ -1673,13 +1750,14 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
         return;
     };
     let fx = build_fixture(&url, "force").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
     let creator = make_user(&fx.state, "force").await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, creator).await;
-    fx.state.stripe_store.set_customer(creator, "cus_test_force").await.unwrap();
+    fx.state.stripe_store.set_customer(creator, &format!("cus_test_force_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 600, period, 1).await; // 600c in the CLOSED period
 
     let svc = test::init_service(
@@ -1721,20 +1799,14 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
         "the keyed reconcile created exactly one invoice item for the closed period",
     );
 
-    // And it recorded a completed billing_runs row for THAT period.
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT stripe_invoice_id FROM zeroship.billing_runs \
-             WHERE creator_id = $1 AND period_start = to_timestamp($2::double precision)",
-            &[&creator, &(period as f64)],
-        )
-        .await
-        .expect("read billing_runs");
-    assert_eq!(rows.len(), 1, "one billing_runs row for the reconciled period");
+    // And it recorded a finalized invoice for THAT period.
+    assert_eq!(
+        read_invoice(&fx.state, creator, period).await.map(|(s, _)| s).as_deref(),
+        Some("finalized"),
+        "one finalized invoice for the reconciled period",
+    );
     assert!(
-        rows[0].get::<_, Option<String>>("stripe_invoice_id").is_some(),
-        "the reconciled run carries a finalized invoice id",
+        finalized_invoice_id(&fx.state, creator, period).await.is_some(),
+        "the reconciled invoice carries a finalized provider invoice id",
     );
 }
