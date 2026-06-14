@@ -1,9 +1,11 @@
-# Billing & Metering Schema Redesign (v3.3)
+# Billing & Metering Schema Redesign (v3.4)
 
-**Status:** Proposal — pre-launch clean rewrite of changesets `0037`–`0044`. Not a live migration. No back-compat.
+**Status: HARDENED (critic→reviser 3 rounds, score 93/100) — ready for implementation review.** Pre-launch clean rewrite of the billing changesets. Not a live migration. No back-compat. Every table was verified against the live code that reads/writes it (control `pricing`/`spend`/`metering`/`account_status`/`stripe_*`, the `billing_reconcile`/`spend_reconcile`/`metering_export`/`dunning` crons, the 3 metering providers, the `account_reaper`, and changesets `0037`–`0043`/`0045`/`0046`); all idempotency, spend-enforcement, snapshot-replay, G2 order-safe suspension, and G6 webhook-dedup invariants confirmed preserved.
 **Date:** 2026-06-14
 **Branch / worktree:** `feat/billing-metering` · `/home/ruiyang/Projects/appbase-billing`
-**Scope:** replaces the current 16-table billing surface (changesets `0037`–`0044`) with a reproducible, provider-agnostic, FK-anchored model. Net: **16 tables + 2 immutability triggers + 4 domains.**
+**Scope:** replaces the current **14-table** billing surface (changesets `0037`,`0038`,`0039`,`0040`,`0041`,`0042`,`0043`,`0045`,`0046` — note there is **no billing `0044`**; `0044` is reserved for the unrelated G1 work) with a reproducible, provider-agnostic, FK-anchored model. Net: **19 tables + 2 immutability triggers + 5 domains.**
+
+> **Changeset numbering.** The current billing tables live across `0037`–`0043`, `0045` (G2 account-status), and `0046` (G6 webhook-dedup). This redesign consolidates them into **`0037`–`0043`** (re-using those exact slots for a clean re-author) plus **`0047`** for the account-status + webhook-dedup tables (the next free slot after the live `0046`; the `0044`/`0045`/`0046` numbers are NOT re-used — `0044` is G1's, and `0045`/`0046` are superseded-in-place by the `0037`–`0043` + `0047` set on a clean dev/test re-migrate). The redesign accounts for the **NOW-current** schema, i.e. it must carry forward G2's `creator_billing_status` (incl. its order-safety columns) **and** G6's `stripe_events_seen`.
 
 ---
 
@@ -13,7 +15,7 @@ The current billing schema bills correctly only by luck: it mutates `plans`, `me
 
 This redesign fixes all of that without versioned rate cards or a general ledger (both deferred). The single reproducibility mechanism is **snapshot-onto-line**: at finalize, each invoice line freezes the *inputs* to the charge function — the raw usage map, the applied weights, the resolved FX, the applied included-units quota, and the base fee — so any finalized bill replays bit-for-bit by re-running `charge_cents` over the frozen snapshot. Weights, FX, and plans therefore stay un-versioned and simple.
 
-Around that core: a **`billing_metrics` catalog** is the FK spine for every metric reference (no silent `$0`; custom SDK metrics auto-register, capped + GC'd + app-attributed); a migration-time **seed-parity assertion** fails loudly if a billable metric lacks a weight; `period` becomes a **`DATE` domain** pinned to first-of-month (killing the `f64` round-trip); spend state splits into **config (`app_spend_limit`) vs derived (`app_spend_state`)** to end a three-writer clobber dance; the invoice model becomes **provider-agnostic** (`invoices` + `invoice_lines` with a balance CHECK and immutability triggers) with all provider ids relocated to **real-FK side tables** (`billing_customer_refs`, `billing_provider_refs`, `billing_line_provider_refs`); and account/dunning state (`creator_billing_status`) is pulled fully into scope and re-keyed onto `creator_billing` so the FK and erase policy are uniform end-to-end.
+Around that core: a **`billing_metrics` catalog** is the FK spine for every metric reference (no silent `$0`; custom SDK metrics auto-register, capped + GC'd + app-attributed); a migration-time **seed-parity assertion** fails loudly if a billable metric lacks a weight; `period` becomes a **`DATE` domain** pinned to first-of-month (killing the `f64` round-trip); spend state splits into **config (`app_spend_limit`) vs derived (`app_spend_state`)** to end a three-writer clobber dance; the invoice model becomes **provider-agnostic** (`invoices` + `invoice_lines` with a balance CHECK and immutability triggers) with all provider ids relocated to **real-FK side tables** (`billing_customer_refs`, `billing_provider_refs`, `billing_line_provider_refs`); account/dunning state (`creator_billing_status`, **carrying forward G2's `last_event_at`/`last_recovered_at` order-safety high-water columns verbatim**) is pulled fully into scope and re-keyed onto `creator_billing` so the FK and erase policy are uniform end-to-end; and G6's **`stripe_events_seen`** webhook replay-dedup ledger is carried forward unchanged (control-internal, no RLS, append-only) so each verified webhook still processes at-most-once.
 
 The local spend-enforcement aggregate (`usage_aggregates`) stays local, fast, single-row-per-`(app, period, metric)`, and provider-independent — the gateway's Warn/Degrade/Block path can never be outsourced to a billing backend. Idempotent at-least-once ingest (dedup on `(worker_id, sequence)`, never on period) and idempotent invoicing (finalize-in-one-statement, durable real-FK provider-ref guards) are both preserved exactly, including the two prior holistic-review fixes (crash-window and spend↔invoice divergence). Account erase **conforms to the existing reaper's anonymize-on-financial-history model** rather than inventing a parallel RESTRICT path: all billing tables stay `ON DELETE CASCADE` from `users`, and `user_has_financial_history` is widened to recognize invoiced creators.
 
@@ -45,7 +47,7 @@ The local spend-enforcement aggregate (`usage_aggregates`) stays local, fast, si
 
 ## Full schema — consolidated Liquibase changesets
 
-These replace changesets `0037`–`0044` verbatim. File order preserves FK precedence (domains → catalog → cost model → metering → plans → spend → invoicing → exports → account-status).
+These replace the live billing changesets (`0037`–`0043`, `0045`, `0046`) on a clean dev/test re-migrate. File order preserves FK precedence (domains → catalog → cost model → metering → plans → spend → invoicing → exports → account-status + webhook-dedup). Numbering: `0037`–`0043` are re-authored in place; the account-status and webhook-dedup tables move to **`0047`** (the next free slot after the live `0046`, leaving G1's `0044` untouched).
 
 ### `0037` — `billing_domains_and_metrics.sql`
 
@@ -409,11 +411,23 @@ CREATE TABLE zeroship.creator_billing (
 -- UNIQUE (provider, external_id) backs the reverse lookup.
 CREATE TABLE zeroship.billing_customer_refs (
     creator_id  UUID NOT NULL REFERENCES zeroship.creator_billing(creator_id) ON DELETE CASCADE,
-    provider    TEXT NOT NULL,                -- 'stripe' | 'stripe_meters' | 'openmeter'
-    external_id TEXT NOT NULL,                -- cus_…
+    -- 'stripe' (the platform Customer — shared by the Native invoice rail AND
+    -- Stripe Billing Meters, which posts meter events against the same cus_…) |
+    -- 'openmeter' (a distinct external customer handle). Stripe-Meters does NOT
+    -- get its own ref; see Key flow E.
+    provider    TEXT NOT NULL,
+    external_id TEXT NOT NULL,                -- cus_… (stripe) / external handle (openmeter)
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (creator_id, provider),
-    UNIQUE (provider, external_id)
+    -- Reverse lookup: the webhook resolves creator FROM a customer id with NO
+    -- provider in hand (stripe_handlers.rs:874 get_creator_by_customer(customer)).
+    -- A provider customer id (cus_…) is globally unique, so the reverse lookup is
+    -- `WHERE external_id = $1` and a STANDALONE UNIQUE(external_id) makes it
+    -- constraint-guaranteed-singular — NOT merely UNIQUE(provider, external_id),
+    -- which would not back a providerless probe. UNIQUE(provider, external_id)
+    -- additionally documents per-provider scoping but is subsumed by the stricter
+    -- global unique below.
+    UNIQUE (external_id)
 );
 --rollback DROP TABLE zeroship.billing_customer_refs;
 
@@ -610,7 +624,7 @@ END $g$;
 > - **`billing_metrics`** — GC `kind='custom'` rows past `last_seen_at` cutoff with no referencing aggregate / line snapshot / weight.
 > Range-partition `DROP` is the preferred mechanism at scale.
 
-### `0044` — `account_status.sql`
+### `0047` — `account_status_and_webhook_dedup.sql`
 
 ```sql
 --liquibase formatted sql
@@ -629,8 +643,23 @@ CREATE TABLE zeroship.creator_billing_status (
     state                   zeroship.account_state NOT NULL DEFAULT 'active',
     past_due_since          TIMESTAMPTZ,                -- set on active→past_due; cleared on recovery
     suspended_at            TIMESTAMPTZ,                -- NULL unless suspended
-    last_payment_failure_at TIMESTAMPTZ,                -- idempotency guard for re-delivered payment_failed
-    failed_invoice_id       TEXT,
+    last_payment_failure_at TIMESTAMPTZ,                -- audit: most recent failed-payment signal
+    failed_invoice_id       TEXT,                       -- audit: WHICH invoice last failed
+    -- G2 ORDER-SAFETY (account_status.rs critic #1) — CARRIED FORWARD VERBATIM
+    -- from the live 0045. Stripe webhooks reorder/redeliver, so a stale
+    -- `payment_failed` can land AFTER an `invoice.paid` recovery. These two
+    -- high-water columns are the false-suspend guard and are READ + WRITTEN by
+    -- account_status.rs (record_payment_failed / record_payment_recovered):
+    --   * last_recovered_at — the Stripe `event.created` of the most recent
+    --     RECOVERY (advanced monotonically via GREATEST). A `payment_failed`
+    --     whose `event.created <= last_recovered_at` is STALE and is IGNORED —
+    --     it MUST NOT re-arm past_due on an already-paying creator.
+    --   * last_event_at — the `event.created` of the most recent event applied
+    --     (monotonic audit bookkeeping).
+    -- DROPPING EITHER COLUMN regresses the G2 order-safe suspension (the live
+    -- code would fail with "column does not exist"). Both default NULL.
+    last_event_at           TIMESTAMPTZ,
+    last_recovered_at       TIMESTAMPTZ,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE zeroship.creator_billing_status_history (
@@ -659,6 +688,30 @@ DO $g$ BEGIN
   END IF;
 END $g$;
 --rollback DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.creator_billing_status FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.creator_billing_status_history FROM zeroship_control'; END IF; END $rb$;
+
+--changeset zeroship:stripe-events-seen splitStatements:true
+-- G6 WEBHOOK REPLAY-DEDUP — CARRIED FORWARD VERBATIM from the live 0046.
+-- Stripe delivers webhooks AT-LEAST-ONCE; this is the GENERAL dedup ledger so
+-- each verified event processes AT-MOST-ONCE. Written CLAIM-AFTER-SUCCESS by the
+-- webhook dispatcher (stripe_handlers.rs:582 event_processed / :603
+-- mark_event_processed → stripe_store.rs:453/472), so a handler that errored is
+-- NOT recorded and Stripe's retry re-processes it (exactly-once EFFECTIVE).
+-- Mirrors usage_reports_seen: control-internal, NOT app-keyed (keyed by the
+-- Stripe evt_… id) ⇒ NO RLS; append-only ⇒ no DELETE/UPDATE grant.
+CREATE TABLE zeroship.stripe_events_seen (
+    event_id   TEXT        PRIMARY KEY,       -- evt_… ; the dedup key
+    event_type TEXT        NOT NULL,
+    seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+--rollback DROP TABLE zeroship.stripe_events_seen;
+
+--changeset zeroship:stripe-events-seen-grants splitStatements:false
+DO $g$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
+    EXECUTE 'GRANT SELECT, INSERT ON zeroship.stripe_events_seen TO zeroship_control';
+  END IF;
+END $g$;
+--rollback DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.stripe_events_seen FROM zeroship_control'; END IF; END $rb$;
 ```
 
 ---
@@ -676,13 +729,14 @@ END $g$;
 - **`invoices` (replaces `billing_runs`).** Provider-agnostic; `invoice_status` domain; balance CHECK; immutability trigger. `UNIQUE (creator_id, period)` is the no-double-bill claim; `status='finalized'` is the crash-safe short-circuit.
 - **`invoice_lines` (replaces `billing_run_items`).** The reproducibility record (critique #1). `app_id` FK'd at last. Freezes the charge *inputs* (`usage_snapshot`, `weights_snapshot`, `included_units`, `fx_pico_cents_per_unit`, `base_fee_cents`); `total_units`/`billable_units` are derived on read to avoid drift.
 - **`metering_exports`.** Export high-water + failure surface, `period DATE`. Never feeds enforcement — the spend cap reads `usage_aggregates` directly, which is what keeps providers pluggable.
-- **`creator_billing_status` + `_history`.** Account/dunning state, re-keyed onto `creator_billing` for a uniform FK/erase policy. Partial index for the dunning scan.
+- **`creator_billing_status` + `_history` (0045/G2).** Account/dunning state, re-keyed onto `creator_billing` for a uniform FK/erase policy; typed `account_state`; partial index for the dunning scan. The G2 order-safety high-water columns `last_event_at`/`last_recovered_at` are **carried forward verbatim** — they are the stale-failure gate read+written by `account_status.rs`; dropping either regresses the G2 order-safe suspension.
+- **`stripe_events_seen` (0046/G6, kept).** The Stripe webhook replay-dedup ledger — one row per verified `evt_…`, written claim-after-success so a handler that errored is re-processed (exactly-once EFFECTIVE). Carried forward unchanged: control-internal, NOT app-keyed (keyed by event-id) ⇒ no RLS; append-only ⇒ no DELETE/UPDATE grant. Without it, every redelivered webhook re-runs its side effects.
 
 ---
 
 ## OLD → NEW mapping
 
-| Old (0037–0044) | New | Action | Key changes |
+| Old (0037–0043, 0045, 0046) | New | Action | Key changes |
 |---|---|---|---|
 | `usage_aggregates` | `usage_aggregates` | reshape | `period DATE`; `metric` FK → `billing_metrics`; period-leading index. |
 | `usage_reports_seen` | `usage_reports_seen` | reshape | PK stays `(worker_id, sequence)`; `period` NULLable, retention-only, NOT written at ingest. |
@@ -696,27 +750,39 @@ END $g$;
 | `billing_runs` | `invoices` | replace | provider-agnostic; status domain; balance CHECK; immutability trigger; Stripe ids → side table. |
 | `billing_run_items` | `invoice_lines` | replace | FK `app_id`; frozen snapshot incl. `included_units`; derived `total_units`; immutability trigger. |
 | `metering_exports` | `metering_exports` | reshape | `period DATE`; failure surface kept. |
-| `creator_billing_status` | `creator_billing_status` | reshape | FK → `creator_billing(creator_id)` CASCADE; typed `account_state`. |
-| `creator_billing_status_history` | `creator_billing_status_history` | reshape | typed states; FK → `creator_billing(creator_id)` CASCADE; append-only. |
-| — | `billing_customer_refs` | **new** | customer↔provider, real FK → `creator_billing`. |
+| `creator_billing_status` (0045/G2) | `creator_billing_status` | reshape | FK → `creator_billing(creator_id)` CASCADE; typed `account_state`; **`last_event_at`/`last_recovered_at` order-safety columns CARRIED FORWARD verbatim** (dropping either regresses G2). |
+| `creator_billing_status_history` (0045/G2) | `creator_billing_status_history` | reshape | typed states; FK → `creator_billing(creator_id)` CASCADE; append-only. |
+| `stripe_events_seen` (0046/G6) | `stripe_events_seen` | **keep** | webhook replay-dedup ledger carried forward verbatim; control-internal, NO RLS, append-only (event_processed / mark_event_processed). |
+| — | `billing_customer_refs` | **new** | customer↔provider, real FK → `creator_billing`; `UNIQUE(external_id)` backs the providerless reverse lookup. |
 | — | `billing_provider_refs` | **new** | invoice provider seam, real FK → `invoices(id)`. |
 | — | `billing_line_provider_refs` | **new** | line provider seam, real composite FK → `invoice_lines(invoice_id, app_id)`. |
 
-Net 13 live billing tables → **16** + 2 immutability triggers + 4 domains.
+**14 live billing tables** (`usage_aggregates`, `usage_reports_seen`, `plans`, `metric_weights`, `pricing_config`, `app_spend_state`, `spend_state_history`, `creator_billing`, `billing_runs`, `billing_run_items`, `metering_exports`, `creator_billing_status`, `creator_billing_status_history`, `stripe_events_seen`) → **19 new tables**:
+- **12 reshaped/kept** (1:1): `usage_aggregates`, `usage_reports_seen`, `plans`, `metric_weights`, `pricing_config`, `app_spend_state`, `spend_state_history`, `creator_billing`, `metering_exports`, `creator_billing_status`, `creator_billing_status_history`, `stripe_events_seen`.
+- **2 replacements**: `billing_runs` → `invoices`, `billing_run_items` → `invoice_lines`.
+- **5 net-new**: `billing_metrics`, `app_spend_limit` (split from `app_spend_state`), `billing_customer_refs`, `billing_provider_refs`, `billing_line_provider_refs`.
+
+Net **19 tables + 2 immutability triggers + 5 domains** (`billing_period`, `spend_state`, `account_state`, `metric_kind`, `invoice_status`).
 
 ---
 
 ## Key flows
 
-**A. Idempotent at-least-once ingest** (`metering/mod.rs`, one tx per report). `period = first-of-month(now)::date`. The dedup gate is **unchanged**: `INSERT … usage_reports_seen (worker_id, sequence) VALUES ($1,$2) ON CONFLICT (worker_id, sequence) DO NOTHING RETURNING sequence` — 0 rows ⇒ duplicate ⇒ no-op, including across a month boundary; `period` is **not** written. On a new report: one capped set-valued custom-metric upsert into `billing_metrics`, then per `(app_id, metric, delta)` an UPSERT `(app_id, period, metric) total = total + delta`. `high_water_sequence` stays cross-period (`MAX(sequence) WHERE worker_id=$1`, never `AND period=$2`). The u64→i64 overflow skip-with-warn stays. No double-count regression.
+**A. Idempotent at-least-once ingest** (`metering/mod.rs`, one tx per report). `period = first-of-month(now)::date`. The dedup gate is **unchanged**: `INSERT … usage_reports_seen (worker_id, sequence) VALUES ($1,$2) ON CONFLICT (worker_id, sequence) DO NOTHING RETURNING sequence` — 0 rows ⇒ duplicate ⇒ no-op, including across a month boundary; `period` is **not** written. On a new report, **inside the SAME report transaction and BEFORE the aggregate UPSERT** (so the `usage_aggregates.metric` → `billing_metrics(metric) ON DELETE RESTRICT` FK always resolves): one capped, set-valued custom-metric registration into `billing_metrics`, then per `(app_id, metric, delta)` an UPSERT `(app_id, period, metric) total = total + delta`.
+
+  **Cap-refuse MUST NOT wedge ingest (FK-abort guard).** The custom-metric catalog is capped per-`owner_app` to bound attacker cardinality. When a report carries a *new* custom metric that would exceed the cap, the registration step does NOT insert the catalog row — but then the aggregate UPSERT for that metric would FK-violate and abort the WHOLE report tx (and, because the dedup row already committed-or-rolls-back with it, retries can never make progress). So the ingest path **filters the delta set to metrics that resolved in the catalog**: a metric refused at the cap is **dropped-with-warn** (`billing_event="custom_metric_cap_refused"`), its delta is NOT applied, and the rest of the report commits normally. At-least-once liveness is preserved — a refused metric never FK-aborts the report, and the platform/primitive metrics (always cataloged) always apply. The registration itself is an `INSERT … ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW()` so an already-known custom metric simply bumps its GC clock.
+
+  `high_water_sequence` stays cross-period (`MAX(sequence) WHERE worker_id=$1`, never `AND period=$2`). The u64→i64 overflow skip-with-warn stays. No double-count regression.
 
 **B. Local spend enforcement** (`spend.rs`, ~60s). Hoist plans/weights/FX once; run the active unweighted-metric check against the loaded `weights` map (no extra query). One batched fleet read `WHERE period=$1` (hits `usage_aggregates_period_idx`). Per app: effective limit = `app_spend_limit.spend_limit_cents` else `plan.spend_limit_default_cents` (double LEFT JOIN); `derive_state` with hysteresis; on transition, one tx UPSERTs `app_spend_state` (no override column to clobber) and appends `spend_state_history` **with `period` bound** (the column is NOT NULL). The gateway reads precomputed `app_spend_state.state` via the 5s route-pull. `GET /spend-limit` (`get_spend_limit`) is rewritten to the double LEFT JOIN reading `l.spend_limit_cents` + `s.state`.
 
 **C. Reproducible month-end reconcile** (`billing_reconcile.rs`, per-creator advisory-locked). Claim with `INSERT … invoices (…, 'draft') ON CONFLICT (creator_id, period) DO NOTHING`; short-circuit when `status='finalized'`. Per app: compute the `ChargeBreakdown`, then **snapshot the inputs onto the line** (`usage_snapshot`, `weights_snapshot`, `included_units`, resolved FX, base fee, authoritative `amount_cents`) before the provider POST. Provider success → INSERT `billing_line_provider_refs(invoice_id, app_id, 'stripe', 'invoice_item', ii_…)`. **Finalize in ONE UPDATE** (subtotal/credit/tax/total/status/finalized_at) so the balance CHECK never sees a half-written row; the line trigger then freezes lines. Any finalized line replays bit-for-bit by re-running `charge_cents` over its snapshot — fixing the retroactive-reprice flaw (critique #1).
 
+  **Snapshot-completeness argument (why replay is bit-for-bit).** `charge_cents(price, usage, weights)` (`pricing.rs:321`) is a pure function of exactly three inputs: `usage` (metric→raw total), `weights` (metric→`{units_per_op, per_units}`), and `price.{base_fee_cents, included_units, fx_pico_cents_per_unit}` — `price.spend_limit_default_cents` is a *cap*, not a charge input, and is correctly absent. The line freezes all five charge inputs (`usage_snapshot`, `weights_snapshot`, `base_fee_cents`, `included_units`, `fx_pico_cents_per_unit`) and the authoritative output (`amount_cents`). Since the function is deterministic and reads nothing else (the half-up `÷ FX_SCALE` rounding is a constant), re-running it over the frozen snapshot reproduces `amount_cents` exactly — no live rate-table read participates. This is the *complete* input set; that is why versioned rate cards are unnecessary. **Base fee is per-app-per-line** (each line carries the owning app's plan `base_fee_cents`, matching `bill_creator`'s per-app `charge_cents`), NOT a creator-level fee summed across lines — so N apps yield N base fees by design, never a double-count.
+
 **D. Crash / retry / >24h idempotency.** The claim short-circuit `invoices.status='finalized'` == old `stripe_invoice_id NOT NULL`. Per-app guard: an `invoice_lines (invoice_id, app_id)` intent row exists before the POST; **presence of a `billing_line_provider_refs` row (real composite FK) == old `stripe_item_id IS NOT NULL`** ⇒ skip; intent present + ref absent ⇒ within 24h, deterministic-key replay; past 24h, `find_invoice_item_by_key` adopt-or-post then INSERT the ref. Draft-before-finalize is guarded by the `draft_invoice` `billing_provider_refs` row. The Native provider's `invoice` verb (`native.rs::lookup_invoice_id`) is rewritten to resolve the finalized id via `invoices ⋈ billing_provider_refs (provider='stripe', ref_kind='invoice', status='finalized')`, with `period_start i64 → period DATE`. The ref rows are durable real-FK guards — no malformed-key gap.
 
-**E. Export (pluggable providers)** (`metering_export.rs`). Reads `usage_aggregates` (CU), applies weights/FX, and pushes a cumulative high-water to the configured provider (Native / Stripe Billing Meters / OpenMeter), recording `exported_units` + failure surface in `metering_exports`. The customer id comes from `billing_customer_refs` (`provider`-scoped). **Export never feeds enforcement** — that read stays local on `usage_aggregates` — which is exactly what lets the backend be swapped without touching the cap path.
+**E. Export (pluggable providers)** (`metering_export.rs`). Reads `usage_aggregates`, derives the app's *current cumulative* CU via `pricing::total_units(weights, period_totals)` (no CU column — always re-derived from the re-weightable raw totals), then pushes the **DELTA** `current_total_units − exported_units` to the configured provider (Native / Stripe Billing Meters / OpenMeter); a 0 delta is the no-op that makes a re-run safe. On a successful push it advances the durable high-water `exported_units = current_total_units` in `metering_exports` (monotonic), recording the failure surface (`consecutive_failures`/`last_error`/`last_attempt_at`) on failure. The local high-water — NOT Stripe's dedup window — is the primary double-push guard. The customer id comes from `billing_customer_refs`. **Provider→ref mapping (avoid a redundant ref):** Stripe Billing Meters (`stripe_meters`) posts meter events against the SAME platform Stripe customer the Native/invoice rail uses (`stripe_meters.rs:83` calls `get_customer` → the `cus_…`), so it reads the **`provider='stripe'`** ref — it does NOT mint a separate `'stripe_meters'` customer ref. Only a backend with a *distinct external customer handle* (OpenMeter) writes a non-`'stripe'` ref (`provider='openmeter'`). So `billing_customer_refs` holds at most one `'stripe'` row (shared by Native + Stripe-Meters) plus, if OpenMeter is configured, one `'openmeter'` row per creator. **Export never feeds enforcement** — that read stays local on `usage_aggregates` — which is exactly what lets the backend be swapped without touching the cap path.
 
 **F. Account erase** (`auth::cron::account_reaper`). Conforms to the existing anonymize-vs-hard-delete branch. `user_has_financial_history` is widened to `creator_accounts OR invoices` (an invoice is the durable artifact GDPR 17(3)(b) lets us retain). Financial history ⇒ `anonymize_user` retains the `users` row, so `creator_billing`, `creator_billing_status`(+history), `invoices`, `invoice_lines`, `billing_customer_refs` all survive (FK targets alive). No financial history ⇒ `hard_delete_user`, and CASCADE reaps the empty billing shell. No RESTRICT flip, no bespoke billing-side anonymize, no dangling suspension state — uniform.
 
@@ -725,22 +791,24 @@ Net 13 live billing tables → **16** + 2 immutability triggers + 4 domains.
 ## Implementation plan
 
 ### Schema (this proposal)
-Replace changesets `0037`–`0044` with the consolidated files above. FK precedence is satisfied by file order (domains/catalog → cost model → metering → plans → spend → invoicing → exports → account-status). The platform/primitive metric seed lives in `0037`, so the `usage_aggregates.metric` / `metric_weights.metric` FKs resolve at first boot regardless of `seed_plans` timing; `0044`'s FK targets `creator_billing(creator_id)`, so it correctly follows `0042` by number.
+Replace the live billing changesets (`0037`–`0043`, `0045`, `0046`) with the consolidated files above (`0037`–`0043` re-authored in place; account-status + webhook-dedup in `0047`). FK precedence is satisfied by file order (domains/catalog → cost model → metering → plans → spend → invoicing → exports → account-status + webhook-dedup). The platform/primitive metric seed lives in `0037`, so the `usage_aggregates.metric` / `metric_weights.metric` FKs resolve at first boot regardless of `seed_plans` timing; `0047`'s `creator_billing_status` FK targets `creator_billing(creator_id)` (created in `0042`), so it correctly follows by number, and `0047`'s `stripe_events_seen` is FK-free (control-internal), so it has no ordering constraint.
 
 ### Code changes (each lands with a regression test that fails pre-fix)
 1. **`metering/mod.rs`** — bind `period DATE` directly (drop `period_ts`/the `f64` idiom); ingest UPSERT keys `(app_id, period, metric)`; dedup INSERT unchanged; add the capped set-valued custom-metric registration; keep the u64→i64 overflow skip.
-2. **`spend.rs`** — `set_limit` upserts `app_spend_limit` only (drop its `period_ts` bind); `app_state_row` double LEFT JOIN; `touch_state`/`persist_transition` UPSERT `app_spend_state` with no `spend_limit_cents`; `persist_transition` history INSERT **binds `period`**; add the active unweighted-metric warn.
+2. **`spend.rs`** — `set_limit` upserts `app_spend_limit` only (drop its `period_ts` bind); `app_state_row` double LEFT JOIN (`apps ⋈ app_spend_limit ⋈ app_spend_state`); `touch_state`/`persist_transition` UPSERT `app_spend_state` with no `spend_limit_cents`; `persist_transition` history INSERT **binds `period`**. NOTE: `spend_state_history.period` is `NOT NULL` in the new schema while the live `persist_transition` (`spend.rs:444`) does not bind it — so this code change and the `0041` DDL MUST land in the **same PR**, or the first transition INSERT fails the NOT NULL. Also add the active unweighted-metric warn (a metric present in `usage_aggregates` with no `metric_weights` row prices $0 silently → warn).
 3. **`api.rs::get_spend_limit`** — rewrite to the double LEFT JOIN (`l.spend_limit_cents` + `s.state`); the `override ?? plan_default` logic unchanged. Regression: `GET /spend-limit` returns the override after `set_limit`.
-4. **`stripe_store.rs`** — `set_customer` becomes a 2-statement tx (identity `creator_billing` then `billing_customer_refs`); `set_default_pm` unchanged (the 2nd lazy identity writer, FK-parent-safe); `get_customer`/`get_creator_by_customer` read `billing_customer_refs`.
+4. **`stripe_store.rs`** — `set_customer` becomes a 2-statement tx (identity `creator_billing` then `billing_customer_refs(creator_id, 'stripe', cus_…)`); `set_default_pm` unchanged (the 2nd lazy identity writer, FK-parent-safe — but it must now INSERT the `creator_billing` parent before/instead-of writing a customer ref, since the customer id moved); `get_customer(creator_id)` reads `billing_customer_refs WHERE creator_id=$1 AND provider='stripe'`; `get_creator_by_customer(cus)` reads `billing_customer_refs WHERE external_id=$1` (the caller `stripe_handlers.rs:874` has NO provider in hand — the `UNIQUE(external_id)` constraint makes this providerless probe guaranteed-singular). Regression: round-trip `set_customer` then `get_creator_by_customer` resolves the creator; the customer id is absent from `creator_billing` (fully relocated).
 5. **`billing_reconcile.rs`** — claim/short-circuit on `invoices.status`; snapshot-onto-line before POST; line provider-ref INSERT; **finalize-in-one-statement**. Regression: a two-statement subtotal-then-total write is rejected; re-running `charge_cents` over a finalized snapshot reproduces `amount_cents`.
 6. **`metering/provider/native.rs::lookup_invoice_id`** — rewrite to `invoices ⋈ billing_provider_refs`; `period_start i64 → period DATE`. Regression: the Native `invoice` verb returns the finalized id post-relocation.
-7. **`account_status.rs`** — payment-failure UPSERT becomes parent-first (`creator_billing` then `creator_billing_status`); `state` literal → `account_state` domain (same wire TEXT). Regression: a payment-failure UPSERT for a creator with no prior `creator_billing` row succeeds.
+7. **`account_status.rs`** — payment-failure UPSERT becomes parent-first (`creator_billing` then `creator_billing_status`, since the FK now targets `creator_billing(creator_id)` not `users`); `state` literal → `account_state` domain (same wire TEXT). The G2 order-safety columns `last_event_at`/`last_recovered_at` are READ+WRITTEN unchanged (carried forward in the schema) — the `record_payment_failed` stale-failure gate (`event.created <= last_recovered_at` ⇒ ignore) and the `record_payment_recovered` `GREATEST(...)` high-water advance keep working verbatim. Regression: (a) a payment-failure UPSERT for a creator with no prior `creator_billing` row succeeds (parent-first); (b) a stale `payment_failed` (event.created older than `last_recovered_at`) does NOT re-arm `past_due` (proves the carried-forward columns still gate).
+   - **G6 dispatcher: no code change.** `stripe_events_seen` is carried forward verbatim, so `event_processed`/`mark_event_processed` (`stripe_store.rs:453/472`) and the webhook dispatcher (`stripe_handlers.rs:582/603`) compile and run unchanged. The schema-level requirement is solely that the table survives the rewrite (it does, in `0047`).
+   - **Gateway route-pull: no code change.** The FK-target change (`creator_billing_status.creator_id → creator_billing` instead of `→ users`) is TRANSPARENT to the registry projection: `registry.rs:556` LATERAL-joins `cbs.creator_id = m.user_id` on the *value* (the same user id), not via the FK, so `RouteEntry.account_state` resolves unchanged. Likewise `app_spend_state` is still joined `s.app_id = a.id` (`registry.rs:552`); only the column the engine *writes* moved (the override is now in `app_spend_limit`), not the `state` column the gateway reads.
 8. **`account_reaper.rs`** — widen `user_has_financial_history` to `creator_accounts OR invoices`. Regression: a previously-invoiced creator anonymize-retains (rows intact); a never-billed creator hard-deletes (CASCADE, no dangling rows).
 9. **Immutability triggers** — regression: updating `invoice_lines.amount_cents` after the parent finalizes is rejected; a finalized invoice rejects any non-void UPDATE.
 
 ### Now vs pre-scale priority
 
-**Build now:** all 16 tables + 4 domains + 2 immutability triggers + balance CHECK + `period DATE` everywhere + the metric-catalog FK spine (capped/GC-able/app-attributed custom rows + seed/weight parity assertion) + the active unweighted-metric alert + the spend config/derived split (with `get_spend_limit` reader fixed + `period` history bind) + the real-FK `billing_customer_refs` + the `billing_provider_refs`/`billing_line_provider_refs` seams + snapshot-onto-line (frozen `included_units`, derived `total_units`) + the 2-statement `set_customer` rewrite + the `native.rs::lookup_invoice_id` rewrite + `creator_billing_status` in scope + finalize-in-one-statement + the conformed account-erase widening.
+**Build now:** all 19 tables + 5 domains + 2 immutability triggers + balance CHECK + `period DATE` everywhere + the metric-catalog FK spine (capped/GC-able/app-attributed custom rows + seed/weight parity assertion) + the active unweighted-metric alert + the spend config/derived split (with `get_spend_limit` reader fixed + `period` history bind) + the real-FK `billing_customer_refs` (with `UNIQUE(external_id)` for the providerless reverse lookup) + the `billing_provider_refs`/`billing_line_provider_refs` seams + snapshot-onto-line (frozen `included_units`, derived `total_units`) + the 2-statement `set_customer` rewrite + the `native.rs::lookup_invoice_id` rewrite + `creator_billing_status` in scope (incl. the G2 `last_event_at`/`last_recovered_at` order-safety columns) + `stripe_events_seen` (G6 webhook-dedup) carried forward + finalize-in-one-statement + the conformed account-erase widening.
 
 **Pre-stage now, activate on a measured signal:**
 1. Retention cron (`cron/billing_retention`, disabled) — `usage_reports_seen` (begins writing `period` + adds its index then), `spend_state_history`, `usage_aggregates` (per-owner-finalized **or** system/owner-less age gate, outside reconcile window), custom-metric GC.
