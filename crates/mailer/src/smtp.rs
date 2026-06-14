@@ -354,6 +354,7 @@ mod tests {
             html: None,
             headers: vec![],
             tags: vec![],
+            idempotency_key: None,
         };
         let m = build_lettre_message(&msg).expect("build");
         let raw = String::from_utf8_lossy(&m.formatted()).to_string();
@@ -382,6 +383,7 @@ mod tests {
             html: Some("<p>html</p>".into()),
             headers: vec![],
             tags: vec![],
+            idempotency_key: None,
         };
         let m = build_lettre_message(&msg).expect("build");
         let raw = String::from_utf8_lossy(&m.formatted()).to_string();
@@ -423,6 +425,7 @@ mod tests {
             html: None,
             headers: vec![("X-ZS-Relay".into(), "1".into())],
             tags: vec![],
+            idempotency_key: None,
         };
         let m = build_lettre_message(&msg).expect("build");
         let raw = String::from_utf8_lossy(&m.formatted()).to_string();

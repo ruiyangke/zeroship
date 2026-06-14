@@ -79,6 +79,8 @@ pub fn build_forward(
         // Built from scratch — the ONLY header carried is the loop stamp.
         headers: vec![(RELAY_LOOP_HEADER.to_owned(), hop.to_string())],
         tags: vec!["relay-forward".to_owned()],
+        // Relay forwards are not re-driven through a notify ledger; no dedup key.
+        idempotency_key: None,
     }
 }
 
@@ -115,6 +117,7 @@ pub fn build_bounce(
         html: None,
         headers: vec![],
         tags: vec!["relay-bounce".to_owned()],
+        idempotency_key: None,
     }
 }
 

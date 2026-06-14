@@ -110,6 +110,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
             .expect("native tax provider builds"),
+            notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
             pairwise_salt: [0u8; 32],
         }),
         blob_root,

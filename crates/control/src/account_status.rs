@@ -313,12 +313,20 @@ impl AccountStatusStore {
             .conn()
             .await
             .map_err(|e| StripeError::Db(format!("{e}")))?;
-        // `from_state`/`to_state` are the `account_state` domain — bind `::text`
-        // (the domain param OID rejects a bare &str, same as billing_period/DATE).
+        // `id` is the PR-6 surrogate PK (`cbh_<base62>`) = the
+        // `billing_notifications.transition_id` for the dunning-driven notification kinds
+        // (payment_failed/past_due/suspended/recovered). Minted in Rust here (no SQL
+        // DEFAULT — the disjoint prefix the notify dedup relies on cannot come from
+        // `gen_random_uuid()`). `from_state`/`to_state` are the `account_state` domain —
+        // bind `::text` (the domain param OID rejects a bare &str, same as
+        // billing_period/DATE).
+        let history_id = zeroship_core::typed_id::new_creator_billing_history_id();
         conn.execute(
             "INSERT INTO zeroship.creator_billing_status_history \
-                (creator_id, from_state, to_state, reason) VALUES ($1, $2::text, $3::text, $4)",
+                (id, creator_id, from_state, to_state, reason) \
+             VALUES ($1, $2, $3::text, $4::text, $5)",
             &[
+                &history_id,
                 &creator_id,
                 &account_state_str(from),
                 &account_state_str(to),

@@ -139,6 +139,9 @@ pub fn build_email(
         html: Some(html),
         headers: vec![],
         tags,
+        // Transactional auth mail is not re-driven through a notify ledger; the
+        // billing notifier sets its own key via `Email { idempotency_key: Some(..) }`.
+        idempotency_key: None,
     }
 }
 

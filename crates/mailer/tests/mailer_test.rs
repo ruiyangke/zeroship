@@ -43,6 +43,7 @@ async fn stdout_mailer_sends_when_not_suppressed() {
         html: None,
         headers: vec![],
         tags: vec![],
+        idempotency_key: None,
     };
     let result = mailer.send(&client, msg).await;
     assert!(
@@ -94,6 +95,7 @@ async fn stdout_mailer_refuses_suppressed() {
         html: None,
         headers: vec![],
         tags: vec![],
+        idempotency_key: None,
     };
     let result = mailer.send(&client, msg).await;
     assert!(
@@ -184,6 +186,7 @@ async fn smtp_plaintext_sink_delivers_relay_forward() {
         html: None,
         headers: vec![("X-ZS-Relay".into(), "1".into())],
         tags: vec![],
+        idempotency_key: None,
     };
 
     let result = mailer.send(&client, msg).await;

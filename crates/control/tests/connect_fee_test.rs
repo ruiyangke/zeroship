@@ -361,6 +361,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
         .expect("native tax provider builds"),
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
     });
 

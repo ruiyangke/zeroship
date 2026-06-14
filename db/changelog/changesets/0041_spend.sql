@@ -18,7 +18,16 @@ CREATE TABLE zeroship.app_spend_state (
     evaluated_at     TIMESTAMPTZ             NOT NULL DEFAULT NOW()
 );
 -- Append-only transition audit; typed states; period bound in code.
+-- `id` (billing-ops gap #26, PR-6 notifications) is a STABLE surrogate PK = the
+-- `billing_notifications.transition_id` for spend-driven notification kinds. A
+-- `she_<base62>` typed id minted in Rust by `spend.rs::persist_transition` (NO SQL
+-- DEFAULT — there is no in-DB base62 generator, and `gen_random_uuid()` would not
+-- carry the `she_` prefix the cross-source dedup-disjointness assertion relies on,
+-- design MINOR-3). Added in PR-6 (pre-launch, edited in place — clean re-migrate, no
+-- live ALTER). Without it the notifier would dedup on (app_id, at), which is not
+-- collision-proof (two transitions can share a timestamp at clock resolution).
 CREATE TABLE zeroship.spend_state_history (
+    id          TEXT                    PRIMARY KEY,       -- she_<base62> (PR-6)
     app_id      UUID                    NOT NULL REFERENCES zeroship.apps(id) ON DELETE CASCADE,
     period      zeroship.billing_period NOT NULL,
     from_state  zeroship.spend_state    NOT NULL,

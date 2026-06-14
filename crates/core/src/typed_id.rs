@@ -262,6 +262,31 @@ pub const REFUND_PREFIX: &str = "ref";
 /// base62 generator).
 pub const PLAN_CHANGE_EVENT_PREFIX: &str = "pce";
 
+/// Spend-state-history surrogate-id prefix (billing-ops gap #26, PR-6: notifications).
+/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// `zeroship.spend_state_history.id` column stores the full typed-id string
+/// (`she_<base62>`), minted in Rust by `spend.rs::persist_transition` (no SQL
+/// `DEFAULT` — there is no in-DB base62 generator, and a bare `gen_random_uuid()`
+/// would not carry the `she_` prefix the notify dedup key relies on).
+///
+/// The surrogate id IS the `billing_notifications.transition_id` for spend-driven
+/// notification kinds. Its prefix MUST be pairwise-disjoint from every other
+/// notification source (`cbh`/`inv`/`ref`/`dsp`) so a `transition_id` from one source
+/// can never collide with another's in the send-ledger dedup key — asserted by
+/// [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+pub const SPEND_HISTORY_PREFIX: &str = "she";
+
+/// Creator-billing-status-history surrogate-id prefix (billing-ops gap #26, PR-6:
+/// notifications). Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
+/// (R16-API2). The `zeroship.creator_billing_status_history.id` column stores the full
+/// typed-id string (`cbh_<base62>`), minted in Rust by `account_status.rs::append_history`
+/// (no SQL `DEFAULT` — see [`SPEND_HISTORY_PREFIX`]).
+///
+/// The surrogate id IS the `billing_notifications.transition_id` for the dunning-driven
+/// kinds (`payment_failed`/`past_due`/`suspended`/`recovered`). Its prefix MUST be
+/// pairwise-disjoint from every other notification source — see [`SPEND_HISTORY_PREFIX`].
+pub const CREATOR_BILLING_HISTORY_PREFIX: &str = "cbh";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -343,6 +368,23 @@ pub fn new_refund_id() -> String {
 /// snapshot (billing-ops gap #26, PR-4: full usage-segment proration).
 pub fn new_plan_change_event_id() -> String {
     generate(PLAN_CHANGE_EVENT_PREFIX)
+}
+
+/// Generate a new spend-state-history surrogate ID: `she_{base62(uuidv7)}`. Minted by
+/// `spend.rs::persist_transition` when it appends a `spend_state_history` row; the value
+/// becomes the `billing_notifications.transition_id` for spend-driven notification kinds
+/// (billing-ops gap #26, PR-6).
+pub fn new_spend_history_id() -> String {
+    generate(SPEND_HISTORY_PREFIX)
+}
+
+/// Generate a new creator-billing-status-history surrogate ID: `cbh_{base62(uuidv7)}`.
+/// Minted by `account_status.rs::append_history` when it appends a
+/// `creator_billing_status_history` row; the value becomes the
+/// `billing_notifications.transition_id` for the dunning-driven kinds (billing-ops
+/// gap #26, PR-6).
+pub fn new_creator_billing_history_id() -> String {
+    generate(CREATOR_BILLING_HISTORY_PREFIX)
 }
 
 #[cfg(test)]
@@ -514,6 +556,55 @@ mod tests {
         assert_ne!(prefix, CREDIT_PREFIX);
         assert_ne!(prefix, REFUND_PREFIX);
         assert_ne!(prefix, PLAN_PREFIX);
+    }
+
+    #[test]
+    fn spend_and_creator_billing_history_prefixes_roundtrip() {
+        for (mk, want) in [
+            (new_spend_history_id as fn() -> String, "she"),
+            (new_creator_billing_history_id as fn() -> String, "cbh"),
+        ] {
+            let id = mk();
+            assert!(id.starts_with(&format!("{want}_")), "got {id}");
+            assert_eq!(id.len(), 26, "{want}_ + 22 base62 = 26 chars: {id}");
+            let (prefix, _) = parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
+            assert_eq!(prefix, want);
+            assert_eq!(want.len(), 3, "{want} prefix must be 3 chars (R16-API2)");
+        }
+    }
+
+    /// PR-6 regression (brief test (d)): the `billing_notifications` dedup key is
+    /// `(creator_id, kind, transition_id)`, where `transition_id` is the typed-id of the
+    /// SOURCE row (a `she_…` spend-history id, a `cbh_…` creator-billing-history id, an
+    /// `inv_…` invoice id, a `ref_…` refund id, or a `dsp_…` dispute id). The design's
+    /// MINOR-3 cross-source dedup correctness REQUIRES these prefixes be pairwise-disjoint
+    /// so a `transition_id` from one source can NEVER collide with another's. This test is
+    /// the typed-id-registry assertion the design names; it fails the day two sources
+    /// share a prefix (which would let one source's id silently dedup against another's).
+    #[test]
+    fn notification_source_prefixes_are_pairwise_disjoint() {
+        // `dsp` (disputes) has no `*_PREFIX` const in this crate yet (the dispute id is
+        // minted by stripe_handlers in a later PR); assert against the literal so the
+        // disjointness invariant is complete and a future `DISPUTE_PREFIX = "dsp"`
+        // re-uses the same string.
+        let sources = [
+            ("spend_state_history", SPEND_HISTORY_PREFIX),
+            ("creator_billing_status_history", CREATOR_BILLING_HISTORY_PREFIX),
+            ("invoices", INVOICE_PREFIX),
+            ("refunds", REFUND_PREFIX),
+            ("disputes", "dsp"),
+        ];
+        for (i, (name_a, pa)) in sources.iter().enumerate() {
+            assert_eq!(pa.len(), 3, "{name_a} prefix must be 3 chars (R16-API2)");
+            for (name_b, pb) in &sources[i + 1..] {
+                assert_ne!(
+                    pa, pb,
+                    "notification source prefixes must be pairwise-disjoint: \
+                     {name_a} and {name_b} both use '{pa}' — the send-ledger dedup key \
+                     would let one source collide with the other"
+                );
+            }
+        }
     }
 
     #[test]

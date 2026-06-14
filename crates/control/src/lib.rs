@@ -23,6 +23,7 @@ pub mod http_util;
 pub mod internal;
 pub mod invoice_payments;
 pub mod metering;
+pub mod notify;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod openmeter_client;
@@ -216,6 +217,12 @@ pub struct AppState {
     /// provider swap, not a schema change (`tax_cents` already exists). See
     /// [`tax::TaxProvider`].
     pub tax_provider: Arc<dyn tax::TaxProvider>,
+    /// The billing notifier, built once at boot. The `cron::billing_notify` sweep
+    /// renders a per-kind template and sends it through this seam (over the relocated
+    /// `zeroship-mailer` `Mailer`), passing a provider-side `Idempotency-Key =
+    /// (creator_id, kind, transition_id)` so a re-driven send is idempotent at the
+    /// provider (billing-ops gap #26, PR-6, MAJOR-A). See [`notify::BillingNotifier`].
+    pub notifier: Arc<dyn notify::BillingNotifier>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
     /// stash signing key the gateway uses via
     /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a

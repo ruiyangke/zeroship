@@ -33,7 +33,14 @@ CREATE TABLE zeroship.creator_billing_status (
     last_recovered_at       TIMESTAMPTZ,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- `id` (billing-ops gap #26, PR-6 notifications) is a STABLE surrogate PK = the
+-- `billing_notifications.transition_id` for the dunning-driven notification kinds
+-- (payment_failed/past_due/suspended/recovered). A `cbh_<base62>` typed id minted in
+-- Rust by `account_status.rs::append_history` (NO SQL DEFAULT — see the `she_` note in
+-- 0041; the prefix must stay disjoint from `she`/`inv`/`ref`/`dsp`, design MINOR-3).
+-- Added in PR-6 (pre-launch, edited in place — clean re-migrate, no live ALTER).
 CREATE TABLE zeroship.creator_billing_status_history (
+    id         TEXT NOT NULL PRIMARY KEY,  -- cbh_<base62> (PR-6)
     creator_id UUID NOT NULL REFERENCES zeroship.creator_billing(creator_id) ON DELETE CASCADE,
     from_state zeroship.account_state NOT NULL,
     to_state   zeroship.account_state NOT NULL,

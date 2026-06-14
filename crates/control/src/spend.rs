@@ -463,11 +463,17 @@ impl SpendEngine {
         // `spend_state_history.period` is NOT NULL — bind it (this is why the
         // 0041 DDL and this code had to land together). The `from_state`/`to_state`
         // params are bound `::text` (the spend_state domain rejects a bare &str).
+        // `id` is the PR-6 surrogate PK (`she_<base62>`) = the
+        // `billing_notifications.transition_id` for spend-driven notification kinds;
+        // minted in Rust here (no SQL DEFAULT — the prefix the notify dedup-disjointness
+        // relies on cannot be produced by `gen_random_uuid()`).
+        let history_id = zeroship_core::typed_id::new_spend_history_id();
         tx.execute(
             "INSERT INTO zeroship.spend_state_history \
-               (app_id, period, from_state, to_state, spend_cents, limit_cents) \
-             VALUES ($1, $2::date, $3::text, $4::text, $5, $6)",
+               (id, app_id, period, from_state, to_state, spend_cents, limit_cents) \
+             VALUES ($1, $2, $3::date, $4::text, $5::text, $6, $7)",
             &[
+                &history_id,
                 app_id,
                 &period,
                 &spend_state_str(from),

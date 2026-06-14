@@ -254,6 +254,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
         .expect("native tax provider builds"),
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
     });
 

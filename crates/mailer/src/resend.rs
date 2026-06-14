@@ -135,14 +135,23 @@ impl Mailer for ResendMailer {
             .map_err(|e| MailerError::Transport(format!("resend encode: {e}")))?;
 
         // 3. POST to the API.
-        let res = self
+        let mut req = self
             .http
             .request(http::Method::POST, self.endpoint.clone())
             .map_err(|e| MailerError::Transport(format!("resend build request: {e}")))?
             .header("authorization", format!("Bearer {}", self.api_key))
             .map_err(|e| MailerError::Transport(format!("resend auth header: {e}")))?
             .header("content-type", "application/json")
-            .map_err(|e| MailerError::Transport(format!("resend ct header: {e}")))?
+            .map_err(|e| MailerError::Transport(format!("resend ct header: {e}")))?;
+        // Honour a provider-side idempotency key (billing-ops PR-6, MAJOR-A): Resend
+        // dedups sends carrying the same `Idempotency-Key`, so a re-driven billing
+        // notification (a crash in the send→`sent`-flip window) delivers ONE email.
+        if let Some(key) = msg.idempotency_key.as_deref() {
+            req = req
+                .header("Idempotency-Key", key)
+                .map_err(|e| MailerError::Transport(format!("resend idempotency header: {e}")))?;
+        }
+        let res = req
             .body(body_bytes)
             .send()
             .await
@@ -233,6 +242,7 @@ mod tests {
             html: None,
             headers: vec![("X-ZS-Relay".into(), "1".into())],
             tags: vec![],
+            idempotency_key: None,
         };
         let body = ResendRequest::from_email(&msg);
         let json = serde_json::to_value(&body).expect("serialize");
@@ -268,6 +278,7 @@ mod tests {
             html: None,
             headers: vec![],
             tags: vec![],
+            idempotency_key: None,
         };
         let json = serde_json::to_value(ResendRequest::from_email(&msg)).expect("serialize");
         assert!(json.get("reply_to").is_none(), "reply_to omitted: {json}");

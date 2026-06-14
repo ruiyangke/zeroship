@@ -14,6 +14,7 @@
 //!     client. Excludes `system = true` apps (the platform console). See ISS-12b.
 
 pub mod audit_retention;
+pub mod billing_notify;
 pub mod billing_reconcile;
 pub mod dunning;
 pub mod metering_export;
@@ -63,6 +64,18 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     let dunning_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         dunning::run(dunning_state, dunning::DEFAULT_TICK_SECS).await;
+    })
+    .detach();
+
+    // Billing-notify sweep (billing-ops gap #26, PR-6) — turns the already-written
+    // billing transition rows (dunning history, newly-finalized invoices, newly-issued
+    // refunds) into creator emails via the `BillingNotifier` seam: claim-before-send
+    // under a dedicated advisory lock (multi-node safe), then flip to `sent`.
+    // Provider-agnostic and ALWAYS spawned (peer of dunning): notifications are
+    // orthogonal to which metering backend is configured. READ-ONLY w.r.t. money.
+    let notify_state = Arc::clone(&state);
+    compio::runtime::spawn(async move {
+        billing_notify::run(notify_state, billing_notify::DEFAULT_TICK_SECS).await;
     })
     .detach();
 

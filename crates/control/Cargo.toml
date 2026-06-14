@@ -23,6 +23,11 @@ zeroship-authz = { workspace = true }
 # Builder OAuth bootstrap reuses auth/control migrations for
 # `control.oauth_clients` in dev-mode startup.
 zeroship-auth = { workspace = true }
+# Shared mailer (extracted to `crates/mailer` in PR-0). The billing-notify cron
+# (PR-6) sends creator lifecycle/money emails through the `Mailer` seam, honouring
+# the same `email_suppressions` contract auth uses. PR-0 deliberately left control
+# un-wired; this is the wiring.
+zeroship-mailer = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.

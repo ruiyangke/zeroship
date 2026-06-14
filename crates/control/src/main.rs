@@ -117,6 +117,31 @@ struct ControlCli {
     #[arg(long = "tax-provider", env = "TAX_PROVIDER", default_value = "native")]
     tax_provider: String,
 
+    /// Mailer driver for billing notifications (billing-ops gap #26, PR-6).
+    /// `stdout` (default, dev) | `smtp` | `resend`. The `resend` driver honours
+    /// the per-message `Idempotency-Key` the notifier passes, making a re-driven
+    /// notification an effective no-op at the provider (MAJOR-A). `smtp`/`stdout`
+    /// do not dedup (documented). SMTP creds via `CONTROL_SMTP_*`; Resend key via
+    /// `CONTROL_RESEND_API_KEY`.
+    #[arg(long = "mailer", env = "CONTROL_MAILER", default_value = "stdout")]
+    mailer: String,
+
+    /// SMTP host — required when `--mailer=smtp`.
+    #[arg(long = "smtp-host", env = "CONTROL_SMTP_HOST")]
+    smtp_host: Option<String>,
+    /// SMTP port (default 587, STARTTLS).
+    #[arg(long = "smtp-port", env = "CONTROL_SMTP_PORT", default_value_t = 587)]
+    smtp_port: u16,
+    /// SMTP username (optional; unauthenticated relay if unset).
+    #[arg(long = "smtp-username", env = "CONTROL_SMTP_USERNAME")]
+    smtp_username: Option<String>,
+    /// SMTP password (optional).
+    #[arg(long = "smtp-password", env = "CONTROL_SMTP_PASSWORD")]
+    smtp_password: Option<String>,
+    /// Resend API key — required when `--mailer=resend`.
+    #[arg(long = "resend-api-key", env = "CONTROL_RESEND_API_KEY")]
+    resend_api_key: Option<String>,
+
     /// Stripe **Billing Meter** event name (M-Stripe). REQUIRED when
     /// `--metering-provider stripe` (else the deployment refuses to boot — a
     /// Stripe-Meters deployment with no meter is a silent revenue black hole).
@@ -415,6 +440,40 @@ impl std::fmt::Debug for ControlCli {
 ///
 /// A configured-but-unreadable file is fatal — a misconfigured prod salt must
 /// fail loudly, not silently fall through to the dev default.
+/// Build the billing-notification mailer from `--mailer` (default stdout), mirroring
+/// auth's `build_mailer`. Returns a `String` error (consumed at the boot call site,
+/// which logs + exits) when a selected driver's required creds are missing.
+fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
+    use zeroship_mailer::{
+        ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, SmtpTls, StdoutMailer,
+    };
+    match cli.mailer.as_str() {
+        "stdout" => Ok(Arc::new(StdoutMailer)),
+        "smtp" => {
+            let host = cli
+                .smtp_host
+                .clone()
+                .ok_or_else(|| "CONTROL_SMTP_HOST is required when --mailer=smtp".to_string())?;
+            let driver = SmtpMailer::new(&SmtpConfig {
+                host,
+                port: cli.smtp_port,
+                username: cli.smtp_username.clone(),
+                password: cli.smtp_password.clone(),
+                tls: SmtpTls::Starttls,
+            })
+            .map_err(|e| format!("smtp mailer: {e}"))?;
+            Ok(Arc::new(driver))
+        }
+        "resend" => {
+            let api_key = cli.resend_api_key.clone().ok_or_else(|| {
+                "CONTROL_RESEND_API_KEY is required when --mailer=resend".to_string()
+            })?;
+            Ok(Arc::new(ResendMailer::new(ResendConfig { api_key })))
+        }
+        other => Err(format!("unknown mailer: {other:?}; use stdout|smtp|resend")),
+    }
+}
+
 fn resolve_pairwise_salt(
     salt_file: &str,
     salt_value: &str,
@@ -439,6 +498,16 @@ fn resolve_pairwise_salt(
 
 fn main() -> std::io::Result<()> {
     let cli = ControlCli::parse();
+    // Billing notifier mailer (PR-6): built from the --mailer flag up front, before any
+    // `cli` field is moved out below. An unknown driver / missing creds refuses to boot.
+    let billing_mailer: Arc<dyn zeroship_mailer::Mailer> = match build_billing_mailer(&cli) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "control: refusing to start — billing mailer not available");
+            std::process::exit(1);
+        }
+    };
+    let mailer_kind = cli.mailer.clone();
     let boot = bootstrap_or_exit(
         cli.config_path.as_deref(),
         !cli.no_config,
@@ -1180,6 +1249,12 @@ fn main() -> std::io::Result<()> {
     };
     tracing::info!(tax_provider = tax_provider_kind.as_str(), "control: tax provider selected");
 
+    // Billing notifier (PR-6): a `BillingNotifier` over the relocated `zeroship-mailer`
+    // `Mailer` built above. Wraps the mailer + the per-message idempotency key.
+    let notifier: Arc<dyn zeroship_control::notify::BillingNotifier> =
+        Arc::new(zeroship_control::notify::MailerNotifier::new(billing_mailer));
+    tracing::info!(mailer = %mailer_kind, "control: billing notifier selected");
+
     let state = Arc::new(AppState {
         registry,
         env_store,
@@ -1214,6 +1289,7 @@ fn main() -> std::io::Result<()> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider,
         tax_provider,
+        notifier,
         pairwise_salt,
     });
 

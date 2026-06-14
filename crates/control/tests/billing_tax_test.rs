@@ -316,6 +316,7 @@ async fn build_fixture(
         )
         .expect("native provider builds"),
         tax_provider,
+        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
     });
 
