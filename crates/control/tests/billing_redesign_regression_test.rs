@@ -449,6 +449,56 @@ async fn finalized_invoice_line_amount_update_is_rejected() {
 }
 
 #[compio::test]
+async fn finalized_invoice_rejects_line_insert() {
+    // Schema MAJOR-2 REGRESSION: the line immutability trigger fires on INSERT too,
+    // so a NEW line cannot be appended to an ALREADY-finalized invoice (the frozen
+    // reproducibility record can't grow after finalize). A draft-invoice line INSERT
+    // still works (proven by the sibling tests + the second assertion below).
+    //
+    // RED before the trigger covered INSERT (it was BEFORE UPDATE OR DELETE only):
+    // appending a line to a finalized invoice would silently succeed.
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let (creator, app) = seed_creator_app(&client).await;
+    // Finalize an invoice that has one line.
+    let inv = finalized_invoice_with_line(&client, creator, app).await;
+
+    // Appending a SECOND line to the now-finalized invoice must be rejected.
+    let (_creator2, app2) = seed_creator_app(&client).await;
+    let res = client
+        .execute(
+            "INSERT INTO zeroship.invoice_lines \
+               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
+                amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
+            &[&inv, &app2],
+        )
+        .await;
+    assert!(
+        res.is_err(),
+        "INSERT of a line into a FINALIZED invoice is rejected (immutability covers INSERT)",
+    );
+
+    // Confirm a DRAFT invoice still accepts a line INSERT (the trigger only blocks
+    // when the parent is finalized).
+    let (creator3, app3) = seed_creator_app(&client).await;
+    let draft = claim_draft(&client, creator3).await;
+    client
+        .execute(
+            "INSERT INTO zeroship.invoice_lines \
+               (invoice_id, app_id, included_units, fx_pico_cents_per_unit, base_fee_cents, \
+                amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
+            &[&draft, &app3],
+        )
+        .await
+        .expect("a draft invoice still accepts a line INSERT");
+}
+
+#[compio::test]
 async fn draft_invoice_lines_stay_mutable_until_finalize() {
     let Some(url) = db_url() else {
         eprintln!("skip: CONTROL_TEST_DB not set");

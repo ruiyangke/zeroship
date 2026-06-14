@@ -170,8 +170,13 @@ BEGIN
     RETURN COALESCE(NEW, OLD);
 END;
 $fn$ LANGUAGE plpgsql;
+-- Schema MAJOR-2: fire on INSERT too, not only UPDATE/DELETE — otherwise a NEW
+-- line could be appended to an ALREADY-finalized invoice (the reproducibility
+-- record is supposed to be frozen at finalize). The function COALESCE(OLD, NEW)s
+-- the invoice_id, so an INSERT (OLD is NULL) reads the parent via NEW and is
+-- rejected when that parent is finalized; a draft-invoice INSERT still passes.
 CREATE TRIGGER invoice_lines_immutable_trg
-    BEFORE UPDATE OR DELETE ON zeroship.invoice_lines
+    BEFORE INSERT OR UPDATE OR DELETE ON zeroship.invoice_lines
     FOR EACH ROW EXECUTE FUNCTION zeroship.invoice_lines_immutable();
 --rollback DROP TRIGGER IF EXISTS invoice_lines_immutable_trg ON zeroship.invoice_lines;
 --rollback DROP FUNCTION IF EXISTS zeroship.invoice_lines_immutable();
