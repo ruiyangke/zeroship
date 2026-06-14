@@ -174,6 +174,41 @@ impl StripeStore {
         }))
     }
 
+    /// Update the Connect onboarding verification flags for a creator's CURRENT
+    /// (not-unlinked) account (billing G1, ISS-30). The `callback` handler calls
+    /// this AFTER a server-side `retrieve_account` confirmed the `acct_…` belongs
+    /// to this creator — so the flags reflect Stripe's truth, not a client claim.
+    ///
+    /// Guarded on `stripe_account_id` so a stale/racing callback for a DIFFERENT
+    /// acct_… cannot flip the flags on the current link. Returns `true` iff a live
+    /// row matched and was updated.
+    pub async fn set_account_flags(
+        &self,
+        creator_id: Uuid,
+        stripe_account_id: &str,
+        charges_enabled: bool,
+        payouts_enabled: bool,
+        details_submitted: bool,
+    ) -> Result<bool, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let n = conn
+            .execute(
+                "UPDATE zeroship.creator_accounts \
+                    SET charges_enabled = $3, payouts_enabled = $4, details_submitted = $5 \
+                 WHERE creator_id = $1 AND stripe_account_id = $2 AND unlinked_at IS NULL",
+                &[
+                    &creator_id,
+                    &stripe_account_id,
+                    &charges_enabled,
+                    &payouts_enabled,
+                    &details_submitted,
+                ],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(n > 0)
+    }
+
     /// Return the link-history rows for a creator (newest first).
     /// Each row spans `[linked_at, unlinked_at)` for a single
     /// stripe_account_id binding.

@@ -774,6 +774,50 @@ mod tests {
         ) -> Result<u64, StripeError> {
             Ok(0)
         }
+        // Stream-2 Connect verbs (G1) — not exercised by the infra reconciler;
+        // stubbed so the fake satisfies the trait.
+        async fn create_connect_account(
+            &self,
+            _email: &str,
+            _creator_id: &str,
+            _country: &str,
+        ) -> Result<String, StripeError> {
+            Ok("acct_fake".to_string())
+        }
+        async fn create_account_link(
+            &self,
+            _account_id: &str,
+            _refresh_url: &str,
+            _return_url: &str,
+        ) -> Result<String, StripeError> {
+            Ok("https://fake/onboard".to_string())
+        }
+        async fn retrieve_account(
+            &self,
+            account_id: &str,
+        ) -> Result<crate::stripe_client::ConnectAccount, StripeError> {
+            Ok(crate::stripe_client::ConnectAccount {
+                id: account_id.to_string(),
+                charges_enabled: true,
+                payouts_enabled: true,
+                details_submitted: true,
+                creator_id: None,
+            })
+        }
+        async fn create_connect_payment_intent(
+            &self,
+            _connected_account: &str,
+            _amount_cents: u64,
+            _currency: &str,
+            _application_fee_cents: u64,
+            _description: &str,
+            _idempotency_key: &str,
+        ) -> Result<crate::stripe_client::ConnectPaymentIntent, StripeError> {
+            Ok(crate::stripe_client::ConnectPaymentIntent {
+                id: "pi_fake".to_string(),
+                client_secret: None,
+            })
+        }
     }
 
     #[compio::test]

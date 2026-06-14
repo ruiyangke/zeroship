@@ -40,6 +40,33 @@ pub struct Period {
     pub end: i64,
 }
 
+/// A retrieved Connect account's onboarding signals (billing G1, Stream-2). The
+/// `callback` handler reads these from a server-side `retrieve_account` to verify
+/// ownership + completeness — never trusting the client's POSTed acct_…
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectAccount {
+    /// The `acct_…` id Stripe returned (echoed so the caller can re-confirm it
+    /// matches what it requested).
+    pub id: String,
+    pub charges_enabled: bool,
+    pub payouts_enabled: bool,
+    pub details_submitted: bool,
+    /// The `metadata.creator_id` we stamped at account-create time, if present —
+    /// the ownership signal the callback matches against the path principal.
+    pub creator_id: Option<String>,
+}
+
+/// Result of creating a server-stamped Connect charge (billing G1). The platform
+/// builds the PaymentIntent server-side with `application_fee_amount` resolved
+/// from the creator's server-held [`crate::fee_policy::FeePolicy`] — the SDK
+/// cannot set or override the fee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectPaymentIntent {
+    pub id: String,
+    /// The `client_secret` the creator's front-end uses to confirm the payment.
+    pub client_secret: Option<String>,
+}
+
 /// The Stripe billing surface PR6 needs. A trait so unit tests can inject a
 /// recording fake; [`StripeClient`] is the production `cyper` impl, and the
 /// integration tests use that real impl against a localhost mock server.
@@ -157,6 +184,54 @@ pub trait StripeApi {
         start_time: i64,
         end_time: i64,
     ) -> Result<u64, StripeError>;
+
+    // ── Stream-2: Connect onboarding + server-stamped application fee (G1) ───
+
+    /// Create an **Express** Connect account for a creator (`POST /v1/accounts`,
+    /// `type=express`). `creator_id` is stamped into `metadata.creator_id` so the
+    /// `callback` can VERIFY ownership server-side (it never trusts a client-POSTed
+    /// acct_…). `email` pre-fills the onboarding form. Returns the `acct_…` id.
+    async fn create_connect_account(
+        &self,
+        email: &str,
+        creator_id: &str,
+        country: &str,
+    ) -> Result<String, StripeError>;
+
+    /// Create a hosted onboarding **account link** for an existing Connect account
+    /// (`POST /v1/account_links`, `type=account_onboarding`). Returns the URL the
+    /// creator visits to complete Stripe-hosted onboarding. This REPLACES the
+    /// placeholder `connect.stripe.com/express_login?...` URL (ISS-30).
+    async fn create_account_link(
+        &self,
+        account_id: &str,
+        refresh_url: &str,
+        return_url: &str,
+    ) -> Result<String, StripeError>;
+
+    /// Retrieve a Connect account (`GET /v1/accounts/:id`) → its onboarding
+    /// signals + the `metadata.creator_id` we stamped at create time. The
+    /// `callback` uses this to VERIFY the acct_… belongs to the path creator
+    /// (server-side truth), closing the "callback trusts the POSTed acct_…" hole.
+    async fn retrieve_account(&self, account_id: &str) -> Result<ConnectAccount, StripeError>;
+
+    /// Create a Connect **PaymentIntent** on the connected account, with the
+    /// platform's `application_fee_amount` stamped SERVER-SIDE (`POST
+    /// /v1/payment_intents`, `transfer_data[destination]=acct_…`,
+    /// `application_fee_amount=<server-resolved fee>`). The fee is computed by the
+    /// platform from the creator's server-held [`crate::fee_policy::FeePolicy`] —
+    /// the SDK/creator code cannot set or override it (ISS-29). `idempotency_key`
+    /// makes the create replay-safe. Returns the intent id + client_secret.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_connect_payment_intent(
+        &self,
+        connected_account: &str,
+        amount_cents: u64,
+        currency: &str,
+        application_fee_cents: u64,
+        description: &str,
+        idempotency_key: &str,
+    ) -> Result<ConnectPaymentIntent, StripeError>;
 }
 
 /// Production `cyper`-based Stripe client. Holds the secret key (never logged —
@@ -497,6 +572,109 @@ impl StripeApi for StripeClient {
             }
         }
         Ok(total)
+    }
+
+    async fn create_connect_account(
+        &self,
+        email: &str,
+        creator_id: &str,
+        country: &str,
+    ) -> Result<String, StripeError> {
+        // Express Connect account. metadata[creator_id] is the OWNERSHIP signal
+        // the callback verifies (the account belongs to THIS creator). No
+        // Idempotency-Key here: the caller ensures at-most-once via the
+        // `creator_accounts` row check (reuse an existing acct_… on re-onboard).
+        let form = vec![
+            ("type".to_string(), "express".to_string()),
+            ("email".to_string(), email.to_string()),
+            ("country".to_string(), country.to_string()),
+            ("metadata[creator_id]".to_string(), creator_id.to_string()),
+        ];
+        let json = self.post_form("/v1/accounts", &form, None).await?;
+        extract_id(&json, "connect account")
+    }
+
+    async fn create_account_link(
+        &self,
+        account_id: &str,
+        refresh_url: &str,
+        return_url: &str,
+    ) -> Result<String, StripeError> {
+        let form = vec![
+            ("account".to_string(), account_id.to_string()),
+            ("type".to_string(), "account_onboarding".to_string()),
+            ("refresh_url".to_string(), refresh_url.to_string()),
+            ("return_url".to_string(), return_url.to_string()),
+        ];
+        let json = self.post_form("/v1/account_links", &form, None).await?;
+        json.get("url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| StripeError::Db("stripe: account_links response missing url".into()))
+    }
+
+    async fn retrieve_account(&self, account_id: &str) -> Result<ConnectAccount, StripeError> {
+        let enc = encode_query_component(account_id);
+        let json = self.get_json(&format!("/v1/accounts/{enc}")).await?;
+        let id = extract_id(&json, "account retrieve")?;
+        let bool_field = |k: &str| json.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let creator_id = json
+            .get("metadata")
+            .and_then(|m| m.get("creator_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Ok(ConnectAccount {
+            id,
+            charges_enabled: bool_field("charges_enabled"),
+            payouts_enabled: bool_field("payouts_enabled"),
+            details_submitted: bool_field("details_submitted"),
+            creator_id,
+        })
+    }
+
+    async fn create_connect_payment_intent(
+        &self,
+        connected_account: &str,
+        amount_cents: u64,
+        currency: &str,
+        application_fee_cents: u64,
+        description: &str,
+        idempotency_key: &str,
+    ) -> Result<ConnectPaymentIntent, StripeError> {
+        // Money MUST NOT silently clamp on overflow — surface as a hard error.
+        let amount = i64::try_from(amount_cents).map_err(|_| {
+            StripeError::Validation(format!(
+                "payment_intent amount_cents {amount_cents} exceeds i64::MAX — refusing to clamp"
+            ))
+        })?;
+        let fee = i64::try_from(application_fee_cents).map_err(|_| {
+            StripeError::Validation(format!(
+                "application_fee_cents {application_fee_cents} exceeds i64::MAX — refusing to clamp"
+            ))
+        })?;
+        // The fee is the SERVER-resolved value (from the creator's FeePolicy); the
+        // SDK/creator code never reaches this. `transfer_data[destination]` routes
+        // the charge (minus fee) to the connected account; `application_fee_amount`
+        // is the platform's cut.
+        let form = vec![
+            ("amount".to_string(), amount.to_string()),
+            ("currency".to_string(), currency.to_string()),
+            ("description".to_string(), description.to_string()),
+            ("application_fee_amount".to_string(), fee.to_string()),
+            (
+                "transfer_data[destination]".to_string(),
+                connected_account.to_string(),
+            ),
+        ];
+        let json = self
+            .post_form("/v1/payment_intents", &form, Some(idempotency_key))
+            .await?;
+        let id = extract_id(&json, "payment intent")?;
+        let client_secret = json
+            .get("client_secret")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Ok(ConnectPaymentIntent { id, client_secret })
     }
 }
 

@@ -1325,6 +1325,15 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/creators/{id}/stripe/callback")
                     .route(web::post().to(stripe_handlers::callback)),
             )
+            // --- Stream-2 Connect: server-stamped checkout + operator fee policy (G1) ---
+            .service(
+                web::resource("/api/creators/{id}/connect/checkout")
+                    .route(web::post().to(stripe_handlers::connect_checkout)),
+            )
+            .service(
+                web::resource("/api/creators/{id}/fee-policy")
+                    .route(web::put().to(stripe_handlers::set_fee_policy)),
+            )
             // --- Stream-1 infra-billing setup (PR6): platform Customer + card ---
             .service(
                 web::resource("/api/creators/{id}/billing/setup")

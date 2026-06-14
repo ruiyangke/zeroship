@@ -49,6 +49,11 @@ pub enum Action {
     /// An operator archived a plan via `DELETE /api/plans/:id` (billing-v2
     /// MINOR-1). Audited with the actor + the plan id.
     PlanArchived,
+    /// An operator set a creator's application-fee policy via `PUT
+    /// /api/creators/:id/fee-policy` (billing G1, ISS-29). The fee is
+    /// server-authoritative + operator-only — a creator may never lower it — so
+    /// every change is audited with the actor + the new policy in the detail JSON.
+    SetFeePolicy,
 }
 
 impl Action {
@@ -69,6 +74,7 @@ impl Action {
             Self::AccountStateChange => "account_state_change",
             Self::PlanUpserted => "plan_upserted",
             Self::PlanArchived => "plan_archived",
+            Self::SetFeePolicy => "set_fee_policy",
         }
     }
 }

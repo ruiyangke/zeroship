@@ -1075,6 +1075,18 @@ impl StripeApi for FailAfterFirstItem {
     async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
         self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
     }
+    async fn create_connect_account(&self, email: &str, creator_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_account(email, creator_id, country).await
+    }
+    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_account_link(account_id, refresh_url, return_url).await
+    }
+    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
+        self.inner.retrieve_account(account_id).await
+    }
+    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
+    }
 }
 
 /// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
@@ -1226,6 +1238,18 @@ impl StripeApi for PostThenCrash {
     }
     async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
         self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
+    }
+    async fn create_connect_account(&self, email: &str, creator_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_account(email, creator_id, country).await
+    }
+    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_account_link(account_id, refresh_url, return_url).await
+    }
+    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
+        self.inner.retrieve_account(account_id).await
+    }
+    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
     }
 }
 
@@ -1415,6 +1439,18 @@ impl StripeApi for CrashOnFinalize {
     }
     async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
         self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
+    }
+    async fn create_connect_account(&self, email: &str, creator_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_account(email, creator_id, country).await
+    }
+    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_account_link(account_id, refresh_url, return_url).await
+    }
+    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
+        self.inner.retrieve_account(account_id).await
+    }
+    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
+        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
     }
 }
 

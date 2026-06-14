@@ -80,13 +80,22 @@ fn bad_creator_id() -> web::HttpResponse { err_json(400, "bad creator_id") }
 // Onboarding (master-key)
 // ----------------------------------------------------------------
 
-/// Generate a creator onboarding link.
+/// Country code an Express Connect account is created in. Stripe requires a
+/// supported country at account-create time; US is the launch market.
+const CONNECT_ACCOUNT_COUNTRY: &str = "US";
+
+/// `POST /api/creators/:id/stripe/onboard` — start (or resume) Stripe **Connect**
+/// onboarding for a creator (billing G1, Stream-2, ISS-30).
 ///
-/// In production this should POST to `/v1/account_links` on Stripe's
-/// API (requires `STRIPE_SECRET_KEY` at the platform level). For v1 we
-/// return a placeholder URL so the dashboard flow can be wired without
-/// live Stripe integration. Swap in the real Stripe call via
-/// `docs/stripe-integration-todo.md` when dashboard UX lands.
+/// REPLACES the old placeholder `connect.stripe.com/express_login?...` URL with a
+/// REAL flow: ensure the creator has a Connect `acct_…` (create an Express
+/// account once, stamping `metadata.creator_id` for ownership verification),
+/// persist it, then return a real `account_links` hosted-onboarding URL.
+///
+/// **`:id` is bound to the principal** (self-service, like `billing_setup`): a
+/// creator onboards their OWN account, OR a platform billing operator
+/// (`BillingWrite`/`Resource::Any`) acts on their behalf. A creator calling
+/// onboard for a DIFFERENT creator's id is denied — closing the cross-creator hole.
 pub async fn onboard(
     req: web::HttpRequest,
     path: Path<String>,
@@ -94,17 +103,79 @@ pub async fn onboard(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
-    // Placeholder — real impl goes to api.stripe.com/v1/account_links.
-    let url = format!("https://connect.stripe.com/express_login?creator={creator_id}");
-    web::HttpResponse::Ok().json(&serde_json::json!({
-        "url": url,
-        "note": "placeholder — implement Stripe account_links call per docs/stripe-integration-todo.md",
-    }))
+    // Bind `:id` to the principal: self-service OR an operator with BillingWrite.
+    if authz.principal_id != creator_id {
+        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+            return resp;
+        }
+    }
+
+    if state.stripe_secret_key.expose_secret().is_empty() {
+        tracing::error!("stripe: onboard called with no STRIPE_SECRET_KEY configured");
+        return err_json(500, "stripe not configured");
+    }
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+
+    // Reuse the creator's existing Connect account if onboarding was already
+    // started (idempotent — re-onboarding resumes the SAME acct_…). Otherwise
+    // create an Express account stamped with metadata.creator_id (the ownership
+    // signal the callback verifies) and persist it.
+    let account_id = match state.stripe_store.get_account(creator_id).await {
+        Ok(Some(acct)) => acct.stripe_account_id,
+        Ok(None) => {
+            let email = match creator_email(&state, creator_id).await {
+                Ok(Some(e)) => e,
+                Ok(None) => return err_json(404, "creator not found"),
+                Err(e) => return stripe_err_response(e),
+            };
+            let acct = match stripe
+                .create_connect_account(&email, &creator_id.to_string(), CONNECT_ACCOUNT_COUNTRY)
+                .await
+            {
+                Ok(a) => a,
+                Err(e) => return stripe_err_response(e),
+            };
+            // Persist via the verified-link path (history + live row). The acct_…
+            // here is SERVER-MINTED (we just created it on Stripe), not client input.
+            if let Err(e) = state.stripe_store.link_account(creator_id, &acct).await {
+                return stripe_err_response(e);
+            }
+            let ip = source_ip(&req, &state);
+            audit::log(&state.registry, AuditEntry {
+                app_id: None,
+                creator_id: Some(creator_id),
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
+                action: Action::LinkAccount,
+                resource: Some(&acct),
+                source_ip: ip.as_deref(),
+            }).await;
+            acct
+        }
+        Err(e) => return stripe_err_response(e),
+    };
+
+    // Build the hosted onboarding link. refresh_url is re-entered if the link
+    // expires; return_url is where Stripe sends the creator when done (the
+    // dashboard then POSTs callback to refresh status).
+    let base = format!("{}://console.{}", state.app_scheme(), state.app_base_domain);
+    let refresh_url = format!("{base}/billing/connect?refresh=1");
+    let return_url = format!("{base}/billing/connect?done=1");
+    match stripe
+        .create_account_link(&account_id, &refresh_url, &return_url)
+        .await
+    {
+        Ok(url) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "url": url,
+            "account_id": account_id,
+        })),
+        Err(e) => stripe_err_response(e),
+    }
 }
 
 // ----------------------------------------------------------------
@@ -211,11 +282,30 @@ async fn creator_email(state: &AppState, creator_id: Uuid) -> Result<Option<Stri
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackBody {
-    pub stripe_account_id: String,
+    /// OPTIONAL hint from the dashboard's return URL. It is NEVER trusted to
+    /// LINK an account: ownership is verified SERVER-SIDE against the acct_… we
+    /// minted in `onboard` (stored on `creator_accounts`) + Stripe's
+    /// `metadata.creator_id`. A mismatching/forged acct_… is rejected (ISS-30).
+    #[serde(default)]
+    pub stripe_account_id: Option<String>,
 }
 
-/// Complete onboarding: the dashboard collects the `acct_xxx` from
-/// Stripe's return URL and POSTs it here.
+/// `POST /api/creators/:id/stripe/callback` — refresh Connect onboarding status
+/// after the creator returns from the Stripe-hosted flow (billing G1, ISS-30).
+///
+/// **SECURITY (ISS-30 fix).** The old handler blindly `link_account`'d a POSTed
+/// `acct_…` — a creator could bind an account they don't control. This handler
+/// instead drives the verification SERVER-SIDE:
+///   1. Load the acct_… we MINTED for this creator in `onboard` (server truth on
+///      `creator_accounts`). No stored account ⇒ 400 (onboard first).
+///   2. If the body carries an acct_… hint, it MUST equal the stored one — a
+///      foreign/forged acct_… is REJECTED (403), never linked.
+///   3. `retrieve_account` from Stripe and verify `metadata.creator_id` (which we
+///      stamped at create) equals this creator — REJECT (403) otherwise.
+///   4. Persist the verified `charges_enabled`/`payouts_enabled`/`details_submitted`
+///      flags from Stripe's truth.
+///
+/// `:id` is bound to the principal (self-service) OR an operator (BillingWrite).
 pub async fn callback(
     req: web::HttpRequest,
     path: Path<String>,
@@ -224,13 +314,76 @@ pub async fn callback(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
-    match state.stripe_store.link_account(creator_id, &body.stripe_account_id).await {
-        Ok(()) => {
+    // Bind `:id` to the principal: self-service OR an operator with BillingWrite.
+    if authz.principal_id != creator_id {
+        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+            return resp;
+        }
+    }
+
+    if state.stripe_secret_key.expose_secret().is_empty() {
+        tracing::error!("stripe: callback called with no STRIPE_SECRET_KEY configured");
+        return err_json(500, "stripe not configured");
+    }
+
+    // (1) The acct_… is SERVER TRUTH — the one we minted in `onboard`.
+    let stored = match state.stripe_store.get_account(creator_id).await {
+        Ok(Some(acct)) => acct.stripe_account_id,
+        Ok(None) => return err_json(400, "no connect account; call onboard first"),
+        Err(e) => return stripe_err_response(e),
+    };
+
+    // (2) A body hint, if present, must MATCH the stored acct_… — a forged
+    // foreign acct_… is rejected, never linked.
+    if let Some(claimed) = body.stripe_account_id.as_deref() {
+        if claimed != stored {
+            tracing::warn!(
+                creator_id = %creator_id,
+                claimed = %stripe_store::sanitize_for_display(claimed),
+                "stripe: callback rejected — POSTed acct_… does not match the creator's onboarded account"
+            );
+            return err_json(403, "stripe account not owned by this creator");
+        }
+    }
+
+    // (3) Verify ownership against Stripe's truth: retrieve the account and confirm
+    // metadata.creator_id (stamped at create) is THIS creator.
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+    let account = match stripe.retrieve_account(&stored).await {
+        Ok(a) => a,
+        Err(e) => return stripe_err_response(e),
+    };
+    let owner_ok = account
+        .creator_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        == Some(creator_id);
+    if !owner_ok {
+        tracing::warn!(
+            creator_id = %creator_id,
+            "stripe: callback rejected — retrieved account metadata.creator_id does not match"
+        );
+        return err_json(403, "stripe account not owned by this creator");
+    }
+
+    // (4) Persist Stripe's verified onboarding flags.
+    match state
+        .stripe_store
+        .set_account_flags(
+            creator_id,
+            &stored,
+            account.charges_enabled,
+            account.payouts_enabled,
+            account.details_submitted,
+        )
+        .await
+    {
+        Ok(_) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
@@ -238,9 +391,210 @@ pub async fn callback(
                 actor_user_id: Some(authz.principal_id),
                 actor_token_id: authz.token_id,
                 action: Action::LinkAccount,
-                resource: Some(&body.stripe_account_id),
+                resource: Some(&stored),
                 source_ip: ip.as_deref(),
             }).await;
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "account_id": stored,
+                "charges_enabled": account.charges_enabled,
+                "payouts_enabled": account.payouts_enabled,
+                "details_submitted": account.details_submitted,
+            }))
+        }
+        Err(e) => stripe_err_response(e),
+    }
+}
+
+// ----------------------------------------------------------------
+// Server-stamped Connect checkout (billing G1, ISS-29 fee-bypass fix)
+// ----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ConnectCheckoutBody {
+    /// The amount the creator charges THEIR end-user, in cents. BUSINESS input —
+    /// the creator names what to charge their customer.
+    pub amount_cents: u64,
+    /// ISO currency (e.g. "usd").
+    pub currency: String,
+    /// Optional human description on the charge.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// An idempotency discriminator for THIS cart/checkout (the SDK supplies a
+    /// stable value per end-user cart so a retry replays the same PaymentIntent).
+    #[serde(default)]
+    pub cart_id: Option<String>,
+}
+
+/// `POST /api/creators/:id/connect/checkout` — create a Connect PaymentIntent
+/// with the platform's `application_fee_amount` stamped **SERVER-SIDE** (billing
+/// G1, ISS-29 fix).
+///
+/// **The fee is server-authoritative.** The body carries only BUSINESS params
+/// (amount, currency, end-user). The platform resolves the creator's server-held
+/// [`crate::fee_policy::FeePolicy`] and computes `application_fee_amount` itself;
+/// the SDK/creator code can NOT name, set, or override the fee. Any
+/// `application_fee*` a client tries to send is simply not read here (the body
+/// has no such field) — there is no wire path for it.
+///
+/// `:id` is bound to the principal (self-service) OR an operator (BillingWrite).
+pub async fn connect_checkout(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    body: web::types::Json<ConnectCheckoutBody>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
+
+    if authz.principal_id != creator_id {
+        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+            return resp;
+        }
+    }
+
+    if body.amount_cents == 0 {
+        return err_json(400, "amount_cents must be positive");
+    }
+    if state.stripe_secret_key.is_empty() {
+        tracing::error!("stripe: connect_checkout called with no STRIPE_SECRET_KEY configured");
+        return err_json(500, "stripe not configured");
+    }
+
+    // The connected account must exist + be ready to take charges. This is
+    // server truth (the acct_… we minted + verified), never client input.
+    let account = match state.stripe_store.get_account(creator_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err_json(400, "creator has no connected stripe account"),
+        Err(e) => return stripe_err_response(e),
+    };
+
+    // Resolve the SERVER-HELD fee policy and compute the fee. The default (no
+    // row) is 15%. The creator cannot influence this value.
+    let store = crate::fee_policy::FeePolicyStore::new(state.registry.clone());
+    let policy = match store.get(creator_id).await {
+        Ok(p) => p,
+        Err(e) => return stripe_err_response(e),
+    };
+    let fee_cents = policy.fee_cents(body.amount_cents);
+
+    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
+    .with_base_url(state.stripe_base_url.clone());
+
+    // Deterministic idempotency key per (creator, cart) so an at-least-once
+    // retry replays the same PaymentIntent rather than double-charging.
+    let cart = body.cart_id.as_deref().unwrap_or("");
+    let idempotency_key = format!("connect_pi:{creator_id}:{cart}");
+    let description = body.description.as_deref().unwrap_or("zeroship connect charge");
+
+    match stripe
+        .create_connect_payment_intent(
+            &account.stripe_account_id,
+            body.amount_cents,
+            &body.currency,
+            fee_cents,
+            description,
+            &idempotency_key,
+        )
+        .await
+    {
+        Ok(pi) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "payment_intent_id": pi.id,
+            "client_secret": pi.client_secret,
+            // Echo the SERVER-resolved fee for transparency (read-only).
+            "application_fee_cents": fee_cents,
+        })),
+        Err(e) => stripe_err_response(e),
+    }
+}
+
+// ----------------------------------------------------------------
+// Fee policy administration (OPERATOR-ONLY — ISS-29)
+// ----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct FeePolicyBody {
+    /// "fixed" | "percent".
+    pub kind: String,
+    /// kind="fixed": the flat fee in cents.
+    #[serde(default)]
+    pub amount_cents: Option<u64>,
+    /// kind="percent": basis points (1500 = 15%).
+    #[serde(default)]
+    pub percent_bps: Option<u32>,
+    #[serde(default)]
+    pub cap_cents: Option<u64>,
+    #[serde(default)]
+    pub floor_cents: Option<u64>,
+}
+
+/// `PUT /api/creators/:id/fee-policy` — set a creator's application-fee policy.
+///
+/// **OPERATOR-ONLY (ISS-29).** A creator self-editing their own fee is a
+/// privilege escalation (they could zero it). This handler ALWAYS requires Cedar
+/// `BillingWrite` on `Resource::Any` (the operator/master-key grant) — there is
+/// NO self-service branch, even when the principal IS the path creator. The fee
+/// lives on the server and only the platform may change it.
+pub async fn set_fee_policy(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    body: web::types::Json<FeePolicyBody>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    // OPERATOR-ONLY — no self-service branch. A creator principal is denied even
+    // for their OWN id.
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
+    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
+
+    let policy = match body.kind.as_str() {
+        "fixed" => {
+            let Some(amount) = body.amount_cents else {
+                return err_json(400, "fixed fee requires amount_cents");
+            };
+            crate::fee_policy::FeePolicy::Fixed { amount_cents: amount }
+        }
+        "percent" => {
+            let Some(bps) = body.percent_bps else {
+                return err_json(400, "percent fee requires percent_bps");
+            };
+            if bps > 10_000 {
+                return err_json(400, "percent_bps must be in [0, 10000]");
+            }
+            crate::fee_policy::FeePolicy::Percent {
+                bps,
+                cap_cents: body.cap_cents,
+                floor_cents: body.floor_cents,
+            }
+        }
+        other => return err_json(400, format!("unknown fee policy kind: {}", stripe_store::sanitize_for_display(other))),
+    };
+
+    let store = crate::fee_policy::FeePolicyStore::new(state.registry.clone());
+    match store.set(creator_id, policy).await {
+        Ok(()) => {
+            let ip = source_ip(&req, &state);
+            audit::log_with_detail(&state.registry, AuditEntry {
+                app_id: None,
+                creator_id: Some(creator_id),
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
+                action: Action::SetFeePolicy,
+                resource: None,
+                source_ip: ip.as_deref(),
+            }, &serde_json::json!({
+                "creator_id": creator_id.to_string(),
+                "kind": body.kind,
+                "amount_cents": body.amount_cents,
+                "percent_bps": body.percent_bps,
+                "cap_cents": body.cap_cents,
+                "floor_cents": body.floor_cents,
+            })).await;
             web::HttpResponse::NoContent().finish()
         }
         Err(e) => stripe_err_response(e),

@@ -17,6 +17,7 @@ pub mod cron;
 pub mod deploy;
 pub mod env_handlers;
 pub mod env_store;
+pub mod fee_policy;
 pub mod http_util;
 pub mod internal;
 pub mod metering;
