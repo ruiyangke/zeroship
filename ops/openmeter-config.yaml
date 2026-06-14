@@ -1,0 +1,71 @@
+# OpenMeter configuration for the zeroship metering-export FAITHFUL e2e.
+#
+# Stood up by docker-compose.openmeter.yml and consumed by the `openmeter` API
+# + `sink-worker` services. This is a DEV-ONLY local config (weak ClickHouse /
+# Postgres passwords, no TLS, an insecure portal token) — it exists purely so
+# the zeroship OpenMeterProvider's REAL cyper client can be exercised against a
+# LIVE OpenMeter, not the in-test mock. See tests/e2e_openmeter_export.sh and
+# docs/runbooks/docker-compose.md (OpenMeter section).
+#
+# The shape mirrors OpenMeter's upstream quickstart config; the ONLY zeroship
+# specialization is the single `compute_units` meter below, provisioned to match
+# exactly what crates/control/src/metering/provider/openmeter.rs emits.
+
+ingest:
+  kafka:
+    broker: kafka:9092
+    brokerAddressFamily: v4
+    socketKeepAliveEnable: true
+    topicMetadataRefreshInterval: 10s
+
+aggregation:
+  clickhouse:
+    address: clickhouse:9000
+
+sink:
+  minCommitCount: 1
+  namespaceRefetch: 1s
+  namespaceRefetchTimeout: 1s
+  kafka:
+    brokers: kafka:9092
+    brokerAddressFamily: v4
+    socketKeepAliveEnable: true
+    topicMetadataRefreshInterval: 10s
+  # Deduplication on the CloudEvent (source, id). zeroship pushes each export
+  # delta under a deterministic id so a transport retry / same-window re-push
+  # REPLAYS instead of double-counting. 32d window mirrors the upstream default;
+  # the e2e's C2 re-drive scenario runs INSIDE this window (so a blind re-push
+  # WOULD be deduped — the test proves the cron's aggregate-reconcile still
+  # pushes the correct delta), and ALSO documents the >window behaviour.
+  dedupe:
+    enabled: true
+    driver: redis
+    config:
+      address: redis:6379
+      database: 0
+      expiration: 768h # 32d
+
+postgres:
+  url: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
+  autoMigrate: migration
+
+# THE zeroship meter. Must match the OpenMeterProvider emit/query contract:
+#   * slug == --openmeter-meter-slug   (the C2 reconcile queries /meters/<slug>/query)
+#   * eventType == --openmeter-event-type == the CloudEvent `type` report_usage sends
+#   * aggregation SUM over valueProperty $.value — OpenMeter SUMS the per-event
+#     `data.value` (the CU delta) per subject, which is exactly the cumulative
+#     high-water `reported_total` reads back.
+# Subject is the CloudEvent `subject` (zeroship maps it to the creator handle);
+# no groupBy is needed for the (subject, period) aggregate the reconcile uses.
+meters:
+  - slug: compute_units
+    description: zeroship compute units (export-only aggregate)
+    eventType: compute_units
+    aggregation: SUM
+    valueProperty: $.value
+
+# The dev portal token + svix are not used by the export path; keep the portal
+# enabled (harmless) and leave notifications/webhooks out of this minimal stack.
+portal:
+  enabled: true
+  tokenSecret: this-isnt-secure

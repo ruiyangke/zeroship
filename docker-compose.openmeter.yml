@@ -1,0 +1,150 @@
+# ============================================================================
+# docker-compose.openmeter.yml — a DEDICATED, opt-in OpenMeter stack for the
+# zeroship metering-export FAITHFUL e2e (tests/e2e_openmeter_export.sh).
+#
+# ⚠️  This is OPT-IN and ISOLATED on purpose. It is a SEPARATE compose project
+#     (`name: zeroship-openmeter`) with its OWN network + volumes and its OWN
+#     127.0.0.1-bound port band — it shares NOTHING with the main
+#     docker-compose.yml stack. In particular its internal Postgres is OpenMeter
+#     metadata only and is NOT published on :5440 (the zeroship billing PG the
+#     cargo integration tests use). Bringing this up does NOT touch the main
+#     stack; tearing it down does NOT touch :5440.
+#
+# Why OpenMeter needs this many services: OpenMeter ingests CloudEvents into
+# Kafka, a sink-worker drains Kafka into ClickHouse (the aggregate store), Redis
+# backs CloudEvent (source,id) dedup, and Postgres holds meter/namespace
+# metadata. The aggregate the zeroship C2 reconcile reads is therefore
+# EVENTUALLY consistent (ingest 204 → kafka → sink-worker → clickhouse), which
+# the e2e accounts for by polling the query.
+#
+# Pinned images mirror OpenMeter's upstream quickstart (digests included so the
+# stack is reproducible). All host ports are 127.0.0.1-only (loopback) and in a
+# private 4xxxx band to avoid collisions.
+#
+# Usage:
+#   docker compose -f docker-compose.openmeter.yml up -d        # bring it up
+#   docker compose -f docker-compose.openmeter.yml down -v      # tear it down
+#   OpenMeter API:  http://127.0.0.1:48888  (ingest POST /api/v1/events,
+#                                            query GET /api/v1/meters/<slug>/query)
+#
+# DEV ONLY — weak passwords + insecure portal token, see ops/openmeter-config.yaml.
+# ============================================================================
+name: zeroship-openmeter
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:8.0.3@sha256:db5eac24a1d15a1689fa89642ef97a7e3bc4f55ad5159a07b213c4dc7d0114e3
+    environment:
+      CLUSTER_ID: ca497efe-9f82-4b84-890b-d9969a9a2e1c
+      KAFKA_BROKER_ID: 0
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_MESSAGE_TIMESTAMP_AFTER_MAX_MS: 9223372036854775807
+      JMX_PORT: 9997
+      KAFKA_JMX_OPTS: "-Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=kafka -Dcom.sun.management.jmxremote.rmi.port=9997"
+    # No published port needed (internal-only); expose for optional debugging.
+    ports:
+      - "127.0.0.1:49092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "JMX_PORT=9998", "kafka-topics", "--bootstrap-server", "kafka:9092", "--list"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12.3-alpine@sha256:74da41cd61db84f652c6364fd30d59e19b7276d34f7c82515f5f0e70d6f325da
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: default
+      CLICKHOUSE_DB: openmeter
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "127.0.0.1:48123:8123"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://clickhouse:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  redis:
+    image: redis:7.4.7@sha256:c6e4a82ce60b829a72a21cc4ad4c1c274fa6962eb0d6ac698e8157cbc3fe16a4
+    command: ["redis-server", "--maxmemory", "50mb", "--maxmemory-policy", "noeviction", "--maxmemory-samples", "10"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  postgres:
+    image: postgres:14.20-alpine3.23@sha256:14f02666642586a64d6fae8ef42d479fd76456a77c73ae8a626b8fe323b76d22
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: md5
+    command: ["postgres", "-c", "wal_level=logical"]
+    # OpenMeter metadata ONLY. Deliberately NOT published on :5440 — that is the
+    # zeroship billing PG. No host port at all (internal to this project net).
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "postgres", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # The OpenMeter API — serves CloudEvents ingest (POST /api/v1/events) and the
+  # meter aggregate query (GET /api/v1/meters/<slug>/query). zeroship's
+  # OpenMeterClient (--openmeter-url http://127.0.0.1:48888) hits THIS.
+  openmeter:
+    image: ghcr.io/openmeterio/openmeter:latest
+    command: "openmeter --address 0.0.0.0:8888 --config /etc/openmeter/config.yaml"
+    volumes:
+      - ./ops/openmeter-config.yaml:/etc/openmeter/config.yaml:ro
+    ports:
+      - "127.0.0.1:48888:8888"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8888/api/v1/debug/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  # Drains Kafka → ClickHouse. WITHOUT this the aggregate /query stays empty even
+  # after a 204 ingest — this is the source of the eventual-consistency lag the
+  # e2e polls for (the key real-API divergence from the synchronous mock).
+  sink-worker:
+    image: ghcr.io/openmeterio/openmeter:latest
+    command: "openmeter-sink-worker --config /etc/openmeter/config.yaml"
+    volumes:
+      - ./ops/openmeter-config.yaml:/etc/openmeter/config.yaml:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      openmeter:
+        condition: service_healthy
+    restart: on-failure
