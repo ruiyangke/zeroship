@@ -223,6 +223,16 @@ pub const PLAN_PREFIX: &str = "pln";
 /// string (`inv_<base62>`); the provider-ref + line side tables FK into it.
 pub const INVOICE_PREFIX: &str = "inv";
 
+/// Invoice-payment typed-id prefix (billing-ops gap #26, PR-1). Three chars to
+/// match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// (R16-API2). `ipy` (NOT the design's 4-char `ipay`, which would break the
+/// 3-char invariant) and disjoint from `inv` so a payment id can never be
+/// confused with the invoice it FKs into. The `zeroship.invoice_payments.id`
+/// column stores the full typed-id string (`ipy_<base62>`), minted in Rust by
+/// the payment-confirmation webhook (no SQL `DEFAULT` — there is no in-DB base62
+/// generator).
+pub const INVOICE_PAYMENT_PREFIX: &str = "ipy";
+
 /// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
 /// Deterministic and stable for the life of the app (spec §1.1).
 #[must_use]
@@ -273,6 +283,14 @@ pub fn new_plan_id() -> String {
 /// billing reconciler when it claims a `(creator, period)` invoice row.
 pub fn new_invoice_id() -> String {
     generate(INVOICE_PREFIX)
+}
+
+/// Generate a new invoice-payment ID: `ipy_{base62(uuidv7)}`. Minted by the
+/// payment-confirmation webhook when it appends a `charge` row recording the
+/// cash actually collected against a finalized invoice (billing-ops gap #26,
+/// PR-1).
+pub fn new_invoice_payment_id() -> String {
+    generate(INVOICE_PAYMENT_PREFIX)
 }
 
 #[cfg(test)]
@@ -392,6 +410,21 @@ mod tests {
         assert_eq!(i.len(), 26, "inv_ + 22 base62 = 26 chars");
         let (prefix, _) = parse(&i).expect("new_invoice_id must roundtrip");
         assert_eq!(prefix, "inv");
+    }
+
+    #[test]
+    fn invoice_payment_prefix_is_three_chars_and_roundtrips() {
+        assert_eq!(
+            INVOICE_PAYMENT_PREFIX.len(),
+            3,
+            "invoice-payment prefix must be 3 chars (R16-API2)"
+        );
+        let p = new_invoice_payment_id();
+        assert!(p.starts_with("ipy_"));
+        assert_eq!(p.len(), 26, "ipy_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&p).expect("new_invoice_payment_id must roundtrip");
+        assert_eq!(prefix, "ipy");
+        assert_ne!(prefix, INVOICE_PREFIX, "payment id must be disjoint from invoice id");
     }
 
     #[test]

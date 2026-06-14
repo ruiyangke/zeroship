@@ -1051,6 +1051,17 @@ async fn dispatch_event(
                         }
                     }
                 }
+                // PAYMENTS (billing-ops PR-1, design CRITICAL-A): record the cash actually
+                // collected as an APPEND-ONLY `invoice_payments` row — NEVER a mutation of
+                // the finalized invoice (the immutability trigger forbids it; that is
+                // precisely why payment tracking is a side table). cash-collected =
+                // Σ(invoice_payments) anchors PR-3's over-refund cap. Map the Stripe invoice
+                // (`in_…`) back to the internal `zeroship.invoices.id` via
+                // `billing_provider_refs`; skip a $0 fully-credit-covered invoice (no charge
+                // ⇒ no row ⇒ cash-collected stays 0). This append is best-effort-logged: a
+                // failure here must NOT 500 the webhook (Stripe would redeliver and the
+                // dedup gate above would already mark the event processed).
+                record_infra_payment(state, obj).await;
             }
         }
         _ => {
@@ -1267,6 +1278,73 @@ async fn resolve_infra_creator(state: &AppState, obj: &StripeObject) -> Option<U
         }
     }
     None
+}
+
+/// Append a `charge` `invoice_payments` row for a paid INFRA invoice (billing-ops
+/// PR-1). Maps the Stripe invoice (`obj.id`, an `in_…`) back to the internal
+/// `zeroship.invoices.id` via `billing_provider_refs`, then appends the cash
+/// actually collected (`obj.amount_paid`) WITHOUT touching the finalized invoice.
+/// A $0 invoice (fully credit-covered, or no `amount_paid`) records NO row, so
+/// cash-collected stays 0 — exactly right. Best-effort: any failure is logged, not
+/// surfaced as a 500 (Stripe redelivery + the event-dedup gate handle recovery).
+async fn record_infra_payment(state: &AppState, obj: &StripeObject) {
+    let Some(provider_invoice_id) = obj.id.as_deref() else {
+        tracing::warn!("stripe: infra invoice.paid missing invoice id — no payment row appended");
+        return;
+    };
+    let amount = obj.amount_paid.unwrap_or(0);
+    if amount <= 0 {
+        // $0 fully-credit-covered invoice (or no cash) ⇒ no charge ⇒ no row.
+        return;
+    }
+    let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
+    let conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: invoice.paid payment-row conn failed");
+            return;
+        }
+    };
+    let internal_id =
+        match crate::invoice_payments::invoice_id_for_provider_invoice(&conn, provider_invoice_id)
+            .await
+        {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                // No finalized internal invoice maps to this Stripe invoice (a
+                // pre-reconciler-finalize race, or not a platform invoice). Nothing
+                // to anchor a payment against.
+                tracing::warn!(
+                    "stripe: infra invoice.paid has no internal invoice ref — no payment row appended"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "stripe: invoice.paid invoice-ref lookup failed");
+                return;
+            }
+        };
+    match crate::invoice_payments::append_charge(
+        &conn,
+        &internal_id,
+        amount,
+        &currency,
+        Some(provider_invoice_id),
+    )
+    .await
+    {
+        Ok(pay_id) => {
+            tracing::info!(
+                invoice_id = %internal_id,
+                payment_id = %pay_id,
+                amount_cents = amount,
+                "stripe: appended invoice_payments charge row"
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: invoice.paid payment-row append failed");
+        }
+    }
 }
 
 /// Audit one account-state transition (G2). The detail carries the edge + reason

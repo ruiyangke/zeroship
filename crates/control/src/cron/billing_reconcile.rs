@@ -339,10 +339,16 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // for (creator, period) means this period is fully billed — do no pricing
     // work at all (== old `stripe_invoice_id NOT NULL`). A `draft` row is a
     // crash-window remnant we re-drive, so we fall through to pricing then.
+    // Scope to the ACTIVE (non-void) invoice. After a void+reissue (billing-ops
+    // PR-1) the same (creator, period) can have BOTH a voided audit row AND a live
+    // non-void row; the partial unique index `WHERE status <> 'void'` guarantees AT
+    // MOST ONE non-void row, so this read is single and the void audit rows are
+    // ignored (a re-drive must never pick up the void or it would mis-decide
+    // invoice_done / re-drive the wrong id).
     let existing = conn
         .query(
             "SELECT id, status FROM zeroship.invoices \
-             WHERE creator_id = $1 AND period = $2::date",
+             WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
             &[creator_id, &period],
         )
         .await?;
@@ -474,17 +480,26 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         }
         None => {
             let new_id = zeroship_core::typed_id::new_invoice_id();
+            // ON CONFLICT targets the PARTIAL unique index `invoices_active_period_claim`
+            // (WHERE status <> 'void') the 0042 reshape introduced — NOT the old
+            // unconditional UNIQUE (which is gone). The `WHERE status <> 'void'` on the
+            // conflict clause names the partial index's predicate so a voided prior
+            // invoice does NOT collide: a corrected invoice can reissue into the released
+            // period slot (billing-ops PR-1, gap #26 C).
             conn.execute(
                 "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
                  VALUES ($1, $2, $3::date, 'draft') \
-                 ON CONFLICT (creator_id, period) DO NOTHING",
+                 ON CONFLICT (creator_id, period) WHERE status <> 'void' DO NOTHING",
                 &[&new_id, creator_id, &period],
             )
             .await?;
             // ON CONFLICT may have no-op'd if a concurrent drive claimed it first
-            // (the advisory lock makes this rare, but be exact): re-read the id.
+            // (the advisory lock makes this rare, but be exact): re-read the id. Scope to
+            // the ACTIVE (non-void) row — a voided invoice for this period still exists as
+            // an audit row, but the live claim is the non-void one.
             conn.query(
-                "SELECT id FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date",
+                "SELECT id FROM zeroship.invoices \
+                 WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
                 &[creator_id, &period],
             )
             .await?

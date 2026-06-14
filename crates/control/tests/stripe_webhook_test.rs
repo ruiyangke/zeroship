@@ -202,6 +202,120 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     assert_eq!(detail["stripe_object_id"], stripe_object_id);
 }
 
+/// PR-1 (billing-ops gap #26): a paid INFRA invoice webhook appends a `charge`
+/// `invoice_payments` row recording the cash actually collected, WITHOUT mutating
+/// the finalized invoice; cash-collected = Σ(invoice_payments) reflects it.
+///
+/// FAITHFUL: drives the REAL `stripe_handlers::webhook` end to end (signature path,
+/// JSON parse, dispatch, the infra branch's `record_infra_payment` → the REAL
+/// `invoice_payments::append_charge`) against live PG. RED pre-fix: there is no
+/// `invoice_payments` table and no webhook append, so the row never appears.
+#[compio::test]
+async fn infra_invoice_paid_appends_charge_payment_row() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "infra-payment").await;
+    let app = init_control!(fx);
+    let seed = side_conn(&db_url).await;
+    let creator_id = make_user(&seed).await;
+    seed.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
+         ON CONFLICT (creator_id) DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+    // An `invoice.paid` carrying `metadata.creator_id` also flows through the
+    // Stream-2 Connect payout-ledger path (record_payout), which FKs to a linked
+    // Connect account. Link one so that path succeeds and the webhook returns 200 —
+    // the infra `invoice_payments` append (PR-1) is what this test asserts.
+    fx.state
+        .stripe_store
+        .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
+        .await
+        .expect("link stripe account");
+
+    // Seed a FINALIZED internal invoice + the Stripe provider-invoice ref the
+    // webhook maps `obj.id` back through. Period uniquified per-run.
+    let period = {
+        use chrono::Datelike;
+        let now = chrono::Utc::now().date_naive();
+        chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap()
+    };
+    let inv_id = zeroship_core::typed_id::new_invoice_id();
+    seed.execute(
+        "INSERT INTO zeroship.invoices \
+           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+            total_cents, finalized_at) \
+         VALUES ($1, $2, $3::date, 'finalized', 4500, 0, 0, 4500, NOW())",
+        &[&inv_id, &creator_id, &period],
+    )
+    .await
+    .expect("finalized invoice");
+    let provider_invoice_id = format!("in_infra_{}", Uuid::new_v4().simple());
+    seed.execute(
+        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'invoice', $2)",
+        &[&inv_id, &provider_invoice_id],
+    )
+    .await
+    .expect("provider ref");
+
+    // POST a paid INFRA invoice webhook (invoice_kind=infra is the recovery/marker gate).
+    let event_id = format!("evt_infra_{}", Uuid::new_v4().simple());
+    let body = json!({
+        "id": event_id,
+        "type": "invoice.paid",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": provider_invoice_id,
+            "amount_paid": 4500,
+            "currency": "usd",
+            "metadata": { "creator_id": creator_id.to_string(), "invoice_kind": "infra" }
+        }}
+    });
+    let req = test::TestRequest::post()
+        .uri("/internal/webhooks/stripe")
+        .header("content-type", "application/json")
+        .set_payload(body.to_string())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A single `charge` row was appended for exactly the cash collected.
+    let rows = seed
+        .query(
+            "SELECT amount_cents, kind, provider_ref FROM zeroship.invoice_payments \
+             WHERE invoice_id = $1",
+            &[&inv_id],
+        )
+        .await
+        .expect("select payments");
+    assert_eq!(rows.len(), 1, "exactly one charge row appended");
+    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 4500);
+    assert_eq!(rows[0].get::<_, String>("kind"), "charge");
+    assert_eq!(rows[0].get::<_, Option<String>>("provider_ref").as_deref(), Some(provider_invoice_id.as_str()));
+
+    // cash-collected reflects it.
+    let cash = zeroship_control::invoice_payments::cash_collected(&seed, &inv_id)
+        .await
+        .expect("cash_collected");
+    assert_eq!(cash, 4500);
+
+    // The FINALIZED invoice was NOT mutated.
+    let inv = seed
+        .query(
+            "SELECT status, total_cents FROM zeroship.invoices WHERE id = $1",
+            &[&inv_id],
+        )
+        .await
+        .expect("read invoice");
+    assert_eq!(inv[0].get::<_, String>("status"), "finalized");
+    assert_eq!(inv[0].get::<_, i64>("total_cents"), 4500);
+}
+
 // ─── G6 replay-dedup ledger tests ──────────────────────────────────────────
 
 /// Open a side connection for seeding users + reading the dedup ledger / audit.

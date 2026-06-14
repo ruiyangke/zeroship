@@ -20,6 +20,7 @@ pub mod env_store;
 pub mod fee_policy;
 pub mod http_util;
 pub mod internal;
+pub mod invoice_payments;
 pub mod metering;
 pub mod oauth_grants_handlers;
 pub mod oauth_handlers;

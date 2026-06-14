@@ -61,9 +61,21 @@ CREATE TABLE zeroship.invoices (
     voided_at      TIMESTAMPTZ,
     created_at     TIMESTAMPTZ             NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ             NOT NULL DEFAULT NOW(),
-    CONSTRAINT invoice_total_balances CHECK (total_cents = subtotal_cents - credit_cents + tax_cents),
-    UNIQUE (creator_id, period)
+    CONSTRAINT invoice_total_balances CHECK (total_cents = subtotal_cents - credit_cents + tax_cents)
+    -- VOID + REISSUE (gap #26 C, billing-ops PR-1). The no-double-bill claim is NOT an
+    -- unconditional UNIQUE(creator_id, period) — that would PERMANENTLY block reissuing a
+    -- corrected invoice for a period whose first invoice was voided (a void is the legal
+    -- correction transition; once voided an invoice must RELEASE its period claim so a
+    -- fresh re-priced invoice can take the slot). The claim is a PARTIAL unique index
+    -- `WHERE status <> 'void'` (created below): AT MOST ONE non-void invoice per
+    -- (creator, period), UNBOUNDED void rows (the audit trail). The reconciler's
+    -- `ON CONFLICT (creator_id, period) WHERE status <> 'void' DO NOTHING` targets it.
 );
+-- PARTIAL UNIQUE PERIOD CLAIM (gap #26 C, billing-ops PR-1). See the note on the table.
+CREATE UNIQUE INDEX invoices_active_period_claim
+    ON zeroship.invoices (creator_id, period)
+    WHERE status <> 'void';
+--rollback DROP INDEX IF EXISTS zeroship.invoices_active_period_claim;
 --rollback DROP TABLE zeroship.invoices;
 
 --changeset zeroship:invoice-lines splitStatements:true
@@ -114,7 +126,12 @@ CREATE TABLE zeroship.billing_line_provider_refs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (invoice_id, app_id, provider, ref_kind),
     UNIQUE (provider, ref_kind, external_id),
-    FOREIGN KEY (invoice_id, app_id)
+    -- NAMED (billing-ops PR-1, MINOR-7): the composite FK is given an EXPLICIT name so a
+    -- later changeset (0054, full usage-segment proration) can DROP it by a KNOWN name
+    -- rather than a Postgres-guessed one. The DROP is name-pinned (no IF EXISTS), so a
+    -- name skew fails the migration LOUDLY rather than silently leaving the old 2-col FK.
+    CONSTRAINT billing_line_provider_refs_line_fk
+        FOREIGN KEY (invoice_id, app_id)
         REFERENCES zeroship.invoice_lines(invoice_id, app_id) ON DELETE CASCADE
 );
 --rollback DROP TABLE zeroship.billing_line_provider_refs;
