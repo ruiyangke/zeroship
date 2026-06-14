@@ -70,12 +70,25 @@ pub async fn invoice_id_for_provider_invoice<C: GenericClient + Sync>(
 /// against a finalized invoice. The finalized invoice row is NEVER touched — the
 /// immutability trigger is never challenged (the whole point of the side table).
 ///
-/// `amount_cents` is the cash collected (must be `> 0`; a $0 fully-credit-covered
-/// invoice records NO row — the caller skips it, so cash-collected stays 0).
-/// `provider_ref` is the Stripe event/object id (`in_…`/`pi_…`/`ch_…`) for audit.
+/// `amount_cents` is the **incremental** cash collected by THIS payment (must be
+/// `> 0`; a $0 fully-credit-covered invoice records NO row — the caller skips it,
+/// so cash-collected stays 0). A future partial-pay caller MUST pass the
+/// INCREMENTAL amount of that one payment, **never** the Stripe invoice's
+/// cumulative `amount_paid` — `cash_collected` is `Σ(amount_cents)`, so passing the
+/// running total on each partial would double-count every prior payment.
 ///
-/// Returns the new `ipy_…` id. Generic over the client so the webhook can call it
-/// inside the same transaction that records the payment.
+/// `provider_ref` is the Stripe payment object id (`in_…`/`pi_…`/`ch_…`) and is the
+/// IDEMPOTENCY KEY for `charge` rows. The append is `INSERT … ON CONFLICT DO
+/// NOTHING` against the `(invoice_id, provider_ref) WHERE kind='charge'` partial
+/// unique index (0046), so any number of webhook retries / Stripe redeliveries for
+/// the SAME payment append EXACTLY ONE row — cash-collected (and PR-3's over-refund
+/// cap that reads it) never over-counts. `provider_ref` MUST therefore be `Some`
+/// for a charge; a `None` would defeat the dedup (and the index can't cover it).
+///
+/// Returns the `ipy_…` id of the charge row for this payment — the freshly inserted
+/// id on first append, or the already-present row's id on a conflicting retry.
+/// Generic over the client so the webhook can call it inside the same transaction
+/// that records the payment.
 pub async fn append_charge<C: GenericClient + Sync>(
     conn: &C,
     invoice_id: &str,
@@ -90,13 +103,41 @@ pub async fn append_charge<C: GenericClient + Sync>(
         )));
     }
     let id = zeroship_core::typed_id::new_invoice_payment_id();
-    conn.execute(
-        "INSERT INTO zeroship.invoice_payments \
-           (id, invoice_id, amount_cents, currency, kind, provider_ref) \
-         VALUES ($1, $2, $3, $4, 'charge', $5)",
-        &[&id, &invoice_id, &amount_cents, &currency, &provider_ref],
-    )
-    .await
-    .map_err(|e| RegistryError::Database(e.to_string()))?;
-    Ok(id)
+    // ON CONFLICT DO NOTHING against the charge idempotency index makes a retry /
+    // redelivery of the SAME Stripe payment a no-op. `RETURNING id` yields the new
+    // id on insert and ZERO rows on conflict — in which case we read back the
+    // already-present row's id so the caller always gets the canonical charge id.
+    let inserted = conn
+        .query(
+            "INSERT INTO zeroship.invoice_payments \
+               (id, invoice_id, amount_cents, currency, kind, provider_ref) \
+             VALUES ($1, $2, $3, $4, 'charge', $5) \
+             ON CONFLICT (invoice_id, provider_ref) WHERE kind = 'charge' \
+             DO NOTHING \
+             RETURNING id",
+            &[&id, &invoice_id, &amount_cents, &currency, &provider_ref],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    if let Some(row) = inserted.first() {
+        return Ok(row.get::<_, String>("id"));
+    }
+    // Conflict: a charge row for this (invoice_id, provider_ref) already exists.
+    // Return its id (idempotent no-op append).
+    let existing = conn
+        .query(
+            "SELECT id FROM zeroship.invoice_payments \
+             WHERE invoice_id = $1 AND provider_ref = $2 AND kind = 'charge'",
+            &[&invoice_id, &provider_ref],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    existing
+        .first()
+        .map(|r| r.get::<_, String>("id"))
+        .ok_or_else(|| {
+            RegistryError::Database(
+                "append_charge ON CONFLICT but no existing charge row found".to_string(),
+            )
+        })
 }

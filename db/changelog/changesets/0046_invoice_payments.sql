@@ -53,6 +53,24 @@ CREATE TABLE zeroship.invoice_payments (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX invoice_payments_invoice_idx ON zeroship.invoice_payments (invoice_id);
+-- IDEMPOTENCY KEY (billing-ops gap #26 review, CRITICAL-1). The webhook's
+-- `record_infra_payment` appends a `charge` row from `invoice.paid`. The outer
+-- `stripe_events_seen` event-id gate is NOT sufficient to make the APPEND
+-- idempotent: (a) the append runs before the fallible payout path, so a payout
+-- error → non-2xx → event NOT claimed → Stripe retries the SAME `evt_id` while a
+-- charge row is already committed from the first pass; (b) Stripe can redeliver
+-- `invoice.paid` under a NEW `evt_id` (re-finalize / uncollectible-then-paid)
+-- carrying the cumulative `amount_paid`. Both append a second row → cash_collected
+-- over-counts → PR-3's over-refund cap inflates. The real dedup key is the Stripe
+-- payment object (`in_…`/`pi_…`) carried in `provider_ref`. A PARTIAL unique index
+-- on `kind='charge'` rows (which ALWAYS supply `provider_ref`) lets `append_charge`
+-- do `INSERT … ON CONFLICT DO NOTHING`, so any number of retries/redeliveries for
+-- the same Stripe payment append EXACTLY ONE row. `provider_ref` stays nullable
+-- (dispute_debit/dispute_reversal rows may omit it) — the index covers only the
+-- charge rows, which never do.
+CREATE UNIQUE INDEX invoice_payments_charge_provider_ref_key
+    ON zeroship.invoice_payments (invoice_id, provider_ref) WHERE kind = 'charge';
+--rollback DROP INDEX IF EXISTS zeroship.invoice_payments_charge_provider_ref_key;
 --rollback DROP INDEX IF EXISTS zeroship.invoice_payments_invoice_idx;
 --rollback DROP TABLE zeroship.invoice_payments;
 

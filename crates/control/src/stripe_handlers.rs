@@ -1058,10 +1058,20 @@ async fn dispatch_event(
                 // Σ(invoice_payments) anchors PR-3's over-refund cap. Map the Stripe invoice
                 // (`in_…`) back to the internal `zeroship.invoices.id` via
                 // `billing_provider_refs`; skip a $0 fully-credit-covered invoice (no charge
-                // ⇒ no row ⇒ cash-collected stays 0). This append is best-effort-logged: a
-                // failure here must NOT 500 the webhook (Stripe would redeliver and the
-                // dedup gate above would already mark the event processed).
-                record_infra_payment(state, obj).await;
+                // ⇒ no row ⇒ cash-collected stays 0).
+                //
+                // FAIL-CLOSED (gap #26 review, MAJOR-2): a TRANSIENT append failure must
+                // NOT be swallowed — that would mark the event processed (claim-after-
+                // success below) and permanently DROP a cash row (under-counting
+                // cash_collected forever, since the redelivery is acked as a duplicate).
+                // Instead propagate the error so the webhook returns non-2xx → the event is
+                // left UNCLAIMED → Stripe retries. The retry safely re-appends because the
+                // append is now idempotent on `provider_ref` (CRITICAL-1: ON CONFLICT DO
+                // NOTHING), so the duplicate-write window the old ordering opened is closed.
+                if let Err(e) = record_infra_payment(state, obj).await {
+                    tracing::error!(error = %e, "stripe: invoice.paid payment-row append failed — failing closed for retry");
+                    return err_json(500, "internal error");
+                }
             }
         }
         _ => {
@@ -1285,66 +1295,62 @@ async fn resolve_infra_creator(state: &AppState, obj: &StripeObject) -> Option<U
 /// `zeroship.invoices.id` via `billing_provider_refs`, then appends the cash
 /// actually collected (`obj.amount_paid`) WITHOUT touching the finalized invoice.
 /// A $0 invoice (fully credit-covered, or no `amount_paid`) records NO row, so
-/// cash-collected stays 0 — exactly right. Best-effort: any failure is logged, not
-/// surfaced as a 500 (Stripe redelivery + the event-dedup gate handle recovery).
-async fn record_infra_payment(state: &AppState, obj: &StripeObject) {
+/// cash-collected stays 0 — exactly right.
+///
+/// FAIL-CLOSED (gap #26 review, MAJOR-2): a TRANSIENT DB failure (conn, ref lookup,
+/// or the append itself) is PROPAGATED so the caller can return non-2xx and leave
+/// the event UNCLAIMED for Stripe to retry — never silently dropped (which would
+/// permanently lose a cash row). The retry is safe because `append_charge` is
+/// idempotent on `provider_ref`. Cases that are legitimately "nothing to anchor"
+/// (missing invoice id, no internal invoice ref, $0 cash) are NOT errors — they
+/// return `Ok(())` so the webhook still acks 200.
+async fn record_infra_payment(
+    state: &AppState,
+    obj: &StripeObject,
+) -> Result<(), crate::registry::RegistryError> {
     let Some(provider_invoice_id) = obj.id.as_deref() else {
         tracing::warn!("stripe: infra invoice.paid missing invoice id — no payment row appended");
-        return;
+        return Ok(());
     };
     let amount = obj.amount_paid.unwrap_or(0);
     if amount <= 0 {
         // $0 fully-credit-covered invoice (or no cash) ⇒ no charge ⇒ no row.
-        return;
+        return Ok(());
     }
     let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
-    let conn = match state.registry.conn().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "stripe: invoice.paid payment-row conn failed");
-            return;
+    let conn = state.registry.conn().await?;
+    let internal_id = match crate::invoice_payments::invoice_id_for_provider_invoice(
+        &conn,
+        provider_invoice_id,
+    )
+    .await?
+    {
+        Some(id) => id,
+        None => {
+            // No finalized internal invoice maps to this Stripe invoice (a
+            // pre-reconciler-finalize race, or not a platform invoice). Nothing
+            // to anchor a payment against — not an error, ack the webhook.
+            tracing::warn!(
+                "stripe: infra invoice.paid has no internal invoice ref — no payment row appended"
+            );
+            return Ok(());
         }
     };
-    let internal_id =
-        match crate::invoice_payments::invoice_id_for_provider_invoice(&conn, provider_invoice_id)
-            .await
-        {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                // No finalized internal invoice maps to this Stripe invoice (a
-                // pre-reconciler-finalize race, or not a platform invoice). Nothing
-                // to anchor a payment against.
-                tracing::warn!(
-                    "stripe: infra invoice.paid has no internal invoice ref — no payment row appended"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "stripe: invoice.paid invoice-ref lookup failed");
-                return;
-            }
-        };
-    match crate::invoice_payments::append_charge(
+    let pay_id = crate::invoice_payments::append_charge(
         &conn,
         &internal_id,
         amount,
         &currency,
         Some(provider_invoice_id),
     )
-    .await
-    {
-        Ok(pay_id) => {
-            tracing::info!(
-                invoice_id = %internal_id,
-                payment_id = %pay_id,
-                amount_cents = amount,
-                "stripe: appended invoice_payments charge row"
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "stripe: invoice.paid payment-row append failed");
-        }
-    }
+    .await?;
+    tracing::info!(
+        invoice_id = %internal_id,
+        payment_id = %pay_id,
+        amount_cents = amount,
+        "stripe: appended invoice_payments charge row"
+    );
+    Ok(())
 }
 
 /// Audit one account-state transition (G2). The detail carries the edge + reason

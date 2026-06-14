@@ -507,7 +507,8 @@ impl StripeStore {
 
     // ------------------------------------------------------------------
     // Webhook replay-dedup ledger (billing G6) — process each verified
-    // event AT MOST ONCE. See `zeroship.stripe_events_seen` (changeset 0046).
+    // event AT MOST ONCE. See `zeroship.stripe_events_seen` (changeset 0047;
+    // 0046 is invoice_payments).
     // ------------------------------------------------------------------
 
     /// `true` iff this webhook event-id was already processed (a prior delivery
