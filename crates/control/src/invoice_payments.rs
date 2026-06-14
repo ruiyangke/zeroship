@@ -66,6 +66,47 @@ pub async fn invoice_id_for_provider_invoice<C: GenericClient + Sync>(
     Ok(rows.first().map(|r| r.get::<_, String>("invoice_id")))
 }
 
+/// Persist the dispute-resolution linkage for a paid Stripe invoice (billing-ops gap #26,
+/// PR-8 CRITICAL-1). A Stripe Dispute object carries NO `invoice` field — only `charge`
+/// (`ch_…`) and `payment_intent` (`pi_…`). So to map a future `charge.dispute.*` back to
+/// THIS internal invoice we must record, at `invoice.paid` time, the `pi_…`/`ch_…` that
+/// settled the invoice as `billing_provider_refs` rows keyed by their own `ref_kind`
+/// (`'payment_intent'` / `'charge'`) → the SAME `invoices(id)`.
+///
+/// A `pi_`/`ch_` is GLOBALLY unique at Stripe, so `billing_provider_refs`' existing
+/// `UNIQUE(provider, ref_kind, external_id)` makes the later dispute resolution
+/// deterministic (no ambiguity). The insert is webhook-idempotent: `ON CONFLICT DO
+/// NOTHING` against the `(invoice_id, provider, ref_kind)` PK, so a redelivered
+/// `invoice.paid` re-records the same linkage as a no-op.
+///
+/// `payment_intent`/`charge` are each optional — a paid invoice carries one OR the other
+/// (or both, across wire versions); whichever is present is persisted. Passing both `None`
+/// is a harmless no-op (`Ok(())`). This does NOT touch the existing `'invoice'` (`in_…`)
+/// ref or the `'charge'`-KIND `invoice_payments` row — it is an ADDITIONAL linkage, so
+/// PR-1 charge idempotency and PR-3's invoice-ref guards are untouched.
+pub async fn record_payment_object_refs<C: GenericClient + Sync>(
+    conn: &C,
+    invoice_id: &str,
+    payment_intent: Option<&str>,
+    charge: Option<&str>,
+) -> Result<(), RegistryError> {
+    for (ref_kind, external_id) in [("payment_intent", payment_intent), ("charge", charge)] {
+        let Some(external_id) = external_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        conn.execute(
+            "INSERT INTO zeroship.billing_provider_refs \
+               (invoice_id, provider, ref_kind, external_id) \
+             VALUES ($1, 'stripe', $2, $3) \
+             ON CONFLICT (invoice_id, provider, ref_kind) DO NOTHING",
+            &[&invoice_id, &ref_kind, &external_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Append a positive `charge` payment row recording the cash actually collected
 /// against a finalized invoice. The finalized invoice row is NEVER touched — the
 /// immutability trigger is never challenged (the whole point of the side table).

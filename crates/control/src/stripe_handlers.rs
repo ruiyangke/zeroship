@@ -861,12 +861,36 @@ struct StripeObject {
     /// The disputed PaymentIntent (`pi_…`). Another resolution candidate.
     #[serde(default)]
     payment_intent: Option<String>,
-    /// An optional invoice hint (`in_…`) some Stripe API versions surface on the dispute.
-    #[serde(default)]
-    invoice: Option<String>,
     /// `evidence_details.due_by` — the evidence-submission deadline.
     #[serde(default)]
     evidence_details: Option<DisputeEvidenceDetails>,
+    /// Modern (Basil 2025-03-31+) Invoice wire surface: the per-payment settlement objects
+    /// moved OFF the top level (`invoice.payment_intent`/`invoice.charge`) into
+    /// `invoice.payments.data[].payment.{payment_intent,charge}`. On a paid invoice this is
+    /// where the `pi_…`/`ch_…` live so we can record the dispute-resolution linkage; the
+    /// legacy top-level `payment_intent`/`charge` fields above cover older API versions.
+    #[serde(default)]
+    payments: Option<InvoicePayments>,
+}
+
+#[derive(Deserialize, Debug)]
+struct InvoicePayments {
+    #[serde(default)]
+    data: Vec<InvoicePaymentEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct InvoicePaymentEntry {
+    #[serde(default)]
+    payment: Option<InvoicePaymentObject>,
+}
+
+#[derive(Deserialize, Debug)]
+struct InvoicePaymentObject {
+    #[serde(default)]
+    payment_intent: Option<String>,
+    #[serde(default)]
+    charge: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1394,7 +1418,46 @@ async fn record_infra_payment(
         amount_cents = amount,
         "stripe: appended invoice_payments charge row"
     );
+
+    // DISPUTE-RESOLUTION LINKAGE (PR-8 CRITICAL-1). A future `charge.dispute.*` carries
+    // only the settling `pi_…`/`ch_…` (never the `in_…`). Capture those off THIS paid
+    // invoice and persist them as `billing_provider_refs(ref_kind='payment_intent'|'charge')`
+    // → this invoice, so the dispute handler can resolve back to us. Idempotent (ON CONFLICT
+    // DO NOTHING); a paid invoice with neither id is a harmless no-op.
+    let (pi, ch) = invoice_payment_object_ids(obj);
+    crate::invoice_payments::record_payment_object_refs(
+        &conn,
+        &internal_id,
+        pi.as_deref(),
+        ch.as_deref(),
+    )
+    .await?;
     Ok(())
+}
+
+/// Extract the settling PaymentIntent (`pi_…`) and Charge (`ch_…`) from a paid Stripe
+/// Invoice object, robust across API versions:
+///   * legacy (pre-Basil): top-level `invoice.payment_intent` / `invoice.charge`.
+///   * modern (Basil 2025-03-31+): `invoice.payments.data[].payment.{payment_intent,charge}`
+///     (the top-level fields were removed when multiple partial payments shipped).
+/// Returns the FIRST non-empty id seen for each, preferring the top-level (older) shape and
+/// falling back to the nested entries.
+fn invoice_payment_object_ids(obj: &StripeObject) -> (Option<String>, Option<String>) {
+    let nonempty = |s: &Option<String>| s.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let mut pi = nonempty(&obj.payment_intent);
+    let mut ch = nonempty(&obj.charge);
+    if let Some(payments) = obj.payments.as_ref() {
+        for entry in &payments.data {
+            let Some(p) = entry.payment.as_ref() else { continue };
+            if pi.is_none() {
+                pi = nonempty(&p.payment_intent);
+            }
+            if ch.is_none() {
+                ch = nonempty(&p.charge);
+            }
+        }
+    }
+    (pi, ch)
 }
 
 /// `charge.dispute.created` (billing-ops PR-8, design flow I). A cardholder disputed a
@@ -1435,8 +1498,10 @@ async fn handle_dispute_created(
             return err_json(500, "internal error");
         }
     };
-    // Resolve the disputed object → our invoice via the recorded charge/invoice refs.
-    let candidates: Vec<&str> = [obj.charge.as_deref(), obj.payment_intent.as_deref(), obj.invoice.as_deref()]
+    // Resolve the disputed object → our invoice via the pi_/ch_ linkage recorded at
+    // invoice.paid (CRITICAL-1). A Stripe Dispute object has NO `invoice` field — only
+    // `payment_intent` (pi_…) and `charge` (ch_…) — so those are the only candidates.
+    let candidates: Vec<&str> = [obj.payment_intent.as_deref(), obj.charge.as_deref()]
         .into_iter()
         .flatten()
         .collect();
@@ -1523,6 +1588,16 @@ async fn handle_dispute_closed_or_updated(
         return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_dispute_id"}));
     };
     let stripe_status = obj.status.as_deref().unwrap_or("");
+    // MINOR-6: surface an UNKNOWN Stripe dispute status (one not in our mapping table)
+    // rather than silently bucketing it to `open`. A new Stripe lifecycle value should be
+    // noticed, not swallowed.
+    if !crate::disputes::DisputeStatus::is_known_stripe_status(stripe_status) {
+        tracing::warn!(
+            event_id = %sanitize_event_id(&event.id),
+            status = %stripe_store::sanitize_for_display(stripe_status),
+            "stripe: charge.dispute.closed/updated carries an UNKNOWN dispute status — mapped to open"
+        );
+    }
     let status = crate::disputes::DisputeStatus::from_stripe(stripe_status);
     if !status.is_terminal() {
         // A mid-lifecycle update (still open). Nothing to resolve; ack.
@@ -1536,7 +1611,31 @@ async fn handle_dispute_closed_or_updated(
             return err_json(500, "internal error");
         }
     };
-    let rec = match crate::disputes::record_dispute_closed(&mut conn, provider_dispute_id, status).await {
+    // Resolve the anchor invoice from the dispute's pi_/ch_ so a CLOSE-BEFORE-CREATE
+    // (MAJOR-4) can seed a terminal row. A close-before-create with no resolvable invoice
+    // (an unrecorded charge) yields ctx=None → record_dispute_closed acks with Ok(None).
+    let candidates: Vec<&str> = [obj.payment_intent.as_deref(), obj.charge.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let invoice_id = match crate::disputes::resolve_invoice_for_dispute(&conn, &candidates).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: dispute.closed invoice resolution failed — failing closed");
+            return err_json(500, "internal error");
+        }
+    };
+    let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
+    let amount = obj.amount.unwrap_or(0);
+    let ctx = invoice_id.as_deref().filter(|_| amount > 0).map(|iid| {
+        crate::disputes::DisputeCloseContext {
+            invoice_id: iid,
+            amount_cents: amount,
+            currency: &currency,
+            reason: obj.reason.as_deref(),
+        }
+    });
+    let rec = match crate::disputes::record_dispute_closed(&mut conn, provider_dispute_id, status, ctx).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             // No dispute row for this du_… (close-before-create or an unrecorded charge).
@@ -1726,5 +1825,56 @@ mod verification_tests {
     #[test]
     fn invalid_json_message_is_constant() {
         assert_eq!(invalid_json_message(), "invalid json");
+    }
+
+    // PR-8 CRITICAL-1: the pi_/ch_ capture must read BOTH Stripe Invoice wire shapes.
+    #[test]
+    fn invoice_payment_object_ids_legacy_top_level() {
+        // Pre-Basil: top-level invoice.payment_intent / invoice.charge.
+        let obj: StripeObject = serde_json::from_value(serde_json::json!({
+            "id": "in_x",
+            "amount_paid": 4500,
+            "payment_intent": "pi_legacy",
+            "charge": "ch_legacy"
+        }))
+        .unwrap();
+        let (pi, ch) = invoice_payment_object_ids(&obj);
+        assert_eq!(pi.as_deref(), Some("pi_legacy"));
+        assert_eq!(ch.as_deref(), Some("ch_legacy"));
+    }
+
+    #[test]
+    fn invoice_payment_object_ids_modern_nested() {
+        // Basil 2025-03-31+: nested under payments.data[].payment.
+        let obj: StripeObject = serde_json::from_value(serde_json::json!({
+            "id": "in_x",
+            "amount_paid": 4500,
+            "payments": { "object": "list", "data": [
+                { "payment": { "type": "payment_intent", "payment_intent": "pi_modern", "charge": "ch_modern" } }
+            ]}
+        }))
+        .unwrap();
+        let (pi, ch) = invoice_payment_object_ids(&obj);
+        assert_eq!(pi.as_deref(), Some("pi_modern"), "reads nested payments.data[].payment.payment_intent");
+        assert_eq!(ch.as_deref(), Some("ch_modern"), "reads nested payments.data[].payment.charge");
+    }
+
+    #[test]
+    fn invoice_payment_object_ids_none_when_absent() {
+        let obj: StripeObject =
+            serde_json::from_value(serde_json::json!({ "id": "in_x", "amount_paid": 0 })).unwrap();
+        let (pi, ch) = invoice_payment_object_ids(&obj);
+        assert!(pi.is_none() && ch.is_none(), "a paid invoice with no settle ids yields none");
+    }
+
+    // MINOR-6: a documented Stripe status is known; junk is not.
+    #[test]
+    fn unknown_dispute_status_is_flagged() {
+        use crate::disputes::DisputeStatus;
+        assert!(DisputeStatus::is_known_stripe_status("needs_response"));
+        assert!(DisputeStatus::is_known_stripe_status("won"));
+        assert!(DisputeStatus::is_known_stripe_status("warning_closed"));
+        assert!(!DisputeStatus::is_known_stripe_status("charge_refunded"));
+        assert!(!DisputeStatus::is_known_stripe_status("brand_new_status"));
     }
 }

@@ -100,11 +100,25 @@ CREATE TABLE zeroship.invoice_lines (
 --changeset zeroship:billing-provider-refs splitStatements:true
 -- INVOICE-level provider ids. Real FK → invoices(id): no dangling ref. Core invoices
 -- carry no provider ids.
+--
+-- DISPUTE-RESOLUTION LINKAGE (billing-ops gap #26, PR-8 CRITICAL-1). A Stripe Dispute
+-- object carries NO `invoice` field — only `charge` (ch_…) and `payment_intent` (pi_…)
+-- (docs.stripe.com/api/disputes/object). To map a dispute back to OUR invoice, the
+-- `invoice.paid` handler captures the paid Invoice's `pi_…`/`ch_…` and persists them here
+-- as ADDITIONAL `ref_kind`s alongside the finalize-time `'invoice'` (in_…) ref:
+--   'invoice'        — the finalized Stripe invoice id (in_…), written at finalize.
+--   'draft_invoice'  — the draft id, written while building the invoice.
+--   'payment_intent' — the paid invoice's PaymentIntent (pi_…), written at invoice.paid.
+--   'charge'         — the paid invoice's Charge (ch_…), written at invoice.paid.
+-- A pi_/ch_ is GLOBALLY unique at Stripe, so the existing UNIQUE(provider, ref_kind,
+-- external_id) makes dispute resolution deterministic (no LIMIT-1 ambiguity). `ref_kind`
+-- is a plain TEXT column (no constrained domain), so adding these kinds needs no schema
+-- change beyond this documentation — the comment is the contract.
 CREATE TABLE zeroship.billing_provider_refs (
     invoice_id  TEXT NOT NULL REFERENCES zeroship.invoices(id) ON DELETE CASCADE,
     provider    TEXT NOT NULL,                -- 'stripe' | 'stripe_meters' | 'openmeter'
-    ref_kind    TEXT NOT NULL,                -- 'invoice' | 'draft_invoice'
-    external_id TEXT NOT NULL,                -- in_…
+    ref_kind    TEXT NOT NULL,                -- 'invoice' | 'draft_invoice' | 'payment_intent' | 'charge'
+    external_id TEXT NOT NULL,                -- in_… | pi_… | ch_…
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (invoice_id, provider, ref_kind),
     UNIQUE (provider, ref_kind, external_id)

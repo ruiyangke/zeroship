@@ -102,6 +102,21 @@ BEGIN
        OR NEW.created_at <> OLD.created_at THEN
         RAISE EXCEPTION 'billing_disputes frozen columns are immutable (invoice_id/amount_cents/currency/provider_dispute_id) — only status/resolved_at/reason/evidence_due_at may progress';
     END IF;
+    -- STATUS LIFECYCLE (PR-8 CRITICAL-3 / MAJOR-7): the status is a STRICT one-way
+    -- progression `open → won|lost`. A terminal row NEVER moves again — so a
+    -- redelivered/out-of-order/late terminal event (e.g. a `won` followed by a stale
+    -- `lost`) can NOT flip an already-resolved dispute and strand restored cash on a
+    -- now-`lost` dispute (an over-refund window). The application layer gates the close
+    -- UPDATE with `WHERE status='open'` so this is normally a no-op; this trigger is the
+    -- DURABLE backstop that rejects any `won→lost` / `lost→won` / `*→open` / terminal→*
+    -- transition outright. A no-op same-status UPDATE (OLD.status = NEW.status) is allowed
+    -- (idempotent metadata touch).
+    IF NEW.status <> OLD.status THEN
+        IF NOT (OLD.status = 'open' AND NEW.status IN ('won','lost')) THEN
+            RAISE EXCEPTION 'billing_disputes status may only progress open→won/lost (got %→%) — a terminal dispute is frozen',
+                OLD.status, NEW.status;
+        END IF;
+    END IF;
     RETURN NEW;
 END;
 $fn$ LANGUAGE plpgsql;

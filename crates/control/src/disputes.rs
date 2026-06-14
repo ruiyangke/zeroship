@@ -15,8 +15,9 @@
 //!   * [`DisputeStatus`] — the `dispute_status` domain (`open`/`won`/`lost`) + the mapping
 //!     from Stripe's many lifecycle statuses onto it ([`DisputeStatus::from_stripe`]).
 //!   * [`resolve_invoice_for_dispute`] — map the disputed Stripe payment object
-//!     (`charge`/`payment_intent`, and an optional `invoice` hint) back to the internal
-//!     `zeroship.invoices.id`, mirroring how `invoice.paid` resolves it.
+//!     (`payment_intent`/`charge`; a Dispute object has NO `invoice` field) back to the
+//!     internal `zeroship.invoices.id` via the `pi_…`/`ch_…` `billing_provider_refs`
+//!     linkage that the `invoice.paid` handler records at payment time (CRITICAL-1).
 //!   * [`record_dispute_created`] — in ONE txn, UPSERT the `billing_disputes` row
 //!     (`status='open'`) AND append the negative `dispute_debit` `invoice_payments` row.
 //!     Idempotent on the Stripe `du_…` (the `provider_dispute_id` UNIQUE + the dispute
@@ -78,6 +79,26 @@ impl DisputeStatus {
         }
     }
 
+    /// `true` iff `status` is a Stripe dispute lifecycle value we KNOW (one of the documented
+    /// enum members). A value NOT in this set is mapped to [`Self::Open`] by `from_stripe`
+    /// but is logged at the call site (MINOR-6) — a new/unknown Stripe status should be
+    /// noticed rather than silently bucketed. Kept in lock-step with the docs:
+    /// docs.stripe.com/api/disputes/object (`status`).
+    #[must_use]
+    pub fn is_known_stripe_status(status: &str) -> bool {
+        matches!(
+            status,
+            "warning_needs_response"
+                | "warning_under_review"
+                | "warning_closed"
+                | "needs_response"
+                | "under_review"
+                | "won"
+                | "lost"
+                | "prevented"
+        )
+    }
+
     /// Is this a TERMINAL status (won/lost)? A terminal status drives the `.closed`
     /// handling (resolved_at + the won reversal / lost no-op).
     #[must_use]
@@ -86,52 +107,53 @@ impl DisputeStatus {
     }
 }
 
-/// Resolve the internal `zeroship.invoices.id` for a disputed Stripe payment object.
+/// Resolve the internal `zeroship.invoices.id` a `charge.dispute.*` is against.
 ///
-/// The dispute object carries `charge` (`ch_…`) and `payment_intent` (`pi_…`) — and, on
-/// some API versions, an `invoice` hint — but NOT the `in_…` directly. We resolve by
-/// matching ANY of those candidate ids against the provider refs we DID record at payment
-/// time, mirroring how `invoice.paid` resolves the internal id:
+/// A Stripe Dispute object carries NO `invoice` field (verified against
+/// docs.stripe.com/api/disputes/object) — only `charge` (`ch_…`) and `payment_intent`
+/// (`pi_…`). Those settle ids are recorded against OUR invoice at `invoice.paid` time as
+/// `billing_provider_refs(ref_kind IN ('payment_intent','charge'))` (CRITICAL-1). We
+/// resolve by matching the dispute's candidate ids against that linkage in a SINGLE
+/// round-trip (MINOR-5):
 ///
-///   1. the `charge` `invoice_payments.provider_ref` (the Stripe payment object recorded
-///      when the charge was collected — the very object the dispute is against), then
-///   2. `billing_provider_refs(ref_kind='invoice')` (the `in_…` linkage), in case the
-///      dispute surfaced the invoice id.
+///   * `billing_provider_refs WHERE ref_kind IN ('payment_intent','charge') AND
+///     external_id = ANY($candidates)` → the invoice. A `pi_`/`ch_` is GLOBALLY unique at
+///     Stripe, and `billing_provider_refs` has `UNIQUE(provider, ref_kind, external_id)`,
+///     so this is deterministic (no LIMIT-1 ambiguity). `payment_intent` is preferred over
+///     `charge` when both happen to map (ordered in the query) — they point at the same
+///     invoice anyway.
 ///
 /// Returns `None` if no internal invoice maps to any candidate (a Connect end-user charge
-/// the platform never invoiced, or a pre-finalize race) — the webhook then acks the event
-/// without recording a dispute (nothing to anchor it to).
+/// the platform never invoiced, or a pre-`invoice.paid` race) — the webhook then acks the
+/// event WITHOUT recording a dispute (nothing to anchor it to), no crash.
 pub async fn resolve_invoice_for_dispute<C: GenericClient + Sync>(
     conn: &C,
     candidate_refs: &[&str],
 ) -> Result<Option<String>, RegistryError> {
-    for cand in candidate_refs.iter().filter(|c| !c.is_empty()) {
-        // (1) Match against a recorded charge payment row's provider_ref.
-        let rows = conn
-            .query(
-                "SELECT invoice_id FROM zeroship.invoice_payments \
-                 WHERE kind = 'charge' AND provider_ref = $1 LIMIT 1",
-                &[cand],
-            )
-            .await
-            .map_err(|e| RegistryError::Database(e.to_string()))?;
-        if let Some(r) = rows.first() {
-            return Ok(Some(r.get::<_, String>("invoice_id")));
-        }
-        // (2) Match against the invoice-level provider ref (in_…).
-        let rows = conn
-            .query(
-                "SELECT invoice_id FROM zeroship.billing_provider_refs \
-                 WHERE provider = 'stripe' AND ref_kind = 'invoice' AND external_id = $1 LIMIT 1",
-                &[cand],
-            )
-            .await
-            .map_err(|e| RegistryError::Database(e.to_string()))?;
-        if let Some(r) = rows.first() {
-            return Ok(Some(r.get::<_, String>("invoice_id")));
-        }
+    let candidates: Vec<&str> = candidate_refs
+        .iter()
+        .copied()
+        .filter(|c| !c.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
     }
-    Ok(None)
+    // ONE round-trip: match any candidate against the pi_/ch_ linkage recorded at
+    // invoice.paid. ORDER BY puts 'payment_intent' before 'charge' so a deterministic
+    // winner is returned if (pathologically) both kinds resolve.
+    let rows = conn
+        .query(
+            "SELECT invoice_id FROM zeroship.billing_provider_refs \
+             WHERE provider = 'stripe' \
+               AND ref_kind IN ('payment_intent','charge') \
+               AND external_id = ANY($1) \
+             ORDER BY (ref_kind = 'payment_intent') DESC \
+             LIMIT 1",
+            &[&candidates],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    Ok(rows.first().map(|r| r.get::<_, String>("invoice_id")))
 }
 
 /// What [`record_dispute_created`] / [`record_dispute_closed`] did, so the webhook can
@@ -162,6 +184,12 @@ pub struct DisputeRecord {
 ///     no-op on redelivery.
 /// So a redelivered created event NEVER double-debits, even under a fresh `evt_id` that
 /// the `stripe_events_seen` gate would not catch.
+///
+/// ORDER-INDEPENDENT (MAJOR-4): if a TERMINAL row already exists because `.closed` arrived
+/// FIRST (close-before-create), the `ON CONFLICT DO NOTHING` no-ops the insert, the debit
+/// append is idempotent (already applied), and we reconcile to the existing row WITHOUT
+/// touching its terminal status. The `.created` therefore never resurrects a resolved
+/// dispute back to `open`; the end state is identical to in-order delivery.
 ///
 /// `conn` MUST be a live OWNED connection (`&mut`): the upsert + append run in one
 /// transaction so the dispute fact and its cash clawback land atomically.
@@ -261,20 +289,48 @@ pub async fn record_dispute_created<C: GenericClient + Sync>(
     })
 }
 
-/// Record a `charge.dispute.closed` (or any terminal `.updated`): progress the dispute to
-/// `won`/`lost` and, on `won`, append the compensating positive `dispute_reversal` row
-/// restoring the budget. On `lost` the `dispute_debit` stands (no reversal).
+/// Context the close handler resolves from the `charge.dispute.closed`/`.updated` event so
+/// it can CREATE the dispute terminal if the `.created` never arrived (MAJOR-4). All of it
+/// is carried on the dispute object Stripe delivers on the close event.
+#[derive(Debug, Clone)]
+pub struct DisputeCloseContext<'a> {
+    /// The internal invoice the dispute is against, resolved via the pi_/ch_ linkage.
+    pub invoice_id: &'a str,
+    /// The disputed (clawed-back) amount in cents — used only to seed a close-before-create
+    /// terminal row (and its debit). Must be `> 0` when creating.
+    pub amount_cents: i64,
+    pub currency: &'a str,
+    pub reason: Option<&'a str>,
+}
+
+/// Record a `charge.dispute.closed` (or terminal `.updated`): progress the dispute to its
+/// terminal status and reconcile its cash. ORDER-INDEPENDENT and LIFECYCLE-SAFE:
 ///
-/// Idempotent: the `dispute_reversal` append is deduped on the `du_…`, so a redelivered
-/// `won` close never double-restores. The status UPDATE is naturally idempotent.
+///   * Normal order (`.created` already landed `open`): the row is UPDATEd
+///     `open → won|lost` (gated `WHERE status='open'`, so a redelivered/late terminal event
+///     is a no-op). On `won` the compensating positive `dispute_reversal` is appended
+///     (idempotent on the `du_…`); on `lost` the debit stands.
 ///
-/// Returns `None` if no `billing_disputes` row exists for the `du_…` yet (a `.closed`
-/// arriving before its `.created`, or for a charge we never recorded) — the webhook acks
-/// it (nothing to resolve).
+///   * CLOSE-BEFORE-CREATE (MAJOR-4 — legal at-least-once reordering): no row exists yet,
+///     so we UPSERT a FRESH row DIRECTLY in the terminal status, applying the `dispute_debit`
+///     (always) AND, on `won`, the `dispute_reversal` (so net cash is restored). The later
+///     `.created` then finds a terminal row and reconciles to a no-op
+///     ([`record_dispute_created`]). End state is identical regardless of delivery order:
+///     debit applied; reversal iff won.
+///
+///   * Already terminal (redelivery, or the `won→lost` reorder the trigger forbids): the
+///     gated UPDATE matches 0 rows and the row already exists — we return it UNCHANGED
+///     (no status flip, no extra cash movement). This is the CRITICAL-3 guard: a stale
+///     `lost` after a `won` can NEVER strand restored cash on a lost dispute.
+///
+/// `ctx` is `None` only when the caller could not resolve the invoice (an unrecorded
+/// charge); then a close-before-create returns `Ok(None)` (nothing to anchor) rather than
+/// inventing a row.
 pub async fn record_dispute_closed<C: GenericClient + Sync>(
     conn: &mut C,
     provider_dispute_id: &str,
     status: DisputeStatus,
+    ctx: Option<DisputeCloseContext<'_>>,
 ) -> Result<Option<DisputeRecord>, RegistryError> {
     debug_assert!(status.is_terminal(), "record_dispute_closed expects a terminal status");
 
@@ -283,53 +339,135 @@ pub async fn record_dispute_closed<C: GenericClient + Sync>(
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
 
-    // Progress the row to the terminal status (controlled-update trigger permits the
-    // status/resolved_at change; the frozen columns are held). Return its identity +
-    // amount/currency/invoice so we can drive the reversal.
+    // (1) Progress an OPEN row to the terminal status. The `WHERE status='open'` gate makes
+    // a redelivered/late terminal event (the row is already terminal) a 0-row no-op — and
+    // the controlled-update trigger independently rejects any terminal→* flip, so a stale
+    // `lost` after a `won` can never strand restored cash (CRITICAL-3).
     let updated = tx
         .query(
             "UPDATE zeroship.billing_disputes \
                 SET status = $2::text::zeroship.dispute_status, resolved_at = NOW() \
-              WHERE provider_dispute_id = $1 \
+              WHERE provider_dispute_id = $1 AND status = 'open' \
               RETURNING id, invoice_id, amount_cents, currency",
             &[&provider_dispute_id, &status.as_str()],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
-    let Some(r) = updated.first() else {
-        tx.commit()
-            .await
-            .map_err(|e| RegistryError::Database(e.to_string()))?;
+
+    if let Some(r) = updated.first() {
+        let dispute_id: String = r.get("id");
+        let invoice_id: String = r.get("invoice_id");
+        let amount_cents: i64 = r.get("amount_cents");
+        let currency: String = r.get("currency");
+        if status == DisputeStatus::Won {
+            // +amount raises Σ(invoice_payments) back, restoring the refundable-cash budget.
+            append_dispute_row(
+                &tx, &invoice_id, amount_cents, &currency, DisputePaymentKind::Reversal,
+                provider_dispute_id,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        return Ok(Some(DisputeRecord { dispute_id, invoice_id, status, newly_created: false }));
+    }
+
+    // (2) No OPEN row moved. Either the row is ALREADY terminal (redelivery / a forbidden
+    // reorder) — return it unchanged — or NO row exists at all (close-before-create).
+    let existing = tx
+        .query(
+            "SELECT id, invoice_id, amount_cents, currency, status::text AS status \
+               FROM zeroship.billing_disputes WHERE provider_dispute_id = $1",
+            &[&provider_dispute_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    if let Some(r) = existing.first() {
+        // Already terminal: a no-op. Surface the EXISTING terminal status (NOT the incoming
+        // one) so a stale `lost` after a `won` reports `won` — the cash state is coherent.
+        let dispute_id: String = r.get("id");
+        let invoice_id: String = r.get("invoice_id");
+        let existing_status = DisputeStatus::from_stripe(&r.get::<_, String>("status"));
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        return Ok(Some(DisputeRecord {
+            dispute_id,
+            invoice_id,
+            status: existing_status,
+            newly_created: false,
+        }));
+    }
+
+    // (3) CLOSE-BEFORE-CREATE: no row at all. UPSERT a fresh row DIRECTLY terminal, applying
+    // the debit (always) + the won reversal — but only if we resolved the anchor invoice.
+    let Some(ctx) = ctx else {
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
         return Ok(None);
     };
-    let dispute_id: String = r.get("id");
-    let invoice_id: String = r.get("invoice_id");
-    let amount_cents: i64 = r.get("amount_cents");
-    let currency: String = r.get("currency");
+    if ctx.amount_cents <= 0 {
+        return Err(RegistryError::InvalidInput(format!(
+            "dispute amount must be > 0 to create a terminal dispute (got {})",
+            ctx.amount_cents
+        )));
+    }
+    let dsp_id = zeroship_core::typed_id::new_dispute_id();
+    let inserted = tx
+        .query(
+            "INSERT INTO zeroship.billing_disputes \
+               (id, invoice_id, amount_cents, currency, status, reason, provider_dispute_id, \
+                resolved_at) \
+             VALUES ($1, $2, $3, $4, $5::text::zeroship.dispute_status, $6, $7, NOW()) \
+             ON CONFLICT (provider_dispute_id) DO NOTHING \
+             RETURNING id",
+            &[
+                &dsp_id,
+                &ctx.invoice_id,
+                &ctx.amount_cents,
+                &ctx.currency,
+                &status.as_str(),
+                &ctx.reason,
+                &provider_dispute_id,
+            ],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    // A concurrent create could have raced in between our probe and this INSERT; if so the
+    // ON CONFLICT no-ops and we read the existing id (its status is whatever that create
+    // set — left to the normal create/close reconciliation, no flip here).
+    let (dispute_id, created_terminal) = if let Some(r) = inserted.first() {
+        (r.get::<_, String>("id"), true)
+    } else {
+        let row = tx
+            .query(
+                "SELECT id FROM zeroship.billing_disputes WHERE provider_dispute_id = $1",
+                &[&provider_dispute_id],
+            )
+            .await
+            .map_err(|e| RegistryError::Database(e.to_string()))?;
+        let id = row.first().map(|r| r.get::<_, String>("id")).ok_or_else(|| {
+            RegistryError::Database("dispute ON CONFLICT but no existing row found".to_string())
+        })?;
+        (id, false)
+    };
 
+    // Apply the cash facts. Both appends are idempotent on the du_…, so even if a racing
+    // create already appended the debit this is a no-op.
+    append_dispute_row(
+        &tx, ctx.invoice_id, -ctx.amount_cents, ctx.currency, DisputePaymentKind::Debit,
+        provider_dispute_id,
+    )
+    .await?;
     if status == DisputeStatus::Won {
-        // Append the compensating positive reversal (idempotent on the du_…). +amount
-        // raises Σ(invoice_payments) back, restoring the refundable-cash budget.
         append_dispute_row(
-            &tx,
-            &invoice_id,
-            amount_cents,
-            &currency,
-            DisputePaymentKind::Reversal,
+            &tx, ctx.invoice_id, ctx.amount_cents, ctx.currency, DisputePaymentKind::Reversal,
             provider_dispute_id,
         )
         .await?;
     }
-
-    tx.commit()
-        .await
-        .map_err(|e| RegistryError::Database(e.to_string()))?;
-
+    tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
     Ok(Some(DisputeRecord {
         dispute_id,
-        invoice_id,
+        invoice_id: ctx.invoice_id.to_string(),
         status,
-        newly_created: false,
+        newly_created: created_terminal,
     }))
 }
 

@@ -1,16 +1,24 @@
 //! PR-8 regression tests for billing-ops gap #26: disputes / chargebacks (the FINAL PR).
 //!
-//! FAITHFUL by construction: every assertion drives the REAL
-//! `stripe_handlers::webhook` end to end (signature path, JSON parse, dispatch, the
-//! `charge.dispute.*` branch → the REAL `disputes::record_dispute_*` →
-//! `invoice_payments::append_dispute_row`) against a live, migrated Postgres. The
-//! over-refund interaction runs the REAL `refund::issue_refund` against the REAL `0049`
-//! trigger. Gated on `CONTROL_TEST_DB`; silent skip otherwise.
+//! FAITHFUL by construction (gap #26 PR-8 review, CRITICAL-2): a REAL Stripe Dispute object
+//! carries NO `invoice` field — only `charge` (`ch_…`) and `payment_intent` (`pi_…`). The
+//! pre-fix suite masked the dead resolution path by putting an `in_…` in the dispute's
+//! `charge`; that NEVER appears at Stripe and let the suite pass while production was dead.
+//! Here every test FIRST drives the REAL `invoice.paid` webhook (carrying the settling
+//! `pi_…`) so the handler records the `pi_…`→invoice `billing_provider_refs` linkage EXACTLY
+//! as production does, and the dispute object then names that REAL `pi_…`. No `in_…` ever
+//! appears on a dispute object. The whole chain runs end to end against a live, migrated
+//! Postgres: `stripe_handlers::webhook` (signature path, JSON parse, dispatch) →
+//! `record_infra_payment` (charge row + pi_/ch_ linkage) → `charge.dispute.*` →
+//! `disputes::record_dispute_*` → `invoice_payments::append_dispute_row`. The over-refund
+//! interaction runs the REAL `refund::issue_refund` against the REAL trigger. Gated on
+//! `CONTROL_TEST_DB`; silent skip otherwise.
 //!
-//! These FAIL against the pre-PR-8 schema/code:
-//!   (a) `charge.dispute.created` records a `billing_disputes` row + a `dispute_debit`
-//!       `invoice_payments` row lowering cash_collected; a redelivered event (same du_…)
-//!       does NOT double-debit (pre-fix there is no table / no branch → nothing recorded).
+//! These FAIL against the broken resolution (an `in_…`-on-dispute test would resolve
+//! nothing → no dispute recorded → assertions on the debit / cap / reversal all fail):
+//!   (a) `charge.dispute.created` (naming the REAL `pi_…`) records a `billing_disputes` row
+//!       + a `dispute_debit` lowering cash_collected; a redelivered event (same du_…) does
+//!       NOT double-debit.
 //!   (b) after a dispute_debit, a cash refund that WOULD have fit the pre-dispute cap is
 //!       now rejected by the over-refund trigger (the cap auto-tightened).
 //!   (c) `.closed won` appends a `dispute_reversal` restoring cash_collected; `.closed
@@ -18,9 +26,15 @@
 //!   (d) the dispute produces exactly ONE `disputed` notification (asserted off the DB
 //!       ledger, per-creator, via the REAL notify cron tick).
 //!   (e) a dispute on a credited/refunded invoice doesn't corrupt credit/refund balances.
+//!   (f) the PR-8 schema objects exist on the migrated DB.
+//!   (g) LIFECYCLE (CRITICAL-3): a won→(late/replayed)lost reorder is rejected — the row
+//!       stays `won` and cash stays restored (no over-refund window).
+//!   (h) ORDER-INDEPENDENCE (MAJOR-4): `.closed won` BEFORE `.created` ends with the dispute
+//!       won, debit + reversal both present (net cash restored), and the late `.created`
+//!       does not resurrect it to `open`.
 //!
 //! Parallel-safe: every test seeds its OWN creator (unique email) + its own invoice +
-//! globally-unique Stripe ids (`du_…`/`evt_…`/`in_…` carry a fresh UUID), and every
+//! globally-unique Stripe ids (`du_…`/`evt_…`/`in_…`/`pi_…` carry a fresh UUID), and every
 //! assertion is scoped to that creator/invoice — so the DEFAULT parallel cargo runner
 //! (and the shared notify cron sweep) never causes cross-test interference.
 
@@ -187,7 +201,32 @@ async fn make_creator(conn: &compio_postgres::Client) -> Uuid {
     )
     .await
     .expect("creator_billing");
+    // A `cus_…` ↔ creator mapping so the REAL infra `invoice.paid` path resolves the
+    // creator via CUSTOMER reverse-resolve (the genuine infra-invoice shape: Stripe's
+    // auto-generated subscription invoices carry no creator metadata). This keeps the seed
+    // off the Stream-2 Connect payout fall-through entirely.
+    let cus = format!("cus_dsp_{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id) \
+         VALUES ($1, 'stripe', $2) ON CONFLICT DO NOTHING",
+        &[&creator, &cus],
+    )
+    .await
+    .expect("customer ref");
     creator
+}
+
+/// Resolve the `cus_…` mapped to a creator (seeded in `make_creator`) — the infra
+/// `invoice.paid` body names it so the handler reverse-resolves the creator.
+async fn creator_customer(conn: &compio_postgres::Client, creator: Uuid) -> String {
+    conn.query(
+        "SELECT external_id FROM zeroship.billing_customer_refs \
+         WHERE creator_id = $1 AND provider = 'stripe'",
+        &[&creator],
+    )
+    .await
+    .expect("customer ref")[0]
+        .get::<_, String>("external_id")
 }
 
 fn this_period() -> chrono::NaiveDate {
@@ -206,53 +245,97 @@ fn period_offset(months: i64) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(year, month0 + 1, 1).unwrap()
 }
 
-/// Seed a FINALIZED infra invoice + a `charge` invoice_payments row recording the cash
-/// collected (provider_ref = the Stripe payment object the dispute will name) + the
-/// invoice-level provider ref. Returns `(internal_invoice_id, provider_object_id)`. A
-/// per-creator-unique `period` avoids the partial-unique-index collision when one creator
-/// holds several invoices.
-async fn seed_paid_infra_invoice_period(
-    conn: &compio_postgres::Client,
-    creator: Uuid,
-    total: i64,
-    period: chrono::NaiveDate,
-) -> (String, String) {
-    let inv = zeroship_core::typed_id::new_invoice_id();
-    conn.execute(
-        "INSERT INTO zeroship.invoices \
-           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
-            total_cents, finalized_at) \
-         VALUES ($1, $2, $3::date, 'finalized', $4, 0, 0, $4, NOW())",
-        &[&inv, &creator, &period, &total],
-    )
-    .await
-    .expect("finalized invoice");
-    let provider_obj = format!("in_dsp_{}", Uuid::new_v4().simple());
-    conn.execute(
-        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
-         VALUES ($1, 'stripe', 'invoice', $2)",
-        &[&inv, &provider_obj],
-    )
-    .await
-    .expect("provider ref");
-    // The recorded charge — this is the payment object the dispute is against; its
-    // provider_ref is what `resolve_invoice_for_dispute` matches.
-    zeroship_control::invoice_payments::append_charge(conn, &inv, total, "usd", Some(&provider_obj))
-        .await
-        .expect("append charge");
-    (inv, provider_obj)
+/// FAITHFUL seed (CRITICAL-2): seed a FINALIZED infra invoice + its `ref_kind='invoice'`
+/// linkage, then drive the REAL `invoice.paid` webhook (via `$app`) so the production
+/// handler (`record_infra_payment`) records BOTH the `charge` `invoice_payments` row AND
+/// the settling `payment_intent` (`pi_…`)→invoice `billing_provider_refs` linkage that
+/// dispute resolution depends on. Yields `(internal_invoice_id, pi_id)` — the `pi_…` is what
+/// the dispute object then names (NEVER an `in_…`, which a Stripe dispute never carries). A
+/// per-creator-unique `period` avoids the partial-unique-index collision.
+///
+/// A macro (not a fn) so it can drive the REAL webhook through `$app` without naming ntex's
+/// opaque `init_service` Service type.
+macro_rules! seed_paid_invoice_period {
+    ($app:expr, $conn:expr, $creator:expr, $total:expr, $period:expr) => {{
+        let inv = zeroship_core::typed_id::new_invoice_id();
+        $conn
+            .execute(
+                "INSERT INTO zeroship.invoices \
+                   (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                    total_cents, finalized_at) \
+                 VALUES ($1, $2, $3::date, 'finalized', $4, 0, 0, $4, NOW())",
+                &[&inv, &$creator, &$period, &($total as i64)],
+            )
+            .await
+            .expect("finalized invoice");
+        let provider_invoice = format!("in_dsp_{}", Uuid::new_v4().simple());
+        $conn
+            .execute(
+                "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+                 VALUES ($1, 'stripe', 'invoice', $2)",
+                &[&inv, &provider_invoice],
+            )
+            .await
+            .expect("provider ref");
+
+        // Drive the REAL invoice.paid webhook — the genuine infra shape: invoice_kind=infra
+        // marker + a `customer` (cus_…) the handler reverse-resolves to the creator (NO
+        // creator metadata, so no Stream-2 payout fall-through), naming the settling
+        // payment_intent (pi_…) which the handler persists as the resolution linkage.
+        let cus = creator_customer(&$conn, $creator).await;
+        let pi = format!("pi_dsp_{}", Uuid::new_v4().simple());
+        let paid_body = json!({
+            "id": format!("evt_paid_{}", Uuid::new_v4().simple()),
+            "type": "invoice.paid",
+            "created": 1_777_000_000i64,
+            "data": { "object": {
+                "id": provider_invoice,
+                "amount_paid": ($total as i64),
+                "currency": "usd",
+                "payment_intent": pi,
+                "customer": cus,
+                "metadata": { "invoice_kind": "infra" }
+            }}
+        });
+        let resp = post_webhook!($app, paid_body);
+        assert_eq!(resp.status(), StatusCode::OK, "invoice.paid seed webhook must 200");
+        assert_eq!(
+            cash_collected(&$conn, &inv).await,
+            $total as i64,
+            "invoice.paid recorded the cash via the REAL handler"
+        );
+        assert_eq!(
+            provider_ref_count(&$conn, &pi, "payment_intent").await,
+            1,
+            "invoice.paid recorded the pi_…→invoice linkage (the dispute-resolution anchor)"
+        );
+        (inv, pi)
+    }};
 }
 
-/// The common case: seed a paid infra invoice for THIS month.
-async fn seed_paid_infra_invoice(
-    conn: &compio_postgres::Client,
-    creator: Uuid,
-    total: i64,
-) -> (String, String) {
-    seed_paid_infra_invoice_period(conn, creator, total, this_period()).await
+/// The common case: a paid infra invoice for THIS month.
+macro_rules! seed_paid_invoice {
+    ($app:expr, $conn:expr, $creator:expr, $total:expr) => {
+        seed_paid_invoice_period!($app, $conn, $creator, $total, this_period())
+    };
 }
 
-fn dispute_created_body(evt: &str, du: &str, charge_obj: &str, amount: i64) -> String {
+/// Count `billing_provider_refs` rows for a given external id + ref_kind (the dispute
+/// resolution linkage assertion).
+async fn provider_ref_count(conn: &compio_postgres::Client, external_id: &str, ref_kind: &str) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_provider_refs \
+         WHERE provider = 'stripe' AND ref_kind = $2 AND external_id = $1",
+        &[&external_id, &ref_kind],
+    )
+    .await
+    .expect("provider ref count")[0]
+        .get::<_, i64>("n")
+}
+
+/// A `charge.dispute.created` carrying a REAL settling `pi_…` (a Stripe Dispute object has
+/// NO `invoice` field — only `payment_intent`/`charge`).
+fn dispute_created_body(evt: &str, du: &str, payment_intent: &str, amount: i64) -> String {
     json!({
         "id": evt,
         "type": "charge.dispute.created",
@@ -263,19 +346,27 @@ fn dispute_created_body(evt: &str, du: &str, charge_obj: &str, amount: i64) -> S
             "currency": "usd",
             "status": "needs_response",
             "reason": "fraudulent",
-            "charge": charge_obj,
+            "payment_intent": payment_intent,
             "evidence_details": { "due_by": 1_779_000_000i64 }
         }}
     })
     .to_string()
 }
 
-fn dispute_closed_body(evt: &str, du: &str, status: &str) -> String {
+/// A `charge.dispute.closed` carrying the REAL settling `pi_…` so a close-before-create
+/// (MAJOR-4) can resolve the anchor invoice. `amount` lets a close-first seed a terminal row.
+fn dispute_closed_body(evt: &str, du: &str, status: &str, payment_intent: &str, amount: i64) -> String {
     json!({
         "id": evt,
         "type": "charge.dispute.closed",
         "created": 1_777_900_000i64,
-        "data": { "object": { "id": du, "status": status, "currency": "usd" } }
+        "data": { "object": {
+            "id": du,
+            "status": status,
+            "currency": "usd",
+            "amount": amount,
+            "payment_intent": payment_intent
+        }}
     })
     .to_string()
 }
@@ -332,13 +423,13 @@ async fn dispute_created_records_debit_and_is_idempotent() {
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
     let creator = make_creator(&conn).await;
-    let (inv, charge_obj) = seed_paid_infra_invoice(&conn, creator, 6000).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
 
     assert_eq!(cash_collected(&conn, &inv).await, 6000, "cash starts at the charge");
 
     let du = format!("du_{}", Uuid::new_v4().simple());
     let evt1 = format!("evt_dc1_{}", Uuid::new_v4().simple());
-    let r1 = post_webhook!(app, dispute_created_body(&evt1, &du, &charge_obj, 6000));
+    let r1 = post_webhook!(app, dispute_created_body(&evt1, &du, &pi, 6000));
     assert_eq!(r1.status(), StatusCode::OK);
     let b1: Value = serde_json::from_slice(&test::read_body(r1).await).unwrap();
     assert_eq!(b1["status"], "dispute_recorded");
@@ -352,7 +443,7 @@ async fn dispute_created_records_debit_and_is_idempotent() {
     // Redelivery under a DIFFERENT event id (so stripe_events_seen does NOT dedup it) —
     // the du_… dedup must still prevent a second debit.
     let evt2 = format!("evt_dc2_{}", Uuid::new_v4().simple());
-    let r2 = post_webhook!(app, dispute_created_body(&evt2, &du, &charge_obj, 6000));
+    let r2 = post_webhook!(app, dispute_created_body(&evt2, &du, &pi, 6000));
     assert_eq!(r2.status(), StatusCode::OK);
 
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
@@ -391,7 +482,7 @@ async fn dispute_debit_tightens_over_refund_cap() {
     let app = init_control!(fx);
     let mut conn = side_conn(&url).await;
     let creator = make_creator(&conn).await;
-    let (inv, charge_obj) = seed_paid_infra_invoice(&conn, creator, 6000).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
 
     // PRE-dispute: a $50 cash refund fits the $60 cash cap. (Prove the baseline fits by
     // checking cash_collected, then NOT issuing — we want the dispute to flip it.)
@@ -400,7 +491,7 @@ async fn dispute_debit_tightens_over_refund_cap() {
     // Dispute claws back $40 → cash_collected = $20.
     let du = format!("du_{}", Uuid::new_v4().simple());
     let evt = format!("evt_cap_{}", Uuid::new_v4().simple());
-    let r = post_webhook!(app, dispute_created_body(&evt, &du, &charge_obj, 4000));
+    let r = post_webhook!(app, dispute_created_body(&evt, &du, &pi, 4000));
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv).await, 2000, "cap auto-tightened to $20");
 
@@ -459,17 +550,16 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     let creator = make_creator(&conn).await;
 
     // --- WON path --- (distinct periods so both invoices fit the partial unique index)
-    let (inv_won, charge_won) =
-        seed_paid_infra_invoice_period(&conn, creator, 6000, period_offset(0)).await;
+    let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(0));
     let du_won = format!("du_won_{}", Uuid::new_v4().simple());
     let r = post_webhook!(
         app,
-        dispute_created_body(&format!("evt_w1_{}", Uuid::new_v4().simple()), &du_won, &charge_won, 6000)
+        dispute_created_body(&format!("evt_w1_{}", Uuid::new_v4().simple()), &du_won, &pi_won, 6000)
     );
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv_won).await, 0, "debited to 0 on created");
 
-    let rc = post_webhook!(app, dispute_closed_body(&format!("evt_w2_{}", Uuid::new_v4().simple()), &du_won, "won"));
+    let rc = post_webhook!(app, dispute_closed_body(&format!("evt_w2_{}", Uuid::new_v4().simple()), &du_won, "won", &pi_won, 6000));
     assert_eq!(rc.status(), StatusCode::OK);
     let bc: Value = serde_json::from_slice(&test::read_body(rc).await).unwrap();
     assert_eq!(bc["dispute_status"], "won");
@@ -478,21 +568,20 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     assert_eq!(cash_collected(&conn, &inv_won).await, 6000, "won restores the budget");
 
     // Redelivered won close must NOT double-restore.
-    let rc2 = post_webhook!(app, dispute_closed_body(&format!("evt_w3_{}", Uuid::new_v4().simple()), &du_won, "won"));
+    let rc2 = post_webhook!(app, dispute_closed_body(&format!("evt_w3_{}", Uuid::new_v4().simple()), &du_won, "won", &pi_won, 6000));
     assert_eq!(rc2.status(), StatusCode::OK);
     assert_eq!(payment_kind_count(&conn, &inv_won, "dispute_reversal").await, 1, "no double reversal");
     assert_eq!(cash_collected(&conn, &inv_won).await, 6000);
 
     // --- LOST path ---
-    let (inv_lost, charge_lost) =
-        seed_paid_infra_invoice_period(&conn, creator, 5000, period_offset(1)).await;
+    let (inv_lost, pi_lost) = seed_paid_invoice_period!(app, conn, creator, 5000, period_offset(1));
     let du_lost = format!("du_lost_{}", Uuid::new_v4().simple());
     post_webhook!(
         app,
-        dispute_created_body(&format!("evt_l1_{}", Uuid::new_v4().simple()), &du_lost, &charge_lost, 5000)
+        dispute_created_body(&format!("evt_l1_{}", Uuid::new_v4().simple()), &du_lost, &pi_lost, 5000)
     );
     assert_eq!(cash_collected(&conn, &inv_lost).await, 0, "debited on created");
-    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_l2_{}", Uuid::new_v4().simple()), &du_lost, "lost"));
+    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_l2_{}", Uuid::new_v4().simple()), &du_lost, "lost", &pi_lost, 5000));
     assert_eq!(rl.status(), StatusCode::OK);
     assert_eq!(dispute_status(&conn, &du_lost).await.as_deref(), Some("lost"));
     assert_eq!(payment_kind_count(&conn, &inv_lost, "dispute_reversal").await, 0, "lost adds NO reversal");
@@ -513,12 +602,12 @@ async fn dispute_produces_exactly_one_disputed_notification() {
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
     let creator = make_creator(&conn).await;
-    let (_inv, charge_obj) = seed_paid_infra_invoice(&conn, creator, 6000).await;
+    let (_inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
 
     let du = format!("du_{}", Uuid::new_v4().simple());
     let r = post_webhook!(
         app,
-        dispute_created_body(&format!("evt_n1_{}", Uuid::new_v4().simple()), &du, &charge_obj, 6000)
+        dispute_created_body(&format!("evt_n1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
     );
     assert_eq!(r.status(), StatusCode::OK);
 
@@ -589,6 +678,8 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     let creator = make_creator(&conn).await;
 
     // A partially-credit-covered invoice: subtotal 8000, credit 2000, total 6000, cash 6000.
+    // Seed the invoice + its 'invoice' ref, then drive the REAL invoice.paid (naming pi_…)
+    // so the charge row + pi_…→invoice linkage land via the production handler.
     let inv = zeroship_core::typed_id::new_invoice_id();
     conn.execute(
         "INSERT INTO zeroship.invoices \
@@ -598,17 +689,32 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     )
     .await
     .expect("finalized credited invoice");
-    let charge_obj = format!("in_dsp_{}", Uuid::new_v4().simple());
+    let provider_invoice = format!("in_dsp_{}", Uuid::new_v4().simple());
     conn.execute(
         "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
          VALUES ($1, 'stripe', 'invoice', $2)",
-        &[&inv, &charge_obj],
+        &[&inv, &provider_invoice],
     )
     .await
     .expect("provider ref");
-    zeroship_control::invoice_payments::append_charge(&conn, &inv, 6000, "usd", Some(&charge_obj))
-        .await
-        .expect("charge");
+    let cus = creator_customer(&conn, creator).await;
+    let pi = format!("pi_dsp_{}", Uuid::new_v4().simple());
+    let paid_body = json!({
+        "id": format!("evt_paid_{}", Uuid::new_v4().simple()),
+        "type": "invoice.paid",
+        "created": 1_777_000_000i64,
+        "data": { "object": {
+            "id": provider_invoice,
+            "amount_paid": 6000,
+            "currency": "usd",
+            "payment_intent": pi,
+            "customer": cus,
+            "metadata": { "invoice_kind": "infra" }
+        }}
+    });
+    let pr = post_webhook!(app, paid_body);
+    assert_eq!(pr.status(), StatusCode::OK, "invoice.paid seed");
+    assert_eq!(cash_collected(&conn, &inv).await, 6000, "cash via real handler");
 
     // Record a $2000 credit-destination refund first (a goodwill credit-back). This appends
     // a refund_to_credit grant (credit balance +2000) — independent of cash.
@@ -639,7 +745,7 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     let du = format!("du_{}", Uuid::new_v4().simple());
     let r = post_webhook!(
         app,
-        dispute_created_body(&format!("evt_e1_{}", Uuid::new_v4().simple()), &du, &charge_obj, 6000)
+        dispute_created_body(&format!("evt_e1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
     );
     assert_eq!(r.status(), StatusCode::OK);
 
@@ -677,6 +783,106 @@ async fn refund_count(conn: &compio_postgres::Client, inv: &str) -> i64 {
     .await
     .expect("refund count")[0]
         .get::<_, i64>("n")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// (g) LIFECYCLE (CRITICAL-3): a won → (late/replayed) lost reorder is REJECTED — the row
+//     stays `won`, the reversal stands, and the over-refund cap reflects the terminal
+//     (won) outcome (no stranded restored cash on a lost dispute). Pre-fix the close
+//     UPDATE was unconditional, so the late `lost` flipped status to lost while the
+//     reversal (restored cash) remained — an over-refund window.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "won-then-lost").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+
+    let du = format!("du_wl_{}", Uuid::new_v4().simple());
+    // created → open, debit to 0.
+    let r = post_webhook!(app, dispute_created_body(&format!("evt_wl1_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(cash_collected(&conn, &inv).await, 0);
+
+    // closed WON → reversal restores cash to 6000; status won.
+    let rw = post_webhook!(app, dispute_closed_body(&format!("evt_wl2_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000));
+    assert_eq!(rw.status(), StatusCode::OK);
+    assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("won"));
+    assert_eq!(cash_collected(&conn, &inv).await, 6000, "won restored the cash");
+
+    // A LATE / replayed closed LOST must NOT flip the terminal won dispute. The handler
+    // still 200-acks (a no-op), but the row stays won and the cash stays restored — no
+    // over-refund window opens on a now-falsely-lost dispute.
+    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_wl3_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000));
+    assert_eq!(rl.status(), StatusCode::OK, "the late lost is acked, not 500");
+    assert_eq!(
+        dispute_status(&conn, &du).await.as_deref(),
+        Some("won"),
+        "the won→lost reorder is rejected; status stays won"
+    );
+    assert_eq!(
+        cash_collected(&conn, &inv).await,
+        6000,
+        "the restored cash reflects the terminal WON outcome (no stranded over-refund window)"
+    );
+    // Exactly one reversal, zero extra debits from the late lost.
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1);
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// (h) ORDER-INDEPENDENCE (MAJOR-4): `.closed won` delivered BEFORE `.created` (legal
+//     at-least-once reordering) ends with the dispute won, debit + reversal both present
+//     (net cash restored), and the late `.created` does NOT resurrect it to `open`. Pre-fix
+//     the close-before-create was dropped (no row) and the later created left it open
+//     forever.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_closed_won_before_created_is_order_independent() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "close-first").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    assert_eq!(cash_collected(&conn, &inv).await, 6000);
+
+    let du = format!("du_cf_{}", Uuid::new_v4().simple());
+
+    // closed WON arrives FIRST (no created yet). It must seed a terminal won row applying
+    // debit + reversal (net cash unchanged = 6000), resolving the invoice via the pi_….
+    let rc = post_webhook!(app, dispute_closed_body(&format!("evt_cf1_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000));
+    assert_eq!(rc.status(), StatusCode::OK);
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "close-before-create seeded the row");
+    assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("won"), "seeded directly terminal won");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "debit applied");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1, "reversal applied");
+    assert_eq!(cash_collected(&conn, &inv).await, 6000, "net cash restored (won)");
+
+    // The LATE created must reconcile to a no-op: it must NOT resurrect the dispute to open,
+    // NOT add a second debit, NOT add a second row.
+    let rcr = post_webhook!(app, dispute_created_body(&format!("evt_cf2_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
+    assert_eq!(rcr.status(), StatusCode::OK);
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
+    assert_eq!(
+        dispute_status(&conn, &du).await.as_deref(),
+        Some("won"),
+        "the late created did NOT resurrect the dispute to open"
+    );
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "no second debit");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 1, "no second reversal");
+    assert_eq!(cash_collected(&conn, &inv).await, 6000, "end state identical to in-order delivery");
 }
 
 // ───────────────────────────────────────────────────────────────────────────
