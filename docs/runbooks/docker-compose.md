@@ -286,6 +286,42 @@ docker compose -f docker-compose.cluster.yml down -v
 
 The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`. These use `network_mode: host` (not a `ports:` mapping), so the ports can't be remapped and must be free on the host before you start the stack.
 
+## OpenMeter metering-export test stack
+
+`docker-compose.openmeter.yml` is a **separate, opt-in** stack used only by the
+faithful OpenMeter metering-export e2e (`tests/e2e_openmeter_export.sh`). It does
+**not** boot the platform stack and shares **nothing** with `docker-compose.yml`:
+it is a distinct compose project (`name: zeroship-openmeter`) with its own
+network, volumes, and a private `127.0.0.1`-only port band. In particular its
+internal Postgres is OpenMeter metadata only and is **not** published on `:5440`
+(the zeroship billing PG the cargo integration tests use), so bringing it up or
+tearing it down never touches the main stack or the billing tests.
+
+It stands up the minimal real OpenMeter pipeline — Kafka + ClickHouse + Redis +
+Postgres + the OpenMeter API + a sink-worker — with a single `compute_units`
+meter pre-provisioned in `ops/openmeter-config.yaml` to match exactly what
+`crates/control/src/metering/provider/openmeter.rs` emits (`eventType` /
+`slug` = `compute_units`, `aggregation: SUM` over `$.value`).
+
+```bash
+# Bring it up (pulls ~1 GB of images on first run); the API lands on :48888.
+docker compose -f docker-compose.openmeter.yml up -d
+curl -s http://127.0.0.1:48888/api/v1/meters | grep compute_units   # meter live?
+
+# Run the faithful e2e (owns its OWN ephemeral zeroship PG on :5481, NOT :5440):
+./tests/e2e_openmeter_export.sh
+
+# Tear it down (volumes too):
+docker compose -f docker-compose.openmeter.yml down -v
+```
+
+The e2e script brings the stack up/down for you; run the raw compose only when
+iterating manually. `KEEP_OPENMETER=1 ./tests/e2e_openmeter_export.sh` leaves the
+OpenMeter stack running between iterations. See
+[Billing & metering](../reference/billing-metering.md) (OpenMeter §"Real-API
+divergences from the mock") for what this e2e catches that the in-test mock cannot
+(eventual-consistency lag + the query-window/`time` interaction).
+
 ## Database migrations
 
 The shared Postgres `zeroship` schema is owned by Liquibase.

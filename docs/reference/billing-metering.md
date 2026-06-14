@@ -140,3 +140,61 @@ Exactly-once revenue under crash × >24h re-drive × multi-instance:
 - **Append-only — no clawback.** Stripe meters are additive: once CU is exported
   it is never refunded. A DOWNWARD re-weight mid-period does NOT claw back already
   exported CU; treat metric weights as append-only within a billing period.
+
+## OpenMeter export (M-OpenMeter)
+
+An **export-only** rail (`--metering-provider openmeter`): the platform PUSHES
+compute units to OpenMeter as **CloudEvents** and READS the per-subject aggregate
+back, but OpenMeter **never invoices** — billing stays on the Native (or Stripe)
+rail. The same hardened export cron drives it through
+[crates/control/src/metering/provider/openmeter.rs](../../crates/control/src/metering/provider/openmeter.rs)
++ [crates/control/src/openmeter_client.rs](../../crates/control/src/openmeter_client.rs):
+
+- **Wire contract.** `report_usage` → `POST /api/v1/events` with
+  `content-type: application/cloudevents+json` + `Authorization: Bearer` carrying
+  one CloudEvent 1.0 (`source: zeroship-control`, `type` = the configured
+  `--openmeter-event-type`, `subject` = the creator handle, `time` = the
+  consumption instant, `data.value` = the CU delta, `data.app_id` for audit).
+  `reported_total` → `GET /api/v1/meters/{slug}/query?subject=…&from=…&to=…`,
+  summing `data[].value`. The operator provisions ONE meter (slug = eventType =
+  e.g. `compute_units`, `aggregation: SUM`, `valueProperty: $.value`).
+- **Same inherited guarantees as M-Stripe:** billable-CU parity,
+  consumption-instant `time`, the aggregate reconcile
+  (`current − max(local_high_water, openmeter_aggregate)`) so a >dedup-window
+  re-drive never double-counts, and the durable per-app failure surface.
+
+### Real-API divergences from the mock (faithful e2e findings)
+
+The in-test mock (`crates/control/tests/metering_export_openmeter_test.rs`) is a
+fast in-process HTTP server. The **faithful e2e** against a real OpenMeter
+(`tests/e2e_openmeter_export.sh` + `crates/control/tests/metering_export_openmeter_live_test.rs`,
+`docker-compose.openmeter.yml`) surfaced two behaviours the mock does NOT model —
+each a latent bug class if a future change relied on the mock's simplification:
+
+1. **The aggregate is EVENTUALLY consistent.** Real OpenMeter ingests CloudEvents
+   into Kafka and a sink-worker drains them into ClickHouse asynchronously: a
+   `204`-accepted event is NOT immediately visible to `/query` (observed lag a few
+   seconds locally). The mock answers `/query` synchronously. ⇒ Any caller that
+   reads `reported_total` *immediately* after `report_usage` and expects the new
+   value will see a stale aggregate. The export cron is safe (it reconciles on the
+   NEXT tick, and the local high-water — not the live aggregate — is the
+   authoritative post-push state), and the e2e POLLS the aggregate for convergence.
+2. **`/query` filters by the `time`/`[from,to)` window; the mock ignores it.** Real
+   OpenMeter only counts events whose CloudEvent `time` falls inside the query's
+   `[from, to)`. `report_usage` stamps `time` at the consumption instant (`now`)
+   and `reported_total` queries `[period.start, period.end)`, so the reconcile is
+   correct **only because `now ∈ [period.start, period.end)`** for the current
+   billing month — which always holds in production. The mock sums by subject
+   regardless of window, so the mock test can use far-future synthetic period
+   buckets (`month_period(2032, …)`) while stamping `time` at `now`; against real
+   OpenMeter that combination returns an empty aggregate. The live e2e therefore
+   uses the **current calendar month** as the period. This mirrors the M-Stripe
+   future-`period.end` $0-revenue class: a timestamp outside the query window
+   silently aggregates to zero.
+
+No provider bug was found — the wire shape (CloudEvents body, headers, 204-on-
+accept, `{ "data": [ { "value": N } ] }` query response) matches the real
+`/api/v1/events` + `/api/v1/meters/{slug}/query` contracts exactly. The
+divergences are test-design constraints the faithful e2e encodes, documented here
+so future edits don't reintroduce the far-future-period or read-after-write
+assumptions the mock would let pass.
