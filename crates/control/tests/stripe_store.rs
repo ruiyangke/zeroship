@@ -9,7 +9,23 @@ use zeroship_control::{Registry, StripeStore};
 
 fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
 
-fn fresh_creator_id() -> Uuid { Uuid::new_v4() }
+/// MINOR-3: mint a creator id that is BACKED BY A REAL `users` row. The Connect /
+/// payout tables FK creator_id → `users(id)` (`creator_accounts`,
+/// `creator_billing`), so a bare `Uuid::new_v4()` with no users row FK-violates on
+/// the first insert. Seeding the user makes these tests exercise the FK-satisfied
+/// REAL path (faithful) instead of relying on an orphan id.
+async fn fresh_creator_id(url: &str) -> Uuid {
+    let client = pg(url).await;
+    let email = format!("ss-creator-{}@test.invalid", Uuid::new_v4().simple());
+    client
+        .query(
+            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'ss-creator') RETURNING id",
+            &[&email],
+        )
+        .await
+        .expect("insert user")[0]
+        .get("id")
+}
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
@@ -28,7 +44,7 @@ async fn link_account_roundtrip() {
     };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     assert!(store.get_account(creator).await.unwrap().is_none());
 
@@ -55,7 +71,7 @@ async fn reject_bad_account_id_shape() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     let err = store.link_account(creator, "cus_wrong_prefix").await.unwrap_err();
     match err {
@@ -83,7 +99,7 @@ async fn record_payout_idempotent() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
     // Unique per test run — soft-delete preserves payouts so a fixed
     // string would collide with previous runs' rows.
     let evt = format!("evt_unique_{}", Uuid::new_v4());
@@ -137,7 +153,7 @@ async fn total_earnings_aggregates_correctly() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     store.link_account(creator, "acct_aggregate12345").await.unwrap();
     for (i, (gross, fee)) in [(500, 75), (1000, 150), (750, 112)].iter().enumerate() {
@@ -169,7 +185,7 @@ async fn recent_payouts_newest_first_with_limit() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     store.link_account(creator, "acct_recentPayouts").await.unwrap();
     // Chronological order — occurred_at is what recent_payouts sorts on.
@@ -218,8 +234,8 @@ async fn per_creator_isolation() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let a = fresh_creator_id();
-    let b = fresh_creator_id();
+    let a = fresh_creator_id(&url).await;
+    let b = fresh_creator_id(&url).await;
 
     store.link_account(a, "acct_isolationA1234").await.unwrap();
     store.link_account(b, "acct_isolationB1234").await.unwrap();
@@ -250,7 +266,7 @@ async fn empty_creator_totals_are_zero() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     // No link, no payouts — SUM returns zero across the board.
     let totals = store.total_earnings(creator).await.unwrap();
@@ -266,7 +282,7 @@ async fn payload_hash_mismatch_rejects_duplicate() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     store.link_account(creator, "acct_tamperCheck123").await.unwrap();
     let evt = format!("evt_tamper_{}", Uuid::new_v4());
@@ -313,7 +329,7 @@ async fn payout_ledger_check_constraints_reject_impossible_rows() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
     store.link_account(creator, "acct_checkConstraints").await.unwrap();
 
     let pg = pg(&url).await;
@@ -338,7 +354,7 @@ async fn unlink_is_soft_delete_payouts_preserved() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     store.link_account(creator, "acct_softDelete12345").await.unwrap();
     store.record_payout(
@@ -363,7 +379,7 @@ async fn double_unlink_returns_false_second_time() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     store.link_account(creator, "acct_doubleUnlink12").await.unwrap();
     assert!(store.unlink_account(creator).await.unwrap());
@@ -376,7 +392,7 @@ async fn same_account_link_is_idempotent_no_history_pollution() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     // Three back-to-back links of the SAME account — creator double-
     // clicked "Connect Stripe" or a script retried.
@@ -396,7 +412,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
     let Some(url) = db_url() else { return; };
     Registry::new(&url).await.expect("registry");
     let pg = pg(&url).await;
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     pg.execute(
         "INSERT INTO zeroship.creator_account_history (creator_id, stripe_account_id)
@@ -427,7 +443,7 @@ async fn relink_clears_unlinked_at_and_records_history() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
-    let creator = fresh_creator_id();
+    let creator = fresh_creator_id(&url).await;
 
     store.link_account(creator, "acct_firstAccount12").await.unwrap();
     store.unlink_account(creator).await.unwrap();
