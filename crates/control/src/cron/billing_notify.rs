@@ -55,6 +55,13 @@ const NOTIFY_SCAN_WINDOW: &str = "30 days";
 /// so the sweeps never block each other.
 const NOTIFY_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6e6f_7466_0001;
 
+/// USD-launch assumption for the spend-band notifications (arm g). The spend tables
+/// (`app_spend_state`, `spend_state_history`, `app_spend_limit`) carry NO currency column —
+/// limits and accrued spend are stored as bare cents. We are launching single-currency
+/// (USD), so the body formats spend/limit as USD. A future multi-currency spend ledger must
+/// add a currency column and thread it through here rather than relying on this constant.
+const SPEND_NOTIFY_CURRENCY: &str = "usd";
+
 /// Cron entry point. Loops forever; each iteration runs one [`tick`] then sleeps. A
 /// transient PG/mailer error is logged and swallowed so the cron survives (mirrors
 /// `dunning`/`spend_reconcile`).
@@ -397,17 +404,24 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     }
 
     // (g) Spend-band transitions (`spend_state_history`). The spend reconcile cron writes
-    // an append-only `she_…` row on every state change; we notify the creator when an app
-    // crosses INTO warn/degrade/block (the actionable, more-restrictive edges). A
-    // `*→allow` recovery and a deadband HOLD write no row / a non-notified row, so they
-    // never email. Unlike the other (creator-keyed) kinds, the spend source is PER-APP, so
-    // we resolve the creator via the H1 ownership join (`app_members` role='owner',
-    // DISTINCT ON the app so a fan-out of owner rows never double-notifies) — the SAME join
-    // the metering export and billing sweep use. An app with no owner row, or an owner with
-    // no `creator_billing` identity (the `billing_notifications` FK target), is skipped
-    // (the INNER JOINs drop it) — it has no creator mailbox to reach. The app NAME + the
-    // effective limit are formatted into the body (frozen at the transition; never
-    // re-priced here).
+    // an append-only `she_…` row on EVERY state change — including downward/recovery edges
+    // (`block→degrade`, `degrade→warn`, `*→allow`) once the deadband relaxes. We notify ONLY
+    // on ESCALATION: an edge where severity rises (`allow<warn<degrade<block`). A recovery /
+    // de-escalation, and any `*→allow`, are silent — emailing "you're approaching your limit"
+    // to a creator whose app is RECOVERING is wrong. The escalation gate is encoded in SQL via
+    // a CASE-rank on both `h.from_state` and `h.to_state`: we emit iff rank(to) > rank(from).
+    // (The row stores both endpoints — 0041 DDL — so no prior-state derivation is needed.)
+    //
+    // Unlike the other (creator-keyed) kinds, the spend source is PER-APP, so we resolve the
+    // creator via the ownership join (`app_members` role='owner', DISTINCT ON the app so a
+    // fan-out of owner rows never double-notifies). The tiebreaker is `ORDER BY m.app_id,
+    // m.user_id` — IDENTICAL to the authoritative billed-owner resolution in
+    // `cron/billing_reconcile.rs` and `cron/metering_export.rs` — so the spend notice reaches
+    // the SAME creator who is billed (a stable `added_at`-based pick could diverge under a
+    // multi-owner fan-out). An app with no owner row, or an owner with no `creator_billing`
+    // identity (the `billing_notifications` FK target), is skipped (the INNER JOINs drop it).
+    // The app NAME + the effective limit are formatted into the body (frozen at the
+    // transition; never re-priced here).
     let rows = conn
         .query(
             "SELECT h.id, h.to_state, h.spend_cents, h.limit_cents, a.name AS app_name, \
@@ -418,7 +432,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                      SELECT DISTINCT ON (m.app_id) m.app_id, m.user_id AS creator_id \
                        FROM zeroship.app_members m \
                       WHERE m.role = 'owner' \
-                      ORDER BY m.app_id, m.added_at \
+                      ORDER BY m.app_id, m.user_id \
                ) o ON o.app_id = h.app_id \
                JOIN zeroship.creator_billing cb ON cb.creator_id = o.creator_id \
                LEFT JOIN zeroship.billing_notifications n \
@@ -430,6 +444,10 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                       WHEN 'block'   THEN 'spend_block' END::zeroship.billing_notification_kind \
               WHERE h.at > NOW() - $1::text::interval \
                 AND h.to_state IN ('warn','degrade','block') \
+                AND CASE h.to_state WHEN 'allow' THEN 0 WHEN 'warn' THEN 1 \
+                                    WHEN 'degrade' THEN 2 WHEN 'block' THEN 3 END \
+                  > CASE h.from_state WHEN 'allow' THEN 0 WHEN 'warn' THEN 1 \
+                                      WHEN 'degrade' THEN 2 WHEN 'block' THEN 3 END \
                 AND ( n.status IS NULL \
                    OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
             &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
@@ -452,10 +470,10 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
             transition_id: r.get("id"),
             detail: NotificationDetail {
                 period_label: None,
-                amount_label: Some(format_money(spend, "usd")),
+                amount_label: Some(format_money(spend, SPEND_NOTIFY_CURRENCY)),
                 refund_destination_label: None,
                 app_label: Some(r.get::<_, String>("app_name")),
-                limit_label: limit.map(|l| format_money(l, "usd")),
+                limit_label: limit.map(|l| format_money(l, SPEND_NOTIFY_CURRENCY)),
             },
         });
     }

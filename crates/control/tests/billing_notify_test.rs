@@ -777,6 +777,41 @@ async fn set_spend_cents(pg: &compio_postgres::Client, app: Uuid, cents: i64) {
     .expect("set usage_aggregates total");
 }
 
+/// Set the per-app spend-limit override in `app_spend_limit` (the same config table
+/// `SpendEngine::set_limit` writes). Raising the effective limit makes the next reconcile
+/// tick see `limit_changed = true`, bypassing the anti-flap deadband so the app RECOVERS
+/// one band in a single tick (a faithful downward/de-escalation edge).
+async fn set_spend_limit_override(pg: &compio_postgres::Client, app: Uuid, cents: i64) {
+    pg.execute(
+        "INSERT INTO zeroship.app_spend_limit (app_id, spend_limit_cents, updated_at) \
+         VALUES ($1, $2, NOW()) \
+         ON CONFLICT (app_id) DO UPDATE SET spend_limit_cents = EXCLUDED.spend_limit_cents, \
+           updated_at = NOW()",
+        &[&app, &cents],
+    )
+    .await
+    .expect("set app_spend_limit override");
+}
+
+/// Count spend_state_history transitions OUT OF / INTO a specific (from,to) edge for an app.
+async fn spend_edge_count(
+    pg: &compio_postgres::Client,
+    app: Uuid,
+    from_state: &str,
+    to_state: &str,
+) -> i64 {
+    pg.query(
+        "SELECT COUNT(*) AS c FROM zeroship.spend_state_history \
+          WHERE app_id = $1 \
+            AND from_state = $2::text::zeroship.spend_state \
+            AND to_state   = $3::text::zeroship.spend_state",
+        &[&app, &from_state, &to_state],
+    )
+    .await
+    .expect("count spend edge")[0]
+        .get::<_, i64>("c")
+}
+
 /// Read the current persisted spend state for an app (the cron's derived hot state).
 async fn spend_state_of(pg: &compio_postgres::Client, app: Uuid) -> Option<String> {
     let rows = pg
@@ -900,6 +935,109 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     // The app NAME made it into the dedup transition_id mapping (sanity: the ledger rows
     // are keyed by the she_ transition id, one per band).
     let _ = app_name; // (name is asserted via the rendered body in notify.rs unit tests)
+}
+
+// ===========================================================================
+// (HIGH, #10 follow-up) DOWNWARD / RECOVERY walk — escalation-only gate.
+//
+// `spend.rs::persist_transition` writes a `spend_state_history` row on EVERY edge,
+// INCLUDING de-escalations (`block→degrade`, `degrade→warn`, `warn→allow`) once the
+// effective limit rises and the deadband bypass relaxes the band. The notify scan arm (g)
+// must email ONLY on ESCALATION (severity(to) > severity(from)). A recovery edge whose
+// `to_state` is still warn/degrade/block must NOT email — telling a creator whose app is
+// RECOVERING that it "is being throttled" / "approaching the limit" is wrong.
+//
+// RED proof: the original arm (g) filtered solely on `to_state IN ('warn','degrade','block')`
+// with NO direction check, so the `block→degrade` edge produced a spurious SpendDegrade
+// ("being throttled") email and `degrade→warn` produced a spurious SpendWarn ("approaching
+// your limit") email on the way DOWN. This test walks the band DOWN (Block→Degrade→Warn→
+// Allow) via real limit-raise reconcile ticks and asserts ZERO spend notifications — it
+// FAILS against the pre-fix code (2 spurious recovery emails), passes after the SQL gate.
+// ===========================================================================
+#[compio::test]
+async fn spend_band_recovery_walk_sends_no_notifications() {
+    let Some(url) = db_url() else {
+        eprintln!("SKIP spend_band_recovery_walk_sends_no_notifications: CONTROL_TEST_DB unset");
+        return;
+    };
+    let fx = build_fixture(&url, "spend-recovery").await;
+    let st = &*fx.state;
+
+    let creator = make_creator(&fx.pg).await;
+    let (app, _app_name) = make_spend_app_owned_by(&fx.pg, creator, 100).await;
+
+    use BillingNotificationKind::{SpendBlock, SpendDegrade, SpendWarn};
+
+    // --- Climb to Block first (spend = limit = 100 ⇒ 100% ⇒ Block). One upward tick.
+    //     This `allow→block` IS a legitimate escalation and DOES email — we drain it and
+    //     snapshot the baseline so the recovery walk below is measured as a DELTA (it must
+    //     add zero).
+    set_spend_cents(&fx.pg, app, 100).await;
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("block"), "→block");
+    tick_until_sent(st, &fx.pg, &[(creator, 1)]).await; // the single allow→block escalation
+    let base_warn = sent_count_kind(&fx.pg, creator, SpendWarn).await;
+    let base_degrade = sent_count_kind(&fx.pg, creator, SpendDegrade).await;
+    let base_block = sent_count_kind(&fx.pg, creator, SpendBlock).await;
+    assert_eq!(
+        (base_warn, base_degrade, base_block),
+        (0, 0, 1),
+        "the upward allow→block escalation sent exactly one spend_block (and nothing else)"
+    );
+
+    // --- Now walk DOWN one band per tick by RAISING the effective limit (override). Each
+    //     raise makes `limit_changed = true`, bypassing the deadband so the band relaxes
+    //     immediately to the new raw band. Spend stays pinned at 100 cents throughout.
+    //
+    //   limit 105 ⇒ pct = 100*100/105 = 95 ⇒ raw Degrade ⇒ edge block→degrade
+    set_spend_limit_override(&fx.pg, app, 105).await;
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("degrade"), "block→degrade");
+
+    //   limit 120 ⇒ pct = 100*100/120 = 83 ⇒ raw Warn ⇒ edge degrade→warn
+    set_spend_limit_override(&fx.pg, app, 120).await;
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("warn"), "degrade→warn");
+
+    //   limit 200 ⇒ pct = 100*100/200 = 50 ⇒ raw Allow ⇒ edge warn→allow
+    set_spend_limit_override(&fx.pg, app, 200).await;
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("allow"), "warn→allow");
+
+    // The three downward edges were genuinely written (history rows exist with the
+    // recovering `from`/`to` endpoints) — so the notify scan really has rows to (not) email.
+    assert_eq!(spend_edge_count(&fx.pg, app, "block", "degrade").await, 1, "block→degrade row");
+    assert_eq!(spend_edge_count(&fx.pg, app, "degrade", "warn").await, 1, "degrade→warn row");
+    assert_eq!(spend_edge_count(&fx.pg, app, "warn", "allow").await, 1, "warn→allow row");
+
+    // --- Run the notify cron to convergence. NONE of the recovery edges may email.
+    {
+        let _gate = lock_tick_gate();
+        billing_notify::tick(st).await.expect("notify tick");
+        // A second sweep to be sure nothing was left pending to re-drive into a send.
+        billing_notify::tick(st).await.expect("second notify tick");
+    }
+
+    let warn = sent_count_kind(&fx.pg, creator, SpendWarn).await;
+    let degrade = sent_count_kind(&fx.pg, creator, SpendDegrade).await;
+    let block = sent_count_kind(&fx.pg, creator, SpendBlock).await;
+    // DELTA vs the baseline (the upward allow→block): the recovery walk must add NOTHING.
+    // Pre-fix, block→degrade adds a SpendDegrade and degrade→warn adds a SpendWarn.
+    assert_eq!(warn, base_warn, "NO new spend_warn on the degrade→warn recovery edge");
+    assert_eq!(degrade, base_degrade, "NO new spend_degrade on the block→degrade recovery edge");
+    assert_eq!(block, base_block, "NO new spend_block on any recovery edge");
+    assert_eq!(
+        (warn + degrade + block) - (base_warn + base_degrade + base_block),
+        0,
+        "a RECOVERING app must receive ZERO additional spend escalation notifications"
+    );
+    // And no half-claimed pending rows linger either (claim-before-send would have inserted
+    // one per spurious candidate; the gate must drop them before the claim).
+    assert_eq!(
+        ledger_count(&fx.pg, creator, "pending").await,
+        0,
+        "no pending spend notification rows for a recovery walk"
+    );
 }
 
 // ===========================================================================
