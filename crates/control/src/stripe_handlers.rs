@@ -1757,10 +1757,12 @@ async fn record_infra_payment(
             ))
         })?;
 
-    // (3) Record the fetched linkage on a FRESH connection (post-HTTP).
-    let conn = state.registry.conn().await?;
+    // (3) Record the fetched linkage on a FRESH connection (post-HTTP). This ALSO promotes
+    // any dispute that raced ahead of this invoice.paid (parked in pending_disputes), so the
+    // dispute-vs-linkage ordering is symmetric (0055): a created-before-paid resolves here.
+    let mut conn = state.registry.conn().await?;
     crate::invoice_payments::record_payment_object_refs(
-        &conn,
+        &mut conn,
         &internal_id,
         pi.as_deref(),
         ch.as_deref(),
@@ -1869,13 +1871,49 @@ async fn handle_dispute_created(
         .into_iter()
         .flatten()
         .collect();
+    let evidence_due_at = obj
+        .evidence_details
+        .as_ref()
+        .and_then(|d| d.due_by)
+        .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0));
+
     let internal_id = match crate::disputes::resolve_invoice_for_dispute(&conn, &candidates).await {
         Ok(Some(id)) => id,
         Ok(None) => {
-            // Not a charge we invoiced (a Connect end-user dispute, or a pre-finalize
-            // race). Nothing to anchor — ack so Stripe stops retrying.
-            tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.dispute.created has no internal invoice — no dispute recorded");
-            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_internal_invoice"}));
+            // No pi_/ch_→invoice linkage YET. This is EITHER a charge we never invoiced (a
+            // Connect end-user dispute) OR — the bug the live e2e surfaced — a
+            // `charge.dispute.created` that raced AHEAD of its `invoice.paid` (which writes
+            // the linkage). Dropping it here is NOT self-healing (the later invoice.paid never
+            // re-checks; a Stripe resend is dedup-acked). So PARK the dispute facts in
+            // `pending_disputes` (idempotent on the du_…); `record_payment_object_refs` will
+            // promote it the moment the linkage lands. A genuinely-unrecognized charge parks
+            // harmlessly and simply never resolves — no poison, no 5xx-retry storm (0055).
+            let pending = crate::disputes::PendingDispute {
+                provider_dispute_id,
+                payment_intent: obj.payment_intent.as_deref(),
+                charge: obj.charge.as_deref(),
+                amount_cents: amount,
+                currency: &currency,
+                reason: obj.reason.as_deref(),
+                evidence_due_at,
+            };
+            match crate::disputes::park_pending_dispute(&conn, &pending).await {
+                Ok(parked) => {
+                    tracing::warn!(
+                        event_id = %sanitize_event_id(&event.id),
+                        parked,
+                        "stripe: charge.dispute.created has no invoice linkage yet — parked pending resolution"
+                    );
+                    return web::HttpResponse::Ok().json(&serde_json::json!({
+                        "status": "dispute_pending_linkage",
+                        "parked": parked,
+                    }));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "stripe: dispute.created park failed — failing closed for retry");
+                    return err_json(500, "internal error");
+                }
+            }
         }
         Err(e) => {
             tracing::error!(error = %e, "stripe: dispute.created invoice resolution failed — failing closed");
@@ -1883,11 +1921,6 @@ async fn handle_dispute_created(
         }
     };
 
-    let evidence_due_at = obj
-        .evidence_details
-        .as_ref()
-        .and_then(|d| d.due_by)
-        .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0));
     let mut conn = conn;
     let rec = match crate::disputes::record_dispute_created(
         &mut conn,

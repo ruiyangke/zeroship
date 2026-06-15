@@ -98,7 +98,7 @@ pub async fn invoice_id_for_provider_invoice<C: GenericClient + Sync>(
 /// ref or the `'charge'`-KIND `invoice_payments` row — it is an ADDITIONAL linkage, so
 /// PR-1 charge idempotency and PR-3's invoice-ref guards are untouched.
 pub async fn record_payment_object_refs<C: GenericClient + Sync>(
-    conn: &C,
+    conn: &mut C,
     invoice_id: &str,
     payment_intent: Option<&str>,
     charge: Option<&str>,
@@ -140,6 +140,34 @@ pub async fn record_payment_object_refs<C: GenericClient + Sync>(
                 invoice_id = %invoice_id,
                 ref_kind = %ref_kind,
                 "stripe: payment-object linkage already recorded (idempotent; possibly under another invoice) — ack"
+            );
+        }
+    }
+
+    // ORDER-INDEPENDENCE (gap #26 dispute-vs-linkage race, 0055). A `charge.dispute.created`
+    // may have arrived BEFORE this `invoice.paid` and parked itself in `pending_disputes`
+    // (no linkage to resolve against yet). Now that the settling pi_…/ch_…→invoice linkage is
+    // written, promote any parked dispute matching these candidates: a `billing_disputes` row
+    // + its `dispute_debit` (tightening the over-refund cap), exactly once on the du_…. The
+    // common case (no waiting dispute) is a single cheap indexed lookup returning nothing.
+    let candidates: Vec<&str> = [payment_intent, charge]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !candidates.is_empty() {
+        let promoted = crate::disputes::resolve_pending_disputes_for_linkage(
+            conn,
+            invoice_id,
+            &candidates,
+        )
+        .await?;
+        if promoted > 0 {
+            tracing::info!(
+                invoice_id = %invoice_id,
+                promoted,
+                "stripe: promoted parked dispute(s) on invoice.paid linkage (created arrived before paid)"
             );
         }
     }

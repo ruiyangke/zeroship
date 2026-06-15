@@ -886,6 +886,198 @@ async fn dispute_closed_won_before_created_is_order_independent() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// (i) ORDER-INDEPENDENCE vs. the LINKAGE (gap #26 dispute-vs-invoice.paid race, 0055):
+//     `charge.dispute.created` delivered BEFORE the `invoice.paid` that writes the
+//     pi_…→invoice linkage. Pre-fix the created acked "no_internal_invoice" and DROPPED
+//     the dispute (no row, no debit, cap untightened) — and it was NOT self-healing (the
+//     later invoice.paid never re-checked; a Stripe resend is dedup-acked). Post-fix the
+//     created PARKS the dispute (recorded, no debit yet); the later invoice.paid promotes
+//     it (billing_disputes row + dispute_debit + cap tightened). A redelivery of either
+//     event is a no-op; both delivery orders converge identically.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Seed a FINALIZED infra invoice + its `ref_kind='invoice'` linkage WITHOUT driving
+/// `invoice.paid` yet, and pre-pick the settling `pi_…` the eventual `invoice.paid` will
+/// name. Yields `(internal_invoice_id, provider_invoice_id (in_…), pi_…)`. This lets a test
+/// deliver a dispute on that `pi_…` BEFORE the linkage exists (the out-of-order case).
+macro_rules! seed_finalized_unpaid_invoice {
+    ($conn:expr, $creator:expr, $total:expr) => {{
+        let inv = zeroship_core::typed_id::new_invoice_id();
+        $conn
+            .execute(
+                "INSERT INTO zeroship.invoices \
+                   (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                    total_cents, finalized_at) \
+                 VALUES ($1, $2, $3::date, 'finalized', $4, 0, 0, $4, NOW())",
+                &[&inv, &$creator, &this_period(), &($total as i64)],
+            )
+            .await
+            .expect("finalized invoice");
+        let provider_invoice = format!("in_dsp_{}", Uuid::new_v4().simple());
+        $conn
+            .execute(
+                "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+                 VALUES ($1, 'stripe', 'invoice', $2)",
+                &[&inv, &provider_invoice],
+            )
+            .await
+            .expect("provider ref");
+        let pi = format!("pi_dsp_{}", Uuid::new_v4().simple());
+        (inv, provider_invoice, pi)
+    }};
+}
+
+/// Drive the REAL `invoice.paid` webhook for an ALREADY-seeded finalized invoice, naming a
+/// KNOWN settling `pi_…` (so a dispute can have referenced it before this paid arrives). This
+/// records the charge row + the `pi_…`→invoice linkage AND (post-fix) promotes any parked
+/// dispute matching that `pi_…`.
+macro_rules! drive_invoice_paid_for {
+    ($app:expr, $conn:expr, $creator:expr, $provider_invoice:expr, $pi:expr, $total:expr) => {{
+        let cus = creator_customer(&$conn, $creator).await;
+        let paid_body = json!({
+            "id": format!("evt_paid_{}", Uuid::new_v4().simple()),
+            "type": "invoice.paid",
+            "created": 1_777_000_000i64,
+            "data": { "object": {
+                "id": $provider_invoice,
+                "amount_paid": ($total as i64),
+                "currency": "usd",
+                "payment_intent": $pi,
+                "customer": cus,
+                "metadata": { "invoice_kind": "infra" }
+            }}
+        });
+        let resp = post_webhook!($app, paid_body);
+        assert_eq!(resp.status(), StatusCode::OK, "invoice.paid webhook must 200");
+        resp
+    }};
+}
+
+async fn pending_dispute_count(conn: &compio_postgres::Client, du: &str) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.pending_disputes WHERE provider_dispute_id = $1",
+        &[&du],
+    )
+    .await
+    .expect("count pending disputes")[0]
+        .get::<_, i64>("n")
+}
+
+#[compio::test]
+async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "created-before-paid").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    let (inv, provider_invoice, pi) = seed_finalized_unpaid_invoice!(conn, creator, 6000);
+
+    // (1) The dispute arrives FIRST — its pi_… has NO linkage yet. Pre-fix this dropped the
+    // dispute; post-fix it PARKS it: no billing_disputes row, no debit, but a pending row.
+    let du = format!("du_cbp_{}", Uuid::new_v4().simple());
+    let r1 = post_webhook!(
+        app,
+        dispute_created_body(&format!("evt_cbp1_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
+    );
+    assert_eq!(r1.status(), StatusCode::OK);
+    let b1: Value = serde_json::from_slice(&test::read_body(r1).await).unwrap();
+    assert_eq!(b1["status"], "dispute_pending_linkage", "created-before-paid is parked, not dropped");
+    assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row yet (unlinked)");
+    assert_eq!(pending_dispute_count(&conn, &du).await, 1, "parked in pending_disputes");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 0, "no debit applied yet");
+
+    // (2) Now invoice.paid arrives and writes the pi_…→invoice linkage. It MUST promote the
+    // parked dispute: a billing_disputes row (open) + the dispute_debit tightening the cap,
+    // and the holding row is consumed.
+    drive_invoice_paid_for!(app, conn, creator, provider_invoice, pi, 6000);
+    assert_eq!(cash_collected(&conn, &inv).await, 0, "charge 6000 then dispute_debit -6000 = 0");
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "the parked dispute was promoted");
+    assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("open"));
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "debit now applied");
+    assert_eq!(pending_dispute_count(&conn, &du).await, 0, "holding row consumed on promotion");
+
+    // The promoted dispute carried the parked metadata through.
+    let row = conn
+        .query(
+            "SELECT reason, evidence_due_at IS NOT NULL AS has_due, amount_cents \
+               FROM zeroship.billing_disputes WHERE provider_dispute_id = $1",
+            &[&du],
+        )
+        .await
+        .expect("read promoted dispute")[0]
+        .clone();
+    assert_eq!(row.get::<_, Option<String>>("reason").as_deref(), Some("fraudulent"));
+    assert!(row.get::<_, bool>("has_due"), "evidence_due_at carried through the park");
+    assert_eq!(row.get::<_, i64>("amount_cents"), 6000);
+
+    // (3) The over-refund cap reflects the dispute: a $50 cash refund (would have fit the
+    // $60 pre-dispute cap) is now rejected; the dispute tightened it to $0.
+    let mut rconn = side_conn(&url).await;
+    let provider = NativeRefundProvider;
+    let outcome = issue_refund(
+        &mut rconn, &provider, &inv, 5000, 5000, 0, RefundDestination::Cash,
+        Some("post-promotion over-refund"), &format!("idem-cbp-{}", Uuid::new_v4().simple()),
+    )
+    .await
+    .expect("issue_refund call");
+    assert!(
+        matches!(outcome, RefundOutcome::OverRefund(_)),
+        "the promoted dispute tightened the cap; a $50 refund must be rejected, got {outcome:?}"
+    );
+
+    // (4) Idempotency both ways: a redelivered created (post-promotion) is a no-op; a
+    // redelivered invoice.paid is a no-op. No second row, no second debit.
+    let r_redeliver_created = post_webhook!(
+        app,
+        dispute_created_body(&format!("evt_cbp2_{}", Uuid::new_v4().simple()), &du, &pi, 6000)
+    );
+    assert_eq!(r_redeliver_created.status(), StatusCode::OK);
+    drive_invoice_paid_for!(app, conn, creator, provider_invoice, pi, 6000);
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "still exactly one debit");
+    assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no re-park");
+}
+
+/// A dispute on a charge the platform NEVER invoiced parks but NEVER resolves — it does NOT
+/// poison the webhook (no 5xx-retry storm), and never invents a billing_disputes row.
+#[compio::test]
+async fn dispute_on_never_invoiced_charge_parks_without_poison() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "never-ours").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+
+    // A pi_… that no invoice.paid will ever link (a Connect end-user charge we never invoiced).
+    let pi = format!("pi_never_{}", Uuid::new_v4().simple());
+    let du = format!("du_never_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(
+        app,
+        dispute_created_body(&format!("evt_never1_{}", Uuid::new_v4().simple()), &du, &pi, 4000)
+    );
+    // Acked 200 (parked) — NOT a 5xx that Stripe would retry into a storm.
+    assert_eq!(r.status(), StatusCode::OK, "never-ours dispute is acked, not poisoned");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "dispute_pending_linkage");
+    assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
+    assert_eq!(pending_dispute_count(&conn, &du).await, 1, "parked, awaiting a linkage that never comes");
+
+    // A redelivery is still a clean ack (idempotent park) — no row, no poison.
+    let r2 = post_webhook!(
+        app,
+        dispute_created_body(&format!("evt_never2_{}", Uuid::new_v4().simple()), &du, &pi, 4000)
+    );
+    assert_eq!(r2.status(), StatusCode::OK);
+    assert_eq!(pending_dispute_count(&conn, &du).await, 1, "still exactly one parked row");
+    assert_eq!(dispute_row_count(&conn, &du).await, 0);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // (f) schema guard: the PR-8 objects exist on the migrated DB.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -940,4 +1132,16 @@ async fn pr8_schema_objects_present() {
         .expect("domain")[0]
         .get("n");
     assert_eq!(ok, 1, "dispute_status domain must exist");
+
+    // 0055: the pending-dispute holding table (created-before-paid order-independence).
+    let pending: i64 = conn
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM pg_tables \
+             WHERE schemaname = 'zeroship' AND tablename = 'pending_disputes'",
+            &[],
+        )
+        .await
+        .expect("pending table")[0]
+        .get("n");
+    assert_eq!(pending, 1, "pending_disputes holding table must exist");
 }

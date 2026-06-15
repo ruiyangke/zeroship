@@ -289,6 +289,210 @@ pub async fn record_dispute_created<C: GenericClient + Sync>(
     })
 }
 
+/// Facts carried on a `charge.dispute.created` we PARK when its settling `pi_…`/`ch_…` has
+/// no `invoice.paid` linkage yet (the dispute arrived BEFORE the payment committed). Held in
+/// `pending_disputes` (0055) until the linkage is first written, then promoted to a real
+/// `billing_disputes` row + its `dispute_debit` ([`resolve_pending_disputes_for_linkage`]).
+#[derive(Debug, Clone)]
+pub struct PendingDispute<'a> {
+    pub provider_dispute_id: &'a str,
+    /// At least one of `payment_intent`/`charge` MUST be `Some` (the resolution candidates).
+    pub payment_intent: Option<&'a str>,
+    pub charge: Option<&'a str>,
+    pub amount_cents: i64,
+    pub currency: &'a str,
+    pub reason: Option<&'a str>,
+    pub evidence_due_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// PARK a `charge.dispute.created` whose settling `pi_…`/`ch_…`→invoice linkage is not yet
+/// recorded (the dispute raced ahead of `invoice.paid`). Idempotent on the `du_…` (the
+/// `pending_disputes` PK ⇒ `ON CONFLICT DO NOTHING`), so a redelivered created under a fresh
+/// `evt_…` parks at most once. The parked row is consumed (promoted + deleted) the moment the
+/// linkage is first written ([`resolve_pending_disputes_for_linkage`]) — making the whole flow
+/// ORDER-INDEPENDENT w.r.t. `invoice.paid`, mirroring the close-before-create handling.
+///
+/// Returns `true` iff a row was freshly parked (a redelivery returns `false`). No cash moves
+/// here: the `dispute_debit` lands only at promotion time, against the resolved invoice.
+pub async fn park_pending_dispute<C: GenericClient + Sync>(
+    conn: &C,
+    p: &PendingDispute<'_>,
+) -> Result<bool, RegistryError> {
+    if p.amount_cents <= 0 {
+        return Err(RegistryError::InvalidInput(format!(
+            "pending dispute amount must be > 0 (got {})",
+            p.amount_cents
+        )));
+    }
+    if p.provider_dispute_id.is_empty() {
+        return Err(RegistryError::InvalidInput(
+            "pending dispute requires a non-empty provider_dispute_id (du_…)".to_string(),
+        ));
+    }
+    let pi = p.payment_intent.map(str::trim).filter(|s| !s.is_empty());
+    let ch = p.charge.map(str::trim).filter(|s| !s.is_empty());
+    if pi.is_none() && ch.is_none() {
+        return Err(RegistryError::InvalidInput(
+            "pending dispute requires at least one of payment_intent/charge to resolve against"
+                .to_string(),
+        ));
+    }
+    let inserted = conn
+        .query(
+            "INSERT INTO zeroship.pending_disputes \
+               (provider_dispute_id, payment_intent, charge, amount_cents, currency, reason, \
+                evidence_due_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (provider_dispute_id) DO NOTHING \
+             RETURNING provider_dispute_id",
+            &[
+                &p.provider_dispute_id,
+                &pi,
+                &ch,
+                &p.amount_cents,
+                &p.currency,
+                &p.reason,
+                &p.evidence_due_at,
+            ],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    Ok(!inserted.is_empty())
+}
+
+/// RESOLVE any PARKED disputes against a newly-written `pi_…`/`ch_…`→invoice linkage. Called
+/// from the linkage writer (`record_payment_object_refs`, driven by `invoice.paid`) the moment
+/// the settling-object→invoice binding is first persisted, so a dispute that arrived BEFORE
+/// its `invoice.paid` is promoted as soon as the payment commits — the order-independent half
+/// of the fix.
+///
+/// For each parked row whose `payment_intent` or `charge` matches a `candidate_ref`, in ONE
+/// txn per dispute: UPSERT the `billing_disputes` row (`status='open'`), append the negative
+/// `dispute_debit` (tightening the over-refund cap), and DELETE the holding row. All idempotent
+/// on the `du_…` (the `billing_disputes` UNIQUE + the dispute payment-row dedup index 0053), so
+/// a concurrent in-order `.created` that already promoted the dispute makes this a clean no-op.
+///
+/// `candidate_refs` are the just-linked settling ids (the `pi_…`/`ch_…` for THIS invoice);
+/// empty ids are ignored. Returns the count promoted (0 in the overwhelmingly common case where
+/// no dispute was waiting). FAIL-CLOSED: any DB error propagates so the caller's webhook 5xx's
+/// and Stripe retries — the parked row is still there to retry against.
+pub async fn resolve_pending_disputes_for_linkage<C: GenericClient + Sync>(
+    conn: &mut C,
+    invoice_id: &str,
+    candidate_refs: &[&str],
+) -> Result<usize, RegistryError> {
+    let candidates: Vec<&str> = candidate_refs
+        .iter()
+        .copied()
+        .filter(|c| !c.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    // Find every parked dispute whose pi_/ch_ matches one of the just-linked candidates. A
+    // pi_/ch_ is globally unique at Stripe, so a match unambiguously belongs to THIS invoice.
+    let parked = conn
+        .query(
+            "SELECT provider_dispute_id, amount_cents, currency, reason, evidence_due_at \
+               FROM zeroship.pending_disputes \
+              WHERE payment_intent = ANY($1) OR charge = ANY($1)",
+            &[&candidates],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+
+    let mut promoted = 0usize;
+    for row in &parked {
+        let du: String = row.get("provider_dispute_id");
+        let amount_cents: i64 = row.get("amount_cents");
+        let currency: String = row.get("currency");
+        let reason: Option<String> = row.get("reason");
+        let evidence_due_at: Option<chrono::DateTime<chrono::Utc>> = row.get("evidence_due_at");
+
+        // ONE txn per dispute: promote (billing_disputes + dispute_debit) AND delete the
+        // holding row atomically, so the parked row vanishes iff the promotion committed.
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| RegistryError::Database(e.to_string()))?;
+        promote_pending_dispute_in_tx(
+            &tx,
+            invoice_id,
+            amount_cents,
+            &currency,
+            reason.as_deref(),
+            evidence_due_at,
+            &du,
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM zeroship.pending_disputes WHERE provider_dispute_id = $1",
+            &[&du],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| RegistryError::Database(e.to_string()))?;
+        promoted += 1;
+    }
+    Ok(promoted)
+}
+
+/// Promote a parked dispute to a real `billing_disputes` row + its `dispute_debit`, INSIDE a
+/// caller-owned transaction. Identical shape to [`record_dispute_created`]'s body (UPSERT
+/// `open` + append the negative debit), but composable into the linkage writer's txn so the
+/// promotion and the holding-row delete land atomically. Idempotent on the `du_…`: if an
+/// in-order `.created` already created the row + debit (a race), both statements no-op.
+async fn promote_pending_dispute_in_tx<C: GenericClient + Sync>(
+    tx: &C,
+    invoice_id: &str,
+    amount_cents: i64,
+    currency: &str,
+    reason: Option<&str>,
+    evidence_due_at: Option<chrono::DateTime<chrono::Utc>>,
+    provider_dispute_id: &str,
+) -> Result<(), RegistryError> {
+    if amount_cents <= 0 {
+        return Err(RegistryError::InvalidInput(format!(
+            "dispute amount must be > 0 to promote a pending dispute (got {amount_cents})"
+        )));
+    }
+    let dsp_id = zeroship_core::typed_id::new_dispute_id();
+    // ON CONFLICT DO NOTHING: a racing in-order `.created` may already hold the row. We don't
+    // need the id back here (the holding-row delete keys on the du_…), so a plain upsert is
+    // enough — but keep the insert gated so a terminal close-before-create row is NOT reset.
+    tx.execute(
+        "INSERT INTO zeroship.billing_disputes \
+           (id, invoice_id, amount_cents, currency, status, reason, evidence_due_at, \
+            provider_dispute_id) \
+         VALUES ($1, $2, $3, $4, 'open', $5, $6, $7) \
+         ON CONFLICT (provider_dispute_id) DO NOTHING",
+        &[
+            &dsp_id,
+            &invoice_id,
+            &amount_cents,
+            &currency,
+            &reason,
+            &evidence_due_at,
+            &provider_dispute_id,
+        ],
+    )
+    .await
+    .map_err(|e| RegistryError::Database(e.to_string()))?;
+
+    append_dispute_row(
+        tx,
+        invoice_id,
+        -amount_cents,
+        currency,
+        DisputePaymentKind::Debit,
+        provider_dispute_id,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Context the close handler resolves from the `charge.dispute.closed`/`.updated` event so
 /// it can CREATE the dispute terminal if the `.created` never arrived (MAJOR-4). All of it
 /// is carried on the dispute object Stripe delivers on the close event.

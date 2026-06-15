@@ -657,8 +657,11 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
     // The charge row carries the Stripe invoice id (`in_…`) as its provider_ref…
     append_payment(&fx.state, &inv, 10_000, &format!("in_target_{suffix}")).await;
     // …and the webhook recorded the REAL settling pi_/ch_ in billing_provider_refs.
+    // (record_payment_object_refs now takes &mut — it also promotes any parked dispute —
+    // so use an owned connection rather than the shared Arc<Client>.)
+    let mut link_conn = new_conn(&url).await;
     zeroship_control::invoice_payments::record_payment_object_refs(
-        &*fx.state.control_pg,
+        &mut link_conn,
         &inv,
         Some(&pi),
         Some(&ch),
