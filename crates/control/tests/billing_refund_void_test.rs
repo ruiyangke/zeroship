@@ -1877,3 +1877,547 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         400, "balance still $4 after a third drive",
     );
 }
+
+// ===========================================================================
+// GAP-5: the operator `issue_refund` is FINALIZED-ONLY (after the `allow_voided`
+//     removal). A refund of a DRAFT or a VOID invoice must be rejected as
+//     `RefundOutcome::InvalidInvoice` — never claimed, never issued. No prior test
+//     asserts this rejection; the true-up bridge (which legitimately refunds a VOID
+//     invoice) no longer routes through `issue_refund`, so this path is finalized-only.
+//
+// RED-proof: this PINS `let refundable = status == "finalized"` in
+//     `issue_refund_inner`. If that bound is loosened (e.g. back to
+//     `status == "finalized" || status == "void"`), the VOID case below would
+//     CLAIM-and-ISSUE instead of returning InvalidInvoice — the second assertion
+//     (`Issued`-vs-`InvalidInvoice`) and the "zero refund rows" assertion both flip.
+// ===========================================================================
+
+#[compio::test]
+async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "gap5-nonfinal").await;
+
+    let creator = make_user(&fx.state, "gap5").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    // A DRAFT invoice (never finalized). Seed it directly + record cash on it (so the
+    // rejection is provably about STATUS, not about a $0 over-refund cap).
+    let draft = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+             VALUES ($1, $2, DATE '2032-01-01', 'draft')",
+            &[&draft, &creator],
+        )
+        .await
+        .expect("seed draft");
+    append_payment(&fx.state, &draft, 5000, "in_gap5_draft").await;
+
+    let mut conn = new_conn(&url).await;
+    let provider = NativeRefundProvider;
+    let on_draft = refund::issue_refund(
+        &mut conn, &provider, &draft, 1000, 1000, 0, RefundDestination::Cash, None, &key(&draft, "g5d"),
+    )
+    .await
+    .expect("issue (draft)");
+    match on_draft {
+        RefundOutcome::InvalidInvoice(_) => {}
+        other => panic!("a refund of a DRAFT invoice must be InvalidInvoice, got {other:?}"),
+    }
+
+    // A VOID invoice (finalized then voided) — also not operator-refundable: the true-up
+    // bridge handles a voided invoice's over-collection via its OWN path, not this one.
+    let voided = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at, voided_at) \
+             VALUES ($1, $2, DATE '2032-02-01', 'void', 5000, 0, 0, 5000, NOW(), NOW())",
+            &[&voided, &creator],
+        )
+        .await
+        .expect("seed void");
+    append_payment(&fx.state, &voided, 5000, "in_gap5_void").await;
+    let on_void = refund::issue_refund(
+        &mut conn, &provider, &voided, 1000, 1000, 0, RefundDestination::Cash, None, &key(&voided, "g5v"),
+    )
+    .await
+    .expect("issue (void)");
+    match on_void {
+        RefundOutcome::InvalidInvoice(_) => {}
+        other => panic!("a refund of a VOID invoice must be InvalidInvoice, got {other:?}"),
+    }
+
+    // NO refund row was claimed for EITHER invoice (the rejection precedes the claim).
+    for inv in [&draft, &voided] {
+        let n: i64 = fx
+            .state
+            .control_pg
+            .query(
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1",
+                &[inv],
+            )
+            .await
+            .expect("count")[0]
+            .get("n");
+        assert_eq!(n, 0, "a non-finalized invoice never gets a refund row claimed (invoice {inv})");
+    }
+}
+
+// ===========================================================================
+// GAP-6: a refund against a NON-EXISTENT invoice id is `RefundOutcome::InvalidInvoice`
+//     — the `inv.first()` None branch in `issue_refund_inner`. No row claimed; the
+//     provider is never called.
+// ===========================================================================
+
+#[compio::test]
+async fn refund_on_nonexistent_invoice_is_invalid() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "gap6-missing").await;
+
+    // An invoice id that was never inserted.
+    let ghost = zeroship_core::typed_id::new_invoice_id();
+    let stripe = RecordingStripe::default();
+    let mut conn = new_conn(&url).await;
+    let provider = refund::StripeRefundProvider { stripe: &stripe };
+    let r = refund::issue_refund(
+        &mut conn, &provider, &ghost, 1000, 1000, 0, RefundDestination::Cash, None, &key(&ghost, "g6"),
+    )
+    .await
+    .expect("issue");
+    match r {
+        RefundOutcome::InvalidInvoice(_) => {}
+        other => panic!("a refund of a non-existent invoice must be InvalidInvoice, got {other:?}"),
+    }
+    // The provider was never called (no cash leg for a missing invoice).
+    assert_eq!(stripe.refund_count(), 0, "no Stripe Refund issued for a missing invoice");
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&ghost])
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 0, "no refund row for a non-existent invoice");
+}
+
+// ===========================================================================
+// GAP-7: the `refunds_immutable` trigger (0049 + 0054) is the append-only/identity
+//     backstop. The analogous invoice_payments trigger is tested; this one had ZERO
+//     direct coverage. We exercise EVERY arm against a real `refunds` row:
+//       * a frozen-money/identity-column UPDATE RAISEs (amount, subtotal, tax,
+//         destination, invoice_id, currency, idempotency_key, request_fingerprint);
+//       * a DELETE RAISEs;
+//       * an ILLEGAL status transition (issued→pending) RAISEs;
+//       * a LEGAL transition (pending→issued, then issued→failed) SUCCEEDS.
+//
+// RED-proof: every RAISE assertion below fails (the UPDATE/DELETE succeeds) if the
+//     `refunds_immutable_trg` trigger is dropped; the illegal-transition RAISE fails if
+//     the status-progression guard (added in 0054) is removed.
+// ===========================================================================
+
+#[compio::test]
+async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "gap7-immut").await;
+
+    let creator = make_user(&fx.state, "gap7").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    // A finalized invoice with $50 cash collected (so the refund INSERT passes the cap).
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at) \
+             VALUES ($1, $2, DATE '2033-01-01', 'finalized', 5000, 0, 0, 5000, NOW())",
+            &[&inv, &creator],
+        )
+        .await
+        .expect("seed invoice");
+    append_payment(&fx.state, &inv, 5000, "in_gap7").await;
+
+    // Seed a 'pending' cash refund directly (the legal claim INSERT).
+    let refund_id = zeroship_core::typed_id::new_refund_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.refunds \
+               (id, invoice_id, amount_cents, subtotal_cents, tax_cents, currency, \
+                destination, idempotency_key, request_fingerprint, status) \
+             VALUES ($1, $2, 2000, 2000, 0, 'usd', 'cash', $3, 'fp-gap7', 'pending')",
+            &[&refund_id, &inv, &key(&inv, "gap7")],
+        )
+        .await
+        .expect("seed pending refund");
+
+    // ── Each FROZEN money/identity column UPDATE must RAISE. ──
+    let frozen_updates: [(&str, &[&(dyn compio_postgres::types::ToSql + Sync)]); 1] = [(
+        "UPDATE zeroship.refunds SET amount_cents = 1999 WHERE id = $1",
+        &[&refund_id],
+    )];
+    for (sql, params) in frozen_updates {
+        assert!(
+            fx.state.control_pg.execute(sql, params).await.is_err(),
+            "frozen-column UPDATE must RAISE: {sql}",
+        );
+    }
+    // The remaining frozen columns (one assertion each — same identity guard).
+    for sql in [
+        "UPDATE zeroship.refunds SET subtotal_cents = 1999, tax_cents = 1 WHERE id = $1",
+        "UPDATE zeroship.refunds SET destination = 'credit' WHERE id = $1",
+        "UPDATE zeroship.refunds SET currency = 'eur' WHERE id = $1",
+        "UPDATE zeroship.refunds SET request_fingerprint = 'tampered' WHERE id = $1",
+        "UPDATE zeroship.refunds SET idempotency_key = 'tampered-key' WHERE id = $1",
+    ] {
+        assert!(
+            fx.state.control_pg.execute(sql, &[&refund_id]).await.is_err(),
+            "frozen-column UPDATE must RAISE: {sql}",
+        );
+    }
+
+    // A DELETE must RAISE (append-only).
+    assert!(
+        fx.state
+            .control_pg
+            .execute("DELETE FROM zeroship.refunds WHERE id = $1", &[&refund_id])
+            .await
+            .is_err(),
+        "a refunds DELETE must be rejected (append-only)",
+    );
+
+    // ── A LEGAL transition pending→issued SUCCEEDS (the claim-after-success flip). ──
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.refunds SET status = 'issued', issued_at = NOW() WHERE id = $1",
+            &[&refund_id],
+        )
+        .await
+        .expect("pending→issued is the legal flip");
+
+    // ── An ILLEGAL transition issued→pending must RAISE (status only progresses). ──
+    assert!(
+        fx.state
+            .control_pg
+            .execute("UPDATE zeroship.refunds SET status = 'pending' WHERE id = $1", &[&refund_id])
+            .await
+            .is_err(),
+        "issued→pending must RAISE — the refund status only progresses forward",
+    );
+
+    // ── A LEGAL terminal transition issued→failed SUCCEEDS (the charge.refund.updated
+    //    reversal), stamping failed_at. ──
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.refunds SET status = 'failed', failed_at = NOW() WHERE id = $1",
+            &[&refund_id],
+        )
+        .await
+        .expect("issued→failed is a legal terminal transition");
+
+    // The row survived every illegal mutation intact: amount/destination frozen, status
+    // is the legally-progressed terminal 'failed'.
+    let row = &fx
+        .state
+        .control_pg
+        .query(
+            "SELECT amount_cents, destination::text AS dest, status::text AS status \
+             FROM zeroship.refunds WHERE id = $1",
+            &[&refund_id],
+        )
+        .await
+        .expect("read back")[0];
+    assert_eq!(row.get::<_, i64>("amount_cents"), 2000, "amount never changed");
+    assert_eq!(row.get::<_, String>("dest"), "cash", "destination never changed");
+    assert_eq!(row.get::<_, String>("status"), "failed", "status legally progressed to failed");
+}
+
+// ===========================================================================
+// GAP-2/3: the true-up NoOp path. When the over-collection is `≤ 0` (a reissue at or
+//     above what was collected, or a prior refund already returned the over-collection),
+//     `issue_true_up_refund` returns the no-op `Duplicate(empty)` sentinel and claims NO
+//     refund row — the `ClaimResult::NoOp` arm. Two cases:
+//       (i)  reissued_total == cash collected (over = 0);
+//       (ii) reissued_total >  cash collected (over < 0, floored to 0).
+//     And the void+reissue bridge reports `true_up_refund_id == None && true_up_cents == 0`.
+// ===========================================================================
+
+#[compio::test]
+async fn true_up_noop_when_over_collection_not_positive() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "gap23-noop").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let creator = make_user(&fx.state, "gap23").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    // A VOIDED invoice with $40 cash collected, no prior refunds.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at, voided_at) \
+             VALUES ($1, $2, DATE '2034-01-01', 'void', 4000, 0, 0, 4000, NOW(), NOW())",
+            &[&inv, &creator],
+        )
+        .await
+        .expect("seed void invoice");
+    append_payment(&fx.state, &inv, 4000, "in_gap23").await;
+
+    let mut conn = new_conn(&url).await;
+    let provider = NativeRefundProvider;
+
+    // (i) reissued_total == cash ($40) ⇒ over = $40 − $0 − $40 = 0 ⇒ NoOp.
+    let exact = refund::issue_true_up_refund(
+        &mut conn, &provider, &inv, 4000, Some("noop-exact"), &key(&inv, "g23-exact"),
+    )
+    .await
+    .expect("true-up (exact)");
+    assert_eq!(
+        exact,
+        RefundOutcome::Duplicate(String::new()),
+        "over-collection == 0 ⇒ the no-op Duplicate sentinel (nothing to refund)",
+    );
+
+    // (ii) reissued_total > cash ($60 > $40) ⇒ over < 0, floored to 0 ⇒ NoOp.
+    let above = refund::issue_true_up_refund(
+        &mut conn, &provider, &inv, 6000, Some("noop-above"), &key(&inv, "g23-above"),
+    )
+    .await
+    .expect("true-up (above)");
+    assert_eq!(
+        above,
+        RefundOutcome::Duplicate(String::new()),
+        "reissue ≥ collected ⇒ over ≤ 0 ⇒ the no-op Duplicate sentinel",
+    );
+
+    // NO refund row was claimed by either no-op call.
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&inv])
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 0, "a no-op true-up claims NO refund row");
+
+    // The void+reissue BRIDGE reports the NoOp as no true-up: drive it on a fresh bill
+    // where the reissue equals the original (no over-collection) and assert
+    // `true_up_refund_id == None && true_up_cents == 0`.
+    set_customer(&fx.state, creator).await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+    ingest_at(&fx.state, app, 3000, period, 1).await; // $30
+    let stripe = RecordingStripe::default();
+    assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
+    let inv_b = active_invoice_id(&fx.state, creator, period).await.expect("invoice B");
+    // Cash collected EXACTLY equals the bill ($30); the reissue re-prices the SAME usage
+    // (== $30), so over = $30 − $0 − $30 = 0 ⇒ the bridge reports no true-up.
+    append_payment(&fx.state, &inv_b, 3000, "in_gap23_b").await;
+    let outcome = zeroship_control::void_reissue::void_and_reissue(&fx.state, &stripe, &inv_b)
+        .await
+        .expect("void+reissue");
+    assert_eq!(outcome.true_up_refund_id, None, "no true-up refund when over-collection ≤ 0");
+    assert_eq!(outcome.true_up_cents, 0, "true_up_cents == 0 on the no-op path");
+}
+
+// ===========================================================================
+// GAP-4: `issue_true_up_refund` re-drive convergence (Phase-3 idempotency).
+//
+//   (a) Re-drive AFTER a real true-up issued: the over-collection is recomputed UNDER
+//       the lock and is now ZERO (the issued cash refund COUNTS toward
+//       `cash_refunds_already`: over = cash − refunds_already − reissued_total). So a
+//       same-key re-drive returns the no-op `Duplicate(empty)` sentinel — it issues NO
+//       second refund and the over-collection is never double-returned. This IS the
+//       Phase-3 convergence guarantee: a crash-retry of an already-issued true-up is a
+//       no-op, never a double refund.
+//
+//       (NOTE — faithfulness: the `ClaimResult::DuplicateSameBody(real_id)` /
+//       `Conflict` claim-key branches that `claim_refund_locked` exposes for the
+//       OPERATOR path are NOT reachable by a true-up re-drive once the first refund has
+//       ISSUED: the over-collection recompute SHORT-CIRCUITS to NoOp before the claim
+//       INSERT is ever reached, because the prior cash refund already consumed the
+//       over-collection. The operator-path Duplicate/Conflict branches are covered by
+//       `refund_replay_is_idempotent_exactly_one`. The true-up's own convergence is
+//       this NoOp path — the one a re-drive actually takes.)
+//
+//   (b) Conflict / moved-anchor on the TRUE-UP claim key: reachable only while `over`
+//       is still positive (before the first refund counted). We claim a true-up as a
+//       bare `pending` row WITHOUT issuing it (the provider call never runs), then
+//       re-drive with the SAME key but a DIFFERENT reissued_total (a moved anchor ⇒ a
+//       different `over` ⇒ a different fingerprint) ⇒ a hard `Conflict`, never a silent
+//       second true-up.
+// ===========================================================================
+
+#[compio::test]
+async fn true_up_redrive_converges_noop_after_issue() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "gap4-redrive").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let creator = make_user(&fx.state, "gap4").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    // A VOIDED invoice with $60 cash collected, no prior refunds.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at, voided_at) \
+             VALUES ($1, $2, DATE '2035-01-01', 'void', 6000, 0, 0, 6000, NOW(), NOW())",
+            &[&inv, &creator],
+        )
+        .await
+        .expect("seed void invoice");
+    append_payment(&fx.state, &inv, 6000, "in_gap4").await;
+
+    let stripe = RecordingStripe::default();
+    let mut conn = new_conn(&url).await;
+    let provider = refund::StripeRefundProvider { stripe: &stripe };
+    let idem = key(&inv, "g4-trueup");
+
+    // First true-up: reissued_total $10 ⇒ over = $60 − $0 − $10 = $50 ⇒ a REAL refund.
+    let first = refund::issue_true_up_refund(
+        &mut conn, &provider, &inv, 1000, Some("trueup"), &idem,
+    )
+    .await
+    .expect("true-up 1");
+    let first_id = match first {
+        RefundOutcome::Issued { refund_id, .. } => refund_id,
+        other => panic!("expected Issued, got {other:?}"),
+    };
+    assert_eq!(stripe.refund_count(), 1, "one Stripe refund issued");
+
+    // RE-DRIVE with the SAME key + SAME body ⇒ over is now $60 − $50 − $10 = 0 ⇒ the
+    // no-op Duplicate(empty) sentinel. NO second refund / NO second Stripe call.
+    let redrive = refund::issue_true_up_refund(
+        &mut conn, &provider, &inv, 1000, Some("trueup"), &idem,
+    )
+    .await
+    .expect("true-up re-drive");
+    assert_eq!(
+        redrive,
+        RefundOutcome::Duplicate(String::new()),
+        "re-drive of an issued true-up is a no-op (over-collection already returned), got {redrive:?}",
+    );
+    assert_eq!(stripe.refund_count(), 1, "re-drive must NOT issue a second Stripe refund");
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&inv])
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 1, "exactly one true-up refund row after the re-drive (the first $50)");
+    // The first refund is intact + issued.
+    let st: String = fx
+        .state
+        .control_pg
+        .query("SELECT status::text AS s FROM zeroship.refunds WHERE id = $1", &[&first_id])
+        .await
+        .expect("read")[0]
+        .get("s");
+    assert_eq!(st, "issued", "the original true-up stayed issued; the re-drive added nothing");
+}
+
+#[compio::test]
+async fn true_up_claim_key_conflict_on_moved_anchor() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "gap4-conflict").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let creator = make_user(&fx.state, "gap4c").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    // A VOIDED invoice with $60 cash collected.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at, voided_at) \
+             VALUES ($1, $2, DATE '2036-01-01', 'void', 6000, 0, 0, 6000, NOW(), NOW())",
+            &[&inv, &creator],
+        )
+        .await
+        .expect("seed void invoice");
+    append_payment(&fx.state, &inv, 6000, "in_gap4c").await;
+
+    let idem = key(&inv, "g4c-trueup");
+
+    // Claim a true-up as a bare `pending` row WITHOUT issuing it (drive `claim_refund_locked`
+    // directly on a held tx, then COMMIT the claim — the provider call never runs). A SMALL
+    // $10 claim leaves over-refund room so the re-claim below clears the precheck and reaches
+    // the claim-key (idempotency) conflict path rather than tripping the over-refund cap.
+    let mut conn = new_conn(&url).await;
+    {
+        let tx = conn.transaction().await.expect("tx");
+        let claim = refund::claim_refund_locked(
+            &tx, &creator, &inv, 1000, 1000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+        )
+        .await
+        .expect("claim");
+        assert!(matches!(claim, refund::ClaimResult::Claimed(_)), "the $10 true-up claim is under cash $60, got {claim:?}");
+        tx.commit().await.expect("commit claim");
+    }
+
+    // Re-claim with the SAME idempotency key but a DIFFERENT amount ($20). The sum
+    // $10(pending) + $20 = $30 ≤ cash $60, so the over-refund precheck PASSES — the call
+    // reaches the `ON CONFLICT (idempotency_key)` key hit, sees a DIFFERENT fingerprint
+    // (a moved anchor), and returns the hard `Conflict`.
+    {
+        let tx = conn.transaction().await.expect("tx2");
+        let conflict = refund::claim_refund_locked(
+            &tx, &creator, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+        )
+        .await
+        .expect("conflict claim");
+        assert!(
+            matches!(conflict, refund::ClaimResult::Conflict),
+            "same idempotency key + a DIFFERENT amount ($20 vs claimed $10) ⇒ Conflict, got {conflict:?}",
+        );
+        tx.commit().await.expect("commit");
+    }
+
+    // Exactly ONE refund row for the key — the conflict never claimed a second.
+    let n: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE idempotency_key = $1", &[&idem])
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(n, 1, "the moved-anchor conflict never appended a second refund row");
+}
