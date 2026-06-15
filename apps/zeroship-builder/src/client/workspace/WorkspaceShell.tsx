@@ -16,19 +16,13 @@
 // ErrorBoundary wrappers, every data hook, and ALL data-testid hooks
 // are unchanged — only presentation moved to crystal.
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell, Button, Center, Cluster, Drawer } from "@zeroship/ui";
 import { getProject } from "../api";
 import { TopBar } from "./TopBar";
 import { CanvasPills, pillsForTier, type CanvasPillId, type CanvasTier } from "./CanvasPills";
-import { PreviewCanvas } from "./PreviewCanvas";
-import { FilesCanvas } from "./canvases/FilesCanvas";
-import { LogsCanvas } from "./canvases/LogsCanvas";
-import { EnvCanvas } from "./canvases/EnvCanvas";
-import { SettingsCanvas } from "./canvases/SettingsCanvas";
-import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
 import { ProductTour } from "../components/ProductTour";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -38,6 +32,25 @@ import "./WorkspaceShell.css";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
 const TIER_KEY = "zeroship_canvas_tier";
+
+const PreviewCanvas = lazy(() =>
+  import("./PreviewCanvas").then((m) => ({ default: m.PreviewCanvas })),
+);
+const FilesCanvas = lazy(() =>
+  import("./canvases/FilesCanvas").then((m) => ({ default: m.FilesCanvas })),
+);
+const LogsCanvas = lazy(() =>
+  import("./canvases/LogsCanvas").then((m) => ({ default: m.LogsCanvas })),
+);
+const EnvCanvas = lazy(() =>
+  import("./canvases/EnvCanvas").then((m) => ({ default: m.EnvCanvas })),
+);
+const SettingsCanvas = lazy(() =>
+  import("./canvases/SettingsCanvas").then((m) => ({ default: m.SettingsCanvas })),
+);
+const ChatRail = lazy(() =>
+  import("./chat/ChatRail").then((m) => ({ default: m.ChatRail })),
+);
 
 function readTier(): CanvasTier {
   const v = lsGet(TIER_KEY);
@@ -182,7 +195,13 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   // one pane does not blank the whole workspace. The fallback at the
   // bottom keeps each pill clickable when an appId is not available.
   const canvasContent = (
-    <>
+    <Suspense
+      fallback={
+        <Center inline minHeight="100%" className="zb-ws__no-project">
+          loading…
+        </Center>
+      }
+    >
       {active === "preview" && (
         <ErrorBoundary label="the preview"><PreviewCanvas appId={appId} /></ErrorBoundary>
       )}
@@ -205,7 +224,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           No project selected.
         </Center>
       )}
-    </>
+    </Suspense>
   );
 
   return (
@@ -280,11 +299,13 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         {!isPhone && (
           <AppShell.Sidebar className="zb-ws__rail">
             <ErrorBoundary label="the chat rail">
-              <ChatRail
-                appName={projectName}
-                appId={appId}
-                seedBrief={seedBrief ?? undefined}
-              />
+              <Suspense fallback={null}>
+                <ChatRail
+                  appName={projectName}
+                  appId={appId}
+                  seedBrief={seedBrief ?? undefined}
+                />
+              </Suspense>
             </ErrorBoundary>
           </AppShell.Sidebar>
         )}
@@ -321,11 +342,13 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
               </Drawer.Header>
               <Drawer.Body className="zb-ws__drawer-body">
                 <ErrorBoundary label="the chat rail">
-                  <ChatRail
-                    appName={projectName}
-                    appId={appId}
-                    seedBrief={seedBrief ?? undefined}
-                  />
+                  <Suspense fallback={null}>
+                    <ChatRail
+                      appName={projectName}
+                      appId={appId}
+                      seedBrief={seedBrief ?? undefined}
+                    />
+                  </Suspense>
                 </ErrorBoundary>
               </Drawer.Body>
             </Drawer.Content>

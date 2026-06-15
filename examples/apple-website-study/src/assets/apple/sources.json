@@ -1,0 +1,341 @@
+{
+  "capturedFrom": "https://www.apple.com/iphone/",
+  "images": [
+    {
+      "index": 0,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_iphone_17pro__b8rt659h2ogi_large.png",
+      "file": "chapternav_nav_iphone_17pro__b8rt659h2ogi_large.png",
+      "alt": "",
+      "bytes": 7113,
+      "sha256": "81b8b941dc2527171959965eb646820b7a2aeb401fe03bf47c5f3cf385084b60"
+    },
+    {
+      "index": 1,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_iphone_air__f066mfdfhi62_large.png",
+      "file": "chapternav_nav_iphone_air__f066mfdfhi62_large.png",
+      "alt": "",
+      "bytes": 4966,
+      "sha256": "b64285e2e675d5be29ea72f9975db543fa6f59a03f66bc2c3fe52564a3f0110f"
+    },
+    {
+      "index": 2,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_iphone_17__bx67weh1ur5y_large.png",
+      "file": "chapternav_nav_iphone_17__bx67weh1ur5y_large.png",
+      "alt": "",
+      "bytes": 5783,
+      "sha256": "3232ae1612c029d386a62975897695d8e0c2faf3f896bc57cc3d8e888053e5a5"
+    },
+    {
+      "index": 3,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_iphone_17e__dea363vi6ggi_large.png",
+      "file": "chapternav_nav_iphone_17e__dea363vi6ggi_large.png",
+      "alt": "",
+      "bytes": 4569,
+      "sha256": "434b7143a818164f4d5d6d4d8108af8721056168c2ac19a8005ad492338dfc6e"
+    },
+    {
+      "index": 4,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_iphone_16__qsxcpuia0oam_large.png",
+      "file": "chapternav_nav_iphone_16__qsxcpuia0oam_large.png",
+      "alt": "",
+      "bytes": 6541,
+      "sha256": "96e26d2752ea72b15a6cab74ca17e94fcfbe53a462fee52fdbe437d04480b08a"
+    },
+    {
+      "index": 5,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_compare__e3xurpy671me_large.png",
+      "file": "chapternav_nav_compare__e3xurpy671me_large.png",
+      "alt": "",
+      "bytes": 6114,
+      "sha256": "135ba0a22314ca0f0aabd0b85c8915a423a87e776412ec11b01fd59e9ced185f"
+    },
+    {
+      "index": 6,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_accessories__d0p6sy36eueu_large.png",
+      "file": "chapternav_nav_accessories__d0p6sy36eueu_large.png",
+      "alt": "",
+      "bytes": 7185,
+      "sha256": "4ddbb51ccb3a435638cae647a0711a2dfbf21a0f3b43dbc7f53c78d5eba1eed3"
+    },
+    {
+      "index": 7,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_shop__en8a967ft5km_large.png",
+      "file": "chapternav_nav_shop__en8a967ft5km_large.png",
+      "alt": "",
+      "bytes": 4595,
+      "sha256": "429e65f72ae8bc2a79e1114f4c39c0f1012e9b7b5b3ff6c5c1c8ae4b7918aa4a"
+    },
+    {
+      "index": 8,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/chapternav/nav_ios__e5jic1u960ya_large.png",
+      "file": "chapternav_nav_ios__e5jic1u960ya_large.png",
+      "alt": "",
+      "bytes": 7371,
+      "sha256": "0241f500e55a69f356e79e0c63a1cb1a72db80c7376c5ca8091cd43831cbcd62"
+    },
+    {
+      "index": 9,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/select/iphone_17pro__t1j902iw6kya_large.jpg",
+      "file": "select_iphone_17pro__t1j902iw6kya_large.jpg",
+      "alt": "iPhone 17 Pro in cosmic orange finish showing partial-screen display and side angle shows - Action button, volume button and side button. Back exterior shows Pro Fusion camera system in top left corner.",
+      "bytes": 32085,
+      "sha256": "363670c5fad1f475765d1ce4463f5d09a0f739ad7d631d5771b1b8ca12bc98fe"
+    },
+    {
+      "index": 10,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/select/iphone_air__b5qmgl05ojyq_large.jpg",
+      "file": "select_iphone_air__b5qmgl05ojyq_large.jpg",
+      "alt": "iPhone Air in Sky Blue finish, partial-screen display and side angle shows - Action button, volume button and side button. Back exterior shows Fusion camera system in top left corner.",
+      "bytes": 18550,
+      "sha256": "aee689dac1e30f0e394b09315975fb3152178b48d2c44954e8c6107668253b4d"
+    },
+    {
+      "index": 11,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/select/iphone_17__fb1277oq3eaa_large.jpg",
+      "file": "select_iphone_17__fb1277oq3eaa_large.jpg",
+      "alt": "iPhone 17 in Lavender finish, partial-screen display and side angle shows - Action, volume and side button. Back exterior shows Dual Fusion camera system in top left corner.",
+      "bytes": 19490,
+      "sha256": "f12693ddf47a92bd3e44e8ebe7454c12a984fdcf478bb0fcf26ee195f6f79096"
+    },
+    {
+      "index": 12,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/select/iphone_17e__cq5ygzct314y_large.jpg",
+      "file": "select_iphone_17e__cq5ygzct314y_large.jpg",
+      "alt": "Front and back of iPhone 17e in soft pink, partial front screen, full back with Apple logo and single camera, side shows Action, volume and side buttons.",
+      "bytes": 31982,
+      "sha256": "144375185f9a6c15b2ddc6ebcae80593ab4d05eab6ee0ad834fd76e09d88ce9a"
+    },
+    {
+      "index": 13,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/select/iphone_16__b6tkv86m2gc2_large.jpg",
+      "file": "select_iphone_16__b6tkv86m2gc2_large.jpg",
+      "alt": "iPhone 16 in Ultramarine finish, partial-screen display and side angle shows - Action, volume and side button. Back exterior shows advanced dual-camera system in top left corner.",
+      "bytes": 23604,
+      "sha256": "f17ba8b29f7763a9fb95a994bb0989c9bed6f638f7ef11f10e6e9d6a6ac769e4"
+    },
+    {
+      "index": 14,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/guided-tour/guided_tour__e70yvshmbb2i_large.jpg",
+      "file": "guided-tour_guided_tour__e70yvshmbb2i_large.jpg",
+      "alt": "A Guided Tour, image of a person holding: iPhone 17 Pro, back exterior, cosmic orange finish, and an iPhone Air, side angle, sky blue finish",
+      "bytes": 72498,
+      "sha256": "17e001a8794bf332026977ddb4fc28b147327b96f3e5ec8b5e6d63ed200154b6"
+    },
+    {
+      "index": 15,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/trade_in__d4dobu5egm0y_large.jpg",
+      "file": "incentive_trade_in__d4dobu5egm0y_large.jpg",
+      "alt": "Hands exchanging trade-in iPhone 13 with Silicon cover, stickers on back exterior, for new iPhone 17 Pro in the box.",
+      "bytes": 16187,
+      "sha256": "017b6007e0ad90e118d05704a51e72ec5f3fe93778de6c217e2eab667d45e8e3"
+    },
+    {
+      "index": 16,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/buy__gdo4oaj4ekmm_large.jpg",
+      "file": "incentive_buy__gdo4oaj4ekmm_large.jpg",
+      "alt": "Front of Apple Card, titanium finish",
+      "bytes": 7043,
+      "sha256": "8133e6568039e73df9700385cb085d777f12a7f56e544c7ddf38c74be74ba90c"
+    },
+    {
+      "index": 17,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/carrier__dllu07ktiuaa_large.jpg",
+      "file": "incentive_carrier__dllu07ktiuaa_large.jpg",
+      "alt": "Verizon, AT&T, T- mobile, Boost mobile",
+      "bytes": 16051,
+      "sha256": "b7b2824dedfd5c0c697f82e48ea8726e5cdcf5def5664ba6679fde70af5b26fc"
+    },
+    {
+      "index": 18,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/setup__d177om0fsqs2_large.jpg",
+      "file": "incentive_setup__d177om0fsqs2_large.jpg",
+      "alt": "Apple devices and features, iCloud, iPhone with Face ID and charging cable, Camera, Messages.",
+      "bytes": 28639,
+      "sha256": "73b13774adba0176eaa32e47c9e5ac8e50207644e4af2acf409a8c60ec883f01"
+    },
+    {
+      "index": 19,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/deliver__by32yxmh41ma_large.jpg",
+      "file": "incentive_deliver__by32yxmh41ma_large.jpg",
+      "alt": "Apple shopping bag in white color with Apple Logo near top",
+      "bytes": 9141,
+      "sha256": "f85159a68dbf424f47f4e288b3177acf6f8e1182c545c79493f735dc1c61608f"
+    },
+    {
+      "index": 20,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/specialist__bxk6m5pp2k3m_large.jpg",
+      "file": "incentive_specialist__bxk6m5pp2k3m_large.jpg",
+      "alt": "Apple Specialist smiling with an approachable demeanor",
+      "bytes": 16377,
+      "sha256": "15e430f3f1cbb5972069e18c83b306e82d842dc3068a4ca48596aaef2cd10e7a"
+    },
+    {
+      "index": 21,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/incentive/app__evu5fxqoamye_large.jpg",
+      "file": "incentive_app__evu5fxqoamye_large.jpg",
+      "alt": "Apple Store App, shopping bag icon, blue",
+      "bytes": 11176,
+      "sha256": "a38f87157ed86c2998dfead212bc4f8403810e30a9c5c0083a40e07a89aaa8b9"
+    },
+    {
+      "index": 22,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/innovation__fmir5mp9zpay_large.jpg",
+      "file": "consider_innovation__fmir5mp9zpay_large.jpg",
+      "alt": "iPhone 17 Pro in cosmic orange finish, back exterior showcasing Pro Fusion camera system, LiDAR flash, and microphone.",
+      "bytes": 45715,
+      "sha256": "9c5206b9696f0b9140db1ad7cb56777cf2d41ba64c0fd41a8f8f6b5a37a8c37f"
+    },
+    {
+      "index": 23,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/camera__dez4cvpw83sm_large.jpg",
+      "file": "consider_camera__dez4cvpw83sm_large.jpg",
+      "alt": "Close-up black and white photo of person in sunglasses and large hat",
+      "bytes": 97200,
+      "sha256": "48ae13468324fe6fa0e407eeedc454c35b5a6b0be508b62874d5b9a32b4e6ee2"
+    },
+    {
+      "index": 24,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/chip__fh5j5on49p2e_large.jpg",
+      "file": "consider_chip__fh5j5on49p2e_large.jpg",
+      "alt": "Apple A19 Pro Chip",
+      "bytes": 17762,
+      "sha256": "cc9e1a473c7373e33f33841fa553ee4852b28c7da815ec1d47997a34d414c053"
+    },
+    {
+      "index": 25,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/ios__8z58j1o80yqi_large.jpg",
+      "file": "consider_ios__8z58j1o80yqi_large.jpg",
+      "alt": "Hand holding iPhone 17 Pro, Message pop-up on personalized Lock Screen",
+      "bytes": 61730,
+      "sha256": "3ee2438500ab49c94eea9254b22ac983d0bb2b79943c719f47fe983d914fd346"
+    },
+    {
+      "index": 26,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/environment__c8tpot4ti2qa_large.jpg",
+      "file": "consider_environment__c8tpot4ti2qa_large.jpg",
+      "alt": "iPhone Air in Sky Blue finish, back exterior showcasing Fusion camera system, 2-in-1 lens, LiDAR, flash and microphone",
+      "bytes": 25615,
+      "sha256": "fd1a4fc5573cf4ba73d188d5b1979f2c764a31a9b942d15f9e617b9c7c791171"
+    },
+    {
+      "index": 27,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/privacy__cv4ztv5gebyq_large.jpg",
+      "file": "consider_privacy__cv4ztv5gebyq_large.jpg",
+      "alt": "Silver Apple logo with padlock loop replacing leaf on top of logo",
+      "bytes": 7343,
+      "sha256": "48b78c7e4495055b00910c712da0624a62f64ca8a5407e1067a4cefa19ce7884"
+    },
+    {
+      "index": 28,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/safety__grtwyqpan8yi_large.jpg",
+      "file": "consider_safety__grtwyqpan8yi_large.jpg",
+      "alt": "Overhead zoomed out photo of Earth",
+      "bytes": 29320,
+      "sha256": "60ecabcd7ba29a03ab6163b50f9f464807ed11e55284868ba25985eefac1c316"
+    },
+    {
+      "index": 29,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/banner/privacy__cv4ztv5gebyq_large.jpg",
+      "file": "banner_privacy__cv4ztv5gebyq_large.jpg",
+      "alt": "A person holds iPhone 17 Pro in front of their face, back exterior facing outward, Cosmic Orange color",
+      "bytes": 66443,
+      "sha256": "ecf310f910f3a519f8207107174cc2adddc6791bc1edf9e67e48207010db878c"
+    },
+    {
+      "index": 30,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/essentials/accessories__ghgqo4vsxcqe_large.jpg",
+      "file": "essentials_accessories__ghgqo4vsxcqe_large.jpg",
+      "alt": "Side-by-side, new iPhone models showing accessories like the TechWoven Case with MagSafe, MagSafe charger, MagSafe battery, and Crossbody Strap",
+      "bytes": 27829,
+      "sha256": "6fbf80604347fea7c8c2939dac0fc73aad67a083e8bedbd907280add9dbd0f9c"
+    },
+    {
+      "index": 31,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/essentials/airtag_accessories__kpd2m3mfy4ia_large.jpg",
+      "file": "essentials_airtag_accessories__kpd2m3mfy4ia_large.jpg",
+      "alt": "AirTag and AirTag FineWoven Key Ring: available in a selection of colors, the key ring accessory covers the outer edge and displays the front with Apple logo or the back with custom engraving",
+      "bytes": 50222,
+      "sha256": "6de73d663ebc2070cc5e04659ed85bcbb581b5b5f6b416a50c8b09ee2f653b3d"
+    },
+    {
+      "index": 32,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/augment/mac__e1itm725bz8m_large.jpg",
+      "file": "augment_mac__e1itm725bz8m_large.jpg",
+      "alt": "iPhone and MacBook side by side showcasing mirror effect displayed on MacBook. Calendar and Notes widgets near top of display, apps near bottom.",
+      "bytes": 166901,
+      "sha256": "25db4b3b66c1773fd8398560f1471540b24c42ac38bff8247c340ef65f0a14bc"
+    },
+    {
+      "index": 33,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/augment/watch__co62o3s4jn6u_large.jpg",
+      "file": "augment_watch__co62o3s4jn6u_large.jpg",
+      "alt": "iPhone 17, front exterior, camera in use to capture group selfie, next to Apple Watch Ultra 3 with Camera Remote app open",
+      "bytes": 136562,
+      "sha256": "56d96288fad4a3058da52358123b7f62fc7b3c7b8bcfc51051f6637cca93fc9c"
+    },
+    {
+      "index": 34,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/augment/airpods__bz9s5pwm8j6u_large.jpg",
+      "file": "augment_airpods__bz9s5pwm8j6u_large.jpg",
+      "alt": "iPhone 17 Pro, front exterior, Apple Music app with Home Screen open, next to AirPods Pro 3 in open MagSafe Charging case",
+      "bytes": 113439,
+      "sha256": "61b88c5786b834d6726eafde10eb01a4e15829ecacb6c4f771d29cb36d8d11b8"
+    },
+    {
+      "index": 35,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/innovation__fmir5mp9zpay_small.jpg",
+      "file": "consider_innovation__fmir5mp9zpay_small.jpg",
+      "alt": "iPhone 17 Pro in cosmic orange finish, back exterior showcasing Pro Fusion camera system, LiDAR flash, and microphone.",
+      "bytes": 23809,
+      "sha256": "cacbdb8d2701a05a7099fbf3a52f72d284f2ae8d083f169985753f804d072913"
+    },
+    {
+      "index": 36,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/camera__dez4cvpw83sm_small.jpg",
+      "file": "consider_camera__dez4cvpw83sm_small.jpg",
+      "alt": "Close-up black and white photo of person in sunglasses and large hat",
+      "bytes": 47759,
+      "sha256": "4194fabf940c5660e0e4d74a3b5cfb52112df87ec964e99fdaadf70e6fea29c8"
+    },
+    {
+      "index": 37,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/chip__fh5j5on49p2e_small.jpg",
+      "file": "consider_chip__fh5j5on49p2e_small.jpg",
+      "alt": "Apple A19 Pro Chip",
+      "bytes": 10790,
+      "sha256": "2e6a3cc7278f438bcf231f7a6452006a82c37f396274e3d361df6bd920a3e61a"
+    },
+    {
+      "index": 38,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/ios__8z58j1o80yqi_small.jpg",
+      "file": "consider_ios__8z58j1o80yqi_small.jpg",
+      "alt": "Hand holding iPhone 17 Pro, Message pop-up on personalized Lock Screen",
+      "bytes": 32600,
+      "sha256": "daa80d23940d2ddaf21810c8775394992191d54f3a2ec3ffc25628088aef97f8"
+    },
+    {
+      "index": 39,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/environment__c8tpot4ti2qa_small.jpg",
+      "file": "consider_environment__c8tpot4ti2qa_small.jpg",
+      "alt": "iPhone Air in Sky Blue finish, back exterior showcasing Fusion camera system, 2-in-1 lens, LiDAR, flash and microphone",
+      "bytes": 11935,
+      "sha256": "e39dd83082ab7147b550e2f98f46ea4aee6a1874e77911257dc617a5c9dc3a37"
+    },
+    {
+      "index": 40,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/privacy__cv4ztv5gebyq_small.jpg",
+      "file": "consider_privacy__cv4ztv5gebyq_small.jpg",
+      "alt": "Silver Apple logo with padlock loop replacing leaf on top of logo",
+      "bytes": 4899,
+      "sha256": "33dacbc564a8df9804379a28b49634dade0bc03cf9bf507ec475aecd6a7f87b2"
+    },
+    {
+      "index": 41,
+      "source": "https://www.apple.com/v/iphone/home/cj/images/overview/consider/safety__grtwyqpan8yi_small.jpg",
+      "file": "consider_safety__grtwyqpan8yi_small.jpg",
+      "alt": "Overhead zoomed out photo of Earth",
+      "bytes": 16242,
+      "sha256": "81b063ef9ce1216f9963821483792312086c4e9433b8f9fd37605e3720280dd8"
+    }
+  ]
+}

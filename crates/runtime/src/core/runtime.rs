@@ -1433,17 +1433,27 @@ impl RuntimeInner {
     /// vdso syscall on every dispatch in the common (no-limit) case — this
     /// is the benchmark configuration and also the default for many deploys.
     fn check_v8_terminated(&mut self) -> bool {
-        // If no timer is configured, V8 cannot have been terminated by us.
-        // (Other code paths never call terminate_execution.)
-        if self.cpu_timer.is_none() {
-            return false;
+        // The CPU timer is the only thing that calls terminate_execution, and
+        // it only exists on Linux. On other targets V8 can never have been
+        // terminated by us, so this is always false.
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
         }
-        if !self.isolate.is_execution_terminating() {
-            return false;
+        #[cfg(target_os = "linux")]
+        {
+            // If no timer is configured, V8 cannot have been terminated by us.
+            // (Other code paths never call terminate_execution.)
+            if self.cpu_timer.is_none() {
+                return false;
+            }
+            if !self.isolate.is_execution_terminating() {
+                return false;
+            }
+            self.isolate.cancel_terminate_execution();
+            self.disarm_cpu_timer();
+            true
         }
-        self.isolate.cancel_terminate_execution();
-        self.disarm_cpu_timer();
-        true
     }
 
     // -----------------------------------------------------------------------

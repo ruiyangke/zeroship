@@ -1,151 +1,108 @@
 # zeroship-builder
 
-The zeroship AI builder — a fullstack zeroship app that **runs on the
-zeroship platform itself.** Replaces the standalone `web/dashboard/`
-+ `agent/` services with a single deployable.
+The zeroship AI builder is a fullstack zeroship app that runs on the
+zeroship platform itself. It is the creator-facing surface for starting a
+project, clarifying the brief, building in a sandbox, inspecting the result,
+and iterating through the chat rail.
 
-## Architecture
+The app is mid-rebuild. Keep changes contract-first: preserve the RPC ids,
+stream part names, sandbox ownership rules, and manifest resource policy
+before reshaping UI.
+
+## Current Shape
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Browser  ──HTTPS──►  gateway  ──►  worker (V8)          │
-│                                       │                  │
-│                                       ▼                  │
-│                              this app's fetch handler    │
-│                              (dist/server/index.js)      │
-│                                       │                  │
-│                              ┌────────┼────────┐         │
-│                              ▼        ▼        ▼         │
-│                          control   sandbox   OpenAI API  │
-│                          plane     service                │
-└──────────────────────────────────────────────────────────┘
+Browser
+  -> gateway
+  -> worker V8
+  -> builder fetch/RPC handlers
+       -> @zeroship/auth BFF session via currentUser()
+       -> @zeroship/kv for project/agent read models
+       -> zeroship-sandbox controller for files, exec, preview proxy
+       -> OpenAI/LangGraph/deepagents for wizard + builder agents
 ```
 
-The `@zeroship/vite-plugin` builds two outputs:
+The builder is a pure creator app. It does not import `@zeroship/control`,
+does not hold a control-plane credential, and does not deploy apps from the
+console. Projects are local builder records backed by KV; generated app bytes
+live in the per-project sandbox.
 
-- **Client bundle** (`dist/assets/`) — React + Tailwind + shadcn/ui
-  + CodeMirror 6, mounts at `/`.
-- **Server bundle** (`dist/server/index.js`) — every
-  `"use server"` module compiled into RPC stubs the runtime
-  registers as a fetch handler.
-
-The client calls server functions as plain async functions —
-imports get rewritten by the plugin into chunked RPCs over the wire.
-
-## What runs in V8 (no Node)
+## Server Modules
 
 | Module | Purpose |
-|---|---|
-| `src/client/api/auth.ts` | Calls same-origin `/auth/*` directly so login / signup / logout can receive control-plane `Set-Cookie` headers in the browser; `src/server/preview-proxy.ts` proxies those raw fetches in deployed apps. |
-| `src/server/apps.ts` | Cookie-forwarding RPC proxy to control plane `/api/apps/*` for app CRUD, env vars, secrets, logs, plan switching. It does not attach `CONTROL_KEY` to browser-callable RPCs. |
-| `src/server/sandbox.ts` | Proxies to `zeroship-sandbox` for file ops + shell exec inside the per-project Docker container. Holds the sandbox token (browser never sees it). |
-| `src/server/chat.ts` | Builder agent — deepagents + LangGraph in V8 (~691 LOC). Translates the LangChain event stream into AI SDK v6 UI Message Stream Protocol on the wire. Marked `lazy: true` so the heavy graph only loads on first call. |
-| `src/server/wizard.ts` | Pre-coding clarification flow — plain LangGraph (no deepagents, no sandbox) in V8 (~495 LOC). Loops surveys against the LLM until it emits a terminal `data-brief` chunk. Also `lazy: true`. |
+| --- | --- |
+| `src/server/config.ts` | Manifest resource policy. `rpc:projects`, `rpc:sandbox`, `rpc:agents`, and `rpc:chat` are user-gated; `rpc:wizard` is anonymous/public; worker stubs are admin-gated. |
+| `src/server/projects.ts` | Project registry in KV plus `.env` and log helpers over sandbox files. |
+| `src/server/sandbox.ts` | Canvas-facing file and live-preview RPCs. |
+| `src/server/preview-proxy.ts` | Same-origin `/api/preview/:appId/:port/*` proxy to the sandbox controller. |
+| `src/server/chat.ts` | Builder stream. Translates deepagents/LangGraph events into AI SDK UI message stream parts. |
+| `src/server/wizard.ts` | Pre-coding clarification stream. Emits `data-survey` and terminal `data-brief` parts. |
+| `src/server/agents.ts` | Issue and quality read models used by the workspace and subagent cards. |
+| `src/server/pm-worker.ts` / `sre-worker.ts` | Scheduled-worker stubs for PM/SRE digests; scheduler wiring is still future work. |
 
-## Project layout
+Server-only helper code lives in `src/server/internal/`. Do not import those
+modules from client code.
 
-```
-apps/zeroship-builder/
-├── package.json
-├── vite.config.ts          (react + tailwind + zeroship plugins)
-├── tsconfig.json
-├── index.html
-└── src/
-    ├── server.ts           (entry — re-exports every server fn)
-    ├── server/
-    │   ├── config.ts       (resource auth/rate-limit policy)
-    │   ├── apps.ts
-    │   ├── agents.ts        (issue + quality read model)
-    │   ├── sandbox.ts
-    │   ├── chat.ts          (Builder — deepagents + LangGraph, lazy)
-    │   ├── wizard.ts        (clarification — plain LangGraph, lazy)
-    │   ├── pm-worker.ts     (PM digest RPC)
-    │   ├── sre-worker.ts    (SRE monitor RPC)
-    │   └── internal/
-    │       ├── env.ts
-    │       ├── critic.ts       (Critic SubAgent)
-    │       ├── reviewer.ts     (Reviewer SubAgent)
-    │       ├── pm.ts           (PM SubAgent)
-    │       ├── sre.ts          (SRE SubAgent)
-    │       ├── tools.ts        (tool defs)
-    │       ├── middleware.ts   (deepagents middleware)
-    │       ├── persist.ts      (checkpointer)
-    │       ├── prompts.ts      (system prompts)
-    │       ├── survey-wire.ts  (data-survey wire)
-    │       ├── agent-writes.ts (agent-write fan-out)
-    │       └── sandbox-backend.ts (sandbox HTTP client)
-    └── client/
-        ├── main.tsx
-        ├── App.tsx
-        ├── index.css       (Tailwind v4 + shadcn theme tokens)
-        ├── api/            (re-exports of server functions)
-        ├── auth/           (AuthProvider, useAuth)
-        ├── components/ui/  (shadcn primitives — button, card, …)
-        ├── lib/utils.ts    (cn helper)
-        ├── pages/          (Home, Login, Signup, Account)
-        ├── workspace/      (ProjectWorkspace + tabs)
-        └── builder/        (Chat + tool-call rendering)
-```
+## Client Surfaces
 
-The files in `src/server/internal/` are server-only helpers (SubAgents,
-prompts, middleware, wire shapes) - NOT client-facing RPC procedure
-modules. They're imported by server modules and never reach the browser.
-`chat.ts` and `wizard.ts` carry `lazy: true` in their config so the
-heavy LangGraph / deepagents code only loads on the first call to
-`/__zeroship/v1/chat` or `/__zeroship/v1/wizard` — boot stays cheap.
+| Surface | Path |
+| --- | --- |
+| Public marketing/auth/legal pages | `/`, `/pricing`, `/skills`, `/templates`, `/about`, `/changelog`, `/login`, `/signup`, `/legal/*` |
+| Signed-in project gallery | `/home` |
+| Anonymous pre-coding wizard | `/new` |
+| Workspace | `/p/:appId/*` |
 
-## Configuration (env / secrets)
+The active chat surface is `src/client/workspace/chat/*` and uses
+`@ai-sdk/react` with explicit `chatTransport()` / `wizardTransport()`
+wrappers in `src/client/api.ts`.
+
+## Key Contracts
+
+- Project RPC ids are `projects.*` and inherit auth/rate-limit from
+  `rpc:projects`.
+- Missing projects fail; they must not synthesize placeholder records.
+- The wizard stream emits `data-survey` and `data-brief`.
+- The builder stream emits text, tool receipts, `data-survey`,
+  `data-critic-round`, `data-reviewer-round`, `data-pm-recommendation`,
+  and `data-sre-finding`.
+- Sandbox ownership is `(user_id, project_id)`, where the user id comes from
+  `currentUser()` in production and the dev synthetic id only in local dev.
+- The console has no deploy tool. The quality tool is `review` and ships
+  nothing.
+
+## Configuration
 
 | Var | What | Default in dev |
-|---|---|---|
-| `CONTROL_URL` | control plane base URL | `http://localhost:9090` |
-| `SANDBOX_URL` | sandbox service URL | `http://localhost:9091` |
+| --- | --- | --- |
+| `SANDBOX_URL` | sandbox controller base URL | `http://localhost:9091` |
 | `SANDBOX_TOKEN` | sandbox bearer token | `test` |
-| `OPENAI_API_KEY` | OpenAI API key | (required for chat) |
+| `OPENAI_API_KEY` | model key for chat, wizard, reviewer, PM, SRE | required for agent flows |
+| `ZEROSHIP_SDK_REGISTRY` | optional private registry line injected into sandbox `.npmrc` | unset |
 
-In production, set via `zeroship secret set` per app.
-
-## Build + deploy
+## Commands
 
 ```bash
-# install deps (uses local file:../../sdks/vite-plugin)
-npm install
-
-# dev — vite serves client + the plugin runs server fns in-process
-npm run dev
-
-# production — emits dist/ + dist/server/index.js
-npm run build
-
-# deploy to zeroship — wraps the build into a .appbundle
-zeroship deploy --app=zeroship-builder
+pnpm --filter zeroship-builder test
+pnpm --filter zeroship-builder build
+pnpm --filter zeroship-builder test:e2e
 ```
 
-After deploy, the app is reachable at `/apps/zeroship-builder/` on
-the gateway. Set the env vars + `OPENAI_API_KEY` secret first.
+`pnpm --filter zeroship-builder build` emits `dist/` and `dist/app.zship`.
+After build, inspect the resource policy with:
 
-## What this proves
+```bash
+tar -xOf apps/zeroship-builder/dist/app.zship manifest.json | jq '.resources'
+```
 
-1. **The platform can host its own creator surface.** The dashboard
-   and the agent are now *zeroship apps*, deployed via the same
-   pipeline a creator uses for their app. Dogfood: complete.
-2. **No Node-compat compromises.** The chat/agent loop is pure JS
-   (vanilla OpenAI tool-use); LangGraph/deepagents stay on the host
-   for the standalone dashboard if anyone wants them, but the
-   first-class builder is V8-clean.
-3. **Server functions are real.** ~13 KB of compiled server code
-   handles apps CRUD, sandbox file ops, and a full agent
-   loop. The `"use server"` transform is doing what it advertises.
+## Rebuild Direction
 
-## Differences vs. `web/dashboard/`
+Prefer vertical slices over a blind rewrite:
 
-| | dashboard | builder |
-|---|---|---|
-| runtime | Node + Vite dev / static SPA | zeroship V8 fetch handler |
-| auth surface | calls `/auth/*` directly | calls `/auth/*` directly |
-| agent | separate Bun service (deepagents/LangGraph) | inline server fn (vanilla OpenAI loop) |
-| sandbox | calls `/agent/*` proxy | server functions proxy sandbox HTTP |
-| deploy | static files served by anything | `zeroship deploy` |
-
-The dashboard remains as a fallback for environments where the
-zeroship platform isn't available; the builder is what creators get.
+1. Stabilize manifest/RPC/security contracts.
+2. Delete dead compatibility paths and stale comments.
+3. Keep the server stream contracts while rebuilding the client shell.
+4. Keep splitting heavy workspace/canvas bundles; route and workspace shell
+   chunks are split, but the files editor still carries large CodeMirror/vendor
+   chunks.
+5. Promote E2E journeys that represent actual product flows, and remove
+   mock-era tests that assert deleted behavior.

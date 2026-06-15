@@ -47,6 +47,16 @@ export interface ProjectRecord {
   archived?: boolean;
 }
 
+export class ProjectNotFoundError extends Error {
+  readonly status = 404;
+  readonly code = "NOT_FOUND";
+
+  constructor(id: string) {
+    super(`project not found: ${id}`);
+    this.name = "ProjectNotFoundError";
+  }
+}
+
 // The acting creator's id resolves via `internal/creator-scope.ts`
 // (shared with the issues/quality namespaces, SEC-10): platform subject
 // when authenticated, the stable dev id behind `ZEROSHIP_DEV=1`, and a
@@ -76,15 +86,7 @@ export const getProject = action(async (id: string): Promise<ProjectRecord> => {
   const projects = await loadProjects();
   const found = projects.find((p) => p.id === id);
   if (found) return found;
-  // A project the registry doesn't know about (e.g. an old link or a
-  // hand-typed id). Surface a minimal record so the workspace can still
-  // open the sandbox rather than dead-ending on "not found".
-  return {
-    id,
-    name: id,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
+  throw new ProjectNotFoundError(id);
 }, { id: "projects.getProject" });
 
 /**

@@ -16,7 +16,7 @@ body,
 
 body {
   margin: 0;
-  background: var(--zs-surface);
+  background: var(--zs-surface-bg);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
   font-size: var(--zs-text-body-size);

@@ -53,6 +53,7 @@ import {
   deleteProject,
   getEnv,
   getLogs,
+  getProject,
   listProjects,
   parseDotenv,
   serializeDotenv,
@@ -180,6 +181,14 @@ describe("project registry over KV", () => {
 
     await deleteProject(created.id);
     await expect(listProjects()).resolves.toEqual([]);
+  });
+
+  it("does not synthesize a project record for unknown ids", async () => {
+    await expect(getProject("prj_missing")).rejects.toMatchObject({
+      name: "ProjectNotFoundError",
+      status: 404,
+      code: "NOT_FOUND",
+    });
   });
 
   it("scopes the registry per creator", async () => {

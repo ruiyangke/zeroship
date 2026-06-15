@@ -72,13 +72,10 @@ function deriveProjectName(idea: string): string {
   return `${base}-${suffix}`.slice(0, 64);
 }
 
-// Inline minimal frame instead of PageFrame because the latter pulls
-// in TopBar → useAuth → AuthProvider, which lives in the orphan tree
-// from the pre-redesign auth pages and has broken imports. A later cleanup
-// restores AuthProvider at the App root and we'll switch to PageFrame
-// then. Keeping the wizard layout decoupled also matches §4.8.2b: the
-// wizard runs *before* a project (and arguably before a real auth
-// session in some flows), so a lightweight standalone frame fits.
+// Inline minimal frame instead of PageFrame: the wizard runs before a
+// project exists (and before a real auth session in some flows), so a
+// lightweight standalone frame fits better than the signed-in console
+// chrome.
 
 export function WizardWorkspace() {
   const [searchParams] = useSearchParams();

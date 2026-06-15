@@ -1,0 +1,62 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: #fbfbfd;
+  color: #1d1d1f;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #fbfbfd;
+  color: #1d1d1f;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+a {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+.zs-theme-root {
+  min-height: 100vh;
+}
+
+.apple-demo {
+  --page-width: 1260px;
+  --nav-width: 1024px;
+  --globalnav-height: 44px;
+  min-height: 100vh;
+  position: relative;
+  overflow-x: clip;
+  background: #fbfbfd;
+  color: #1d1d1f;
+}
+
+.apple-demo main {
+  padding-top: var(--globalnav-height);
+}
