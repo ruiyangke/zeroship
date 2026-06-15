@@ -141,6 +141,60 @@ Exactly-once revenue under crash × >24h re-drive × multi-instance:
   it is never refunded. A DOWNWARD re-weight mid-period does NOT claw back already
   exported CU; treat metric weights as append-only within a billing period.
 
+### Real-API divergences from the mock (faithful e2e findings)
+
+The in-test mock (`crates/control/tests/metering_export_test.rs`) is a fast
+in-process HTTP server. The **faithful e2e** against REAL `api.stripe.com` (test
+mode) — `tests/e2e_stripe_meters_export.sh` +
+`crates/control/tests/metering_export_stripe_live_test.rs` — provisions a real
+Billing Meter via `POST /v1/billing/meters` and drives the SAME export cron
+through the real cyper `StripeClient` over the wire. Findings:
+
+1. **The aggregate is EVENTUALLY consistent.** Real Stripe aggregates
+   `meter_events` ASYNCHRONOUSLY: a `2xx`-accepted event is NOT immediately
+   reflected in `GET .../event_summaries` (observed convergence lag tens of
+   seconds to a couple of minutes; the full 4-test live run took ~200s, dominated
+   by aggregate-convergence polling). The mock answers `event_summaries`
+   synchronously. ⇒ The e2e POLLS the aggregate for convergence (up to 180s/leg);
+   the export cron is safe because the local high-water — not the live aggregate —
+   is the authoritative post-push state, and the C2 reconcile runs on the next
+   tick.
+2. **`event_summaries` filters by the `[start_time, end_time)` window AND requires
+   day-aligned bounds; the mock ignores both.** Real Stripe only counts events
+   whose `timestamp` falls inside `[start_time, end_time)`, and with
+   `value_grouping_window=day` (which `meter_event_summary` sends) BOTH bounds must
+   align to UTC day boundaries. `report_usage` stamps the event at the consumption
+   instant (`now`) and `reported_total` queries `[period.start, period.end)`, so
+   the reconcile is correct **only because `now ∈ [period.start, period.end)`** for
+   the current billing month (period start/end are first-of-month 00:00 UTC, i.e.
+   already day-aligned). The mock sums by customer regardless of window, so the
+   mock test can use far-future synthetic buckets (`month_period(2031, …)`) while
+   stamping at `now`; against real Stripe that combination returns an empty
+   aggregate. The live e2e therefore uses the **current calendar month**.
+3. **The `[now−35d, now+5min]` timestamp window is REAL — confirmed against
+   api.stripe.com.** A meter event stamped at `period.end` (the first of NEXT
+   month — weeks in the future) is rejected with HTTP `400` and is NOT counted;
+   the same event stamped at `now` is accepted. This is the C1 bug-class proven on
+   the real API (the pre-fix code stamped at `period.end`): a `period.end`-stamped
+   push is a literal $0-revenue black hole. (Verified per
+   docs.stripe.com/api/billing/meter-event/create: "Must be within the past 35
+   calendar days or up to 5 minutes in the future.")
+
+**No provider bug was found.** The wire shape — form body
+`event_name` + `payload[stripe_customer_id]` + `payload[value]` + `identifier` +
+`timestamp`, the `identifier`-as-`Idempotency-Key`, the `Stripe-Version` pin, and
+the `event_summaries` `data[].aggregated_value` readback — matches the real
+`POST /v1/billing/meter_events` + `GET .../event_summaries` contracts exactly, and
+a real meter provisioned with `customer_mapping.event_payload_key=stripe_customer_id`
++ `value_settings.event_payload_key=value` + `default_aggregation.formula=sum`
+aggregated the pushed deltas to the exact billable-CU total (incl. the
+`gross − included` M1 case). The divergences above are test-design constraints the
+faithful e2e encodes (poll for convergence; current-month period), documented so
+future edits don't reintroduce the far-future-period or read-after-write
+assumptions the mock would let pass. Billing Meters are standard test-mode
+resources — meter creation succeeded on the same test account where Connect is
+NOT enabled (see `tests/e2e_stripe_webhooks_live.sh`).
+
 ## OpenMeter export (M-OpenMeter)
 
 An **export-only** rail (`--metering-provider openmeter`): the platform PUSHES
