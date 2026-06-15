@@ -517,7 +517,7 @@ pub async fn issue_refund<C: GenericClient + Sync, P: RefundProvider>(
 ) -> Result<RefundOutcome, RegistryError> {
     issue_refund_inner(
         conn, provider, invoice_id, amount_cents, subtotal_cents, tax_cents, destination, reason,
-        idempotency_key, false,
+        idempotency_key,
     )
     .await
 }
@@ -662,7 +662,6 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     destination: RefundDestination,
     reason: Option<&str>,
     idempotency_key: &str,
-    allow_voided: bool,
 ) -> Result<RefundOutcome, RegistryError> {
     if amount_cents <= 0 {
         return Err(RegistryError::InvalidInput(format!(
@@ -696,11 +695,11 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     let creator_id: uuid::Uuid = row.get("creator_id");
     let currency: String = row.get("currency");
     let status: String = row.get("status");
-    // A finalized invoice is refundable. The true-up bridge (`allow_voided`) also
-    // refunds a deliberately-VOIDED invoice's over-collection — the cap reads
-    // Σ(invoice_payments), which survives the void, so it stays money-correct. A draft
-    // invoice is never refundable.
-    let refundable = status == "finalized" || (allow_voided && status == "void");
+    // Only a finalized invoice is refundable here; a draft or void invoice is not. (The
+    // true-up bridge refunds a VOIDED invoice's over-collection, but it no longer routes
+    // through this function — it recomputes under the per-creator lock via
+    // `claim_true_up_locked` (HIGH-1), so this path is finalized-only.)
+    let refundable = status == "finalized";
     if !refundable {
         return Ok(RefundOutcome::InvalidInvoice(format!(
             "invoice {invoice_id} is {status} — not refundable"

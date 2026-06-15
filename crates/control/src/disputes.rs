@@ -506,11 +506,13 @@ async fn promote_pending_dispute_in_tx<C: GenericClient + Sync>(
             "dispute amount must be > 0 to promote a pending dispute (got {amount_cents})"
         )));
     }
-    // SERIALIZE per creator before appending the dispute_debit. This runs inside the
-    // linkage-writer's shared txn (whose own `charge` append is a monotonic cash INCREASE —
-    // conservative for the cap, so it need not be pre-locked); the DECREASE we are about to
-    // append DOES need serializing against a concurrent refund. `pg_advisory_xact_lock` is
-    // re-entrant and auto-releases at the shared txn's commit, so taking it here is safe.
+    // SERIALIZE per creator before appending the dispute_debit. This runs in its OWN
+    // per-dispute txn (opened by `resolve_pending_disputes_for_linkage`), so the lock is taken
+    // here as the txn's first statement and auto-releases at this txn's commit. The
+    // linkage-writer's `charge` append that created the pi_/ch_→invoice binding was a monotonic
+    // cash INCREASE committed earlier (conservative for the cap, so it need not have been
+    // pre-locked); the DECREASE we are about to append DOES need serializing against a
+    // concurrent refund — which is exactly what this lock provides.
     lock_dispute_creator(tx, invoice_id).await?;
     let dsp_id = zeroship_core::typed_id::new_dispute_id();
     // ON CONFLICT DO NOTHING: a racing in-order `.created` may already hold the row. We don't
