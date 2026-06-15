@@ -1145,3 +1145,99 @@ async fn pr8_schema_objects_present() {
         .get("n");
     assert_eq!(pending, 1, "pending_disputes holding table must exist");
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// C1: the dispute money-write rail takes the SAME per-creator advisory lock every
+//     sibling money path (refund/credit/void/proration) takes — so a dispute's
+//     `dispute_debit` cannot interleave with a concurrent refund reading the cap
+//     anchor (`cash = Σ(invoice_payments)`) pre-debit. We prove the lock by holding
+//     the per-creator key on an observer txn and showing `record_dispute_created`
+//     BLOCKS (its `lock_dispute_creator` waits on the held key) until we release it.
+//
+// RED pre-fix: `disputes.rs` took NO advisory lock, so `record_dispute_created`
+//     would commit the dispute row WHILE the observer held the creator key — the
+//     `timeout` would NOT elapse and the post-release assert that the row appears
+//     "only after release" would be false (the row exists during the held window).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_created_takes_per_creator_advisory_lock() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "dsp-lock").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 9000);
+    assert_eq!(cash_collected(&conn, &inv).await, 9000, "cash starts at the charge");
+
+    // (1) An OBSERVER connection takes the per-creator advisory lock in an OPEN txn and
+    // HOLDS it — exactly the key every sibling money path (and now the dispute rail) takes.
+    let mut obs = side_conn(&url).await;
+    let obs_tx = obs.transaction().await.expect("observer tx");
+    obs_tx
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
+            &[&creator.to_string()],
+        )
+        .await
+        .expect("observer takes the creator lock");
+
+    // (2) On a DEDICATED connection, call the REAL dispute money-write. It must BLOCK on
+    // `lock_dispute_creator` while the observer holds the key. A bounded `timeout` therefore
+    // ELAPSES — the strongest faithful proof the path waits on the per-creator lock.
+    let mut writer = side_conn(&url).await;
+    let du = format!("du_lock_{}", Uuid::new_v4().simple());
+    let blocked = compio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        zeroship_control::disputes::record_dispute_created(
+            &mut writer, &inv, 9000, "usd", Some("fraudulent"), None, &du,
+        ),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "record_dispute_created must BLOCK on the held per-creator advisory lock — it returned \
+         while the observer held the key, so the dispute rail took NO lock (the C1 bug)",
+    );
+    // While blocked, NOTHING was written (the txn is still waiting on the lock).
+    assert_eq!(dispute_row_count(&conn, &du).await, 0, "no dispute row written while blocked");
+    assert_eq!(cash_collected(&conn, &inv).await, 9000, "cash untouched while blocked");
+
+    // A DIFFERENT creator's key is free — the lock serializes per creator only.
+    let other = make_creator(&conn).await;
+    let other_free: bool = conn
+        .query(
+            "SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got",
+            &[&other.to_string()],
+        )
+        .await
+        .expect("try other")[0]
+        .get("got");
+    assert!(other_free, "a DIFFERENT creator's advisory lock is free — per-creator, not global");
+
+    // Drop the blocked writer's connection so its abandoned (timed-out) txn can't race the
+    // retry for the lock once it's released — the retry below owns the write deterministically.
+    drop(writer);
+
+    // (3) RELEASE the observer lock (commit the holding txn). The dispute write — re-driven on
+    // a fresh connection now that the key is free — completes, writing the row + the debit.
+    obs_tx.commit().await.expect("release observer lock");
+    let mut writer2 = side_conn(&url).await;
+    zeroship_control::disputes::record_dispute_created(
+        &mut writer2, &inv, 9000, "usd", Some("fraudulent"), None, &du,
+    )
+    .await
+    .expect("dispute write completes once the lock is free");
+
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "the dispute row landed after release");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "one dispute_debit");
+    assert_eq!(
+        cash_collected(&conn, &inv).await,
+        0,
+        "the dispute_debit tightened the cap by the full disputed amount (9000 − 9000)",
+    );
+    let _ = pi;
+}
