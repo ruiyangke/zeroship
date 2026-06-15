@@ -126,7 +126,7 @@ CREATE TRIGGER billing_disputes_controlled_update_trg
 --rollback DROP TRIGGER IF EXISTS billing_disputes_controlled_update_trg ON zeroship.billing_disputes;
 --rollback DROP FUNCTION IF EXISTS zeroship.billing_disputes_controlled_update();
 
---changeset zeroship:billing-disputes-grants splitStatements:false
+--changeset zeroship:billing-disputes-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- SELECT/INSERT/UPDATE: UPDATE is needed for the open→won/lost lifecycle progression

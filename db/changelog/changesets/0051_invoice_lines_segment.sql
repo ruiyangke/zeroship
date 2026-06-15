@@ -67,7 +67,7 @@ ALTER TABLE zeroship.billing_line_provider_refs
 --rollback ALTER TABLE zeroship.invoice_lines DROP COLUMN segment_no;
 --rollback ALTER TABLE zeroship.billing_line_provider_refs ADD CONSTRAINT billing_line_provider_refs_line_fk FOREIGN KEY (invoice_id, app_id) REFERENCES zeroship.invoice_lines(invoice_id, app_id) ON DELETE CASCADE;
 
---changeset zeroship:invoice-lines-segment-delete-grants splitStatements:false
+--changeset zeroship:invoice-lines-segment-delete-grants splitStatements:false rollbackSplitStatements:false
 -- round 4, MAJOR-1: the reconcile now DELETEs orphaned DRAFT segment lines + their
 -- provider-refs when a re-drive builds FEWER segments than a prior crashed drive
 -- posted (else the draft invoice sweeps the stale higher-segment Stripe items and

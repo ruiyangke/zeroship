@@ -59,7 +59,7 @@ CREATE TABLE zeroship.usage_reports_seen (
 -- (NO period index here. Added by the retention-activation PR alongside the cron.)
 --rollback DROP TABLE zeroship.usage_reports_seen;
 
---changeset zeroship:metering-usage-grants splitStatements:false
+--changeset zeroship:metering-usage-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON zeroship.usage_aggregates   TO zeroship_control';

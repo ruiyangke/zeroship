@@ -130,7 +130,7 @@ CREATE TRIGGER credit_ledger_immutable_trg
 --rollback DROP TRIGGER IF EXISTS credit_ledger_immutable_trg ON zeroship.credit_ledger;
 --rollback DROP FUNCTION IF EXISTS zeroship.credit_ledger_immutable();
 
---changeset zeroship:credit-ledger-grants splitStatements:false
+--changeset zeroship:credit-ledger-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- INSERT-only beyond SELECT: append-only, no UPDATE/DELETE grant (the trigger

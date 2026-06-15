@@ -78,7 +78,7 @@ ALTER TABLE zeroship.creator_accounts
 -- a policy reverts to the in-code 15% default by leaving the row absent, but the
 -- operator path never deletes). Guard on role existence like 0040/0045 so a
 -- dev/test DB without the 0025 role model (superuser-only) still migrates.
---changeset zeroship:creator-fee-policy-grants splitStatements:false
+--changeset zeroship:creator-fee-policy-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.creator_fee_policy TO zeroship_control';

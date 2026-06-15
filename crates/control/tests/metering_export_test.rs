@@ -623,15 +623,6 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
         .expect("ingest usage");
 }
 
-/// A FIXED period start (a calendar-month boundary) so the test is deterministic
-/// and isolated from "now". May 2026.
-fn fixed_period() -> i64 {
-    chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_746_057_600, 0) // 2026-05-01T00:00:00Z
-        .single()
-        .unwrap()
-        .timestamp()
-}
-
 /// A DISTINCT, isolated calendar-month period bucket keyed off `year_month`
 /// (e.g. `(2031, 3)`). Each new test uses its OWN month so the FLEET-WIDE export
 /// sweep (which keys on `period_start`) sees only that test's app — making the
@@ -662,7 +653,7 @@ async fn export_pushes_cu_as_meter_event_with_correct_value_customer_and_identif
     };
     let fx = build_fixture(&url, "push").await;
     let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let period = fixed_period();
+    let period = month_period(2031, 5); // distinct isolated bucket
 
     let creator = make_user(&fx.state, "push").await;
     let plan = make_plan(&fx.state).await;
@@ -721,7 +712,7 @@ async fn second_export_tick_with_no_new_usage_is_a_noop() {
     };
     let fx = build_fixture(&url, "noop").await;
     let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let period = fixed_period();
+    let period = month_period(2031, 6); // distinct isolated bucket
 
     let creator = make_user(&fx.state, "noop").await;
     let plan = make_plan(&fx.state).await;
@@ -754,7 +745,7 @@ async fn export_computes_delta_across_two_ticks() {
     };
     let fx = build_fixture(&url, "delta").await;
     let _export = EXPORT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let period = fixed_period();
+    let period = month_period(2031, 7); // distinct isolated bucket
 
     let creator = make_user(&fx.state, "delta").await;
     let plan = make_plan(&fx.state).await;

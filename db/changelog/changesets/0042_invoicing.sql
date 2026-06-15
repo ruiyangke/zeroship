@@ -212,7 +212,7 @@ CREATE TRIGGER invoice_lines_immutable_trg
 --rollback DROP TRIGGER IF EXISTS invoice_lines_immutable_trg ON zeroship.invoice_lines;
 --rollback DROP FUNCTION IF EXISTS zeroship.invoice_lines_immutable();
 
---changeset zeroship:invoice-and-creator-grants splitStatements:false
+--changeset zeroship:invoice-and-creator-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON zeroship.creator_billing            TO zeroship_control';

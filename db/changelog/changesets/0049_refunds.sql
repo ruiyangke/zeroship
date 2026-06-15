@@ -192,7 +192,7 @@ CREATE TRIGGER refunds_immutable_trg
 --rollback DROP TRIGGER IF EXISTS refunds_immutable_trg ON zeroship.refunds;
 --rollback DROP FUNCTION IF EXISTS zeroship.refunds_immutable();
 
---changeset zeroship:refunds-grants splitStatements:false
+--changeset zeroship:refunds-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- refunds: SELECT/INSERT/UPDATE (pending→issued status flip + issued_at). No DELETE

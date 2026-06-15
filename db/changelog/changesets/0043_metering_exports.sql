@@ -29,7 +29,7 @@ CREATE POLICY tenant_isolation ON zeroship.metering_exports
 --rollback ALTER TABLE zeroship.metering_exports NO FORCE ROW LEVEL SECURITY;
 --rollback ALTER TABLE zeroship.metering_exports DISABLE ROW LEVEL SECURITY;
 
---changeset zeroship:metering-exports-grants splitStatements:false
+--changeset zeroship:metering-exports-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.metering_exports TO zeroship_control';

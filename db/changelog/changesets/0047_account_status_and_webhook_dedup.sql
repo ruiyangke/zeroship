@@ -58,7 +58,7 @@ CREATE INDEX idx_creator_billing_status_past_due
 --rollback DROP TABLE zeroship.creator_billing_status_history;
 --rollback DROP TABLE zeroship.creator_billing_status;
 
---changeset zeroship:creator-billing-status-grants splitStatements:false
+--changeset zeroship:creator-billing-status-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.creator_billing_status         TO zeroship_control';
@@ -83,7 +83,7 @@ CREATE TABLE zeroship.stripe_events_seen (
 );
 --rollback DROP TABLE zeroship.stripe_events_seen;
 
---changeset zeroship:stripe-events-seen-grants splitStatements:false
+--changeset zeroship:stripe-events-seen-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT ON zeroship.stripe_events_seen TO zeroship_control';

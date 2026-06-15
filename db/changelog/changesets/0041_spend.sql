@@ -74,7 +74,7 @@ CREATE POLICY tenant_isolation ON zeroship.spend_state_history
 --rollback ALTER TABLE zeroship.app_spend_limit NO FORCE ROW LEVEL SECURITY;
 --rollback ALTER TABLE zeroship.app_spend_limit DISABLE ROW LEVEL SECURITY;
 
---changeset zeroship:app-spend-grants splitStatements:false
+--changeset zeroship:app-spend-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.app_spend_limit     TO zeroship_control';

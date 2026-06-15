@@ -65,7 +65,7 @@ END
 $assert$;
 --rollback SELECT 1;
 
---changeset zeroship:compute-unit-pricing-grants splitStatements:false
+--changeset zeroship:compute-unit-pricing-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.metric_weights TO zeroship_control';

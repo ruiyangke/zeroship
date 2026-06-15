@@ -85,7 +85,7 @@ CREATE TRIGGER plan_change_events_immutable_trg
 --rollback DROP TRIGGER IF EXISTS plan_change_events_immutable_trg ON zeroship.plan_change_events;
 --rollback DROP FUNCTION IF EXISTS zeroship.plan_change_events_immutable();
 
---changeset zeroship:plan-change-events-grants splitStatements:false
+--changeset zeroship:plan-change-events-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- Append-only: SELECT/INSERT, no UPDATE/DELETE.

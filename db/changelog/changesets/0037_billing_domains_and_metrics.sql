@@ -79,7 +79,7 @@ INSERT INTO zeroship.billing_metrics (metric, kind, unit) VALUES
 ON CONFLICT (metric) DO NOTHING;
 --rollback DELETE FROM zeroship.billing_metrics;
 
---changeset zeroship:billing-metrics-grants splitStatements:false
+--changeset zeroship:billing-metrics-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON zeroship.billing_metrics TO zeroship_control';

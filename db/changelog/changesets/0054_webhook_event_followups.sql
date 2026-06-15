@@ -314,7 +314,7 @@ ALTER DOMAIN zeroship.billing_notification_kind ADD CONSTRAINT billing_notificat
 -- Grants
 -- ─────────────────────────────────────────────────────────────────────────────
 
---changeset zeroship:webhook-followups-grants splitStatements:false
+--changeset zeroship:webhook-followups-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- refunds already has SELECT/INSERT/UPDATE (0049) — the failed/canceled flip is an UPDATE.

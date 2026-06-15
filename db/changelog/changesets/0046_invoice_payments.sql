@@ -89,7 +89,7 @@ CREATE TRIGGER invoice_payments_immutable_trg
 --rollback DROP TRIGGER IF EXISTS invoice_payments_immutable_trg ON zeroship.invoice_payments;
 --rollback DROP FUNCTION IF EXISTS zeroship.invoice_payments_immutable();
 
---changeset zeroship:invoice-payments-grants splitStatements:false
+--changeset zeroship:invoice-payments-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- INSERT-only beyond SELECT: append-only (the trigger is the backstop; the grant is

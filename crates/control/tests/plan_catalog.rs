@@ -24,6 +24,21 @@ fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
 }
 
+/// `pricing_config (id='global')` is a fleet-wide SINGLETON, and the MAJOR-3
+/// regression below momentarily DROPs its CHECK constraint and sets the global FX
+/// to a below-floor 0 (so the loader can be observed failing closed → `None`),
+/// then restores. Any test that READS the global default FX concurrently would
+/// otherwise observe that transient 0/None and flake. Serialize every
+/// global-FX-touching test in this binary with a process-wide lock so the suite
+/// is correct under the default multi-threaded runner (not just
+/// `--test-threads=1`). A poisoned lock (a prior test panicked mid-section) is
+/// recovered — the mutator restores the seed in a panic-safe order anyway.
+static FX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_fx() -> std::sync::MutexGuard<'static, ()> {
+    FX_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 async fn pg(db_url: &str) -> compio_postgres::Client {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
     compio::runtime::spawn(async move {
@@ -381,6 +396,9 @@ async fn charge_from_real_aggregates_uses_weight_table() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    // Reads the global default FX; serialize against the MAJOR-3 mutator via
+    // FX_LOCK so the price is computed against a stable, seeded global FX.
+    let _fx = lock_fx();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry.clone());
@@ -445,6 +463,9 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    // Reads the global default FX; serialize against the MAJOR-3 mutator (which
+    // transiently drops it below floor) via FX_LOCK so this never observes None.
+    let _fx = lock_fx();
     let _client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
@@ -493,12 +514,16 @@ async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
     //       (returns None) so the sweep fails CLOSED — it does NOT coerce a
     //       near-zero/zero global FX to Some(0) and silently price ALL overage to
     //       ~$0 platform-wide.
-    // Single-threaded (the harness runs --test-threads=1), and we RESTORE the
-    // seeded global row + CHECK before returning so other tests see a sane FX.
+    // This momentarily DROPs the CHECK + sets the global FX to 0; serialize
+    // against every other global-FX-touching test in this binary (FX_LOCK) so a
+    // concurrent reader never observes the transient below-floor/None state. We
+    // RESTORE the seeded global row + CHECK before returning so siblings see a
+    // sane FX even if --test-threads > 1.
     let Some(url) = db_url() else {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _fx = lock_fx();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());

@@ -73,7 +73,7 @@ CREATE INDEX pending_disputes_charge_idx
 --rollback DROP INDEX IF EXISTS zeroship.pending_disputes_payment_intent_idx;
 --rollback DROP TABLE zeroship.pending_disputes;
 
---changeset zeroship:pending-disputes-grants splitStatements:false
+--changeset zeroship:pending-disputes-grants splitStatements:false rollbackSplitStatements:false
 -- SELECT/INSERT (park on dispute.created) + DELETE (drop on promotion at invoice.paid
 -- linkage time). No UPDATE: a parked row is never mutated, only created then consumed.
 DO $g$ BEGIN

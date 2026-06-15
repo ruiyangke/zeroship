@@ -414,11 +414,19 @@ async fn ensure_global_pricing(pg: &Client, metric: &str, units_per_op: i64, per
     )
     .await
     .expect("seed weight");
+    // Ensure the global pricing_config singleton EXISTS, but do NOT overwrite its
+    // value: it is fleet-wide shared state across every billing test binary on the
+    // shared :5440 DB, and every plan in this file carries its OWN plan-level
+    // `fx_pico_cents_per_unit` (so the effective FX is the plan's, never the
+    // global). Overwriting the singleton to `FX_SCALE` here would (a) permanently
+    // corrupt the migrated default (30_000_000) for every subsequent
+    // reconcile-family test in the run and (b) race concurrent readers in sibling
+    // binaries. `ON CONFLICT DO NOTHING` preserves the migrated default.
     pg.execute(
         "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
-         VALUES ('global', $1) \
-         ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit",
-        &[&(FX_SCALE as i64)],
+         VALUES ('global', 30000000) \
+         ON CONFLICT (id) DO NOTHING",
+        &[],
     )
     .await
     .expect("seed global fx");

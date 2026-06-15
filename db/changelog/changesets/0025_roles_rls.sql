@@ -80,7 +80,7 @@
 
 -- ─── Roles ───────────────────────────────────────────────────────────────
 -- splitStatements:false: the DO block carries `;` inside `$bootstrap$`.
---changeset zeroship:platform-roles splitStatements:false
+--changeset zeroship:platform-roles splitStatements:false rollbackSplitStatements:false
 --validCheckSum ANY
 --   We mark this ANY because the no-CREATEROLE branch was changed from a silent
 --   RAISE NOTICE/RETURN to a fail-loud RAISE EXCEPTION (finding I3, atomicity).

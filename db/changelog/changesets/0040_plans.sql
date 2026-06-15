@@ -25,7 +25,7 @@ CREATE INDEX apps_plan_id_idx ON zeroship.apps(plan_id);
 --rollback ALTER TABLE zeroship.apps DROP CONSTRAINT apps_plan_fk;
 --rollback DROP TABLE zeroship.plans;
 
---changeset zeroship:plan-catalog-grants splitStatements:false
+--changeset zeroship:plan-catalog-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON zeroship.plans TO zeroship_control';

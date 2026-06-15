@@ -59,7 +59,7 @@ CREATE INDEX idx_billing_notifications_pending
 --rollback DROP INDEX IF EXISTS zeroship.idx_billing_notifications_pending;
 --rollback DROP TABLE zeroship.billing_notifications;
 
---changeset zeroship:billing-notifications-grants splitStatements:false
+--changeset zeroship:billing-notifications-grants splitStatements:false rollbackSplitStatements:false
 DO $g$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN
     -- SELECT/INSERT/UPDATE: UPDATE is needed for the 'pending'->'sent' flip + the stale
