@@ -1301,6 +1301,160 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 }
 
 // ===========================================================================
+// H1: the true-up over-collection is computed UNDER the per-creator lock, NOT pre-read.
+//     A concurrent cash-anchor change (here a dispute_debit) that lands while the lock is
+//     held must be reflected in the claimed amount — proving there is no stale window
+//     between reading the anchor and claiming the refund.
+//
+// Setup: a VOIDED invoice with cash $60 collected, no prior refunds. reissued_total = $10,
+//     so a naive (pre-fix) computation would refund $60 − $0 − $10 = $50. We hold the
+//     creator lock on an observer, start the true-up (it BLOCKS on the lock — proof it
+//     acquires the lock BEFORE reading the anchor), append a −$20 dispute_debit under the
+//     held lock (cash → $40), then release. The true-up must recompute $40 − $0 − $10 = $30
+//     under the lock — NOT the stale $50.
+//
+// RED pre-fix: void_reissue read cash_paid_old OUTSIDE the lock and passed a fixed $50 to
+//     issue_true_up_refund; the concurrent debit would make $50 stale → the over-refund
+//     trigger ($50 cash-refund > $40 cash) would REJECT it (the "BUG cap math" abort), or
+//     under/over-refund. Post-fix the recompute under the lock yields the correct $30.
+// ===========================================================================
+
+#[compio::test]
+async fn true_up_recomputes_over_collection_under_the_lock() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "trueup-lock").await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let creator = make_user(&fx.state, "trueup-lock").await;
+    ensure_creator_billing(&fx.state, creator).await;
+
+    // Seed a VOIDED invoice directly (the true-up runs against the voided invoice; its cash
+    // anchor survives the void). period far-future to avoid the active-period claim index.
+    let inv = zeroship_core::typed_id::new_invoice_id();
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                total_cents, finalized_at, voided_at) \
+             VALUES ($1, $2, DATE '2031-01-01', 'void', 6000, 0, 0, 6000, NOW(), NOW())",
+            &[&inv, &creator],
+        )
+        .await
+        .expect("seed voided invoice");
+    append_payment(&fx.state, &inv, 6000, "in_trueup_lock").await;
+
+    // (1) Observer holds the per-creator advisory lock in an OPEN txn.
+    let mut obs = new_conn(&url).await;
+    let obs_tx = obs.transaction().await.expect("observer tx");
+    obs_tx
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
+            &[&creator.to_string()],
+        )
+        .await
+        .expect("observer takes the creator lock");
+
+    // (2) SPAWN the true-up on its own connection and keep the SINGLE call alive (no
+    // timeout-cancel). It will read the cash anchor ONLY AFTER it wins the per-creator lock
+    // (the H1 fix: lock-then-recompute). We synchronize by polling pg_locks until this call
+    // is provably WAITING on the creator's advisory key — so the debit we append next lands
+    // BEFORE the call reads the anchor, all WITHIN that one call.
+    let lock_key: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT hashtext($1::text)::bigint AS k", &[&creator.to_string()])
+        .await
+        .expect("hash key")[0]
+        .get("k");
+    let inv_w = inv.clone();
+    let url_w = url.clone();
+    let idem_w = key(&inv, "trueup-lock");
+    let task = compio::runtime::spawn(async move {
+        let mut writer = new_conn(&url_w).await;
+        let provider = NativeRefundProvider;
+        refund::issue_true_up_refund(
+            &mut writer, &provider, &inv_w, 1000, Some("true-up"), &idem_w,
+        )
+        .await
+    });
+
+    // Wait until the spawned true-up is BLOCKED waiting on the creator's advisory lock. A
+    // non-granted `advisory` lock on our key in pg_locks proves it reached lock acquisition
+    // BEFORE reading the anchor. Bounded poll (no fixed sleep beyond a short yield).
+    let mut waiting = false;
+    for _ in 0..200 {
+        let n: i64 = fx
+            .state
+            .control_pg
+            .query(
+                "SELECT COUNT(*)::bigint AS n FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = $1",
+                &[&lock_key],
+            )
+            .await
+            .expect("poll pg_locks")[0]
+            .get("n");
+        if n >= 1 {
+            waiting = true;
+            break;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        waiting,
+        "the true-up must be WAITING on the per-creator advisory lock before reading the cash \
+         anchor — if it never waits, the over-collection is read OUTSIDE the lock (H1 stale window)",
+    );
+
+    // (3) While the lock is HELD and the true-up is blocked, change the cash anchor: a −$20
+    // dispute_debit (cash → $40). This commits as part of the observer's locked txn.
+    obs_tx
+        .execute(
+            "INSERT INTO zeroship.invoice_payments (id, invoice_id, amount_cents, currency, kind, provider_ref) \
+             VALUES ($1, $2, -2000, 'usd', 'dispute_debit', $3)",
+            &[
+                &zeroship_core::typed_id::new_invoice_payment_id(),
+                &inv,
+                &format!("du_lockwin_{}", Uuid::new_v4().simple()),
+            ],
+        )
+        .await
+        .expect("append dispute_debit under the held lock");
+
+    // (4) Release the lock. The blocked true-up now wins the lock and recomputes the
+    // over-collection from the POST-debit anchor IN THE SAME CALL: $40 − $0 − $10 = $30
+    // (NOT the stale $50 a pre-lock read would have captured).
+    obs_tx.commit().await.expect("release observer lock");
+    let outcome = task
+        .await
+        .expect("true-up call did not panic / was not cancelled")
+        .expect("true-up completes once the lock is free");
+    let refund_id = match outcome {
+        RefundOutcome::Issued { refund_id, .. } | RefundOutcome::Duplicate(refund_id) => refund_id,
+        other => panic!("expected the true-up to issue under the lock, got {other:?}"),
+    };
+    let amount: i64 = fx
+        .state
+        .control_pg
+        .query("SELECT amount_cents FROM zeroship.refunds WHERE id = $1", &[&refund_id])
+        .await
+        .expect("read true-up")[0]
+        .get("amount_cents");
+    assert_eq!(
+        amount, 3000,
+        "the true-up recomputed UNDER the lock from the post-debit cash $40: $40 − $0 − $10 = $30 \
+         (a stale read taken before the lock would have claimed $50 and been rejected by the cap)",
+    );
+    // Cap holds: Σ cash refunds ($30) ≤ cash anchor ($40).
+    let cash = refund::cash_collected(&*fx.state.control_pg, &inv).await.expect("cash");
+    assert_eq!(cash, 4000, "cash anchor = $60 − $20 dispute_debit = $40");
+}
+
+// ===========================================================================
 // (h) Two non-void invoices for one (creator, period) impossible; a void releases
 //     the claim for reissue.
 // ===========================================================================

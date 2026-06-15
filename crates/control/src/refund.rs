@@ -278,22 +278,12 @@ pub async fn provider_invoice_id_for_cash_refund<C: GenericClient + Sync>(
     Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("provider_ref")))
 }
 
-/// The net cash collected on an invoice: `Σ(invoice_payments.amount_cents)`. The
-/// over-refund anchor (NOT `total_cents`).
-pub async fn cash_collected<C: GenericClient + Sync>(
-    conn: &C,
-    invoice_id: &str,
-) -> Result<i64, RegistryError> {
-    let rows = conn
-        .query(
-            "SELECT COALESCE(SUM(amount_cents), 0)::bigint AS cash \
-             FROM zeroship.invoice_payments WHERE invoice_id = $1",
-            &[&invoice_id],
-        )
-        .await
-        .map_err(|e| RegistryError::Database(e.to_string()))?;
-    Ok(rows.first().map_or(0, |r| r.get::<_, i64>("cash")))
-}
+/// The net cash collected on an invoice: `Σ(invoice_payments.amount_cents)` — the
+/// over-refund anchor (NOT `total_cents`). Re-exported from [`crate::invoice_payments`] so
+/// the cap anchor has EXACTLY ONE implementation (M1): the refund precheck, the true-up
+/// bridge, and the `0049` over-refund trigger all read the identical `Σ`. The historical
+/// `refund::cash_collected` path is preserved for callers; there is no second copy to drift.
+pub use crate::invoice_payments::cash_collected;
 
 /// Σ of refunds already issued/claimed on an invoice for one destination — used by
 /// the Rust-side over-refund precheck (the DB trigger is the backstop) and the
@@ -533,25 +523,130 @@ pub async fn issue_refund<C: GenericClient + Sync, P: RefundProvider>(
 }
 
 /// The true-up bridge variant: refund the over-collection on a now-VOIDED invoice.
-/// Identical to [`issue_refund`] except it ACCEPTS a `void` invoice (the over-refund
-/// cap reads `Σ(invoice_payments)`, which survives the void, so the refund is still
-/// money-correct). Used ONLY by [`crate::void_reissue`]; the public operator endpoint
-/// always goes through [`issue_refund`] (finalized-only).
-#[allow(clippy::too_many_arguments)]
+///
+/// ACCEPTS a `void` invoice (the over-refund cap reads `Σ(invoice_payments)`, which survives
+/// the void, so the refund is still money-correct). Used ONLY by [`crate::void_reissue`]; the
+/// public operator endpoint always goes through [`issue_refund`] (finalized-only).
+///
+/// STALE-WINDOW SAFE (H1). The over-collection
+/// `over = cash_collected(old) − cash_refunds_already(old) − reissued_total`, floored at 0,
+/// is recomputed INSIDE the same per-creator-locked txn that claims the refund — NOT read by
+/// the caller before the lock. Caller-side computation opened a window where a concurrent
+/// refund/dispute landing between the read and the claim's lock re-acquire made `over` stale:
+/// the claim would then either trip the over-refund trigger (the "impossible by construction"
+/// abort) or under-refund. By taking the lock first and reading the cash anchor under it, the
+/// claimed amount is always consistent with the committed cash state. `reissued_total` is the
+/// only input — it is the immutable reissued invoice's total, which cannot drift.
+///
+/// Returns `RefundOutcome::Duplicate` with a sentinel id when the recomputed over-collection
+/// is `≤ 0` (nothing to refund — e.g. a concurrent refund already returned the over-collection):
+/// the void+reissue then reports no true-up, which is correct.
 pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
     conn: &mut C,
     provider: &P,
     invoice_id: &str,
-    amount_cents: i64,
-    subtotal_cents: i64,
-    tax_cents: i64,
-    destination: RefundDestination,
+    reissued_total: i64,
     reason: Option<&str>,
     idempotency_key: &str,
 ) -> Result<RefundOutcome, RegistryError> {
-    issue_refund_inner(
-        conn, provider, invoice_id, amount_cents, subtotal_cents, tax_cents, destination, reason,
-        idempotency_key, true,
+    if idempotency_key.is_empty() {
+        return Err(RegistryError::InvalidInput(
+            "true-up refund requires a non-empty Idempotency-Key".to_string(),
+        ));
+    }
+
+    // (1) The voided invoice must exist; read its creator (keys the lock) + currency.
+    let inv = conn
+        .query(
+            "SELECT creator_id, currency, status FROM zeroship.invoices WHERE id = $1",
+            &[&invoice_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    let Some(row) = inv.first() else {
+        return Ok(RefundOutcome::InvalidInvoice(format!("no invoice {invoice_id}")));
+    };
+    let creator_id: uuid::Uuid = row.get("creator_id");
+    let currency: String = row.get("currency");
+    let status: String = row.get("status");
+    // The true-up runs against the deliberately-VOIDED invoice (or, defensively, a still
+    // finalized one if called before the void committed). A draft is never refundable.
+    if status != "void" && status != "finalized" {
+        return Ok(RefundOutcome::InvalidInvoice(format!(
+            "invoice {invoice_id} is {status} — not true-up-refundable"
+        )));
+    }
+
+    // (2)+(3) Recompute the over-collection AND claim, both under the per-creator lock in ONE
+    // txn — no stale window (H1). The claim commits before the provider call.
+    let claim = {
+        let tx = conn.transaction().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        let claim = claim_true_up_locked(
+            &tx, &creator_id, invoice_id, reissued_total, &currency, reason, idempotency_key,
+        )
+        .await?;
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        claim
+    };
+
+    // (4)+(5): drive the claimed/duplicate refund to `issued` (provider call OUTSIDE any txn).
+    match claim {
+        ClaimResult::Claimed(refund_id) | ClaimResult::DuplicateSameBody(refund_id) => {
+            drive_pending_refund(conn, provider, &refund_id).await
+        }
+        // No over-collection under the lock → nothing to refund (a concurrent refund already
+        // returned it). Surface as a Duplicate(no-op) so the bridge reports true_up = 0.
+        ClaimResult::NoOp => Ok(RefundOutcome::Duplicate(String::new())),
+        ClaimResult::OverRefund(msg) => Ok(RefundOutcome::OverRefund(msg)),
+        ClaimResult::Conflict => Ok(RefundOutcome::Conflict),
+    }
+}
+
+/// Recompute the over-collection and claim the true-up `refunds` row, SERIALIZED per creator
+/// (H1). Like [`claim_refund_locked`] but the AMOUNT is derived UNDER the lock from the cash
+/// anchor, so it can never be stale:
+///
+/// ```text
+/// over = cash_collected(invoice) − cash_refunds_already(invoice) − reissued_total   (floored 0)
+/// ```
+///
+/// `over ≤ 0` ⇒ [`ClaimResult::NoOp`] (a concurrent refund already returned the
+/// over-collection; nothing to do). Otherwise the true-up is tax-degenerate at the USD launch
+/// (subtotal = amount, tax = 0) and claimed exactly as a cash refund. The cap holds by
+/// construction: `cash_refunds_already + over = cash_collected − reissued_total ≤ cash_collected`.
+async fn claim_true_up_locked<C: GenericClient + Sync>(
+    tx: &C,
+    creator_id: &uuid::Uuid,
+    invoice_id: &str,
+    reissued_total: i64,
+    currency: &str,
+    reason: Option<&str>,
+    idempotency_key: &str,
+) -> Result<ClaimResult, RegistryError> {
+    // SERIALIZE per creator — the first act of the txn (mirrors claim_refund_locked).
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
+        &[&creator_id.to_string()],
+    )
+    .await
+    .map_err(|e| RegistryError::Database(e.to_string()))?;
+
+    // Recompute the over-collection UNDER the lock so it reflects every committed sibling
+    // refund/dispute — the H1 fix. cash_collected already nets dispute_debit/_reversal rows.
+    let cash = cash_collected(tx, invoice_id).await?;
+    let cash_refunds_already =
+        refunds_total_for_destination(tx, invoice_id, RefundDestination::Cash).await?;
+    let over = (cash - cash_refunds_already - reissued_total).max(0);
+    if over <= 0 {
+        return Ok(ClaimResult::NoOp);
+    }
+
+    // Tax-degenerate true-up: subtotal = amount, tax = 0. Claim it as a cash refund through
+    // the SAME locked precheck + claim as the operator path, so the over-refund trigger backs
+    // it up identically.
+    claim_refund_locked(
+        tx, creator_id, invoice_id, over, over, 0, currency, RefundDestination::Cash, reason,
+        idempotency_key,
     )
     .await
 }
@@ -637,6 +732,9 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
         }
         ClaimResult::OverRefund(msg) => Ok(RefundOutcome::OverRefund(msg)),
         ClaimResult::Conflict => Ok(RefundOutcome::Conflict),
+        // The operator refund path passes a fixed amount > 0 to claim_refund_locked, which
+        // never yields NoOp — only the true-up's amount-under-lock recompute does.
+        ClaimResult::NoOp => Ok(RefundOutcome::Duplicate(String::new())),
     }
 }
 
@@ -655,6 +753,9 @@ pub enum ClaimResult {
     OverRefund(String),
     /// Idempotency key reused with a DIFFERENT body. No row claimed.
     Conflict,
+    /// Nothing to claim: the recomputed amount was `≤ 0` (only the true-up path produces
+    /// this — the over-collection vanished under the lock). No row claimed; not an error.
+    NoOp,
 }
 
 /// Precheck the over-refund bound and claim the `refunds` row, SERIALIZED per creator.

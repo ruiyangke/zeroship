@@ -46,7 +46,7 @@
 //! invoice consumed anything; the reissue re-draws from the restored balance and the
 //! balance is conserved end-to-end.
 //!
-//! ## The true-up bridge (CRITICAL-B)
+//! ## The true-up bridge (CRITICAL-B + H1)
 //!
 //! A reissue can be LOWER than what was already collected on the voided invoice. The
 //! over-collection must come back to the creator. The bridge auto-issues a cash refund
@@ -62,11 +62,17 @@
 //! then REJECTED the bridge refund, leaving the over-collection stuck. Subtracting the
 //! already-issued cash refunds makes the cap satisfied by construction:
 //! `cash_refunds_already_issued + over = cash_paid(old) − total(new) ≤ cash_paid(old)`.
+//!
+//! H1: that `over` is recomputed INSIDE `refund::issue_true_up_refund`'s per-creator-locked
+//! claim txn from the live cash anchor — Phase 3 passes only the immutable `reissued_total`
+//! and never pre-reads the cash. A concurrent refund/dispute landing between Phase 2 and the
+//! claim therefore cannot make the claimed amount stale (which previously could trip the
+//! over-refund trigger's "impossible by construction" abort, or under-refund).
 
 use compio_postgres::GenericClient;
 
 use crate::cron::billing_reconcile;
-use crate::refund::{self, RefundDestination, RefundOutcome};
+use crate::refund::{self, RefundOutcome};
 use crate::registry::RegistryError;
 use crate::stripe_client::StripeApi;
 use crate::AppState;
@@ -244,54 +250,58 @@ pub async fn void_and_reissue<S: StripeApi>(
 
     // ── Phase 3: the true-up bridge ──
     // over = cash_paid(old) − cash_refunds_already_issued(old) − total(new), floored at 0.
-    let cash_paid_old = refund::cash_collected(&conn2, invoice_id).await?;
-    let cash_refunds_old =
-        refund::refunds_total_for_destination(&conn2, invoice_id, RefundDestination::Cash).await?;
-    let over_collection = (cash_paid_old - cash_refunds_old - reissued_total).max(0);
-
-    let (true_up_refund_id, true_up_cents) = if over_collection > 0 {
-        // Auto-issue a cash refund on the VOIDED invoice for the over-collection. The
-        // idempotency key is derived from (old_invoice_id, 'true_up') so a re-drive of
-        // the same void+reissue does not double-refund. The cap is satisfied by
-        // construction (cash_refunds_already_issued + over ≤ cash_paid(old)). The true-up
-        // is tax-degenerate (subtotal = amount, tax = 0) at the USD launch.
-        let idem = format!("trueup:{invoice_id}");
-        let provider = refund::StripeRefundProvider { stripe };
-        let outcome = refund::issue_true_up_refund(
-            &mut conn2,
-            &provider,
-            invoice_id,
-            over_collection,
-            over_collection,
-            0,
-            RefundDestination::Cash,
-            Some("true-up: over-collection on voided invoice"),
-            &idem,
-        )
-        .await?;
-        match outcome {
-            RefundOutcome::Issued { refund_id, .. } | RefundOutcome::Duplicate(refund_id) => {
-                (Some(refund_id), over_collection)
-            }
-            RefundOutcome::OverRefund(msg) => {
-                // Should be impossible by construction; surface loudly rather than
-                // silently leaving the creator out-of-pocket.
-                return Err(RegistryError::Database(format!(
-                    "true-up over-refund rejected (BUG — cap math): {msg}"
-                )));
-            }
-            RefundOutcome::Conflict => {
-                return Err(RegistryError::Database(
-                    "true-up idempotency conflict — a prior true-up with a different body exists"
-                        .to_string(),
-                ));
-            }
-            RefundOutcome::InvalidInvoice(msg) => {
-                return Err(RegistryError::Database(format!("true-up invalid invoice: {msg}")));
+    //
+    // H1: the over-collection is recomputed INSIDE `issue_true_up_refund`'s per-creator-locked
+    // claim txn from the live cash anchor — NOT pre-read here — so a concurrent refund/dispute
+    // landing between Phase 2 and Phase 3 cannot make the claimed amount stale. We pass only the
+    // immutable `reissued_total`; the bridge returns the actual cents refunded (0 if the
+    // over-collection vanished under the lock). The idempotency key (old_invoice_id, 'true_up')
+    // makes a re-drive of the same void+reissue not double-refund. The cap holds by construction:
+    // cash_refunds_already_issued + over = cash_paid(old) − total(new) ≤ cash_paid(old).
+    let idem = format!("trueup:{invoice_id}");
+    let provider = refund::StripeRefundProvider { stripe };
+    let outcome = refund::issue_true_up_refund(
+        &mut conn2,
+        &provider,
+        invoice_id,
+        reissued_total,
+        Some("true-up: over-collection on voided invoice"),
+        &idem,
+    )
+    .await?;
+    let (true_up_refund_id, true_up_cents) = match outcome {
+        // A real over-collection was refunded — read the cents off the claimed refund row so
+        // the reported amount reflects what was actually issued under the lock.
+        RefundOutcome::Issued { refund_id, .. } => {
+            let cents = true_up_amount_for(&conn2, &refund_id).await?;
+            (Some(refund_id), cents)
+        }
+        // Duplicate carries either a real prior refund id (re-drive) or the empty sentinel
+        // (no over-collection under the lock → nothing refunded).
+        RefundOutcome::Duplicate(refund_id) => {
+            if refund_id.is_empty() {
+                (None, 0)
+            } else {
+                let cents = true_up_amount_for(&conn2, &refund_id).await?;
+                (Some(refund_id), cents)
             }
         }
-    } else {
-        (None, 0)
+        RefundOutcome::OverRefund(msg) => {
+            // Should be impossible by construction (the amount is recomputed under the lock);
+            // surface loudly rather than silently leaving the creator out-of-pocket.
+            return Err(RegistryError::Database(format!(
+                "true-up over-refund rejected (BUG — cap math): {msg}"
+            )));
+        }
+        RefundOutcome::Conflict => {
+            return Err(RegistryError::Database(
+                "true-up idempotency conflict — a prior true-up with a different body exists"
+                    .to_string(),
+            ));
+        }
+        RefundOutcome::InvalidInvoice(msg) => {
+            return Err(RegistryError::Database(format!("true-up invalid invoice: {msg}")));
+        }
     };
 
     Ok(VoidReissueOutcome {
@@ -300,6 +310,23 @@ pub async fn void_and_reissue<S: StripeApi>(
         true_up_refund_id,
         true_up_cents,
     })
+}
+
+/// Read the cents actually refunded by a true-up `refunds` row — the authoritative amount,
+/// since the over-collection is computed UNDER the lock inside `issue_true_up_refund` (H1) and
+/// is no longer known to this caller before the claim. Returns 0 if the row is absent.
+async fn true_up_amount_for<C: GenericClient + Sync>(
+    conn: &C,
+    refund_id: &str,
+) -> Result<i64, RegistryError> {
+    let rows = conn
+        .query(
+            "SELECT amount_cents FROM zeroship.refunds WHERE id = $1",
+            &[&refund_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    Ok(rows.first().map_or(0, |r| r.get::<_, i64>("amount_cents")))
 }
 
 /// Unix-seconds start of a `billing_period` DATE (the first-of-month, UTC midnight).
