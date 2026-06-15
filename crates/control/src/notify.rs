@@ -37,8 +37,8 @@ use zeroship_mailer::{Address, Email, Mailer, MailerError};
 /// send-ledger (`billing_notification_kind` domain).
 ///
 /// PR-6 wires the cron for the dunning- and invoice/refund-driven kinds; PR-8 adds
-/// `disputed` (off `billing_disputes`). The `spend_*` kinds are still reserved in the
-/// domain (their source tables exist) for a follow-up — see the cron's scan set.
+/// `disputed` (off `billing_disputes`). The `spend_*` kinds are driven off
+/// `spend_state_history` (the per-app spend transitions) — see the cron's scan set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BillingNotificationKind {
     /// First failed charge — `creator_billing_status_history` (`*→past_due`, the
@@ -64,6 +64,18 @@ pub enum BillingNotificationKind {
     /// An end-user's Connect checkout charge failed (`connect_checkout_failures`; webhook
     /// follow-up). transition_id = the `cof_…` checkout-failure id. Informational.
     CheckoutFailed,
+    /// An app crossed the spend WARN threshold (`spend_state_history` `*→warn`). The
+    /// creator is approaching their spend limit; apps still run normally. transition_id =
+    /// the `she_…` spend-transition id.
+    SpendWarn,
+    /// An app crossed the spend DEGRADE threshold (`spend_state_history` `*→degrade`). The
+    /// app is close to its limit and is being soft-throttled. transition_id = the `she_…`
+    /// spend-transition id.
+    SpendDegrade,
+    /// An app crossed the spend BLOCK threshold (`spend_state_history` `*→block`). The app
+    /// hit its spend limit and is blocked at the gateway until the limit is raised or the
+    /// period rolls over. transition_id = the `she_…` spend-transition id.
+    SpendBlock,
 }
 
 impl BillingNotificationKind {
@@ -80,6 +92,9 @@ impl BillingNotificationKind {
             Self::Disputed => "disputed",
             Self::PayoutFailed => "payout_failed",
             Self::CheckoutFailed => "checkout_failed",
+            Self::SpendWarn => "spend_warn",
+            Self::SpendDegrade => "spend_degrade",
+            Self::SpendBlock => "spend_block",
         }
     }
 
@@ -96,6 +111,9 @@ impl BillingNotificationKind {
             "disputed" => Self::Disputed,
             "payout_failed" => Self::PayoutFailed,
             "checkout_failed" => Self::CheckoutFailed,
+            "spend_warn" => Self::SpendWarn,
+            "spend_degrade" => Self::SpendDegrade,
+            "spend_block" => Self::SpendBlock,
             _ => return None,
         })
     }
@@ -130,6 +148,12 @@ pub struct NotificationDetail {
     pub amount_label: Option<String>,
     /// For `refunded`: `"cash to your card"` / `"credit to your balance"`.
     pub refund_destination_label: Option<String>,
+    /// For the `spend_*` kinds: the app's name (e.g. `"my-store"`) so the creator knows
+    /// WHICH app crossed the threshold. The spend source is per-app, unlike the other
+    /// (creator-level) kinds.
+    pub app_label: Option<String>,
+    /// For the `spend_*` kinds: the effective spend limit, pre-formatted (e.g. `"$50.00"`).
+    pub limit_label: Option<String>,
 }
 
 /// The `From:` address billing notifications are sent from. A constant so the seam is
@@ -228,6 +252,46 @@ pub fn render_template(n: &Notification) -> (String, String) {
                  We're letting you know for visibility.\n\n— zeroship billing\n"
             ),
         ),
+        BillingNotificationKind::SpendWarn => {
+            let app = n.detail.app_label.as_deref().unwrap_or("your app");
+            let limit = n.detail.limit_label.as_deref().unwrap_or("its spend limit");
+            (
+                format!("Heads up: {app} is approaching its spend limit"),
+                format!(
+                    "Hi {name},\n\nYour app \"{app}\" has reached {amount} of its {limit} spend \
+                     limit for this billing period. Everything is still running normally — this \
+                     is just a heads-up so there are no surprises. You can raise the limit in \
+                     your dashboard if you expect more usage.\n\n— zeroship billing\n"
+                ),
+            )
+        }
+        BillingNotificationKind::SpendDegrade => {
+            let app = n.detail.app_label.as_deref().unwrap_or("your app");
+            let limit = n.detail.limit_label.as_deref().unwrap_or("its spend limit");
+            (
+                format!("\"{app}\" is close to its spend limit — being throttled"),
+                format!(
+                    "Hi {name},\n\nYour app \"{app}\" has used {amount} of its {limit} spend \
+                     limit and is now being lightly throttled to keep you under budget. To \
+                     restore full performance, raise the spend limit in your dashboard.\n\n\
+                     — zeroship billing\n"
+                ),
+            )
+        }
+        BillingNotificationKind::SpendBlock => {
+            let app = n.detail.app_label.as_deref().unwrap_or("your app");
+            let limit = n.detail.limit_label.as_deref().unwrap_or("its spend limit");
+            (
+                format!("\"{app}\" hit its spend limit and is paused"),
+                format!(
+                    "Hi {name},\n\nYour app \"{app}\" has reached its {limit} spend limit \
+                     ({amount} used) and is now paused to prevent further charges this billing \
+                     period. To bring it back online, raise the spend limit in your dashboard — \
+                     it resumes the moment the limit is increased or the period rolls over.\n\n\
+                     — zeroship billing\n"
+                ),
+            )
+        }
     }
 }
 
@@ -438,10 +502,13 @@ mod tests {
             BillingNotificationKind::Disputed,
             BillingNotificationKind::PayoutFailed,
             BillingNotificationKind::CheckoutFailed,
+            BillingNotificationKind::SpendWarn,
+            BillingNotificationKind::SpendDegrade,
+            BillingNotificationKind::SpendBlock,
         ] {
             assert_eq!(BillingNotificationKind::from_str(k.as_str()), Some(k));
         }
-        assert_eq!(BillingNotificationKind::from_str("spend_warn"), None);
+        assert_eq!(BillingNotificationKind::from_str("not_a_kind"), None);
     }
 
     #[test]
@@ -456,6 +523,9 @@ mod tests {
             BillingNotificationKind::Disputed,
             BillingNotificationKind::PayoutFailed,
             BillingNotificationKind::CheckoutFailed,
+            BillingNotificationKind::SpendWarn,
+            BillingNotificationKind::SpendDegrade,
+            BillingNotificationKind::SpendBlock,
         ] {
             let n = Notification {
                 to_email: "c@example.test".to_owned(),
@@ -465,6 +535,8 @@ mod tests {
                     period_label: Some("June 2026".to_owned()),
                     amount_label: Some("$12.34".to_owned()),
                     refund_destination_label: Some("cash to your card".to_owned()),
+                    app_label: Some("my-store".to_owned()),
+                    limit_label: Some("$50.00".to_owned()),
                 },
                 idempotency_key: "c:k:t".to_owned(),
             };

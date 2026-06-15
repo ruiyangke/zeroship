@@ -250,6 +250,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                 period_label: Some(period.format("%B %Y").to_string()),
                 amount_label: Some(format_money(total, &r.get::<_, String>("currency"))),
                 refund_destination_label: None,
+                ..Default::default()
             },
         });
     }
@@ -288,6 +289,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                 period_label: None,
                 amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
                 refund_destination_label: Some(dest_label.to_owned()),
+                ..Default::default()
             },
         });
     }
@@ -323,6 +325,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                 period_label: None,
                 amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
                 refund_destination_label: None,
+                ..Default::default()
             },
         });
     }
@@ -355,6 +358,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                 period_label: None,
                 amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
                 refund_destination_label: None,
+                ..Default::default()
             },
         });
     }
@@ -387,6 +391,71 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                 period_label: None,
                 amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
                 refund_destination_label: None,
+                ..Default::default()
+            },
+        });
+    }
+
+    // (g) Spend-band transitions (`spend_state_history`). The spend reconcile cron writes
+    // an append-only `she_…` row on every state change; we notify the creator when an app
+    // crosses INTO warn/degrade/block (the actionable, more-restrictive edges). A
+    // `*→allow` recovery and a deadband HOLD write no row / a non-notified row, so they
+    // never email. Unlike the other (creator-keyed) kinds, the spend source is PER-APP, so
+    // we resolve the creator via the H1 ownership join (`app_members` role='owner',
+    // DISTINCT ON the app so a fan-out of owner rows never double-notifies) — the SAME join
+    // the metering export and billing sweep use. An app with no owner row, or an owner with
+    // no `creator_billing` identity (the `billing_notifications` FK target), is skipped
+    // (the INNER JOINs drop it) — it has no creator mailbox to reach. The app NAME + the
+    // effective limit are formatted into the body (frozen at the transition; never
+    // re-priced here).
+    let rows = conn
+        .query(
+            "SELECT h.id, h.to_state, h.spend_cents, h.limit_cents, a.name AS app_name, \
+                    o.creator_id \
+               FROM zeroship.spend_state_history h \
+               JOIN zeroship.apps a ON a.id = h.app_id \
+               JOIN ( \
+                     SELECT DISTINCT ON (m.app_id) m.app_id, m.user_id AS creator_id \
+                       FROM zeroship.app_members m \
+                      WHERE m.role = 'owner' \
+                      ORDER BY m.app_id, m.added_at \
+               ) o ON o.app_id = h.app_id \
+               JOIN zeroship.creator_billing cb ON cb.creator_id = o.creator_id \
+               LEFT JOIN zeroship.billing_notifications n \
+                 ON n.creator_id = o.creator_id \
+                AND n.transition_id = h.id \
+                AND n.kind = CASE h.to_state \
+                      WHEN 'warn'    THEN 'spend_warn' \
+                      WHEN 'degrade' THEN 'spend_degrade' \
+                      WHEN 'block'   THEN 'spend_block' END::zeroship.billing_notification_kind \
+              WHERE h.at > NOW() - $1::text::interval \
+                AND h.to_state IN ('warn','degrade','block') \
+                AND ( n.status IS NULL \
+                   OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
+            &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    for r in &rows {
+        let to_state: String = r.get("to_state");
+        let kind = match to_state.as_str() {
+            "warn" => BillingNotificationKind::SpendWarn,
+            "degrade" => BillingNotificationKind::SpendDegrade,
+            "block" => BillingNotificationKind::SpendBlock,
+            _ => continue,
+        };
+        let spend: i64 = r.get("spend_cents");
+        let limit: Option<i64> = r.get("limit_cents");
+        out.push(Candidate {
+            creator_id: r.get("creator_id"),
+            kind,
+            transition_id: r.get("id"),
+            detail: NotificationDetail {
+                period_label: None,
+                amount_label: Some(format_money(spend, "usd")),
+                refund_destination_label: None,
+                app_label: Some(r.get::<_, String>("app_name")),
+                limit_label: limit.map(|l| format_money(l, "usd")),
             },
         });
     }

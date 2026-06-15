@@ -37,7 +37,8 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::account_status::AccountStatusStore;
-use zeroship_control::cron::billing_notify::{self, NOTIFY_REDRIVE_HORIZON};
+use zeroship_control::cron::billing_notify::NOTIFY_REDRIVE_HORIZON;
+use zeroship_control::cron::{billing_notify, spend_reconcile};
 use zeroship_control::notify::{BillingNotificationKind, RecordingNotifier};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -688,4 +689,214 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
             assert_ne!(a, b, "notification source prefixes must be pairwise-disjoint");
         }
     }
+}
+
+// ===========================================================================
+// (#10) SPEND-BAND notifications — the spend_state_history → billing_notifications
+// wiring. Drives a REAL spend transition (Allow→Warn→Degrade→Block AND a deadband
+// HOLD) through the REAL spend_reconcile cron on live PG, then runs the REAL notify
+// cron and asserts EXACTLY ONE notification of the right kind per transition,
+// idempotent across ticks. Authoritative assertions are off the `billing_notifications`
+// ledger (per-creator, per-kind), cross-fixture-safe exactly like the other kinds.
+//
+// RED pre-wiring: before the BillingNotificationKind::Spend* variants + the scan arm (g)
+// existed, `scan_unsent` never read `spend_state_history`, so ZERO spend notifications
+// were ever produced — `sent_count_kind(.., SpendWarn/Degrade/Block)` would all be 0.
+// ===========================================================================
+
+/// A process-wide gate serializing SPEND ticks across this binary's tests (the
+/// spend-reconcile cron single-flights on its OWN fleet-wide advisory lock; a sibling
+/// holding it would make my `tick` skip and win nothing). Mirrors `TICK_GATE`.
+static SPEND_TICK_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_spend_gate() -> std::sync::MutexGuard<'static, ()> {
+    SPEND_TICK_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Seed a plan charging 1 cent/request with `limit_cents` default spend cap, an app on
+/// that plan, and an `owner` app_members row tying the app to `creator` (the H1 join the
+/// notify scan resolves the creator through). Returns the app id.
+async fn make_spend_app_owned_by(
+    pg: &compio_postgres::Client,
+    creator: Uuid,
+    limit_cents: i64,
+) -> (Uuid, String) {
+    pg.execute(
+        "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+         VALUES ('requests', 1, 1) \
+         ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1",
+        &[],
+    )
+    .await
+    .expect("upsert requests weight");
+    let plan_id = format!("pln_spnotf_{}", Uuid::new_v4().simple());
+    let fx_one_cent: i64 = 1_000_000_000_000;
+    pg.execute(
+        "INSERT INTO zeroship.plans \
+           (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+            runtime_limits_json, spend_limit_default_cents) \
+         VALUES ($1, 'spend-notify-test', 0, 0, $3, \
+                 '{\"cpu_limit_ms\":50,\"wall_timeout_ms\":5000,\"heap_limit_mb\":64}', $2)",
+        &[&plan_id, &limit_cents, &fx_one_cent],
+    )
+    .await
+    .expect("seed priced plan");
+    let app_name = format!("spend-notify-{}", Uuid::new_v4());
+    let rows = pg
+        .query(
+            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+             VALUES ($1, $2, $3, '') RETURNING id",
+            &[&app_name, &plan_id, &Uuid::new_v4().to_string()],
+        )
+        .await
+        .expect("insert app");
+    let app_id: Uuid = rows[0].get("id");
+    pg.execute(
+        "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+        &[&app_id, &creator],
+    )
+    .await
+    .expect("insert owner membership");
+    (app_id, app_name)
+}
+
+/// Set this period's priced spend for `app` to exactly `cents` (1 cent/request ⇒ set the
+/// `requests` usage_aggregates total). An authoritative DB write the spend cron reads —
+/// lets the test position spend at any band boundary (including a DROP for the deadband
+/// hold, which cumulative metering ingest could not express).
+async fn set_spend_cents(pg: &compio_postgres::Client, app: Uuid, cents: i64) {
+    // current period = date_trunc('month', now())::date — the same key evaluate_all uses.
+    pg.execute(
+        "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
+         VALUES ($1, date_trunc('month', NOW())::date, 'requests', $2) \
+         ON CONFLICT (app_id, period, metric) DO UPDATE SET total = EXCLUDED.total, updated_at = NOW()",
+        &[&app, &cents],
+    )
+    .await
+    .expect("set usage_aggregates total");
+}
+
+/// Read the current persisted spend state for an app (the cron's derived hot state).
+async fn spend_state_of(pg: &compio_postgres::Client, app: Uuid) -> Option<String> {
+    let rows = pg
+        .query(
+            "SELECT state::text AS state FROM zeroship.app_spend_state WHERE app_id = $1",
+            &[&app],
+        )
+        .await
+        .expect("read spend state");
+    rows.first().map(|r| r.get::<_, String>("state"))
+}
+
+/// Count spend_state_history transitions INTO a given to_state for an app.
+async fn spend_hist_count(pg: &compio_postgres::Client, app: Uuid, to_state: &str) -> i64 {
+    pg.query(
+        "SELECT COUNT(*) AS c FROM zeroship.spend_state_history \
+          WHERE app_id = $1 AND to_state = $2::text::zeroship.spend_state",
+        &[&app, &to_state],
+    )
+    .await
+    .expect("count spend hist")[0]
+        .get::<_, i64>("c")
+}
+
+/// Drive ONE gated spend-reconcile tick (serialized against sibling spend ticks).
+async fn spend_tick(state: &AppState) {
+    let _g = lock_spend_gate();
+    spend_reconcile::tick(state).await.expect("spend tick");
+}
+
+#[compio::test]
+async fn spend_band_walk_produces_one_notification_per_transition() {
+    let Some(url) = db_url() else {
+        eprintln!("SKIP spend_band_walk_produces_one_notification_per_transition: CONTROL_TEST_DB unset");
+        return;
+    };
+    let fx = build_fixture(&url, "spend-band").await;
+    let st = &*fx.state;
+
+    // A creator (user + creator_billing) owning one app on a 100-cent-cap plan.
+    let creator = make_creator(&fx.pg).await;
+    let (app, app_name) = make_spend_app_owned_by(&fx.pg, creator, 100).await;
+
+    // --- Walk the band: Allow→Warn (80%)→Degrade (95%)→Block (100%). Each tick is a REAL
+    //     evaluate_all sweep; position spend at each boundary, tick, and confirm the
+    //     persisted state advanced (so the spend_state_history row was genuinely written).
+    set_spend_cents(&fx.pg, app, 80).await; // 80% ⇒ Warn
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("warn"), "→warn");
+
+    set_spend_cents(&fx.pg, app, 95).await; // 95% ⇒ Degrade
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("degrade"), "→degrade");
+
+    set_spend_cents(&fx.pg, app, 100).await; // 100% ⇒ Block
+    spend_tick(st).await;
+    assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("block"), "→block");
+
+    // --- Deadband HOLD: drop spend to 96% (≥ block_entry 100 − deadband 5 = 95) — a
+    //     RELAXATION the hysteresis must HOLD at Block (limit_changed=false). No new
+    //     transition row, so NO spend notification fires for the hold.
+    set_spend_cents(&fx.pg, app, 96).await; // 96% < 100 but ≥ 95 ⇒ HOLD Block
+    spend_tick(st).await;
+    assert_eq!(
+        spend_state_of(&fx.pg, app).await.as_deref(),
+        Some("block"),
+        "deadband holds Block (96% ≥ block_entry − deadband)"
+    );
+
+    // Exactly one transition row INTO each restrictive band (the hold added none).
+    assert_eq!(spend_hist_count(&fx.pg, app, "warn").await, 1, "one →warn transition");
+    assert_eq!(spend_hist_count(&fx.pg, app, "degrade").await, 1, "one →degrade transition");
+    assert_eq!(spend_hist_count(&fx.pg, app, "block").await, 1, "one →block transition");
+
+    // --- Now the notify cron. Drive it until MY creator's three spend transitions are all
+    //     delivered (and zero pending), retrying past sibling lock contention.
+    tick_until_sent(st, &fx.pg, &[(creator, 3)]).await;
+
+    use BillingNotificationKind::{SpendBlock, SpendDegrade, SpendWarn};
+    assert_eq!(
+        sent_count_kind(&fx.pg, creator, SpendWarn).await,
+        1,
+        "exactly one spend_warn notification for the →warn transition"
+    );
+    assert_eq!(
+        sent_count_kind(&fx.pg, creator, SpendDegrade).await,
+        1,
+        "exactly one spend_degrade notification for the →degrade transition"
+    );
+    assert_eq!(
+        sent_count_kind(&fx.pg, creator, SpendBlock).await,
+        1,
+        "exactly one spend_block notification for the →block transition"
+    );
+    // The deadband hold produced no transition ⇒ no extra notification of any spend kind.
+    let total_spend_sent = sent_count_kind(&fx.pg, creator, SpendWarn).await
+        + sent_count_kind(&fx.pg, creator, SpendDegrade).await
+        + sent_count_kind(&fx.pg, creator, SpendBlock).await;
+    assert_eq!(total_spend_sent, 3, "exactly three spend notifications total (hold added none)");
+
+    // --- Idempotent across ticks: a SECOND notify sweep produces nothing new for MY
+    //     creator (every ledger row is `sent`, none `pending`).
+    let pre = [
+        (SpendWarn, sent_count_kind(&fx.pg, creator, SpendWarn).await),
+        (SpendDegrade, sent_count_kind(&fx.pg, creator, SpendDegrade).await),
+        (SpendBlock, sent_count_kind(&fx.pg, creator, SpendBlock).await),
+    ];
+    {
+        let _gate = lock_tick_gate();
+        billing_notify::tick(st).await.expect("second notify tick");
+    }
+    for (k, before) in pre {
+        assert_eq!(
+            sent_count_kind(&fx.pg, creator, k).await,
+            before,
+            "second sweep must not produce a new {k:?} sent row"
+        );
+    }
+    assert_eq!(ledger_count(&fx.pg, creator, "pending").await, 0, "no pending rows remain");
+
+    // The app NAME made it into the dedup transition_id mapping (sanity: the ledger rows
+    // are keyed by the she_ transition id, one per band).
+    let _ = app_name; // (name is asserted via the rendered body in notify.rs unit tests)
 }
