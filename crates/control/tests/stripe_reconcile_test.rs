@@ -583,15 +583,29 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
     assert_eq!(parked, 0, "default is FLAG-only — no auto-heal park");
 }
 
+// C2: a missed `charge.dispute.created` on an ALREADY-LINKED, already-paid invoice must be
+// APPLIED by the backstop (billing_disputes row + dispute_debit + cash tightened), NOT parked.
+// The ONLY promotion site (`resolve_pending_disputes_for_linkage`) fires when the linkage is
+// FRESHLY written at invoice.paid — which already ran here, before the dispute existed. So a
+// parked row against an already-linked invoice would never promote → the cap would stay at
+// full cash forever (the platform could refund cash it never kept).
+//
+// RED pre-fix: `try_backstop_dispute` called `park_pending_dispute` whenever the linkage
+// resolved, so this test would find a `pending_disputes` row and NO `billing_disputes` row /
+// NO `dispute_debit` — every assert below fails. GREEN post-fix: the dispute is applied
+// directly and Σ(invoice_payments) tightens by the disputed amount.
 #[compio::test]
-async fn missing_dispute_backstop_parks_when_enabled_and_linkage_exists() {
+async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
     let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "dispute-heal").await;
     let creator = make_creator(&fx.state, "dispute-heal").await;
     let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 8000).await;
-    // The settling pi_ links to OUR invoice (what invoice.paid records) → the backstop can resolve.
+    // The invoice is PAID: a charge row records the cash (the cap anchor starts at 8000).
     let pi = format!("pi_heal_{}", short());
+    append_charge(&fx.state, &inv, 8000, &pi).await;
+    // The settling pi_ ALREADY links to OUR invoice (what invoice.paid records) — so the
+    // linkage exists NOW, before the dispute is seen. This is the C2 case.
     fx.state.control_pg
         .execute(
             "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
@@ -610,11 +624,50 @@ async fn missing_dispute_backstop_parks_when_enabled_and_linkage_exists() {
     let summary = stripe_reconcile::tick_with(&fx.state, &stripe, now(), heal_cfg).await.expect("tick");
 
     assert_eq!(finding_count(&fx.state, "missing_dispute", &du).await, 1, "still flagged");
-    assert_eq!(summary.disputes_parked, 1, "the gated backstop parked the missed dispute");
+    assert_eq!(summary.disputes_healed, 1, "the gated backstop APPLIED the missed dispute");
+
+    // Nothing parked — an already-linked dispute is applied directly, never parked.
     let parked: i64 = fx.state.control_pg
         .query("SELECT COUNT(*)::bigint AS n FROM zeroship.pending_disputes WHERE provider_dispute_id=$1", &[&du])
         .await.expect("count parked")[0].get("n");
-    assert_eq!(parked, 1, "auto-heal parked the dispute (idempotent order-independent path)");
+    assert_eq!(parked, 0, "an already-linked dispute is APPLIED, not parked (a parked row would never promote)");
+
+    // A real billing_disputes row was created, bound to OUR invoice, status open.
+    let disputes: Vec<(String, String)> = fx.state.control_pg
+        .query("SELECT invoice_id, status::text AS s FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
+        .await.expect("query dispute")
+        .iter().map(|r| (r.get::<_, String>("invoice_id"), r.get::<_, String>("s"))).collect();
+    assert_eq!(disputes.len(), 1, "exactly one billing_disputes row applied");
+    assert_eq!(disputes[0].0, inv, "the dispute is anchored to OUR invoice");
+    assert_eq!(disputes[0].1, "open", "applied as open");
+
+    // The dispute_debit row exists and Σ(invoice_payments) tightened from 8000 → 5000.
+    let debit: i64 = fx.state.control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_payments \
+             WHERE invoice_id=$1 AND kind='dispute_debit' AND amount_cents = -3000",
+            &[&inv],
+        )
+        .await.expect("count debit")[0].get("n");
+    assert_eq!(debit, 1, "the dispute_debit clawback row was appended");
+    let cash: i64 = fx.state.control_pg
+        .query(
+            "SELECT COALESCE(SUM(amount_cents),0)::bigint AS c FROM zeroship.invoice_payments WHERE invoice_id=$1",
+            &[&inv],
+        )
+        .await.expect("sum cash")[0].get("c");
+    assert_eq!(cash, 5000, "the over-refund cap tightened by the disputed 3000 (8000 − 3000)");
+
+    // Idempotent: a second sweep does not double-apply (same du_… → no new debit, count stays).
+    let summary2 = stripe_reconcile::tick_with(&fx.state, &stripe, now(), heal_cfg).await.expect("tick2");
+    assert_eq!(summary2.disputes_healed, 0, "a redelivered missed dispute is idempotent — not re-applied");
+    let cash2: i64 = fx.state.control_pg
+        .query(
+            "SELECT COALESCE(SUM(amount_cents),0)::bigint AS c FROM zeroship.invoice_payments WHERE invoice_id=$1",
+            &[&inv],
+        )
+        .await.expect("sum cash2")[0].get("c");
+    assert_eq!(cash2, 5000, "no double-debit on re-sweep");
 }
 
 // ===========================================================================

@@ -9,10 +9,11 @@
 //!
 //! READ-ONLY w.r.t. money by DEFAULT. It DETECTS + RECORDS + ALERTS — it does NOT
 //! auto-correct cash on a transient Stripe read (an operator reviews each finding). The
-//! single conservatively-safe exception is the dispute backstop (parking a fully-missed
-//! dispute through the existing order-independent path), and even that is gated behind a
-//! config flag defaulting OFF — FLAG by default. We never mutate a finalized invoice,
-//! never issue a refund, never move cash here.
+//! single conservatively-safe exception is the dispute backstop: a fully-missed dispute
+//! whose settling pi_/ch_ ALREADY links to one of our invoices is APPLIED directly
+//! (`billing_disputes` row + its `dispute_debit`, idempotent on the du_…, under the
+//! per-creator advisory lock) — gated behind a config flag defaulting OFF (FLAG by default).
+//! We never mutate a finalized invoice, never issue a refund.
 //!
 //! Three reconcile passes over the recent window (mirroring the webhook events they back
 //! up):
@@ -27,8 +28,8 @@
 //!   3. DISPUTES — for each recent `billing_disputes` row, `GET /v1/disputes/{du_}` and
 //!      compare status; AND `GET /v1/disputes?created>=window` to find a Stripe dispute we
 //!      have NEITHER a `billing_disputes` NOR a `pending_disputes` row for — a fully-missed
-//!      `charge.dispute.created` (`missing_dispute`). The backstop MAY park it via the
-//!      existing order-independent path, but ONLY when the auto-heal flag is enabled.
+//!      `charge.dispute.created` (`missing_dispute`). The backstop MAY APPLY it directly when
+//!      its linkage already exists, but ONLY when the auto-heal flag is enabled.
 //!
 //! MIRRORS the existing crons (`billing_reconcile` / `spend_reconcile` / `dunning` /
 //! `metering_export`): a `pg_try_advisory_lock` single-flights the sweep fleet-wide; a
@@ -43,7 +44,7 @@ use chrono::{TimeZone, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::disputes::{park_pending_dispute, resolve_invoice_for_dispute, PendingDispute};
+use crate::disputes::{record_dispute_created, resolve_invoice_for_dispute};
 use crate::registry::RegistryError;
 use crate::stripe_client::{StripeApi, StripeClient, StripeDispute};
 use crate::AppState;
@@ -83,10 +84,12 @@ pub struct ReconcileConfig {
     pub entity_cap: i64,
     /// AUTO-HEAL stance for the dispute backstop. OFF by default (FLAG only): a
     /// fully-missed dispute is recorded as a `missing_dispute` finding for operator review.
-    /// When ON, a missed dispute whose settling pi_/ch_ resolves to one of our invoices is
-    /// ALSO parked into `pending_disputes` via the existing order-independent path (which is
-    /// idempotent + clearly safe — it moves no cash itself; the `dispute_debit` lands only
-    /// when the linkage resolves it). A dispute that does NOT resolve is only flagged.
+    /// When ON, a missed dispute whose settling pi_/ch_ ALREADY resolves to one of our
+    /// invoices is APPLIED DIRECTLY (a `billing_disputes` row + its `dispute_debit`, idempotent
+    /// on the `du_…`, under the per-creator advisory lock) — parking would be a silent no-op
+    /// because the only promotion site fires at `invoice.paid`, which already ran. A dispute
+    /// that does NOT yet resolve to a linkage is only flagged (the webhook path parks the
+    /// genuine pre-`invoice.paid` race; a Connect charge has no linkage to anchor to).
     pub auto_heal_disputes: bool,
 }
 
@@ -105,8 +108,10 @@ impl Default for ReconcileConfig {
 pub struct SweepSummary {
     /// Findings freshly INSERTED this sweep (deduped re-observations are NOT counted).
     pub findings_recorded: usize,
-    /// Disputes parked via the gated backstop this sweep (0 unless `auto_heal_disputes`).
-    pub disputes_parked: usize,
+    /// Disputes APPLIED via the gated backstop this sweep (0 unless `auto_heal_disputes`).
+    /// A freshly-applied `billing_disputes` row + its `dispute_debit`; a redelivery / already
+    /// recorded dispute is idempotent and NOT counted.
+    pub disputes_healed: usize,
     /// `true` iff this instance held the advisory lock and actually ran (vs. a single-flight
     /// skip).
     pub ran: bool,
@@ -122,10 +127,10 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control stripe_reconcile cron starting");
     loop {
         match tick(&state).await {
-            Ok(s) if s.findings_recorded > 0 || s.disputes_parked > 0 => {
+            Ok(s) if s.findings_recorded > 0 || s.disputes_healed > 0 => {
                 tracing::warn!(
                     findings = s.findings_recorded,
-                    parked = s.disputes_parked,
+                    healed = s.disputes_healed,
                     "control stripe_reconcile sweep recorded billing drift"
                 );
             }
@@ -209,7 +214,7 @@ async fn sweep<S: StripeApi>(
     summary.findings_recorded += reconcile_refunds(state, stripe, window_start, cfg).await?;
     let (df, dp) = reconcile_disputes(state, stripe, window_start, now_unix, cfg).await?;
     summary.findings_recorded += df;
-    summary.disputes_parked += dp;
+    summary.disputes_healed += dp;
 
     Ok(summary)
 }
@@ -406,10 +411,11 @@ async fn reconcile_refunds<S: StripeApi>(
 ///   (b) `GET /v1/disputes?created>=window` and flag any Stripe dispute we have NEITHER a
 ///       `billing_disputes` NOR a `pending_disputes` row for (a fully-missed
 ///       `charge.dispute.created`). When `auto_heal_disputes` is ON and the dispute's
-///       settling pi_/ch_ resolves to one of our invoices, ALSO park it (the existing
-///       idempotent order-independent path) — otherwise FLAG only.
+///       settling pi_/ch_ ALREADY resolves to one of our invoices, APPLY it directly (a
+///       `billing_disputes` row + its `dispute_debit`, idempotent on the du_…) — otherwise
+///       FLAG only.
 ///
-/// Returns `(findings_recorded, disputes_parked)`. FAIL-SOFT per dispute.
+/// Returns `(findings_recorded, disputes_healed)`. FAIL-SOFT per dispute.
 #[allow(clippy::future_not_send)]
 async fn reconcile_disputes<S: StripeApi>(
     state: &AppState,
@@ -421,7 +427,7 @@ async fn reconcile_disputes<S: StripeApi>(
     let conn = state.registry.conn().await?;
     let ws = unix_to_dt(window_start);
     let mut recorded = 0usize;
-    let mut parked = 0usize;
+    let mut healed = 0usize;
 
     // (a) Status-drift on the disputes we DO know about.
     let rows = conn
@@ -474,7 +480,7 @@ async fn reconcile_disputes<S: StripeApi>(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "stripe_reconcile: list_disputes failed — skipping missing-dispute pass");
-            return Ok((recorded, parked));
+            return Ok((recorded, healed));
         }
     };
     for sd in &listed {
@@ -516,35 +522,46 @@ async fn reconcile_disputes<S: StripeApi>(
         )
         .await?;
 
-        // GATED, conservatively-safe AUTO-HEAL (default OFF): park the dispute via the
-        // existing order-independent path so the linkage writer promotes it idempotently.
-        // No cash moves here — `park_pending_dispute` only stages the facts; the
-        // `dispute_debit` lands when the pi_/ch_→invoice linkage resolves it (or when we
-        // resolve it below if the linkage already exists). FLAG-only when disabled.
+        // GATED, conservatively-safe AUTO-HEAL (default OFF): if the settling pi_/ch_ ALREADY
+        // links to one of our invoices, APPLY the dispute directly (billing_disputes row +
+        // dispute_debit, idempotent on the du_…, under the per-creator lock). Parking it would
+        // be a silent no-op — the only promotion site fires at invoice.paid, which already ran
+        // before this dropped dispute existed. A not-yet-linked dispute is left flagged.
         if cfg.auto_heal_disputes {
             match try_backstop_dispute(state, sd).await {
-                Ok(true) => parked += 1,
-                Ok(false) => { /* no settling-id resolution candidate / already linked */ }
+                Ok(true) => healed += 1,
+                Ok(false) => { /* no linkage yet / already recorded — finding stands */ }
                 Err(e) => {
                     tracing::warn!(provider_dispute_id = %sd.id, error = %e,
-                        "stripe_reconcile: dispute backstop park failed — finding recorded, not parked");
+                        "stripe_reconcile: dispute backstop heal failed — finding recorded, not healed");
                 }
             }
         }
     }
 
-    Ok((recorded, parked))
+    Ok((recorded, healed))
 }
 
-/// Conservatively park a fully-missed dispute (gated by `auto_heal_disputes`). Idempotent +
-/// clearly safe: parks the facts in `pending_disputes` keyed on the `du_…` (the existing
-/// order-independent path); the actual `dispute_debit` lands only when the pi_/ch_→invoice
-/// linkage resolves the parked row. Returns `true` iff a row was freshly parked.
+/// Heal a fully-missed dispute (gated by `auto_heal_disputes`). Idempotent + clearly safe.
+/// Two cases, split on whether the settling `pi_…`/`ch_…`→invoice linkage EXISTS YET:
 ///
-/// We park (rather than directly create a `billing_disputes` row) so the heal rides EXACTLY
-/// the webhook's order-independent machinery — no new money-moving code path. A dispute with
-/// no settling pi_/ch_ candidate cannot be parked (the holding table requires one); we leave
-/// it as a flagged finding for the operator.
+///   * LINKAGE EXISTS NOW (the common backstop case — `invoice.paid` already ran, but the
+///     `charge.dispute.created` webhook was dropped): APPLY the dispute DIRECTLY via
+///     [`record_dispute_created`] (UPSERT `billing_disputes` + append the `dispute_debit`,
+///     idempotent on the `du_…`, taking the per-creator advisory lock). Parking here would be a
+///     SILENT BUG: the ONLY promotion site is `resolve_pending_disputes_for_linkage`, fired
+///     solely when the linkage is FRESHLY written at `invoice.paid` — which already happened,
+///     before the dispute existed. A parked row against an already-linked invoice would never
+///     promote, so the cap would stay permanently under-tightened (the platform could refund
+///     cash it never kept). We therefore apply, not park.
+///   * NO LINKAGE YET (the dispute raced ahead of `invoice.paid`, OR a Connect end-user charge
+///     we never invoiced): leave it for the operator finding. We do NOT park here — the
+///     primary webhook path already parks the pre-`invoice.paid` race, and a Connect charge has
+///     no linkage that will ever come; parking it would poison the holding table. We return
+///     `false` (no heal applied) and the recorded finding stands.
+///
+/// Returns `true` iff the dispute was freshly applied (a redelivery / already-recorded dispute
+/// returns `false` — `record_dispute_created` no-ops idempotently on the `du_…`).
 #[allow(clippy::future_not_send)]
 async fn try_backstop_dispute(
     state: &AppState,
@@ -558,33 +575,30 @@ async fn try_backstop_dispute(
     if sd.amount <= 0 {
         return Ok(false);
     }
-    let conn = state.registry.conn().await?;
-    // If the settling object already links to one of our invoices, the dispute belongs to us;
-    // park it so the promotion machinery (resolve_pending_disputes_for_linkage, already
-    // triggered at invoice.paid time, or a future linkage write) handles it idempotently.
-    // If there is NO linkage, this is most likely a Connect end-user charge we never
-    // invoiced — parking it harmlessly waits for a linkage that will never come, so we
-    // park ONLY when we can resolve our invoice (keeps the holding table free of poison).
     let candidates: Vec<&str> = [pi, ch].into_iter().filter(|s| !s.is_empty()).collect();
+    let conn = state.registry.conn().await?;
     let resolved = resolve_invoice_for_dispute(&conn, &candidates).await?;
-    if resolved.is_none() {
+    let Some(invoice_id) = resolved else {
+        // No pi_/ch_→invoice linkage. Either a pre-`invoice.paid` race (the webhook path parks
+        // it) or a Connect end-user charge we never invoiced. Don't park here — leave the
+        // finding. The order-independent promotion handles the legitimate race when paid lands.
         return Ok(false);
-    }
+    };
     let evidence_due_at = sd.evidence_due_by.map(unix_to_dt);
-    let parked = park_pending_dispute(
-        &conn,
-        &PendingDispute {
-            provider_dispute_id: &sd.id,
-            payment_intent: sd.payment_intent.as_deref(),
-            charge: sd.charge.as_deref(),
-            amount_cents: sd.amount,
-            currency: &sd.currency,
-            reason: sd.reason.as_deref(),
-            evidence_due_at,
-        },
+    // The linkage EXISTS — apply the dispute directly (idempotent on the du_…, takes the
+    // per-creator advisory lock). `record_dispute_created` needs an owned `&mut` connection.
+    let mut conn = conn;
+    let rec = record_dispute_created(
+        &mut conn,
+        &invoice_id,
+        sd.amount,
+        &sd.currency,
+        sd.reason.as_deref(),
+        evidence_due_at,
+        &sd.id,
     )
     .await?;
-    Ok(parked)
+    Ok(rec.newly_created)
 }
 
 // ===========================================================================
