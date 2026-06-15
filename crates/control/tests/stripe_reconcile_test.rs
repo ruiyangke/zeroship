@@ -671,6 +671,180 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
 }
 
 // ===========================================================================
+// GAP #31: the backstop must NOT PARK an unresolved missed dispute. With
+// `auto_heal_disputes=true` and a du_… whose pi_/ch_ resolves to NO invoice (no linkage
+// exists, and none will ever come — e.g. a Connect end-user charge we never invoiced),
+// `try_backstop_dispute` must return false: the finding STANDS, NOTHING is healed, and
+// `pending_disputes` stays EMPTY. Parking here would silently re-break C2 — the only
+// promotion site fires at invoice.paid, which already ran (or never will), so a parked row
+// would never promote and the cap would stay permanently under-tightened.
+// ===========================================================================
+
+#[compio::test]
+async fn missing_dispute_backstop_does_not_park_when_unresolved() {
+    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let _sweep_guard = serialize_sweeps();
+    let fx = build_fixture(&url, "no-park").await;
+    let _creator = make_creator(&fx.state, "no-park").await;
+
+    // A dispute whose settling pi_/ch_ links to NO invoice (no billing_provider_refs seeded).
+    let du = format!("du_nopark_{}", short());
+    fx.mock.list_dispute(&du, MockDispute {
+        status: "needs_response".into(), amount: 3000, currency: "usd".into(),
+        charge: None, payment_intent: Some(format!("pi_unlinked_{}", short())), reason: None,
+    });
+
+    let stripe = real_client(&fx);
+    let heal_cfg = ReconcileConfig { auto_heal_disputes: true, ..cfg() };
+    let summary = stripe_reconcile::tick_with(&fx.state, &stripe, now(), heal_cfg).await.expect("tick");
+
+    // The finding stands; nothing healed.
+    assert_eq!(finding_count(&fx.state, "missing_dispute", &du).await, 1, "flagged for the operator");
+    assert_eq!(summary.disputes_healed, 0, "an unresolved dispute is NOT healed");
+
+    // CRITICAL: NOTHING parked (a park here would silently re-break C2).
+    let parked: i64 = fx.state.control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.pending_disputes WHERE provider_dispute_id=$1", &[&du])
+        .await.expect("count parked")[0].get("n");
+    assert_eq!(parked, 0, "the backstop must NOT park an unresolved missed dispute");
+    // And no billing_disputes row was invented either.
+    let rows: i64 = fx.state.control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
+        .await.expect("count disputes")[0].get("n");
+    assert_eq!(rows, 0, "no billing_disputes row invented for an unresolved dispute");
+}
+
+// ===========================================================================
+// GAP #30 (webhook audit): cron-backstop vs live-webhook NO double-apply. The backstop
+// applies a missed dispute (auto_heal on, linkage exists), THEN the real
+// `charge.dispute.created` cash path arrives for the SAME du_… — it must NOT double-apply:
+// exactly ONE `dispute_debit`, no double cap-tightening. The webhook handler's post-resolution
+// call is EXACTLY `disputes::record_dispute_created(&mut conn, invoice, amount, currency,
+// reason, evidence_due_at, du)` (stripe_handlers::handle_dispute_created) — so driving that
+// call against the same du_… faithfully reproduces the live webhook's cash effect after the
+// backstop already applied it. Idempotency is the du_… dedup index (0053) shared by both rails.
+// ===========================================================================
+
+#[compio::test]
+async fn backstop_then_live_webhook_does_not_double_apply() {
+    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let _sweep_guard = serialize_sweeps();
+    let fx = build_fixture(&url, "no-double-apply").await;
+    let creator = make_creator(&fx.state, "no-double-apply").await;
+    let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 8000).await;
+    let pi = format!("pi_dbl_{}", short());
+    append_charge(&fx.state, &inv, 8000, &pi).await;
+    fx.state.control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+             VALUES ($1, 'stripe', 'payment_intent', $2)",
+            &[&inv, &pi],
+        )
+        .await.expect("seed pi linkage");
+    let du = format!("du_dbl_{}", short());
+    fx.mock.list_dispute(&du, MockDispute {
+        status: "needs_response".into(), amount: 3000, currency: "usd".into(),
+        charge: None, payment_intent: Some(pi.clone()), reason: Some("fraudulent".into()),
+    });
+
+    // (1) The cron backstop applies the missed dispute (linkage exists → applied, not parked).
+    let stripe = real_client(&fx);
+    let heal_cfg = ReconcileConfig { auto_heal_disputes: true, ..cfg() };
+    let s = stripe_reconcile::tick_with(&fx.state, &stripe, now(), heal_cfg).await.expect("tick");
+    assert_eq!(s.disputes_healed, 1, "backstop applied the missed dispute");
+    let debit_after_backstop: i64 = fx.state.control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_payments \
+             WHERE invoice_id=$1 AND kind='dispute_debit'",
+            &[&inv],
+        )
+        .await.expect("debit count")[0].get("n");
+    assert_eq!(debit_after_backstop, 1, "exactly one dispute_debit after backstop");
+    let cash_after_backstop: i64 = fx.state.control_pg
+        .query("SELECT COALESCE(SUM(amount_cents),0)::bigint AS c FROM zeroship.invoice_payments WHERE invoice_id=$1", &[&inv])
+        .await.expect("cash")[0].get("c");
+    assert_eq!(cash_after_backstop, 5000, "cap tightened once (8000 − 3000)");
+
+    // (2) The LIVE `charge.dispute.created` then arrives for the SAME du_… — the webhook's
+    // exact post-resolution cash call. It MUST be idempotent on the du_…: no second debit, no
+    // double cap-tightening, still exactly one billing_disputes row.
+    let mut conn = side_conn(&url).await;
+    let rec = zeroship_control::disputes::record_dispute_created(
+        &mut conn, &inv, 3000, "usd", Some("fraudulent"), None, &du,
+    )
+    .await
+    .expect("live webhook cash path");
+    assert!(!rec.newly_created, "the live webhook found the backstop-applied row (no fresh create)");
+
+    let debit_after_webhook: i64 = fx.state.control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_payments \
+             WHERE invoice_id=$1 AND kind='dispute_debit'",
+            &[&inv],
+        )
+        .await.expect("debit count 2")[0].get("n");
+    assert_eq!(debit_after_webhook, 1, "STILL exactly one dispute_debit — no double-apply");
+    let cash_after_webhook: i64 = fx.state.control_pg
+        .query("SELECT COALESCE(SUM(amount_cents),0)::bigint AS c FROM zeroship.invoice_payments WHERE invoice_id=$1", &[&inv])
+        .await.expect("cash2")[0].get("c");
+    assert_eq!(cash_after_webhook, 5000, "cap NOT double-tightened");
+    let rows: i64 = fx.state.control_pg
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.billing_disputes WHERE provider_dispute_id=$1", &[&du])
+        .await.expect("dispute rows")[0].get("n");
+    assert_eq!(rows, 1, "exactly one billing_disputes row across both rails");
+}
+
+async fn side_conn(url: &str) -> compio_postgres::Client {
+    let (conn, driver) = compio_postgres::connect(url, compio_postgres::NoTls)
+        .await
+        .expect("side connect");
+    compio::runtime::spawn(async move { let _ = driver.run().await; }).detach();
+    conn
+}
+
+// ===========================================================================
+// GAP #32: `dispute_status_drift` reconcile half-(a). Seed an OPEN dispute locally, mock
+// Stripe `get_dispute` returning a TERMINAL status (won/lost) for it → the status-drift pass
+// (a) must record exactly one `dispute_status_drift` finding (Stripe resolved a dispute we
+// still hold open — a missed `.closed`).
+// ===========================================================================
+
+#[compio::test]
+async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
+    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let _sweep_guard = serialize_sweeps();
+    let fx = build_fixture(&url, "status-drift").await;
+    let creator = make_creator(&fx.state, "status-drift").await;
+    let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 6000).await;
+
+    // A locally-OPEN dispute (seeded directly, status open).
+    let du = format!("du_drift_{}", short());
+    let dsp = zeroship_core::typed_id::new_dispute_id();
+    fx.state.control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_disputes (id, invoice_id, amount_cents, currency, status, provider_dispute_id) \
+             VALUES ($1, $2, 4000, 'usd', 'open', $3)",
+            &[&dsp, &inv, &du],
+        )
+        .await.expect("seed open dispute");
+    // Stripe says it's WON now (a missed `.closed won`) — same amount, so the DRIFT is the
+    // status, not the amount.
+    fx.mock.set_dispute(&du, MockDispute {
+        status: "won".into(), amount: 4000, currency: "usd".into(),
+        charge: None, payment_intent: None, reason: None,
+    });
+
+    let stripe = real_client(&fx);
+    stripe_reconcile::tick_with(&fx.state, &stripe, now(), cfg()).await.expect("tick");
+
+    assert!(fx.mock.get_count("/v1/disputes/") >= 1, "the REAL client hit Stripe's dispute retrieve");
+    assert_eq!(
+        finding_count(&fx.state, "dispute_status_drift", &du).await, 1,
+        "a Stripe-resolved dispute we still hold open → exactly one dispute_status_drift finding"
+    );
+}
+
+// ===========================================================================
 // (d) fully-consistent — NO false positives.
 // ===========================================================================
 
