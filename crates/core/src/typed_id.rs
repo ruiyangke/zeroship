@@ -450,6 +450,20 @@ pub fn new_checkout_failure_id() -> String {
     generate(CHECKOUT_FAILURE_PREFIX)
 }
 
+/// Stripe-reconciliation-finding surrogate-id prefix (#28 Stripe reconciliation cron).
+/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// `zeroship.billing_reconciliation_findings.id` column stores the full typed-id string
+/// (`rcf_<base62>`), minted in Rust by the `stripe_reconcile` cron when it records a
+/// drift finding. NOT a notification source (it is never a `billing_notifications.
+/// transition_id`), so it carries no pairwise-disjointness obligation against the notify
+/// source prefixes — it is a plain audit row id.
+pub const RECONCILE_FINDING_PREFIX: &str = "rcf";
+
+/// Generate a new reconciliation-finding ID: `rcf_{base62(uuidv7)}`.
+pub fn new_reconcile_finding_id() -> String {
+    generate(RECONCILE_FINDING_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,6 +20,7 @@ pub mod dunning;
 pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
+pub mod stripe_reconcile;
 
 use std::sync::Arc;
 
@@ -102,6 +103,20 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
                 billing_reconcile::run(billing_state, billing_reconcile::DEFAULT_TICK_SECS).await;
             })
             .detach();
+
+            // Stripe state-reconciliation backstop (#28) — the Native invoice rail is what
+            // MINTS the Stripe invoices / refunds / disputes this cron re-reads, so it is
+            // spawned alongside `billing_reconcile`. It catches drift when an
+            // `invoice.paid` / `charge.refund.updated` / `charge.dispute.created` webhook is
+            // missed/dropped/out-of-order. READ-ONLY w.r.t. money by default (detect + record
+            // + alert; the dispute auto-heal is config-gated OFF). Provider-aware: under the
+            // export backends (stripe/openmeter) the platform does NOT run the Native invoice
+            // rail, so there are no platform-minted invoices/refunds/disputes to reconcile.
+            let reconcile_state = Arc::clone(&state);
+            compio::runtime::spawn(async move {
+                stripe_reconcile::run(reconcile_state, stripe_reconcile::DEFAULT_TICK_SECS).await;
+            })
+            .detach();
         }
         // Export backends (stripe / openmeter): the export sweep pushes CU to the
         // external meter (Stripe self-invoices; OpenMeter aggregates). The
@@ -132,7 +147,7 @@ pub fn provider_aware_cron_tasks(
 ) -> &'static [&'static str] {
     use crate::metering::provider::MeteringProviderKind;
     match kind {
-        MeteringProviderKind::Native => &["billing_reconcile"],
+        MeteringProviderKind::Native => &["billing_reconcile", "stripe_reconcile"],
         MeteringProviderKind::Stripe | MeteringProviderKind::OpenMeter => &["metering_export"],
     }
 }
@@ -170,6 +185,26 @@ mod tests {
             !tasks.contains(&"metering_export"),
             "native must NOT spawn metering_export (report_usage is a no-op) — got {tasks:?}"
         );
+    }
+
+    /// The Stripe state-reconciliation backstop (#28) rides the Native invoice rail (which
+    /// MINTS the Stripe objects it re-reads), so it is spawned under `native` and NOT under
+    /// the export backends (which never run the invoice rail → nothing platform-minted to
+    /// reconcile).
+    #[test]
+    fn native_spawns_stripe_reconcile_export_backends_do_not() {
+        let native = provider_aware_cron_tasks(MeteringProviderKind::Native);
+        assert!(
+            native.contains(&"stripe_reconcile"),
+            "native MUST spawn stripe_reconcile (the missed-webhook backstop) — got {native:?}"
+        );
+        for export in [MeteringProviderKind::Stripe, MeteringProviderKind::OpenMeter] {
+            let tasks = provider_aware_cron_tasks(export);
+            assert!(
+                !tasks.contains(&"stripe_reconcile"),
+                "{export:?} must NOT spawn stripe_reconcile (no Native invoice rail) — got {tasks:?}"
+            );
+        }
     }
 
     /// OpenMeter, like Stripe, is an export backend: the `metering_export` cron —

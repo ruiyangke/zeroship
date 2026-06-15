@@ -94,6 +94,51 @@ pub struct ConnectPaymentIntent {
     pub client_secret: Option<String>,
 }
 
+/// A retrieved Stripe **Invoice**'s reconciliation-relevant fields (`GET
+/// /v1/invoices/{in_}`, #28). All amounts are cents. `status` is the raw Stripe
+/// enum (`draft`/`open`/`paid`/`uncollectible`/`void`); the reconciler compares
+/// it against OUR `invoices.status` + the cash we recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripeInvoice {
+    pub id: String,
+    pub status: String,
+    pub amount_due: i64,
+    pub amount_paid: i64,
+    pub total: i64,
+}
+
+/// A retrieved Stripe **Refund**'s reconciliation-relevant fields (`GET
+/// /v1/refunds/{re_}`, #28). `status` is the raw Stripe enum
+/// (`pending`/`requires_action`/`succeeded`/`failed`/`canceled`). The reconciler
+/// flags a refund Stripe says `failed`/`canceled` that we still hold
+/// `pending`/`issued` (a missed `charge.refund.updated`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripeRefund {
+    pub id: String,
+    pub status: String,
+    pub amount: i64,
+}
+
+/// A retrieved Stripe **Dispute**'s reconciliation-relevant fields (`GET
+/// /v1/disputes/{du_}` or a row from `GET /v1/disputes?created>=…`, #28). A
+/// Dispute object carries NO `invoice` field — only the settling `charge`
+/// (`ch_…`) / `payment_intent` (`pi_…`) (verified at docs.stripe.com/api/disputes/
+/// object), which the reconciler resolves back to our invoice via the
+/// `billing_provider_refs` linkage (mirroring the webhook's
+/// `resolve_invoice_for_dispute`). `status` is the raw Stripe lifecycle value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripeDispute {
+    pub id: String,
+    pub status: String,
+    pub amount: i64,
+    pub currency: String,
+    pub charge: Option<String>,
+    pub payment_intent: Option<String>,
+    pub reason: Option<String>,
+    /// `evidence_details.due_by` (unix seconds), if Stripe supplied it.
+    pub evidence_due_by: Option<i64>,
+}
+
 /// The Stripe billing surface PR6 needs. A trait so unit tests can inject a
 /// recording fake; [`StripeClient`] is the production `cyper` impl, and the
 /// integration tests use that real impl against a localhost mock server.
@@ -320,6 +365,57 @@ pub trait StripeApi {
         description: &str,
         idempotency_key: &str,
     ) -> Result<ConnectPaymentIntent, StripeError>;
+
+    // ── #28: READ-ONLY state-reconciliation GETs (the missed-webhook backstop) ──
+
+    /// Retrieve a Stripe Invoice's reconciliation fields (`GET /v1/invoices/{in_}`).
+    /// READ-ONLY: the reconciler compares Stripe's `status`/`amount_due`/`amount_paid`
+    /// against OUR invoice + the cash we recorded, flagging drift (e.g. Stripe paid but
+    /// we have no charge row → a missed `invoice.paid`). NO expand needed — these are
+    /// top-level Invoice fields on every API version.
+    ///
+    /// Default: `StripeError::NotFound`. Only the production [`StripeClient`] and the
+    /// reconciliation tests' mock model the read path; the other (billing/refund/tax)
+    /// recording fakes never reconcile, so they inherit this default rather than each
+    /// stubbing four unused methods.
+    async fn get_invoice(&self, invoice_id: &str) -> Result<StripeInvoice, StripeError> {
+        let _ = invoice_id;
+        Err(StripeError::NotFound)
+    }
+
+    /// Retrieve a Stripe Refund's reconciliation fields (`GET /v1/refunds/{re_}`).
+    /// READ-ONLY: the reconciler catches a refund Stripe says `failed`/`canceled` that we
+    /// still hold `pending`/`issued` (a missed `charge.refund.updated`). Default:
+    /// `StripeError::NotFound` (see [`StripeApi::get_invoice`]).
+    async fn get_refund(&self, refund_id: &str) -> Result<StripeRefund, StripeError> {
+        let _ = refund_id;
+        Err(StripeError::NotFound)
+    }
+
+    /// Retrieve a Stripe Dispute's reconciliation fields (`GET /v1/disputes/{du_}`).
+    /// READ-ONLY: the reconciler compares Stripe's status/amount against OUR
+    /// `billing_disputes` row. Default: `StripeError::NotFound` (see
+    /// [`StripeApi::get_invoice`]).
+    async fn get_dispute(&self, dispute_id: &str) -> Result<StripeDispute, StripeError> {
+        let _ = dispute_id;
+        Err(StripeError::NotFound)
+    }
+
+    /// List Stripe Disputes created at/after `created_gte` (unix seconds), most-recent
+    /// first, bounded by `limit` (`GET /v1/disputes?created[gte]=…&limit=…`). READ-ONLY:
+    /// the reconciler scans this window to find a Stripe dispute we have NEITHER a
+    /// `billing_disputes` NOR a `pending_disputes` row for (a fully-missed
+    /// `charge.dispute.created`). A single page bounded by `limit` is sufficient — the
+    /// per-sweep entity cap keeps the Stripe call rate-aware (no pagination drain).
+    /// Default: empty (see [`StripeApi::get_invoice`]).
+    async fn list_disputes(
+        &self,
+        created_gte: i64,
+        limit: u32,
+    ) -> Result<Vec<StripeDispute>, StripeError> {
+        let _ = (created_gte, limit);
+        Ok(Vec::new())
+    }
 }
 
 /// Production `cyper`-based Stripe client. Holds the secret key (never logged —
@@ -541,6 +637,55 @@ fn parse_invoice_settlement_ids(
         }
     }
     (pi, ch)
+}
+
+/// Parse a Stripe Dispute object (from a retrieve OR a `data[]` list row) into the
+/// reconciliation-relevant [`StripeDispute`]. `charge`/`payment_intent` may be string
+/// ids OR (if a caller ever expands them) objects whose `id` we read; a missing/empty
+/// value is `None`. `evidence_details.due_by` is the evidence deadline (unix secs).
+fn parse_dispute(d: &serde_json::Value) -> Result<StripeDispute, StripeError> {
+    let id = extract_id(d, "dispute")?;
+    let status = d
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let amount = d.get("amount").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let currency = d
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("usd")
+        .to_string();
+    // A settling id may be a bare string or (rarely) an expanded object → its `id`.
+    let id_field = |k: &str| -> Option<String> {
+        let f = d.get(k)?;
+        let s = f
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| f.get("id").and_then(|v| v.as_str()).map(str::to_string));
+        s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    };
+    let charge = id_field("charge");
+    let payment_intent = id_field("payment_intent");
+    let reason = d
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|v| !v.is_empty());
+    let evidence_due_by = d
+        .get("evidence_details")
+        .and_then(|e| e.get("due_by"))
+        .and_then(serde_json::Value::as_i64);
+    Ok(StripeDispute {
+        id,
+        status,
+        amount,
+        currency,
+        charge,
+        payment_intent,
+        reason,
+        evidence_due_by,
+    })
 }
 
 /// Pull the `id` field out of a Stripe object response, or surface a clear
@@ -978,6 +1123,65 @@ impl StripeApi for StripeClient {
             .post_form("/v1/refunds", &form, Some(idempotency_key))
             .await?;
         extract_id(&json, "refund")
+    }
+
+    async fn get_invoice(&self, invoice_id: &str) -> Result<StripeInvoice, StripeError> {
+        let enc = encode_query_component(invoice_id);
+        let json = self.get_json(&format!("/v1/invoices/{enc}")).await?;
+        let id = extract_id(&json, "invoice retrieve")?;
+        let i64_field = |k: &str| json.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        Ok(StripeInvoice {
+            id,
+            status: json
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            amount_due: i64_field("amount_due"),
+            amount_paid: i64_field("amount_paid"),
+            total: i64_field("total"),
+        })
+    }
+
+    async fn get_refund(&self, refund_id: &str) -> Result<StripeRefund, StripeError> {
+        let enc = encode_query_component(refund_id);
+        let json = self.get_json(&format!("/v1/refunds/{enc}")).await?;
+        let id = extract_id(&json, "refund retrieve")?;
+        Ok(StripeRefund {
+            id,
+            status: json
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            amount: json.get("amount").and_then(serde_json::Value::as_i64).unwrap_or(0),
+        })
+    }
+
+    async fn get_dispute(&self, dispute_id: &str) -> Result<StripeDispute, StripeError> {
+        let enc = encode_query_component(dispute_id);
+        let json = self.get_json(&format!("/v1/disputes/{enc}")).await?;
+        parse_dispute(&json)
+    }
+
+    async fn list_disputes(
+        &self,
+        created_gte: i64,
+        limit: u32,
+    ) -> Result<Vec<StripeDispute>, StripeError> {
+        // Stripe caps `limit` at 100; clamp defensively. `created[gte]` is the
+        // inclusive lower bound (verified at docs.stripe.com/api/disputes/list).
+        let limit = limit.clamp(1, 100);
+        let path = format!("/v1/disputes?created[gte]={created_gte}&limit={limit}");
+        let json = self.get_json(&path).await?;
+        let Some(rows) = json.get("data").and_then(|d| d.as_array()) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(parse_dispute(row)?);
+        }
+        Ok(out)
     }
 }
 
