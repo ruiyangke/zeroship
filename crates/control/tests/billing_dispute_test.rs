@@ -1241,3 +1241,521 @@ async fn dispute_created_takes_per_creator_advisory_lock() {
     );
     let _ = pi;
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// BUG-4: a `charge.dispute.created` with amount>0 but NEITHER `payment_intent` NOR `charge`
+// has NO settling object to resolve OR park against. `resolve_invoice_for_dispute` returns
+// None and `park_pending_dispute` REJECTS (it requires a candidate) — so the pre-fix park
+// branch 500'd, and Stripe would retry the malformed event FOREVER (a poison/retry storm).
+// The fix ACKS 200 with a warn (matching every other unrecognized-input ignore path) and
+// writes nothing.
+//
+// RED pre-fix: the handler reached `park_pending_dispute(no candidate) → Err → err_json(500)`,
+// so `r.status()` is 500, not 200.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A `charge.dispute.created` with amount>0 but NO `payment_intent`/`charge` (the BUG-4
+/// malformed shape). Stripe never actually sends this — purely defensive.
+fn dispute_created_body_no_settling_object(evt: &str, du: &str, amount: i64) -> String {
+    json!({
+        "id": evt,
+        "type": "charge.dispute.created",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": du,
+            "amount": amount,
+            "currency": "usd",
+            "status": "needs_response",
+            "reason": "fraudulent"
+        }}
+    })
+    .to_string()
+}
+
+#[compio::test]
+async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "no-settling-object").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+
+    let du = format!("du_nosettle_{}", Uuid::new_v4().simple());
+    let evt = format!("evt_nosettle_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, dispute_created_body_no_settling_object(&evt, &du, 4000));
+    // ACKED 200 (not a 5xx that Stripe would retry into a storm).
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "a dispute with no pi_/ch_ must be acked 200, not 500-poisoned"
+    );
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "dispute_no_settling_object");
+
+    // Nothing written: no billing_disputes row, no pending_disputes row, no payment movement.
+    assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
+    assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no pending_disputes row parked");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GAP #14: a `lost → won` illegal reorder (the financially riskier direction — a bug would
+// spuriously RESTORE clawed-back cash via a stray `dispute_reversal`). Handler-level: dispute
+// closed `lost`, then a late/replayed `won` → status stays `lost`, NO `dispute_reversal`
+// appended, cash stays clawed-back at 0. The mirror of (g) but in the opposite direction.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "lost-then-won").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+
+    let du = format!("du_lw_{}", Uuid::new_v4().simple());
+    // created → open, debit to 0.
+    let r = post_webhook!(app, dispute_created_body(&format!("evt_lw1_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(cash_collected(&conn, &inv).await, 0);
+
+    // closed LOST → debit stands, cash stays 0, status lost, NO reversal.
+    let rl = post_webhook!(app, dispute_closed_body(&format!("evt_lw2_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000));
+    assert_eq!(rl.status(), StatusCode::OK);
+    assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("lost"));
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 0, "lost adds no reversal");
+    assert_eq!(cash_collected(&conn, &inv).await, 0, "lost leaves the debit standing");
+
+    // A LATE / replayed closed WON must NOT flip the terminal lost dispute and must NOT append
+    // a spurious reversal restoring cash the chargeback clawed back. The handler 200-acks
+    // (a no-op via the WHERE status='open' gate + the trigger backstop).
+    let rw = post_webhook!(app, dispute_closed_body(&format!("evt_lw3_{}", Uuid::new_v4().simple()), &du, "won", &pi, 6000));
+    assert_eq!(rw.status(), StatusCode::OK, "the late won is acked, not 500");
+    assert_eq!(
+        dispute_status(&conn, &du).await.as_deref(),
+        Some("lost"),
+        "the lost→won reorder is rejected; status stays lost"
+    );
+    assert_eq!(
+        payment_kind_count(&conn, &inv, "dispute_reversal").await,
+        0,
+        "no spurious dispute_reversal restoring clawed-back cash"
+    );
+    assert_eq!(
+        cash_collected(&conn, &inv).await,
+        0,
+        "the clawed-back cash stays gone — a lost chargeback is final"
+    );
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "exactly one debit");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GAP #18: close-before-create LOST. The `.closed lost` arrives with no `.created` yet → a
+// fresh terminal `lost` row is seeded DIRECTLY, the `dispute_debit` is applied (always), but
+// NO `dispute_reversal` (lost ≠ won). Cash ends clawed-back. The lost twin of (h).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "close-lost-first").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    assert_eq!(cash_collected(&conn, &inv).await, 6000);
+
+    let du = format!("du_clf_{}", Uuid::new_v4().simple());
+    // closed LOST arrives FIRST (no created yet). Seed a terminal lost row applying ONLY the
+    // debit (no reversal), resolving the invoice via the pi_….
+    let rc = post_webhook!(app, dispute_closed_body(&format!("evt_clf1_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000));
+    assert_eq!(rc.status(), StatusCode::OK);
+    let bc: Value = serde_json::from_slice(&test::read_body(rc).await).unwrap();
+    assert_eq!(bc["dispute_status"], "lost");
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "close-before-create seeded the row");
+    assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("lost"), "seeded directly terminal lost");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "debit applied");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_reversal").await, 0, "NO reversal on lost");
+    assert_eq!(cash_collected(&conn, &inv).await, 0, "net cash clawed back (lost)");
+
+    // The LATE created reconciles to a no-op: no resurrect to open, no second debit/row.
+    let rcr = post_webhook!(app, dispute_created_body(&format!("evt_clf2_{}", Uuid::new_v4().simple()), &du, &pi, 6000));
+    assert_eq!(rcr.status(), StatusCode::OK);
+    assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
+    assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("lost"), "late created did NOT resurrect to open");
+    assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "no second debit");
+    assert_eq!(cash_collected(&conn, &inv).await, 0, "end state identical to in-order delivery");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GAP #19: close-before-create with NO resolvable invoice (ctx=None). A `.closed` arrives for
+// a du_… whose pi_/ch_ resolves to no invoice (an unrecorded charge) AND no dispute row exists
+// → `record_dispute_closed` returns Ok(None) → handler acks `no_dispute_row`, writing NOTHING
+// (no row invented, no cash moved).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "close-no-invoice").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+
+    // A pi_… that no invoice.paid ever linked (an unrecorded / Connect end-user charge).
+    let pi = format!("pi_unlinked_{}", Uuid::new_v4().simple());
+    let du = format!("du_noinv_{}", Uuid::new_v4().simple());
+    let rc = post_webhook!(app, dispute_closed_body(&format!("evt_noinv1_{}", Uuid::new_v4().simple()), &du, "lost", &pi, 6000));
+    assert_eq!(rc.status(), StatusCode::OK, "no-invoice close is acked, not 500");
+    let bc: Value = serde_json::from_slice(&test::read_body(rc).await).unwrap();
+    assert_eq!(bc["status"], "no_dispute_row", "ctx=None → no_dispute_row ack");
+
+    // Nothing written.
+    assert_eq!(dispute_row_count(&conn, &du).await, 0, "no billing_disputes row invented");
+    assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no pending_disputes row");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GAP #16: directly EXERCISE the 0053 `billing_disputes_controlled_update` trigger RAISEs.
+// The app layer always gates the close UPDATE with `WHERE status='open'`, so the illegal
+// terminal→* transitions NEVER reach the DB through the app — a DROPPED or INVERTED trigger
+// would currently pass the whole handler-level suite. Only a RAW direct UPDATE/DELETE
+// exercises the trigger. We seed rows directly and assert the DB RAISEs on every illegal
+// mutation: won→lost, won→open, lost→won, a frozen-money-column rewrite, and a DELETE.
+//
+// FAITHFUL / would-FAIL-if-removed: each raw statement below succeeds (no error) if the
+// trigger is dropped or its guard inverted, so every `expect_err` flips to a pass → the test
+// FAILS. (Proven by dropping the trigger on the dedicated DB — see the fix report.)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Seed a `billing_disputes` row DIRECTLY in a given terminal/open status (bypassing the
+/// handler) so the raw-UPDATE trigger can be exercised against it. Returns the du_….
+async fn seed_dispute_row_direct(
+    conn: &compio_postgres::Client,
+    inv: &str,
+    status: &str,
+    amount: i64,
+) -> String {
+    let dsp = zeroship_core::typed_id::new_dispute_id();
+    let du = format!("du_trg_{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.billing_disputes \
+           (id, invoice_id, amount_cents, currency, status, provider_dispute_id, resolved_at) \
+         VALUES ($1, $2, $3, 'usd', $4::text::zeroship.dispute_status, $5, \
+                 CASE WHEN $4 = 'open' THEN NULL ELSE NOW() END)",
+        &[&dsp, &inv, &amount, &status, &du],
+    )
+    .await
+    .expect("seed dispute row direct");
+    du
+}
+
+#[compio::test]
+async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "trigger").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+    // Distinct periods so each seeded invoice fits the partial-unique-period index.
+    let (inv_a, _pa) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(0));
+    let (inv_b, _pb) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(1));
+    let (inv_c, _pc) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(2));
+
+    // (1) won → lost is rejected (the classic stale-lost-after-won that would strand cash).
+    let du_won = seed_dispute_row_direct(&conn, &inv_a, "won", 6000).await;
+    let e = conn
+        .execute(
+            "UPDATE zeroship.billing_disputes SET status = 'lost'::zeroship.dispute_status \
+             WHERE provider_dispute_id = $1",
+            &[&du_won],
+        )
+        .await;
+    assert!(e.is_err(), "won→lost MUST be rejected by the controlled-update trigger");
+    assert_eq!(dispute_status(&conn, &du_won).await.as_deref(), Some("won"), "row unchanged");
+
+    // (2) won → open (a terminal→open resurrection) is rejected.
+    let e = conn
+        .execute(
+            "UPDATE zeroship.billing_disputes SET status = 'open'::zeroship.dispute_status \
+             WHERE provider_dispute_id = $1",
+            &[&du_won],
+        )
+        .await;
+    assert!(e.is_err(), "won→open MUST be rejected");
+    assert_eq!(dispute_status(&conn, &du_won).await.as_deref(), Some("won"));
+
+    // (3) lost → won (the financially riskier restore) is rejected.
+    let du_lost = seed_dispute_row_direct(&conn, &inv_b, "lost", 6000).await;
+    let e = conn
+        .execute(
+            "UPDATE zeroship.billing_disputes SET status = 'won'::zeroship.dispute_status \
+             WHERE provider_dispute_id = $1",
+            &[&du_lost],
+        )
+        .await;
+    assert!(e.is_err(), "lost→won MUST be rejected");
+    assert_eq!(dispute_status(&conn, &du_lost).await.as_deref(), Some("lost"));
+
+    // (4) a frozen-money-column rewrite (amount_cents) is rejected even on an OPEN row.
+    let du_open = seed_dispute_row_direct(&conn, &inv_c, "open", 6000).await;
+    let e = conn
+        .execute(
+            "UPDATE zeroship.billing_disputes SET amount_cents = 1 WHERE provider_dispute_id = $1",
+            &[&du_open],
+        )
+        .await;
+    assert!(e.is_err(), "rewriting the frozen amount_cents MUST be rejected");
+    let amt: i64 = conn
+        .query(
+            "SELECT amount_cents FROM zeroship.billing_disputes WHERE provider_dispute_id = $1",
+            &[&du_open],
+        )
+        .await
+        .expect("read amount")[0]
+        .get("amount_cents");
+    assert_eq!(amt, 6000, "the frozen amount is unchanged");
+
+    // (5) a DELETE is rejected outright (append-only fact).
+    let e = conn
+        .execute(
+            "DELETE FROM zeroship.billing_disputes WHERE provider_dispute_id = $1",
+            &[&du_open],
+        )
+        .await;
+    assert!(e.is_err(), "DELETE on billing_disputes MUST be rejected");
+    assert_eq!(dispute_row_count(&conn, &du_open).await, 1, "the row survives the rejected DELETE");
+
+    // SANITY: a LEGAL open→won progression on the still-open row succeeds (proving the trigger
+    // is not a blanket block — it permits the one allowed transition).
+    conn.execute(
+        "UPDATE zeroship.billing_disputes SET status = 'won'::zeroship.dispute_status, resolved_at = NOW() \
+         WHERE provider_dispute_id = $1",
+        &[&du_open],
+    )
+    .await
+    .expect("legal open→won progression must succeed");
+    assert_eq!(dispute_status(&conn, &du_open).await.as_deref(), Some("won"));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GAP #22: `record_dispute_closed` (the close rail) takes the SAME per-creator advisory lock
+// the create rail does. C1 was proven only on the CREATED rail (the existing
+// `dispute_created_takes_per_creator_advisory_lock`); the close rail moves cash too — the won
+// reversal (RAISES the cap) and the close-before-create debit (LOWERS it) must serialize
+// against a concurrent refund. We hold the creator's `pg_advisory_xact_lock` key on an
+// observer txn and assert `record_dispute_closed` BLOCKS until release, for BOTH the won path
+// (existing-open-row) and the close-before-create path. A different creator's key is free.
+//
+// RED-if-removed: drop `lock_dispute_creator(&tx, inv)` from `record_dispute_closed` and the
+// timeout would NOT elapse (the close commits while the observer holds the key) — `is_err()`
+// flips false.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn dispute_closed_takes_per_creator_advisory_lock() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = Fixture::new(&url, "dsp-close-lock").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+
+    // ---- WON path (existing open row): seed an open dispute, then close it WON under lock. ----
+    let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, creator, 9000, period_offset(0));
+    let du_won = format!("du_clk_won_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, dispute_created_body(&format!("evt_clk_w0_{}", Uuid::new_v4().simple()), &du_won, &pi_won, 9000));
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(cash_collected(&conn, &inv_won).await, 0, "debited to 0 on created");
+
+    // Observer holds the per-creator key.
+    let mut obs = side_conn(&url).await;
+    let obs_tx = obs.transaction().await.expect("observer tx");
+    obs_tx
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
+            &[&creator.to_string()],
+        )
+        .await
+        .expect("observer takes the creator lock");
+
+    // The won close (which appends a reversal RAISING the cap) must BLOCK on the held key.
+    let mut writer = side_conn(&url).await;
+    let ctx = zeroship_control::disputes::DisputeCloseContext {
+        invoice_id: &inv_won,
+        amount_cents: 9000,
+        currency: "usd",
+        reason: None,
+    };
+    let blocked = compio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        zeroship_control::disputes::record_dispute_closed(
+            &mut writer,
+            &du_won,
+            zeroship_control::disputes::DisputeStatus::Won,
+            Some(ctx),
+        ),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "record_dispute_closed (won) must BLOCK on the held per-creator advisory lock — the \
+         close rail took NO lock if it returned while the observer held the key",
+    );
+    // While blocked, nothing moved: still terminal-pending, no reversal, cash still 0.
+    assert_eq!(dispute_status(&conn, &du_won).await.as_deref(), Some("open"), "still open while blocked");
+    assert_eq!(payment_kind_count(&conn, &inv_won, "dispute_reversal").await, 0, "no reversal while blocked");
+
+    // A DIFFERENT creator's key is free — per-creator, not global.
+    let other = make_creator(&conn).await;
+    let other_free: bool = conn
+        .query("SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got", &[&other.to_string()])
+        .await
+        .expect("try other")[0]
+        .get("got");
+    assert!(other_free, "a DIFFERENT creator's advisory lock is free");
+
+    // Drop the blocked writer so its abandoned txn can't race the retry for the key.
+    drop(writer);
+    // RELEASE and re-drive: the close now completes (reversal appended, cash restored).
+    obs_tx.commit().await.expect("release observer lock");
+    let mut writer2 = side_conn(&url).await;
+    let ctx2 = zeroship_control::disputes::DisputeCloseContext {
+        invoice_id: &inv_won, amount_cents: 9000, currency: "usd", reason: None,
+    };
+    zeroship_control::disputes::record_dispute_closed(
+        &mut writer2, &du_won, zeroship_control::disputes::DisputeStatus::Won, Some(ctx2),
+    )
+    .await
+    .expect("won close completes once the lock is free");
+    assert_eq!(dispute_status(&conn, &du_won).await.as_deref(), Some("won"), "won after release");
+    assert_eq!(payment_kind_count(&conn, &inv_won, "dispute_reversal").await, 1, "reversal applied");
+    assert_eq!(cash_collected(&conn, &inv_won).await, 9000, "cash restored on won");
+
+    // ---- CLOSE-BEFORE-CREATE path: no row yet; the terminal-seed debit LOWERS the cap. ----
+    let (inv_cbc, pi_cbc) = seed_paid_invoice_period!(app, conn, creator, 7000, period_offset(1));
+    let du_cbc = format!("du_clk_cbc_{}", Uuid::new_v4().simple());
+    assert_eq!(cash_collected(&conn, &inv_cbc).await, 7000);
+
+    let mut obs2 = side_conn(&url).await;
+    let obs2_tx = obs2.transaction().await.expect("observer2 tx");
+    obs2_tx
+        .execute("SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)", &[&creator.to_string()])
+        .await
+        .expect("observer2 takes the creator lock");
+
+    let mut writer3 = side_conn(&url).await;
+    let ctx3 = zeroship_control::disputes::DisputeCloseContext {
+        invoice_id: &inv_cbc, amount_cents: 7000, currency: "usd", reason: None,
+    };
+    let blocked2 = compio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        zeroship_control::disputes::record_dispute_closed(
+            &mut writer3, &du_cbc, zeroship_control::disputes::DisputeStatus::Lost, Some(ctx3),
+        ),
+    )
+    .await;
+    assert!(
+        blocked2.is_err(),
+        "record_dispute_closed (close-before-create) must BLOCK on the held per-creator lock",
+    );
+    assert_eq!(dispute_row_count(&conn, &du_cbc).await, 0, "no row seeded while blocked");
+    assert_eq!(cash_collected(&conn, &inv_cbc).await, 7000, "cap untouched while blocked");
+
+    drop(writer3);
+    obs2_tx.commit().await.expect("release observer2 lock");
+    let mut writer4 = side_conn(&url).await;
+    let ctx4 = zeroship_control::disputes::DisputeCloseContext {
+        invoice_id: &inv_cbc, amount_cents: 7000, currency: "usd", reason: None,
+    };
+    zeroship_control::disputes::record_dispute_closed(
+        &mut writer4, &du_cbc, zeroship_control::disputes::DisputeStatus::Lost, Some(ctx4),
+    )
+    .await
+    .expect("close-before-create completes once the lock is free");
+    assert_eq!(dispute_status(&conn, &du_cbc).await.as_deref(), Some("lost"), "seeded terminal lost after release");
+    assert_eq!(payment_kind_count(&conn, &inv_cbc, "dispute_debit").await, 1, "debit applied");
+    assert_eq!(cash_collected(&conn, &inv_cbc).await, 0, "cap tightened by the close-before-create debit");
+    let _ = pi_cbc;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GAP #35: `resolve_invoice_for_dispute` deterministically PREFERS `payment_intent` over
+// `charge` when both candidate ids map to a (different) invoice — the `ORDER BY (ref_kind =
+// 'payment_intent') DESC LIMIT 1`. We seed a pi_… linked to invoice A and a ch_… linked to a
+// DIFFERENT invoice B (pathological — they would normally point at the same invoice), pass
+// BOTH as candidates, and assert the pi_…'s invoice (A) wins.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+async fn resolve_invoice_for_dispute_prefers_payment_intent_over_charge() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let conn = side_conn(&url).await;
+    let creator = make_creator(&conn).await;
+
+    // Two distinct finalized invoices for distinct periods (partial-unique-period index).
+    let inv_pi = zeroship_core::typed_id::new_invoice_id();
+    let inv_ch = zeroship_core::typed_id::new_invoice_id();
+    conn.execute(
+        "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+         VALUES ($1, $2, $3::date, 'finalized', 6000, 0, 0, 6000, NOW())",
+        &[&inv_pi, &creator, &period_offset(0)],
+    ).await.expect("invoice A");
+    conn.execute(
+        "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+         VALUES ($1, $2, $3::date, 'finalized', 6000, 0, 0, 6000, NOW())",
+        &[&inv_ch, &creator, &period_offset(1)],
+    ).await.expect("invoice B");
+
+    let pi = format!("pi_pref_{}", Uuid::new_v4().simple());
+    let ch = format!("ch_pref_{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'payment_intent', $2)",
+        &[&inv_pi, &pi],
+    ).await.expect("pi linkage");
+    conn.execute(
+        "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'charge', $2)",
+        &[&inv_ch, &ch],
+    ).await.expect("ch linkage");
+
+    // Both candidates present → the payment_intent's invoice (A) must win, deterministically.
+    let resolved = zeroship_control::disputes::resolve_invoice_for_dispute(&conn, &[&pi, &ch])
+        .await
+        .expect("resolve")
+        .expect("an invoice resolves");
+    assert_eq!(resolved, inv_pi, "payment_intent is preferred over charge");
+
+    // Order of the candidate slice must NOT change the winner (the ORDER BY decides, not slice order).
+    let resolved_rev = zeroship_control::disputes::resolve_invoice_for_dispute(&conn, &[&ch, &pi])
+        .await
+        .expect("resolve rev")
+        .expect("an invoice resolves");
+    assert_eq!(resolved_rev, inv_pi, "preference is by ref_kind, independent of candidate order");
+
+    // And with ONLY the charge present, it falls back to the charge's invoice (B).
+    let resolved_ch = zeroship_control::disputes::resolve_invoice_for_dispute(&conn, &[&ch])
+        .await
+        .expect("resolve ch")
+        .expect("an invoice resolves");
+    assert_eq!(resolved_ch, inv_ch, "charge alone resolves the charge's invoice");
+}

@@ -1870,7 +1870,23 @@ async fn handle_dispute_created(
     let candidates: Vec<&str> = [obj.payment_intent.as_deref(), obj.charge.as_deref()]
         .into_iter()
         .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .collect();
+    // BUG-4: a dispute with NEITHER a `payment_intent` NOR a `charge` has NO settling object
+    // to resolve OR to park against — `resolve_invoice_for_dispute` returns None and
+    // `park_pending_dispute` would REJECT (it requires a candidate) → a 500 that Stripe
+    // retries forever (poison). Stripe always sends at least one of pi_/ch_, so this is purely
+    // defensive, but it must ACK like every other unrecognized-input ignore path (200 + warn),
+    // NOT 5xx into a retry storm.
+    if candidates.is_empty() {
+        tracing::warn!(
+            event_id = %sanitize_event_id(&event.id),
+            "stripe: charge.dispute.created carries NO payment_intent/charge — no settling object to anchor; ignored"
+        );
+        return web::HttpResponse::Ok()
+            .json(&serde_json::json!({"status": "dispute_no_settling_object"}));
+    }
     let evidence_due_at = obj
         .evidence_details
         .as_ref()
