@@ -828,6 +828,14 @@ struct StripeEvent {
     event_type: String,
     created: i64,
     data: StripeEventData,
+    /// Connect webhooks carry a TOP-LEVEL `account` (`acct_…`) identifying the connected
+    /// account the event came from (verified docs.stripe.com/connect/webhooks: "Each event
+    /// for a connected account contains a top-level `account` property"). The Connect
+    /// failure handlers (`payout.failed` / `payment_intent.payment_failed`) resolve the
+    /// creator through this when the object itself doesn't carry the `acct_…`. Absent on
+    /// platform-account events.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -916,6 +924,26 @@ struct StripeObject {
     /// fallback when `on_behalf_of` is absent.
     #[serde(default)]
     transfer_data: Option<TransferData>,
+    // ── Connect failure fields (payout.failed / payment_intent.payment_failed) ───────
+    /// `failure_code` on a Payout object (`account_closed`/`insufficient_funds`/… —
+    /// verified docs.stripe.com/api/payouts/object). Unset on non-payout objects.
+    #[serde(default)]
+    failure_code: Option<String>,
+    /// `failure_message` on a Payout object (human-readable failure reason).
+    #[serde(default)]
+    failure_message: Option<String>,
+    /// `last_payment_error` on a PaymentIntent object (`payment_intent.payment_failed`):
+    /// the decline `{code, message}`. Unset on non-PI objects / a PI with no error.
+    #[serde(default)]
+    last_payment_error: Option<LastPaymentError>,
+}
+
+#[derive(Deserialize, Debug)]
+struct LastPaymentError {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1259,34 +1287,34 @@ async fn dispatch_event(
                 return web::HttpResponse::Ok().json(&serde_json::json!({"status": "infra_recorded"}));
             }
         }
-        // M2: billing-relevant events we do NOT yet act on, but must NOT silently
-        // drop. A LOUD warn (not a silent `_ => ignored`) so they surface in logs and
-        // are not lost. DEFERRED handling (each is a follow-up):
-        //   * `payout.failed` — a payout to a connected account bounced (bad bank
-        //     details); ops should notify the creator. Deferred: needs a creator-facing
-        //     notification + a payout-failure ledger.
-        //   * `payment_intent.payment_failed` — a Connect end-user charge failed; the
-        //     creator's front-end already sees this via the client_secret confirm, so
-        //     there is no platform-ledger action, but we log it for observability.
-        //   * `charge.refund.updated` — a `re_…` we issued later transitioned (e.g. to
-        //     `failed` when the bank rejected the credit). Deferred: needs a refund
-        //     status column to reconcile a failed refund back into cash_collected.
-        //
+        // MONEY-CRITICAL: a refund we recorded `issued` that LATER transitioned to a
+        // terminal FAILURE (`failed`/`canceled`) — the cash did NOT return to the
+        // cardholder. Reconcile our ledger: flip the refund to failed (so the over-refund
+        // cap stops counting it → the creator can re-refund) and, for a credit-destination
+        // refund, claw back the minted `refund_to_credit` grant. Idempotent + fail-closed.
+        "charge.refund.updated" => {
+            return handle_refund_updated(req, state, event, obj).await;
+        }
+        // A payout to a creator's connected account FAILED (bad bank details / closed
+        // account). Record it in `payout_failures` (idempotent on the `po_…`) and notify
+        // the creator via the `payout_failed` notification (off the new row, by the cron).
+        "payout.failed" => {
+            return handle_payout_failed(req, state, event, obj).await;
+        }
+        // An end-user's Connect checkout charge FAILED. No money moved (informational), but
+        // it must be SURFACED, not silently dropped — record it in
+        // `connect_checkout_failures` (idempotent on the `pi_…`) + a `checkout_failed`
+        // creator notification.
+        "payment_intent.payment_failed" => {
+            return handle_payment_intent_failed(req, state, event, obj).await;
+        }
         // MUST-ENABLE webhook event set (configure these on the Stripe endpoint):
         //   setup_intent.succeeded, invoice.payment_failed, invoice.paid,
         //   account.updated, charge.dispute.created, charge.dispute.closed,
         //   charge.dispute.updated, charge.dispute.funds_withdrawn,
-        //   charge.dispute.funds_reinstated  (handled above)
-        //   payout.failed, payment_intent.payment_failed, charge.refund.updated
-        //   (logged here, handling deferred)
-        "payout.failed" | "payment_intent.payment_failed" | "charge.refund.updated" => {
-            tracing::warn!(
-                event_id = %sanitize_event_id(&event.id),
-                event_type = %event.event_type,
-                "stripe: unhandled billing-relevant event — acked but NOT acted on (handling deferred; see dispatch_event doc)"
-            );
-            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "acked_unhandled"}));
-        }
+        //   charge.dispute.funds_reinstated,
+        //   charge.refund.updated, payout.failed, payment_intent.payment_failed
+        //   (all handled above — none deferred).
         _ => {
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "ignored"}));
         }
@@ -2009,6 +2037,276 @@ async fn handle_dispute_closed_or_updated(
         "status": "dispute_resolved",
         "dispute_status": rec.status.as_str(),
     }))
+}
+
+/// `charge.refund.updated` (webhook follow-up, MONEY-CRITICAL). A Stripe `Refund` (`re_…`)
+/// we previously recorded `issued` later transitioned. We act ONLY on the terminal-failure
+/// states (`failed`/`canceled`) — the cash did NOT return to the cardholder — and otherwise
+/// ack (a `succeeded`/`pending`/`requires_action` update needs no reconciliation).
+///
+/// On failure we [`crate::refund::reconcile_failed_refund`] (idempotent, in one txn):
+///   * flip our `refunds` row to the terminal status (so the over-refund cap STOPS counting
+///     it → a failed cash refund no longer permanently reduces refundable cash; the creator
+///     CAN re-refund),
+///   * for a `destination='credit'` refund, claw back the minted `refund_to_credit` grant
+///     via a compensating negative `refund_clawback` entry (the credit must not survive a
+///     refund whose cash never moved). Balance is conserved.
+///
+/// Idempotent: a redelivered `charge.refund.updated` for an already-failed refund is a
+/// no-op (no double-reversal / double-claw). FAIL-CLOSED: a transient DB error 5xx's so the
+/// event is left UNCLAIMED for Stripe's retry, matching the M1 discipline.
+async fn handle_refund_updated(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(re_id) = obj.id.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.refund.updated missing refund id — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_refund_id"}));
+    };
+    let stripe_status = obj.status.as_deref().unwrap_or("");
+    // Only the cash-did-not-return states reconcile; everything else is a benign ack.
+    let Some(terminal) = crate::refund::stripe_refund_failure_status(stripe_status) else {
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "refund_update_noop"}));
+    };
+
+    let mut conn = match state.registry.conn().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: refund.updated conn failed — failing closed");
+            return err_json(500, "internal error");
+        }
+    };
+    match crate::refund::reconcile_failed_refund(&mut conn, re_id, terminal).await {
+        Ok(crate::refund::RefundFailureOutcome::Reversed { refund_id, clawed_back_credit }) => {
+            let ip = source_ip(req, state);
+            audit::log_with_detail(
+                &state.registry,
+                AuditEntry {
+                    app_id: None,
+                    creator_id: None,
+                    actor_user_id: None,
+                    actor_token_id: None,
+                    action: Action::RefundFailed,
+                    resource: Some(&event.id),
+                    source_ip: ip.as_deref(),
+                },
+                &serde_json::json!({
+                    "stripe_event_type": "charge.refund.updated",
+                    "refund_id": refund_id,
+                    "provider_refund_id": re_id,
+                    "terminal_status": terminal,
+                    "credit_clawed_back": clawed_back_credit,
+                }),
+            )
+            .await;
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "status": "refund_reversed",
+                "refund_id": refund_id,
+                "credit_clawed_back": clawed_back_credit,
+            }))
+        }
+        Ok(crate::refund::RefundFailureOutcome::AlreadyReversed(refund_id)) => web::HttpResponse::Ok()
+            .json(&serde_json::json!({"status": "refund_already_reversed", "refund_id": refund_id})),
+        Ok(crate::refund::RefundFailureOutcome::Unknown) => {
+            tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: charge.refund.updated for an unknown re_… (not a platform refund) — acked");
+            web::HttpResponse::Ok().json(&serde_json::json!({"status": "refund_unknown"}))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: refund.updated reconciliation failed — failing closed for retry");
+            err_json(500, "internal error")
+        }
+    }
+}
+
+/// Resolve the connected account (`acct_…`) for a Connect event, preferring the event's
+/// top-level `account` (the Connect-event signal) and falling back to the object's
+/// `on_behalf_of` / `transfer_data.destination` (a destination charge on the platform).
+fn connect_account_for<'a>(event: &'a StripeEvent, obj: &'a StripeObject) -> Option<&'a str> {
+    event
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| obj.on_behalf_of.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            obj.transfer_data
+                .as_ref()
+                .and_then(|t| t.destination.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// `payout.failed` (webhook follow-up). A payout to a creator's connected account bounced.
+/// Resolve the creator from the connected account, record an idempotent `payout_failures`
+/// row, and let the notify cron emit the `payout_failed` notification off it. FAIL-CLOSED on
+/// a DB error.
+async fn handle_payout_failed(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(po_id) = obj.id.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: payout.failed missing payout id — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_payout_id"}));
+    };
+    let Some(account_id) = connect_account_for(event, obj) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: payout.failed carries no connected account (top-level account / transfer_data) — acked, not attributable");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_connected_account"}));
+    };
+    let creator_id = match state.stripe_store.get_creator_by_account(account_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            tracing::warn!(event_id = %sanitize_event_id(&event.id), account = %stripe_store::sanitize_for_display(account_id), "stripe: payout.failed for an account we don't have linked — acked");
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "account_not_linked"}));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: payout.failed creator resolve failed — failing closed for retry");
+            return err_json(500, "internal error");
+        }
+    };
+    let amount = obj.amount.unwrap_or(0);
+    let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
+    match state
+        .stripe_store
+        .record_payout_failure(
+            creator_id,
+            po_id,
+            account_id,
+            amount,
+            &currency,
+            obj.failure_code.as_deref(),
+            obj.failure_message.as_deref(),
+            event.created,
+        )
+        .await
+    {
+        Ok(inserted) => {
+            if inserted {
+                let ip = source_ip(req, state);
+                audit::log_with_detail(
+                    &state.registry,
+                    AuditEntry {
+                        app_id: None,
+                        creator_id: Some(creator_id),
+                        actor_user_id: None,
+                        actor_token_id: None,
+                        action: Action::PayoutFailed,
+                        resource: Some(&event.id),
+                        source_ip: ip.as_deref(),
+                    },
+                    &serde_json::json!({
+                        "stripe_event_type": "payout.failed",
+                        "creator_id": creator_id.to_string(),
+                        "stripe_payout_id": po_id,
+                        "stripe_account_id": account_id,
+                        "amount_cents": amount,
+                        "failure_code": obj.failure_code.as_deref(),
+                    }),
+                )
+                .await;
+            }
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "status": if inserted { "payout_failure_recorded" } else { "duplicate" },
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: payout.failed record failed — failing closed for retry");
+            stripe_err_response(e)
+        }
+    }
+}
+
+/// `payment_intent.payment_failed` (webhook follow-up). An end-user's Connect checkout
+/// charge failed. No money moved — informational — but surfaced (recorded + a creator
+/// notification) rather than silently dropped. Resolve the creator from the PI's
+/// destination account (or the Connect event's top-level account), record an idempotent
+/// `connect_checkout_failures` row. FAIL-CLOSED on a DB error.
+async fn handle_payment_intent_failed(
+    req: &web::HttpRequest,
+    state: &AppState,
+    event: &StripeEvent,
+    obj: &StripeObject,
+) -> web::HttpResponse {
+    let Some(pi_id) = obj.id.as_deref().filter(|s| !s.is_empty()) else {
+        tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: payment_intent.payment_failed missing PI id — ignored");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_pi_id"}));
+    };
+    let Some(account_id) = connect_account_for(event, obj) else {
+        // A PLATFORM (non-Connect) PI failure is not creator-attributable here — ack.
+        tracing::info!(event_id = %sanitize_event_id(&event.id), "stripe: payment_intent.payment_failed carries no connected account — acked (not a Connect checkout)");
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_connected_account"}));
+    };
+    let creator_id = match state.stripe_store.get_creator_by_account(account_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            tracing::warn!(event_id = %sanitize_event_id(&event.id), account = %stripe_store::sanitize_for_display(account_id), "stripe: payment_intent.payment_failed for an unlinked account — acked");
+            return web::HttpResponse::Ok().json(&serde_json::json!({"status": "account_not_linked"}));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: payment_intent.payment_failed creator resolve failed — failing closed for retry");
+            return err_json(500, "internal error");
+        }
+    };
+    // PI amount: `amount` is the intended charge; default 0 if absent.
+    let amount = obj.amount.unwrap_or(0);
+    let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
+    let (failure_code, failure_message) = obj
+        .last_payment_error
+        .as_ref()
+        .map(|e| (e.code.as_deref(), e.message.as_deref()))
+        .unwrap_or((None, None));
+    match state
+        .stripe_store
+        .record_checkout_failure(
+            creator_id,
+            pi_id,
+            account_id,
+            amount,
+            &currency,
+            failure_code,
+            failure_message,
+            event.created,
+        )
+        .await
+    {
+        Ok(inserted) => {
+            if inserted {
+                let ip = source_ip(req, state);
+                audit::log_with_detail(
+                    &state.registry,
+                    AuditEntry {
+                        app_id: None,
+                        creator_id: Some(creator_id),
+                        actor_user_id: None,
+                        actor_token_id: None,
+                        action: Action::CheckoutFailed,
+                        resource: Some(&event.id),
+                        source_ip: ip.as_deref(),
+                    },
+                    &serde_json::json!({
+                        "stripe_event_type": "payment_intent.payment_failed",
+                        "creator_id": creator_id.to_string(),
+                        "stripe_payment_intent_id": pi_id,
+                        "stripe_account_id": account_id,
+                        "amount_cents": amount,
+                        "failure_code": failure_code,
+                    }),
+                )
+                .await;
+            }
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "status": if inserted { "checkout_failure_recorded" } else { "duplicate" },
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "stripe: payment_intent.payment_failed record failed — failing closed for retry");
+            stripe_err_response(e)
+        }
+    }
 }
 
 /// Audit one account-state transition (G2). The detail carries the edge + reason

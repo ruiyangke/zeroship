@@ -119,8 +119,13 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
 }
 
 /// The lock-held sweep body: scan → claim-before-send → send → flip, for each kind.
+///
+/// `pub` so an integration test can drive the sweep DIRECTLY (bypassing the single-flight
+/// advisory-lock gate) — the claim-before-send INSERT is itself the multi-node arbiter, so a
+/// direct sweep is still safe under concurrency; it just avoids the lock-starvation a tight
+/// `tick`-loop hits when many parallel test binaries compete for the one advisory lock.
 #[allow(clippy::future_not_send)]
-async fn sweep(state: &AppState) -> Result<usize, RegistryError> {
+pub async fn sweep(state: &AppState) -> Result<usize, RegistryError> {
     let candidates = scan_unsent(state).await?;
     let mut sent = 0usize;
     for c in candidates {
@@ -313,6 +318,70 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
         out.push(Candidate {
             creator_id: r.get("creator_id"),
             kind: BillingNotificationKind::Disputed,
+            transition_id: r.get("id"),
+            detail: NotificationDetail {
+                period_label: None,
+                amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
+                refund_destination_label: None,
+            },
+        });
+    }
+
+    // (e) Failed payouts (webhook follow-up: payout.failed). transition_id = the `pof_…`
+    // payout-failure id; creator is on the row directly (a connected-account creator). We
+    // notify the creator so they learn their payout bounced and can fix their bank details.
+    let rows = conn
+        .query(
+            "SELECT pf.id, pf.creator_id, pf.amount_cents, pf.currency \
+               FROM zeroship.payout_failures pf \
+               LEFT JOIN zeroship.billing_notifications n \
+                 ON n.creator_id = pf.creator_id \
+                AND n.transition_id = pf.id \
+                AND n.kind = 'payout_failed'::zeroship.billing_notification_kind \
+              WHERE pf.created_at > NOW() - $1::text::interval \
+                AND ( n.status IS NULL \
+                   OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
+            &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    for r in &rows {
+        let amount: i64 = r.get("amount_cents");
+        out.push(Candidate {
+            creator_id: r.get("creator_id"),
+            kind: BillingNotificationKind::PayoutFailed,
+            transition_id: r.get("id"),
+            detail: NotificationDetail {
+                period_label: None,
+                amount_label: Some(format_money(amount, &r.get::<_, String>("currency"))),
+                refund_destination_label: None,
+            },
+        });
+    }
+
+    // (f) Failed end-user checkouts (webhook follow-up: payment_intent.payment_failed).
+    // transition_id = the `cof_…` checkout-failure id; creator on the row. Informational —
+    // no money moved — but surfaced to the creator for visibility.
+    let rows = conn
+        .query(
+            "SELECT cf.id, cf.creator_id, cf.amount_cents, cf.currency \
+               FROM zeroship.connect_checkout_failures cf \
+               LEFT JOIN zeroship.billing_notifications n \
+                 ON n.creator_id = cf.creator_id \
+                AND n.transition_id = cf.id \
+                AND n.kind = 'checkout_failed'::zeroship.billing_notification_kind \
+              WHERE cf.created_at > NOW() - $1::text::interval \
+                AND ( n.status IS NULL \
+                   OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
+            &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    for r in &rows {
+        let amount: i64 = r.get("amount_cents");
+        out.push(Candidate {
+            creator_id: r.get("creator_id"),
+            kind: BillingNotificationKind::CheckoutFailed,
             transition_id: r.get("id"),
             detail: NotificationDetail {
                 period_label: None,

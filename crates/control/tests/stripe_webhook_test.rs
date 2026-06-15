@@ -1592,3 +1592,470 @@ async fn handler_failure_is_retried_not_lost() {
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "retry recorded once");
     assert_eq!(setup_audit_count(&conn, creator_id, &event_id).await, 1);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Webhook follow-ups (0054): charge.refund.updated / payout.failed /
+// payment_intent.payment_failed — the 3 previously-deferred handlers.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A fresh OWNED Postgres connection (mutable) — `refund::issue_refund` opens a txn for
+/// its claim, so it needs `&mut`.
+async fn owned_conn(db_url: &str) -> compio_postgres::Client {
+    let (conn, driver) = compio_postgres::connect(db_url, compio_postgres::NoTls)
+        .await
+        .expect("owned connect");
+    compio::runtime::spawn(async move {
+        let _ = driver.run().await;
+    })
+    .detach();
+    conn
+}
+
+/// Credit balance for a creator = SUM(credit_ledger.amount_cents).
+async fn credit_balance(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+    conn.query(
+        "SELECT COALESCE(SUM(amount_cents),0)::bigint AS b FROM zeroship.credit_ledger WHERE creator_id = $1",
+        &[&creator_id],
+    )
+    .await
+    .expect("credit balance")[0]
+        .get::<_, i64>("b")
+}
+
+/// The status of a refund row.
+async fn refund_status(conn: &compio_postgres::Client, refund_id: &str) -> String {
+    conn.query(
+        "SELECT status::text AS s FROM zeroship.refunds WHERE id = $1",
+        &[&refund_id],
+    )
+    .await
+    .expect("refund status")[0]
+        .get::<_, String>("s")
+}
+
+/// Count `refund_clawback` credit entries for a refund's note.
+async fn clawback_count(conn: &compio_postgres::Client, refund_id: &str) -> i64 {
+    let note = zeroship_control::refund::refund_clawback_note(refund_id);
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.credit_ledger \
+         WHERE kind = 'refund_clawback' AND note = $1",
+        &[&note],
+    )
+    .await
+    .expect("clawback count")[0]
+        .get::<_, i64>("n")
+}
+
+/// charge.refund.updated body for a re_… that transitioned to `status`.
+fn refund_updated_body(event_id: &str, re_id: &str, status: &str) -> String {
+    json!({
+        "id": event_id,
+        "type": "charge.refund.updated",
+        "created": 1_777_017_700i64,
+        "data": { "object": {
+            "id": re_id,
+            "object": "refund",
+            "status": status
+        }}
+    })
+    .to_string()
+}
+
+/// MONEY-CRITICAL (charge.refund.updated, CASH leg): a CASH refund whose Stripe `Refund`
+/// later FAILS must be marked `failed` so the over-refund cap STOPS counting it — the
+/// creator can re-refund the same cash. A redelivery is a no-op.
+///
+/// RED pre-fix: the deferred arm left the refund `issued`, so the cash stayed
+/// permanently "refunded" and a re-refund was blocked by the over-refund cap.
+#[compio::test]
+async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "refund-updated-cash").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    conn.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+
+    // Finalized invoice + cash collected + the in_… charge provider_ref so the cash refund
+    // resolves a money object.
+    let (inv_id, provider_invoice_id) = seed_finalized_infra_invoice(&conn, creator_id, 5000).await;
+    zeroship_control::invoice_payments::append_charge(
+        &conn, &inv_id, 5000, "usd", Some(&provider_invoice_id),
+    )
+    .await
+    .expect("append charge");
+
+    // Issue a CASH refund for the FULL cash → the Native provider mints a
+    // `re_native_<idem>` recorded as a refund_provider_refs(ref_kind='refund') row.
+    let mut oc = owned_conn(&db_url).await;
+    let provider = zeroship_control::refund::NativeRefundProvider;
+    let idem = format!("refkey_cash_{}", Uuid::new_v4().simple());
+    let outcome = zeroship_control::refund::issue_refund(
+        &mut oc, &provider, &inv_id, 5000, 5000, 0,
+        zeroship_control::refund::RefundDestination::Cash, Some("test"), &idem,
+    )
+    .await
+    .expect("issue cash refund");
+    let (refund_id, re_id) = match outcome {
+        zeroship_control::refund::RefundOutcome::Issued { refund_id, provider_ref } => {
+            (refund_id, provider_ref.expect("cash refund has a re_…"))
+        }
+        other => panic!("expected Issued, got {other:?}"),
+    };
+    drop(oc);
+    assert_eq!(refund_status(&conn, &refund_id).await, "issued", "refund issued");
+
+    // Sanity: a SECOND full cash refund is now BLOCKED (the cap is consumed).
+    {
+        let mut oc2 = owned_conn(&db_url).await;
+        let blocked = zeroship_control::refund::issue_refund(
+            &mut oc2, &provider, &inv_id, 5000, 5000, 0,
+            zeroship_control::refund::RefundDestination::Cash, None,
+            &format!("refkey_blocked_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .expect("second refund attempt");
+        assert!(
+            matches!(blocked, zeroship_control::refund::RefundOutcome::OverRefund(_)),
+            "while the first refund is issued, a second full refund is over-cap; got {blocked:?}",
+        );
+        drop(oc2);
+    }
+
+    // charge.refund.updated → status=failed: the bank rejected the credit.
+    let evt = format!("evt_refundfail_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, refund_updated_body(&evt, &re_id, "failed"), None);
+    assert_eq!(r.status(), StatusCode::OK, "refund.updated processed");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "refund_reversed");
+    assert_eq!(refund_status(&conn, &refund_id).await, "failed", "refund flipped to failed");
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
+
+    // The cap is FREED: a fresh full cash refund now SUCCEEDS (the failed one no longer counts).
+    {
+        let mut oc3 = owned_conn(&db_url).await;
+        let re_refund = zeroship_control::refund::issue_refund(
+            &mut oc3, &provider, &inv_id, 5000, 5000, 0,
+            zeroship_control::refund::RefundDestination::Cash, None,
+            &format!("refkey_rerefund_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .expect("re-refund after the failed one");
+        assert!(
+            matches!(re_refund, zeroship_control::refund::RefundOutcome::Issued { .. }),
+            "a failed refund frees the cap so the cash can be re-refunded; got {re_refund:?}",
+        );
+        drop(oc3);
+    }
+
+    // Redelivery of the SAME charge.refund.updated is a no-op (refund already failed).
+    let evt2 = format!("evt_refundfail2_{}", Uuid::new_v4().simple());
+    let r2 = post_webhook!(app, refund_updated_body(&evt2, &re_id, "failed"), None);
+    assert_eq!(r2.status(), StatusCode::OK, "redelivery processed");
+    let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
+}
+
+/// MONEY-CRITICAL (charge.refund.updated, credit clawback via a directly-seeded re_…):
+/// a credit-destination refund whose Refund later FAILS claws back the minted credit,
+/// conserving the balance; a redelivery is a no-op. We seed the re_… linkage directly
+/// (a credit refund carries none natively) to exercise the clawback path end-to-end.
+#[compio::test]
+async fn refund_updated_failed_credit_claws_back_grant() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "refund-updated-claw").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    conn.execute(
+        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&creator_id],
+    )
+    .await
+    .expect("creator_billing");
+
+    let (inv_id, _provider) = seed_finalized_infra_invoice(&conn, creator_id, 5000).await;
+    append_charge_via_helper(&conn, &inv_id, 5000).await;
+
+    let mut oc = owned_conn(&db_url).await;
+    let provider = zeroship_control::refund::NativeRefundProvider;
+    let idem = format!("refkey_claw_{}", Uuid::new_v4().simple());
+    let outcome = zeroship_control::refund::issue_refund(
+        &mut oc, &provider, &inv_id, 2000, 2000, 0,
+        zeroship_control::refund::RefundDestination::Credit, None, &idem,
+    )
+    .await
+    .expect("issue credit refund");
+    let refund_id = match outcome {
+        zeroship_control::refund::RefundOutcome::Issued { refund_id, .. } => refund_id,
+        other => panic!("expected Issued, got {other:?}"),
+    };
+    let balance_before = credit_balance(&conn, creator_id).await;
+    assert_eq!(balance_before, 2000, "credit minted");
+
+    // Seed the re_… cash ref the failed-refund webhook resolves through. (Stripe does
+    // surface a re_… on a customer-balance refund's charge.refund.updated; a credit refund
+    // in our model would normally have none — we seed it to exercise the clawback path.)
+    let re_id = format!("re_seed_{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.refund_provider_refs (refund_id, provider, ref_kind, external_id) \
+         VALUES ($1, 'stripe', 'refund', $2)",
+        &[&refund_id, &re_id],
+    )
+    .await
+    .expect("seed re_ ref");
+    drop(oc);
+
+    // charge.refund.updated → failed: claw back the credit.
+    let evt = format!("evt_claw_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, refund_updated_body(&evt, &re_id, "failed"), None);
+    assert_eq!(r.status(), StatusCode::OK, "refund.updated processed");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "refund_reversed");
+    assert_eq!(b["credit_clawed_back"], true, "the minted credit was clawed back");
+
+    assert_eq!(refund_status(&conn, &refund_id).await, "failed", "refund failed");
+    assert_eq!(clawback_count(&conn, &refund_id).await, 1, "exactly one refund_clawback entry");
+    assert_eq!(
+        credit_balance(&conn, creator_id).await,
+        0,
+        "balance conserved: +2000 grant − 2000 clawback = 0 (the phantom credit is gone)",
+    );
+
+    // Redelivery: no second clawback, balance unchanged.
+    let evt2 = format!("evt_claw2_{}", Uuid::new_v4().simple());
+    let r2 = post_webhook!(app, refund_updated_body(&evt2, &re_id, "failed"), None);
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
+    assert_eq!(clawback_count(&conn, &refund_id).await, 1, "still exactly one clawback");
+    assert_eq!(credit_balance(&conn, creator_id).await, 0, "balance still conserved");
+}
+
+/// A `charge.refund.updated` with a NON-terminal status (e.g. `succeeded`) is a benign
+/// no-op — it must NOT reverse a healthy refund.
+#[compio::test]
+async fn refund_updated_succeeded_is_noop() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "refund-updated-ok").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let evt = format!("evt_refok_{}", Uuid::new_v4().simple());
+    let re_id = format!("re_ok_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, refund_updated_body(&evt, &re_id, "succeeded"), None);
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "refund_update_noop", "a non-failure update is a no-op");
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event still claimed (acked)");
+}
+
+/// Count payout_failures rows for a creator.
+async fn payout_failure_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures WHERE creator_id = $1",
+        &[&creator_id],
+    )
+    .await
+    .expect("count payout failures")[0]
+        .get::<_, i64>("n")
+}
+
+/// payout.failed body: a Connect event (top-level `account`) for a `po_…` payout.
+fn payout_failed_body(event_id: &str, po_id: &str, account: &str, amount: i64) -> String {
+    json!({
+        "id": event_id,
+        "type": "payout.failed",
+        "created": 1_777_017_800i64,
+        "account": account,
+        "data": { "object": {
+            "id": po_id,
+            "object": "payout",
+            "amount": amount,
+            "currency": "usd",
+            "status": "failed",
+            "failure_code": "account_closed",
+            "failure_message": "The bank account has been closed"
+        }}
+    })
+    .to_string()
+}
+
+/// payout.failed (webhook follow-up): records a payout_failures row + (via the notify cron)
+/// exactly ONE payout_failed notification, idempotent on the payout id.
+///
+/// RED pre-fix: payout.failed fell into the deferred "acked but not acted on" arm — no
+/// ledger row, no creator notification.
+#[compio::test]
+async fn payout_failed_records_failure_and_notifies_once() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "payout-failed").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let acct = format!("acct_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.link_account(creator_id, &acct).await.expect("link");
+
+    let po_id = format!("po_{}", Uuid::new_v4().simple());
+    let evt = format!("evt_payout_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, payout_failed_body(&evt, &po_id, &acct, 7500), None);
+    assert_eq!(r.status(), StatusCode::OK, "payout.failed processed");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "payout_failure_recorded");
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
+    assert_eq!(payout_failure_count(&conn, creator_id).await, 1, "one failure row");
+
+    // The notify cron emits exactly one payout_failed notification for this creator. We
+    // assert off the DB send-ledger PER-CREATOR (parallel-safe per the PR-6 lesson: a
+    // sibling's fleet-wide tick could deliver my creator's email into ITS recorder, but the
+    // `billing_notifications` row is per-(creator,kind,transition) and immune).
+    drive_notify_until_sent(&fx.state, &conn, creator_id, "payout_failed").await;
+    assert_eq!(
+        notification_sent_count(&conn, creator_id, "payout_failed").await,
+        1,
+        "exactly one payout_failed notification ledger row (sent) for this creator",
+    );
+
+    // Redelivery (different evt id, same po_…) is an idempotent no-op: no second row.
+    let evt2 = format!("evt_payout2_{}", Uuid::new_v4().simple());
+    let r2 = post_webhook!(app, payout_failed_body(&evt2, &po_id, &acct, 7500), None);
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b2["status"], "duplicate", "same po_… is a no-op");
+    assert_eq!(payout_failure_count(&conn, creator_id).await, 1, "still one failure row");
+    let _ = zeroship_control::cron::billing_notify::tick(&fx.state).await;
+    assert_eq!(
+        notification_sent_count(&conn, creator_id, "payout_failed").await,
+        1,
+        "still exactly one payout_failed notification (no duplicate)",
+    );
+}
+
+/// Count `sent` `billing_notifications` rows for a creator + kind (per-creator, immune to
+/// the fleet-wide cron's sibling-recorder race — the PR-6 parallel-safe assertion).
+async fn notification_sent_count(conn: &compio_postgres::Client, creator_id: Uuid, kind: &str) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_notifications \
+         WHERE creator_id = $1 AND kind = $2::text::zeroship.billing_notification_kind AND status = 'sent'",
+        &[&creator_id, &kind],
+    )
+    .await
+    .expect("count notifications")[0]
+        .get::<_, i64>("n")
+}
+
+/// Drive the notify cron until MY creator's `(kind)` row is `sent` (or a bounded number of
+/// ticks elapse). The cron's single-flight PG advisory lock means a given tick can LOSE to a
+/// concurrent sibling test's sweep and win nothing — exactly the multi-node "loser skips"
+/// path. So we retry rather than assume one tick delivers. Per-creator + DB-ledger-anchored,
+/// so a sibling's tick delivering MY row (into ITS recorder) still flips MY ledger row to
+/// `sent` and satisfies this loop (the PR-6 lesson).
+async fn drive_notify_until_sent(
+    state: &std::sync::Arc<AppState>,
+    conn: &compio_postgres::Client,
+    creator_id: Uuid,
+    kind: &str,
+) {
+    for _ in 0..40 {
+        // Drive the sweep DIRECTLY (not `tick`): under the default parallel runner many test
+        // binaries compete for the cron's single advisory lock, so a `tick` loop can starve
+        // (always losing the lock). The claim-before-send INSERT is the real multi-node
+        // arbiter, so a direct sweep stays exactly-once-correct; it just guarantees the work
+        // runs for THIS test's assertion.
+        let _ = zeroship_control::cron::billing_notify::sweep(state).await;
+        if notification_sent_count(conn, creator_id, kind).await >= 1 {
+            return;
+        }
+    }
+    panic!("notify cron did not deliver a `{kind}` notification for creator {creator_id} within 40 sweeps");
+}
+
+/// Count connect_checkout_failures rows for a creator.
+async fn checkout_failure_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+    conn.query(
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures WHERE creator_id = $1",
+        &[&creator_id],
+    )
+    .await
+    .expect("count checkout failures")[0]
+        .get::<_, i64>("n")
+}
+
+/// payment_intent.payment_failed body: a destination charge (transfer_data.destination)
+/// PI that failed, carrying last_payment_error.
+fn pi_failed_body(event_id: &str, pi_id: &str, account: &str, amount: i64) -> String {
+    json!({
+        "id": event_id,
+        "type": "payment_intent.payment_failed",
+        "created": 1_777_017_900i64,
+        "data": { "object": {
+            "id": pi_id,
+            "object": "payment_intent",
+            "amount": amount,
+            "currency": "usd",
+            "status": "requires_payment_method",
+            "transfer_data": { "destination": account },
+            "last_payment_error": { "code": "card_declined", "message": "Your card was declined." }
+        }}
+    })
+    .to_string()
+}
+
+/// payment_intent.payment_failed (webhook follow-up): surfaces the failure as a
+/// connect_checkout_failures row + (via the cron) exactly ONE checkout_failed
+/// notification, idempotent on the PI id. No money moved — informational.
+///
+/// RED pre-fix: it fell into the deferred "acked but not acted on" arm — silently dropped.
+#[compio::test]
+async fn payment_intent_failed_surfaces_record_and_notifies_once() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "pi-failed").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let acct = format!("acct_{}", Uuid::new_v4().simple());
+    fx.state.stripe_store.link_account(creator_id, &acct).await.expect("link");
+
+    let pi_id = format!("pi_{}", Uuid::new_v4().simple());
+    let evt = format!("evt_pifail_{}", Uuid::new_v4().simple());
+    let r = post_webhook!(app, pi_failed_body(&evt, &pi_id, &acct, 3200), None);
+    assert_eq!(r.status(), StatusCode::OK, "payment_intent.payment_failed processed");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "checkout_failure_recorded");
+    assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
+    assert_eq!(checkout_failure_count(&conn, creator_id).await, 1, "one checkout-failure row");
+
+    drive_notify_until_sent(&fx.state, &conn, creator_id, "checkout_failed").await;
+    assert_eq!(
+        notification_sent_count(&conn, creator_id, "checkout_failed").await,
+        1,
+        "exactly one checkout_failed notification ledger row (sent) for this creator",
+    );
+
+    // Redelivery (same pi_…) is a no-op.
+    let evt2 = format!("evt_pifail2_{}", Uuid::new_v4().simple());
+    let r2 = post_webhook!(app, pi_failed_body(&evt2, &pi_id, &acct, 3200), None);
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
+    assert_eq!(b2["status"], "duplicate", "same pi_… is a no-op");
+    assert_eq!(checkout_failure_count(&conn, creator_id).await, 1, "still one row");
+}

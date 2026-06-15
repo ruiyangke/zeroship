@@ -87,6 +87,17 @@ pub enum Action {
     /// `invoice_payments` row — so every dispute create/resolve is audited with the
     /// dispute / invoice / amount / status in the detail JSON.
     RecordDispute,
+    /// A refund we recorded `issued` later FAILED/CANCELED at Stripe
+    /// (`charge.refund.updated`, webhook follow-up). The cash did not return to the
+    /// cardholder, so the refund is reversed (status→failed; a credit-destination grant
+    /// clawed back). Audited with the refund / terminal status / clawback in the detail JSON.
+    RefundFailed,
+    /// A payout to a creator's connected account FAILED (`payout.failed`, webhook
+    /// follow-up). Audited with the creator / payout / amount / failure code.
+    PayoutFailed,
+    /// An end-user's Connect checkout charge FAILED (`payment_intent.payment_failed`,
+    /// webhook follow-up). Informational; audited with the creator / PI / amount.
+    CheckoutFailed,
 }
 
 impl Action {
@@ -114,6 +125,9 @@ impl Action {
             Self::InvoiceRefunded => "invoice_refunded",
             Self::InvoiceVoided => "invoice_voided",
             Self::RecordDispute => "record_dispute",
+            Self::RefundFailed => "refund_failed",
+            Self::PayoutFailed => "payout_failed",
+            Self::CheckoutFailed => "checkout_failed",
         }
     }
 }

@@ -416,6 +416,40 @@ pub fn new_dispute_id() -> String {
     generate(DISPUTE_PREFIX)
 }
 
+/// Payout-failure surrogate-id prefix (billing webhook follow-ups: `payout.failed`).
+/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// `zeroship.payout_failures.id` column stores the full typed-id string (`pof_<base62>`),
+/// minted in Rust by the `payout.failed` webhook branch in `stripe_handlers`.
+///
+/// The id IS the `billing_notifications.transition_id` for the `payout_failed` kind. Its
+/// prefix MUST be pairwise-disjoint from every other notification source
+/// (`she`/`cbh`/`inv`/`ref`/`dsp`/`cof`) so a `transition_id` from one source can never
+/// collide with another's in the send-ledger dedup key — asserted by
+/// [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+pub const PAYOUT_FAILURE_PREFIX: &str = "pof";
+
+/// Generate a new payout-failure ID: `pof_{base62(uuidv7)}`.
+pub fn new_payout_failure_id() -> String {
+    generate(PAYOUT_FAILURE_PREFIX)
+}
+
+/// Connect-checkout-failure surrogate-id prefix (billing webhook follow-ups:
+/// `payment_intent.payment_failed`). Three chars to match the global
+/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// `zeroship.connect_checkout_failures.id` column stores the full typed-id string
+/// (`cof_<base62>`), minted in Rust by the `payment_intent.payment_failed` webhook branch.
+///
+/// The id IS the `billing_notifications.transition_id` for the `checkout_failed` kind. Its
+/// prefix MUST be pairwise-disjoint from every other notification source
+/// (`she`/`cbh`/`inv`/`ref`/`dsp`/`pof`) — see
+/// [`tests::notification_source_prefixes_are_pairwise_disjoint`].
+pub const CHECKOUT_FAILURE_PREFIX: &str = "cof";
+
+/// Generate a new connect-checkout-failure ID: `cof_{base62(uuidv7)}`.
+pub fn new_checkout_failure_id() -> String {
+    generate(CHECKOUT_FAILURE_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +655,8 @@ mod tests {
             ("invoices", INVOICE_PREFIX),
             ("refunds", REFUND_PREFIX),
             ("disputes", DISPUTE_PREFIX),
+            ("payout_failures", PAYOUT_FAILURE_PREFIX),
+            ("connect_checkout_failures", CHECKOUT_FAILURE_PREFIX),
         ];
         for (i, (name_a, pa)) in sources.iter().enumerate() {
             assert_eq!(pa.len(), 3, "{name_a} prefix must be 3 chars (R16-API2)");

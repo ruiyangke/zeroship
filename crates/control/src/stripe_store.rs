@@ -309,6 +309,139 @@ impl StripeStore {
         Ok(!rows.is_empty())
     }
 
+    /// Reverse-resolve the creator who owns a connected account (`acct_…`), live link
+    /// only (`unlinked_at IS NULL`). Used by the Connect failure handlers (`payout.failed`
+    /// / `payment_intent.payment_failed`), which carry the `acct_…` via the Connect event's
+    /// top-level `account` or the charge's `transfer_data.destination`/`on_behalf_of`.
+    pub async fn get_creator_by_account(
+        &self,
+        stripe_account_id: &str,
+    ) -> Result<Option<Uuid>, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT creator_id FROM zeroship.creator_accounts \
+                 WHERE stripe_account_id = $1 AND unlinked_at IS NULL",
+                &[&stripe_account_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(rows.first().map(|r| r.get::<_, Uuid>("creator_id")))
+    }
+
+    // ------------------------------------------------------------------
+    // Connect failure ledgers (webhook follow-ups, 0054)
+    // ------------------------------------------------------------------
+
+    /// Record a `payout.failed` (a creator's connected-account payout bounced). Idempotent
+    /// on the Stripe payout id (`po_…`): a redelivery returns `Ok(false)` (no new row) so the
+    /// notify cron never emits a second `payout_failed`. Returns `Ok(true)` iff THIS call
+    /// inserted the row (the notify cron picks it up off the new `pof_…` transition_id).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_payout_failure(
+        &self,
+        creator_id: Uuid,
+        provider_payout_id: &str,
+        stripe_account_id: &str,
+        amount_cents: i64,
+        currency: &str,
+        failure_code: Option<&str>,
+        failure_message: Option<&str>,
+        occurred_at_unix: i64,
+    ) -> Result<bool, StripeError> {
+        let mut conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let id = zeroship_core::typed_id::new_payout_failure_id();
+        let tx = conn.transaction().await.map_err(|e| StripeError::Db(e.to_string()))?;
+        // Ensure the `creator_billing` identity exists so the notify cron's
+        // `billing_notifications(creator_id → creator_billing)` FK is satisfiable for a
+        // Connect-only creator (one with a `creator_accounts` row but no billing row yet).
+        tx.execute(
+            "INSERT INTO zeroship.creator_billing (creator_id) \
+             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        let rows = tx
+            .query(
+                "INSERT INTO zeroship.payout_failures \
+                   (id, creator_id, provider_payout_id, stripe_account_id, amount_cents, \
+                    currency, failure_code, failure_message, occurred_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9::double precision)) \
+                 ON CONFLICT (provider_payout_id) DO NOTHING \
+                 RETURNING id",
+                &[
+                    &id,
+                    &creator_id,
+                    &provider_payout_id,
+                    &stripe_account_id,
+                    &amount_cents.max(0),
+                    &currency,
+                    &failure_code,
+                    &failure_message,
+                    &(occurred_at_unix as f64),
+                ],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        let inserted = rows.first().is_some();
+        tx.commit().await.map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(inserted)
+    }
+
+    /// Record a `payment_intent.payment_failed` (an end-user's Connect checkout charge
+    /// failed). Informational — no money moved — but surfaced (not silently dropped).
+    /// Idempotent on the PaymentIntent id (`pi_…`). Returns `Ok(true)` iff THIS call inserted.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_checkout_failure(
+        &self,
+        creator_id: Uuid,
+        provider_payment_intent_id: &str,
+        stripe_account_id: &str,
+        amount_cents: i64,
+        currency: &str,
+        failure_code: Option<&str>,
+        failure_message: Option<&str>,
+        occurred_at_unix: i64,
+    ) -> Result<bool, StripeError> {
+        let mut conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let id = zeroship_core::typed_id::new_checkout_failure_id();
+        let tx = conn.transaction().await.map_err(|e| StripeError::Db(e.to_string()))?;
+        // Ensure the `creator_billing` identity exists (notify FK; see record_payout_failure).
+        tx.execute(
+            "INSERT INTO zeroship.creator_billing (creator_id) \
+             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        let rows = tx
+            .query(
+                "INSERT INTO zeroship.connect_checkout_failures \
+                   (id, creator_id, provider_payment_intent_id, stripe_account_id, \
+                    amount_cents, currency, failure_code, failure_message, occurred_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9::double precision)) \
+                 ON CONFLICT (provider_payment_intent_id) DO NOTHING \
+                 RETURNING id",
+                &[
+                    &id,
+                    &creator_id,
+                    &provider_payment_intent_id,
+                    &stripe_account_id,
+                    &amount_cents.max(0),
+                    &currency,
+                    &failure_code,
+                    &failure_message,
+                    &(occurred_at_unix as f64),
+                ],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        let inserted = rows.first().is_some();
+        tx.commit().await.map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(inserted)
+    }
+
     // ------------------------------------------------------------------
     // Payout ledger
     // ------------------------------------------------------------------

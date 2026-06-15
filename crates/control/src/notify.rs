@@ -58,6 +58,12 @@ pub enum BillingNotificationKind {
     /// A newly-opened dispute / chargeback (`billing_disputes`; PR-8). transition_id =
     /// the `dsp_…` dispute id.
     Disputed,
+    /// A payout to the creator's connected account FAILED (`payout_failures`; webhook
+    /// follow-up). transition_id = the `pof_…` payout-failure id.
+    PayoutFailed,
+    /// An end-user's Connect checkout charge failed (`connect_checkout_failures`; webhook
+    /// follow-up). transition_id = the `cof_…` checkout-failure id. Informational.
+    CheckoutFailed,
 }
 
 impl BillingNotificationKind {
@@ -72,6 +78,8 @@ impl BillingNotificationKind {
             Self::InvoiceFinalized => "invoice_finalized",
             Self::Refunded => "refunded",
             Self::Disputed => "disputed",
+            Self::PayoutFailed => "payout_failed",
+            Self::CheckoutFailed => "checkout_failed",
         }
     }
 
@@ -86,6 +94,8 @@ impl BillingNotificationKind {
             "invoice_finalized" => Self::InvoiceFinalized,
             "refunded" => Self::Refunded,
             "disputed" => Self::Disputed,
+            "payout_failed" => Self::PayoutFailed,
+            "checkout_failed" => Self::CheckoutFailed,
             _ => return None,
         })
     }
@@ -197,6 +207,25 @@ pub fn render_template(n: &Notification) -> (String, String) {
                  disputed by the cardholder. The funds are held by the card network while \
                  the dispute is reviewed. No action is needed from you right now — we'll \
                  update you when it resolves.\n\n— zeroship billing\n"
+            ),
+        ),
+        BillingNotificationKind::PayoutFailed => (
+            "Your payout couldn't be completed".to_owned(),
+            format!(
+                "Hi {name},\n\nA payout of {amount} to your connected bank account couldn't \
+                 be completed — your bank rejected it (often a closed account or incorrect \
+                 details). The funds are safe and will be re-attempted once you fix your \
+                 payout details. Please review your bank account in your dashboard.\n\n\
+                 — zeroship billing\n"
+            ),
+        ),
+        BillingNotificationKind::CheckoutFailed => (
+            "A customer's payment didn't go through".to_owned(),
+            format!(
+                "Hi {name},\n\nA customer's payment of {amount} on one of your apps didn't \
+                 go through (their card was declined or the charge failed). No money moved \
+                 and no action is needed from you — your customer can simply try again. \
+                 We're letting you know for visibility.\n\n— zeroship billing\n"
             ),
         ),
     }
@@ -407,6 +436,8 @@ mod tests {
             BillingNotificationKind::InvoiceFinalized,
             BillingNotificationKind::Refunded,
             BillingNotificationKind::Disputed,
+            BillingNotificationKind::PayoutFailed,
+            BillingNotificationKind::CheckoutFailed,
         ] {
             assert_eq!(BillingNotificationKind::from_str(k.as_str()), Some(k));
         }
@@ -423,6 +454,8 @@ mod tests {
             BillingNotificationKind::InvoiceFinalized,
             BillingNotificationKind::Refunded,
             BillingNotificationKind::Disputed,
+            BillingNotificationKind::PayoutFailed,
+            BillingNotificationKind::CheckoutFailed,
         ] {
             let n = Notification {
                 to_email: "c@example.test".to_owned(),

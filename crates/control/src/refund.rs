@@ -298,6 +298,12 @@ pub async fn cash_collected<C: GenericClient + Sync>(
 /// Σ of refunds already issued/claimed on an invoice for one destination — used by
 /// the Rust-side over-refund precheck (the DB trigger is the backstop) and the
 /// true-up bridge's `cash_refunds_already_issued`.
+///
+/// EXCLUDES `failed`/`canceled` refunds (0054): a refund the bank later rejected
+/// returned NO cash, so it must not consume the over-refund cap — otherwise a creator
+/// whose refund bounced could never re-refund. This filter mirrors the
+/// `refunds_no_over_refund` trigger (which applies the same `status NOT IN
+/// ('failed','canceled')` filter) so the Rust precheck and the DB backstop agree.
 pub async fn refunds_total_for_destination<C: GenericClient + Sync>(
     conn: &C,
     invoice_id: &str,
@@ -306,12 +312,187 @@ pub async fn refunds_total_for_destination<C: GenericClient + Sync>(
     let rows = conn
         .query(
             "SELECT COALESCE(SUM(amount_cents), 0)::bigint AS s \
-             FROM zeroship.refunds WHERE invoice_id = $1 AND destination = $2::text",
+             FROM zeroship.refunds \
+             WHERE invoice_id = $1 AND destination = $2::text \
+               AND status NOT IN ('failed','canceled')",
             &[&invoice_id, &destination.as_str()],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
     Ok(rows.first().map_or(0, |r| r.get::<_, i64>("s")))
+}
+
+/// The stable `credit_ledger.note` marker for the `refund_clawback` entry that offsets a
+/// FAILED `destination='credit'` refund's `refund_to_credit` grant (0054). One clawback per
+/// refund; the `credit_ledger_refund_clawback_note_idx` partial UNIQUE over it makes a
+/// duplicate clawback a DB impossibility, so a redelivered `charge.refund.updated` can never
+/// double-claw.
+#[must_use]
+pub fn refund_clawback_note(refund_id: &str) -> String {
+    format!("refund_clawback:{refund_id}")
+}
+
+/// The terminal outcome of a `charge.refund.updated` reconciliation (the webhook leg).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefundFailureOutcome {
+    /// The refund was reconciled to `failed`/`canceled` for the FIRST time. Carries the
+    /// `ref_…` id and, for a `destination='credit'` refund, whether a `refund_clawback`
+    /// entry was appended (the grant clawed back).
+    Reversed { refund_id: String, clawed_back_credit: bool },
+    /// The refund row was ALREADY terminal (`failed`/`canceled`) — a redelivered
+    /// `charge.refund.updated` is a no-op (no double-reversal).
+    AlreadyReversed(String),
+    /// No `refunds` row resolves from the `re_…` (a Connect / non-platform refund, or a
+    /// pre-issue race) — nothing to reconcile; the webhook acks.
+    Unknown,
+}
+
+/// Reconcile a Stripe `charge.refund.updated` whose Refund (`re_…`) went terminal-FAILED
+/// or -CANCELED (the cash did NOT return to the cardholder). MONEY-CRITICAL, idempotent.
+///
+/// Resolves OUR refund row through `refund_provider_refs(ref_kind='refund', external_id=
+/// re_…)` (the cash ref recorded claim-after-success at issue time), then in ONE txn:
+///   1. flips `refunds.status` → the terminal failure (gated `WHERE status NOT IN
+///      ('failed','canceled')`, so a redelivery is a 0-row no-op) and stamps `failed_at`.
+///      This makes the over-refund cap STOP counting the refund (the trigger + the Rust
+///      precheck exclude failed/canceled) — so a failed CASH refund no longer permanently
+///      reduces refundable cash; the creator CAN re-refund.
+///   2. for a `destination='credit'` refund, appends a compensating NEGATIVE
+///      `credit_ledger('refund_clawback')` entry that offsets the `refund_to_credit` grant
+///      (the cash never left Stripe, so the creator must not keep the minted credit). The
+///      clawback NAMES the original grant via `consumed_from_grant_id` and is idempotent on
+///      the `refund_clawback:<refund_id>` note (the partial UNIQUE makes a double-claw
+///      impossible). Balance is conserved: grant (+amount) + clawback (−amount) = 0.
+///
+/// `terminal` MUST be `failed` or `canceled`. `conn` must be a live OWNED connection
+/// (`&mut`) — the flip + the clawback append run in one transaction so they land atomically.
+pub async fn reconcile_failed_refund<C: GenericClient + Sync>(
+    conn: &mut C,
+    provider_refund_id: &str,
+    terminal: &str,
+) -> Result<RefundFailureOutcome, RegistryError> {
+    if !matches!(terminal, "failed" | "canceled") {
+        return Err(RegistryError::InvalidInput(format!(
+            "reconcile_failed_refund expects 'failed'|'canceled' (got {terminal:?})"
+        )));
+    }
+
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+
+    // Resolve our refund row from the re_… cash ref, joining the invoice for the creator
+    // (the clawback needs creator_id) and the grant we may need to claw back.
+    let resolved = tx
+        .query(
+            "SELECT r.id, r.destination::text AS destination, r.amount_cents, r.currency, \
+                    r.status::text AS status, r.invoice_id, i.creator_id \
+             FROM zeroship.refund_provider_refs pr \
+             JOIN zeroship.refunds r ON r.id = pr.refund_id \
+             JOIN zeroship.invoices i ON i.id = r.invoice_id \
+             WHERE pr.provider = 'stripe' AND pr.ref_kind = 'refund' AND pr.external_id = $1",
+            &[&provider_refund_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    let Some(row) = resolved.first() else {
+        // No platform refund maps to this re_… (a Connect / out-of-band refund). Ack.
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        return Ok(RefundFailureOutcome::Unknown);
+    };
+    let refund_id: String = row.get("id");
+    let destination: String = row.get("destination");
+    let amount_cents: i64 = row.get("amount_cents");
+    let currency: String = row.get("currency");
+    let status: String = row.get("status");
+    let invoice_id: String = row.get("invoice_id");
+    let creator_id: uuid::Uuid = row.get("creator_id");
+
+    if status == "failed" || status == "canceled" {
+        // Already reconciled — a redelivered charge.refund.updated. No double-reversal.
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        return Ok(RefundFailureOutcome::AlreadyReversed(refund_id));
+    }
+
+    // (1) Flip to the terminal failure. Gated so a concurrent redelivery loses the race and
+    // the second flip is a 0-row no-op (idempotent). The over-refund cap stops counting it.
+    let flipped = tx
+        .query(
+            "UPDATE zeroship.refunds \
+                SET status = $2::text::zeroship.refund_status, failed_at = NOW() \
+              WHERE id = $1 AND status NOT IN ('failed','canceled') \
+              RETURNING id",
+            &[&refund_id, &terminal],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    if flipped.first().is_none() {
+        // Lost a concurrent race to another reconciliation — it already reversed.
+        tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+        return Ok(RefundFailureOutcome::AlreadyReversed(refund_id));
+    }
+
+    // (2) For a CREDIT-destination refund, claw back the minted refund_to_credit grant.
+    let mut clawed_back_credit = false;
+    if destination == "credit" {
+        // The grant this refund minted (refund_to_credit:<refund_id>). Resolve its id so the
+        // clawback can name it via consumed_from_grant_id (the kind↔grant-ref CHECK requires it).
+        let grant_marker = refund_to_credit_note(&refund_id);
+        let grant_rows = tx
+            .query(
+                "SELECT id FROM zeroship.credit_ledger \
+                 WHERE kind = 'refund_to_credit' AND note = $1",
+                &[&grant_marker],
+            )
+            .await
+            .map_err(|e| RegistryError::Database(e.to_string()))?;
+        if let Some(g) = grant_rows.first() {
+            let grant_id: String = g.get("id");
+            let clawback_marker = refund_clawback_note(&refund_id);
+            let clawback_id = zeroship_core::typed_id::new_credit_id();
+            // NEGATIVE amount (the kind↔sign CHECK requires refund_clawback < 0). ON CONFLICT
+            // DO NOTHING on the per-refund note ⇒ a redelivered failure never double-claws.
+            let inserted = tx
+                .query(
+                    "INSERT INTO zeroship.credit_ledger \
+                       (id, creator_id, kind, amount_cents, currency, applied_invoice_id, \
+                        consumed_from_grant_id, note) \
+                     VALUES ($1, $2, 'refund_clawback', $3, $4, $5, $6, $7) \
+                     ON CONFLICT (note) WHERE kind = 'refund_clawback' DO NOTHING \
+                     RETURNING id",
+                    &[
+                        &clawback_id,
+                        &creator_id,
+                        &(-amount_cents),
+                        &currency,
+                        &invoice_id,
+                        &grant_id,
+                        &clawback_marker,
+                    ],
+                )
+                .await
+                .map_err(|e| RegistryError::Database(e.to_string()))?;
+            clawed_back_credit = inserted.first().is_some();
+        }
+    }
+
+    tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
+    Ok(RefundFailureOutcome::Reversed { refund_id, clawed_back_credit })
+}
+
+/// Map a Stripe Refund `status` (`charge.refund.updated`) onto OUR terminal-failure string.
+/// Returns `Some("failed")` / `Some("canceled")` for the two cash-did-not-return states, and
+/// `None` for `succeeded`/`pending`/`requires_action` (no reconciliation needed — the refund
+/// is fine / still in flight). Verified against docs.stripe.com/api/refunds/object: status ∈
+/// {pending, requires_action, succeeded, failed, canceled}.
+#[must_use]
+pub fn stripe_refund_failure_status(stripe_status: &str) -> Option<&'static str> {
+    match stripe_status {
+        "failed" => Some("failed"),
+        "canceled" => Some("canceled"),
+        _ => None,
+    }
 }
 
 /// Issue a refund against a finalized invoice — the operator flow's core helper.
