@@ -284,3 +284,95 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
     let n2 = spend_reconcile::tick(&fx.state).await.expect("tick runs");
     assert!(n2 >= 1, "after release, the sweep runs and transitions our app");
 }
+
+/// #12 (spend band walk): drive a single app through Allow→Warn→Degrade→Block AND a
+/// deadband HOLD through the REAL `evaluate_all`/spend cron `tick` on live PG. Only
+/// Allow→Block was cron-tested before; this pins every intermediate band edge AND the
+/// anti-flap deadband (a relaxation inside the deadband HOLDS, writing no transition).
+///
+/// Thresholds (SpendThresholds::default): warn 80%, degrade 95%, block 100%, deadband 5%.
+/// With a 100-cent cap and 1 cent/request, the `requests` usage_aggregates total IS the
+/// spend percent. We position spend at each boundary by writing usage_aggregates directly
+/// (an authoritative DB write the cron reads — the same row metering ingest would write),
+/// then tick and assert the persisted state advanced + the history row was appended.
+#[compio::test]
+async fn reconcile_walks_spend_bands_and_holds_deadband() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_state(&url, "band-walk").await;
+    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let app = make_over_limit_app(&fx.state, 100).await;
+
+    // Position this period's priced spend (1 cent/request ⇒ requests total = spend cents).
+    let set_spend = |cents: i64| {
+        let pg = fx.state.control_pg.clone();
+        async move {
+            pg.execute(
+                "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
+                 VALUES ($1, date_trunc('month', NOW())::date, 'requests', $2) \
+                 ON CONFLICT (app_id, period, metric) DO UPDATE SET total = EXCLUDED.total, updated_at = NOW()",
+                &[&app, &cents],
+            )
+            .await
+            .expect("set usage");
+        }
+    };
+    let state_of = |app: Uuid| {
+        let pg = fx.state.control_pg.clone();
+        async move {
+            pg.query("SELECT state::text AS s FROM zeroship.app_spend_state WHERE app_id = $1", &[&app])
+                .await
+                .expect("read state")
+                .first()
+                .map(|r| r.get::<_, String>("s"))
+        }
+    };
+    let hist_into = |app: Uuid, to: &'static str| {
+        let pg = fx.state.control_pg.clone();
+        async move {
+            pg.query(
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.spend_state_history \
+                  WHERE app_id = $1 AND to_state = $2::text::zeroship.spend_state",
+                &[&app, &to],
+            )
+            .await
+            .expect("count hist")[0]
+                .get::<_, i64>("n")
+        }
+    };
+
+    // Allow→Warn (80%).
+    set_spend(80).await;
+    assert!(spend_reconcile::tick(&fx.state).await.expect("tick") >= 1);
+    assert_eq!(state_of(app).await.as_deref(), Some("warn"), "→warn at 80%");
+
+    // Warn→Degrade (95%).
+    set_spend(95).await;
+    assert!(spend_reconcile::tick(&fx.state).await.expect("tick") >= 1);
+    assert_eq!(state_of(app).await.as_deref(), Some("degrade"), "→degrade at 95%");
+
+    // Degrade→Block (100%).
+    set_spend(100).await;
+    assert!(spend_reconcile::tick(&fx.state).await.expect("tick") >= 1);
+    assert_eq!(state_of(app).await.as_deref(), Some("block"), "→block at 100%");
+
+    // Deadband HOLD: drop to 96% (≥ block_entry 100 − deadband 5 = 95) → HOLD Block,
+    // no transition. (limit_changed=false, so the deadband governs the relaxation.)
+    let hist_block_before = hist_into(app, "block").await;
+    set_spend(96).await;
+    let _ = spend_reconcile::tick(&fx.state).await.expect("tick");
+    assert_eq!(state_of(app).await.as_deref(), Some("block"), "deadband holds Block at 96%");
+    assert_eq!(
+        hist_into(app, "block").await,
+        hist_block_before,
+        "the deadband HOLD writes NO new transition row (anti-flap)",
+    );
+
+    // Each restrictive band was entered exactly once across the walk.
+    assert_eq!(hist_into(app, "warn").await, 1, "exactly one →warn transition");
+    assert_eq!(hist_into(app, "degrade").await, 1, "exactly one →degrade transition");
+    assert_eq!(hist_into(app, "block").await, 1, "exactly one →block transition");
+}

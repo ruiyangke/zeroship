@@ -37,8 +37,9 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::account_status::AccountStatusStore;
+use zeroship_control::account_status::DEFAULT_MAX_DUNNING_DAYS;
 use zeroship_control::cron::billing_notify::NOTIFY_REDRIVE_HORIZON;
-use zeroship_control::cron::{billing_notify, spend_reconcile};
+use zeroship_control::cron::{billing_notify, dunning, spend_reconcile};
 use zeroship_control::notify::{BillingNotificationKind, RecordingNotifier};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -899,4 +900,154 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     // The app NAME made it into the dedup transition_id mapping (sanity: the ledger rows
     // are keyed by the she_ transition id, one per band).
     let _ = app_name; // (name is asserted via the rendered body in notify.rs unit tests)
+}
+
+// ===========================================================================
+// (#6 watermark) a creator_billing_status_history transition aged past the
+// 30-day NOTIFY_SCAN_WINDOW is NOT picked up by the notify scan — the watermark
+// caps the sweep so long-dead transitions are abandoned, never belatedly emailed.
+// ===========================================================================
+
+/// Age a creator's `creator_billing_status_history` rows back `days` so the source
+/// transition falls outside the notify scan window (the `h.at > NOW() - 30 days` bound).
+async fn age_history(pg: &compio_postgres::Client, creator: Uuid, days: i64) {
+    pg.execute(
+        "UPDATE zeroship.creator_billing_status_history \
+            SET at = NOW() - make_interval(days => $2::int) WHERE creator_id = $1",
+        &[&creator, &(days as i32)],
+    )
+    .await
+    .expect("age history");
+}
+
+#[compio::test]
+async fn aged_transition_past_scan_window_is_not_notified() {
+    let Some(url) = db_url() else {
+        eprintln!("SKIP aged_transition_past_scan_window_is_not_notified: CONTROL_TEST_DB unset");
+        return;
+    };
+    let fx = build_fixture(&url, "watermark").await;
+    let st = &*fx.state;
+    let _gate = lock_tick_gate(); // own the sweep so a sibling can't claim my aged row
+
+    // A creator with ONE past_due transition (a cbh_ history row).
+    let creator = make_creator(&fx.pg).await;
+    fail_payment(st, creator, 1_000).await;
+    // Age the transition WELL past the 30-day NOTIFY_SCAN_WINDOW.
+    age_history(&fx.pg, creator, 45).await;
+
+    // Sweep a few times: the aged transition must NEVER be scanned/claimed/sent.
+    for _ in 0..3 {
+        billing_notify::sweep(st).await.expect("sweep");
+    }
+    assert_eq!(
+        sent_count_kind(&fx.pg, creator, BillingNotificationKind::PastDue).await,
+        0,
+        "a transition aged past the 30-day scan window is abandoned — never notified",
+    );
+    assert_eq!(
+        ledger_count(&fx.pg, creator, "pending").await,
+        0,
+        "the aged transition is never even claimed (no pending ledger row)",
+    );
+
+    // Control: a FRESH transition for the same creator IS picked up — proving the
+    // sweep is working and the watermark (not some other reason) excluded the aged row.
+    fail_payment(st, creator, 2_000).await; // a new past_due edge is a no-op state-wise,
+    // but to get a fresh actionable edge, drive a recovery then a re-failure.
+    recover_payment(st, creator, 3_000).await; // past_due→active (a fresh `recovered` cbh row, at=NOW)
+    let mut settled = false;
+    for _ in 0..50 {
+        billing_notify::sweep(st).await.expect("sweep fresh");
+        if sent_count_kind(&fx.pg, creator, BillingNotificationKind::Recovered).await >= 1 {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "a FRESH (in-window) transition IS notified — the sweep works");
+    // The aged past_due STILL never fired.
+    assert_eq!(
+        sent_count_kind(&fx.pg, creator, BillingNotificationKind::PastDue).await,
+        0,
+        "the aged past_due remains un-notified even after the sweep delivered a fresh row",
+    );
+}
+
+// ===========================================================================
+// (#8) dunning tick's advisory-lock single-flight: a second concurrent tick that
+// cannot acquire the dunning advisory lock no-ops (mirrors the spend-reconcile and
+// notify lock tests). The dunning key is distinct from spend/notify so the sweeps
+// never block each other.
+// ===========================================================================
+#[compio::test]
+async fn dunning_tick_skips_when_advisory_lock_held() {
+    let Some(url) = db_url() else {
+        eprintln!("SKIP dunning_tick_skips_when_advisory_lock_held: CONTROL_TEST_DB unset");
+        return;
+    };
+    let fx = build_fixture(&url, "dunning-lock").await;
+    let st = &*fx.state;
+
+    // A creator past the dunning window — `suspend_exhausted` WOULD suspend it if the
+    // sweep ran. (Drive a real past_due, then backdate the dunning clock.)
+    let creator = make_creator(&fx.pg).await;
+    fail_payment(st, creator, 1_000).await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.creator_billing_status \
+                SET past_due_since = NOW() - make_interval(days => $2::int) WHERE creator_id = $1",
+            &[&creator, &((DEFAULT_MAX_DUNNING_DAYS + 1) as i32)],
+        )
+        .await
+        .expect("backdate past_due");
+
+    // Hold the DUNNING advisory lock on a side session (the cron's key, "zsdunn").
+    const DUNNING_LOCK_KEY: i64 = 0x7a73_6475_6e6e_0001;
+    let (side, side_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("side lock conn");
+    compio::runtime::spawn(async move {
+        let _ = side_conn.run().await;
+    })
+    .detach();
+    let got: bool = side
+        .query("SELECT pg_try_advisory_lock($1) AS locked", &[&DUNNING_LOCK_KEY])
+        .await
+        .expect("hold dunning lock")[0]
+        .get("locked");
+    assert!(got, "side conn acquires the dunning lock");
+
+    // A tick that loses the lock must NO-OP: zero suspensions, creator stays past_due.
+    let n = dunning::tick(st, DEFAULT_MAX_DUNNING_DAYS).await.expect("tick while locked");
+    assert_eq!(n, 0, "a dunning tick that loses the advisory lock suspends NOBODY");
+    let state = db_state_of(&fx.pg, creator).await;
+    assert_eq!(
+        state.as_deref(),
+        Some("past_due"),
+        "the exhausted creator is NOT suspended while the lock is held elsewhere",
+    );
+
+    // Release the lock; now a tick proceeds and suspends the exhausted creator.
+    side.execute("SELECT pg_advisory_unlock($1)", &[&DUNNING_LOCK_KEY])
+        .await
+        .expect("release dunning lock");
+    let n2 = dunning::tick(st, DEFAULT_MAX_DUNNING_DAYS).await.expect("tick runs");
+    assert!(n2 >= 1, "after release, the sweep runs and suspends our exhausted creator");
+    assert_eq!(
+        db_state_of(&fx.pg, creator).await.as_deref(),
+        Some("suspended"),
+        "the exhausted creator is suspended once the lock is free",
+    );
+}
+
+/// Read the persisted account state for a creator (None ⇒ no row).
+async fn db_state_of(pg: &compio_postgres::Client, creator: Uuid) -> Option<String> {
+    pg.query(
+        "SELECT state FROM zeroship.creator_billing_status WHERE creator_id = $1",
+        &[&creator],
+    )
+    .await
+    .expect("read state")
+    .first()
+    .map(|r| r.get::<_, String>("state"))
 }

@@ -2068,6 +2068,32 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
 // ════════════════════════════════════════════════════════════════════════════
 // HTTP-boundary + signature + dispatch gaps (#9 / #2 / #7 / #12 / #29 / #27)
 // ════════════════════════════════════════════════════════════════════════════
+//
+// #13 (event_processed Err → 500 fail-CLOSED) and #14 (mark_event_processed Err →
+// log + ack-200 fail-OPEN) are COVERED-BY-REASONING, not by a faithful test —
+// deliberately, because a faithful test is infeasible here WITHOUT an invasive
+// production test-seam, which the brief forbids:
+//
+//   * #13 lives at `process_locked_event`: `event_processed()` Err → `err_json(500)`.
+//     `event_processed` is a plain parameterised `SELECT 1 FROM stripe_events_seen
+//     WHERE event_id = $1` on a clean, valid table. Forcing it to ERROR (not just
+//     return a row) needs a DB-level fault (drop/rename/revoke the table, or kill the
+//     connection mid-query). On this single shared test DB that would corrupt every
+//     sibling test; control connects as a superuser so REVOKE doesn't bite; and there
+//     is no natural row-state that makes a valid SELECT fail. The 500-fail-closed-
+//     unclaimed CONTRACT is, however, already proven faithfully on a REAL error path
+//     by `append_failure_leaves_event_unclaimed_not_silently_dropped` (a genuine
+//     currency-CHECK violation → 500, event left unclaimed) and by the symmetric
+//     `lock_event` Err → 500 arm immediately above it.
+//
+//   * #14 lives at the tail of `process_locked_event`: `mark_event_processed()` Err is
+//     logged and the handler STILL acks 200 (do-NOT-5xx, since the idempotent handler
+//     already applied its effect). `mark_event_processed` is an `INSERT … ON CONFLICT
+//     (event_id) DO NOTHING` on the same two-column table — idempotent, so a duplicate
+//     event_id is a no-op, NOT an error; and there is no other constraint a faithful
+//     payload can violate. Forcing this INSERT to error likewise needs DB-level fault
+//     injection / a prod seam. The deliberate fail-OPEN choice is documented inline at
+//     the call site; exercising it faithfully is not feasible without a seam we won't add.
 
 /// Compute Stripe's `v1` HMAC-SHA256 over `"{t}.{body}"` with `secret` — the SAME
 /// construction `verify_stripe_signature` checks, so a test can build a header that
