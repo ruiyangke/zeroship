@@ -1536,6 +1536,10 @@ fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/internal/webhooks/stripe")
+                    // Give the Bytes extractor headroom above the handler's body cap so
+                    // the handler (not the extractor's default-256KiB 400) owns the
+                    // oversized-body rejection with its descriptive 413.
+                    .state(stripe_handlers::webhook_payload_config())
                     .route(web::post().to(stripe_handlers::webhook)),
             )
             // --- Health ---

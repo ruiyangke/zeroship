@@ -95,5 +95,11 @@ bytes = { workspace = true }
 # with a `gate-…` producer id, and ingests through the real `Metering` path —
 # exercising the producer→ingest seam end to end, not a hand-built report.
 zeroship-metering = { workspace = true }
+# Webhook HTTP-boundary tests (#9/#2/#7) compute a REAL Stripe `v1=` HMAC so the
+# multi-v1 OR-fold and the signed-but-large-header paths exercise the production
+# `verify_stripe_signature`, not a hand-faked header. Same crates the lib uses.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 [lints]
 workspace = true

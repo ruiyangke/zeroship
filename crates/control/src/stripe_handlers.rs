@@ -1030,7 +1030,30 @@ fn is_infra_invoice(obj: &StripeObject) -> bool {
 /// Max raw webhook body we'll accept. Stripe's own `invoice.paid` is a
 /// few KB; we pad generously. Larger is rejected before we allocate
 /// anything for parsing — defense against POSTing gigabytes.
-const MAX_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
+///
+/// The handler owns the rejection (a descriptive 413) — but the `Bytes`
+/// extractor in front of it has its OWN limit (ntex default = 262144, the
+/// SAME value), so without a wider extractor budget the extractor would 400
+/// first and this 413 would be unreachable. The route therefore configures a
+/// `PayloadConfig` of [`WEBHOOK_PAYLOAD_EXTRACTOR_LIMIT`] (this cap + headroom)
+/// so a body just over `MAX_WEBHOOK_BODY_BYTES` is delivered to the handler and
+/// rejected HERE with the explicit 413, while a truly gigantic body is still
+/// stopped by the extractor. See [`webhook_payload_config`].
+pub(crate) const MAX_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
+
+/// Extractor payload budget for the webhook route: the handler cap plus headroom
+/// so the HANDLER (not the extractor) is the one that rejects a body just over
+/// [`MAX_WEBHOOK_BODY_BYTES`] — with the descriptive 413. A body beyond this
+/// extractor budget is still refused (the extractor 400s) so the DoS bound holds.
+pub const WEBHOOK_PAYLOAD_EXTRACTOR_LIMIT: usize = MAX_WEBHOOK_BODY_BYTES + 64 * 1024;
+
+/// The `PayloadConfig` the webhook route MUST install so the handler's body cap
+/// (413) is the effective boundary rather than the extractor's default 400. Used
+/// by the production route wiring and mirrored verbatim by the webhook tests.
+#[must_use]
+pub fn webhook_payload_config() -> web::types::PayloadConfig {
+    web::types::PayloadConfig::new(WEBHOOK_PAYLOAD_EXTRACTOR_LIMIT)
+}
 /// Max signature header. Stripe's is ~150 bytes; cap to refuse parser-DoS.
 const MAX_SIGNATURE_HEADER_BYTES: usize = 4096;
 

@@ -295,7 +295,12 @@ fn http_resp(status: u16, body: &str) -> Vec<u8> {
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(web::App::new().state($fx.state.clone()).service(
-            web::resource("/internal/webhooks/stripe").route(web::post().to(stripe_handlers::webhook)),
+            // Mirror the production route's PayloadConfig so the handler's 413 body cap
+            // is the effective boundary (the extractor's default 256KiB 400 would
+            // otherwise win at the same threshold — see webhook_payload_config()).
+            web::resource("/internal/webhooks/stripe")
+                .state(stripe_handlers::webhook_payload_config())
+                .route(web::post().to(stripe_handlers::webhook)),
         ))
         .await
     }};
@@ -2058,4 +2063,340 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "duplicate", "same pi_… is a no-op");
     assert_eq!(checkout_failure_count(&conn, creator_id).await, 1, "still one row");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// HTTP-boundary + signature + dispatch gaps (#9 / #2 / #7 / #12 / #29 / #27)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Compute Stripe's `v1` HMAC-SHA256 over `"{t}.{body}"` with `secret` — the SAME
+/// construction `verify_stripe_signature` checks, so a test can build a header that
+/// the REAL verifier accepts (not a hand-faked hex string).
+fn stripe_v1(secret: &str, t: i64, body: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()).expect("hmac key");
+    mac.update(format!("{t}.").as_bytes());
+    mac.update(body.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// #9 (body cap): a body over MAX_WEBHOOK_BODY_BYTES (256 KiB) is rejected with 413
+/// BEFORE any parse/HMAC/DB work. insecure_dev fixture (empty secret) so the body cap
+/// — which runs ahead of the signature block — is the gate under test.
+#[compio::test]
+async fn webhook_oversized_body_rejected_413() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "boundary-413").await;
+    let app = init_control!(fx);
+    // 256 KiB + 1 byte of valid-ish JSON padding.
+    let big = format!("{{\"id\":\"evt_big\",\"pad\":\"{}\"}}", "a".repeat(256 * 1024 + 1));
+    let r = post_webhook!(app, big, None);
+    assert_eq!(
+        r.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a webhook body over 256 KiB is rejected with 413 before parse/HMAC/DB"
+    );
+}
+
+/// #9 (signature-header cap): a `stripe-signature` header over MAX_SIGNATURE_HEADER_BYTES
+/// (4096) is rejected 400. Real secret + insecure_dev=false so the header-size guard
+/// (inside the verify block) is reached.
+#[compio::test]
+async fn webhook_oversized_signature_header_rejected_400() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new_with_secret(&db_url, "boundary-sig", "whsec_test_boundary", false).await;
+    let app = init_control!(fx);
+    let body = json!({"id":"evt_x","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
+    // A 4097-char header.
+    let huge_sig = format!("t=1,{}", "v1=deadbeef,".repeat(400)); // > 4096 chars
+    assert!(huge_sig.len() > 4096);
+    let r = post_webhook!(app, &body, Some(huge_sig.as_str()));
+    assert_eq!(
+        r.status(),
+        StatusCode::BAD_REQUEST,
+        "a stripe-signature header over 4096 bytes is rejected with 400"
+    );
+}
+
+/// #9 (missing signature header): with verification ON (real secret, insecure_dev=false),
+/// a request carrying NO `stripe-signature` header is rejected 400 (the empty header has
+/// no `t`/`v1` → verify fails). Proves the unsigned request never reaches a handler.
+#[compio::test]
+async fn webhook_missing_signature_header_rejected_400() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new_with_secret(&db_url, "boundary-nosig", "whsec_test_nosig", false).await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let event_id = format!("evt_nosig_{}", Uuid::new_v4().simple());
+    let body = setup_intent_body(&event_id, creator_id);
+    // No stripe-signature header at all.
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(
+        r.status(),
+        StatusCode::BAD_REQUEST,
+        "a request with NO stripe-signature header is rejected 400 when verification is on"
+    );
+    assert_eq!(ledger_count(&conn, &event_id).await, 0, "unsigned event never claimed");
+}
+
+/// #2 (multi-v1 OR-fold): a signature header whose FIRST `v1=` is WRONG but a LATER `v1=`
+/// MATCHES is ACCEPTED — pins the rotation-window OR-fold (the verifier must not early-exit
+/// on the first mismatch). The event then dispatches and is claimed.
+///
+/// RED if `verify_stripe_signature` early-exits on the first non-matching v1.
+#[compio::test]
+async fn webhook_second_v1_matches_is_accepted() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let secret = "whsec_test_rotation";
+    let fx = Fixture::new_with_secret(&db_url, "boundary-multiv1", secret, false).await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let event_id = format!("evt_multiv1_{}", Uuid::new_v4().simple());
+    let body = setup_intent_body(&event_id, creator_id);
+
+    // `t` must be within tolerance of NOW (verify checks |now - t| <= 300).
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let good = stripe_v1(secret, t, &body);
+    // FIRST v1 wrong, SECOND v1 correct — the rotation-window OR-fold must accept.
+    let sig = format!("t={t},v1=00000000deadbeef,v1={good}");
+    let r = post_webhook!(app, &body, Some(sig.as_str()));
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "a later matching v1 is accepted (rotation-window OR-fold; no early-exit on the first mismatch)"
+    );
+    assert_eq!(ledger_count(&conn, &event_id).await, 1, "the accepted event is claimed");
+}
+
+/// #7 (empty signing secret → verify Err): `verify_stripe_signature` with an EMPTY secret
+/// returns Err — an empty HMAC key is a misconfiguration that must never silently accept.
+/// Unit-level (the function is `pub`), no DB needed.
+#[test]
+fn verify_empty_secret_is_err() {
+    let r = stripe_handlers::verify_stripe_signature(b"body", "t=1,v1=abc", "", 1, 300);
+    assert!(r.is_err(), "an empty signing secret must error, never accept");
+    assert!(
+        r.unwrap_err().contains("empty"),
+        "the error names the empty-secret misconfiguration"
+    );
+}
+
+/// #7 (HTTP path, empty secret + insecure_dev=false → 500): the webhook endpoint with NO
+/// configured signing secret and insecure_dev OFF rejects with 500 (misconfiguration —
+/// fail closed, do not process). insecure_dev=true would be the dev bypass; this pins the
+/// PROD posture.
+#[compio::test]
+async fn webhook_empty_secret_not_insecure_dev_is_500() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    // Empty secret, insecure_dev=false — the production-misconfig posture.
+    let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "", false).await;
+    let app = init_control!(fx);
+    let body = json!({"id":"evt_emptysecret","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
+    let r = post_webhook!(app, &body, Some("t=1,v1=abc"));
+    assert_eq!(
+        r.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "empty webhook secret with insecure_dev=false fails closed (500), never processes"
+    );
+}
+
+/// #12 (concurrent dispatch e2e): two CONCURRENT `webhook()` calls for the SAME event_id
+/// dispatch the handler EXACTLY ONCE — the per-event advisory lock serializes them, and
+/// the second observes the first's claim and 200-acks as a `duplicate`. End-to-end
+/// exactly-once (the lock PRIMITIVE is unit-tested in `lock_event_serializes_same_event`;
+/// this pins the full webhook() path).
+#[compio::test]
+async fn concurrent_same_event_dispatches_once() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "concurrent-dispatch").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+    let creator_id = make_user(&conn).await;
+    let event_id = format!("evt_concur_{}", Uuid::new_v4().simple());
+    let body = setup_intent_body(&event_id, creator_id);
+
+    // Two concurrent deliveries of the SAME event.
+    let req_a = test::TestRequest::post()
+        .uri("/internal/webhooks/stripe")
+        .header("content-type", "application/json")
+        .set_payload(body.clone())
+        .to_request();
+    let req_b = test::TestRequest::post()
+        .uri("/internal/webhooks/stripe")
+        .header("content-type", "application/json")
+        .set_payload(body.clone())
+        .to_request();
+    let (ra, rb) =
+        futures::future::join(test::call_service(&app, req_a), test::call_service(&app, req_b)).await;
+
+    // Both 200 (the serialized loser 200-acks the duplicate).
+    assert_eq!(ra.status(), StatusCode::OK);
+    assert_eq!(rb.status(), StatusCode::OK);
+    let ba: Value = serde_json::from_slice(&test::read_body(ra).await).unwrap();
+    let bb: Value = serde_json::from_slice(&test::read_body(rb).await).unwrap();
+    let statuses = [ba["status"].as_str().unwrap_or(""), bb["status"].as_str().unwrap_or("")];
+    assert!(
+        statuses.contains(&"duplicate"),
+        "exactly one of the concurrent deliveries 200-acks as a duplicate (got {statuses:?})"
+    );
+    // The handler ran EXACTLY ONCE (one audit row) and the event is claimed once.
+    assert_eq!(
+        setup_audit_count(&conn, creator_id, &event_id).await,
+        1,
+        "the handler dispatched exactly once across the concurrent deliveries"
+    );
+    assert_eq!(ledger_count(&conn, &event_id).await, 1, "event claimed exactly once");
+}
+
+/// #29 (payout.failed with NO connected account): a `payout.failed` carrying neither a
+/// top-level `account` nor a destination → benign 200 ack (`no_connected_account`), no
+/// payout_failures row written.
+#[compio::test]
+async fn payout_failed_without_connected_account_acks_no_row() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "payout-noacct").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+
+    let po_id = format!("po_{}", Uuid::new_v4().simple());
+    let evt = format!("evt_payout_noacct_{}", Uuid::new_v4().simple());
+    // payout.failed body with NO top-level `account` and NO destination.
+    let body = json!({
+        "id": evt,
+        "type": "payout.failed",
+        "created": 1_777_017_800i64,
+        "data": { "object": {
+            "id": po_id,
+            "object": "payout",
+            "amount": 5000,
+            "currency": "usd",
+            "status": "failed"
+        }}
+    })
+    .to_string();
+    let count_before = conn
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures", &[])
+        .await
+        .expect("count")[0]
+        .get::<_, i64>("n");
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "benign ack — not attributable");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "no_connected_account");
+    let count_after = conn
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures", &[])
+        .await
+        .expect("count")[0]
+        .get::<_, i64>("n");
+    assert_eq!(count_after, count_before, "no payout_failures row written");
+}
+
+/// #29 (payment_intent.payment_failed with NO connected account): a platform (non-Connect)
+/// PI failure → benign 200 ack (`no_connected_account`), no connect_checkout_failures row.
+#[compio::test]
+async fn payment_intent_failed_without_connected_account_acks_no_row() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "pifail-noacct").await;
+    let app = init_control!(fx);
+    let conn = side_conn(&db_url).await;
+
+    let pi_id = format!("pi_{}", Uuid::new_v4().simple());
+    let evt = format!("evt_pifail_noacct_{}", Uuid::new_v4().simple());
+    // No transfer_data.destination, no on_behalf_of, no top-level account.
+    let body = json!({
+        "id": evt,
+        "type": "payment_intent.payment_failed",
+        "created": 1_777_017_900i64,
+        "data": { "object": {
+            "id": pi_id,
+            "object": "payment_intent",
+            "amount": 3200,
+            "currency": "usd",
+            "status": "requires_payment_method",
+            "last_payment_error": { "code": "card_declined", "message": "declined" }
+        }}
+    })
+    .to_string();
+    let count_before = conn
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures", &[])
+        .await
+        .expect("count")[0]
+        .get::<_, i64>("n");
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "benign ack — not a Connect checkout");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(b["status"], "no_connected_account");
+    let count_after = conn
+        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures", &[])
+        .await
+        .expect("count")[0]
+        .get::<_, i64>("n");
+    assert_eq!(count_after, count_before, "no connect_checkout_failures row written");
+}
+
+/// #27 (account.updated for an UNLINKED account): an `account.updated` for an `acct_…` we
+/// never linked updates 0 rows → `account_not_linked` ack, no error. The event is still
+/// claimed (it was validly delivered; re-processing it would be a no-op).
+#[compio::test]
+async fn account_updated_unlinked_account_acks_not_linked() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "acct-unlinked").await;
+    let app = init_control!(fx);
+
+    // An acct_ we NEVER linked to any creator (valid acct_ format, just no link row).
+    let acct = format!("acct_{}", Uuid::new_v4().simple());
+    let evt = format!("evt_acct_unlinked_{}", Uuid::new_v4().simple());
+    let body = json!({
+        "id": evt,
+        "type": "account.updated",
+        "created": 1_777_017_600i64,
+        "data": { "object": {
+            "id": acct,
+            "object": "account",
+            "charges_enabled": false,
+            "payouts_enabled": false,
+            "details_submitted": true
+        }}
+    })
+    .to_string();
+    let r = post_webhook!(app, &body, None);
+    assert_eq!(r.status(), StatusCode::OK, "account.updated for an unlinked account acks 200 (no error)");
+    let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
+    assert_eq!(
+        b["status"], "account_not_linked",
+        "an account.updated for an acct_ we never linked is a benign no-op (0-row flag update)"
+    );
 }
