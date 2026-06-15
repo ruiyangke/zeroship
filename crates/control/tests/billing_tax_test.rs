@@ -651,3 +651,314 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
     let bases = fake.seen_bases.lock().unwrap().clone();
     assert_eq!(bases[0], 500, "tax computed over the full subtotal (no credit)");
 }
+
+// ===========================================================================
+// #37 (FAIL-CLOSED): a TaxProvider that returns Err must ABORT the finalize — the
+//     invoice is NOT finalized, no tax/total is partially written, no Stripe item is
+//     ledgered as billed. Tax is computed INSIDE the finalize txn just before the
+//     one-statement UPDATE, so a provider error rolls the whole finalize back (the
+//     `compute_tax(...).map_err(RegistryError::from)?` propagates; the sweep swallows
+//     the per-creator error and the DB stays 'draft').
+//
+//     RED-proof: pins that the reconciler PROPAGATES the tax error (fail-closed). If
+//     the `?` were swallowed (e.g. `unwrap_or(TaxAmount::zero())`), the invoice would
+//     finalize with tax 0 — the "finalized" assertion below would flip.
+// ===========================================================================
+
+struct ErrTaxProvider;
+
+#[async_trait::async_trait(?Send)]
+impl TaxProvider for ErrTaxProvider {
+    fn kind(&self) -> TaxProviderKind {
+        TaxProviderKind::Native
+    }
+    async fn compute_tax(
+        &self,
+        _ctx: &TaxContext<'_>,
+    ) -> Result<TaxAmount, zeroship_control::metering::provider::ProviderError> {
+        Err(zeroship_control::metering::provider::ProviderError::Transport(
+            "tax backend unavailable".to_string(),
+        ))
+    }
+}
+
+#[compio::test]
+async fn tax_provider_error_fails_closed_invoice_not_finalized() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "tax-err", Arc::new(ErrTaxProvider) as Arc<dyn TaxProvider>).await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A DISTINCT far-back period so this test's permanent 'draft' leftover (the finalize
+    // is intentionally never allowed to commit) can never be swept by a sibling reconcile.
+    let now = now_for_closed_period() - 200 * 86_400;
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "tax-err").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+    ingest_at(&fx.state, app, 500, period, 1).await; // $5
+
+    // The sweep swallows the per-creator tax error → this creator is NOT billed.
+    let _ = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+        .await
+        .expect("tick swallows the per-creator tax error and returns Ok");
+
+    // The invoice is NOT finalized — fail-closed. (The draft claim may exist, but it is
+    // NEVER 'finalized' with a partial/zero tax.)
+    let inv = read_invoice(&fx.state, creator, period).await;
+    assert_ne!(
+        inv.as_ref().map(|i| i.0.as_str()),
+        Some("finalized"),
+        "a tax-provider error must NOT finalize the invoice (fail-closed), got {inv:?}",
+    );
+    let finalized: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
+             WHERE creator_id = $1 AND status = 'finalized'",
+            &[&creator],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(finalized, 0, "no finalized invoice when the tax provider errors");
+}
+
+// ===========================================================================
+// #23/#8 (missing customer with usage): a creator with BILLABLE usage but NO saved
+//     Stripe Customer is SKIPPED (warn `missing_customer_with_usage`) — `bill_creator`
+//     returns Ok(false) BEFORE any draft claim / Stripe item / finalize. Revenue is
+//     surfaced (the warn), never silently billed against a phantom customer.
+// ===========================================================================
+
+#[compio::test]
+async fn missing_customer_with_usage_is_skipped_no_invoice() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(
+        &url,
+        "nocust",
+        zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
+    )
+    .await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "nocust").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    // DELIBERATELY do NOT set a Stripe customer for this creator.
+    ingest_at(&fx.state, app, 500, period, 1).await; // $5 of billable usage
+
+    let _ = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+        .await
+        .expect("tick");
+
+    // NO invoice (draft or finalized) was created for the customer-less creator.
+    let any: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices WHERE creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(any, 0, "a creator with usage but no Stripe customer gets NO invoice (skipped + warned)");
+}
+
+// ===========================================================================
+// #14: credit FULLY covers the subtotal ⇒ a $0 invoice (total 0) ⇒ NO charge row.
+//     A fully-credit-covered invoice never reaches `invoice.paid`, so NO
+//     `invoice_payments('charge')` row is ever appended: `cash_collected == 0` and there
+//     are ZERO invoice_payments rows. (The over-refund cap on such an invoice is 0 —
+//     credit-funded value is never refundable as cash.)
+// ===========================================================================
+
+#[compio::test]
+async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(
+        &url,
+        "fullcredit",
+        zeroship_control::tax::build_tax_provider(
+            &zeroship_control::tax::TaxProviderConfig::native(),
+        )
+        .expect("native tax provider builds"),
+    )
+    .await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "fullcredit").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    let plan = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+
+    // $20 credit grant; $5 of usage → subtotal 500, credit 500 (capped at subtotal),
+    // total 0.
+    insert_grant(&fx.state, creator, 2000, "usd", chrono::Utc::now()).await;
+    ingest_at(&fx.state, app, 500, period, 1).await;
+
+    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1);
+
+    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    assert_eq!(inv.0, "finalized");
+    assert_eq!(inv.1, 500, "subtotal");
+    assert_eq!(inv.2, 500, "credit applied == subtotal (capped at subtotal)");
+    assert_eq!(inv.4, 0, "total = subtotal − credit + tax = 0 (a $0 invoice)");
+
+    // The invoice id (active) for cash_collected / invoice_payments assertions.
+    let inv_id: String = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT id FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&creator, &period_d(period)],
+        )
+        .await
+        .expect("read id")[0]
+        .get("id");
+
+    // NO charge row: cash_collected == 0 and ZERO invoice_payments rows (a $0 invoice
+    // never reaches invoice.paid, so the payment webhook never appends a charge).
+    let cash = zeroship_control::invoice_payments::cash_collected(&*fx.state.control_pg, &inv_id)
+        .await
+        .expect("cash");
+    assert_eq!(cash, 0, "a fully-credit-covered $0 invoice collected zero cash");
+    let pay_rows: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_payments WHERE invoice_id = $1",
+            &[&inv_id],
+        )
+        .await
+        .expect("count")[0]
+        .get("n");
+    assert_eq!(pay_rows, 0, "no invoice_payments charge row for a $0 invoice");
+}
+
+// ===========================================================================
+// #19: tax × MULTI-SEGMENT proration. An app with a mid-period plan change splits into
+//     2 segments (2 invoice lines summed into the subtotal). A non-zero fake tax must be
+//     computed ONCE over the SUMMED post-credit subtotal (not once per segment), and
+//     frozen onto the single invoice with the balance CHECK holding.
+//
+//     The plan-change is written through the REAL server-side path
+//     (`proration::record_plan_change_tx`, the same code `api.rs::set_plan` runs), so the
+//     two segments are produced by the real proration engine — no shim.
+// ===========================================================================
+
+#[compio::test]
+async fn tax_computed_once_over_summed_multi_segment_subtotal() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fake = Arc::new(FakeTaxProvider::new(200));
+    let fx = build_fixture(&url, "tax-multiseg", fake.clone() as Arc<dyn TaxProvider>).await;
+    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = now_for_closed_period();
+    let period = prev_period(now);
+
+    let creator = make_user(&fx.state, "tax-multiseg").await;
+    ensure_creator_billing(&fx.state, creator).await;
+    // Two plans, both 1 cent/CU, no base fee — so the two segments are easy to sum.
+    let plan_a = make_plan(&fx.state).await;
+    let plan_b = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan_a, creator).await;
+    fx.state
+        .stripe_store
+        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .await
+        .unwrap();
+
+    // Usage at the plan-change snapshot: 300 cumulative (segment 0 = 300c). Then total
+    // period usage 800 cumulative (segment 1 = 500c). Subtotal = 300 + 500 = 800c.
+    ingest_at(&fx.state, app, 300, period, 1).await;
+    // Record the plan change mid-period (the REAL server-side path; snapshots usage = 300).
+    use chrono::{Datelike, TimeZone};
+    let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
+    let mid = chrono::Utc
+        .with_ymd_and_hms(pstart.year(), pstart.month(), 15, 0, 0, 0)
+        .unwrap()
+        .timestamp();
+    let from_plan: Option<String> = fx
+        .state
+        .control_pg
+        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app])
+        .await
+        .expect("read plan")
+        .first()
+        .map(|r| r.get::<_, String>("plan_id"));
+    zeroship_control::proration::record_plan_change_tx(
+        &fx.state.registry, &app, &creator, from_plan.as_deref(), &plan_b, mid,
+    )
+    .await
+    .expect("record plan change");
+    // More usage after the change → cumulative 800 (segment 1 delta = 500c).
+    ingest_at(&fx.state, app, 500, period, 2).await;
+
+    let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
+        .await
+        .expect("tick");
+    assert_eq!(billed, 1);
+
+    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    assert_eq!(inv.0, "finalized");
+    assert_eq!(inv.1, 800, "subtotal = segment 0 (300) + segment 1 (500) summed");
+    assert_eq!(inv.2, 0, "no credit");
+    assert_eq!(inv.3, 200, "fake tax frozen ONCE");
+    assert_eq!(inv.4, 1000, "total = subtotal(800) − credit(0) + tax(200)");
+    assert_eq!(inv.4, inv.1 - inv.2 + inv.3, "balance CHECK identity with multi-segment + tax");
+
+    // TWO invoice lines (one per segment) — the proration actually split.
+    let n_lines: i64 = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_lines l \
+             JOIN zeroship.invoices i ON i.id = l.invoice_id \
+             WHERE i.creator_id = $1",
+            &[&creator],
+        )
+        .await
+        .expect("count lines")[0]
+        .get("n");
+    assert_eq!(n_lines, 2, "the plan change produced two segment lines");
+
+    // Tax computed EXACTLY ONCE over the summed subtotal (not once per segment).
+    let bases = fake.seen_bases.lock().unwrap().clone();
+    assert_eq!(bases.len(), 1, "compute_tax called ONCE per invoice — not per segment");
+    assert_eq!(bases[0], 800, "tax computed over the SUMMED post-credit subtotal (300 + 500)");
+}
